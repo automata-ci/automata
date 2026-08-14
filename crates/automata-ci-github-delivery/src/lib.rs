@@ -27,6 +27,7 @@
 #![deny(missing_docs)]
 
 mod changed_files;
+mod checks_presentation;
 mod checks_publisher;
 mod processor;
 mod schedule;
@@ -84,19 +85,21 @@ use automata_ci_core::{Sha256Digest, UnixMillis};
 #[cfg(test)]
 use automata_ci_github::VerifiedGithubPush;
 use automata_ci_github::{
-    GithubRepositoryVisibility, GithubWebhookError, GithubWebhookVerifier, VerifiedGithubWebhook,
-    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+    GithubCheckRunAction, GithubRepositoryVisibility, GithubWebhookError, GithubWebhookVerifier,
+    VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubProviderWebhookVerifierFingerprint,
-    GithubRepositoryDispatchEvidenceRepository, GithubServerServiceRevision,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    GithubAuthenticatedEventKind, GithubCheckAppId, GithubCheckHeadSha, GithubCheckRerunAction,
+    GithubCheckRerunRepository, GithubCheckRerunRequest, GithubCheckRerunStoreError,
+    GithubCheckRerunTarget, GithubCheckRunId, GithubCheckSuiteId,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
+    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, PendingGithubRepositoryDispatchReceipt,
     ProviderConnectionId, ProviderDeliveryIdentity, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, TenantScope,
+    ProviderRepositoryVisibility, StoreError, TenantScope,
 };
 use bytes::Bytes;
 use http::HeaderMap;
@@ -413,7 +416,61 @@ impl AcceptedGithubRepositoryDispatch {
     }
 }
 
-/// Verified GitHub webhook ingress backed by immutable object and inbox ports.
+/// Durable repositories used by authenticated GitHub webhook ingress.
+#[derive(Clone)]
+pub struct GithubDeliveryRepositories {
+    deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+    repository_dispatches: Option<Arc<dyn GithubRepositoryDispatchEvidenceRepository>>,
+    check_reruns: Option<Arc<dyn GithubCheckRerunRepository>>,
+}
+
+impl GithubDeliveryRepositories {
+    /// Creates the required webhook-evidence repository set.
+    #[must_use]
+    pub fn new(deliveries: Arc<dyn GithubSubjectEvidenceRepository>) -> Self {
+        Self {
+            deliveries,
+            repository_dispatches: None,
+            check_reruns: None,
+        }
+    }
+
+    /// Adds durable custom-dispatch pre-resolution.
+    #[must_use]
+    pub fn with_repository_dispatches(
+        mut self,
+        repository: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
+    ) -> Self {
+        self.repository_dispatches = Some(repository);
+        self
+    }
+
+    /// Adds durable GitHub-native Check rerun admission.
+    #[must_use]
+    pub fn with_check_reruns(mut self, repository: Arc<dyn GithubCheckRerunRepository>) -> Self {
+        self.check_reruns = Some(repository);
+        self
+    }
+}
+
+impl fmt::Debug for GithubDeliveryRepositories {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubDeliveryRepositories")
+            .field("deliveries", &"configured")
+            .field(
+                "repository_dispatches",
+                &self.repository_dispatches.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "check_reruns",
+                &self.check_reruns.as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
+}
+
+/// Authenticated GitHub webhook ingress with one explicit repository set.
 pub struct GithubDeliveryIngress {
     verifier: GithubWebhookVerifier,
     verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
@@ -423,6 +480,7 @@ pub struct GithubDeliveryIngress {
     objects: Arc<dyn ImmutableBlobStore>,
     deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
     repository_dispatches: Option<Arc<dyn GithubRepositoryDispatchEvidenceRepository>>,
+    check_reruns: Option<Arc<dyn GithubCheckRerunRepository>>,
     clock: Arc<dyn GithubDeliveryClock>,
 }
 
@@ -440,59 +498,9 @@ impl GithubDeliveryIngress {
     pub fn new(
         verifier: GithubWebhookVerifier,
         verifier_revision: GithubServerServiceRevision,
-        connections: Vec<GithubDeliveryConnection>,
-        objects: Arc<dyn ImmutableBlobStore>,
-        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
-        clock: Arc<dyn GithubDeliveryClock>,
-    ) -> Result<Self, GithubDeliveryConfigurationError> {
-        Self::build(
-            verifier,
-            verifier_revision,
-            connections,
-            objects,
-            deliveries,
-            None,
-            clock,
-        )
-    }
-
-    /// Constructs an ingress with durable custom-dispatch pre-resolution.
-    ///
-    /// The dedicated repository-dispatch port is narrow: it persists signed
-    /// event evidence and authority pins but cannot expose credentials or make
-    /// provider API calls.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same bounded registry errors as [`Self::new`].
-    pub fn new_with_repository_dispatch(
-        verifier: GithubWebhookVerifier,
-        verifier_revision: GithubServerServiceRevision,
-        connections: Vec<GithubDeliveryConnection>,
-        objects: Arc<dyn ImmutableBlobStore>,
-        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
-        repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
-        clock: Arc<dyn GithubDeliveryClock>,
-    ) -> Result<Self, GithubDeliveryConfigurationError> {
-        Self::build(
-            verifier,
-            verifier_revision,
-            connections,
-            objects,
-            deliveries,
-            Some(repository_dispatches),
-            clock,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build(
-        verifier: GithubWebhookVerifier,
-        verifier_revision: GithubServerServiceRevision,
         mut connections: Vec<GithubDeliveryConnection>,
         objects: Arc<dyn ImmutableBlobStore>,
-        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
-        repository_dispatches: Option<Arc<dyn GithubRepositoryDispatchEvidenceRepository>>,
+        repositories: GithubDeliveryRepositories,
         clock: Arc<dyn GithubDeliveryClock>,
     ) -> Result<Self, GithubDeliveryConfigurationError> {
         if connections.is_empty() {
@@ -546,8 +554,9 @@ impl GithubDeliveryIngress {
             connections: connections.into(),
             connection_by_selector,
             objects,
-            deliveries,
-            repository_dispatches,
+            deliveries: repositories.deliveries,
+            repository_dispatches: repositories.repository_dispatches,
+            check_reruns: repositories.check_reruns,
             clock,
         })
     }
@@ -576,6 +585,8 @@ impl GithubDeliveryIngress {
         if matches!(
             &selected.event,
             VerifiedGithubWebhook::RepositoryDispatch(_)
+                | VerifiedGithubWebhook::CheckRun(_)
+                | VerifiedGithubWebhook::CheckSuite(_)
         ) {
             return Err(GithubDeliveryIngressError::InvariantViolation);
         }
@@ -657,6 +668,81 @@ impl GithubDeliveryIngress {
             request_digest: prepared.request_digest,
             raw_event: prepared.raw_event,
         })
+    }
+
+    /// Authenticates and executes one GitHub-native Check rerun control.
+    ///
+    /// The exact Check/App/repository/commit identity is resolved by the store,
+    /// which also maps the signed sender to current Automata authority before
+    /// entering the normal idempotent workflow-rerun transaction.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for non-control events, mismatched Check identity, stale
+    /// sender authority, an ineligible source, or an unavailable durable store.
+    pub async fn accept_check_rerun(
+        &self,
+        headers: &HeaderMap,
+        raw_body: Bytes,
+    ) -> Result<usize, GithubDeliveryIngressError> {
+        let check_reruns = self
+            .check_reruns
+            .as_ref()
+            .ok_or(GithubDeliveryIngressError::InvariantViolation)?;
+        let selected = self.authenticate_and_select_event(headers, raw_body)?;
+        let connection = self.selected_connection(selected.connection_index)?;
+        let (app_id, head_revision, sender_id, target) = match &selected.event {
+            VerifiedGithubWebhook::CheckRun(check) => (
+                check.app_id().get(),
+                check.head_revision(),
+                check.sender_id().get(),
+                GithubCheckRerunTarget::Run {
+                    run_id: GithubCheckRunId::new(check.run_id().get())
+                        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
+                    suite_id: GithubCheckSuiteId::new(check.suite_id().get())
+                        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
+                    external_id: check.external_id().to_owned(),
+                    action: match check.action() {
+                        GithubCheckRunAction::Rerequested => GithubCheckRerunAction::Rerequested,
+                        GithubCheckRunAction::RerunAll => GithubCheckRerunAction::RerunAll,
+                        GithubCheckRunAction::RerunFailed => GithubCheckRerunAction::RerunFailed,
+                        GithubCheckRunAction::RerunJob => GithubCheckRerunAction::RerunJob,
+                    },
+                },
+            ),
+            VerifiedGithubWebhook::CheckSuite(check) => (
+                check.app_id().get(),
+                check.head_revision(),
+                check.sender_id().get(),
+                GithubCheckRerunTarget::Suite {
+                    suite_id: GithubCheckSuiteId::new(check.suite_id().get())
+                        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
+                },
+            ),
+            _ => return Err(GithubDeliveryIngressError::InvariantViolation),
+        };
+        let request = GithubCheckRerunRequest::new(
+            connection.tenant.clone(),
+            connection.connection_id,
+            connection.installation_id.get(),
+            connection.repository_id.get(),
+            GithubCheckAppId::new(app_id)
+                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
+            github_check_head_sha(head_revision.as_str())?,
+            sender_id,
+            selected.event.delivery_id(),
+            Sha256Digest::from_bytes(*selected.event.body_sha256().as_bytes()),
+            target,
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let receipts = check_reruns
+            .rerun_github_check(request)
+            .await
+            .map_err(|error| GithubDeliveryIngressError::from_check_rerun_store(&error))?;
+        if receipts.is_empty() {
+            return Err(GithubDeliveryIngressError::InvariantViolation);
+        }
+        Ok(receipts.len())
     }
 
     fn authenticate_and_select_event(
@@ -796,6 +882,10 @@ impl fmt::Debug for GithubDeliveryIngress {
                 "repository_dispatches",
                 &self.repository_dispatches.as_ref().map(|_| "[configured]"),
             )
+            .field(
+                "check_reruns",
+                &self.check_reruns.as_ref().map(|_| "[configured]"),
+            )
             .field("clock", &self.clock)
             .finish()
     }
@@ -834,6 +924,12 @@ pub enum GithubDeliveryIngressError {
     /// Durable provider-delivery evidence failed invariant validation.
     #[error("the durable provider delivery inbox evidence was corrupt")]
     InboxCorrupt,
+    /// The signed Check or current sender authority was rejected.
+    #[error("the GitHub Check rerun was not authorized")]
+    CheckRerunAuthorityRejected,
+    /// The selected Check no longer represented an eligible terminal source.
+    #[error("the GitHub Check rerun source is not eligible")]
+    CheckRerunConflict,
     /// Trusted construction unexpectedly violated an internal invariant.
     #[error("trusted GitHub delivery construction violated an invariant")]
     InvariantViolation,
@@ -848,6 +944,36 @@ impl GithubDeliveryIngressError {
             GithubSubjectEvidenceStoreError::NotFound => Self::InboxNotFound,
             GithubSubjectEvidenceStoreError::CorruptData => Self::InboxCorrupt,
         }
+    }
+
+    fn from_check_rerun_store(error: &GithubCheckRerunStoreError) -> Self {
+        match error {
+            GithubCheckRerunStoreError::Store(StoreError::Operation(_)) => Self::InboxUnavailable,
+            GithubCheckRerunStoreError::Store(_) => Self::InboxCorrupt,
+            GithubCheckRerunStoreError::AuthorityRejected => Self::CheckRerunAuthorityRejected,
+            GithubCheckRerunStoreError::Conflict => Self::CheckRerunConflict,
+        }
+    }
+}
+
+fn github_check_head_sha(value: &str) -> Result<GithubCheckHeadSha, GithubDeliveryIngressError> {
+    if value.len() != 40 {
+        return Err(GithubDeliveryIngressError::InvariantViolation);
+    }
+    let mut bytes = [0_u8; 20];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(pair[0]).ok_or(GithubDeliveryIngressError::InvariantViolation)?;
+        let low = hex_nibble(pair[1]).ok_or(GithubDeliveryIngressError::InvariantViolation)?;
+        bytes[index] = (high << 4) | low;
+    }
+    GithubCheckHeadSha::new(bytes).map_err(|_| GithubDeliveryIngressError::InvariantViolation)
+}
+
+const fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
     }
 }
 

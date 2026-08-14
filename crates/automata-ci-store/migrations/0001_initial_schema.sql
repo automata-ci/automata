@@ -24078,7 +24078,7 @@ CASE claim_action
     ELSE false
 END)),
     CONSTRAINT github_check_projection_outbox_attempt CHECK ((((attempt_count >= 0) AND (attempt_count <= 64)) AND (claim_fence >= 0) AND ((attempted_revision IS NULL) OR (attempted_revision > 0)))),
-    CONSTRAINT github_check_projection_outbox_block_shape CHECK ((((state = 'blocked'::text) AND (blocked_reason = ANY (ARRAY['ambiguous_create'::text, 'attempt_limit'::text, 'credential_rejected'::text]))) OR ((state <> 'blocked'::text) AND (blocked_reason IS NULL)))),
+    CONSTRAINT github_check_projection_outbox_block_shape CHECK ((((state = 'blocked'::text) AND (blocked_reason = ANY (ARRAY['ambiguous_create'::text, 'annotation_mismatch'::text, 'attempt_limit'::text, 'credential_rejected'::text]))) OR ((state <> 'blocked'::text) AND (blocked_reason IS NULL)))),
     CONSTRAINT github_check_projection_outbox_claim_shape CHECK ((((state <> 'claimed'::text) AND (claim_owner_id IS NULL) AND (claim_action IS NULL) AND (claimed_desired_revision IS NULL) AND (claimed_desired_state IS NULL) AND (claimed_desired_conclusion IS NULL) AND (claimed_at_ms IS NULL) AND (claim_expires_at_ms IS NULL)) OR ((state = 'claimed'::text) AND (claim_owner_id IS NOT NULL) AND (claim_owner_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (claim_action = ANY (ARRAY['ensure_suite'::text, 'prepare_run_create'::text, 'reconcile_run_create'::text, 'publish'::text])) AND (claimed_desired_revision > 0) AND (claimed_desired_state = ANY (ARRAY['queued'::text, 'in_progress'::text, 'completed'::text])) AND (((claimed_desired_state = 'completed'::text) AND (claimed_desired_conclusion = ANY (ARRAY['action_required'::text, 'cancelled'::text, 'failure'::text, 'success'::text, 'skipped'::text, 'timed_out'::text]))) OR ((claimed_desired_state <> 'completed'::text) AND (claimed_desired_conclusion IS NULL))) AND (claimed_at_ms >= 0) AND (claim_expires_at_ms > claimed_at_ms) AND ((claim_expires_at_ms - claimed_at_ms) <= 900000)))),
     CONSTRAINT github_check_projection_outbox_create_shape CHECK ((((create_started_at_ms IS NULL) AND (create_owner_id IS NULL) AND (create_fence IS NULL) AND (create_issue_expires_at_ms IS NULL) AND (reconcile_not_before_ms IS NULL) AND (next_reconcile_at_ms IS NULL)) OR ((create_started_at_ms >= 0) AND (create_owner_id IS NOT NULL) AND (create_owner_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (create_fence > 0) AND (create_issue_expires_at_ms > create_started_at_ms) AND ((create_issue_expires_at_ms - create_started_at_ms) <= 900000) AND (reconcile_not_before_ms > create_issue_expires_at_ms) AND ((reconcile_not_before_ms - create_issue_expires_at_ms) <= 420000) AND (next_reconcile_at_ms >= reconcile_not_before_ms) AND (external_suite_id IS NOT NULL) AND (external_run_id IS NULL)))),
     CONSTRAINT github_check_projection_outbox_delivery_shape CHECK (((state <> 'delivered'::text) OR ((projected_revision > 0) AND (provider_state IS NOT NULL) AND (external_run_id IS NOT NULL)))),
@@ -24144,6 +24144,19 @@ CASE terminal_cause
 END)),
     CONSTRAINT github_check_subjects_subject_shape CHECK ((((subject_kind = 'workflow'::text) AND (parent_subject_id IS NULL) AND (job_id IS NULL) AND (job_attempt_id IS NULL)) OR ((subject_kind = 'job'::text) AND (parent_subject_id IS NOT NULL) AND (job_id IS NOT NULL) AND (job_attempt_id IS NOT NULL)))),
     CONSTRAINT github_check_subjects_workflow_rerun_non_nil CHECK (((workflow_rerun_run_id IS NULL) OR (workflow_rerun_run_id <> '00000000-0000-0000-0000-000000000000'::uuid)))
+);
+
+CREATE TABLE github_check_annotation_progress (
+    subject_id uuid PRIMARY KEY REFERENCES github_check_subjects(id) ON DELETE RESTRICT,
+    presentation_digest bytea NOT NULL,
+    annotation_total integer NOT NULL,
+    annotation_next integer DEFAULT 0 NOT NULL,
+    uncertain_batch_size smallint,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT github_check_annotation_progress_digest CHECK ((octet_length(presentation_digest) = 32)),
+    CONSTRAINT github_check_annotation_progress_cursor CHECK (((annotation_total >= 0) AND (annotation_total <= 4096) AND (annotation_next >= 0) AND (annotation_next <= annotation_total))),
+    CONSTRAINT github_check_annotation_progress_uncertainty CHECK (((uncertain_batch_size IS NULL) OR ((uncertain_batch_size >= 1) AND (uncertain_batch_size <= 50) AND ((annotation_next + uncertain_batch_size) <= annotation_total)))),
+    CONSTRAINT github_check_annotation_progress_time CHECK ((updated_at_ms >= 0))
 );
 
 CREATE TABLE github_membership_snapshots (

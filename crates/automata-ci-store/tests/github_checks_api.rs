@@ -1,11 +1,12 @@
-use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
+use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
+use automata_ci_core::{JobId, RunId, Sha256Digest, UnixMillis};
 use automata_ci_store::{
     BeginGithubCheckRunCreate, BlockGithubCheckProjectionForCredentialRejection,
-    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, GithubCheckAppId,
-    GithubCheckConclusion, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
-    GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
-    GithubCheckProjectionClaimFence, GithubCheckProjectionWorkerId, GithubCheckRunId,
-    GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
+    ClaimGithubCheckProjection, ClaimedGithubCheckProjection, GithubCheckAnnotationProgress,
+    GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateReconciliation,
+    GithubCheckDesiredProjection, GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckProjectionAction, GithubCheckProjectionClaimFence, GithubCheckProjectionWorkerId,
+    GithubCheckRunId, GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
     GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckValueError,
     GithubRepositoryName, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
     GithubServerServiceRevision, MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS,
@@ -254,6 +255,8 @@ fn prepare_projection(
         UnixMillis::new(claimed_at.saturating_sub(2)),
         UnixMillis::new(claimed_at.saturating_sub(1)),
         None,
+        GithubCheckAnnotationProgress::default(),
+        None,
         None,
         UnixMillis::new(claimed_at),
         UnixMillis::new(expires_at),
@@ -307,6 +310,7 @@ fn subject_receipt_rehydrates_and_rejects_nil_workflow_run_id() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn claimed_projection_rehydrates_only_complete_current_state() {
     let subject = GithubCheckSubjectId::from_uuid(Uuid::new_v4()).expect("subject ID");
     let worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4()).expect("worker ID");
@@ -345,6 +349,8 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
         Some(run),
         UnixMillis::new(50),
         UnixMillis::new(75),
+        None,
+        GithubCheckAnnotationProgress::default(),
         Some(UnixMillis::new(75)),
         None,
         UnixMillis::new(100),
@@ -374,6 +380,8 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
             None,
             UnixMillis::new(50),
             UnixMillis::new(75),
+            None,
+            GithubCheckAnnotationProgress::default(),
             Some(UnixMillis::new(75)),
             None,
             UnixMillis::new(100),
@@ -397,11 +405,76 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
             UnixMillis::new(50),
             UnixMillis::new(75),
             None,
+            GithubCheckAnnotationProgress::default(),
+            None,
             None,
             UnixMillis::new(100),
             UnixMillis::new(200),
         ),
         Err(GithubCheckValueError::InvalidDesiredRevision)
+    );
+}
+
+#[test]
+fn terminal_result_evidence_requires_a_terminal_job_target() {
+    let subject = GithubCheckSubjectId::from_uuid(Uuid::new_v4()).expect("subject ID");
+    let worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4()).expect("worker ID");
+    let claim = GithubCheckProjectionClaimFence::from_durable_parts(subject, worker, 7)
+        .expect("claim fence");
+    let tenant = TenantScope::from_authenticated_tenant_id("tenant").expect("tenant");
+    let identity = GithubCheckSubjectIdentity::new(
+        tenant.clone(),
+        RepositoryId::from_uuid(Uuid::new_v4()),
+        ProviderDeliveryId::from_uuid(Uuid::new_v4()).expect("delivery"),
+        GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("subject key"),
+        ProviderConnectionId::from_uuid(Uuid::new_v4()).expect("connection"),
+        ProviderInstallationId::new(11).expect("installation"),
+        ProviderRepositoryId::new(13).expect("provider repository"),
+        GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
+        GithubCheckAppId::new(17).expect("App"),
+        GithubCheckHeadSha::new([1; 20]).expect("head SHA"),
+        GithubCheckName::new("Automata / CI").expect("name"),
+    )
+    .expect("identity");
+    let descriptor = BlobDescriptor::new(
+        BlobKey::new("runner-results/test/result.json").expect("result key"),
+        Sha256Digest::from_bytes([7; 32]),
+        100,
+        MediaType::new(automata_ci_store::HUMAN_JOB_RESULT_MEDIA_TYPE).expect("result media type"),
+    );
+    let terminal_claim = |details_target| {
+        ClaimedGithubCheckProjection::from_durable_parts(
+            claim,
+            GithubCheckProjectionAction::Publish,
+            1,
+            identity.clone(),
+            details_target,
+            checks_authority(&tenant),
+            format!("automata-check:{}", subject.as_uuid()),
+            GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowSuccess),
+            3,
+            Some(GithubCheckSuiteId::new(19).expect("suite")),
+            Some(GithubCheckRunId::new(23).expect("run")),
+            UnixMillis::new(50),
+            UnixMillis::new(75),
+            Some(descriptor.clone()),
+            GithubCheckAnnotationProgress::default(),
+            Some(UnixMillis::new(75)),
+            Some(UnixMillis::new(90)),
+            UnixMillis::new(100),
+            UnixMillis::new(200),
+        )
+    };
+
+    let job_claim = terminal_claim(GithubCheckDetailsTarget::Job {
+        run_id: RunId::new(),
+        job_id: JobId::new(),
+    })
+    .expect("terminal job claim");
+    assert_eq!(job_claim.terminal_result(), Some(&descriptor));
+    assert_eq!(
+        terminal_claim(GithubCheckDetailsTarget::Repository),
+        Err(GithubCheckValueError::InvalidProjectionBinding)
     );
 }
 
@@ -432,6 +505,8 @@ fn claimed_projection_rejects_cross_tenant_authority_selector() {
             claimed.run_id(),
             claimed.created_at(),
             claimed.desired_updated_at(),
+            claimed.terminal_result().cloned(),
+            claimed.annotation_progress(),
             claimed.started_at(),
             claimed.completed_at(),
             claimed.claimed_at(),

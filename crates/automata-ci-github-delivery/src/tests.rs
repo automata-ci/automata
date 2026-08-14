@@ -13,7 +13,7 @@ use automata_ci_blob::{
     BlobDescriptor, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
     PutBlobOutcome, VerifiedBlob,
 };
-use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
 use automata_ci_github::{
     GithubWebhookError, GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES, X_GITHUB_DELIVERY,
     X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
@@ -23,8 +23,10 @@ use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
     CompleteProviderDelivery, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
     GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN, GithubAuthenticatedEventKind,
-    GithubCheckName, GithubCheckSubjectId, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubCheckName, GithubCheckRerunRepository, GithubCheckRerunRequest,
+    GithubCheckRerunStoreError, GithubCheckRerunTarget, GithubCheckSubjectId,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
+    GithubProviderOrigins, GithubProviderRunnerPolicyObject,
     GithubRepositoryDispatchEvidenceRepository, GithubRepositoryName,
     GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
     GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
@@ -36,7 +38,7 @@ use automata_ci_store::{
     ProviderDeliveryStoreError, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RejectProviderDelivery, RepositoryId, ResolveGithubRepositoryDispatch, RetryProviderDelivery,
-    TenantScope, WorkflowRuntimePolicy, WorkflowRuntimePolicyRevision,
+    TenantScope, WorkflowRerunReceipt, WorkflowRuntimePolicy, WorkflowRuntimePolicyRevision,
 };
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue};
@@ -47,7 +49,7 @@ use uuid::Uuid;
 use super::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryConfigurationError,
     GithubDeliveryConnection, GithubDeliveryIngress, GithubDeliveryIngressError,
-    MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_event_request_digest,
+    GithubDeliveryRepositories, MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_event_request_digest,
 };
 
 const SECRET: &[u8] = b"delivery-test-secret";
@@ -436,6 +438,41 @@ struct RecordingRepositoryDispatchAcceptance {
     deliveries: Mutex<BTreeMap<(String, Uuid, String), RecordedRepositoryDispatch>>,
 }
 
+#[derive(Debug, Default)]
+struct RecordingCheckReruns {
+    requests: Mutex<Vec<GithubCheckRerunRequest>>,
+}
+
+impl RecordingCheckReruns {
+    fn requests(&self) -> Vec<GithubCheckRerunRequest> {
+        self.requests.lock().expect("rerun lock is healthy").clone()
+    }
+}
+
+#[async_trait]
+impl GithubCheckRerunRepository for RecordingCheckReruns {
+    async fn rerun_github_check(
+        &self,
+        request: GithubCheckRerunRequest,
+    ) -> Result<Vec<WorkflowRerunReceipt>, GithubCheckRerunStoreError> {
+        self.requests
+            .lock()
+            .expect("rerun lock is healthy")
+            .push(request);
+        Ok(vec![
+            WorkflowRerunReceipt::new(
+                RunId::from_uuid(Uuid::from_u128(0x100)),
+                RunId::from_uuid(Uuid::from_u128(0x101)),
+                11,
+                12,
+                2,
+                false,
+            )
+            .expect("rerun receipt"),
+        ])
+    }
+}
+
 #[derive(Clone, Debug)]
 struct RecordedRepositoryDispatch {
     identity: ProviderDeliveryIdentity,
@@ -689,7 +726,7 @@ fn registry(
         GithubServerServiceRevision::new(1).expect("verifier revision"),
         connections,
         Arc::new(RecordingBlobStore::default()),
-        Arc::new(RecordingDeliveryAcceptance::default()),
+        GithubDeliveryRepositories::new(Arc::new(RecordingDeliveryAcceptance::default())),
         Arc::new(FixedClock(UnixMillis::new(100))),
     )
 }
@@ -717,7 +754,7 @@ fn ingress_for_connections_at_revision(
         GithubServerServiceRevision::new(verifier_revision).expect("verifier revision"),
         connections,
         objects,
-        deliveries,
+        GithubDeliveryRepositories::new(deliveries),
         clock,
     )
     .expect("fixture registry is valid")
@@ -779,6 +816,12 @@ fn push_body_with_visibility(
     };
     Bytes::from(format!(
         r#"{{"ref":"refs/heads/main","before":"{BEFORE_COMMIT}","after":"{AFTER_COMMIT}","created":false,"deleted":false,"forced":false,"repository":{{"id":{repository_id},"private":{private},"visibility":"{visibility}","name":"{name}","full_name":"{owner}/{name}","owner":{{"id":{repository_owner_id},"login":"{owner}"}}}},"installation":{{"id":{installation_id}}},"commits":{commits}}}"#
+    ))
+}
+
+fn check_run_control_body() -> Bytes {
+    Bytes::from(format!(
+        r#"{{"action":"requested_action","requested_action":{{"identifier":"rerun_failed"}},"check_run":{{"id":66,"head_sha":"{AFTER_COMMIT}","external_id":"automata-check:00000000-0000-4000-8000-000000000123","status":"completed","conclusion":"failure","app":{{"id":88}},"check_suite":{{"id":77,"head_sha":"{AFTER_COMMIT}"}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"private-repository","full_name":"octo-private/private-repository","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"octo-private"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ))
 }
 
@@ -1095,13 +1138,13 @@ async fn repository_dispatch_ingress_pins_raw_event_authority_and_exact_replay()
     .expect("fixture connection")
     .with_default_branch_ref("refs/heads/main")
     .expect("configured default branch");
-    let ingress = GithubDeliveryIngress::new_with_repository_dispatch(
+    let ingress = GithubDeliveryIngress::new(
         GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
         GithubServerServiceRevision::new(1).expect("verifier revision"),
         vec![configured],
         objects.clone(),
-        deliveries.clone(),
-        dispatches.clone(),
+        GithubDeliveryRepositories::new(deliveries.clone())
+            .with_repository_dispatches(dispatches.clone()),
         Arc::new(FixedClock(UnixMillis::new(100))),
     )
     .expect("dispatch ingress");
@@ -1172,6 +1215,64 @@ async fn repository_dispatch_ingress_pins_raw_event_authority_and_exact_replay()
 }
 
 #[tokio::test]
+async fn check_run_control_preserves_exact_signed_identity_for_rerun_authorization() {
+    let objects = Arc::new(RecordingBlobStore::default());
+    let deliveries = Arc::new(RecordingDeliveryAcceptance::default());
+    let dispatches = Arc::new(RecordingRepositoryDispatchAcceptance::default());
+    let reruns = Arc::new(RecordingCheckReruns::default());
+    let configured = connection(
+        ProviderRepositoryVisibility::Private,
+        "octo-private",
+        "private-repository",
+    )
+    .expect("fixture connection")
+    .with_default_branch_ref("refs/heads/main")
+    .expect("configured default branch");
+    let ingress = GithubDeliveryIngress::new(
+        GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
+        GithubServerServiceRevision::new(1).expect("verifier revision"),
+        vec![configured],
+        objects.clone(),
+        GithubDeliveryRepositories::new(deliveries.clone())
+            .with_repository_dispatches(dispatches)
+            .with_check_reruns(reruns.clone()),
+        Arc::new(FixedClock(UnixMillis::new(100))),
+    )
+    .expect("control ingress");
+    let body = check_run_control_body();
+    let headers = signed_event_headers(SECRET, &body, "check_run", "delivery-check-control");
+
+    assert_eq!(
+        ingress
+            .accept_check_rerun(&headers, body)
+            .await
+            .expect("control accepted"),
+        1
+    );
+    let requests = reruns.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.tenant().as_str(), "tenant-private");
+    assert_eq!(request.connection_id().as_uuid(), CONNECTION_UUID);
+    assert_eq!(request.installation_id(), INSTALLATION_ID);
+    assert_eq!(request.github_repository_id(), REPOSITORY_ID);
+    assert_eq!(request.app_id().get(), 88);
+    assert_eq!(request.sender_id(), 301);
+    assert_eq!(request.delivery_id(), "delivery-check-control");
+    assert!(matches!(
+        request.target(),
+        GithubCheckRerunTarget::Run {
+            run_id,
+            suite_id,
+            action: automata_ci_store::GithubCheckRerunAction::RerunFailed,
+            ..
+        } if run_id.get() == 66 && suite_id.get() == 77
+    ));
+    assert_eq!(objects.put_count(), 0);
+    assert_eq!(deliveries.call_count(), 0);
+}
+
+#[tokio::test]
 async fn repository_dispatch_default_branch_mismatch_performs_no_writes() {
     let objects = Arc::new(RecordingBlobStore::default());
     let deliveries = Arc::new(RecordingDeliveryAcceptance::default());
@@ -1184,13 +1285,13 @@ async fn repository_dispatch_default_branch_mismatch_performs_no_writes() {
     .expect("fixture connection")
     .with_default_branch_ref("refs/heads/main")
     .expect("configured default branch");
-    let ingress = GithubDeliveryIngress::new_with_repository_dispatch(
+    let ingress = GithubDeliveryIngress::new(
         GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
         GithubServerServiceRevision::new(1).expect("verifier revision"),
         vec![configured],
         objects.clone(),
-        deliveries.clone(),
-        dispatches.clone(),
+        GithubDeliveryRepositories::new(deliveries.clone())
+            .with_repository_dispatches(dispatches.clone()),
         Arc::new(FixedClock(UnixMillis::new(100))),
     )
     .expect("dispatch ingress");
@@ -1815,7 +1916,7 @@ async fn object_and_request_digest_are_byte_deterministic() {
 }
 
 #[tokio::test]
-async fn generic_ingress_persists_typed_event_coordinates_without_legacy_aliasing() {
+async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_aliasing() {
     for (body, event_name, delivery_id, expected_kind, expected_ref) in [
         (
             fixture_body(),

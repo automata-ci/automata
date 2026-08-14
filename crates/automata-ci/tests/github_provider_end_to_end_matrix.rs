@@ -25,11 +25,11 @@ use automata_ci_github::{
     GithubWebhookVerifier, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
 };
 use automata_ci_github_delivery::{
-    GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction, GithubDeliveryService,
-    GithubDeliveryServiceConfig, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
-    GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
-    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
-    GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
+    GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction, GithubDeliveryRepositories,
+    GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceOutcome,
+    GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
+    GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
+    GithubDeliverySourceCredentialRequest, GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
     GithubDeliveryWorkflowAdmissionProcessor, GithubServerServiceCredentialRelease,
 };
 use automata_ci_postgres_test_support::{
@@ -462,7 +462,7 @@ async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
         GithubServerServiceRevision::new(11)?,
         initial_plan.into_connections(),
         blobs.clone(),
-        store.clone(),
+        GithubDeliveryRepositories::new(store.clone()),
         delivery_clock.clone(),
     )?;
     let mut accepted_deliveries = Vec::with_capacity(MATRIX.len());

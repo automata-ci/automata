@@ -1,9 +1,9 @@
 use std::fmt::Write as _;
 
 use automata_ci_github::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubMergeGroupAction, GithubPullRequestAction,
-    GithubPushRefKind, GithubRepositoryVisibility, GithubStoredWebhookError,
-    GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookVerifier,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubCheckRunAction, GithubMergeGroupAction,
+    GithubPullRequestAction, GithubPushRefKind, GithubRepositoryVisibility,
+    GithubStoredWebhookError, GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookVerifier,
     StoredAuthenticatedGithubWebhook, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
     X_HUB_SIGNATURE_256, rehydrate_stored_authenticated_github_webhook,
 };
@@ -17,6 +17,72 @@ const BASE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const HEAD_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const MERGE_SHA: &str = "76543210fedcba9876543210fedcba9876543210";
 const GROUP_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+#[test]
+fn check_run_controls_retain_exact_signed_identity() {
+    let event = normalize_payload(&check_run_payload("rerequested", None), "check_run")
+        .expect("check run rerun");
+    let VerifiedGithubWebhook::CheckRun(event) = event else {
+        panic!("expected check-run evidence");
+    };
+    assert_eq!(event.installation_id().get(), 71);
+    assert_eq!(event.repository().id().get(), 41);
+    assert_eq!(event.sender_id().get(), 301);
+    assert_eq!(event.app_id().get(), 17);
+    assert_eq!(event.run_id().get(), 41);
+    assert_eq!(event.suite_id().get(), 23);
+    assert_eq!(event.head_revision().as_str(), HEAD_SHA);
+    assert_eq!(
+        event.external_id(),
+        "automata-check:00000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(event.action(), GithubCheckRunAction::Rerequested);
+
+    let event = normalize_payload(
+        &check_run_payload("requested_action", Some("rerun_failed")),
+        "check_run",
+    )
+    .expect("requested action");
+    let VerifiedGithubWebhook::CheckRun(event) = event else {
+        panic!("expected check-run evidence");
+    };
+    assert_eq!(event.action(), GithubCheckRunAction::RerunFailed);
+    assert!(!format!("{event:?}").contains(event.external_id()));
+}
+
+#[test]
+fn check_controls_reject_unsupported_or_inconsistent_payloads() {
+    for payload in [
+        check_run_payload("completed", None),
+        check_run_payload("requested_action", None),
+        check_run_payload("requested_action", Some("unknown")),
+    ] {
+        assert_payload_error(&payload, "check_run", GithubWebhookError::InvalidPayload);
+    }
+    let mut inconsistent = check_run_payload("rerequested", None);
+    inconsistent["check_run"]["check_suite"]["head_sha"] = json!(BASE_SHA);
+    assert_payload_error(
+        &inconsistent,
+        "check_run",
+        GithubWebhookError::InvalidPayload,
+    );
+
+    let mut suite = check_suite_payload();
+    suite["action"] = json!("completed");
+    assert_payload_error(&suite, "check_suite", GithubWebhookError::InvalidPayload);
+}
+
+#[test]
+fn check_suite_rerequest_retains_suite_app_sender_and_revision() {
+    let event = normalize_payload(&check_suite_payload(), "check_suite").expect("check suite");
+    let VerifiedGithubWebhook::CheckSuite(event) = event else {
+        panic!("expected check-suite evidence");
+    };
+    assert_eq!(event.sender_id().get(), 301);
+    assert_eq!(event.app_id().get(), 17);
+    assert_eq!(event.suite_id().get(), 23);
+    assert_eq!(event.head_revision().as_str(), HEAD_SHA);
+}
 
 #[test]
 fn pull_request_normalization_retains_exact_dispatch_evidence() {
@@ -505,6 +571,44 @@ fn repository_dispatch_payload() -> Value {
 
 fn base_repository() -> Value {
     repository(41, 11, "example", "base-repository")
+}
+
+fn check_run_payload(action: &str, requested_action: Option<&str>) -> Value {
+    let mut payload = json!({
+        "action": action,
+        "check_run": {
+            "id": 41,
+            "head_sha": HEAD_SHA,
+            "external_id": "automata-check:00000000-0000-4000-8000-000000000001",
+            "status": "completed",
+            "conclusion": "failure",
+            "app": { "id": 17 },
+            "check_suite": { "id": 23, "head_sha": HEAD_SHA }
+        },
+        "repository": base_repository(),
+        "installation": { "id": 71 },
+        "sender": { "id": 301 }
+    });
+    if let Some(identifier) = requested_action {
+        payload["requested_action"] = json!({ "identifier": identifier });
+    }
+    payload
+}
+
+fn check_suite_payload() -> Value {
+    json!({
+        "action": "rerequested",
+        "check_suite": {
+            "id": 23,
+            "head_sha": HEAD_SHA,
+            "status": "completed",
+            "conclusion": "failure",
+            "app": { "id": 17 }
+        },
+        "repository": base_repository(),
+        "installation": { "id": 71 },
+        "sender": { "id": 301 }
+    })
 }
 
 fn head_repository() -> Value {

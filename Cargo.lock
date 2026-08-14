@@ -510,6 +510,7 @@ dependencies = [
  "flate2",
  "http 1.5.0",
  "ring",
+ "serde_json",
  "sha2 0.11.0",
  "tar",
  "thiserror",

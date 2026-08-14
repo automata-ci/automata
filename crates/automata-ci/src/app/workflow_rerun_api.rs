@@ -1,4 +1,4 @@
-//! CLI-authenticated HTTP boundary for durable workflow reruns.
+//! Authenticated HTTP boundary for durable CLI and browser workflow reruns.
 
 use std::{fmt, sync::Arc};
 
@@ -31,6 +31,8 @@ const MAX_REPOSITORY_SEGMENT_BYTES: usize = 100;
 
 pub(crate) const WORKFLOW_RERUN_PATH: &str =
     "/api/v1/repositories/{owner}/{repository}/runs/{source_run_id}/reruns";
+pub(crate) const WORKFLOW_BROWSER_RERUN_PATH: &str =
+    "/{owner}/{repository}/actions/runs/{source_run_id}/reruns";
 
 /// Exact authority-bearing rerun request passed to product composition.
 #[derive(Clone, Eq, PartialEq)]
@@ -177,6 +179,7 @@ pub(crate) fn workflow_rerun_api_router(
 ) -> Router {
     Router::new()
         .route(WORKFLOW_RERUN_PATH, post(rerun_workflow))
+        .route(WORKFLOW_BROWSER_RERUN_PATH, post(rerun_workflow))
         .with_state(WorkflowRerunApiState { backend, clock })
         .layer(middleware::from_fn(super::api_security::no_store))
 }
@@ -263,7 +266,11 @@ fn actor_from_request(
         .get::<AuthenticatedRequestSnapshot>()
         .ok_or(ApiError::Unauthorized)?;
     let identity = snapshot.session().identity();
-    if identity.kind() != SessionKind::Cli {
+    let route_kind_is_exact = match identity.kind() {
+        SessionKind::Cli => request.uri().path().starts_with("/api/v1/"),
+        SessionKind::Browser => request.uri().path().contains("/actions/runs/"),
+    };
+    if !route_kind_is_exact {
         return Err(ApiError::Unauthorized);
     }
     let authorization_revision =
@@ -569,6 +576,8 @@ mod tests {
     const RUN_ID: &str = "44444444-4444-4444-8444-444444444444";
     const LOGICAL_JOB_ID: &str = "77777777-7777-4777-8777-777777777777";
     const PATH: &str = "/api/v1/repositories/automata-ci/automata/runs/22222222-2222-4222-8222-222222222222/reruns";
+    const BROWSER_PATH: &str =
+        "/automata-ci/automata/actions/runs/22222222-2222-4222-8222-222222222222/reruns";
 
     #[derive(Debug)]
     struct FixedClock;
@@ -662,6 +671,21 @@ mod tests {
             .expect("replay response");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response_json(response).await["replay"], true);
+    }
+
+    #[tokio::test]
+    async fn browser_route_uses_the_same_durable_backend() {
+        let backend = RecordingBackend::success(false);
+        let response = app(backend.clone())
+            .oneshot(request(
+                BROWSER_PATH,
+                Some(SessionKind::Browser),
+                valid_body(),
+            ))
+            .await
+            .expect("browser rerun response");
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(backend.requests.lock().expect("request lock").len(), 1);
     }
 
     #[tokio::test]

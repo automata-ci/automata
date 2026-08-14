@@ -22,6 +22,18 @@ const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const MAX_CHECK_NAME_BYTES: usize = 255;
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
 const MAX_DETAILS_URL_BYTES: usize = 2_048;
+const MAX_CHECK_OUTPUT_TITLE_BYTES: usize = 255;
+const MAX_CHECK_OUTPUT_SUMMARY_BYTES: usize = 65_535;
+const MAX_CHECK_OUTPUT_TEXT_BYTES: usize = 65_535;
+const MAX_REQUESTED_ACTIONS: usize = 3;
+const MAX_REQUESTED_ACTION_IDENTIFIER_BYTES: usize = 20;
+const MAX_REQUESTED_ACTION_LABEL_BYTES: usize = 20;
+const MAX_REQUESTED_ACTION_DESCRIPTION_BYTES: usize = 40;
+const MAX_CHECK_ANNOTATION_PATH_BYTES: usize = 4_096;
+const MAX_CHECK_ANNOTATION_MESSAGE_BYTES: usize = 65_535;
+const MAX_CHECK_ANNOTATION_TITLE_BYTES: usize = 255;
+const MAX_CHECK_ANNOTATIONS_PER_REQUEST: usize = 50;
+const CHECK_ANNOTATIONS_PER_PAGE: usize = 100;
 const CHECK_SUITES_PER_PAGE: usize = 100;
 const CHECK_RUNS_PER_PAGE: usize = 100;
 const MAX_GITHUB_ID: u64 = i64::MAX as u64;
@@ -250,6 +262,336 @@ impl fmt::Debug for GithubCheckTimestamp {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("GithubCheckTimestamp([validated])")
     }
+}
+
+/// Bounded native Markdown presentation for one GitHub Check Run update.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GithubCheckOutput {
+    title: String,
+    summary: String,
+    text: Option<String>,
+}
+
+impl GithubCheckOutput {
+    /// Creates a bounded title, required Markdown summary, and optional Markdown detail.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, non-canonical, or unsafe control-containing text.
+    pub fn new(
+        title: impl Into<String>,
+        summary: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Self, GithubCheckModelError> {
+        let title = title.into();
+        let summary = summary.into();
+        if title.is_empty()
+            || title.len() > MAX_CHECK_OUTPUT_TITLE_BYTES
+            || title.trim() != title
+            || title.chars().any(char::is_control)
+            || summary.trim().is_empty()
+            || summary.len() > MAX_CHECK_OUTPUT_SUMMARY_BYTES
+            || !canonical_markdown(&summary)
+            || text.as_ref().is_some_and(|text| {
+                text.trim().is_empty()
+                    || text.len() > MAX_CHECK_OUTPUT_TEXT_BYTES
+                    || !canonical_markdown(text)
+            })
+        {
+            return Err(GithubCheckModelError::InvalidOutput);
+        }
+        Ok(Self {
+            title,
+            summary,
+            text,
+        })
+    }
+
+    /// Returns the native Check output title.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Returns the required Markdown summary.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Returns optional detailed Markdown.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+}
+
+impl fmt::Debug for GithubCheckOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubCheckOutput")
+            .field("title", &"[REDACTED]")
+            .field("summary", &"[REDACTED]")
+            .field("text", &self.text.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+/// One native button displayed on a completed GitHub Check Run.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+pub struct GithubCheckRequestedAction {
+    label: String,
+    description: String,
+    identifier: String,
+}
+
+impl GithubCheckRequestedAction {
+    /// Creates one bounded GitHub Check requested action.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, edge-whitespace, control-bearing, or
+    /// non-portable identifiers.
+    pub fn new(
+        label: impl Into<String>,
+        description: impl Into<String>,
+        identifier: impl Into<String>,
+    ) -> Result<Self, GithubCheckModelError> {
+        let label = label.into();
+        let description = description.into();
+        let identifier = identifier.into();
+        if !bounded_action_text(&label, MAX_REQUESTED_ACTION_LABEL_BYTES)
+            || !bounded_action_text(&description, MAX_REQUESTED_ACTION_DESCRIPTION_BYTES)
+            || identifier.is_empty()
+            || identifier.len() > MAX_REQUESTED_ACTION_IDENTIFIER_BYTES
+            || !identifier
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            return Err(GithubCheckModelError::InvalidRequestedAction);
+        }
+        Ok(Self {
+            label,
+            description,
+            identifier,
+        })
+    }
+}
+
+impl fmt::Debug for GithubCheckRequestedAction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubCheckRequestedAction")
+            .field("label", &"[REDACTED]")
+            .field("description", &"[REDACTED]")
+            .field("identifier", &self.identifier)
+            .finish()
+    }
+}
+
+/// Complete desired terminal presentation for one Check Run mutation.
+#[derive(Clone, Copy, Debug)]
+pub struct GithubCheckCompletion<'a> {
+    conclusion: GithubCheckConclusion,
+    started_at: Option<&'a GithubCheckTimestamp>,
+    completed_at: &'a GithubCheckTimestamp,
+    output: Option<&'a GithubCheckOutput>,
+    actions: &'a [GithubCheckRequestedAction],
+}
+
+impl<'a> GithubCheckCompletion<'a> {
+    /// Creates one terminal mutation with optional rich output and native actions.
+    ///
+    /// When output is absent, the endpoint generates the canonical bounded
+    /// conclusion summary. GitHub permits at most three requested actions.
+    ///
+    /// # Errors
+    ///
+    /// Rejects more than three requested actions.
+    pub fn new(
+        conclusion: GithubCheckConclusion,
+        started_at: Option<&'a GithubCheckTimestamp>,
+        completed_at: &'a GithubCheckTimestamp,
+        output: Option<&'a GithubCheckOutput>,
+        actions: &'a [GithubCheckRequestedAction],
+    ) -> Result<Self, GithubCheckModelError> {
+        if actions.len() > MAX_REQUESTED_ACTIONS {
+            return Err(GithubCheckModelError::InvalidRequestedAction);
+        }
+        Ok(Self {
+            conclusion,
+            started_at,
+            completed_at,
+            output,
+            actions,
+        })
+    }
+}
+
+fn bounded_action_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+/// Severity displayed for one source annotation in GitHub's Checks UI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubCheckAnnotationLevel {
+    /// A failing diagnostic.
+    Failure,
+    /// A warning diagnostic.
+    Warning,
+    /// An informational diagnostic.
+    Notice,
+}
+
+/// One bounded repository-relative source annotation for a GitHub Check Run.
+#[derive(Clone, Eq, PartialEq, Serialize)]
+pub struct GithubCheckAnnotation {
+    path: String,
+    start_line: u32,
+    end_line: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_column: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_column: Option<u32>,
+    annotation_level: GithubCheckAnnotationLevel,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
+impl GithubCheckAnnotation {
+    /// Creates one canonical source annotation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsafe paths, invalid locations, oversized text, or unsupported
+    /// control characters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        path: impl Into<String>,
+        start_line: u32,
+        end_line: u32,
+        start_column: Option<u32>,
+        end_column: Option<u32>,
+        annotation_level: GithubCheckAnnotationLevel,
+        message: impl Into<String>,
+        title: Option<String>,
+    ) -> Result<Self, GithubCheckModelError> {
+        let path = path.into();
+        let message = message.into();
+        let path_is_safe = !path.is_empty()
+            && path.len() <= MAX_CHECK_ANNOTATION_PATH_BYTES
+            && !path.starts_with('/')
+            && !path.contains('\\')
+            && !path.chars().any(char::is_control)
+            && path
+                .split('/')
+                .all(|component| !component.is_empty() && !matches!(component, "." | ".."));
+        let columns_are_valid = match (start_column, end_column) {
+            (None, None) => true,
+            (Some(start), Some(end)) => start_line == end_line && start > 0 && end >= start,
+            (None, Some(_)) | (Some(_), None) => false,
+        };
+        if !path_is_safe
+            || start_line == 0
+            || end_line < start_line
+            || !columns_are_valid
+            || message.trim().is_empty()
+            || message.len() > MAX_CHECK_ANNOTATION_MESSAGE_BYTES
+            || !canonical_markdown(&message)
+            || title.as_ref().is_some_and(|title| {
+                title.trim().is_empty()
+                    || title.len() > MAX_CHECK_ANNOTATION_TITLE_BYTES
+                    || !canonical_markdown(title)
+            })
+        {
+            return Err(GithubCheckModelError::InvalidAnnotation);
+        }
+        Ok(Self {
+            path,
+            start_line,
+            end_line,
+            start_column,
+            end_column,
+            annotation_level,
+            message,
+            title,
+        })
+    }
+
+    /// Returns the canonical repository-relative path.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Returns the inclusive starting line.
+    #[must_use]
+    pub const fn start_line(&self) -> u32 {
+        self.start_line
+    }
+
+    /// Returns the inclusive ending line.
+    #[must_use]
+    pub const fn end_line(&self) -> u32 {
+        self.end_line
+    }
+
+    /// Returns the optional starting column.
+    #[must_use]
+    pub const fn start_column(&self) -> Option<u32> {
+        self.start_column
+    }
+
+    /// Returns the optional ending column.
+    #[must_use]
+    pub const fn end_column(&self) -> Option<u32> {
+        self.end_column
+    }
+
+    /// Returns the provider annotation severity.
+    #[must_use]
+    pub const fn level(&self) -> GithubCheckAnnotationLevel {
+        self.annotation_level
+    }
+
+    /// Returns the masked diagnostic message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns the optional masked annotation title.
+    #[must_use]
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+}
+
+impl fmt::Debug for GithubCheckAnnotation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubCheckAnnotation")
+            .field("path", &"[REDACTED]")
+            .field("start_line", &self.start_line)
+            .field("end_line", &self.end_line)
+            .field("start_column", &self.start_column)
+            .field("end_column", &self.end_column)
+            .field("annotation_level", &self.annotation_level)
+            .field("message", &"[REDACTED]")
+            .field("title", &self.title.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+fn canonical_markdown(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
 }
 
 /// Immutable identity expected on every response for one Automata Check Run.
@@ -591,6 +933,15 @@ pub enum GithubCheckModelError {
     /// A lifecycle timestamp was negative or outside RFC 3339's range.
     #[error("invalid GitHub Check timestamp")]
     InvalidTimestamp,
+    /// Native Check output violated the bounded canonical Markdown policy.
+    #[error("invalid GitHub Check output")]
+    InvalidOutput,
+    /// A native requested-action button violated GitHub's bounded shape.
+    #[error("invalid GitHub Check requested action")]
+    InvalidRequestedAction,
+    /// A source annotation violated path, location, or bounded text policy.
+    #[error("invalid GitHub Check annotation")]
+    InvalidAnnotation,
 }
 
 /// Sanitized failure at the GitHub Checks HTTP boundary.
@@ -668,18 +1019,48 @@ struct CompleteRunBody<'a> {
     started_at: Option<&'a str>,
     completed_at: &'a str,
     output: CheckOutputBody<'a>,
+    #[serde(skip_serializing_if = "<[GithubCheckRequestedAction]>::is_empty")]
+    actions: &'a [GithubCheckRequestedAction],
+}
+
+#[derive(Serialize)]
+struct AnnotateRunBody<'a> {
+    output: CheckOutputAnnotationsBody<'a>,
+}
+
+#[derive(Serialize)]
+struct CheckOutputAnnotationsBody<'a> {
+    title: &'a str,
+    summary: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
+    annotations: &'a [GithubCheckAnnotation],
 }
 
 #[derive(Clone, Copy, Serialize)]
 struct CheckOutputBody<'a> {
     title: &'a str,
     summary: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
 struct CheckRunsPage {
     total_count: u64,
     check_runs: Vec<RunResponse>,
+}
+
+#[derive(Deserialize)]
+struct AnnotationResponse {
+    path: String,
+    start_line: u32,
+    end_line: u32,
+    start_column: Option<u32>,
+    end_column: Option<u32>,
+    annotation_level: String,
+    message: String,
+    title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -870,6 +1251,7 @@ impl GithubHttpEndpoint {
             output: CheckOutputBody {
                 title: "Queued",
                 summary: &summary,
+                text: None,
             },
         };
         let Ok(response) =
@@ -1073,6 +1455,7 @@ impl GithubHttpEndpoint {
             output: CheckOutputBody {
                 title: "Running",
                 summary: &summary,
+                text: None,
             },
         };
         let response =
@@ -1094,34 +1477,101 @@ impl GithubHttpEndpoint {
         Ok(into_public_run(&run, identity))
     }
 
-    /// Publishes an immutable terminal state, completion time, and native summary.
+    /// Publishes one immutable terminal state and its complete native presentation.
     ///
     /// # Errors
     ///
     /// Returns a sanitized error unless GitHub returns exact `200` JSON matching
     /// the run ID, immutable identity, completed state, and requested conclusion.
-    #[allow(clippy::too_many_arguments)]
     pub async fn complete_check_run(
         &self,
         repository: &RepositoryId,
         run_id: GithubCheckRunId,
         identity: &GithubCheckRunIdentity,
-        conclusion: GithubCheckConclusion,
-        started_at: Option<&GithubCheckTimestamp>,
-        completed_at: &GithubCheckTimestamp,
+        completion: GithubCheckCompletion<'_>,
         server_service_token: &SecretString,
     ) -> Result<GithubCheckRun, GithubChecksError> {
+        let generated_output = if completion.output.is_none() {
+            let summary = check_summary(
+                completion.conclusion.summary(),
+                identity.details_url.as_str(),
+            );
+            Some(
+                GithubCheckOutput::new(completion.conclusion.title(), summary, None)
+                    .map_err(|_| GithubChecksError::InvalidRequest)?,
+            )
+        } else {
+            None
+        };
+        let output = completion
+            .output
+            .or(generated_output.as_ref())
+            .ok_or(GithubChecksError::InvalidRequest)?;
         let run_id_segment = run_id.get().to_string();
         let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
-        let summary = check_summary(conclusion.summary(), identity.details_url.as_str());
         let body = CompleteRunBody {
             status: "completed",
-            conclusion: conclusion.as_str(),
-            started_at: started_at.map(GithubCheckTimestamp::as_str),
-            completed_at: completed_at.as_str(),
+            conclusion: completion.conclusion.as_str(),
+            started_at: completion.started_at.map(GithubCheckTimestamp::as_str),
+            completed_at: completion.completed_at.as_str(),
             output: CheckOutputBody {
-                title: conclusion.title(),
-                summary: &summary,
+                title: output.title(),
+                summary: output.summary(),
+                text: output.text(),
+            },
+            actions: completion.actions,
+        };
+        let response =
+            authenticated_checks_request(self.client.patch(endpoint), server_service_token)?
+                .json(&body)
+                .send()
+                .await
+                .map_err(|_| GithubChecksError::Unavailable(GithubCheckRetryEvidence::default()))?;
+        if response.status() != StatusCode::OK {
+            return Err(map_error_response(&response));
+        }
+        let run = self.decode_run_response(response).await?;
+        let expected_state = GithubCheckRunState::Completed(GithubObservedCheckConclusion::from(
+            completion.conclusion,
+        ));
+        if run.id != run_id || !run_matches_identity(&run, identity) || run.state != expected_state
+        {
+            return Err(GithubChecksError::InvalidResponse);
+        }
+        Ok(into_public_run(&run, identity))
+    }
+
+    /// Appends one bounded source-annotation batch to a completed Check Run.
+    ///
+    /// GitHub appends annotations rather than replacing them. Callers must use
+    /// a durable cursor and reconcile transport ambiguity before retrying.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty or oversized batches locally and otherwise returns a
+    /// sanitized error unless GitHub returns the exact completed Check Run.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append_check_run_annotations(
+        &self,
+        repository: &RepositoryId,
+        run_id: GithubCheckRunId,
+        identity: &GithubCheckRunIdentity,
+        conclusion: GithubCheckConclusion,
+        output: &GithubCheckOutput,
+        annotations: &[GithubCheckAnnotation],
+        server_service_token: &SecretString,
+    ) -> Result<GithubCheckRun, GithubChecksError> {
+        if annotations.is_empty() || annotations.len() > MAX_CHECK_ANNOTATIONS_PER_REQUEST {
+            return Err(GithubChecksError::InvalidRequest);
+        }
+        let run_id_segment = run_id.get().to_string();
+        let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
+        let body = AnnotateRunBody {
+            output: CheckOutputAnnotationsBody {
+                title: output.title(),
+                summary: output.summary(),
+                text: output.text(),
+                annotations,
             },
         };
         let response =
@@ -1141,6 +1591,76 @@ impl GithubHttpEndpoint {
             return Err(GithubChecksError::InvalidResponse);
         }
         Ok(into_public_run(&run, identity))
+    }
+
+    /// Fully paginates and validates every annotation currently on one Check Run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized error for transport/provider failure, malformed or
+    /// cross-origin pagination, excess pages/items, or invalid annotation data.
+    pub async fn list_check_run_annotations(
+        &self,
+        repository: &RepositoryId,
+        run_id: GithubCheckRunId,
+        server_service_token: &SecretString,
+    ) -> Result<Vec<GithubCheckAnnotation>, GithubChecksError> {
+        let run_id_segment = run_id.get().to_string();
+        let mut endpoint = self
+            .checks_repository_url(repository, &["check-runs", &run_id_segment, "annotations"])?;
+        endpoint
+            .query_pairs_mut()
+            .append_pair("per_page", &CHECK_ANNOTATIONS_PER_PAGE.to_string())
+            .append_pair("page", "1");
+        let expected_path = endpoint.path().to_owned();
+        let mut annotations = Vec::new();
+        let mut current_page = 1_u64;
+        let mut visited_pages = HashSet::new();
+        for _ in 0..self.trusted.limits().max_pages {
+            if !visited_pages.insert(current_page) {
+                return Err(GithubChecksError::InvalidResponse);
+            }
+            let response = authenticated_checks_request(
+                self.client.get(endpoint.clone()),
+                server_service_token,
+            )?
+            .send()
+            .await
+            .map_err(|_| GithubChecksError::Unavailable(GithubCheckRetryEvidence::default()))?;
+            if response.status() != StatusCode::OK {
+                return Err(map_error_response(&response));
+            }
+            let response =
+                read_json_response(response, self.trusted.limits().max_response_bytes, false)
+                    .await
+                    .map_err(map_endpoint_error)?;
+            let page: Vec<AnnotationResponse> =
+                decode_json(&response.body).map_err(map_endpoint_error)?;
+            if page.len() > CHECK_ANNOTATIONS_PER_PAGE {
+                return Err(GithubChecksError::InvalidResponse);
+            }
+            annotations.reserve(page.len());
+            for annotation in page {
+                annotations.push(validate_annotation(annotation)?);
+                if annotations.len() > 4_096 {
+                    return Err(GithubChecksError::InvalidResponse);
+                }
+            }
+            let Some(next) = next_annotation_page(
+                &response.headers,
+                &self.trusted,
+                &expected_path,
+                current_page,
+            )?
+            else {
+                return Ok(annotations);
+            };
+            current_page = current_page
+                .checked_add(1)
+                .ok_or(GithubChecksError::InvalidResponse)?;
+            endpoint = next;
+        }
+        Err(GithubChecksError::InvalidResponse)
     }
 
     fn checks_repository_url(
@@ -1436,6 +1956,86 @@ fn parse_bounded_decimal(bytes: &[u8], maximum: u64) -> Option<u64> {
     let raw = std::str::from_utf8(bytes).ok()?;
     let value = raw.parse::<u64>().ok()?;
     (value <= maximum && value.to_string() == raw).then_some(value)
+}
+
+fn validate_annotation(
+    value: AnnotationResponse,
+) -> Result<GithubCheckAnnotation, GithubChecksError> {
+    let level = match value.annotation_level.as_str() {
+        "failure" => GithubCheckAnnotationLevel::Failure,
+        "warning" => GithubCheckAnnotationLevel::Warning,
+        "notice" => GithubCheckAnnotationLevel::Notice,
+        _ => return Err(GithubChecksError::InvalidResponse),
+    };
+    GithubCheckAnnotation::new(
+        value.path,
+        value.start_line,
+        value.end_line,
+        value.start_column,
+        value.end_column,
+        level,
+        value.message,
+        value.title,
+    )
+    .map_err(|_| GithubChecksError::InvalidResponse)
+}
+
+fn next_annotation_page(
+    headers: &HeaderMap,
+    trusted: &crate::GithubTrustedOrigins,
+    expected_path: &str,
+    current_page: u64,
+) -> Result<Option<Url>, GithubChecksError> {
+    let mut next = None;
+    for parsed in
+        pagination::parse_links(headers).map_err(|_| GithubChecksError::InvalidResponse)?
+    {
+        let page = validate_annotation_page_url(&parsed.url, trusted, expected_path)?;
+        if parsed.is_next {
+            if next.is_some() || page != current_page.saturating_add(1) {
+                return Err(GithubChecksError::InvalidResponse);
+            }
+            next = Some(parsed.url);
+        }
+    }
+    Ok(next)
+}
+
+fn validate_annotation_page_url(
+    url: &Url,
+    trusted: &crate::GithubTrustedOrigins,
+    expected_path: &str,
+) -> Result<u64, GithubChecksError> {
+    if !trusted.trusts_api_url(url)
+        || !same_origin(trusted.api_base(), url)
+        || url.path() != expected_path
+        || url.query().is_none()
+    {
+        return Err(GithubChecksError::InvalidResponse);
+    }
+    let mut per_page = None;
+    let mut page = None;
+    for (name, value) in url.query_pairs() {
+        let slot = match name.as_ref() {
+            "per_page" => &mut per_page,
+            "page" => &mut page,
+            _ => return Err(GithubChecksError::InvalidResponse),
+        };
+        if slot.replace(value.into_owned()).is_some() {
+            return Err(GithubChecksError::InvalidResponse);
+        }
+    }
+    if per_page.as_deref() != Some("100") {
+        return Err(GithubChecksError::InvalidResponse);
+    }
+    let page = page
+        .ok_or(GithubChecksError::InvalidResponse)?
+        .parse::<u64>()
+        .map_err(|_| GithubChecksError::InvalidResponse)?;
+    if page == 0 || page.to_string() != page_value(url)? {
+        return Err(GithubChecksError::InvalidResponse);
+    }
+    Ok(page)
 }
 
 fn next_check_run_page(

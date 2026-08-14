@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
-    GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateIndeterminateKind,
-    GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckModelError, GithubCheckName,
-    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
-    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
-    GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint,
-    GithubHttpLimits, GithubObservedCheckConclusion,
+    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
+    GithubCheckConclusion, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
+    GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckOutput,
+    GithubCheckRequestedAction, GithubCheckRunCreateOutcome, GithubCheckRunId,
+    GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
+    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
+    GithubHttpEndpoint, GithubHttpLimits, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use serde_json::{Value, json};
@@ -109,6 +110,20 @@ fn list_url(server: &FixtureServer, page: u64) -> Url {
     url
 }
 
+fn annotation(path: &str, line: u32, message: &str) -> GithubCheckAnnotation {
+    GithubCheckAnnotation::new(
+        path,
+        line,
+        line,
+        None,
+        None,
+        GithubCheckAnnotationLevel::Failure,
+        message,
+        Some("compiler".to_owned()),
+    )
+    .expect("annotation")
+}
+
 #[tokio::test]
 async fn check_suite_creation_preserves_the_exact_200_and_201_distinction() {
     let server = FixtureServer::spawn().await;
@@ -159,6 +174,120 @@ async fn check_suite_creation_preserves_the_exact_200_and_201_distinction() {
             json!({"head_sha": SHA})
         );
     }
+}
+
+#[tokio::test]
+async fn annotation_batches_are_bounded_and_preserve_exact_source_locations() {
+    let server = FixtureServer::spawn().await;
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        exact_run_value(41, "completed", Some("failure")).to_string(),
+    ));
+    let output = GithubCheckOutput::new(
+        "Failed",
+        "One source diagnostic",
+        Some("See the full run in Automata.".to_owned()),
+    )
+    .expect("output");
+    let annotations = [GithubCheckAnnotation::new(
+        "src/lib.rs",
+        7,
+        7,
+        Some(3),
+        Some(9),
+        GithubCheckAnnotationLevel::Failure,
+        "type mismatch",
+        Some("compiler".to_owned()),
+    )
+    .expect("annotation")];
+
+    server
+        .endpoint()
+        .append_check_run_annotations(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &identity(),
+            GithubCheckConclusion::Failure,
+            &output,
+            &annotations,
+            &token(),
+        )
+        .await
+        .expect("annotation append");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].uri, "/api/repos/acme/widget/check-runs/41");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request JSON");
+    assert_eq!(body["output"]["title"], "Failed");
+    assert_eq!(body["output"]["annotations"][0]["path"], "src/lib.rs");
+    assert_eq!(body["output"]["annotations"][0]["start_line"], 7);
+    assert_eq!(body["output"]["annotations"][0]["start_column"], 3);
+    assert_eq!(
+        body["output"]["annotations"][0]["annotation_level"],
+        "failure"
+    );
+
+    let oversized = vec![annotation("src/lib.rs", 1, "failure"); 51];
+    assert_eq!(
+        server
+            .endpoint()
+            .append_check_run_annotations(
+                &repository(),
+                GithubCheckRunId::new(41).expect("run id"),
+                &identity(),
+                GithubCheckConclusion::Failure,
+                &output,
+                &oversized,
+                &token(),
+            )
+            .await,
+        Err(GithubChecksError::InvalidRequest)
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn annotation_reconciliation_fully_paginates_same_origin_results() {
+    let server = FixtureServer::spawn().await;
+    let page_two =
+        server.url("api/repos/acme/widget/check-runs/41/annotations?per_page=100&page=2");
+    server.enqueue(
+        ResponseSpec::json(
+            axum::http::StatusCode::OK,
+            json!([{
+                "path": "src/lib.rs", "start_line": 7, "end_line": 7,
+                "start_column": null, "end_column": null,
+                "annotation_level": "failure", "message": "first", "title": "compiler"
+            }])
+            .to_string(),
+        )
+        .header("link", format!("<{page_two}>; rel=\"next\"")),
+    );
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        json!([{
+            "path": "src/main.rs", "start_line": 9, "end_line": 10,
+            "start_column": null, "end_column": null,
+            "annotation_level": "warning", "message": "second", "title": null
+        }])
+        .to_string(),
+    ));
+
+    let annotations = server
+        .endpoint()
+        .list_check_run_annotations(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &token(),
+        )
+        .await
+        .expect("annotation list");
+    assert_eq!(annotations.len(), 2);
+    assert_eq!(annotations[0].path(), "src/lib.rs");
+    assert_eq!(annotations[1].level(), GithubCheckAnnotationLevel::Warning);
+    assert_eq!(server.requests().len(), 2);
 }
 
 #[tokio::test]
@@ -548,6 +677,7 @@ async fn get_validates_id_app_sha_name_external_suite_status_and_conclusion() {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn terminal_patch_sends_completion_time_and_native_output_and_validates_exact_response() {
     let server = FixtureServer::spawn().await;
     server.enqueue(ResponseSpec::json(
@@ -558,15 +688,28 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
         axum::http::StatusCode::OK,
         exact_run_value(41, "completed", Some("failure")).to_string(),
     ));
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        exact_run_value(41, "completed", Some("success")).to_string(),
+    ));
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        exact_run_value(41, "completed", Some("success")).to_string(),
+    ));
     let endpoint = server.endpoint();
     let run = endpoint
         .complete_check_run(
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
-            GithubCheckConclusion::Success,
-            Some(&lifecycle_timestamp()),
-            &lifecycle_timestamp(),
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                None,
+                &[],
+            )
+            .expect("completion"),
             &token(),
         )
         .await
@@ -580,14 +723,65 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
-            GithubCheckConclusion::Success,
-            Some(&lifecycle_timestamp()),
-            &lifecycle_timestamp(),
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                None,
+                &[],
+            )
+            .expect("completion"),
             &token(),
         )
         .await
         .expect_err("wrong terminal response");
     assert_eq!(error, GithubChecksError::InvalidResponse);
+    let custom_output = GithubCheckOutput::new(
+        "Passed with details",
+        "**2 steps** — 2 passed.",
+        Some("| Step | Result |\n| --- | --- |\n| `test` | passed |".to_owned()),
+    )
+    .expect("custom output");
+    endpoint
+        .complete_check_run(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &identity(),
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                Some(&custom_output),
+                &[],
+            )
+            .expect("completion"),
+            &token(),
+        )
+        .await
+        .expect("custom terminal response");
+    let actions = [GithubCheckRequestedAction::new(
+        "Re-run all jobs",
+        "Run every job in this workflow",
+        "rerun_all",
+    )
+    .expect("requested action")];
+    endpoint
+        .complete_check_run(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &identity(),
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                None,
+                &actions,
+            )
+            .expect("completion"),
+            &token(),
+        )
+        .await
+        .expect("terminal response with action");
 
     let requests = server.requests();
     assert_eq!(requests[0].method, "PATCH");
@@ -607,6 +801,25 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
         })
     );
     assert_eq!(body.as_object().expect("object").len(), 5);
+    let custom_body: Value = serde_json::from_slice(&requests[2].body).expect("custom patch JSON");
+    assert_eq!(custom_body["output"]["title"], "Passed with details");
+    assert_eq!(custom_body["output"]["summary"], "**2 steps** — 2 passed.");
+    assert!(
+        custom_body["output"]["text"]
+            .as_str()
+            .expect("custom text")
+            .contains("`test`")
+    );
+    let action_body: Value =
+        serde_json::from_slice(&requests[3].body).expect("requested-action patch JSON");
+    assert_eq!(
+        action_body["actions"],
+        json!([{
+            "label": "Re-run all jobs",
+            "description": "Run every job in this workflow",
+            "identifier": "rerun_all"
+        }])
+    );
 }
 
 #[tokio::test]
@@ -953,7 +1166,7 @@ async fn list_rejects_query_scope_mismatch_duplicate_ids_and_total_count_drift()
 }
 
 #[tokio::test]
-async fn provider_statuses_map_without_reading_or_exposing_bodies() {
+async fn provider_http_failures_map_without_reading_or_exposing_bodies() {
     let server = FixtureServer::spawn().await;
     let statuses = [
         axum::http::StatusCode::UNAUTHORIZED,
@@ -1072,6 +1285,27 @@ fn bounded_models_and_diagnostics_are_redacted() {
         GithubCheckTimestamp::from_unix_millis(-1),
         Err(GithubCheckModelError::InvalidTimestamp)
     );
+    for invalid in [
+        GithubCheckOutput::new("", "summary", None),
+        GithubCheckOutput::new(" title", "summary", None),
+        GithubCheckOutput::new("title", " \n\t", None),
+        GithubCheckOutput::new("title", "bad\u{0000}summary", None),
+        GithubCheckOutput::new("title", "summary", Some("\n".to_owned())),
+    ] {
+        assert_eq!(invalid, Err(GithubCheckModelError::InvalidOutput));
+    }
+    assert_eq!(
+        GithubCheckOutput::new("x".repeat(256), "summary", None),
+        Err(GithubCheckModelError::InvalidOutput)
+    );
+    let output = GithubCheckOutput::new(
+        "secret title",
+        "secret summary",
+        Some("secret text".to_owned()),
+    )
+    .expect("output");
+    let output_debug = format!("{output:?}");
+    assert!(!output_debug.contains("secret"));
     let fractional_timestamp =
         GithubCheckTimestamp::from_unix_millis(1_786_666_505_123).expect("timestamp");
     assert_eq!(fractional_timestamp.as_str(), "2026-08-14T00:15:05.123Z");

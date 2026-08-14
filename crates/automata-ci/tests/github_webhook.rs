@@ -25,6 +25,7 @@ use automata_ci_github::{
 };
 use automata_ci_github_delivery::{
     GithubDeliveryClock, GithubDeliveryConnection, GithubDeliveryIngress,
+    GithubDeliveryRepositories,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AdmissionObject, GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
@@ -387,7 +388,7 @@ fn registry(
             GithubServerServiceRevision::new(1).expect("verifier revision"),
             connections,
             blobs,
-            subjects,
+            GithubDeliveryRepositories::new(subjects),
             Arc::new(FixedClock),
         )
         .expect("mixed registry"),

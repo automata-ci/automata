@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type {
   ArtifactModel,
   JobModel,
@@ -6,6 +6,7 @@ import type {
   ResultCollectionVisibility,
   RunDetailModel,
   RunDetailPageModel,
+  RunRerunControlsModel,
   StatusModel,
 } from "../models";
 import { ActionsLayout } from "../components/ActionsLayout";
@@ -82,6 +83,12 @@ export function RunDetailPage({ model, shellUtility }: RunDetailPageProps) {
                 )}
               </p>
             </div>
+            {model.rerun === null ? null : (
+              <RunRerunControls
+                controls={model.rerun}
+                runsHref={model.repository.runsHref}
+              />
+            )}
           </header>
 
           <RunSummary run={run} />
@@ -97,6 +104,78 @@ export function RunDetailPage({ model, shellUtility }: RunDetailPageProps) {
         </ActionsLayout>
       </main>
     </Shell>
+  );
+}
+
+function RunRerunControls({
+  controls,
+  runsHref,
+}: {
+  readonly controls: RunRerunControlsModel;
+  readonly runsHref: string;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function rerun(mode: "entire_workflow" | "failed_jobs_and_dependents") {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const response = await fetch(controls.endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+          "x-automata-csrf-token": controls.csrfToken,
+        },
+        body: JSON.stringify({
+          operation_id: crypto.randomUUID(),
+          selection: { mode },
+        }),
+      });
+      if (!response.ok) throw new Error("rerun rejected");
+      const document: unknown = await response.json();
+      if (
+        typeof document !== "object" ||
+        document === null ||
+        !("run_id" in document) ||
+        typeof document.run_id !== "string" ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          document.run_id,
+        )
+      ) {
+        throw new Error("invalid rerun response");
+      }
+      window.location.assign(`${runsHref}/runs/${document.run_id}`);
+    } catch {
+      setPending(false);
+      setError("The rerun could not be started. Refresh and try again.");
+    }
+  }
+
+  return (
+    <div aria-label="Rerun controls">
+      <button
+        className="button button--primary"
+        disabled={pending}
+        onClick={() => void rerun("entire_workflow")}
+        type="button"
+      >
+        {pending ? "Starting rerun…" : "Re-run all jobs"}
+      </button>
+      {controls.failedJobsAvailable ? (
+        <button
+          className="button button--quiet"
+          disabled={pending}
+          onClick={() => void rerun("failed_jobs_and_dependents")}
+          type="button"
+        >
+          Re-run failed jobs
+        </button>
+      ) : null}
+      {error === null ? null : <p role="alert">{error}</p>}
+    </div>
   );
 }
 

@@ -448,6 +448,7 @@ function projectRunDetail(sample: PreviewRunSample): RunDetailPageModel {
       label: `${sample.jobs.items.length} jobs`,
     },
     artifacts: sample.artifacts,
+    rerun: null,
   };
 }
 

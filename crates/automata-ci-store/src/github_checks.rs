@@ -1,7 +1,8 @@
 use std::num::{NonZeroU16, NonZeroU64};
 
 use async_trait::async_trait;
-use automata_ci_core::{JobId, RunId, UnixMillis};
+use automata_ci_blob::BlobDescriptor;
+use automata_ci_core::{JobId, RunId, Sha256Digest, UnixMillis};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -922,10 +923,90 @@ pub struct ClaimedGithubCheckProjection {
     run_id: Option<GithubCheckRunId>,
     created_at: UnixMillis,
     desired_updated_at: UnixMillis,
+    terminal_result: Option<BlobDescriptor>,
+    annotation_progress: GithubCheckAnnotationProgress,
     started_at: Option<UnixMillis>,
     completed_at: Option<UnixMillis>,
     claimed_at: UnixMillis,
     expires_at: UnixMillis,
+}
+
+/// Durable append cursor for one deterministic terminal Check presentation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GithubCheckAnnotationProgress {
+    presentation_digest: Option<Sha256Digest>,
+    total: u16,
+    next: u16,
+    uncertain_batch_size: Option<u8>,
+}
+
+impl GithubCheckAnnotationProgress {
+    /// Rehydrates one bounded monotonic annotation cursor.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incomplete presentation identity, excessive counts, a cursor
+    /// beyond the total, or an uncertain batch outside the remaining suffix.
+    pub fn from_durable_parts(
+        presentation_digest: Option<Sha256Digest>,
+        total: u16,
+        next: u16,
+        uncertain_batch_size: Option<u8>,
+    ) -> Result<Self, GithubCheckValueError> {
+        let uncertainty_is_valid = uncertain_batch_size.is_none_or(|count| {
+            count > 0
+                && count <= 50
+                && next
+                    .checked_add(u16::from(count))
+                    .is_some_and(|end| end <= total)
+        });
+        if total > 4_096
+            || next > total
+            || !uncertainty_is_valid
+            || presentation_digest.is_none()
+                && (total != 0 || next != 0 || uncertain_batch_size.is_some())
+        {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
+        Ok(Self {
+            presentation_digest,
+            total,
+            next,
+            uncertain_batch_size,
+        })
+    }
+
+    /// Returns the deterministic presentation digest, once initialized.
+    #[must_use]
+    pub const fn presentation_digest(self) -> Option<Sha256Digest> {
+        self.presentation_digest
+    }
+
+    /// Returns the total valid source annotations in the presentation.
+    #[must_use]
+    pub const fn total(self) -> u16 {
+        self.total
+    }
+
+    /// Returns the first annotation not durably confirmed at GitHub.
+    #[must_use]
+    pub const fn next(self) -> u16 {
+        self.next
+    }
+
+    /// Returns the size of a possibly appended batch requiring reconciliation.
+    #[must_use]
+    pub const fn uncertain_batch_size(self) -> Option<u8> {
+        self.uncertain_batch_size
+    }
+
+    /// Reports whether every annotation is durably confirmed.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.presentation_digest.is_some()
+            && self.next == self.total
+            && self.uncertain_batch_size.is_none()
+    }
 }
 
 impl ClaimedGithubCheckProjection {
@@ -953,6 +1034,8 @@ impl ClaimedGithubCheckProjection {
         run_id: Option<GithubCheckRunId>,
         created_at: UnixMillis,
         desired_updated_at: UnixMillis,
+        terminal_result: Option<BlobDescriptor>,
+        annotation_progress: GithubCheckAnnotationProgress,
         started_at: Option<UnixMillis>,
         completed_at: Option<UnixMillis>,
         claimed_at: UnixMillis,
@@ -1019,6 +1102,21 @@ impl ClaimedGithubCheckProjection {
         {
             return Err(GithubCheckValueError::InvalidClaimInterval);
         }
+        if let Some(result) = terminal_result.as_ref()
+            && (!matches!(desired, GithubCheckDesiredProjection::Terminal(_))
+                || !matches!(details_target, GithubCheckDetailsTarget::Job { .. })
+                || !(1..=crate::MAX_TERMINAL_RESULT_BYTES).contains(&result.size())
+                || result.media_type().as_str() != crate::HUMAN_JOB_RESULT_MEDIA_TYPE)
+        {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
+        if annotation_progress.presentation_digest().is_some()
+            && (terminal_result.is_none()
+                || !matches!(desired, GithubCheckDesiredProjection::Terminal(_))
+                || !matches!(details_target, GithubCheckDetailsTarget::Job { .. }))
+        {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
         Ok(Self {
             claim,
             action,
@@ -1033,6 +1131,8 @@ impl ClaimedGithubCheckProjection {
             run_id,
             created_at,
             desired_updated_at,
+            terminal_result,
+            annotation_progress,
             started_at,
             completed_at,
             claimed_at,
@@ -1104,6 +1204,16 @@ impl ClaimedGithubCheckProjection {
     #[must_use]
     pub const fn desired_updated_at(&self) -> UnixMillis {
         self.desired_updated_at
+    }
+    /// Returns the verified immutable runner result to present for a terminal job Check.
+    #[must_use]
+    pub const fn terminal_result(&self) -> Option<&BlobDescriptor> {
+        self.terminal_result.as_ref()
+    }
+    /// Returns the durable deterministic annotation append cursor.
+    #[must_use]
+    pub const fn annotation_progress(&self) -> GithubCheckAnnotationProgress {
+        self.annotation_progress
     }
     /// Returns the durable attempt start represented by this Check revision.
     #[must_use]
@@ -1488,6 +1598,306 @@ impl ResolveGithubCheckRunCreate {
 
 /// Confirms that the provider exactly reflects the desired state frozen by a claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InitializeGithubCheckPresentation {
+    claim: GithubCheckProjectionClaimFence,
+    digest: Sha256Digest,
+    annotation_count: u16,
+    initialized_at: UnixMillis,
+}
+
+impl InitializeGithubCheckPresentation {
+    /// Binds one deterministic terminal presentation to a live publish claim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects more than 4,096 annotations or a negative observation time.
+    pub fn new(
+        claim: GithubCheckProjectionClaimFence,
+        digest: Sha256Digest,
+        annotation_count: u16,
+        initialized_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        if annotation_count > 4_096 {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
+        validate_timestamp(
+            initialized_at,
+            "GitHub Check presentation initialization time",
+        )?;
+        Ok(Self {
+            claim,
+            digest,
+            annotation_count,
+            initialized_at,
+        })
+    }
+
+    /// Returns the exact live claim.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.claim
+    }
+
+    /// Returns the deterministic presentation digest.
+    #[must_use]
+    pub const fn digest(self) -> Sha256Digest {
+        self.digest
+    }
+
+    /// Returns the complete annotation count.
+    #[must_use]
+    pub const fn annotation_count(self) -> u16 {
+        self.annotation_count
+    }
+
+    /// Returns when the presentation was initialized.
+    #[must_use]
+    pub const fn initialized_at(self) -> UnixMillis {
+        self.initialized_at
+    }
+}
+
+/// Monotonically confirms one exact annotation batch under a live claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AdvanceGithubCheckAnnotations {
+    claim: GithubCheckProjectionClaimFence,
+    digest: Sha256Digest,
+    from: u16,
+    to: u16,
+    observed_at: UnixMillis,
+}
+
+impl AdvanceGithubCheckAnnotations {
+    /// Creates exact append confirmation for one batch of at most 50 annotations.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, excessive, or out-of-range batches and negative times.
+    pub fn new(
+        claim: GithubCheckProjectionClaimFence,
+        digest: Sha256Digest,
+        from: u16,
+        to: u16,
+        observed_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        if to <= from || to > 4_096 || to - from > 50 {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
+        validate_timestamp(observed_at, "GitHub Check annotation observation time")?;
+        Ok(Self {
+            claim,
+            digest,
+            from,
+            to,
+            observed_at,
+        })
+    }
+
+    /// Returns the exact live claim.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.claim
+    }
+
+    /// Returns the presentation digest.
+    #[must_use]
+    pub const fn digest(self) -> Sha256Digest {
+        self.digest
+    }
+
+    /// Returns the cursor before the batch.
+    #[must_use]
+    pub const fn from(self) -> u16 {
+        self.from
+    }
+
+    /// Returns the cursor after the batch.
+    #[must_use]
+    pub const fn to(self) -> u16 {
+        self.to
+    }
+
+    /// Returns when exact provider evidence was observed.
+    #[must_use]
+    pub const fn observed_at(self) -> UnixMillis {
+        self.observed_at
+    }
+}
+
+/// Releases a possibly appended annotation batch into reconcile-only retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetryUncertainGithubCheckAnnotations {
+    claim: GithubCheckProjectionClaimFence,
+    digest: Sha256Digest,
+    from: u16,
+    batch_size: u8,
+    failed_at: UnixMillis,
+    retry_at: UnixMillis,
+}
+
+impl RetryUncertainGithubCheckAnnotations {
+    /// Creates bounded uncertainty evidence for one possibly appended batch.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid batch bounds, timestamps, or retry delay.
+    pub fn new(
+        claim: GithubCheckProjectionClaimFence,
+        digest: Sha256Digest,
+        from: u16,
+        batch_size: u8,
+        failed_at: UnixMillis,
+        retry_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        if from > 4_095 || batch_size == 0 || batch_size > 50 {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
+        retry_at
+            .get()
+            .checked_sub(failed_at.get())
+            .filter(|delay| (1..=MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS).contains(delay))
+            .ok_or(GithubCheckValueError::InvalidRetryBackoff)?;
+        validate_timestamp(failed_at, "GitHub Check annotation failure time")?;
+        Ok(Self {
+            claim,
+            digest,
+            from,
+            batch_size,
+            failed_at,
+            retry_at,
+        })
+    }
+
+    /// Returns the exact live claim.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.claim
+    }
+    /// Returns the presentation digest.
+    #[must_use]
+    pub const fn digest(self) -> Sha256Digest {
+        self.digest
+    }
+    /// Returns the cursor before the uncertain batch.
+    #[must_use]
+    pub const fn from(self) -> u16 {
+        self.from
+    }
+    /// Returns the uncertain batch size.
+    #[must_use]
+    pub const fn batch_size(self) -> u8 {
+        self.batch_size
+    }
+    /// Returns when ambiguity was observed.
+    #[must_use]
+    pub const fn failed_at(self) -> UnixMillis {
+        self.failed_at
+    }
+    /// Returns the reconcile-only retry time.
+    #[must_use]
+    pub const fn retry_at(self) -> UnixMillis {
+        self.retry_at
+    }
+}
+
+/// Clears an uncertain batch after proving GitHub retained the prior prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClearGithubCheckAnnotationUncertainty {
+    claim: GithubCheckProjectionClaimFence,
+    digest: Sha256Digest,
+    from: u16,
+    batch_size: u8,
+    observed_at: UnixMillis,
+}
+
+impl ClearGithubCheckAnnotationUncertainty {
+    /// Creates exact unchanged-prefix reconciliation evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid batch bounds or a negative observation time.
+    pub fn new(
+        claim: GithubCheckProjectionClaimFence,
+        digest: Sha256Digest,
+        from: u16,
+        batch_size: u8,
+        observed_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        if from > 4_095 || batch_size == 0 || batch_size > 50 {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
+        validate_timestamp(observed_at, "GitHub Check annotation reconciliation time")?;
+        Ok(Self {
+            claim,
+            digest,
+            from,
+            batch_size,
+            observed_at,
+        })
+    }
+
+    /// Returns the exact live claim.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.claim
+    }
+    /// Returns the presentation digest.
+    #[must_use]
+    pub const fn digest(self) -> Sha256Digest {
+        self.digest
+    }
+    /// Returns the unchanged cursor.
+    #[must_use]
+    pub const fn from(self) -> u16 {
+        self.from
+    }
+    /// Returns the reconciled uncertain batch size.
+    #[must_use]
+    pub const fn batch_size(self) -> u8 {
+        self.batch_size
+    }
+    /// Returns when the unchanged prefix was observed.
+    #[must_use]
+    pub const fn observed_at(self) -> UnixMillis {
+        self.observed_at
+    }
+}
+
+/// Permanently blocks a live projection whose provider annotations diverged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockGithubCheckAnnotationMismatch {
+    claim: GithubCheckProjectionClaimFence,
+    blocked_at: UnixMillis,
+}
+
+impl BlockGithubCheckAnnotationMismatch {
+    /// Creates exact provider-mismatch block evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a block time before the Unix epoch.
+    pub fn new(
+        claim: GithubCheckProjectionClaimFence,
+        blocked_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        validate_timestamp(blocked_at, "GitHub Check annotation mismatch time")?;
+        Ok(Self { claim, blocked_at })
+    }
+
+    /// Returns the exact live claim.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.claim
+    }
+    /// Returns when divergence was observed.
+    #[must_use]
+    pub const fn blocked_at(self) -> UnixMillis {
+        self.blocked_at
+    }
+}
+
+/// Confirms that the provider exactly reflects the desired state frozen by a claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompleteGithubCheckProjection {
     claim: GithubCheckProjectionClaimFence,
     observed: GithubCheckDesiredProjection,
@@ -1796,6 +2206,36 @@ pub trait GithubCheckProjectionOutbox: Send + Sync {
     async fn resolve_github_check_run_create(
         &self,
         request: ResolveGithubCheckRunCreate,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
+
+    /// Binds the deterministic terminal presentation to the live claim.
+    async fn initialize_github_check_presentation(
+        &self,
+        request: InitializeGithubCheckPresentation,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError>;
+
+    /// Monotonically confirms one exact appended annotation batch.
+    async fn advance_github_check_annotations(
+        &self,
+        request: AdvanceGithubCheckAnnotations,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError>;
+
+    /// Releases a possibly appended batch into reconcile-only retry.
+    async fn retry_uncertain_github_check_annotations(
+        &self,
+        request: RetryUncertainGithubCheckAnnotations,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
+
+    /// Clears uncertainty after proving GitHub retained the prior exact prefix.
+    async fn clear_github_check_annotation_uncertainty(
+        &self,
+        request: ClearGithubCheckAnnotationUncertainty,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError>;
+
+    /// Blocks a claim when provider annotations diverge from the presentation.
+    async fn block_github_check_annotation_mismatch(
+        &self,
+        request: BlockGithubCheckAnnotationMismatch,
     ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
 
     /// Confirms that an exact bound Check Run reflects the claim-frozen projection.

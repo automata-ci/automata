@@ -1,12 +1,15 @@
 use async_trait::async_trait;
+use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{AttemptId, JobId, RunId, Sha256Digest, UnixMillis};
 use sqlx::{AssertSqlSafe, PgConnection, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use crate::{
-    AttemptStoreError, BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
+    AdvanceGithubCheckAnnotations, AttemptStoreError, BeginGithubCheckRunCreate,
+    BindGithubCheckRun, BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
-    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
+    ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
+    CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
     GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
     GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
@@ -15,11 +18,12 @@ use crate::{
     GithubCheckSubjectReceipt, GithubCheckSubjectRepository, GithubCheckSubjectTarget,
     GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckTerminalizationRepository,
     GithubRepositoryName, GithubScheduleFireId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceRevision,
-    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, ProviderConnectionId, ProviderDeliveryId,
-    ProviderInstallationId, ProviderRepositoryId, RegisterGithubCheckSubject,
-    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, StartGithubCheckProjection, StoreError, TenantScope,
+    GithubServerServiceAuthoritySelector, GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE,
+    InitializeGithubCheckPresentation, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
+    MAX_TERMINAL_RESULT_BYTES, ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId,
+    ProviderRepositoryId, RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate,
+    RepositoryId, ResolveGithubCheckRunCreate, RetryGithubCheckProjection,
+    RetryUncertainGithubCheckAnnotations, StartGithubCheckProjection, StoreError, TenantScope,
     TerminalizeGithubCheck,
 };
 
@@ -365,6 +369,30 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
         (SELECT terminal.completed_at_ms
            FROM attempt_terminal_results AS terminal
           WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
+        (SELECT terminal.result_schema
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
+        (SELECT terminal.result_size_bytes
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
+        (SELECT terminal.result_digest
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
+        (SELECT terminal.result_object_key
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
+        (SELECT progress.presentation_digest
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_presentation_digest,
+        (SELECT progress.annotation_total
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_total,
+        (SELECT progress.annotation_next
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_next,
+        (SELECT progress.uncertain_batch_size
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_uncertain_batch_size,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -445,6 +473,30 @@ const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
         (SELECT terminal.completed_at_ms
            FROM attempt_terminal_results AS terminal
           WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
+        (SELECT terminal.result_schema
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
+        (SELECT terminal.result_size_bytes
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
+        (SELECT terminal.result_digest
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
+        (SELECT terminal.result_object_key
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
+        (SELECT progress.presentation_digest
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_presentation_digest,
+        (SELECT progress.annotation_total
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_total,
+        (SELECT progress.annotation_next
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_next,
+        (SELECT progress.uncertain_batch_size
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_uncertain_batch_size,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -526,6 +578,30 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
         (SELECT terminal.completed_at_ms
            FROM attempt_terminal_results AS terminal
           WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
+        (SELECT terminal.result_schema
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
+        (SELECT terminal.result_size_bytes
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
+        (SELECT terminal.result_digest
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
+        (SELECT terminal.result_object_key
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
+        (SELECT progress.presentation_digest
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_presentation_digest,
+        (SELECT progress.annotation_total
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_total,
+        (SELECT progress.annotation_next
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_next,
+        (SELECT progress.uncertain_batch_size
+           FROM github_check_annotation_progress AS progress
+          WHERE progress.subject_id = subject.id) AS annotation_uncertain_batch_size,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -1116,6 +1192,261 @@ impl GithubCheckProjectionOutbox for PostgresStore {
         exact_create_reconciliation_replay(&self.pool, request).await
     }
 
+    async fn initialize_github_check_presentation(
+        &self,
+        request: InitializeGithubCheckPresentation,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+        sqlx::query(
+            r"
+            INSERT INTO github_check_annotation_progress (
+                subject_id, presentation_digest, total_annotations,
+                next_annotation, uncertain_batch_size, updated_at_ms
+            )
+            SELECT outbox.subject_id, $4, $5, 0, NULL, $6
+            FROM github_check_projection_outbox AS outbox
+            JOIN github_check_subjects AS subject ON subject.id = outbox.subject_id
+            WHERE outbox.subject_id = $1
+              AND outbox.state = 'claimed'
+              AND outbox.claim_owner_id = $2
+              AND outbox.claim_fence = $3
+              AND outbox.claim_action = 'publish'
+              AND outbox.claimed_desired_state = 'completed'
+              AND subject.subject_kind = 'job'
+              AND outbox.claimed_at_ms <= $6
+              AND outbox.claim_expires_at_ms > $6
+            ON CONFLICT (subject_id) DO NOTHING
+            ",
+        )
+        .bind(request.claim().subject_id().as_uuid())
+        .bind(request.claim().owner().as_uuid())
+        .bind(request.claim().fence_i64())
+        .bind(request.digest().as_bytes().as_slice())
+        .bind(i32::from(request.annotation_count()))
+        .bind(request.initialized_at().get())
+        .execute(&self.pool)
+        .await
+        .map_err(operation_error)?;
+
+        let row = sqlx::query(
+            r"
+            SELECT progress.presentation_digest AS annotation_presentation_digest,
+                   progress.total_annotations AS annotation_total,
+                   progress.next_annotation AS annotation_next,
+                   progress.uncertain_batch_size AS annotation_uncertain_batch_size
+            FROM github_check_annotation_progress AS progress
+            JOIN github_check_projection_outbox AS outbox
+              ON outbox.subject_id = progress.subject_id
+            WHERE progress.subject_id = $1
+              AND progress.presentation_digest = $4
+              AND progress.total_annotations = $5
+              AND outbox.state = 'claimed'
+              AND outbox.claim_owner_id = $2
+              AND outbox.claim_fence = $3
+              AND outbox.claim_action = 'publish'
+              AND outbox.claimed_at_ms <= $6
+              AND outbox.claim_expires_at_ms > $6
+            ",
+        )
+        .bind(request.claim().subject_id().as_uuid())
+        .bind(request.claim().owner().as_uuid())
+        .bind(request.claim().fence_i64())
+        .bind(request.digest().as_bytes().as_slice())
+        .bind(i32::from(request.annotation_count()))
+        .bind(request.initialized_at().get())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(operation_error)?;
+        row.map(|row| decode_annotation_progress(&row))
+            .transpose()?
+            .ok_or(GithubCheckStoreError::ProjectionMismatch)
+    }
+
+    async fn advance_github_check_annotations(
+        &self,
+        request: AdvanceGithubCheckAnnotations,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+        let row = sqlx::query(
+            r"
+            UPDATE github_check_annotation_progress AS progress
+            SET next_annotation = $6,
+                uncertain_batch_size = NULL,
+                updated_at_ms = $7
+            FROM github_check_projection_outbox AS outbox
+            WHERE progress.subject_id = $1
+              AND outbox.subject_id = progress.subject_id
+              AND outbox.state = 'claimed'
+              AND outbox.claim_owner_id = $2
+              AND outbox.claim_fence = $3
+              AND outbox.claim_action = 'publish'
+              AND outbox.claimed_at_ms <= $7
+              AND outbox.claim_expires_at_ms > $7
+              AND progress.presentation_digest = $4
+              AND progress.next_annotation = $5
+              AND progress.total_annotations >= $6
+              AND (progress.uncertain_batch_size IS NULL
+                   OR progress.uncertain_batch_size = $6 - $5)
+            RETURNING progress.presentation_digest AS annotation_presentation_digest,
+                      progress.total_annotations AS annotation_total,
+                      progress.next_annotation AS annotation_next,
+                      progress.uncertain_batch_size AS annotation_uncertain_batch_size
+            ",
+        )
+        .bind(request.claim().subject_id().as_uuid())
+        .bind(request.claim().owner().as_uuid())
+        .bind(request.claim().fence_i64())
+        .bind(request.digest().as_bytes().as_slice())
+        .bind(i32::from(request.from()))
+        .bind(i32::from(request.to()))
+        .bind(request.observed_at().get())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(operation_error)?;
+        row.map(|row| decode_annotation_progress(&row))
+            .transpose()?
+            .ok_or(GithubCheckStoreError::ProjectionMismatch)
+    }
+
+    async fn retry_uncertain_github_check_annotations(
+        &self,
+        request: RetryUncertainGithubCheckAnnotations,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
+        let query = format!(
+            r"
+            WITH marked AS (
+                UPDATE github_check_annotation_progress AS progress
+                SET uncertain_batch_size = $6,
+                    updated_at_ms = $7
+                FROM github_check_projection_outbox AS claimed
+                WHERE progress.subject_id = $1
+                  AND claimed.subject_id = progress.subject_id
+                  AND claimed.state = 'claimed'
+                  AND claimed.claim_owner_id = $2
+                  AND claimed.claim_fence = $3
+                  AND claimed.claim_action = 'publish'
+                  AND claimed.claimed_at_ms <= $7
+                  AND claimed.claim_expires_at_ms > $7
+                  AND progress.presentation_digest = $4
+                  AND progress.next_annotation = $5
+                  AND progress.uncertain_batch_size IS NULL
+                  AND progress.next_annotation + $6 <= progress.total_annotations
+                RETURNING progress.subject_id
+            )
+            UPDATE github_check_projection_outbox AS outbox
+            SET state = CASE WHEN attempt_count >= 64 THEN 'blocked' ELSE 'retry' END,
+                next_attempt_at_ms = CASE WHEN attempt_count >= 64 THEN NULL ELSE $8 END,
+                last_failure_kind = CASE
+                    WHEN attempt_count >= 64 THEN NULL ELSE 'github_annotation_ambiguous'
+                END,
+                blocked_reason = CASE WHEN attempt_count >= 64 THEN 'attempt_limit' ELSE NULL END,
+                claim_owner_id = NULL, claim_action = NULL,
+                claimed_desired_revision = NULL, claimed_desired_state = NULL,
+                claimed_desired_conclusion = NULL,
+                claimed_at_ms = NULL, claim_expires_at_ms = NULL,
+                state_updated_at_ms = $7
+            FROM github_check_subjects AS subject, marked
+            WHERE outbox.subject_id = $1
+              AND subject.id = outbox.subject_id
+              AND marked.subject_id = outbox.subject_id
+            RETURNING {SUBJECT_COLUMNS}
+            "
+        );
+        let row = sqlx::query(AssertSqlSafe(query))
+            .bind(request.claim().subject_id().as_uuid())
+            .bind(request.claim().owner().as_uuid())
+            .bind(request.claim().fence_i64())
+            .bind(request.digest().as_bytes().as_slice())
+            .bind(i32::from(request.from()))
+            .bind(i16::from(request.batch_size()))
+            .bind(request.failed_at().get())
+            .bind(request.retry_at().get())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(operation_error)?;
+        row.map(|row| decode_subject(&row).map(|subject| subject.receipt))
+            .transpose()?
+            .ok_or(GithubCheckStoreError::ProjectionMismatch)
+    }
+
+    async fn clear_github_check_annotation_uncertainty(
+        &self,
+        request: ClearGithubCheckAnnotationUncertainty,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+        let row = sqlx::query(
+            r"
+            UPDATE github_check_annotation_progress AS progress
+            SET uncertain_batch_size = NULL, updated_at_ms = $7
+            FROM github_check_projection_outbox AS outbox
+            WHERE progress.subject_id = $1
+              AND outbox.subject_id = progress.subject_id
+              AND outbox.state = 'claimed'
+              AND outbox.claim_owner_id = $2
+              AND outbox.claim_fence = $3
+              AND outbox.claim_action = 'publish'
+              AND outbox.claimed_at_ms <= $7
+              AND outbox.claim_expires_at_ms > $7
+              AND progress.presentation_digest = $4
+              AND progress.next_annotation = $5
+              AND progress.uncertain_batch_size = $6
+            RETURNING progress.presentation_digest AS annotation_presentation_digest,
+                      progress.total_annotations AS annotation_total,
+                      progress.next_annotation AS annotation_next,
+                      progress.uncertain_batch_size AS annotation_uncertain_batch_size
+            ",
+        )
+        .bind(request.claim().subject_id().as_uuid())
+        .bind(request.claim().owner().as_uuid())
+        .bind(request.claim().fence_i64())
+        .bind(request.digest().as_bytes().as_slice())
+        .bind(i32::from(request.from()))
+        .bind(i16::from(request.batch_size()))
+        .bind(request.observed_at().get())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(operation_error)?;
+        row.map(|row| decode_annotation_progress(&row))
+            .transpose()?
+            .ok_or(GithubCheckStoreError::ProjectionMismatch)
+    }
+
+    async fn block_github_check_annotation_mismatch(
+        &self,
+        request: BlockGithubCheckAnnotationMismatch,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
+        let query = format!(
+            r"
+            UPDATE github_check_projection_outbox AS outbox
+            SET state = 'blocked', next_attempt_at_ms = NULL,
+                last_failure_kind = NULL, blocked_reason = 'annotation_mismatch',
+                claim_owner_id = NULL, claim_action = NULL,
+                claimed_desired_revision = NULL, claimed_desired_state = NULL,
+                claimed_desired_conclusion = NULL,
+                claimed_at_ms = NULL, claim_expires_at_ms = NULL,
+                state_updated_at_ms = $4
+            FROM github_check_subjects AS subject
+            WHERE outbox.subject_id = $1
+              AND subject.id = outbox.subject_id
+              AND outbox.state = 'claimed'
+              AND outbox.claim_owner_id = $2
+              AND outbox.claim_fence = $3
+              AND outbox.claim_action = 'publish'
+              AND outbox.claimed_at_ms <= $4
+              AND outbox.claim_expires_at_ms > $4
+            RETURNING {SUBJECT_COLUMNS}
+            "
+        );
+        let row = sqlx::query(AssertSqlSafe(query))
+            .bind(request.claim().subject_id().as_uuid())
+            .bind(request.claim().owner().as_uuid())
+            .bind(request.claim().fence_i64())
+            .bind(request.blocked_at().get())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(operation_error)?;
+        row.map(|row| decode_subject(&row).map(|subject| subject.receipt))
+            .transpose()?
+            .ok_or(GithubCheckStoreError::ClaimRejected)
+    }
+
     async fn complete_github_check_projection(
         &self,
         request: CompleteGithubCheckProjection,
@@ -1151,6 +1482,23 @@ impl GithubCheckProjectionOutbox for PostgresStore {
               AND outbox.claimed_desired_conclusion IS NOT DISTINCT FROM $5
               AND outbox.claimed_at_ms <= $6
               AND outbox.claim_expires_at_ms > $6
+              AND (
+                    subject.subject_kind <> 'job'
+                    OR outbox.claimed_desired_state <> 'completed'
+                    OR NOT EXISTS (
+                        SELECT 1
+                        FROM attempt_terminal_results AS terminal
+                        WHERE terminal.attempt_id = subject.job_attempt_id
+                          AND terminal.result_object_key IS NOT NULL
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM github_check_annotation_progress AS progress
+                        WHERE progress.subject_id = outbox.subject_id
+                          AND progress.next_annotation = progress.total_annotations
+                          AND progress.uncertain_batch_size IS NULL
+                    )
+                  )
             RETURNING {SUBJECT_COLUMNS}
             "
         );
@@ -1477,6 +1825,8 @@ fn decode_claimed(
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let job_started_at = optional_unix_millis_column(row, "job_started_at_ms")?;
     let job_completed_at = optional_unix_millis_column(row, "job_completed_at_ms")?;
+    let terminal_result = optional_job_result_descriptor(row)?;
+    let annotation_progress = decode_annotation_progress(row)?;
     let (started_at, completed_at) = match subject.receipt.desired() {
         GithubCheckDesiredProjection::Queued => (None, None),
         GithubCheckDesiredProjection::InProgress => (
@@ -1502,6 +1852,8 @@ fn decode_claimed(
         run_id,
         subject.created_at,
         subject.desired_updated_at,
+        terminal_result,
+        annotation_progress,
         started_at,
         completed_at,
         unix_millis_column(row, "claimed_at_ms")?,
@@ -2099,6 +2451,73 @@ fn sha256_column(
         .try_into()
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
     Ok(Sha256Digest::from_bytes(bytes))
+}
+
+fn optional_job_result_descriptor(
+    row: &sqlx::postgres::PgRow,
+) -> Result<Option<BlobDescriptor>, GithubCheckStoreError> {
+    let schema: Option<i32> = row.try_get("job_result_schema").map_err(operation_error)?;
+    let size: Option<i64> = row
+        .try_get("job_result_size_bytes")
+        .map_err(operation_error)?;
+    let digest: Option<Vec<u8>> = row.try_get("job_result_digest").map_err(operation_error)?;
+    let object_key: Option<String> = row
+        .try_get("job_result_object_key")
+        .map_err(operation_error)?;
+    match (schema, size, digest, object_key) {
+        (None, None, None, None) => Ok(None),
+        (Some(1), Some(size), Some(digest), Some(object_key)) => {
+            let size = u64::try_from(size)
+                .ok()
+                .filter(|size| (1..=MAX_TERMINAL_RESULT_BYTES).contains(size))
+                .ok_or(GithubCheckStoreError::CorruptData)?;
+            let digest: [u8; 32] = digest
+                .try_into()
+                .map_err(|_| GithubCheckStoreError::CorruptData)?;
+            let key = BlobKey::new(object_key).map_err(|_| GithubCheckStoreError::CorruptData)?;
+            let media_type = MediaType::new(HUMAN_JOB_RESULT_MEDIA_TYPE)
+                .map_err(|_| GithubCheckStoreError::CorruptData)?;
+            Ok(Some(BlobDescriptor::new(
+                key,
+                Sha256Digest::from_bytes(digest),
+                size,
+                media_type,
+            )))
+        }
+        _ => Err(GithubCheckStoreError::CorruptData),
+    }
+}
+
+fn decode_annotation_progress(
+    row: &sqlx::postgres::PgRow,
+) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+    let digest: Option<Vec<u8>> = row
+        .try_get("annotation_presentation_digest")
+        .map_err(operation_error)?;
+    let total: Option<i32> = row.try_get("annotation_total").map_err(operation_error)?;
+    let next: Option<i32> = row.try_get("annotation_next").map_err(operation_error)?;
+    let uncertain: Option<i16> = row
+        .try_get("annotation_uncertain_batch_size")
+        .map_err(operation_error)?;
+    match (digest, total, next) {
+        (None, None, None) if uncertain.is_none() => Ok(GithubCheckAnnotationProgress::default()),
+        (Some(digest), Some(total), Some(next)) => {
+            let digest: [u8; 32] = digest
+                .try_into()
+                .map_err(|_| GithubCheckStoreError::CorruptData)?;
+            GithubCheckAnnotationProgress::from_durable_parts(
+                Some(Sha256Digest::from_bytes(digest)),
+                u16::try_from(total).map_err(|_| GithubCheckStoreError::CorruptData)?,
+                u16::try_from(next).map_err(|_| GithubCheckStoreError::CorruptData)?,
+                uncertain
+                    .map(u8::try_from)
+                    .transpose()
+                    .map_err(|_| GithubCheckStoreError::CorruptData)?,
+            )
+            .map_err(|_| GithubCheckStoreError::CorruptData)
+        }
+        _ => Err(GithubCheckStoreError::CorruptData),
+    }
 }
 
 fn positive_u64_column(

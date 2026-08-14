@@ -13,6 +13,7 @@ import type { RepositoryContext } from "./commonModels";
 import { RENDER_REQUEST_LIMITS } from "./limits";
 import {
   expectArray,
+  expectBoolean,
   expectDisplayText,
   expectIdField,
   expectInteger,
@@ -36,6 +37,7 @@ export function validateRunDetailPage(value: unknown, path: string): void {
     "jobs",
     "jobPagination",
     "artifacts",
+    "rerun",
   ]);
   expectLiteral(page.kind, `${path}.kind`, "run-detail");
   const shell = validateShell(page.shell, `${path}.shell`);
@@ -55,6 +57,16 @@ export function validateRunDetailPage(value: unknown, path: string): void {
     RENDER_REQUEST_LIMITS.artifactCount,
     validateArtifact,
   );
+  if (page.rerun !== null) {
+    const rerun = expectObject(page.rerun, `${path}.rerun`, [
+      "endpoint",
+      "csrfToken",
+      "failedJobsAvailable",
+    ]);
+    expectRouteField(rerun, "endpoint", `${path}.rerun`);
+    expectString(rerun.csrfToken, `${path}.rerun.csrfToken`, 256, 1);
+    expectBoolean(rerun.failedJobsAvailable, `${path}.rerun.failedJobsAvailable`);
+  }
 }
 
 function validateResultCollection(

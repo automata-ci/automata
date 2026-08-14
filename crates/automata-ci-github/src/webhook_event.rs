@@ -122,6 +122,19 @@ pub enum GithubMergeGroupAction {
     Destroyed,
 }
 
+/// A native GitHub Check Run control accepted by Automata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GithubCheckRunAction {
+    /// GitHub's standard re-request control.
+    Rerequested,
+    /// Re-run the complete source workflow.
+    RerunAll,
+    /// Re-run failed jobs and their dependents.
+    RerunFailed,
+    /// Re-run the selected logical job and its dependents.
+    RerunJob,
+}
+
 impl GithubMergeGroupAction {
     /// Returns GitHub's canonical activity spelling.
     #[must_use]
@@ -145,6 +158,10 @@ pub enum VerifiedGithubWebhook {
     MergeGroup(VerifiedGithubMergeGroup),
     /// A normalized custom repository-dispatch event.
     RepositoryDispatch(VerifiedGithubRepositoryDispatch),
+    /// A normalized native Check Run rerun request.
+    CheckRun(VerifiedGithubCheckRun),
+    /// A normalized native Check Suite rerun request.
+    CheckSuite(VerifiedGithubCheckSuite),
 }
 
 impl VerifiedGithubWebhook {
@@ -156,6 +173,8 @@ impl VerifiedGithubWebhook {
             Self::PullRequest(event) => event.delivery_id(),
             Self::MergeGroup(event) => event.delivery_id(),
             Self::RepositoryDispatch(event) => event.delivery_id(),
+            Self::CheckRun(event) => event.delivery_id(),
+            Self::CheckSuite(event) => event.delivery_id(),
         }
     }
 
@@ -167,6 +186,8 @@ impl VerifiedGithubWebhook {
             Self::PullRequest(event) => event.event_name(),
             Self::MergeGroup(event) => event.event_name(),
             Self::RepositoryDispatch(event) => event.event_name(),
+            Self::CheckRun(event) => event.event_name(),
+            Self::CheckSuite(event) => event.event_name(),
         }
     }
 
@@ -178,6 +199,8 @@ impl VerifiedGithubWebhook {
             Self::PullRequest(event) => event.raw_body(),
             Self::MergeGroup(event) => event.raw_body(),
             Self::RepositoryDispatch(event) => event.raw_body(),
+            Self::CheckRun(event) => event.raw_body(),
+            Self::CheckSuite(event) => event.raw_body(),
         }
     }
 
@@ -189,6 +212,8 @@ impl VerifiedGithubWebhook {
             Self::PullRequest(event) => event.body_sha256(),
             Self::MergeGroup(event) => event.body_sha256(),
             Self::RepositoryDispatch(event) => event.body_sha256(),
+            Self::CheckRun(event) => event.body_sha256(),
+            Self::CheckSuite(event) => event.body_sha256(),
         }
     }
 
@@ -200,6 +225,8 @@ impl VerifiedGithubWebhook {
             Self::PullRequest(event) => event.installation_id(),
             Self::MergeGroup(event) => event.installation_id(),
             Self::RepositoryDispatch(event) => event.installation_id(),
+            Self::CheckRun(event) => event.installation_id(),
+            Self::CheckSuite(event) => event.installation_id(),
         }
     }
 
@@ -211,6 +238,8 @@ impl VerifiedGithubWebhook {
             Self::PullRequest(event) => event.repository(),
             Self::MergeGroup(event) => event.repository(),
             Self::RepositoryDispatch(event) => event.repository(),
+            Self::CheckRun(event) => event.repository(),
+            Self::CheckSuite(event) => event.repository(),
         }
     }
 }
@@ -225,7 +254,194 @@ impl fmt::Debug for VerifiedGithubWebhook {
                 .debug_tuple("RepositoryDispatch")
                 .field(event)
                 .finish(),
+            Self::CheckRun(event) => formatter.debug_tuple("CheckRun").field(event).finish(),
+            Self::CheckSuite(event) => formatter.debug_tuple("CheckSuite").field(event).finish(),
         }
+    }
+}
+
+/// Authenticated identity for one native Check Run rerun control.
+#[derive(Clone, Eq, PartialEq)]
+pub struct VerifiedGithubCheckRun {
+    authenticated: AuthenticatedGithubWebhook,
+    installation_id: NonZeroU64,
+    repository: GithubWebhookRepository,
+    sender_id: NonZeroU64,
+    app_id: NonZeroU64,
+    run_id: NonZeroU64,
+    suite_id: NonZeroU64,
+    head_revision: ExactRevision,
+    external_id: Box<str>,
+    action: GithubCheckRunAction,
+}
+
+impl VerifiedGithubCheckRun {
+    /// Returns the exact singleton delivery header outside the body MAC.
+    #[must_use]
+    pub fn delivery_id(&self) -> &str {
+        self.authenticated.delivery_id()
+    }
+    /// Returns the exact `check_run` event-name header.
+    #[must_use]
+    pub fn event_name(&self) -> &str {
+        self.authenticated.event_name()
+    }
+    /// Returns the exact HMAC-authenticated body without reserialization.
+    #[must_use]
+    pub const fn raw_body(&self) -> &Bytes {
+        self.authenticated.raw_body()
+    }
+    /// Returns SHA-256 of the exact authenticated body.
+    #[must_use]
+    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
+        self.authenticated.body_sha256()
+    }
+    /// Returns the nonzero App installation identifier.
+    #[must_use]
+    pub const fn installation_id(&self) -> NonZeroU64 {
+        self.installation_id
+    }
+    /// Returns the exact repository from the signed payload.
+    #[must_use]
+    pub const fn repository(&self) -> &GithubWebhookRepository {
+        &self.repository
+    }
+    /// Returns the nonzero GitHub sender identity to reauthorize.
+    #[must_use]
+    pub const fn sender_id(&self) -> NonZeroU64 {
+        self.sender_id
+    }
+    /// Returns the GitHub App that owns the Check Run.
+    #[must_use]
+    pub const fn app_id(&self) -> NonZeroU64 {
+        self.app_id
+    }
+    /// Returns the exact Check Run identifier.
+    #[must_use]
+    pub const fn run_id(&self) -> NonZeroU64 {
+        self.run_id
+    }
+    /// Returns the exact Check Suite identifier.
+    #[must_use]
+    pub const fn suite_id(&self) -> NonZeroU64 {
+        self.suite_id
+    }
+    /// Returns the exact checked commit.
+    #[must_use]
+    pub const fn head_revision(&self) -> &ExactRevision {
+        &self.head_revision
+    }
+    /// Returns Automata's bounded external Check identity.
+    #[must_use]
+    pub fn external_id(&self) -> &str {
+        &self.external_id
+    }
+    /// Returns the requested rerun operation.
+    #[must_use]
+    pub const fn action(&self) -> GithubCheckRunAction {
+        self.action
+    }
+}
+
+impl fmt::Debug for VerifiedGithubCheckRun {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedGithubCheckRun")
+            .field("delivery_id", &"[redacted]")
+            .field("event_name", &self.authenticated.event_name())
+            .field("body_sha256", &self.authenticated.body_sha256())
+            .field("installation_id", &self.installation_id)
+            .field("repository", &self.repository)
+            .field("sender_id", &self.sender_id)
+            .field("app_id", &self.app_id)
+            .field("run_id", &self.run_id)
+            .field("suite_id", &self.suite_id)
+            .field("head_revision", &"[redacted]")
+            .field("external_id", &"[redacted]")
+            .field("action", &self.action)
+            .finish()
+    }
+}
+
+/// Authenticated identity for one native Check Suite re-request.
+#[derive(Clone, Eq, PartialEq)]
+pub struct VerifiedGithubCheckSuite {
+    authenticated: AuthenticatedGithubWebhook,
+    installation_id: NonZeroU64,
+    repository: GithubWebhookRepository,
+    sender_id: NonZeroU64,
+    app_id: NonZeroU64,
+    suite_id: NonZeroU64,
+    head_revision: ExactRevision,
+}
+
+impl VerifiedGithubCheckSuite {
+    /// Returns the exact singleton delivery header outside the body MAC.
+    #[must_use]
+    pub fn delivery_id(&self) -> &str {
+        self.authenticated.delivery_id()
+    }
+    /// Returns the exact `check_suite` event-name header.
+    #[must_use]
+    pub fn event_name(&self) -> &str {
+        self.authenticated.event_name()
+    }
+    /// Returns the exact HMAC-authenticated body without reserialization.
+    #[must_use]
+    pub const fn raw_body(&self) -> &Bytes {
+        self.authenticated.raw_body()
+    }
+    /// Returns SHA-256 of the exact authenticated body.
+    #[must_use]
+    pub const fn body_sha256(&self) -> GithubWebhookBodyDigest {
+        self.authenticated.body_sha256()
+    }
+    /// Returns the nonzero App installation identifier.
+    #[must_use]
+    pub const fn installation_id(&self) -> NonZeroU64 {
+        self.installation_id
+    }
+    /// Returns the exact repository from the signed payload.
+    #[must_use]
+    pub const fn repository(&self) -> &GithubWebhookRepository {
+        &self.repository
+    }
+    /// Returns the nonzero GitHub sender identity to reauthorize.
+    #[must_use]
+    pub const fn sender_id(&self) -> NonZeroU64 {
+        self.sender_id
+    }
+    /// Returns the GitHub App that owns the Check Suite.
+    #[must_use]
+    pub const fn app_id(&self) -> NonZeroU64 {
+        self.app_id
+    }
+    /// Returns the exact Check Suite identifier.
+    #[must_use]
+    pub const fn suite_id(&self) -> NonZeroU64 {
+        self.suite_id
+    }
+    /// Returns the exact checked commit.
+    #[must_use]
+    pub const fn head_revision(&self) -> &ExactRevision {
+        &self.head_revision
+    }
+}
+
+impl fmt::Debug for VerifiedGithubCheckSuite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedGithubCheckSuite")
+            .field("delivery_id", &"[redacted]")
+            .field("event_name", &self.authenticated.event_name())
+            .field("body_sha256", &self.authenticated.body_sha256())
+            .field("installation_id", &self.installation_id)
+            .field("repository", &self.repository)
+            .field("sender_id", &self.sender_id)
+            .field("app_id", &self.app_id)
+            .field("suite_id", &self.suite_id)
+            .field("head_revision", &"[redacted]")
+            .finish()
     }
 }
 
@@ -671,6 +887,135 @@ struct RepositoryOwnerPayload {
 #[derive(Deserialize)]
 struct InstallationPayload {
     id: u64,
+}
+
+#[derive(Deserialize)]
+struct CheckRunPayload {
+    action: String,
+    check_run: CheckRunObjectPayload,
+    repository: RepositoryPayload,
+    installation: InstallationPayload,
+    sender: SenderPayload,
+    #[serde(default)]
+    requested_action: Option<RequestedActionPayload>,
+}
+
+#[derive(Deserialize)]
+struct CheckRunObjectPayload {
+    id: u64,
+    head_sha: String,
+    external_id: String,
+    status: String,
+    conclusion: Option<String>,
+    app: AppPayload,
+    check_suite: CheckSuiteReferencePayload,
+}
+
+#[derive(Deserialize)]
+struct CheckSuitePayload {
+    action: String,
+    check_suite: CheckSuiteObjectPayload,
+    repository: RepositoryPayload,
+    installation: InstallationPayload,
+    sender: SenderPayload,
+}
+
+#[derive(Deserialize)]
+struct CheckSuiteObjectPayload {
+    id: u64,
+    head_sha: String,
+    status: String,
+    conclusion: Option<String>,
+    app: AppPayload,
+}
+
+#[derive(Deserialize)]
+struct CheckSuiteReferencePayload {
+    id: u64,
+    head_sha: String,
+}
+
+#[derive(Deserialize)]
+struct AppPayload {
+    id: u64,
+}
+
+#[derive(Deserialize)]
+struct SenderPayload {
+    id: u64,
+}
+
+#[derive(Deserialize)]
+struct RequestedActionPayload {
+    identifier: String,
+}
+
+pub(crate) fn normalize_check_run(
+    authenticated: AuthenticatedGithubWebhook,
+) -> Result<VerifiedGithubCheckRun, GithubWebhookError> {
+    let payload: CheckRunPayload = serde_json::from_slice(authenticated.raw_body())
+        .map_err(|_| GithubWebhookError::MalformedPayload)?;
+    let action = match (payload.action.as_str(), payload.requested_action) {
+        ("rerequested", None) => GithubCheckRunAction::Rerequested,
+        ("requested_action", Some(requested)) => match requested.identifier.as_str() {
+            "rerun_all" => GithubCheckRunAction::RerunAll,
+            "rerun_failed" => GithubCheckRunAction::RerunFailed,
+            "rerun_job" => GithubCheckRunAction::RerunJob,
+            _ => return Err(GithubWebhookError::InvalidPayload),
+        },
+        _ => return Err(GithubWebhookError::InvalidPayload),
+    };
+    if payload.check_run.status != "completed"
+        || payload.check_run.conclusion.is_none()
+        || payload.check_run.external_id.is_empty()
+        || payload.check_run.external_id.len() > 1_024
+        || payload
+            .check_run
+            .external_id
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    let head_revision = exact_revision(payload.check_run.head_sha)?;
+    let suite_revision = exact_revision(payload.check_run.check_suite.head_sha)?;
+    if head_revision != suite_revision {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    Ok(VerifiedGithubCheckRun {
+        authenticated,
+        installation_id: durable_provider_id(payload.installation.id)?,
+        repository: payload.repository.normalize()?,
+        sender_id: durable_provider_id(payload.sender.id)?,
+        app_id: durable_provider_id(payload.check_run.app.id)?,
+        run_id: durable_provider_id(payload.check_run.id)?,
+        suite_id: durable_provider_id(payload.check_run.check_suite.id)?,
+        head_revision,
+        external_id: payload.check_run.external_id.into_boxed_str(),
+        action,
+    })
+}
+
+pub(crate) fn normalize_check_suite(
+    authenticated: AuthenticatedGithubWebhook,
+) -> Result<VerifiedGithubCheckSuite, GithubWebhookError> {
+    let payload: CheckSuitePayload = serde_json::from_slice(authenticated.raw_body())
+        .map_err(|_| GithubWebhookError::MalformedPayload)?;
+    if payload.action != "rerequested"
+        || payload.check_suite.status != "completed"
+        || payload.check_suite.conclusion.is_none()
+    {
+        return Err(GithubWebhookError::InvalidPayload);
+    }
+    Ok(VerifiedGithubCheckSuite {
+        authenticated,
+        installation_id: durable_provider_id(payload.installation.id)?,
+        repository: payload.repository.normalize()?,
+        sender_id: durable_provider_id(payload.sender.id)?,
+        app_id: durable_provider_id(payload.check_suite.app.id)?,
+        suite_id: durable_provider_id(payload.check_suite.id)?,
+        head_revision: exact_revision(payload.check_suite.head_sha)?,
+    })
 }
 
 pub(crate) fn normalize_pull_request(
