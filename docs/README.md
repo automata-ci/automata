@@ -51,9 +51,6 @@ It does not connect to repositories or execute workflows.
 - [GitHub Actions parity integration-test plan](github-actions-parity/github-actions-parity-11-integration-tests.md)
   coordinates the companion conformance repository, live GitHub differential
   lanes, corpus graduation, and evidence handoff for those work packages.
-- [Foundation governance registry](governance/README.md) binds current internal
-  format versions, migration policy, shared ownership, and reviewed limits to
-  executable source evidence.
 - [Implementation plan](implementation-plan.md) tracks completed foundations
   and the acceptance gates that still block a release.
 - [Local installation and deployment roadmap](maintainers/roadmaps/local-installation.md)

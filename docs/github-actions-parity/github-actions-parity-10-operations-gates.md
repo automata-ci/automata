@@ -222,7 +222,7 @@ covers CPU, memory, ephemeral storage, and GPU request/limit values; the
 runner/provider contract separately carries a PIDs ceiling. Current cache
 finalization enforces a concurrent-safe 10 GiB per-repository LRU quota, and
 rerun admission allows 50 reruns within the current 30-day source horizon.
-These implemented slices do not complete the cross-product limit registry,
+These implemented slices do not complete cross-product limit coverage,
 rate limits, fairness, or SaaS policy-management surface.
 
 Tasks:
@@ -602,8 +602,8 @@ holding one integration branch for weeks:
 
 Handoff checklist:
 
-- [ ] Contract owner posts the exact trait/schema commit and, only after the
-  governance mode enables durable upgrades, its reserved migration number.
+- [ ] Contract owner posts the exact trait/schema commit and, when the package
+  upgrades a released schema, its reviewed migration number.
 - [ ] Downstream owner rebases after that commit rather than copying types.
 - [ ] Operation-ID and fingerprint material is documented and fixture-tested.
 - [ ] Secret classification and durable-data rules are reviewed by lane C.
@@ -629,8 +629,8 @@ Before implementation starts, create issues in this order:
   blocked.
 - [ ] Reserve one rotating integration owner per wave.
 - [ ] Assign canonical-schema ownership and reserve serialized-format versions
-  for Wave 0 and Wave 1; reserve migration numbers only after the governance
-  mode enables durable upgrades.
+  for Wave 0 and Wave 1; reserve migration numbers only when a released schema
+  creates a supported upgrade source.
 - [ ] Attach the relevant backlog section and current code evidence to every
   issue instead of copying a stale support claim.
 - [ ] Record explicit non-goals, especially hosted-image parity, Docker socket

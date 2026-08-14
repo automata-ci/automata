@@ -10,11 +10,9 @@ A feature is compatible only when the same repository revision has equivalent
 observable behavior on GitHub Actions and Automata. Parsing a field, storing it,
 or testing one component is not enough.
 
-The status table and its attributed acceptance fixtures are validated against
-the machine-readable
-[GitHub Actions capability registry](governance/github-actions-capabilities.md).
-Each feature records stages independently, so `Component complete` cannot be
-inferred from decoder or compiler acceptance alone.
+The status table records product stages independently and is maintained with
+the owning behavior tests and acceptance evidence. `Component complete` cannot
+be inferred from decoder or compiler acceptance alone.
 
 ## Reference implementation
 

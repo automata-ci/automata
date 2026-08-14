@@ -245,9 +245,10 @@ Tasks:
 - [ ] Add only separately named image, authority, and network profiles that
   retain Hyper-V isolation; prohibit silent process-isolated fallback.
 - [ ] Keep Windows job containers and service containers rejected in the
-  capability registry because GitHub documents those features for Linux
-  runners; treat any future Windows-container support as an Automata-specific
-  extension with a separate isolation gate.
+  compiler or admission path because GitHub documents those features for Linux
+  runners; document them as unsupported on Windows. Treat any future
+  Windows-container support as an Automata-specific extension with a separate
+  isolation gate.
 - [ ] Add private-network/static-egress and proxy/custom-CA profiles only after
   their exact HCN/WFP and upstream policies pass the hostile network matrix.
 - [ ] Publish per-profile capacity, isolation, guest authority, network, image,

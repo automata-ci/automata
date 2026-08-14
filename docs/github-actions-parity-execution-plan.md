@@ -139,16 +139,13 @@ These files and contracts are merge hotspots. Assign one owner at a time.
 
 Additional coordination rules:
 
-- [x] Check the machine-readable foundation governance registry before changing
-  a registered format, limit, migration, or shared surface.
 - [x] Keep the unreleased greenfield store as one canonical
-  `0001_initial_schema.sql`; fold schema changes into that baseline and its
-  inventory test, and do not create or reserve `0002` while the registry's
-  bootstrap mode remains active.
+  `0001_initial_schema.sql`; fold schema changes into that baseline, and do not
+  create or reserve `0002` while there is no released schema to upgrade.
 - [ ] Introduce ordered upgrade migrations only after a released schema creates
-  durable state that the project commits to preserve. Before supporting those
-  upgrades, change the governance mode and define reservation, immutability,
-  forward-reader, rollback, and live-skew rules in one reviewed contract.
+  durable state that the project commits to preserve. Before supporting an
+  upgrade, define reservation, immutability, forward-reader, rollback, and
+  live-skew rules in one reviewed contract.
 - [ ] Merge provider-neutral core, JobIR, protocol, or protobuf changes before
   provider implementations begin.
 - [ ] Give serialized-format changes one owner for the version bump,
@@ -162,7 +159,7 @@ Additional coordination rules:
 ## Dependency overview
 
 ```text
-Foundation registry + conformance fixtures
+Typed foundation contracts + conformance fixtures
         |
         +--> workflow semantics --> matrices/reusable workflows
         |                              |
@@ -190,18 +187,17 @@ Six developers can start these packages concurrently with little file overlap:
 
 | Developer | First package |
 | --- | --- |
-| W | `FND-01` capability registry and early rejection |
+| W | `FND-01` typed capability requirements and early rejection |
 | S | `SCH-01` workflow-concurrency parity correction |
 | R | `FND-03` executor seam extraction |
 | P | `PROV-01` existing service-container production proof |
 | C | `AUTH-01` permission catalog and effective defaults |
 | X | `FND-02` conformance fixture and exact-client catalog |
 
-The rotating integration owner lands the `FND-04` bootstrap before Wave 1
-branches change the canonical schema, reserve format versions, or add limits.
-The package remains open until its full format/limit catalog and compatibility
-reader policy land. Migration-number reservation begins only after an explicit
-governance-mode transition enables durable upgrades.
+The rotating integration owner lands the `FND-04` ownership and compatibility
+conventions before Wave 1 branches change the canonical schema, reserve format
+versions, or add limits. Migration numbers are reserved only after a released
+schema creates a supported upgrade source and the upgrade contract is reviewed.
 
 Exit criteria:
 
