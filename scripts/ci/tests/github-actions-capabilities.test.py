@@ -641,7 +641,7 @@ pub(super) fn accepts_preview(entry: &YamlMappingEntry) -> bool {
 
         self.reject(
             mutate,
-            "does not run automata-ci-secret --test secret_postgres with --ignored",
+            "does not run automata-ci-secret --test postgres with --ignored",
         )
 
     def test_result_returning_empty_acceptance_test_is_rejected(self) -> None:

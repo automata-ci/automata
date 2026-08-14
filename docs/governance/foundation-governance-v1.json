@@ -26,6 +26,11 @@
       "reason": "Name of an upstream GitHub HTTP header, not an Automata durable or wire-format version."
     },
     {
+      "constant": "MIN_COMPOSE_VERSION",
+      "path": "crates/automata-ci-local/src/lib.rs",
+      "reason": "External Docker Compose prerequisite version, not an Automata-owned durable or wire format."
+    },
+    {
       "constant": "API_VERSION",
       "path": "crates/automata-ci-oidc-github/src/http.rs",
       "reason": "Selected upstream GitHub OIDC query version, not an Automata-owned format."
@@ -39,6 +44,16 @@
       "constant": "TEMPLATE_MARKER_VERSION",
       "path": "crates/automata-ci-postgres-test-support/src/database.rs",
       "reason": "Test-only template cache marker outside product durable and wire contracts."
+    },
+    {
+      "constant": "VERSION_MUTATION_REQUEST_PREFIX",
+      "path": "crates/automata-ci-postgres/src/secret/provider.rs",
+      "reason": "Operation-kind prefix containing the word version, not a serialized format version."
+    },
+    {
+      "constant": "VERSION_MUTATION_REQUEST_PREFIX",
+      "path": "crates/automata-ci-postgres/src/secret/storage.rs",
+      "reason": "Operation-kind prefix containing the word version, not a serialized format version."
     },
     {
       "constant": "CACHE_BLOCK_MEDIA_TYPE",
@@ -104,16 +119,6 @@
       "constant": "SERVICE_PROXY_IMAGE_VERSION",
       "path": "crates/automata-ci-sandbox-podman/src/provider.rs",
       "reason": "Externally built helper-image protocol label validated during provider admission, governed as an image prerequisite rather than an Automata reader schema."
-    },
-    {
-      "constant": "VERSION_MUTATION_REQUEST_PREFIX",
-      "path": "crates/automata-ci-secret-postgres/src/provider.rs",
-      "reason": "Operation-kind prefix containing the word version, not a serialized format version."
-    },
-    {
-      "constant": "VERSION_MUTATION_REQUEST_PREFIX",
-      "path": "crates/automata-ci-secret-postgres/src/storage.rs",
-      "reason": "Operation-kind prefix containing the word version, not a serialized format version."
     },
     {
       "constant": "GITHUB_PROVIDER_REST_API_VERSION",
@@ -305,13 +310,13 @@
           "role": "evidence"
         },
         {
-          "contains": "pub const JOB_RESULT_MEDIA_TYPE: &str = \"application/vnd.automata.job-result+json\";",
-          "path": "crates/automata-ci-runner-control/src/handler.rs",
+          "contains": "const JOB_RESULT_MEDIA_TYPE: &str = \"application/vnd.automata.job-result+json\";",
+          "path": "crates/automata-ci-control/src/runner_control/handler.rs",
           "role": "evidence"
         },
         {
           "contains": "pub const LOG_SEGMENT_MEDIA_TYPE: &str = \"application/vnd.automata.log-segment+json+gzip\";",
-          "path": "crates/automata-ci-runner-control/src/handler.rs",
+          "path": "crates/automata-ci-control/src/runner_control/handler.rs",
           "role": "evidence"
         },
         {
@@ -729,7 +734,7 @@
         },
         {
           "contains": "pub const JOB_IR_PROTOBUF_MEDIA_TYPE: &str = \"application/vnd.automata.job-ir.protobuf\";",
-          "path": "crates/automata-ci-runner-control/src/port.rs",
+          "path": "crates/automata-ci-control/src/runner_control/port.rs",
           "role": "evidence"
         },
         {
@@ -794,7 +799,7 @@
       "sources": [
         {
           "contains": "const LEASE_OFFER_COMMAND_SCHEMA: u16 = 1;",
-          "path": "crates/automata-ci-runner-control/src/port.rs",
+          "path": "crates/automata-ci-control/src/runner_control/port.rs",
           "role": "version"
         }
       ],
@@ -802,7 +807,7 @@
         {
           "contains": "outer_schema: 2",
           "function": "recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_columns",
-          "path": "crates/automata-ci-runner-control/tests/store_adapters.rs"
+          "path": "crates/automata-ci-control/tests/runner_control_store_adapters.rs"
         }
       ],
       "version": 1
@@ -1010,28 +1015,18 @@
           "contains": "pub struct RunnerFrame {",
           "path": "crates/automata-ci-protocol-protobuf/src/generated/automata.runner.v1.rs",
           "role": "evidence"
-        },
-        {
-          "contains": "generated_sha256=1b6b6ac05ab7765774426848766936a03ac49539d2ab713e652897e5103542d2",
-          "path": "crates/automata-ci-protocol-protobuf/proto/automata/runner/v1/PROVENANCE.sha256",
-          "role": "evidence"
-        },
-        {
-          "contains": "schema_sha256=0e9c177da4ca2c6720e4c8191df11a06bf14ad4eb51b7df2d1f9a237239e5788",
-          "path": "crates/automata-ci-protocol-protobuf/proto/automata/runner/v1/PROVENANCE.sha256",
-          "role": "evidence"
         }
       ],
       "tests": [
         {
-          "contains": "assert_eq!(values.len(), 16,",
-          "function": "reviewed_schema_dto_and_generator_provenance_is_exact",
-          "path": "crates/automata-ci-protocol-protobuf/tests/codegen_contract.rs"
+          "contains": "protocol_version += 1;",
+          "function": "only_the_current_protocol_is_accepted",
+          "path": "crates/automata-ci-protocol-protobuf/tests/boundary.rs"
         },
         {
-          "contains": "assert_eq!(actual, expected);",
-          "function": "protobuf_v1_encoding_matches_checked_in_golden_digests",
-          "path": "crates/automata-ci-protocol-protobuf/tests/golden.rs"
+          "contains": "assert_eq!(PROTOBUF_PACKAGE",
+          "function": "public_api_exposes_the_stable_package_not_private_dtos",
+          "path": "crates/automata-ci-protocol-protobuf/tests/roundtrip.rs"
         }
       ],
       "version": 1
@@ -1043,7 +1038,7 @@
       "sources": [
         {
           "contains": "const PROVIDER_TOKEN_PAYLOAD_SCHEMA: u8 = 1;",
-          "path": "crates/automata-ci-auth-postgres/src/provider_tokens.rs",
+          "path": "crates/automata-ci-postgres/src/auth/provider_tokens.rs",
           "role": "version"
         }
       ],
@@ -1051,7 +1046,7 @@
         {
           "contains": "let forward_schema = PROVIDER_TOKEN_PAYLOAD_SCHEMA",
           "function": "provider_token_payload_rejects_forward_schema",
-          "path": "crates/automata-ci-auth-postgres/src/provider_tokens.rs"
+          "path": "crates/automata-ci-postgres/src/auth/provider_tokens.rs"
         }
       ],
       "version": 1
@@ -1405,6 +1400,41 @@
         }
       ],
       "version": "v1"
+    },
+    {
+      "compatibility_policy": "exact-current-only",
+      "id": "shard-capabilities",
+      "owner": "control-plane",
+      "sources": [
+        {
+          "contains": "const CAPABILITY_DOCUMENT_VERSION: u8 = 1;",
+          "path": "crates/automata-ci/src/app/shard_capabilities.rs",
+          "role": "version"
+        },
+        {
+          "contains": "const CORE_HTTP_PROTOCOL_VERSION: u8 = 1;",
+          "path": "crates/automata-ci/src/app/shard_capabilities.rs",
+          "role": "version"
+        },
+        {
+          "contains": "const MANAGEMENT_GRPC_PROTOCOL_VERSION: u8 = 1;",
+          "path": "crates/automata-ci/src/app/shard_capabilities.rs",
+          "role": "version"
+        },
+        {
+          "contains": "const DELEGATED_ACTOR_PROTOCOL_VERSION: u8 = 1;",
+          "path": "crates/automata-ci/src/app/shard_capabilities.rs",
+          "role": "version"
+        }
+      ],
+      "tests": [
+        {
+          "contains": "CAPABILITY_DOCUMENT_VERSION);",
+          "function": "document_identifies_shard_and_only_advertises_implemented_protocols",
+          "path": "crates/automata-ci/src/app/shard_capabilities.rs"
+        }
+      ],
+      "version": 1
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -2803,93 +2833,6 @@
     {
       "classification": "operational",
       "constants": [
-        "MAX_GROUP_CHARACTERS",
-        "MAX_NAME_BYTES",
-        "MAX_REDEEM_RESPONSE_BYTES",
-        "MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS",
-        "MAX_TOKEN_LIFETIME_MS",
-        "MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS",
-        "MIN_TOKEN_LIFETIME_MS"
-      ],
-      "owner": "auth-security",
-      "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs",
-      "phase": "admission",
-      "reason": "One-time runner enrollment group, name, response, token lifetime, and certificate lifetime bounds are control-plane admission policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_GROUP_CHARACTERS",
-          "contains": "&& value.chars().count() <= MAX_GROUP_CHARACTERS",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
-        },
-        {
-          "constant": "MAX_NAME_BYTES",
-          "contains": "&& value.len() <= MAX_NAME_BYTES",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
-        },
-        {
-          "constant": "MAX_REDEEM_RESPONSE_BYTES",
-          "contains": "|| request.response.len() > MAX_REDEEM_RESPONSE_BYTES",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
-        },
-        {
-          "constant": "MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS",
-          "contains": "!(1..=MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS).contains(&lifetime)",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
-        },
-        {
-          "constant": "MAX_TOKEN_LIFETIME_MS",
-          "contains": "|| !(MIN_TOKEN_LIFETIME_MS..=MAX_TOKEN_LIFETIME_MS).contains(&request.lifetime_ms)",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
-        },
-        {
-          "constant": "MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS",
-          "contains": "remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
-        },
-        {
-          "constant": "MIN_TOKEN_LIFETIME_MS",
-          "contains": "|| !(MIN_TOKEN_LIFETIME_MS..=MAX_TOKEN_LIFETIME_MS).contains(&request.lifetime_ms)",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_REQUEST_AUTHORIZATION_ROWS"
-      ],
-      "owner": "auth-security",
-      "path": "crates/automata-ci-auth-postgres/src/request_auth.rs",
-      "phase": "admission",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_REQUEST_AUTHORIZATION_ROWS",
-          "contains": ".bind(one_over_row_limit(MAX_REQUEST_AUTHORIZATION_ROWS)?)",
-          "path": "crates/automata-ci-auth-postgres/src/request_auth.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_CALLER_CLOCK_SKEW_MILLISECONDS"
-      ],
-      "owner": "auth-security",
-      "path": "crates/automata-ci-auth-postgres/src/session.rs",
-      "phase": "admission",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_CALLER_CLOCK_SKEW_MILLISECONDS",
-          "contains": "if caller_ms.abs_diff(database_time_ms) > MAX_CALLER_CLOCK_SKEW_MILLISECONDS {",
-          "path": "crates/automata-ci-auth-postgres/src/session.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
         "MAX_NAME_LENGTH"
       ],
       "owner": "auth-security",
@@ -2901,6 +2844,23 @@
           "constant": "MAX_NAME_LENGTH",
           "contains": "if value.len() > MAX_NAME_LENGTH {",
           "path": "crates/automata-ci-auth/src/authorization.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_ASSERTION_LIFETIME_SECONDS"
+      ],
+      "owner": "auth-security",
+      "path": "crates/automata-ci-auth/src/delegated_actor.rs",
+      "phase": "admission",
+      "reason": "Delegated actor assertion lifetime is internal admission policy, not a GitHub parity claim.",
+      "uses": [
+        {
+          "constant": "MAX_ASSERTION_LIFETIME_SECONDS",
+          "contains": ".filter(|lifetime| *lifetime > 0 && *lifetime <= MAX_ASSERTION_LIFETIME_SECONDS)",
+          "path": "crates/automata-ci-auth/src/delegated_actor.rs"
         }
       ]
     },
@@ -3426,6 +3386,35 @@
     {
       "classification": "operational",
       "constants": [
+        "MAX_HEARTBEAT_INTERVAL_MILLIS",
+        "MAX_LEASE_DURATION_MILLIS",
+        "MAX_NO_WORK_RETRY_AFTER_MILLIS"
+      ],
+      "owner": "runner-contract",
+      "path": "crates/automata-ci-control/src/runner_control/handler.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_HEARTBEAT_INTERVAL_MILLIS",
+          "contains": "if heartbeat_interval_millis > MAX_HEARTBEAT_INTERVAL_MILLIS {",
+          "path": "crates/automata-ci-control/src/runner_control/handler.rs"
+        },
+        {
+          "constant": "MAX_LEASE_DURATION_MILLIS",
+          "contains": "if lease_duration_millis > MAX_LEASE_DURATION_MILLIS {",
+          "path": "crates/automata-ci-control/src/runner_control/handler.rs"
+        },
+        {
+          "constant": "MAX_NO_WORK_RETRY_AFTER_MILLIS",
+          "contains": "if no_work_retry_after_millis > MAX_NO_WORK_RETRY_AFTER_MILLIS {",
+          "path": "crates/automata-ci-control/src/runner_control/handler.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
         "MAX_ENVIRONMENT_PROFILE_ID_LENGTH"
       ],
       "owner": "core-domain",
@@ -3470,7 +3459,7 @@
         {
           "constant": "MAX_REGISTERED_RUNNERS",
           "contains": "if runner_count >= MAX_REGISTERED_RUNNERS {",
-          "path": "crates/automata-ci-auth-postgres/src/management/runner_enrollment.rs"
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
         }
       ]
     },
@@ -3961,6 +3950,24 @@
     {
       "classification": "operational",
       "constants": [
+        "MAX_PRESENTATION_TEXT_BYTES"
+      ],
+      "owner": "github-runtime",
+      "path": "crates/automata-ci-github-delivery/src/checks_presentation.rs",
+      "phase": "results",
+      "reason": "Rendered Check Run presentation length is an internal truncation policy below the provider ceiling, not a GitHub parity claim.",
+      "uses": [
+        {
+          "constant": "MAX_PRESENTATION_TEXT_BYTES",
+          "contains": ".is_some_and(|size| size <= MAX_PRESENTATION_TEXT_BYTES)",
+          "path": "crates/automata-ci-github-delivery/src/checks_presentation.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_ANNOTATIONS_PER_PATCH",
         "MAX_VISIBILITY_MARGIN_MILLIS"
       ],
       "owner": "github-runtime",
@@ -3968,6 +3975,11 @@
       "phase": "runtime",
       "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
       "uses": [
+        {
+          "constant": "MAX_ANNOTATIONS_PER_PATCH",
+          "contains": ".min(from.saturating_add(MAX_ANNOTATIONS_PER_PATCH));",
+          "path": "crates/automata-ci-github-delivery/src/checks_publisher.rs"
+        },
         {
           "constant": "MAX_VISIBILITY_MARGIN_MILLIS",
           "contains": "if visibility_margin_millis <= 0 || visibility_margin_millis > MAX_VISIBILITY_MARGIN_MILLIS",
@@ -4054,7 +4066,18 @@
     {
       "classification": "operational",
       "constants": [
+        "MAX_CHECK_ANNOTATIONS_PER_REQUEST",
+        "MAX_CHECK_ANNOTATION_MESSAGE_BYTES",
+        "MAX_CHECK_ANNOTATION_PATH_BYTES",
+        "MAX_CHECK_ANNOTATION_TITLE_BYTES",
+        "MAX_CHECK_OUTPUT_SUMMARY_BYTES",
+        "MAX_CHECK_OUTPUT_TEXT_BYTES",
+        "MAX_CHECK_OUTPUT_TITLE_BYTES",
         "MAX_RATE_LIMIT_RESET_SECONDS",
+        "MAX_REQUESTED_ACTIONS",
+        "MAX_REQUESTED_ACTION_DESCRIPTION_BYTES",
+        "MAX_REQUESTED_ACTION_IDENTIFIER_BYTES",
+        "MAX_REQUESTED_ACTION_LABEL_BYTES",
         "MAX_RETRY_AFTER_SECONDS"
       ],
       "owner": "github-runtime",
@@ -4063,8 +4086,63 @@
       "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
       "uses": [
         {
+          "constant": "MAX_CHECK_ANNOTATIONS_PER_REQUEST",
+          "contains": "if annotations.is_empty() || annotations.len() > MAX_CHECK_ANNOTATIONS_PER_REQUEST {",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_CHECK_ANNOTATION_MESSAGE_BYTES",
+          "contains": "|| message.len() > MAX_CHECK_ANNOTATION_MESSAGE_BYTES",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_CHECK_ANNOTATION_PATH_BYTES",
+          "contains": "&& path.len() <= MAX_CHECK_ANNOTATION_PATH_BYTES",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_CHECK_ANNOTATION_TITLE_BYTES",
+          "contains": "|| title.len() > MAX_CHECK_ANNOTATION_TITLE_BYTES",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_CHECK_OUTPUT_SUMMARY_BYTES",
+          "contains": "|| summary.len() > MAX_CHECK_OUTPUT_SUMMARY_BYTES",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_CHECK_OUTPUT_TEXT_BYTES",
+          "contains": "|| text.len() > MAX_CHECK_OUTPUT_TEXT_BYTES",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_CHECK_OUTPUT_TITLE_BYTES",
+          "contains": "|| title.len() > MAX_CHECK_OUTPUT_TITLE_BYTES",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
           "constant": "MAX_RATE_LIMIT_RESET_SECONDS",
           "contains": ".and_then(|value| parse_bounded_decimal(value.as_bytes(), MAX_RATE_LIMIT_RESET_SECONDS));",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_REQUESTED_ACTIONS",
+          "contains": "if actions.len() > MAX_REQUESTED_ACTIONS {",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_REQUESTED_ACTION_DESCRIPTION_BYTES",
+          "contains": "|| !bounded_action_text(&description, MAX_REQUESTED_ACTION_DESCRIPTION_BYTES)",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_REQUESTED_ACTION_IDENTIFIER_BYTES",
+          "contains": "|| identifier.len() > MAX_REQUESTED_ACTION_IDENTIFIER_BYTES",
+          "path": "crates/automata-ci-github/src/checks.rs"
+        },
+        {
+          "constant": "MAX_REQUESTED_ACTION_LABEL_BYTES",
+          "contains": "if !bounded_action_text(&label, MAX_REQUESTED_ACTION_LABEL_BYTES)",
           "path": "crates/automata-ci-github/src/checks.rs"
         },
         {
@@ -4313,6 +4391,35 @@
           "constant": "MAX_WRAPPED_DATA_KEY_BYTES",
           "contains": "if ciphertext.is_empty() || ciphertext.len() > MAX_WRAPPED_DATA_KEY_BYTES {",
           "path": "crates/automata-ci-key-management/src/wrapped.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_COMMAND_STREAM_BYTES",
+        "MIN_COMPOSE_VERSION",
+        "MIN_DOCKER_API"
+      ],
+      "owner": "integration",
+      "path": "crates/automata-ci-local/src/lib.rs",
+      "phase": "fleet",
+      "reason": "Local preflight output and external Docker tool prerequisites are bounded installation policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_COMMAND_STREAM_BYTES",
+          "contains": "let remaining = MAX_COMMAND_STREAM_BYTES.saturating_sub(bytes.len());",
+          "path": "crates/automata-ci-local/src/lib.rs"
+        },
+        {
+          "constant": "MIN_COMPOSE_VERSION",
+          "contains": "if parsed < MIN_COMPOSE_VERSION {",
+          "path": "crates/automata-ci-local/src/lib.rs"
+        },
+        {
+          "constant": "MIN_DOCKER_API",
+          "contains": "if client_api < MIN_DOCKER_API",
+          "path": "crates/automata-ci-local/src/lib.rs"
         }
       ]
     },
@@ -4673,6 +4780,133 @@
     {
       "classification": "operational",
       "constants": [
+        "MAX_DELEGATED_ACTOR_ROLE_GRANTS"
+      ],
+      "owner": "auth-security",
+      "path": "crates/automata-ci-postgres/src/auth/delegated_actor.rs",
+      "phase": "admission",
+      "reason": "Delegated actor role grant cardinality is an internal authorization safety ceiling, not a GitHub parity claim.",
+      "uses": [
+        {
+          "constant": "MAX_DELEGATED_ACTOR_ROLE_GRANTS",
+          "contains": "if rows.len() > MAX_DELEGATED_ACTOR_ROLE_GRANTS {",
+          "path": "crates/automata-ci-postgres/src/auth/delegated_actor.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_GROUP_CHARACTERS",
+        "MAX_NAME_BYTES",
+        "MAX_REDEEM_RESPONSE_BYTES",
+        "MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS",
+        "MAX_TOKEN_LIFETIME_MS",
+        "MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS",
+        "MIN_TOKEN_LIFETIME_MS"
+      ],
+      "owner": "auth-security",
+      "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs",
+      "phase": "admission",
+      "reason": "One-time runner enrollment group, name, response, token lifetime, and certificate lifetime bounds are control-plane admission policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_GROUP_CHARACTERS",
+          "contains": "&& value.chars().count() <= MAX_GROUP_CHARACTERS",
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
+        },
+        {
+          "constant": "MAX_NAME_BYTES",
+          "contains": "&& value.len() <= MAX_NAME_BYTES",
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
+        },
+        {
+          "constant": "MAX_REDEEM_RESPONSE_BYTES",
+          "contains": "|| request.response.len() > MAX_REDEEM_RESPONSE_BYTES",
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
+        },
+        {
+          "constant": "MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS",
+          "contains": "!(1..=MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS).contains(&lifetime)",
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
+        },
+        {
+          "constant": "MAX_TOKEN_LIFETIME_MS",
+          "contains": "|| !(MIN_TOKEN_LIFETIME_MS..=MAX_TOKEN_LIFETIME_MS).contains(&request.lifetime_ms)",
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
+        },
+        {
+          "constant": "MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS",
+          "contains": "remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS",
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
+        },
+        {
+          "constant": "MIN_TOKEN_LIFETIME_MS",
+          "contains": "|| !(MIN_TOKEN_LIFETIME_MS..=MAX_TOKEN_LIFETIME_MS).contains(&request.lifetime_ms)",
+          "path": "crates/automata-ci-postgres/src/auth/management/runner_enrollment.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_REQUEST_AUTHORIZATION_ROWS"
+      ],
+      "owner": "auth-security",
+      "path": "crates/automata-ci-postgres/src/auth/request_auth.rs",
+      "phase": "admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_REQUEST_AUTHORIZATION_ROWS",
+          "contains": ".bind(one_over_row_limit(MAX_REQUEST_AUTHORIZATION_ROWS)?)",
+          "path": "crates/automata-ci-postgres/src/auth/request_auth.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_CALLER_CLOCK_SKEW_MILLISECONDS"
+      ],
+      "owner": "auth-security",
+      "path": "crates/automata-ci-postgres/src/auth/session.rs",
+      "phase": "admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_CALLER_CLOCK_SKEW_MILLISECONDS",
+          "contains": "if caller_ms.abs_diff(database_time_ms) > MAX_CALLER_CLOCK_SKEW_MILLISECONDS {",
+          "path": "crates/automata-ci-postgres/src/auth/session.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_DATABASE_CIPHERTEXT_BYTES",
+        "MAX_DATABASE_WRAPPED_KEY_BYTES"
+      ],
+      "owner": "auth-security",
+      "path": "crates/automata-ci-postgres/src/secret/storage.rs",
+      "phase": "admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_DATABASE_CIPHERTEXT_BYTES",
+          "contains": "|| ciphertext.len() > MAX_DATABASE_CIPHERTEXT_BYTES",
+          "path": "crates/automata-ci-postgres/src/secret/storage.rs"
+        },
+        {
+          "constant": "MAX_DATABASE_WRAPPED_KEY_BYTES",
+          "contains": "if wrapped_data_key.len() > MAX_DATABASE_WRAPPED_KEY_BYTES",
+          "path": "crates/automata-ci-postgres/src/secret/storage.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
         "MAX_RUNTIME_AUTHORITIES",
         "MAX_RUNTIME_AUTHORITY_CREDENTIAL_BYTES",
         "MAX_RUNTIME_AUTHORITY_ENDPOINT_BYTES",
@@ -4785,6 +5019,117 @@
       "phase": "runtime",
       "reason": "Lexical header, diagnostic, or protocol-version tokens whose names contain a limit word; these constants do not impose behavioral resource ceilings.",
       "uses": []
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_CLIENT_CA_PEM_BYTES",
+        "MAX_MANAGEMENT_MESSAGE_BYTES",
+        "MAX_SERVER_CERTIFICATE_PEM_BYTES",
+        "MAX_SERVER_PRIVATE_KEY_PEM_BYTES"
+      ],
+      "owner": "control-plane",
+      "path": "crates/automata-ci-provisioning-grpc/src/lib.rs",
+      "phase": "admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_CLIENT_CA_PEM_BYTES",
+          "contains": "client_ca_pem.len() > MAX_CLIENT_CA_PEM_BYTES",
+          "path": "crates/automata-ci-provisioning-grpc/src/lib.rs"
+        },
+        {
+          "constant": "MAX_MANAGEMENT_MESSAGE_BYTES",
+          "contains": ".max_decoding_message_size(MAX_MANAGEMENT_MESSAGE_BYTES)",
+          "path": "crates/automata-ci-provisioning-grpc/src/lib.rs"
+        },
+        {
+          "constant": "MAX_SERVER_CERTIFICATE_PEM_BYTES",
+          "contains": "server_certificate_pem.len() > MAX_SERVER_CERTIFICATE_PEM_BYTES",
+          "path": "crates/automata-ci-provisioning-grpc/src/lib.rs"
+        },
+        {
+          "constant": "MAX_SERVER_PRIVATE_KEY_PEM_BYTES",
+          "contains": "server_private_key_pem.len() > MAX_SERVER_PRIVATE_KEY_PEM_BYTES",
+          "path": "crates/automata-ci-provisioning-grpc/src/lib.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_AUTHORITY_ID_BYTES",
+        "MAX_DISPLAY_NAME_SCALARS",
+        "MAX_REQUEST_ID_BYTES",
+        "MAX_SHARD_ID_BYTES",
+        "PROTOBUF_TIMESTAMP_MAX_SECONDS",
+        "PROTOBUF_TIMESTAMP_MIN_SECONDS"
+      ],
+      "owner": "control-plane",
+      "path": "crates/automata-ci-provisioning/src/model.rs",
+      "phase": "admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_AUTHORITY_ID_BYTES",
+          "contains": "value.len() > MAX_AUTHORITY_ID_BYTES",
+          "path": "crates/automata-ci-provisioning/src/model.rs"
+        },
+        {
+          "constant": "MAX_DISPLAY_NAME_SCALARS",
+          "contains": "value.chars().count() > MAX_DISPLAY_NAME_SCALARS",
+          "path": "crates/automata-ci-provisioning/src/model.rs"
+        },
+        {
+          "constant": "MAX_REQUEST_ID_BYTES",
+          "contains": "value.len() > MAX_REQUEST_ID_BYTES",
+          "path": "crates/automata-ci-provisioning/src/model.rs"
+        },
+        {
+          "constant": "MAX_SHARD_ID_BYTES",
+          "contains": "bytes.len() > MAX_SHARD_ID_BYTES",
+          "path": "crates/automata-ci-provisioning/src/model.rs"
+        },
+        {
+          "constant": "PROTOBUF_TIMESTAMP_MAX_SECONDS",
+          "contains": "seconds > PROTOBUF_TIMESTAMP_MAX_SECONDS",
+          "path": "crates/automata-ci-provisioning/src/model.rs"
+        },
+        {
+          "constant": "PROTOBUF_TIMESTAMP_MIN_SECONDS",
+          "contains": "seconds < PROTOBUF_TIMESTAMP_MIN_SECONDS",
+          "path": "crates/automata-ci-provisioning/src/model.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_CERTIFICATE_CHAIN_DER_BYTES",
+        "MAX_CERTIFICATE_COUNT",
+        "MAX_CERTIFICATE_DER_BYTES"
+      ],
+      "owner": "control-plane",
+      "path": "crates/automata-ci-provisioning/src/port.rs",
+      "phase": "admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_CERTIFICATE_CHAIN_DER_BYTES",
+          "contains": "total > MAX_CERTIFICATE_CHAIN_DER_BYTES",
+          "path": "crates/automata-ci-provisioning/src/port.rs"
+        },
+        {
+          "constant": "MAX_CERTIFICATE_COUNT",
+          "contains": "certificate_chain_der.len() > MAX_CERTIFICATE_COUNT",
+          "path": "crates/automata-ci-provisioning/src/port.rs"
+        },
+        {
+          "constant": "MAX_CERTIFICATE_DER_BYTES",
+          "contains": "certificate.len() > MAX_CERTIFICATE_DER_BYTES",
+          "path": "crates/automata-ci-provisioning/src/port.rs"
+        }
+      ]
     },
     {
       "classification": "operational",
@@ -5040,35 +5385,6 @@
           "constant": "HARD_MAX_CHAIN_CERTIFICATES",
           "contains": "|| maximum_chain_certificates > HARD_MAX_CHAIN_CERTIFICATES",
           "path": "crates/automata-ci-runner-auth/src/limits.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_HEARTBEAT_INTERVAL_MILLIS",
-        "MAX_LEASE_DURATION_MILLIS",
-        "MAX_NO_WORK_RETRY_AFTER_MILLIS"
-      ],
-      "owner": "runner-contract",
-      "path": "crates/automata-ci-runner-control/src/handler.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_HEARTBEAT_INTERVAL_MILLIS",
-          "contains": "if heartbeat_interval_millis > MAX_HEARTBEAT_INTERVAL_MILLIS {",
-          "path": "crates/automata-ci-runner-control/src/handler.rs"
-        },
-        {
-          "constant": "MAX_LEASE_DURATION_MILLIS",
-          "contains": "if lease_duration_millis > MAX_LEASE_DURATION_MILLIS {",
-          "path": "crates/automata-ci-runner-control/src/handler.rs"
-        },
-        {
-          "constant": "MAX_NO_WORK_RETRY_AFTER_MILLIS",
-          "contains": "if no_work_retry_after_millis > MAX_NO_WORK_RETRY_AFTER_MILLIS {",
-          "path": "crates/automata-ci-runner-control/src/handler.rs"
         }
       ]
     },
@@ -6213,29 +6529,6 @@
     {
       "classification": "operational",
       "constants": [
-        "MAX_DATABASE_CIPHERTEXT_BYTES",
-        "MAX_DATABASE_WRAPPED_KEY_BYTES"
-      ],
-      "owner": "auth-security",
-      "path": "crates/automata-ci-secret-postgres/src/storage.rs",
-      "phase": "admission",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_DATABASE_CIPHERTEXT_BYTES",
-          "contains": "|| ciphertext.len() > MAX_DATABASE_CIPHERTEXT_BYTES",
-          "path": "crates/automata-ci-secret-postgres/src/storage.rs"
-        },
-        {
-          "constant": "MAX_DATABASE_WRAPPED_KEY_BYTES",
-          "contains": "if wrapped_data_key.len() > MAX_DATABASE_WRAPPED_KEY_BYTES",
-          "path": "crates/automata-ci-secret-postgres/src/storage.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
         "MAX_SCOPE_ID_BYTES",
         "MAX_SECRET_NAME_BYTES"
       ],
@@ -6467,6 +6760,29 @@
           "constant": "MAX_PROVIDER_NAME_BYTES",
           "contains": "|| provider.len() > MAX_PROVIDER_NAME_BYTES",
           "path": "crates/automata-ci-store/src/conformance.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_DELIVERY_ID_BYTES",
+        "MAX_EXTERNAL_ID_BYTES"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-store/src/github_check_rerun.rs",
+      "phase": "provider-ingress",
+      "reason": "Signed webhook delivery and Check Run correlation identifiers are bounded internal admission values, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_DELIVERY_ID_BYTES",
+          "contains": "|| delivery_id.len() > MAX_DELIVERY_ID_BYTES",
+          "path": "crates/automata-ci-store/src/github_check_rerun.rs"
+        },
+        {
+          "constant": "MAX_EXTERNAL_ID_BYTES",
+          "contains": "|| external_id.len() > MAX_EXTERNAL_ID_BYTES",
+          "path": "crates/automata-ci-store/src/github_check_rerun.rs"
         }
       ]
     },
@@ -7896,6 +8212,47 @@
     {
       "classification": "operational",
       "constants": [
+        "MAX_ASSERTION_BYTES",
+        "MAX_JWKS_BYTES",
+        "MAX_JWKS_KEYS",
+        "MAX_JWT_SEGMENT_BYTES",
+        "MAX_KEY_ID_BYTES"
+      ],
+      "owner": "auth-security",
+      "path": "crates/automata-ci/src/app/delegated_actor_api.rs",
+      "phase": "fleet",
+      "reason": "Delegated actor assertions and key discovery inputs use internal denial-of-service safety ceilings, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_ASSERTION_BYTES",
+          "contains": "if token.is_empty() || token.len() > MAX_ASSERTION_BYTES || !token.is_ascii() {",
+          "path": "crates/automata-ci/src/app/delegated_actor_api.rs"
+        },
+        {
+          "constant": "MAX_JWKS_BYTES",
+          "contains": "if body.len().saturating_add(chunk.len()) > MAX_JWKS_BYTES {",
+          "path": "crates/automata-ci/src/app/delegated_actor_api.rs"
+        },
+        {
+          "constant": "MAX_JWKS_KEYS",
+          "contains": "if document.keys.is_empty() || document.keys.len() > MAX_JWKS_KEYS {",
+          "path": "crates/automata-ci/src/app/delegated_actor_api.rs"
+        },
+        {
+          "constant": "MAX_JWT_SEGMENT_BYTES",
+          "contains": "if segment.is_empty() || segment.len() > MAX_JWT_SEGMENT_BYTES {",
+          "path": "crates/automata-ci/src/app/delegated_actor_api.rs"
+        },
+        {
+          "constant": "MAX_KEY_ID_BYTES",
+          "contains": "&& value.len() <= MAX_KEY_ID_BYTES",
+          "path": "crates/automata-ci/src/app/delegated_actor_api.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
         "MAX_BROWSER_LOGOUT_FORM_BYTES",
         "MAX_CALLBACK_CODE_BYTES",
         "MAX_CALLBACK_DESCRIPTION_BYTES",
@@ -8680,8 +9037,10 @@
         "MAX_CLI_SESSION_TTL_SECONDS",
         "MAX_CONFORMANCE_EXPORT_TOKEN_BYTES",
         "MAX_DATABASE_URL_BYTES",
+        "MAX_DELEGATED_ACTOR_JWKS_URL_BYTES",
         "MAX_ENVIRONMENT_NAME_BYTES",
         "MAX_GITHUB_CLIENT_SECRET_BYTES",
+        "MAX_MANAGEMENT_CLIENT_CERTIFICATES",
         "MAX_PRIVATE_KEY_PEM_BYTES",
         "MAX_RESULTS_KEY_ID_BYTES",
         "MAX_RESULTS_SIGNING_KEY_BYTES",
@@ -8733,6 +9092,11 @@
           "path": "crates/automata-ci/src/server/config.rs"
         },
         {
+          "constant": "MAX_DELEGATED_ACTOR_JWKS_URL_BYTES",
+          "contains": ".filter(|value| value.len() <= MAX_DELEGATED_ACTOR_JWKS_URL_BYTES)",
+          "path": "crates/automata-ci/src/server/config.rs"
+        },
+        {
           "constant": "MAX_ENVIRONMENT_NAME_BYTES",
           "contains": "|| name.len() > MAX_ENVIRONMENT_NAME_BYTES",
           "path": "crates/automata-ci/src/server/config.rs"
@@ -8740,6 +9104,11 @@
         {
           "constant": "MAX_GITHUB_CLIENT_SECRET_BYTES",
           "contains": ".load_scalar(MAX_GITHUB_CLIENT_SECRET_BYTES)",
+          "path": "crates/automata-ci/src/server/config.rs"
+        },
+        {
+          "constant": "MAX_MANAGEMENT_CLIENT_CERTIFICATES",
+          "contains": "args.management_client_certificate_sha256.len() > MAX_MANAGEMENT_CLIENT_CERTIFICATES",
           "path": "crates/automata-ci/src/server/config.rs"
         },
         {
@@ -15453,7 +15822,7 @@
     "next_sequence": null,
     "owner": "store",
     "reservations": [],
-    "sha256": "cca57ab3fb09f75b2e4cc7577f3d292ef58720cb2bbe38fbaa28b989ff73eb05"
+    "sha256": "356c4a90dcdbf593c3be2fc20b08d9acc54e973b2bdc0bee02871ab31a35a670"
   },
   "owners": [
     {
@@ -15532,11 +15901,6 @@
       "description": "Generated runner protobuf bindings",
       "owner": "protocol",
       "path": "crates/automata-ci-protocol-protobuf/src/generated"
-    },
-    {
-      "description": "Runner wire golden fixtures",
-      "owner": "protocol",
-      "path": "crates/automata-ci-protocol-protobuf/tests/fixtures"
     }
   ],
   "status": "active"

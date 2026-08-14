@@ -755,13 +755,13 @@
           {
             "ci_lane": {
               "driver": "scripts/ci/run-rust-coverage.sh",
-              "package": "automata-ci-secret-postgres",
+              "package": "automata-ci-postgres",
               "runner": "scripts/ci/run-postgres-tests.sh",
-              "selection": "--test secret_postgres",
+              "selection": "--test postgres",
               "workflow": ".ci/workflows/ci.yml"
             },
             "function": "replacement_stage_preserves_predecessor_until_atomic_confirmation",
-            "path": "crates/automata-ci-secret-postgres/tests/postgres_provider.rs",
+            "path": "crates/automata-ci-postgres/tests/secret/provider.rs",
             "required_fragments": [
               "ConfirmRepositorySecretVersionMutation::new",
               "ProviderErrorKind::Unavailable",
@@ -789,13 +789,13 @@
         ],
         "ci_lane": {
           "driver": "scripts/ci/run-rust-coverage.sh",
-          "package": "automata-ci-secret-postgres",
+          "package": "automata-ci-postgres",
           "runner": "scripts/ci/run-postgres-tests.sh",
-          "selection": "--test secret_postgres",
+          "selection": "--test postgres",
           "workflow": ".ci/workflows/ci.yml"
         },
         "function": "encrypted_create_stays_unresolvable_until_management_confirmation",
-        "path": "crates/automata-ci-secret-postgres/tests/postgres_provider.rs",
+        "path": "crates/automata-ci-postgres/tests/secret/provider.rs",
         "required_fragments": [
           ".complete_builtin_secret_cleanup(",
           ".delete_repository_secret(",
@@ -809,7 +809,7 @@
       "id": "managed-secrets",
       "source": {
         "contains": "PostgresSecretProvider",
-        "path": "crates/automata-ci-secret-postgres/src/lib.rs"
+        "path": "crates/automata-ci-postgres/src/secret/mod.rs"
       },
       "stage_profile": "managed-secrets",
       "status": "Experimental",
@@ -1179,6 +1179,8 @@
   ],
   "provider_event_inventory": {
     "events": {
+      "check_run": "decoder-only-provider-events",
+      "check_suite": "decoder-only-provider-events",
       "merge_group": "github-provider",
       "pull_request": "github-provider",
       "push": "github-provider",
