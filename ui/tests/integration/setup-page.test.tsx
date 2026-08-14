@@ -1,8 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { act } from "react";
+import { hydrateRoot } from "react-dom/client";
+import { describe, expect, it, vi } from "vitest";
+import { HtmlDocument } from "../../src/Document";
 import { renderPage } from "../../src/entry-server";
 import type { RenderRequest } from "../../src/models";
+import { readRenderRequest } from "../../src/serialization";
 
 const BOOTSTRAP_SENTINEL = "setup-bootstrap-sentinel-0123456789abcdef";
 
@@ -97,6 +101,46 @@ describe("installation setup page", () => {
     expect(document.querySelector('aside[aria-labelledby="setup-guidance-heading"]'))
       .not.toBeNull();
     expect(document.querySelectorAll("h1")).toHaveLength(1);
+  });
+
+  it("disables the action and shows progress after the first hydrated submit", async () => {
+    document.open();
+    document.write(renderPage(setupRequest));
+    document.close();
+    const form = document.querySelector<HTMLFormElement>(
+      'form[action="/setup/auth/github"]',
+    );
+    const submit = form?.querySelector<HTMLButtonElement>('button[type="submit"]');
+    const parsedRequest = readRenderRequest(document);
+    const errors: unknown[] = [];
+
+    expect(submit?.disabled).toBe(false);
+    expect(submit?.textContent).toContain("Continue with GitHub");
+    expect(form?.hasAttribute("aria-busy")).toBe(false);
+
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    await act(async () => {
+      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />, {
+        onRecoverableError: (error) => errors.push(error),
+      });
+    });
+
+    expect(errors).toEqual([]);
+    const first = new Event("submit", { bubbles: true, cancelable: true });
+    await act(async () => form?.dispatchEvent(first));
+    expect(first.defaultPrevented).toBe(false);
+    expect(form?.getAttribute("aria-busy")).toBe("true");
+    expect(submit?.disabled).toBe(true);
+    expect(submit?.getAttribute("aria-busy")).toBe("true");
+    expect(submit?.textContent).toContain("Connecting…");
+    expect(submit?.querySelector(".setup-form__spinner")).not.toBeNull();
+
+    const replay = new Event("submit", { bubbles: true, cancelable: true });
+    await act(async () => form?.dispatchEvent(replay));
+    expect(replay.defaultPrevented).toBe(true);
+
+    await act(async () => root?.unmount());
   });
 
   it("has an explicit narrow-screen single-column and full-width action contract", () => {

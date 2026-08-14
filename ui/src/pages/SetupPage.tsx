@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Shell } from "../components/Shell";
 import type { SetupPageModel } from "../models";
 
@@ -9,6 +9,18 @@ export interface SetupPageProps {
 
 /** One-use, JavaScript-independent administrator setup form. */
 export function SetupPage({ model, shellUtility }: SetupPageProps) {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const submitted = useRef(false);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    if (submitted.current) {
+      event.preventDefault();
+      return;
+    }
+    submitted.current = true;
+    setIsSubmitting(true);
+  }
+
   return (
     <Shell shell={model.shell} repository={null} utility={shellUtility}>
       <main
@@ -36,10 +48,12 @@ export function SetupPage({ model, shellUtility }: SetupPageProps) {
             </div>
             <form
               action={model.form.action}
+              aria-busy={isSubmitting || undefined}
               aria-describedby="setup-form-help setup-security-note"
               autoComplete="off"
               className="setup-form"
               method="post"
+              onSubmit={submit}
             >
               <input
                 name="return_path"
@@ -68,8 +82,19 @@ export function SetupPage({ model, shellUtility }: SetupPageProps) {
                 included in the page or URL.
               </p>
               <div className="setup-form__actions">
-                <button className="button button--primary" type="submit">
-                  Continue with GitHub
+                <button
+                  aria-busy={isSubmitting || undefined}
+                  className="button button--primary"
+                  disabled={isSubmitting}
+                  type="submit"
+                >
+                  {isSubmitting ? (
+                    <span
+                      aria-hidden="true"
+                      className="setup-form__spinner"
+                    />
+                  ) : null}
+                  {isSubmitting ? "Connecting…" : "Continue with GitHub"}
                 </button>
               </div>
             </form>

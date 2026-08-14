@@ -73,6 +73,21 @@
   justify-content: flex-end;
 }
 
+.setup-form__spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, currentColor 28%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: setup-form-spin 1s linear infinite;
+}
+
+@keyframes setup-form-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .setup-guidance {
   padding: 18px;
   background: var(--canvas-subtle);
