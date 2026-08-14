@@ -115,7 +115,7 @@ scrape. Initial limits are:
 | Concurrent scrapes | 2 | 2 |
 | Handler deadline | 5 seconds | 5 seconds |
 | Encoded response | 2 MiB | 2 MiB |
-| Post-relabel samples per scrape | 5,400 | 1,000 |
+| Post-relabel samples per scrape | 5,600 | 1,000 |
 
 The scrape limits are release gates. New metrics must remain within them, and
 remaining headroom is not an invitation to add unbounded labels.
