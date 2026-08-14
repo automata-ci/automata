@@ -73,6 +73,7 @@ enum PendingCommand {
     Empty,
     Saturated,
 }
+
 /// Immutable media type used for canonical terminal [`automata_ci_core::JobResult`] JSON.
 pub const JOB_RESULT_MEDIA_TYPE: &str = "application/vnd.automata.job-result+json";
 /// Immutable media type used for deterministic gzip-compressed log-frame JSON.
@@ -971,8 +972,16 @@ impl DurableRunnerControlHandler {
                 }
                 LeasePollOutcome::Claimed(claimed) => {
                     stage = RunnerLeaseRequestStage::OfferBuild;
-                    self.build_lease_offer(fence, snapshot, request, digest, claimed, cancellation)
-                        .await?
+                    self.build_lease_offer(
+                        fence,
+                        snapshot,
+                        request,
+                        digest,
+                        claimed,
+                        cancellation,
+                        &mut stage,
+                    )
+                    .await?
                 }
             };
 
@@ -1164,7 +1173,7 @@ impl DurableRunnerControlHandler {
         Ok(response)
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn build_lease_offer(
         &self,
         fence: RunnerSessionFence,
@@ -1173,9 +1182,18 @@ impl DurableRunnerControlHandler {
         digest: Sha256Digest,
         claimed: ClaimedLeasePoll,
         cancellation: &CancellationToken,
+        stage: &mut RunnerLeaseRequestStage,
     ) -> Result<ServerToRunner, ApplicationError> {
         let result = self
-            .build_lease_offer_inner(fence, snapshot, request, digest, claimed, cancellation)
+            .build_lease_offer_inner(
+                fence,
+                snapshot,
+                request,
+                digest,
+                claimed,
+                cancellation,
+                stage,
+            )
             .await;
         if result.is_err() {
             self.observer
@@ -1184,7 +1202,7 @@ impl DurableRunnerControlHandler {
         result
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn build_lease_offer_inner(
         &self,
         fence: RunnerSessionFence,
@@ -1193,6 +1211,7 @@ impl DurableRunnerControlHandler {
         digest: Sha256Digest,
         claimed: ClaimedLeasePoll,
         cancellation: &CancellationToken,
+        stage: &mut RunnerLeaseRequestStage,
     ) -> Result<ServerToRunner, ApplicationError> {
         Self::not_cancelled(cancellation)?;
         let metadata = claimed.job_ir();
@@ -1208,6 +1227,7 @@ impl DurableRunnerControlHandler {
             claimed.lease().clone(),
             metadata.clone(),
         );
+        *stage = RunnerLeaseRequestStage::OfferClaimInspection;
         let claim_status = self
             .ports
             .lease
@@ -1217,6 +1237,7 @@ impl DurableRunnerControlHandler {
             .map_err(port_application_error)?;
         match claim_status {
             LeaseOfferClaimStatus::Published(command) => {
+                *stage = RunnerLeaseRequestStage::OfferPublishedClaimDecode;
                 let response = decode_durable_server_command(
                     &command,
                     request.header().protocol_version(),
@@ -1237,6 +1258,7 @@ impl DurableRunnerControlHandler {
             }
             LeaseOfferClaimStatus::Current => {}
         }
+        *stage = RunnerLeaseRequestStage::OfferJobIrRead;
         let bytes = self
             .ports
             .lease
@@ -1244,6 +1266,7 @@ impl DurableRunnerControlHandler {
             .read_job_ir(metadata, metadata.encoded_size())
             .await
             .map_err(port_application_error)?;
+        *stage = RunnerLeaseRequestStage::OfferJobIrVerification;
         let job = verify_job_ir_blob(
             metadata,
             &bytes,
@@ -1254,6 +1277,7 @@ impl DurableRunnerControlHandler {
         Self::not_cancelled(cancellation)?;
         let authority_slot = StableRunnerSlot::new(claim.slot().get())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        *stage = RunnerLeaseRequestStage::OfferRuntimeAuthorityRequest;
         let authority_request = RuntimeAuthorityIssueRequest::new(
             &job,
             claim.job_ir_metadata(),
@@ -1263,6 +1287,7 @@ impl DurableRunnerControlHandler {
             authority_slot,
         )
         .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        *stage = RunnerLeaseRequestStage::OfferRuntimeAuthorityIssue;
         let runtime_authorities = match job.job().authority_profile() {
             JobAuthorityProfile::CredentialFree => {
                 JobRuntimeAuthorities::new(Vec::new(), &job, claimed.lease())
@@ -1280,9 +1305,11 @@ impl DurableRunnerControlHandler {
                     .map_err(port_application_error)?
             }
         };
+        *stage = RunnerLeaseRequestStage::OfferRuntimeAuthorityValidation;
         runtime_authorities
             .validate_for(&job, claimed.lease())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        *stage = RunnerLeaseRequestStage::OfferManagedSecretBindingIssue;
         let managed_secret_bindings = match (
             job.job().authority_profile(),
             self.ports.managed_secret_bindings.as_ref(),
@@ -1296,6 +1323,7 @@ impl DurableRunnerControlHandler {
                 ManagedSecretBindingOverlay::empty(claim.lease())
             }
         };
+        *stage = RunnerLeaseRequestStage::OfferManagedSecretBindingValidation;
         managed_secret_bindings
             .validate_for(claim.lease())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
@@ -1313,12 +1341,14 @@ impl DurableRunnerControlHandler {
         {
             return Err(app(ApplicationErrorKind::Unavailable));
         }
+        *stage = RunnerLeaseRequestStage::OfferCommandConstruction;
         let command =
             LeaseOfferCommand::try_new(claim, job.clone(), runtime_authorities.clone(), publish_at)
                 .and_then(|command| {
                     command.with_managed_secret_bindings(managed_secret_bindings.clone())
                 })
                 .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        *stage = RunnerLeaseRequestStage::OfferCommandPublication;
         let publication = self
             .ports
             .lease
@@ -1337,6 +1367,7 @@ impl DurableRunnerControlHandler {
             } else {
                 LeaseOfferObservation::Published
             });
+        *stage = RunnerLeaseRequestStage::OfferConstruction;
         let offer = LeaseOffer::new(
             ServerCommandHeader::new(
                 request.header().protocol_version(),
