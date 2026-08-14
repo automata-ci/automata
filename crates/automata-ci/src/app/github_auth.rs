@@ -1652,7 +1652,22 @@ async fn poll_device(State(state): State<GithubAuthHttpState>, request: Request)
         .await
     {
         Ok(outcome) => device_poll_response(&state, outcome, state.clock.now()),
-        Err(error) => login_error_response(error, state.clock.now()),
+        Err(error) => {
+            if matches!(
+                error,
+                GithubLoginError::ProviderUnavailable
+                    | GithubLoginError::StorageUnavailable
+                    | GithubLoginError::RandomnessUnavailable
+                    | GithubLoginError::CollisionLimitExceeded
+                    | GithubLoginError::IntegrityFailure
+            ) {
+                tracing::warn!(
+                    error = ?error,
+                    "GitHub device authorization poll failed"
+                );
+            }
+            login_error_response(error, state.clock.now())
+        }
     }
 }
 

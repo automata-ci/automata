@@ -14,7 +14,7 @@ use url::Url;
 use support::{DeterministicRandom, config, secret};
 
 #[test]
-fn browser_state_round_trips_only_with_exact_durable_times() {
+fn browser_state_uses_database_authoritative_durable_times() {
     let protocol = automata_ci_auth::github::GithubAppProtocol::new(config());
     let authorization = protocol
         .begin_web(
@@ -27,32 +27,14 @@ fn browser_state_round_trips_only_with_exact_durable_times() {
         .expect("encode web state");
     let decoded = GithubTransactionStateCodec::decode_web(
         encoded,
-        UnixTimestamp::from_seconds(100),
-        UnixTimestamp::from_seconds(700),
+        UnixTimestamp::from_seconds(101),
+        UnixTimestamp::from_seconds(701),
     )
-    .expect("decode exact web state");
+    .expect("decode state after database-time rebase");
 
     assert_eq!(decoded.state_secret(), original_state);
-    assert_eq!(decoded.created_at(), UnixTimestamp::from_seconds(100));
-    assert_eq!(decoded.expires_at(), UnixTimestamp::from_seconds(700));
-
-    let authorization = protocol
-        .begin_web(
-            &DeterministicRandom::new(9),
-            UnixTimestamp::from_seconds(100),
-        )
-        .expect("begin second web flow");
-    let encoded = GithubTransactionStateCodec::encode_web(authorization.into_transaction())
-        .expect("encode second web state");
-    assert_eq!(
-        GithubTransactionStateCodec::decode_web(
-            encoded,
-            UnixTimestamp::from_seconds(101),
-            UnixTimestamp::from_seconds(700),
-        )
-        .expect_err("clear metadata substitution must fail"),
-        GithubTransactionStateError::MetadataMismatch,
-    );
+    assert_eq!(decoded.created_at(), UnixTimestamp::from_seconds(101));
+    assert_eq!(decoded.expires_at(), UnixTimestamp::from_seconds(701));
 }
 
 #[test]
@@ -96,41 +78,57 @@ fn browser_state_rejects_trailing_and_cross_kind_bytes() {
 }
 
 #[test]
-fn device_state_round_trips_and_binds_every_clear_timing_field() {
+fn device_state_uses_database_authoritative_poll_schedule_after_rebase() {
     let endpoints =
         automata_ci_auth::github::GithubEndpoints::github_dot_com().expect("trusted endpoints");
     let authorization = device_authorization(100, 700, 105, 5);
-    let (encoded, metadata) = GithubTransactionStateCodec::encode_device(authorization)
+    let (encoded, caller_metadata) = GithubTransactionStateCodec::encode_device(authorization)
         .expect("encode pending device state");
-    let rendered = format!("{metadata:?}");
+    let rendered = format!("{caller_metadata:?}");
     assert!(!rendered.contains("ABCD-EFGH"));
-    let decoded = GithubTransactionStateCodec::decode_device(encoded, metadata, &endpoints)
-        .expect("decode exact device state");
+    let (user_code, verification_uri, _, _, _, interval) = caller_metadata.into_parts();
+    let database_metadata = GithubDeviceTransactionMetadata::new(
+        user_code,
+        verification_uri,
+        UnixTimestamp::from_seconds(100),
+        UnixTimestamp::from_seconds(700),
+        UnixTimestamp::from_seconds(106),
+        interval,
+    )
+    .expect("database-rebased metadata");
+    let decoded =
+        GithubTransactionStateCodec::decode_device(encoded, database_metadata, &endpoints)
+            .expect("decode state after database-time rebase");
 
     assert_eq!(decoded.user_code(), "ABCD-EFGH");
     assert_eq!(decoded.created_at(), UnixTimestamp::from_seconds(100));
     assert_eq!(decoded.expires_at(), UnixTimestamp::from_seconds(700));
-    assert_eq!(decoded.next_poll_at(), UnixTimestamp::from_seconds(105));
+    assert_eq!(decoded.next_poll_at(), UnixTimestamp::from_seconds(106));
     assert_eq!(decoded.poll_interval_seconds(), 5);
+}
 
-    let authorization = device_authorization(100, 700, 105, 5);
-    let (encoded, original) = GithubTransactionStateCodec::encode_device(authorization)
-        .expect("encode second device state");
-    let (user_code, uri, created, expires, _, interval) = original.into_parts();
-    let substituted = GithubDeviceTransactionMetadata::new(
-        user_code,
-        uri,
-        created,
-        expires,
-        UnixTimestamp::from_seconds(106),
-        interval,
-    )
-    .expect("individually valid substituted metadata");
-    assert_eq!(
-        GithubTransactionStateCodec::decode_device(encoded, substituted, &endpoints)
-            .expect_err("authenticated next-poll substitution must fail"),
-        GithubTransactionStateError::MetadataMismatch,
-    );
+#[test]
+fn device_state_rejects_legacy_and_trailing_encodings() {
+    let endpoints =
+        automata_ci_auth::github::GithubEndpoints::github_dot_com().expect("trusted endpoints");
+
+    for mutation in ["legacy", "trailing"] {
+        let authorization = device_authorization(100, 700, 105, 5);
+        let (encoded, metadata) = GithubTransactionStateCodec::encode_device(authorization)
+            .expect("encode pending device state");
+        let mut bytes = encoded.into_secret().expose_secret().to_vec();
+        if mutation == "legacy" {
+            bytes[7] = b'1';
+        } else {
+            bytes.push(0);
+        }
+        let state = LoginTransactionState::new(SecretBytes::new(bytes).expect("state bytes"));
+        assert_eq!(
+            GithubTransactionStateCodec::decode_device(state, metadata, &endpoints)
+                .expect_err("unsupported device state must fail"),
+            GithubTransactionStateError::InvalidState,
+        );
+    }
 }
 
 #[test]
