@@ -1100,6 +1100,7 @@ impl GithubHttpEndpoint {
     ///
     /// Returns a sanitized error unless GitHub returns exact `200` JSON matching
     /// the run ID, immutable identity, completed state, and requested conclusion.
+    #[allow(clippy::too_many_arguments)]
     pub async fn complete_check_run(
         &self,
         repository: &RepositoryId,

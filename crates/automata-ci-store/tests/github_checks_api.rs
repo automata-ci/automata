@@ -279,6 +279,34 @@ fn projection_claim_rejects_invalid_window() {
 }
 
 #[test]
+fn subject_receipt_rehydrates_and_rejects_nil_workflow_run_id() {
+    let subject = GithubCheckSubjectId::from_uuid(Uuid::new_v4()).expect("subject ID");
+    let external_id = format!("automata-check:{}", subject.as_uuid());
+
+    let receipt = GithubCheckSubjectReceipt::from_durable_parts(
+        subject,
+        external_id.clone(),
+        None,
+        GithubCheckDesiredProjection::Queued,
+        1,
+    )
+    .expect("complete durable receipt");
+    assert_eq!(receipt.subject_id(), subject);
+    assert_eq!(
+        GithubCheckSubjectReceipt::from_durable_parts(
+            subject,
+            external_id,
+            Some(RunId::from_uuid(Uuid::nil())),
+            GithubCheckDesiredProjection::Queued,
+            1,
+        ),
+        Err(GithubCheckValueError::NilUuid(
+            "GitHub Check workflow run ID"
+        ))
+    );
+}
+
+#[test]
 fn claimed_projection_rehydrates_only_complete_current_state() {
     let subject = GithubCheckSubjectId::from_uuid(Uuid::new_v4()).expect("subject ID");
     let worker = GithubCheckProjectionWorkerId::from_uuid(Uuid::new_v4()).expect("worker ID");
@@ -302,28 +330,6 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
     let run = GithubCheckRunId::new(23).expect("run");
     let external_id = format!("automata-check:{}", subject.as_uuid());
     let authority = checks_authority(identity.tenant());
-
-    let receipt = GithubCheckSubjectReceipt::from_durable_parts(
-        subject,
-        external_id.clone(),
-        None,
-        GithubCheckDesiredProjection::Queued,
-        1,
-    )
-    .expect("complete durable receipt");
-    assert_eq!(receipt.subject_id(), subject);
-    assert_eq!(
-        GithubCheckSubjectReceipt::from_durable_parts(
-            subject,
-            external_id.clone(),
-            Some(RunId::from_uuid(Uuid::nil())),
-            GithubCheckDesiredProjection::Queued,
-            1,
-        ),
-        Err(GithubCheckValueError::NilUuid(
-            "GitHub Check workflow run ID"
-        ))
-    );
 
     let claimed = ClaimedGithubCheckProjection::from_durable_parts(
         claim,
