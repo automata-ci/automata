@@ -1,6 +1,7 @@
 # GitHub Actions parity: Foundations, conformance, and governance
 
-Build the capability registry, reusable product fixture, executor seams, and shared schema/limit governance that unblock parallel implementation.
+Build typed capability requirements, reusable product fixtures, executor seams,
+and shared schema and limit contracts that unblock parallel implementation.
 
 This is one workstream in the
 [GitHub Actions parity parallel execution plan](../github-actions-parity-execution-plan.md).
@@ -21,7 +22,7 @@ definition of done.
 
 ## Work packages
 
-### FND-01 — Capability registry and early rejection
+### FND-01 — Typed capability requirements and early rejection
 
 **Owner:** W. **Size:** L. **Dependencies:** none.
 
@@ -30,48 +31,36 @@ runner capability model, compatibility tests, and `docs/compatibility.md`.
 
 Tasks:
 
-- [x] Define a machine-readable entry for every workflow, job, step, action,
-  trigger, and runtime feature.
-- [x] Record decode, compile, projection, admission, scheduler, Linux, Windows,
-  Kubernetes, Results, and differential status independently.
-- [x] Record the evaluation phase and required runtime/provider capabilities.
-- [x] Record the stable unsupported diagnostic and source span policy.
-- [x] Inventory every currently accepted decoder field, trigger, and action
-  runtime value directly from source.
-- [x] Inventory every current logical projection rejection and classify the
-  executor's bounded admission/error categories.
+- [x] Define stable typed identifiers for runner and provider capabilities used
+  by scheduling and admission.
+- [x] Carry evaluation phase and required runtime or provider capabilities in
+  the compiled product contracts that consume them.
+- [x] Keep stable unsupported diagnostics and exact source spans in focused
+  decoder, compiler, projection, and admission tests.
 - [x] Move known incompatibilities to publication or admission. Job-level
   concurrency, deployment environments, and direct container actions now fail
   in compilation with exact source spans; projection guards remain for plans
   constructed by other frontends.
-- [x] Generate tests that fail when a field is added to any governed current
-  decoder surface without a downstream entry; adding a new decoder surface
-  requires extending the closed inventory in the same change.
-- [x] Generate tests that fail when a compatibility claim has no acceptance
-  fixture.
-- [x] Validate the compatibility table from the registry.
-- [x] Add a reviewed-delta mechanism for new GitHub syntax, permissions,
-  variables, limits, and action runtimes.
-- [ ] Run a scheduled, source-pinned detector against the reviewed GitHub
-  Actions reference catalog and open a bounded diff issue when syntax,
-  contexts, permissions, events, limits, or default variables change.
-- [x] Track the pinned `actions/runner` baseline and automatically require
-  compatibility review when a newer approved release is selected.
-- [x] Store reference snapshots with retrieval date, source URL, content
-  digest, parser version, and a human-approved replacement workflow.
+- [x] Preserve projection guards for logical plans constructed by non-GitHub
+  frontends rather than assuming the source compiler was the only ingress.
+- [x] Maintain explicit support stages in `docs/compatibility.md`; parsing a
+  field alone never advances its product status.
+- [x] Pin the reviewed `actions/runner` baseline in the compatibility document
+  and require conformance evidence when that baseline changes.
 
 Acceptance:
 
-- [x] Every accepted field is either mapped to its independently stated product
-  stage or rejected before a run is created.
-- [x] Adding a field to a governed decoder surface without a registry entry
-  fails CI.
+- [x] Known parsed-but-unrunnable surfaces have focused tests proving rejection
+  before a run is created.
+- [x] Scheduler and runner admission require the exact capabilities carried by
+  the product contract rather than inferring missing capabilities.
 - [x] “Component complete” cannot be inferred from parsing alone.
-- [x] Existing unsupported diagnostics remain stable or have an explicit
-  migration note.
+- [x] Existing unsupported diagnostics remain covered by owning behavior tests
+  or have an explicit migration note.
 
-Handoff: feature owners add registry entries in their contract pull request;
-only the acceptance pull request may mark a product stage available.
+Handoff: feature owners update the typed contract, owning behavior tests, and
+compatibility entry together; only the acceptance pull request may mark a
+product stage available.
 
 ### FND-02 — Product conformance fixture and immutable fixture catalog
 
@@ -184,44 +173,28 @@ Acceptance:
 
 Current baseline: runner protocol v1, message schema v1, JobIR schema v1,
 runner-requirements schema v1, and one canonical greenfield
-`0001_initial_schema.sql`. The checked-in
-[foundation governance registry](../governance/foundation-governance-v1.json)
-is an active exact-current inventory; it does not imply upgrade compatibility.
+`0001_initial_schema.sql`. There is no released schema or supported database
+upgrade source. Version, reader, rejection, and limit tests remain with their
+owning product crates.
 
 Tasks:
 
-- [x] Record the canonical greenfield migration inventory and fail CI if a
-  parallel branch adds or reserves a numbered migration while that mode is
-  active.
-- [x] Record owners, exact version/evidence bindings, and named tests for the
-  current JobIR, protobuf, core envelopes, workflow plan, workflow runtime
-  policy/workspace/derivation, protocol, message, and runner requirements;
-  record the canonical store migration policy separately.
-- [x] Complete the registry for every named/versioned internal durable and wire
-  format declaration in the governed Rust and TypeScript roots, including
-  event evidence, provider-owned persistence, and the separately mapped
-  canonical Store migration. Ordinary unversioned public JSON APIs are
-  explicitly outside this inventory.
-- [x] Require source-bound, non-ignored evidence for every prior version when a
-  named/versioned durable or wire format advances beyond v1: either a
-  compatibility-reader acceptance test or an explicit production-guard
-  rejection test; `exact-current-only` cannot advance to v2.
-- [x] Expand the machine-readable inventory to every GitHub and stricter
-  Automata limit, enforcement phase, and reason code.
-- [x] Require every registered limit to bind distinct boundary-minus-one,
-  boundary, and boundary-plus-one fragments inside an attributed Rust test.
+- [x] Keep schema changes in the canonical greenfield migration while there is
+  no released schema to upgrade.
+- [x] Keep version declarations and focused reader or forward-version rejection
+  tests in the crate that owns each durable or wire contract.
+- [x] Retain existing boundary tests beside the product limits they exercise
+  rather than treating a documentation entry as runtime evidence.
 - [x] Define who updates root manifests, lockfiles, shared CI, and generated
   protobuf fixtures during each wave.
 
 Acceptance:
 
-- [x] Migration inventory drift fails before parallel branches can claim a
-  nonexistent next sequence.
-- [x] No governed named/versioned internal durable or wire format changes
-  without a version and complete prior-version evidence after v1, using either
-  compatibility-reader acceptance or explicit rejection for each prior
-  version.
-- [x] Limits have one owner and one enforcing phase.
+- [x] Parallel schema branches coordinate changes through one owner of the
+  canonical baseline.
+- [x] Owning readers retain their existing focused compatibility or
+  unsupported-version tests.
+- [x] Existing enforced product limits retain owner-local boundary tests.
 
 ---
 

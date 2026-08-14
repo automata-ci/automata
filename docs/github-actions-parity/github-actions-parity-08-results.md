@@ -203,7 +203,7 @@ Acceptance:
 
 ### ART-02 — Artifact management, retention, and garbage collection
 
-**Owner:** X. **Size:** XL. **Dependencies:** ART-01, FND-04 limit registry.
+**Owner:** X. **Size:** XL. **Dependencies:** ART-01, FND-04 limit ownership.
 
 Current artifact metadata may expose an effective expiry and is available to
 the authorized run UI, but cross-run management, deletion, retention workers,
@@ -258,7 +258,7 @@ Acceptance:
 
 ### CACHE-01 — Cache management and physical garbage collection
 
-**Owner:** X. **Size:** L. **Dependencies:** RES-01, FND-04 limit registry.
+**Owner:** X. **Size:** L. **Dependencies:** RES-01, FND-04 limit ownership.
 
 The current CacheService v2 slice implements create, finalize, and signed
 download. Restore checks the current ref and then the server-owned default

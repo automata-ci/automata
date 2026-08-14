@@ -40,7 +40,7 @@ Tasks:
   admission.
 - [ ] Pin Node patch versions in profile manifests.
 - [ ] Decide whether `runs.plugin` is supported; if not, retain an explicit
-  source-spanned publication rejection in the capability registry.
+  source-spanned publication rejection and document it as unsupported.
 
 Acceptance:
 

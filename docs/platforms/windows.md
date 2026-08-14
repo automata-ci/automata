@@ -962,9 +962,9 @@ can work in parallel without claiming early completion:
 | E — runtime parity | WIN-01, WIN-02, WIN-ISO-10 | executor/action contracts and advertised capabilities |
 | X — conformance | WIN-ISO-11, IT-09, GATE-02 | release artifacts, dedicated hosts, evidence ledger |
 
-The root Cargo files, runner config schema, launch enum, capability registry,
-provider ID, guest protocol, image manifest, and compatibility claims each
-have one integration owner at a time.
+The root Cargo files, runner config schema, launch enum, advertised capability
+model, provider ID, guest protocol, image manifest, and compatibility claims
+each have one integration owner at a time.
 
 ## Risks and mitigations
 

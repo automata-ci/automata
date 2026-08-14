@@ -70,16 +70,17 @@ Acceptance:
 FND-04.
 
 **Primary scope:** prove what the product would select or reject before paying
-for full execution, and mechanically connect scenario coverage to the product
-capability registry.
+for full execution, and mechanically connect scenario coverage to stable
+product capability identifiers and admission behavior.
 
 Tasks:
 
 - [ ] Add an admission-only target that accepts the exact locked source and
   event and records selected workflows, expanded jobs, runner requirements,
   and stable rejections.
-- [ ] Map scenario metadata to product capability-registry entries and the
-  owning work-package IDs without leaking planning IDs into runtime labels.
+- [ ] Map scenario metadata to the stable capability identifiers exercised by
+  product admission and to the owning work-package IDs without leaking
+  planning IDs into runtime labels.
 - [ ] Enforce that every locked top-level workflow in a fixture/project has a
   positive, negative, or intentionally unsupported scenario.
 - [ ] Enforce `requiredCapabilities`, runner labels, runner-pool count,
