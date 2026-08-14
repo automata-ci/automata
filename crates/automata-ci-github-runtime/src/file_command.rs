@@ -68,22 +68,14 @@ impl CommandFileDecoder for GithubCommandFileDecoder {
                 received: source.len(),
             });
         }
-        let maximum_file_bytes = if kind == CommandFileKind::Artifacts {
-            self.limits
-                .maximum_file_bytes()
-                .min(MAX_ARTIFACT_DECLARATION_FILE_BYTES)
-        } else {
-            self.limits.maximum_file_bytes()
-        };
-        if kind == CommandFileKind::Artifacts
-            && artifact_declaration_file_byte_rejection(source.len()).is_some()
+        let configured_file_bytes = self.limits.maximum_file_bytes();
+        let maximum_file_bytes = if kind == CommandFileKind::Artifacts
+            && artifact_declaration_file_byte_rejection(configured_file_bytes).is_some()
         {
-            return Err(CommandFileError::FileTooLarge {
-                kind,
-                maximum: MAX_ARTIFACT_DECLARATION_FILE_BYTES,
-                received: source.len(),
-            });
-        }
+            MAX_ARTIFACT_DECLARATION_FILE_BYTES
+        } else {
+            configured_file_bytes
+        };
         if source.len() > maximum_file_bytes {
             return Err(CommandFileError::FileTooLarge {
                 kind,

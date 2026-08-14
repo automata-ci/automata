@@ -3,13 +3,15 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 
 use automata_ci_core::{
-    ActionReference, AttemptId, JobIrEnvelope, RuntimeBoolean, SemanticStep, Sha256Digest, StepId,
-    StepIr, ValueTemplate,
+    ActionReference, AttemptId, ExpressionDialect, ExpressionInstruction, ExpressionProgram,
+    JobIrEnvelope, RuntimeBoolean, SemanticStep, Sha256Digest, StepId, StepIr, ValueTemplate,
 };
 use automata_ci_job_executor_github::{
     ActionPreparationPort, DeterministicOperationIds, ExecutionClock, ExecutionOperationIds,
     GithubContextPort, GithubToolchain, OperationPurpose, PreparedAction, PreparedActionError,
-    RepositoryCredentialPort, SandboxEnvironmentCatalog, SecretPort,
+    PreparedBoolean, PreparedCompositeRunStep, PreparedCompositeStepMetadata,
+    PreparedCompositeUsesStep, PreparedKeyValue, PreparedValue, RepositoryCredentialPort,
+    SandboxEnvironmentCatalog, SecretPort,
 };
 use automata_ci_runner_runtime::JobExecutor;
 use bytes::Bytes;
@@ -271,4 +273,72 @@ fn prepared_action_contract_recomputes_content_identity() {
     )
     .expect_err("mismatched digest must fail closed");
     assert_eq!(error, PreparedActionError::DigestMismatch);
+}
+
+#[test]
+fn oversized_composite_values_preserve_the_public_invalid_step_error() {
+    const OVERSIZED_COMPOSITE_VALUES: usize = 1_025;
+
+    let metadata = || {
+        PreparedCompositeStepMetadata::new(
+            None,
+            None,
+            ExpressionProgram::new(
+                ExpressionDialect::new("github-actions", 1).expect("valid dialect"),
+                "success()",
+                vec![ExpressionInstruction::Call {
+                    name: "success".to_owned(),
+                    argument_count: 0,
+                }],
+            )
+            .expect("valid condition"),
+            PreparedBoolean::Literal(false),
+        )
+    };
+    let values = || {
+        (0..OVERSIZED_COMPOSITE_VALUES)
+            .map(|index| {
+                PreparedKeyValue::new(
+                    format!("value-{index}"),
+                    PreparedValue::Literal(String::new()),
+                )
+                .expect("valid prepared value")
+            })
+            .collect()
+    };
+    assert_eq!(
+        PreparedCompositeRunStep::new(
+            metadata(),
+            PreparedValue::Literal("echo".to_owned()),
+            PreparedValue::Literal("sh".to_owned()),
+            values(),
+            None,
+        )
+        .expect_err("oversized composite run environment must fail"),
+        PreparedActionError::InvalidCompositeStep
+    );
+    assert_eq!(
+        PreparedCompositeUsesStep::new(
+            metadata(),
+            ActionReference::Local {
+                path: "action".to_owned(),
+            },
+            values(),
+            Vec::new(),
+        )
+        .expect_err("oversized composite action inputs must fail"),
+        PreparedActionError::InvalidCompositeStep
+    );
+    assert_eq!(
+        PreparedCompositeUsesStep::new(
+            metadata(),
+            ActionReference::Local {
+                path: "action".to_owned(),
+            },
+            Vec::new(),
+            values(),
+        )
+        .expect_err("oversized composite action environment must fail"),
+        PreparedActionError::InvalidCompositeStep
+    );
 }

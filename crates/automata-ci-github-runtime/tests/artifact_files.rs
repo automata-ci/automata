@@ -1,6 +1,6 @@
 use automata_ci_github_runtime::{
     ARTIFACT_LIST_SCHEMA_VERSION, ArtifactDeclaration, ArtifactSubject, ArtifactSubjectCommandFile,
-    ArtifactSubjectKind, CommandFileDecoder, CommandFileError, CommandFileKind,
+    ArtifactSubjectKind, CommandFileDecoder, CommandFileError, CommandFileKind, CommandFileLimits,
     CommandFilePlatform, CompletedStepApplicator, CompletedStepCommands, EnvironmentCommandFile,
     GithubCommandFileDecoder, GithubCompletedStepApplicator, JobCommandState,
     MAX_ARTIFACT_DECLARATION_FILE_BYTES, MAX_ARTIFACT_SUBJECTS, OutputCommandFile,
@@ -137,6 +137,36 @@ fn declaration_file_has_the_fixed_one_mibibyte_ceiling() {
             kind: CommandFileKind::Artifacts,
             maximum: MAX_ARTIFACT_DECLARATION_FILE_BYTES,
             received: MAX_ARTIFACT_DECLARATION_FILE_BYTES + 1,
+        })
+    );
+}
+
+#[test]
+fn declaration_file_reports_a_lower_configured_ceiling() {
+    let configured_maximum = MAX_ARTIFACT_DECLARATION_FILE_BYTES / 2;
+    let defaults = CommandFileLimits::default();
+    let limits = CommandFileLimits::new(
+        configured_maximum,
+        defaults.maximum_summary_bytes(),
+        defaults.maximum_line_bytes(),
+        defaults.maximum_records(),
+        defaults.maximum_name_bytes(),
+        defaults.maximum_value_bytes(),
+    )
+    .expect("valid lower artifact-file limit");
+    let decoder = GithubCommandFileDecoder::new(limits);
+    let source = vec![b'#'; MAX_ARTIFACT_DECLARATION_FILE_BYTES * 2];
+
+    assert_eq!(
+        decoder.decode(
+            CommandFileKind::Artifacts,
+            &source,
+            CommandFilePlatform::Unix,
+        ),
+        Err(CommandFileError::FileTooLarge {
+            kind: CommandFileKind::Artifacts,
+            maximum: configured_maximum,
+            received: source.len(),
         })
     );
 }

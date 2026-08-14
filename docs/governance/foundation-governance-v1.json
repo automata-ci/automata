@@ -11861,9 +11861,9 @@
       "enforcement_phase": "executor-admission",
       "id": "github.prepared-action.composite-values",
       "owner": "executor",
-      "reason_code": "PreparedActionError::TooManyCompositeValues",
+      "reason_code": "PreparedActionError::InvalidCompositeStep",
       "reason_source": {
-        "contains": "return Err(PreparedActionError::TooManyCompositeValues); // stable composite-value-limit reason",
+        "contains": "return Err(PreparedActionError::InvalidCompositeStep); // stable composite-value-limit reason",
         "path": "crates/automata-ci-job-executor-github/src/prepared.rs"
       },
       "source": {

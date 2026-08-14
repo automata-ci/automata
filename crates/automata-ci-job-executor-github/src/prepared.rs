@@ -683,9 +683,6 @@ pub enum PreparedActionError {
     /// Composite child-step metadata is invalid.
     #[error("prepared action contains an invalid composite step")]
     InvalidCompositeStep,
-    /// Composite child-step input or environment count exceeds the hard ceiling.
-    #[error("prepared action contains too many composite values")]
-    TooManyCompositeValues,
     /// Composite child-step count is empty or exceeds the hard ceiling.
     #[error("prepared action has an invalid composite step count")]
     TooManyCompositeSteps,
@@ -728,7 +725,7 @@ const fn validate_prepared_composite_value_count(
     observed: usize,
 ) -> Result<(), PreparedActionError> {
     if observed > MAX_COMPOSITE_VALUES {
-        return Err(PreparedActionError::TooManyCompositeValues); // stable composite-value-limit reason
+        return Err(PreparedActionError::InvalidCompositeStep); // stable composite-value-limit reason
     }
     Ok(())
 }
@@ -858,7 +855,7 @@ mod limit_contract_tests {
         assert!(validate_prepared_composite_value_count(MAX_COMPOSITE_VALUES).is_ok());
         assert_eq!(
             validate_prepared_composite_value_count(MAX_COMPOSITE_VALUES + 1),
-            Err(PreparedActionError::TooManyCompositeValues)
+            Err(PreparedActionError::InvalidCompositeStep)
         );
     }
 
