@@ -39,6 +39,8 @@ use uuid::Uuid;
 
 use crate::support::{TestDatabase, TestResult, run_with_database};
 
+mod annotation_fencing;
+
 const INSTALLATION_ID: u64 = 101;
 const REPOSITORY_ID: u64 = 202;
 const APP_ID: u64 = 303;

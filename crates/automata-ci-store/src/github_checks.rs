@@ -914,14 +914,14 @@ impl GithubCheckAnnotationProgress {
     /// # Errors
     ///
     /// Rejects incomplete presentation identity, excessive counts, a cursor
-    /// beyond the total, or an uncertain batch outside the remaining suffix.
+    /// beyond the total, or a fenced batch outside the remaining suffix.
     pub fn from_durable_parts(
         presentation_digest: Option<Sha256Digest>,
         total: u16,
         next: u16,
         uncertain_batch_size: Option<u8>,
     ) -> Result<Self, GithubCheckValueError> {
-        let uncertainty_is_valid = uncertain_batch_size.is_none_or(|count| {
+        let batch_marker_is_valid = uncertain_batch_size.is_none_or(|count| {
             count > 0
                 && count <= 50
                 && next
@@ -930,7 +930,7 @@ impl GithubCheckAnnotationProgress {
         });
         if total > 4_096
             || next > total
-            || !uncertainty_is_valid
+            || !batch_marker_is_valid
             || presentation_digest.is_none()
                 && (total != 0 || next != 0 || uncertain_batch_size.is_some())
         {
@@ -962,7 +962,10 @@ impl GithubCheckAnnotationProgress {
         self.next
     }
 
-    /// Returns the size of a possibly appended batch requiring reconciliation.
+    /// Returns the durable in-flight batch size.
+    ///
+    /// A later claim must reconcile this marker before issuing another PATCH,
+    /// because the prior worker may have crossed the provider boundary.
     #[must_use]
     pub const fn uncertain_batch_size(self) -> Option<u8> {
         self.uncertain_batch_size
@@ -1625,6 +1628,81 @@ impl InitializeGithubCheckPresentation {
     }
 }
 
+/// Single-use durable cutoff before one annotation append may begin.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BeginGithubCheckAnnotationBatch {
+    claim: GithubCheckProjectionClaimFence,
+    digest: Sha256Digest,
+    from: u16,
+    batch_size: u8,
+    started_at: UnixMillis,
+}
+
+impl BeginGithubCheckAnnotationBatch {
+    /// Creates one bounded append cutoff under an exact publish claim.
+    ///
+    /// Committing this request authorizes at most one provider PATCH. An
+    /// already-present cutoff must not be replayed as fresh authorization.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty, excessive, or out-of-range batch and negative times.
+    pub fn new(
+        claim: GithubCheckProjectionClaimFence,
+        digest: Sha256Digest,
+        from: u16,
+        batch_size: u8,
+        started_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        if batch_size == 0
+            || batch_size > 50
+            || from
+                .checked_add(u16::from(batch_size))
+                .is_none_or(|to| to > 4_096)
+        {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
+        validate_timestamp(started_at, "GitHub Check annotation batch start time")?;
+        Ok(Self {
+            claim,
+            digest,
+            from,
+            batch_size,
+            started_at,
+        })
+    }
+
+    /// Returns the exact live publish claim.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.claim
+    }
+
+    /// Returns the deterministic presentation digest.
+    #[must_use]
+    pub const fn digest(self) -> Sha256Digest {
+        self.digest
+    }
+
+    /// Returns the cursor immediately before this batch.
+    #[must_use]
+    pub const fn from(self) -> u16 {
+        self.from
+    }
+
+    /// Returns the number of annotations in this batch.
+    #[must_use]
+    pub const fn batch_size(self) -> u8 {
+        self.batch_size
+    }
+
+    /// Returns when the provider-call cutoff was crossed.
+    #[must_use]
+    pub const fn started_at(self) -> UnixMillis {
+        self.started_at
+    }
+}
+
 /// Monotonically confirms one exact annotation batch under a live claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdvanceGithubCheckAnnotations {
@@ -1762,6 +1840,84 @@ impl RetryUncertainGithubCheckAnnotations {
         self.failed_at
     }
     /// Returns the reconcile-only retry time.
+    #[must_use]
+    pub const fn retry_at(self) -> UnixMillis {
+        self.retry_at
+    }
+}
+
+/// Releases one fenced batch only when its provider future never began.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseUnissuedGithubCheckAnnotationBatch {
+    batch: BeginGithubCheckAnnotationBatch,
+    released_at: UnixMillis,
+    retry_at: UnixMillis,
+}
+
+impl ReleaseUnissuedGithubCheckAnnotationBatch {
+    /// Creates exact proof that a durable cutoff did not issue provider I/O.
+    ///
+    /// # Errors
+    ///
+    /// Rejects release before the cutoff or an invalid bounded retry delay.
+    pub fn new(
+        batch: BeginGithubCheckAnnotationBatch,
+        released_at: UnixMillis,
+        retry_at: UnixMillis,
+    ) -> Result<Self, GithubCheckValueError> {
+        if released_at < batch.started_at() {
+            return Err(GithubCheckValueError::InvalidClaimInterval);
+        }
+        retry_at
+            .get()
+            .checked_sub(released_at.get())
+            .filter(|delay| (1..=MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS).contains(delay))
+            .ok_or(GithubCheckValueError::InvalidRetryBackoff)?;
+        validate_timestamp(released_at, "GitHub Check annotation batch release time")?;
+        Ok(Self {
+            batch,
+            released_at,
+            retry_at,
+        })
+    }
+
+    /// Returns the exact live publish claim.
+    #[must_use]
+    pub const fn claim(self) -> GithubCheckProjectionClaimFence {
+        self.batch.claim()
+    }
+
+    /// Returns the deterministic presentation digest.
+    #[must_use]
+    pub const fn digest(self) -> Sha256Digest {
+        self.batch.digest()
+    }
+
+    /// Returns the unchanged cursor before the unissued batch.
+    #[must_use]
+    pub const fn from(self) -> u16 {
+        self.batch.from()
+    }
+
+    /// Returns the size of the unissued batch.
+    #[must_use]
+    pub const fn batch_size(self) -> u8 {
+        self.batch.batch_size()
+    }
+
+    /// Returns the exact durable cutoff being released.
+    #[must_use]
+    pub const fn started_at(self) -> UnixMillis {
+        self.batch.started_at()
+    }
+
+    /// Returns when the cutoff was safely released.
+    #[must_use]
+    pub const fn released_at(self) -> UnixMillis {
+        self.released_at
+    }
+
+    /// Returns the next eligible publish time.
     #[must_use]
     pub const fn retry_at(self) -> UnixMillis {
         self.retry_at
@@ -2182,6 +2338,12 @@ pub trait GithubCheckProjectionOutbox: Send + Sync {
         request: InitializeGithubCheckPresentation,
     ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError>;
 
+    /// Commits a single-use cutoff before one annotation PATCH may begin.
+    async fn begin_github_check_annotation_batch(
+        &self,
+        request: BeginGithubCheckAnnotationBatch,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError>;
+
     /// Monotonically confirms one exact appended annotation batch.
     async fn advance_github_check_annotations(
         &self,
@@ -2192,6 +2354,12 @@ pub trait GithubCheckProjectionOutbox: Send + Sync {
     async fn retry_uncertain_github_check_annotations(
         &self,
         request: RetryUncertainGithubCheckAnnotations,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
+
+    /// Atomically releases a cutoff whose provider future provably never began.
+    async fn release_unissued_github_check_annotation_batch(
+        &self,
+        request: ReleaseUnissuedGithubCheckAnnotationBatch,
     ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
 
     /// Clears uncertainty after proving GitHub retained the prior exact prefix.

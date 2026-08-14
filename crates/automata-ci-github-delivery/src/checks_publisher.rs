@@ -22,8 +22,8 @@ use automata_ci_github::{
 };
 use automata_ci_scm::{ExactRevision, RepositoryId as ScmRepositoryId};
 use automata_ci_store::{
-    AdvanceGithubCheckAnnotations, BeginGithubCheckRunCreate, BindGithubCheckRun,
-    BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
+    AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
+    BindGithubCheckRun, BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
     ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
     CompleteGithubCheckProjection, GithubCheckAppId, GithubCheckConclusion,
@@ -37,9 +37,9 @@ use automata_ci_store::{
     GithubServerServiceRevision, GithubServerServiceWorkerId, InitializeGithubCheckPresentation,
     MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS,
     MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
-    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
-    TenantScope,
+    ProviderRepositoryId, ReleaseUnissuedGithubCheckAnnotationBatch,
+    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
+    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, TenantScope,
 };
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
@@ -1253,13 +1253,107 @@ impl GithubChecksPublisher {
             }
         }
 
+        if progress.is_complete() {
+            return Ok(None);
+        }
+
+        // An admitted PATCH must leave both the complete transport timeout and
+        // the configured post-request visibility margin inside this claim.
+        // That keeps timeout recovery behind the latest possible mutation.
+        let visibility_margin = Duration::from_millis(
+            u64::try_from(self.config.visibility_margin_millis())
+                .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
+        );
+        let recovery_tail = self
+            .endpoint
+            .trusted_origins()
+            .limits()
+            .request_timeout()
+            .checked_add(visibility_margin)
+            .ok_or(GithubChecksPublisherError::InvariantViolation)?;
+        let recovery_tail_millis = duration_millis_ceil(recovery_tail)?;
+        let Some(issue_deadline) = horizon
+            .deadline
+            .checked_sub(recovery_tail)
+            .filter(|deadline| *deadline > horizon.monotonic_started_at)
+        else {
+            return self
+                .schedule_retry(
+                    claimed,
+                    horizon,
+                    "github_annotation_issue_window_elapsed",
+                    None,
+                )
+                .await
+                .map(Some);
+        };
         while !progress.is_complete() {
+            if Instant::now() >= issue_deadline {
+                return self
+                    .schedule_retry(
+                        claimed,
+                        horizon,
+                        "github_annotation_issue_window_elapsed",
+                        None,
+                    )
+                    .await
+                    .map(Some);
+            }
             let from = usize::from(progress.next());
             let to = annotations
                 .len()
                 .min(from.saturating_add(MAX_ANNOTATIONS_PER_PATCH));
             let batch = &annotations[from..to];
-            match self
+            let batch_size = u8::try_from(batch.len())
+                .map_err(|_| GithubChecksPublisherError::InvariantViolation)?;
+            let batch_start = horizon.observed_at()?;
+            let begin = BeginGithubCheckAnnotationBatch::new(
+                claimed.claim(),
+                presentation.digest(),
+                u16::try_from(from).map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
+                batch_size,
+                batch_start,
+            )
+            .map_err(invariant)?;
+            progress = self
+                .outbox
+                .begin_github_check_annotation_batch(begin)
+                .await?;
+            if progress.presentation_digest() != Some(presentation.digest())
+                || progress.total() != annotation_count
+                || progress.next()
+                    != u16::try_from(from)
+                        .map_err(|_| GithubChecksPublisherError::InvariantViolation)?
+                || progress.uncertain_batch_size() != Some(batch_size)
+            {
+                return Err(GithubChecksPublisherError::InvalidClaim);
+            }
+            if Instant::now() >= issue_deadline {
+                let released_at = horizon.observed_after(begin.started_at())?;
+                return self
+                    .release_unissued_annotation_batch(begin, released_at, claimed.attempts())
+                    .await
+                    .map(Some);
+            }
+            let request_admitted_at = horizon.observed_after(begin.started_at())?;
+            let mutation_visibility_not_before =
+                checked_add(request_admitted_at, recovery_tail_millis)?;
+            if mutation_visibility_not_before > horizon.expires_at {
+                return self
+                    .release_unissued_annotation_batch(
+                        begin,
+                        request_admitted_at,
+                        claimed.attempts(),
+                    )
+                    .await
+                    .map(Some);
+            }
+
+            // No await occurs between the final admission timestamp and
+            // polling the endpoint future. Provider I/O may have issued from
+            // this point, so cancellation or an ambiguous response retains
+            // the marker.
+            let append_outcome = self
                 .endpoint
                 .append_check_run_annotations(
                     credential.repository(),
@@ -1270,8 +1364,8 @@ impl GithubChecksPublisher {
                     batch,
                     credential.token(),
                 )
-                .await
-            {
+                .await;
+            match append_outcome {
                 Ok(_) => {
                     let observed_at = horizon.observed_at()?;
                     progress = self
@@ -1297,8 +1391,15 @@ impl GithubChecksPublisher {
                         claimed.attempts(),
                         Some(evidence),
                         failed_at,
-                    );
-                    let retry_at = checked_add(failed_at, delay)?;
+                    )
+                    .max(self.config.visibility_margin_millis());
+                    let backoff_not_before = checked_add(failed_at, delay)?;
+                    // A transport failure can return before the complete
+                    // request timeout while GitHub may still apply the PATCH.
+                    // Reconciliation therefore stays behind the entire
+                    // admitted request-and-visibility tail, not merely behind
+                    // the time at which the local error became observable.
+                    let retry_at = backoff_not_before.max(mutation_visibility_not_before);
                     let receipt = self
                         .outbox
                         .retry_uncertain_github_check_annotations(
@@ -1307,8 +1408,7 @@ impl GithubChecksPublisher {
                                 presentation.digest(),
                                 u16::try_from(from)
                                     .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
-                                u8::try_from(batch.len())
-                                    .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
+                                batch_size,
                                 failed_at,
                                 retry_at,
                             )
@@ -1326,6 +1426,24 @@ impl GithubChecksPublisher {
             }
         }
         Ok(None)
+    }
+
+    async fn release_unissued_annotation_batch(
+        &self,
+        batch: BeginGithubCheckAnnotationBatch,
+        released_at: UnixMillis,
+        attempts: u16,
+    ) -> Result<GithubChecksPublisherOutcome, GithubChecksPublisherError> {
+        let delay = retry_delay(self.config.retry_base_millis(), attempts, None, released_at);
+        let retry_at = checked_add(released_at, delay)?;
+        let receipt = self
+            .outbox
+            .release_unissued_github_check_annotation_batch(
+                ReleaseUnissuedGithubCheckAnnotationBatch::new(batch, released_at, retry_at)
+                    .map_err(invariant)?,
+            )
+            .await?;
+        Ok(GithubChecksPublisherOutcome::RetryScheduled(receipt))
     }
 
     async fn handle_http_error(
