@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package automata.management.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Exports immutable execution-accounting facts from one Automata Core shard to
+// an authorized external control plane. This service shares the management
+// trust domain but is not exposed to browsers, runners, or human sessions.
+service ShardUsageExportService {
+  // Returns a stable page after an opaque exclusive cursor. Retrying a page is
+  // safe: consumers deduplicate by event_id and advance their stored cursor in
+  // the same transaction that durably accepts the returned events.
+  rpc ListWorkspaceUsage(ListWorkspaceUsageRequest) returns (ListWorkspaceUsageResponse) {
+    option idempotency_level = NO_SIDE_EFFECTS;
+  }
+}
+
+// Authority-scoped cursor-pull request for one shard.
+message ListWorkspaceUsageRequest {
+  // Expected immutable shard identity, already verified through capability
+  // discovery and checked against the authenticated workload authority.
+  string shard_id = 1;
+
+  // Opaque exclusive position returned by the preceding response. Empty means
+  // the beginning of the authority's retained feed. A cursor cannot be moved
+  // between authorities or shards.
+  bytes cursor = 2;
+
+  // Positive maximum number of events to return, no greater than 1000.
+  uint32 page_size = 3;
+}
+
+// One immutable actual-execution fact. This is provider-neutral usage, not a
+// price, Stripe meter event, invoice line, or guarantee that usage is billable.
+message WorkspaceUsageEvent {
+  // Globally stable, non-nil canonical lower-case UUID used for idempotency.
+  string event_id = 1;
+
+  // Immutable identity of the shard that recorded the event.
+  string shard_id = 2;
+
+  // Externally managed workspace as a non-nil canonical lower-case UUID.
+  string workspace_id = 3;
+
+  // Core execution attempt as a non-nil canonical lower-case UUID. Several
+  // events may cover non-overlapping intervals of one attempt.
+  string attempt_id = 4;
+
+  // Entitlement revision against which Core accounted this interval.
+  uint64 entitlement_revision = 5;
+
+  // Inclusive start and exclusive end of the positive accounted interval.
+  google.protobuf.Timestamp interval_start = 6;
+  google.protobuf.Timestamp interval_end = 7;
+
+  // Positive actual compute consumption. Cloud may aggregate this into
+  // customer-visible whole-second billing independently of Core enforcement.
+  uint64 consumed_compute_milliseconds = 8;
+}
+
+// Stable feed page. An empty page is valid and retains a continuation cursor
+// from which a later poll can observe newly appended events.
+message ListWorkspaceUsageResponse {
+  // Events in stable append order after the request cursor.
+  repeated WorkspaceUsageEvent events = 1;
+
+  // Opaque exclusive position after every event in this response.
+  bytes next_cursor = 2;
+}
+
+// Stable machine-readable reason attached to a failed usage-export RPC.
+enum ListWorkspaceUsageFailureReason {
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_UNSPECIFIED = 0;
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_INVALID_REQUEST = 1;
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_UNAUTHENTICATED = 2;
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_FORBIDDEN = 3;
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_INVALID_CURSOR = 4;
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_RATE_LIMITED = 5;
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_INTERNAL_ERROR = 6;
+  LIST_WORKSPACE_USAGE_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 7;
+}
+
+// Typed detail carried in google.rpc.Status.details after Core can safely
+// construct contract-specific details.
+message ListWorkspaceUsageFailure {
+  ListWorkspaceUsageFailureReason reason = 1;
+}

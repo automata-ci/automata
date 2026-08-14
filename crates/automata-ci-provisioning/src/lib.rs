@@ -11,11 +11,13 @@
 //! Certificate rotations do not alter the authority ID. Durable adapters must
 //! namespace idempotency by that stable authority and the operation ID, never by
 //! a certificate, connection, pod, or replica. Workspace entitlement snapshots
-//! use the same authority and remain independent of Cloud billing concepts.
+//! and usage-export cursors use the same authority and remain independent of
+//! Cloud billing concepts.
 
 mod entitlement;
 mod model;
 mod port;
+mod usage;
 
 pub use entitlement::{
     ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
@@ -32,7 +34,13 @@ pub use model::{
 };
 pub use port::{
     EntitlementApplicationFuture, ProvisioningAuthenticationError,
-    ProvisioningAuthenticationFuture, ProvisioningWorkloadAuthenticator,
+    ProvisioningAuthenticationFuture, ProvisioningWorkloadAuthenticator, UsageExportFuture,
     WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier, WorkspaceProvisioner,
-    WorkspaceProvisioningFuture,
+    WorkspaceProvisioningFuture, WorkspaceUsageExporter,
+};
+pub use usage::{
+    AuthorizedListWorkspaceUsage, ConsumedComputeMilliseconds, ListWorkspaceUsageCommand,
+    UsageAttemptId, UsageAuthorizationError, UsageEventId, UsageExportCursor, UsageExportFailure,
+    UsageExportFailureKind, UsageExportPageSize, UsageTimestamp, UsageValueError,
+    WorkspaceUsageEvent, WorkspaceUsagePage,
 };

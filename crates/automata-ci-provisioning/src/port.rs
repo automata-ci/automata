@@ -4,8 +4,9 @@ use thiserror::Error;
 
 use crate::{
     ApplyWorkspaceEntitlementResult, AuthorizedApplyWorkspaceEntitlement,
-    AuthorizedProvisionWorkspace, EntitlementFailure, ProvisionWorkspaceResult,
-    ProvisioningAuthority, ProvisioningFailure,
+    AuthorizedListWorkspaceUsage, AuthorizedProvisionWorkspace, EntitlementFailure,
+    ProvisionWorkspaceResult, ProvisioningAuthority, ProvisioningFailure, UsageExportFailure,
+    WorkspaceUsagePage,
 };
 
 const MAX_CERTIFICATE_COUNT: usize = 32;
@@ -135,6 +136,21 @@ pub trait WorkspaceEntitlementApplier: fmt::Debug + Send + Sync {
         &self,
         request: AuthorizedApplyWorkspaceEntitlement,
     ) -> EntitlementApplicationFuture<'_>;
+}
+
+/// Boxed durable workspace usage-export operation.
+pub type UsageExportFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<WorkspaceUsagePage, UsageExportFailure>> + Send + 'a>>;
+
+/// Stable cursor-pull port for immutable execution-accounting facts.
+///
+/// Implementations must scope both cursors and events to the authenticated
+/// authority, return events in stable append order, and never reuse an event ID
+/// for different facts. A consumer can therefore commit event ingestion and
+/// its continuation cursor atomically for at-least-once delivery.
+pub trait WorkspaceUsageExporter: fmt::Debug + Send + Sync {
+    /// Lists one authority-scoped page after the request's exclusive cursor.
+    fn list(&self, request: AuthorizedListWorkspaceUsage) -> UsageExportFuture<'_>;
 }
 
 #[cfg(test)]
