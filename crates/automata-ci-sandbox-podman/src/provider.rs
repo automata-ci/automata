@@ -3900,6 +3900,29 @@ mod command_completion_tests {
             assert!(!creation_command_has_exact_network_sysctl(rejected));
         }
     }
+
+    #[test]
+    fn owned_cgroup_path_accepts_exact_systemd_hex_escapes() {
+        let delegated = r"/system.slice/system-automata\x2drunner.slice/automata-runner@2.service";
+        let reported = format!("{delegated}/62c1f632b461fadf3d4cd0e8ac330ad1b\n");
+
+        assert_eq!(
+            parse_owned_cgroup_path(reported.as_bytes(), delegated),
+            Some(reported.trim_end().to_owned())
+        );
+    }
+
+    #[test]
+    fn owned_cgroup_path_rejects_malformed_systemd_escapes() {
+        let delegated = "/system.slice/automata.service";
+        for component in [r"job\", r"job\x", r"job\x2", r"job\x2g", r"job\q2d"] {
+            let reported = format!("{delegated}/{component}");
+            assert_eq!(
+                parse_owned_cgroup_path(reported.as_bytes(), delegated),
+                None
+            );
+        }
+    }
 }
 
 fn finish_create(
@@ -4648,20 +4671,15 @@ fn parse_service_inspection(bytes: &[u8]) -> Option<InspectedServiceContainer> {
 fn parse_owned_cgroup_path(bytes: &[u8], delegated: &str) -> Option<String> {
     let value = std::str::from_utf8(bytes).ok()?;
     let value = value.strip_suffix('\n').unwrap_or(value);
-    if value.is_empty()
-        || value.len() > 4_096
-        || value.contains(['\n', '\r'])
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b'@')
-        })
-    {
+    if value.is_empty() || value.len() > 4_096 || value.contains(['\n', '\r']) {
         return None;
     }
     let normalized = value.trim_start_matches('/');
-    if normalized
-        .split('/')
-        .any(|component| component.is_empty() || matches!(component, "." | ".."))
-    {
+    if normalized.split('/').any(|component| {
+        component.is_empty()
+            || matches!(component, "." | "..")
+            || !valid_cgroup_component(component)
+    }) {
         return None;
     }
     let delegated = delegated.trim_start_matches('/').trim_end_matches('/');
@@ -4673,6 +4691,28 @@ fn parse_owned_cgroup_path(bytes: &[u8], delegated: &str) -> Option<String> {
         return None;
     }
     Some(value.to_owned())
+}
+
+fn valid_cgroup_component(component: &str) -> bool {
+    let bytes = component.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'@') {
+            index += 1;
+            continue;
+        }
+        if byte != b'\\'
+            || bytes.get(index + 1) != Some(&b'x')
+            || !bytes
+                .get(index + 2..index + 4)
+                .is_some_and(|escaped| escaped.iter().all(u8::is_ascii_hexdigit))
+        {
+            return false;
+        }
+        index += 4;
+    }
+    true
 }
 
 fn create_service_error(error: &ProviderError, handle: SandboxHandle) -> ProviderError {
