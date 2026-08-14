@@ -27,6 +27,7 @@
 #![deny(missing_docs)]
 
 mod changed_files;
+mod checks_presentation;
 mod checks_publisher;
 mod processor;
 mod schedule;

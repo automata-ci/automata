@@ -721,6 +721,7 @@ impl GithubProviderRuntimeBuilder {
             GithubChecksPublisher::new(
                 endpoint,
                 checks_outbox,
+                blobs.clone(),
                 checks_credentials,
                 delivery_clock.clone(),
                 config.dashboard_url().clone(),

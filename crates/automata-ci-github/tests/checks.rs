@@ -6,7 +6,7 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
     GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateIndeterminateKind,
     GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckModelError, GithubCheckName,
-    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
+    GithubCheckOutput, GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
     GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
     GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint,
     GithubHttpLimits, GithubObservedCheckConclusion,
@@ -558,6 +558,10 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
         axum::http::StatusCode::OK,
         exact_run_value(41, "completed", Some("failure")).to_string(),
     ));
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        exact_run_value(41, "completed", Some("success")).to_string(),
+    ));
     let endpoint = server.endpoint();
     let run = endpoint
         .complete_check_run(
@@ -588,6 +592,25 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
         .await
         .expect_err("wrong terminal response");
     assert_eq!(error, GithubChecksError::InvalidResponse);
+    let custom_output = GithubCheckOutput::new(
+        "Passed with details",
+        "**2 steps** — 2 passed.",
+        Some("| Step | Result |\n| --- | --- |\n| `test` | passed |".to_owned()),
+    )
+    .expect("custom output");
+    endpoint
+        .complete_check_run_with_output(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &identity(),
+            GithubCheckConclusion::Success,
+            Some(&lifecycle_timestamp()),
+            &lifecycle_timestamp(),
+            &custom_output,
+            &token(),
+        )
+        .await
+        .expect("custom terminal response");
 
     let requests = server.requests();
     assert_eq!(requests[0].method, "PATCH");
@@ -607,6 +630,15 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
         })
     );
     assert_eq!(body.as_object().expect("object").len(), 5);
+    let custom_body: Value = serde_json::from_slice(&requests[2].body).expect("custom patch JSON");
+    assert_eq!(custom_body["output"]["title"], "Passed with details");
+    assert_eq!(custom_body["output"]["summary"], "**2 steps** — 2 passed.");
+    assert!(
+        custom_body["output"]["text"]
+            .as_str()
+            .expect("custom text")
+            .contains("`test`")
+    );
 }
 
 #[tokio::test]
@@ -1072,6 +1104,27 @@ fn bounded_models_and_diagnostics_are_redacted() {
         GithubCheckTimestamp::from_unix_millis(-1),
         Err(GithubCheckModelError::InvalidTimestamp)
     );
+    for invalid in [
+        GithubCheckOutput::new("", "summary", None),
+        GithubCheckOutput::new(" title", "summary", None),
+        GithubCheckOutput::new("title", " \n\t", None),
+        GithubCheckOutput::new("title", "bad\u{0000}summary", None),
+        GithubCheckOutput::new("title", "summary", Some("\n".to_owned())),
+    ] {
+        assert_eq!(invalid, Err(GithubCheckModelError::InvalidOutput));
+    }
+    assert_eq!(
+        GithubCheckOutput::new("x".repeat(256), "summary", None),
+        Err(GithubCheckModelError::InvalidOutput)
+    );
+    let output = GithubCheckOutput::new(
+        "secret title",
+        "secret summary",
+        Some("secret text".to_owned()),
+    )
+    .expect("output");
+    let output_debug = format!("{output:?}");
+    assert!(!output_debug.contains("secret"));
     let fractional_timestamp =
         GithubCheckTimestamp::from_unix_millis(1_786_666_505_123).expect("timestamp");
     assert_eq!(fractional_timestamp.as_str(), "2026-08-14T00:15:05.123Z");

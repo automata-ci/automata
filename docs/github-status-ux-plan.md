@@ -1,23 +1,28 @@
 # GitHub status and run UX plan
 
-Status: implementation in progress on `feature/github-checks-ux`. This document
-records the researched GitHub platform boundary, the gaps in Automata's current
-implementation, and the complete phased delivery plan.
+Status: implementation in progress. This document records the researched
+GitHub platform boundary, the gaps in Automata's current implementation, and
+the complete phased delivery plan.
 
-Implemented in the first branch slice:
+Implemented to date:
 
 - stable exact-job Details pages with dashboard/log authorization split;
 - generic non-enumerating sign-in handoff back to the exact deep link;
 - bounded same-origin live snapshots with ETag revalidation, visibility pause,
   terminal stop, request cancellation, and exponential failure backoff;
 - native queued/running/terminal Check output with exact Automata links;
-- durable execution start/completion timestamps projected as RFC 3339 UTC.
+- durable execution start/completion timestamps projected as RFC 3339 UTC;
+- verified immutable `JobResult` evidence carried by terminal job claims;
+- deterministic bounded terminal Markdown with conclusion counts, step
+  timelines, retained masked summaries, and UTF-8-safe truncation;
+- idempotent terminal recovery that does not reload result evidence once GitHub
+  already reports the exact desired conclusion.
 
-Still intentionally pending are content-addressed terminal presentations,
-annotation batching/reconciliation, GitHub and browser rerun controls, optional
-commit-status/deployment projections, and the rollout observability described
-below. Those pieces require their own durable idempotency state and must not be
-simulated with unsafe best-effort provider mutations.
+Still intentionally pending are durable annotation batching/reconciliation,
+GitHub and browser rerun controls, optional commit-status/deployment
+projections, and the rollout observability described below. Those pieces
+require their own durable idempotency state and must not be simulated with
+unsafe best-effort provider mutations.
 
 ## Outcome
 
@@ -326,10 +331,10 @@ Work:
   subject and include them in the claimed outbox snapshot/guards;
 - use the durable job attempt start and JobResult completion times, not publisher
   wall-clock time;
-- define bounded `GithubCheckOutput`, annotation, image, and requested-action
-  request models with redacted Debug output and strict UTF-8/URL/path limits;
-- extend create/start/update payloads and response validation for timestamps,
-  output, action shape, and annotation count;
+- define bounded `GithubCheckOutput` request models with redacted Debug output
+  and strict UTF-8 limits;
+- extend create/start/update payloads and response validation for timestamps
+  and output;
 - create queued output (`Waiting for a runner`) and in-progress output with an
   exact Details Markdown link;
 - project terminal masked step summaries and compact result counts;

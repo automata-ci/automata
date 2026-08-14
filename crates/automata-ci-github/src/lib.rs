@@ -22,8 +22,8 @@ pub use changed_files::{
 pub use checks::{
     GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateIndeterminate,
     GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl, GithubCheckExternalId,
-    GithubCheckModelError, GithubCheckName, GithubCheckRetryEvidence, GithubCheckRun,
-    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
+    GithubCheckModelError, GithubCheckName, GithubCheckOutput, GithubCheckRetryEvidence,
+    GithubCheckRun, GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
     GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
     GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
     GithubObservedCheckConclusion,

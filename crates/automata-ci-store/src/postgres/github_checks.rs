@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{AttemptId, JobId, RunId, Sha256Digest, UnixMillis};
 use sqlx::{AssertSqlSafe, PgConnection, Postgres, Row as _, Transaction};
 use uuid::Uuid;
@@ -15,9 +16,9 @@ use crate::{
     GithubCheckSubjectReceipt, GithubCheckSubjectRepository, GithubCheckSubjectTarget,
     GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckTerminalizationRepository,
     GithubRepositoryName, GithubScheduleFireId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceRevision,
-    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, ProviderConnectionId, ProviderDeliveryId,
-    ProviderInstallationId, ProviderRepositoryId, RegisterGithubCheckSubject,
+    GithubServerServiceAuthoritySelector, GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE,
+    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_TERMINAL_RESULT_BYTES, ProviderConnectionId,
+    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, RegisterGithubCheckSubject,
     ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
     RetryGithubCheckProjection, StartGithubCheckProjection, StoreError, TenantScope,
     TerminalizeGithubCheck,
@@ -365,6 +366,18 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
         (SELECT terminal.completed_at_ms
            FROM attempt_terminal_results AS terminal
           WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
+        (SELECT terminal.result_schema
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
+        (SELECT terminal.result_size_bytes
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
+        (SELECT terminal.result_digest
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
+        (SELECT terminal.result_object_key
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -445,6 +458,18 @@ const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
         (SELECT terminal.completed_at_ms
            FROM attempt_terminal_results AS terminal
           WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
+        (SELECT terminal.result_schema
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
+        (SELECT terminal.result_size_bytes
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
+        (SELECT terminal.result_digest
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
+        (SELECT terminal.result_object_key
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -526,6 +551,18 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
         (SELECT terminal.completed_at_ms
            FROM attempt_terminal_results AS terminal
           WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
+        (SELECT terminal.result_schema
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_schema,
+        (SELECT terminal.result_size_bytes
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_size_bytes,
+        (SELECT terminal.result_digest
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_digest,
+        (SELECT terminal.result_object_key
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_result_object_key,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -1477,6 +1514,7 @@ fn decode_claimed(
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
     let job_started_at = optional_unix_millis_column(row, "job_started_at_ms")?;
     let job_completed_at = optional_unix_millis_column(row, "job_completed_at_ms")?;
+    let terminal_result = optional_job_result_descriptor(row)?;
     let (started_at, completed_at) = match subject.receipt.desired() {
         GithubCheckDesiredProjection::Queued => (None, None),
         GithubCheckDesiredProjection::InProgress => (
@@ -1502,6 +1540,7 @@ fn decode_claimed(
         run_id,
         subject.created_at,
         subject.desired_updated_at,
+        terminal_result,
         started_at,
         completed_at,
         unix_millis_column(row, "claimed_at_ms")?,
@@ -2099,6 +2138,41 @@ fn sha256_column(
         .try_into()
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
     Ok(Sha256Digest::from_bytes(bytes))
+}
+
+fn optional_job_result_descriptor(
+    row: &sqlx::postgres::PgRow,
+) -> Result<Option<BlobDescriptor>, GithubCheckStoreError> {
+    let schema: Option<i32> = row.try_get("job_result_schema").map_err(operation_error)?;
+    let size: Option<i64> = row
+        .try_get("job_result_size_bytes")
+        .map_err(operation_error)?;
+    let digest: Option<Vec<u8>> = row.try_get("job_result_digest").map_err(operation_error)?;
+    let object_key: Option<String> = row
+        .try_get("job_result_object_key")
+        .map_err(operation_error)?;
+    match (schema, size, digest, object_key) {
+        (None, None, None, None) => Ok(None),
+        (Some(1), Some(size), Some(digest), Some(object_key)) => {
+            let size = u64::try_from(size)
+                .ok()
+                .filter(|size| (1..=MAX_TERMINAL_RESULT_BYTES).contains(size))
+                .ok_or(GithubCheckStoreError::CorruptData)?;
+            let digest: [u8; 32] = digest
+                .try_into()
+                .map_err(|_| GithubCheckStoreError::CorruptData)?;
+            let key = BlobKey::new(object_key).map_err(|_| GithubCheckStoreError::CorruptData)?;
+            let media_type = MediaType::new(HUMAN_JOB_RESULT_MEDIA_TYPE)
+                .map_err(|_| GithubCheckStoreError::CorruptData)?;
+            Ok(Some(BlobDescriptor::new(
+                key,
+                Sha256Digest::from_bytes(digest),
+                size,
+                media_type,
+            )))
+        }
+        _ => Err(GithubCheckStoreError::CorruptData),
+    }
 }
 
 fn positive_u64_column(

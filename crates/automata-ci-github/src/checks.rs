@@ -22,6 +22,9 @@ const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const MAX_CHECK_NAME_BYTES: usize = 255;
 const MAX_EXTERNAL_ID_BYTES: usize = 1_024;
 const MAX_DETAILS_URL_BYTES: usize = 2_048;
+const MAX_CHECK_OUTPUT_TITLE_BYTES: usize = 255;
+const MAX_CHECK_OUTPUT_SUMMARY_BYTES: usize = 65_535;
+const MAX_CHECK_OUTPUT_TEXT_BYTES: usize = 65_535;
 const CHECK_SUITES_PER_PAGE: usize = 100;
 const CHECK_RUNS_PER_PAGE: usize = 100;
 const MAX_GITHUB_ID: u64 = i64::MAX as u64;
@@ -250,6 +253,85 @@ impl fmt::Debug for GithubCheckTimestamp {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("GithubCheckTimestamp([validated])")
     }
+}
+
+/// Bounded native Markdown presentation for one GitHub Check Run update.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GithubCheckOutput {
+    title: String,
+    summary: String,
+    text: Option<String>,
+}
+
+impl GithubCheckOutput {
+    /// Creates a bounded title, required Markdown summary, and optional Markdown detail.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, non-canonical, or unsafe control-containing text.
+    pub fn new(
+        title: impl Into<String>,
+        summary: impl Into<String>,
+        text: Option<String>,
+    ) -> Result<Self, GithubCheckModelError> {
+        let title = title.into();
+        let summary = summary.into();
+        if title.is_empty()
+            || title.len() > MAX_CHECK_OUTPUT_TITLE_BYTES
+            || title.trim() != title
+            || title.chars().any(char::is_control)
+            || summary.trim().is_empty()
+            || summary.len() > MAX_CHECK_OUTPUT_SUMMARY_BYTES
+            || !canonical_markdown(&summary)
+            || text.as_ref().is_some_and(|text| {
+                text.trim().is_empty()
+                    || text.len() > MAX_CHECK_OUTPUT_TEXT_BYTES
+                    || !canonical_markdown(text)
+            })
+        {
+            return Err(GithubCheckModelError::InvalidOutput);
+        }
+        Ok(Self {
+            title,
+            summary,
+            text,
+        })
+    }
+
+    /// Returns the native Check output title.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Returns the required Markdown summary.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+
+    /// Returns optional detailed Markdown.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+}
+
+impl fmt::Debug for GithubCheckOutput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubCheckOutput")
+            .field("title", &"[REDACTED]")
+            .field("summary", &"[REDACTED]")
+            .field("text", &self.text.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+fn canonical_markdown(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
 }
 
 /// Immutable identity expected on every response for one Automata Check Run.
@@ -591,6 +673,9 @@ pub enum GithubCheckModelError {
     /// A lifecycle timestamp was negative or outside RFC 3339's range.
     #[error("invalid GitHub Check timestamp")]
     InvalidTimestamp,
+    /// Native Check output violated the bounded canonical Markdown policy.
+    #[error("invalid GitHub Check output")]
+    InvalidOutput,
 }
 
 /// Sanitized failure at the GitHub Checks HTTP boundary.
@@ -674,6 +759,8 @@ struct CompleteRunBody<'a> {
 struct CheckOutputBody<'a> {
     title: &'a str,
     summary: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -870,6 +957,7 @@ impl GithubHttpEndpoint {
             output: CheckOutputBody {
                 title: "Queued",
                 summary: &summary,
+                text: None,
             },
         };
         let Ok(response) =
@@ -1073,6 +1161,7 @@ impl GithubHttpEndpoint {
             output: CheckOutputBody {
                 title: "Running",
                 summary: &summary,
+                text: None,
             },
         };
         let response =
@@ -1111,17 +1200,51 @@ impl GithubHttpEndpoint {
         completed_at: &GithubCheckTimestamp,
         server_service_token: &SecretString,
     ) -> Result<GithubCheckRun, GithubChecksError> {
+        let summary = check_summary(conclusion.summary(), identity.details_url.as_str());
+        let output = GithubCheckOutput::new(conclusion.title(), summary, None)
+            .map_err(|_| GithubChecksError::InvalidRequest)?;
+        self.complete_check_run_with_output(
+            repository,
+            run_id,
+            identity,
+            conclusion,
+            started_at,
+            completed_at,
+            &output,
+            server_service_token,
+        )
+        .await
+    }
+
+    /// Publishes an immutable terminal state with a caller-supplied bounded presentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized error unless GitHub returns exact `200` JSON matching
+    /// the run ID, immutable identity, completed state, and requested conclusion.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_check_run_with_output(
+        &self,
+        repository: &RepositoryId,
+        run_id: GithubCheckRunId,
+        identity: &GithubCheckRunIdentity,
+        conclusion: GithubCheckConclusion,
+        started_at: Option<&GithubCheckTimestamp>,
+        completed_at: &GithubCheckTimestamp,
+        output: &GithubCheckOutput,
+        server_service_token: &SecretString,
+    ) -> Result<GithubCheckRun, GithubChecksError> {
         let run_id_segment = run_id.get().to_string();
         let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
-        let summary = check_summary(conclusion.summary(), identity.details_url.as_str());
         let body = CompleteRunBody {
             status: "completed",
             conclusion: conclusion.as_str(),
             started_at: started_at.map(GithubCheckTimestamp::as_str),
             completed_at: completed_at.as_str(),
             output: CheckOutputBody {
-                title: conclusion.title(),
-                summary: &summary,
+                title: output.title(),
+                summary: output.summary(),
+                text: output.text(),
             },
         };
         let response =

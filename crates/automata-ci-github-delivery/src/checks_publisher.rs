@@ -9,7 +9,8 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
-use automata_ci_core::UnixMillis;
+use automata_ci_blob::{BlobStoreErrorKind, ImmutableBlobStore};
+use automata_ci_core::{JobConclusion, JobResult, UnixMillis};
 use automata_ci_github::{
     GithubCheckAppId as HttpAppId, GithubCheckConclusion as HttpConclusion,
     GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
@@ -28,7 +29,7 @@ use automata_ci_store::{
     GithubCheckProjectionAction, GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox,
     GithubCheckProjectionWorkerId, GithubCheckRunBindingFence, GithubCheckRunCreateFence,
     GithubCheckRunId, GithubCheckStoreError, GithubCheckSubjectIdentity, GithubCheckSubjectReceipt,
-    GithubCheckSuiteId, GithubCheckValueError, GithubServerServiceAction,
+    GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckValueError, GithubServerServiceAction,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
     GithubServerServiceRevision, GithubServerServiceWorkerId, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
@@ -41,6 +42,7 @@ use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
 use url::Url;
 
+use crate::checks_presentation;
 use crate::{GithubDeliveryClock, service::GithubServerServiceCredentialRelease};
 
 const DEFAULT_CLAIM_MILLIS: i64 = 5 * 60 * 1_000;
@@ -514,6 +516,7 @@ pub enum GithubChecksPublisherError {
 pub struct GithubChecksPublisher {
     endpoint: GithubHttpEndpoint,
     outbox: Arc<dyn GithubCheckProjectionOutbox>,
+    objects: Arc<dyn ImmutableBlobStore>,
     credentials: Arc<dyn GithubChecksCredentialProvider>,
     clock: Arc<dyn GithubDeliveryClock>,
     dashboard_origin: Url,
@@ -526,6 +529,15 @@ struct GithubChecksClaimHorizon {
     deadline: Instant,
     claimed_at: UnixMillis,
     expires_at: UnixMillis,
+}
+
+struct GithubTerminalUpdate<'a> {
+    identity: &'a GithubCheckRunIdentity,
+    current: &'a GithubCheckRun,
+    cause: GithubCheckTerminalCause,
+    run_id: HttpRunId,
+    started_at: Option<&'a GithubCheckTimestamp>,
+    completed_at: &'a GithubCheckTimestamp,
 }
 
 impl GithubChecksClaimHorizon {
@@ -572,6 +584,7 @@ impl GithubChecksPublisher {
     pub fn new(
         endpoint: GithubHttpEndpoint,
         outbox: Arc<dyn GithubCheckProjectionOutbox>,
+        objects: Arc<dyn ImmutableBlobStore>,
         credentials: Arc<dyn GithubChecksCredentialProvider>,
         clock: Arc<dyn GithubDeliveryClock>,
         dashboard_origin: Url,
@@ -591,6 +604,7 @@ impl GithubChecksPublisher {
         Ok(Self {
             endpoint,
             outbox,
+            objects,
             credentials,
             clock,
             dashboard_origin,
@@ -987,32 +1001,21 @@ impl GithubChecksPublisher {
                 }
             },
             GithubCheckDesiredProjection::Terminal(cause) => {
-                let conclusion = http_conclusion(cause.conclusion());
-                let expected = GithubCheckRunState::Completed(observed_conclusion(conclusion));
-                match current.state() {
-                    state if state == expected => {}
-                    GithubCheckRunState::Queued | GithubCheckRunState::InProgress => {
-                        if let Err(error) = self
-                            .endpoint
-                            .complete_check_run(
-                                credential.repository(),
-                                http_run_id,
-                                &identity,
-                                conclusion,
-                                started_at.as_ref(),
-                                completed_at
-                                    .as_ref()
-                                    .ok_or(GithubChecksPublisherError::InvariantViolation)?,
-                                credential.token(),
-                            )
-                            .await
-                        {
-                            return self.handle_http_error(claimed, horizon, error).await;
-                        }
-                    }
-                    GithubCheckRunState::Completed(_) => {
-                        return Err(GithubChecksPublisherError::ProviderStateMismatch);
-                    }
+                let update = GithubTerminalUpdate {
+                    identity: &identity,
+                    current: &current,
+                    cause,
+                    run_id: http_run_id,
+                    started_at: started_at.as_ref(),
+                    completed_at: completed_at
+                        .as_ref()
+                        .ok_or(GithubChecksPublisherError::InvariantViolation)?,
+                };
+                if let Some(outcome) = self
+                    .publish_terminal_update(claimed, horizon, credential, update)
+                    .await?
+                {
+                    return Ok(outcome);
                 }
             }
         }
@@ -1026,6 +1029,90 @@ impl GithubChecksPublisher {
             )
             .await?;
         Ok(GithubChecksPublisherOutcome::Advanced(receipt))
+    }
+
+    async fn publish_terminal_update(
+        &self,
+        claimed: &ClaimedGithubCheckProjection,
+        horizon: GithubChecksClaimHorizon,
+        credential: &GithubChecksServerServiceCredential,
+        update: GithubTerminalUpdate<'_>,
+    ) -> Result<Option<GithubChecksPublisherOutcome>, GithubChecksPublisherError> {
+        let conclusion = http_conclusion(update.cause.conclusion());
+        let expected = GithubCheckRunState::Completed(observed_conclusion(conclusion));
+        match update.current.state() {
+            state if state == expected => return Ok(None),
+            GithubCheckRunState::Completed(_) => {
+                return Err(GithubChecksPublisherError::ProviderStateMismatch);
+            }
+            GithubCheckRunState::Queued | GithubCheckRunState::InProgress => {}
+        }
+        let publish_result = if let Some(descriptor) = claimed.terminal_result() {
+            let result_blob = match self
+                .objects
+                .get_verified(descriptor, descriptor.size())
+                .await
+            {
+                Ok(blob) => blob,
+                Err(error) => match error.kind() {
+                    BlobStoreErrorKind::Unavailable | BlobStoreErrorKind::Unauthorized => {
+                        return self
+                            .schedule_retry(claimed, horizon, "job_result_unavailable", None)
+                            .await
+                            .map(Some);
+                    }
+                    BlobStoreErrorKind::NotFound
+                    | BlobStoreErrorKind::Conflict
+                    | BlobStoreErrorKind::Integrity
+                    | BlobStoreErrorKind::TooLarge
+                    | BlobStoreErrorKind::InvalidResponse => {
+                        return Err(GithubChecksPublisherError::InvariantViolation);
+                    }
+                },
+            };
+            let result: JobResult = serde_json::from_slice(result_blob.bytes())
+                .map_err(|_| GithubChecksPublisherError::InvariantViolation)?;
+            result
+                .validate()
+                .map_err(|_| GithubChecksPublisherError::InvariantViolation)?;
+            require_terminal_result(&result, update.cause.conclusion(), claimed.completed_at())?;
+            let output = checks_presentation::terminal_output(
+                &result,
+                update.identity.details_url().as_str(),
+            )
+            .map_err(|_| GithubChecksPublisherError::InvariantViolation)?;
+            self.endpoint
+                .complete_check_run_with_output(
+                    credential.repository(),
+                    update.run_id,
+                    update.identity,
+                    conclusion,
+                    update.started_at,
+                    update.completed_at,
+                    &output,
+                    credential.token(),
+                )
+                .await
+        } else {
+            self.endpoint
+                .complete_check_run(
+                    credential.repository(),
+                    update.run_id,
+                    update.identity,
+                    conclusion,
+                    update.started_at,
+                    update.completed_at,
+                    credential.token(),
+                )
+                .await
+        };
+        match publish_result {
+            Ok(_) => Ok(None),
+            Err(error) => self
+                .handle_http_error(claimed, horizon, error)
+                .await
+                .map(Some),
+        }
     }
 
     async fn handle_http_error(
@@ -1162,6 +1249,7 @@ impl fmt::Debug for GithubChecksPublisher {
             .debug_struct("GithubChecksPublisher")
             .field("endpoint", &"[configured]")
             .field("outbox", &"[configured]")
+            .field("objects", &"[configured]")
             .field("credentials", &"[configured]")
             .field("clock", &self.clock)
             .field("dashboard_origin", &self.dashboard_origin)
@@ -1232,6 +1320,27 @@ fn check_details_url(
     }
     drop(segments);
     GithubCheckDetailsUrl::new(url).map_err(|_| GithubChecksPublisherError::InvariantViolation)
+}
+
+fn require_terminal_result(
+    result: &JobResult,
+    conclusion: GithubCheckConclusion,
+    completed_at: Option<UnixMillis>,
+) -> Result<(), GithubChecksPublisherError> {
+    let expected_conclusion = match conclusion {
+        GithubCheckConclusion::Success => JobConclusion::Success,
+        GithubCheckConclusion::Failure => JobConclusion::Failure,
+        GithubCheckConclusion::Cancelled => JobConclusion::Cancelled,
+        GithubCheckConclusion::TimedOut => JobConclusion::TimedOut,
+        GithubCheckConclusion::Skipped => JobConclusion::Skipped,
+        GithubCheckConclusion::ActionRequired => {
+            return Err(GithubChecksPublisherError::InvariantViolation);
+        }
+    };
+    if result.conclusion() != expected_conclusion || Some(result.completed_at()) != completed_at {
+        return Err(GithubChecksPublisherError::InvariantViolation);
+    }
+    Ok(())
 }
 
 fn http_app_id(value: GithubCheckAppId) -> Result<HttpAppId, GithubChecksPublisherError> {

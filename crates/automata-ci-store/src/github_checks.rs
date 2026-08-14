@@ -1,6 +1,7 @@
 use std::num::{NonZeroU16, NonZeroU64};
 
 use async_trait::async_trait;
+use automata_ci_blob::BlobDescriptor;
 use automata_ci_core::{JobId, RunId, UnixMillis};
 use thiserror::Error;
 use uuid::Uuid;
@@ -922,6 +923,7 @@ pub struct ClaimedGithubCheckProjection {
     run_id: Option<GithubCheckRunId>,
     created_at: UnixMillis,
     desired_updated_at: UnixMillis,
+    terminal_result: Option<BlobDescriptor>,
     started_at: Option<UnixMillis>,
     completed_at: Option<UnixMillis>,
     claimed_at: UnixMillis,
@@ -953,6 +955,7 @@ impl ClaimedGithubCheckProjection {
         run_id: Option<GithubCheckRunId>,
         created_at: UnixMillis,
         desired_updated_at: UnixMillis,
+        terminal_result: Option<BlobDescriptor>,
         started_at: Option<UnixMillis>,
         completed_at: Option<UnixMillis>,
         claimed_at: UnixMillis,
@@ -1019,6 +1022,14 @@ impl ClaimedGithubCheckProjection {
         {
             return Err(GithubCheckValueError::InvalidClaimInterval);
         }
+        if let Some(result) = terminal_result.as_ref()
+            && (!matches!(desired, GithubCheckDesiredProjection::Terminal(_))
+                || !matches!(details_target, GithubCheckDetailsTarget::Job { .. })
+                || !(1..=crate::MAX_TERMINAL_RESULT_BYTES).contains(&result.size())
+                || result.media_type().as_str() != crate::HUMAN_JOB_RESULT_MEDIA_TYPE)
+        {
+            return Err(GithubCheckValueError::InvalidProjectionBinding);
+        }
         Ok(Self {
             claim,
             action,
@@ -1033,6 +1044,7 @@ impl ClaimedGithubCheckProjection {
             run_id,
             created_at,
             desired_updated_at,
+            terminal_result,
             started_at,
             completed_at,
             claimed_at,
@@ -1104,6 +1116,11 @@ impl ClaimedGithubCheckProjection {
     #[must_use]
     pub const fn desired_updated_at(&self) -> UnixMillis {
         self.desired_updated_at
+    }
+    /// Returns the verified immutable runner result to present for a terminal job Check.
+    #[must_use]
+    pub const fn terminal_result(&self) -> Option<&BlobDescriptor> {
+        self.terminal_result.as_ref()
     }
     /// Returns the durable attempt start represented by this Check revision.
     #[must_use]

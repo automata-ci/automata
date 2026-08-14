@@ -10,7 +10,13 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
-use automata_ci_core::{JobId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_blob::{
+    BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
+};
+use automata_ci_core::{
+    AttemptId, JobConclusion, JobId, JobResult, JobSecretExposure, RunId, Sha256Digest, StepId,
+    StepResult, UnixMillis,
+};
 use automata_ci_github::{GithubHttpEndpoint, GithubHttpLimits};
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
@@ -93,6 +99,7 @@ struct FakeOutbox {
     begin_delay_millis: AtomicUsize,
     claim_time_offset: AtomicI64,
     claim_delay_millis: AtomicUsize,
+    terminal_result: Mutex<Option<BlobDescriptor>>,
     credential_rejection_blocks: Mutex<Vec<BlockGithubCheckProjectionForCredentialRejection>>,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -113,6 +120,7 @@ impl FakeOutbox {
             begin_delay_millis: AtomicUsize::new(0),
             claim_time_offset: AtomicI64::new(0),
             claim_delay_millis: AtomicUsize::new(0),
+            terminal_result: Mutex::new(None),
             credential_rejection_blocks: Mutex::new(Vec::new()),
             events,
         }
@@ -197,6 +205,10 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             template.run_id,
             UnixMillis::new(claimed_at.get().saturating_sub(2)),
             desired_updated_at,
+            self.terminal_result
+                .lock()
+                .expect("terminal result lock")
+                .clone(),
             started_at,
             completed_at,
             claimed_at,
@@ -664,6 +676,7 @@ impl Drop for FixtureServer {
 struct Harness {
     publisher: GithubChecksPublisher,
     outbox: Arc<FakeOutbox>,
+    objects: Arc<MemoryBlobStore>,
     credentials: Arc<FakeCredentials>,
     server: FixtureServer,
     events: Arc<Mutex<Vec<String>>>,
@@ -707,9 +720,11 @@ impl Harness {
             last_claim: Mutex::new(None),
             events: Arc::clone(&events),
         });
+        let objects = Arc::new(MemoryBlobStore::default());
         let publisher = GithubChecksPublisher::new(
             server.endpoint.clone(),
             outbox.clone(),
+            objects.clone(),
             credentials.clone(),
             clock,
             Url::parse("https://ci.automata.example/").expect("dashboard URL"),
@@ -719,6 +734,7 @@ impl Harness {
         Self {
             publisher,
             outbox,
+            objects,
             credentials,
             server,
             events,
@@ -727,6 +743,26 @@ impl Harness {
 
     async fn run(&self) -> Result<GithubChecksPublisherOutcome, GithubChecksPublisherError> {
         self.publisher.run_once(connection_id(), worker_id()).await
+    }
+
+    async fn install_terminal_result(&self, result: &JobResult) {
+        let bytes = serde_json::to_vec(result).expect("serialize terminal result");
+        let payload = BlobPayload::from_bytes(
+            BlobKey::new("runner-results/test/result.json").expect("result key"),
+            MediaType::new(automata_ci_store::HUMAN_JOB_RESULT_MEDIA_TYPE)
+                .expect("result media type"),
+            bytes.into(),
+        );
+        let descriptor = payload.descriptor().clone();
+        self.objects
+            .put_if_absent(payload)
+            .await
+            .expect("install terminal result");
+        *self
+            .outbox
+            .terminal_result
+            .lock()
+            .expect("terminal result lock") = Some(descriptor);
     }
 
     fn events(&self) -> Vec<String> {
@@ -1048,6 +1084,132 @@ async fn job_check_links_to_the_exact_automata_dashboard_job() {
     assert_eq!(methods(&requests), ["POST"]);
     let expected = format!(r#""details_url":"{details_url}""#);
     assert!(requests[0].raw.contains(&expected));
+}
+
+#[tokio::test]
+async fn terminal_job_publishes_verified_step_markdown_and_exact_details_link() {
+    let dashboard_run_id =
+        RunId::from_uuid(Uuid::from_u128(0x00000000_0000_4000_8000_000000000211));
+    let dashboard_job_id =
+        JobId::from_uuid(Uuid::from_u128(0x00000000_0000_4000_8000_000000000212));
+    let details_url = format!(
+        "https://ci.automata.example/automata-ci/automata/actions/runs/{dashboard_run_id}/jobs/{dashboard_job_id}"
+    );
+    let harness = Harness::new(
+        [claim_for_target(
+            GithubCheckProjectionAction::Publish,
+            GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowFailure),
+            2,
+            Some(suite_id()),
+            Some(run_id()),
+            GithubCheckDetailsTarget::Job {
+                run_id: dashboard_run_id,
+                job_id: dashboard_job_id,
+            },
+        )],
+        vec![
+            ResponseSpec::json(
+                200,
+                run_json_with_details(41, "in_progress", None, &details_url),
+            ),
+            ResponseSpec::json(
+                200,
+                run_json_with_details(41, "completed", Some("failure"), &details_url),
+            ),
+        ],
+        CredentialMode::Exact,
+    )
+    .await;
+    let result = JobResult::new(
+        AttemptId::new(),
+        JobConclusion::Failure,
+        JobSecretExposure::Secretless,
+        UnixMillis::new(999),
+    )
+    .with_steps(vec![
+        StepResult::new(
+            StepId::new("checkout").expect("step ID"),
+            JobConclusion::Success,
+            JobConclusion::Success,
+            UnixMillis::new(100),
+            UnixMillis::new(300),
+        ),
+        StepResult::new(
+            StepId::new("test").expect("step ID"),
+            JobConclusion::Failure,
+            JobConclusion::Failure,
+            UnixMillis::new(300),
+            UnixMillis::new(999),
+        )
+        .with_summary_markdown("The failing assertion was safely masked."),
+    ]);
+    result.validate().expect("terminal result");
+    harness.install_terminal_result(&result).await;
+
+    assert!(matches!(
+        harness.run().await.expect("terminal publication"),
+        GithubChecksPublisherOutcome::Advanced(_)
+    ));
+    let requests = harness.server.requests();
+    assert_eq!(methods(&requests), ["GET", "PATCH"]);
+    let body = request_json(&requests[1]);
+    assert_eq!(body["status"], "completed");
+    assert_eq!(body["conclusion"], "failure");
+    assert_eq!(body["output"]["title"], "Failed");
+    assert!(
+        body["output"]["summary"]
+            .as_str()
+            .expect("summary")
+            .contains(&details_url)
+    );
+    let text = body["output"]["text"].as_str().expect("step detail");
+    assert!(text.contains("| `checkout` | passed | passed | 0s |"));
+    assert!(text.contains("| `test` | failed | failed | 0s |"));
+    assert!(text.contains("The failing assertion was safely masked."));
+}
+
+#[tokio::test]
+async fn exact_terminal_provider_state_does_not_require_the_result_blob_on_recovery() {
+    let dashboard_run_id = RunId::new();
+    let dashboard_job_id = JobId::new();
+    let details_url = format!(
+        "https://ci.automata.example/automata-ci/automata/actions/runs/{dashboard_run_id}/jobs/{dashboard_job_id}"
+    );
+    let harness = Harness::new(
+        [claim_for_target(
+            GithubCheckProjectionAction::Publish,
+            terminal_success(),
+            2,
+            Some(suite_id()),
+            Some(run_id()),
+            GithubCheckDetailsTarget::Job {
+                run_id: dashboard_run_id,
+                job_id: dashboard_job_id,
+            },
+        )],
+        vec![ResponseSpec::json(
+            200,
+            run_json_with_details(41, "completed", Some("success"), &details_url),
+        )],
+        CredentialMode::Exact,
+    )
+    .await;
+    *harness
+        .outbox
+        .terminal_result
+        .lock()
+        .expect("terminal result lock") = Some(BlobDescriptor::new(
+        BlobKey::new("runner-results/missing/result.json").expect("result key"),
+        Sha256Digest::from_bytes([8; 32]),
+        100,
+        MediaType::new(automata_ci_store::HUMAN_JOB_RESULT_MEDIA_TYPE).expect("result media type"),
+    ));
+
+    assert!(matches!(
+        harness.run().await.expect("idempotent recovery"),
+        GithubChecksPublisherOutcome::Advanced(_)
+    ));
+    assert_eq!(methods(&harness.server.requests()), ["GET"]);
 }
 
 #[tokio::test]
@@ -1988,6 +2150,11 @@ fn methods(requests: &[RecordedRequest]) -> Vec<&str> {
         .iter()
         .map(|request| request.method.as_str())
         .collect()
+}
+
+fn request_json(request: &RecordedRequest) -> serde_json::Value {
+    let (_, body) = request.raw.split_once("\r\n\r\n").expect("request body");
+    serde_json::from_str(body).expect("request JSON")
 }
 
 fn position(events: &[String], exact: &str) -> usize {
