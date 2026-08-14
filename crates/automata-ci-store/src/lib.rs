@@ -99,8 +99,8 @@ pub use github_check_rerun::{
     GithubCheckRerunStoreError, GithubCheckRerunTarget, GithubCheckRerunValueError,
 };
 pub use github_checks::{
-    AdvanceGithubCheckAnnotations, BeginGithubCheckRunCreate, BindGithubCheckRun,
-    BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
+    AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
+    BindGithubCheckRun, BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
     ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
     CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
@@ -114,9 +114,9 @@ pub use github_checks::{
     GithubCheckTerminalizationRepository, GithubCheckValueError, InitializeGithubCheckPresentation,
     MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
     MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
-    RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, StartGithubCheckProjection,
-    TerminalizeGithubCheck,
+    RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckAnnotationBatch,
+    ReleaseUnissuedGithubCheckRunCreate, ResolveGithubCheckRunCreate, RetryGithubCheckProjection,
+    RetryUncertainGithubCheckAnnotations, StartGithubCheckProjection, TerminalizeGithubCheck,
 };
 pub use github_job_runtime_authority::{
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,

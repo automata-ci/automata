@@ -26,8 +26,8 @@ use automata_ci_github_delivery::{
 };
 use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
-    AdvanceGithubCheckAnnotations, BeginGithubCheckRunCreate, BindGithubCheckRun,
-    BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
+    AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
+    BindGithubCheckRun, BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
     ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
     CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
@@ -42,8 +42,9 @@ use automata_ci_store::{
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
     GithubServerServiceRevision, GithubServerServiceWorkerId, InitializeGithubCheckPresentation,
     ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
-    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, TenantScope,
+    ReleaseUnissuedGithubCheckAnnotationBatch, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
+    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
+    TenantScope,
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -99,10 +100,13 @@ struct FakeOutbox {
     clock: Arc<StepClock>,
     clock_after_begin: AtomicI64,
     begin_delay_millis: AtomicUsize,
+    annotation_begin_delay_millis: AtomicUsize,
     claim_time_offset: AtomicI64,
     claim_delay_millis: AtomicUsize,
     terminal_result: Mutex<Option<BlobDescriptor>>,
     annotation_progress: Mutex<GithubCheckAnnotationProgress>,
+    annotation_batch_started_at: Mutex<Option<UnixMillis>>,
+    annotation_uncertain_retries: Mutex<Vec<RetryUncertainGithubCheckAnnotations>>,
     credential_rejection_blocks: Mutex<Vec<BlockGithubCheckProjectionForCredentialRejection>>,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -121,10 +125,13 @@ impl FakeOutbox {
             clock,
             clock_after_begin: AtomicI64::new(0),
             begin_delay_millis: AtomicUsize::new(0),
+            annotation_begin_delay_millis: AtomicUsize::new(0),
             claim_time_offset: AtomicI64::new(0),
             claim_delay_millis: AtomicUsize::new(0),
             terminal_result: Mutex::new(None),
             annotation_progress: Mutex::new(GithubCheckAnnotationProgress::default()),
+            annotation_batch_started_at: Mutex::new(None),
+            annotation_uncertain_retries: Mutex::new(Vec::new()),
             credential_rejection_blocks: Mutex::new(Vec::new()),
             events,
         }
@@ -352,6 +359,46 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
         Ok(*progress)
     }
 
+    async fn begin_github_check_annotation_batch(
+        &self,
+        request: BeginGithubCheckAnnotationBatch,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+        self.event(format!(
+            "store:annotations:begin:{}:{}",
+            request.from(),
+            request.batch_size()
+        ));
+        let delay_millis = self.annotation_begin_delay_millis.load(Ordering::SeqCst);
+        if delay_millis > 0 {
+            tokio::time::sleep(Duration::from_millis(
+                u64::try_from(delay_millis).map_err(|_| GithubCheckStoreError::CorruptData)?,
+            ))
+            .await;
+        }
+        let mut progress = self
+            .annotation_progress
+            .lock()
+            .expect("annotation progress lock");
+        if progress.presentation_digest() != Some(request.digest())
+            || progress.next() != request.from()
+            || progress.uncertain_batch_size().is_some()
+        {
+            return Err(GithubCheckStoreError::ProjectionMismatch);
+        }
+        *progress = GithubCheckAnnotationProgress::from_durable_parts(
+            Some(request.digest()),
+            progress.total(),
+            request.from(),
+            Some(request.batch_size()),
+        )
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        *self
+            .annotation_batch_started_at
+            .lock()
+            .expect("annotation batch start lock") = Some(request.started_at());
+        Ok(*progress)
+    }
+
     async fn advance_github_check_annotations(
         &self,
         request: AdvanceGithubCheckAnnotations,
@@ -365,8 +412,14 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             .annotation_progress
             .lock()
             .expect("annotation progress lock");
+        let mut batch_started_at = self
+            .annotation_batch_started_at
+            .lock()
+            .expect("annotation batch start lock");
         if progress.presentation_digest() != Some(request.digest())
             || progress.next() != request.from()
+            || progress.uncertain_batch_size() != u8::try_from(request.to() - request.from()).ok()
+            || batch_started_at.is_none()
         {
             return Err(GithubCheckStoreError::ProjectionMismatch);
         }
@@ -377,6 +430,7 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             None,
         )
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        *batch_started_at = None;
         Ok(*progress)
     }
 
@@ -385,7 +439,42 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
         request: RetryUncertainGithubCheckAnnotations,
     ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
         self.event(format!(
-            "store:annotations:uncertain:{}:{}",
+            "store:annotations:uncertain:{}:{}:{}",
+            request.from(),
+            request.batch_size(),
+            request.retry_at().get() - request.failed_at().get()
+        ));
+        let progress = self
+            .annotation_progress
+            .lock()
+            .expect("annotation progress lock");
+        if progress.presentation_digest() != Some(request.digest())
+            || progress.next() != request.from()
+            || progress.uncertain_batch_size() != Some(request.batch_size())
+            || self
+                .annotation_batch_started_at
+                .lock()
+                .expect("annotation batch start lock")
+                .is_none()
+        {
+            return Err(GithubCheckStoreError::ProjectionMismatch);
+        }
+        self.annotation_uncertain_retries
+            .lock()
+            .expect("annotation uncertain retries lock")
+            .push(request);
+        Self::receipt(
+            request.claim().subject_id(),
+            GithubCheckDesiredProjection::Queued,
+        )
+    }
+
+    async fn release_unissued_github_check_annotation_batch(
+        &self,
+        request: ReleaseUnissuedGithubCheckAnnotationBatch,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
+        self.event(format!(
+            "store:annotations:release_unissued:{}:{}",
             request.from(),
             request.batch_size()
         ));
@@ -393,13 +482,25 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             .annotation_progress
             .lock()
             .expect("annotation progress lock");
+        let mut batch_started_at = self
+            .annotation_batch_started_at
+            .lock()
+            .expect("annotation batch start lock");
+        if progress.presentation_digest() != Some(request.digest())
+            || progress.next() != request.from()
+            || progress.uncertain_batch_size() != Some(request.batch_size())
+            || *batch_started_at != Some(request.started_at())
+        {
+            return Err(GithubCheckStoreError::ProjectionMismatch);
+        }
         *progress = GithubCheckAnnotationProgress::from_durable_parts(
             Some(request.digest()),
             progress.total(),
             request.from(),
-            Some(request.batch_size()),
+            None,
         )
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        *batch_started_at = None;
         Self::receipt(
             request.claim().subject_id(),
             GithubCheckDesiredProjection::Queued,
@@ -415,7 +516,15 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             .annotation_progress
             .lock()
             .expect("annotation progress lock");
-        if progress.uncertain_batch_size() != Some(request.batch_size()) {
+        let mut batch_started_at = self
+            .annotation_batch_started_at
+            .lock()
+            .expect("annotation batch start lock");
+        if progress.presentation_digest() != Some(request.digest())
+            || progress.next() != request.from()
+            || progress.uncertain_batch_size() != Some(request.batch_size())
+            || batch_started_at.is_none()
+        {
             return Err(GithubCheckStoreError::ProjectionMismatch);
         }
         *progress = GithubCheckAnnotationProgress::from_durable_parts(
@@ -425,6 +534,7 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             None,
         )
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        *batch_started_at = None;
         Ok(*progress)
     }
 
@@ -739,7 +849,11 @@ struct FixtureServer {
 }
 
 impl FixtureServer {
-    async fn spawn(responses: Vec<ResponseSpec>, events: Arc<Mutex<Vec<String>>>) -> Self {
+    async fn spawn_with_limits(
+        responses: Vec<ResponseSpec>,
+        events: Arc<Mutex<Vec<String>>>,
+        limits: GithubHttpLimits,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fixture");
@@ -771,7 +885,7 @@ impl FixtureServer {
             oauth_origin,
             api_base,
             "automata-checks-publisher-test",
-            GithubHttpLimits::default(),
+            limits,
         )
         .expect("test endpoint");
         Self {
@@ -822,8 +936,26 @@ impl Harness {
         credential_mode: CredentialMode,
         config: GithubChecksPublisherConfig,
     ) -> Self {
+        Self::new_with_config_and_http_limits(
+            claims,
+            responses,
+            credential_mode,
+            config,
+            GithubHttpLimits::default(),
+        )
+        .await
+    }
+
+    async fn new_with_config_and_http_limits(
+        claims: impl IntoIterator<Item = ClaimTemplate>,
+        responses: Vec<ResponseSpec>,
+        credential_mode: CredentialMode,
+        config: GithubChecksPublisherConfig,
+        http_limits: GithubHttpLimits,
+    ) -> Self {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let server = FixtureServer::spawn(responses, Arc::clone(&events)).await;
+        let server =
+            FixtureServer::spawn_with_limits(responses, Arc::clone(&events), http_limits).await;
         let clock = Arc::new(StepClock::new(1_000));
         let outbox = Arc::new(FakeOutbox::new(
             claims,
@@ -1298,7 +1430,7 @@ async fn terminal_annotations_are_published_in_durable_fifty_item_batches() {
         200,
         run_json_with_details(41, "completed", Some("failure"), &details_url),
     );
-    let harness = Harness::new(
+    let harness = Harness::new_with_config_and_http_limits(
         [claim_for_target(
             GithubCheckProjectionAction::Publish,
             GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowFailure),
@@ -1320,37 +1452,11 @@ async fn terminal_annotations_are_published_in_durable_fifty_item_batches() {
             completed,
         ],
         CredentialMode::Exact,
+        annotation_publisher_config(),
+        annotation_http_limits(),
     )
     .await;
-    let annotations = (1..=51)
-        .map(|line| {
-            StepAnnotation::new(
-                StepAnnotationLevel::Error,
-                format!("failure {line}"),
-                vec![
-                    StepAnnotationProperty::new("file", "src/lib.rs"),
-                    StepAnnotationProperty::new("line", line.to_string()),
-                ],
-            )
-        })
-        .collect();
-    let result = JobResult::new(
-        AttemptId::new(),
-        JobConclusion::Failure,
-        JobSecretExposure::Secretless,
-        UnixMillis::new(999),
-    )
-    .with_steps(vec![
-        StepResult::new(
-            StepId::new("test").expect("step ID"),
-            JobConclusion::Failure,
-            JobConclusion::Failure,
-            UnixMillis::new(300),
-            UnixMillis::new(999),
-        )
-        .with_annotations(annotations),
-    ]);
-    result.validate().expect("terminal result");
+    let result = terminal_result_with_annotations(51);
     harness.install_terminal_result(&result).await;
 
     assert!(matches!(
@@ -1381,6 +1487,235 @@ async fn terminal_annotations_are_published_in_durable_fifty_item_batches() {
             .count(),
         2
     );
+    let events = harness.events();
+    let beginnings: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            event
+                .starts_with("store:annotations:begin")
+                .then_some(index)
+        })
+        .collect();
+    let patches: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| event.starts_with("http:PATCH").then_some(index))
+        .collect();
+    assert_eq!(beginnings.len(), 2);
+    assert_eq!(patches.len(), 3);
+    assert!(beginnings[0] < patches[1] && beginnings[1] < patches[2]);
+}
+
+#[tokio::test]
+async fn ambiguous_patch_is_fenced_and_exact_prefix_avoids_a_duplicate() {
+    let dashboard_run_id = RunId::new();
+    let dashboard_job_id = JobId::new();
+    let details_url = format!(
+        "https://ci.automata.example/automata-ci/automata/actions/runs/{dashboard_run_id}/jobs/{dashboard_job_id}"
+    );
+    let publish = claim_for_target(
+        GithubCheckProjectionAction::Publish,
+        GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowFailure),
+        2,
+        Some(suite_id()),
+        Some(run_id()),
+        GithubCheckDetailsTarget::Job {
+            run_id: dashboard_run_id,
+            job_id: dashboard_job_id,
+        },
+    );
+    let completed = run_json_with_details(41, "completed", Some("failure"), &details_url);
+    let harness = Harness::new_with_config_and_http_limits(
+        [publish, publish],
+        vec![
+            ResponseSpec::json(
+                200,
+                run_json_with_details(41, "in_progress", None, &details_url),
+            ),
+            ResponseSpec::json(200, completed.clone()),
+            ResponseSpec::json(503, "{}"),
+            ResponseSpec::json(200, completed),
+            ResponseSpec::json(
+                200,
+                r#"[{"path":"src/lib.rs","start_line":1,"end_line":1,"start_column":null,"end_column":null,"annotation_level":"failure","message":"failure 1","title":null}]"#,
+            ),
+        ],
+        CredentialMode::Exact,
+        annotation_publisher_config(),
+        annotation_http_limits(),
+    )
+    .await;
+    harness
+        .install_terminal_result(&terminal_result_with_annotations(1))
+        .await;
+
+    assert!(matches!(
+        harness.run().await.expect("ambiguous first PATCH"),
+        GithubChecksPublisherOutcome::RetryScheduled(_)
+    ));
+    assert_eq!(
+        methods(&harness.server.requests()),
+        ["GET", "PATCH", "PATCH"]
+    );
+    let events = harness.events();
+    let annotation_begin = position(&events, "store:annotations:begin:0:1");
+    let annotation_patch = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| event.starts_with("http:PATCH").then_some(index))
+        .nth(1)
+        .expect("annotation PATCH");
+    let uncertain = position_prefix(&events, "store:annotations:uncertain:0:1:");
+    assert!(annotation_begin < annotation_patch && annotation_patch < uncertain);
+    assert_annotation_uncertain_retry_is_bounded(&harness);
+    {
+        let progress = harness
+            .outbox
+            .annotation_progress
+            .lock()
+            .expect("annotation progress lock");
+        assert_eq!(progress.next(), 0);
+        assert_eq!(progress.uncertain_batch_size(), Some(1));
+    }
+    // The fake derives desired timestamps from claim time; keep the same
+    // durable desired event across the recovery claim.
+    harness.outbox.clock.set(1_000);
+    assert!(matches!(
+        harness.run().await.expect("exact prefix recovery"),
+        GithubChecksPublisherOutcome::Advanced(_)
+    ));
+    assert_eq!(
+        methods(&harness.server.requests()),
+        ["GET", "PATCH", "PATCH", "GET", "GET"]
+    );
+    assert_eq!(
+        harness
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("store:annotations:begin"))
+            .count(),
+        1
+    );
+    let progress = harness
+        .outbox
+        .annotation_progress
+        .lock()
+        .expect("annotation progress lock");
+    assert_eq!(progress.next(), 1);
+    assert_eq!(progress.uncertain_batch_size(), None);
+}
+
+#[tokio::test]
+async fn annotation_patch_waits_when_the_claim_cannot_fit_the_recovery_tail() {
+    let dashboard_run_id = RunId::new();
+    let dashboard_job_id = JobId::new();
+    let details_url = format!(
+        "https://ci.automata.example/automata-ci/automata/actions/runs/{dashboard_run_id}/jobs/{dashboard_job_id}"
+    );
+    let harness = Harness::new(
+        [claim_for_target(
+            GithubCheckProjectionAction::Publish,
+            GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowFailure),
+            2,
+            Some(suite_id()),
+            Some(run_id()),
+            GithubCheckDetailsTarget::Job {
+                run_id: dashboard_run_id,
+                job_id: dashboard_job_id,
+            },
+        )],
+        vec![ResponseSpec::json(
+            200,
+            run_json_with_details(41, "completed", Some("failure"), &details_url),
+        )],
+        CredentialMode::Exact,
+    )
+    .await;
+    harness
+        .install_terminal_result(&terminal_result_with_annotations(1))
+        .await;
+
+    assert!(matches!(
+        harness.run().await.expect("bounded no-issue retry"),
+        GithubChecksPublisherOutcome::RetryScheduled(_)
+    ));
+    assert_eq!(methods(&harness.server.requests()), ["GET"]);
+    let events = harness.events();
+    assert!(events.contains(&"store:retry:github_annotation_issue_window_elapsed:10".to_owned()));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.starts_with("store:annotations:begin"))
+    );
+    let progress = harness
+        .outbox
+        .annotation_progress
+        .lock()
+        .expect("annotation progress lock");
+    assert_eq!(progress.next(), 0);
+    assert_eq!(progress.uncertain_batch_size(), None);
+}
+
+#[tokio::test]
+async fn cutoff_that_finishes_after_the_issue_window_is_atomically_released() {
+    let dashboard_run_id = RunId::new();
+    let dashboard_job_id = JobId::new();
+    let details_url = format!(
+        "https://ci.automata.example/automata-ci/automata/actions/runs/{dashboard_run_id}/jobs/{dashboard_job_id}"
+    );
+    let harness = Harness::new_with_config_and_http_limits(
+        [claim_for_target(
+            GithubCheckProjectionAction::Publish,
+            GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowFailure),
+            2,
+            Some(suite_id()),
+            Some(run_id()),
+            GithubCheckDetailsTarget::Job {
+                run_id: dashboard_run_id,
+                job_id: dashboard_job_id,
+            },
+        )],
+        vec![
+            ResponseSpec::json(
+                200,
+                run_json_with_details(41, "in_progress", None, &details_url),
+            ),
+            ResponseSpec::json(
+                200,
+                run_json_with_details(41, "completed", Some("failure"), &details_url),
+            ),
+        ],
+        CredentialMode::Exact,
+        GithubChecksPublisherConfig::new(500, 50, 10).expect("short publisher config"),
+        annotation_http_limits(),
+    )
+    .await;
+    harness
+        .outbox
+        .annotation_begin_delay_millis
+        .store(325, Ordering::SeqCst);
+    harness
+        .install_terminal_result(&terminal_result_with_annotations(1))
+        .await;
+
+    assert!(matches!(
+        harness.run().await.expect("unissued cutoff release"),
+        GithubChecksPublisherOutcome::RetryScheduled(_)
+    ));
+    assert_eq!(methods(&harness.server.requests()), ["GET", "PATCH"]);
+    let events = harness.events();
+    assert!(
+        position(&events, "store:annotations:begin:0:1")
+            < position(&events, "store:annotations:release_unissued:0:1")
+    );
+    let progress = harness
+        .outbox
+        .annotation_progress
+        .lock()
+        .expect("annotation progress lock");
+    assert_eq!(progress.next(), 0);
+    assert_eq!(progress.uncertain_batch_size(), None);
 }
 
 #[tokio::test]
@@ -2369,6 +2704,74 @@ fn ambiguous_list_json() -> String {
         run_json(41, "queued", None),
         run_json(42, "queued", None)
     )
+}
+
+fn terminal_result_with_annotations(count: u32) -> JobResult {
+    let annotations = (1..=count)
+        .map(|line| {
+            StepAnnotation::new(
+                StepAnnotationLevel::Error,
+                format!("failure {line}"),
+                vec![
+                    StepAnnotationProperty::new("file", "src/lib.rs"),
+                    StepAnnotationProperty::new("line", line.to_string()),
+                ],
+            )
+        })
+        .collect();
+    let result = JobResult::new(
+        AttemptId::new(),
+        JobConclusion::Failure,
+        JobSecretExposure::Secretless,
+        UnixMillis::new(999),
+    )
+    .with_steps(vec![
+        StepResult::new(
+            StepId::new("test").expect("step ID"),
+            JobConclusion::Failure,
+            JobConclusion::Failure,
+            UnixMillis::new(300),
+            UnixMillis::new(999),
+        )
+        .with_annotations(annotations),
+    ]);
+    result.validate().expect("terminal result");
+    result
+}
+
+fn annotation_publisher_config() -> GithubChecksPublisherConfig {
+    GithubChecksPublisherConfig::new(1_000, 50, 10).expect("annotation publisher config")
+}
+
+fn annotation_http_limits() -> GithubHttpLimits {
+    GithubHttpLimits::new(
+        1_048_576,
+        128,
+        10_000,
+        Duration::from_millis(50),
+        Duration::from_millis(200),
+    )
+    .expect("annotation HTTP limits")
+}
+
+fn assert_annotation_uncertain_retry_is_bounded(harness: &Harness) {
+    let uncertain_request = harness
+        .outbox
+        .annotation_uncertain_retries
+        .lock()
+        .expect("annotation uncertain retries lock")
+        .first()
+        .copied()
+        .expect("uncertain retry request");
+    let batch_started_at = harness
+        .outbox
+        .annotation_batch_started_at
+        .lock()
+        .expect("annotation batch start lock")
+        .expect("durable annotation batch start");
+    assert!(uncertain_request.retry_at().get() >= batch_started_at.get() + 250);
+    assert!(uncertain_request.retry_at().get() >= uncertain_request.failed_at().get() + 50);
+    assert!(uncertain_request.retry_at().get() <= 2_000);
 }
 
 fn methods(requests: &[RecordedRequest]) -> Vec<&str> {
