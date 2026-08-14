@@ -1712,6 +1712,7 @@ mod tests {
             "/tmp",
             1,
             1,
+            None,
         ));
         assert!(!valid_execution_request(
             "/bin/true",
@@ -1720,6 +1721,7 @@ mod tests {
             "/tmp",
             1,
             1,
+            None,
         ));
         assert!(!valid_execution_request(
             "/bin/true",
@@ -1728,6 +1730,7 @@ mod tests {
             "/tmp",
             MAX_COMMAND_TIMEOUT_MILLIS + 1,
             1,
+            None,
         ));
     }
 
@@ -1741,6 +1744,7 @@ mod tests {
             "/tmp".into(),
             100,
             1_024,
+            None,
         )
         .await;
         let GuestResponse::Exec {
@@ -1807,6 +1811,7 @@ mod tests {
             "/tmp".into(),
             5_000,
             1_024,
+            None,
         )
         .await;
         assert!(matches!(

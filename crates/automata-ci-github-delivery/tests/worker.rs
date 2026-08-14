@@ -58,7 +58,7 @@ use sha2::{Digest as _, Sha256};
 use tar::{Builder, EntryType, Header};
 use uuid::Uuid;
 
-use subject_evidence::{
+use super::subject_evidence::{
     fixture_all_direct_subject_evidence, fixture_check_head_sha, fixture_github_runtime_policy,
     fixture_subject_evidence, fixture_subject_evidence_with_head,
 };
@@ -2305,4 +2305,3 @@ fn configuration_rejects_unrepresentable_outcome_and_provider_bounds() {
         Err(GithubDeliveryWorkerConfigurationError::SourceProviderMismatch)
     ));
 }
-mod subject_evidence;

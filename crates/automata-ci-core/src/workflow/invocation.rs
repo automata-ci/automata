@@ -554,6 +554,45 @@ fn validate_count(field: &'static str, count: usize) -> Result<(), WorkflowPlanE
     Ok(())
 }
 
+fn valid_decimal(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut cursor = usize::from(bytes.first() == Some(&b'-'));
+    match bytes.get(cursor) {
+        Some(b'0') => cursor += 1,
+        Some(b'1'..=b'9') => {
+            cursor += 1;
+            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+                cursor += 1;
+            }
+        }
+        _ => return false,
+    }
+    if bytes.get(cursor) == Some(&b'.') {
+        cursor += 1;
+        let start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor == start {
+            return false;
+        }
+    }
+    if matches!(bytes.get(cursor), Some(b'e' | b'E')) {
+        cursor += 1;
+        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
+            cursor += 1;
+        }
+        let start = cursor;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
+            cursor += 1;
+        }
+        if cursor == start {
+            return false;
+        }
+    }
+    cursor == bytes.len()
+}
+
 #[cfg(test)]
 mod limit_contract_tests {
     use super::{
@@ -592,43 +631,4 @@ mod limit_contract_tests {
             Some(WorkflowInvocationLimitRejection::TextBytes)
         );
     }
-}
-
-fn valid_decimal(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut cursor = usize::from(bytes.first() == Some(&b'-'));
-    match bytes.get(cursor) {
-        Some(b'0') => cursor += 1,
-        Some(b'1'..=b'9') => {
-            cursor += 1;
-            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-                cursor += 1;
-            }
-        }
-        _ => return false,
-    }
-    if bytes.get(cursor) == Some(&b'.') {
-        cursor += 1;
-        let start = cursor;
-        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-            cursor += 1;
-        }
-        if cursor == start {
-            return false;
-        }
-    }
-    if matches!(bytes.get(cursor), Some(b'e' | b'E')) {
-        cursor += 1;
-        if matches!(bytes.get(cursor), Some(b'+' | b'-')) {
-            cursor += 1;
-        }
-        let start = cursor;
-        while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-            cursor += 1;
-        }
-        if cursor == start {
-            return false;
-        }
-    }
-    cursor == bytes.len()
 }

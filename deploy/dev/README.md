@@ -52,7 +52,7 @@ export AUTOMATA_TEST_S3_BUCKET='automata-dev'
 export AUTOMATA_TEST_S3_ACCESS_KEY='automata-local'
 export AUTOMATA_TEST_S3_SECRET_KEY='automata-local-secret-change-me'
 export AUTOMATA_TEST_S3_KMS_KEY_ID='default'
-cargo test -p automata-ci-blob-s3 --test rustfs_contract --all-features --locked -- --ignored
+cargo test -p automata-ci-blob-s3 --test blob_s3 --all-features --locked -- rustfs_contract:: --ignored
 ```
 
 For the complete integration-test environment, use the

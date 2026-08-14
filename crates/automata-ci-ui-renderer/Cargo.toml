@@ -1,5 +1,6 @@
 [package]
 name = "automata-ci-ui-renderer"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +11,10 @@ homepage.workspace = true
 readme = "README.md"
 description = "Isolated server-side renderer and embedded web assets for Automata"
 publish.workspace = true
+
+[[test]]
+name = "ui_renderer"
+path = "tests/ui_renderer.rs"
 
 [dependencies]
 serde_json.workspace = true

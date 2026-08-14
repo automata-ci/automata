@@ -1,5 +1,3 @@
-mod subject_evidence;
-
 use std::{
     collections::BTreeMap,
     sync::{
@@ -57,7 +55,7 @@ use flate2::{Compression, write::GzEncoder};
 use tar::{Builder, EntryType, Header};
 use uuid::Uuid;
 
-use subject_evidence::fixture_subject_evidence;
+use super::subject_evidence::fixture_subject_evidence;
 
 const BEFORE: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const AFTER: &str = "0123456789abcdef0123456789abcdef01234567";

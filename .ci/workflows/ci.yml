@@ -84,6 +84,7 @@ jobs:
           python3 scripts/ci/tests/psql-test-database.test.py
           ./scripts/ci/tests/container-context.test.sh
           ./scripts/ci/tests/install.test.sh
+          python3 scripts/ci/tests/integration-test-targets.test.py
           python3 scripts/ci/tests/release-handoff.test.py
           python3 scripts/ci/tests/rust-coverage.test.py
           python3 scripts/ci/tests/service-proxy-candidate.test.py

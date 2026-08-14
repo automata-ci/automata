@@ -1,15 +1,19 @@
+use std::fmt::Write as _;
+
 pub(crate) const SERVICE_PROXY_STATUS_SCHEMA_VERSION: u64 = 1;
 
 pub(crate) fn encode_startup_status(ports: &[u16]) -> String {
     let mut status = String::with_capacity(32 + ports.len() * 6);
-    status.push_str(&format!(
+    write!(
+        status,
         "{{\"version\":{SERVICE_PROXY_STATUS_SCHEMA_VERSION},\"ports\":["
-    ));
+    )
+    .expect("writing to a String cannot fail");
     for (index, port) in ports.iter().enumerate() {
         if index != 0 {
             status.push(',');
         }
-        status.push_str(&port.to_string());
+        write!(status, "{port}").expect("writing to a String cannot fail");
     }
     status.push_str("]}\n");
     status

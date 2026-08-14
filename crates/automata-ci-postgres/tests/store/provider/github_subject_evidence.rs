@@ -437,6 +437,22 @@ async fn repository_dispatch_resolution_is_claim_fenced_atomic_and_exactly_repla
     .await
 }
 
+async fn remove_authenticated_event_schema_guards(database: &TestDatabase) -> TestResult {
+    for statement in [
+        "ALTER TABLE github_repository_dispatch_pending_evidence \
+         DISABLE TRIGGER github_repository_dispatch_pending_no_update_delete",
+        "ALTER TABLE github_repository_dispatch_pending_evidence \
+         DROP CONSTRAINT github_repository_dispatch_pending_shape",
+        "ALTER TABLE github_provider_delivery_evidence \
+         DISABLE TRIGGER github_provider_delivery_evidence_no_update_delete",
+        "ALTER TABLE github_provider_delivery_evidence \
+         DROP CONSTRAINT github_provider_delivery_evidence_authenticated_event",
+    ] {
+        sqlx::query(statement).execute(database.pool()).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)]
@@ -450,30 +466,7 @@ async fn authenticated_event_readers_reject_forward_envelope_schemas() -> TestRe
             100,
         )
         .await?;
-        sqlx::query(
-            "ALTER TABLE github_repository_dispatch_pending_evidence \
-             DISABLE TRIGGER github_repository_dispatch_pending_no_update_delete",
-        )
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            "ALTER TABLE github_repository_dispatch_pending_evidence \
-             DROP CONSTRAINT github_repository_dispatch_pending_shape",
-        )
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            "ALTER TABLE github_provider_delivery_evidence \
-             DISABLE TRIGGER github_provider_delivery_evidence_no_update_delete",
-        )
-        .execute(database.pool())
-        .await?;
-        sqlx::query(
-            "ALTER TABLE github_provider_delivery_evidence \
-             DROP CONSTRAINT github_provider_delivery_evidence_authenticated_event",
-        )
-        .execute(database.pool())
-        .await?;
+        remove_authenticated_event_schema_guards(&database).await?;
 
         let pending_request = repository_dispatch_acceptance(
             &fixture,

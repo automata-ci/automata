@@ -412,7 +412,8 @@ fn nested_expression_and_strategy_versions_fail_closed() {
             serde_json::Value::Object(fields) => {
                 for (key, child) in fields {
                     path.push(key.clone());
-                    if key == "version" && path.len() > 1 {
+                    // Dialect versions select adapter semantics and are intentionally extensible.
+                    if key == "version" && path.len() > 1 && path[path.len() - 2] != "dialect" {
                         found.push(path.clone());
                     }
                     collect_nested_versions(child, path, found);

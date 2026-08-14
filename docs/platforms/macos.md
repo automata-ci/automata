@@ -268,7 +268,8 @@ When repository-scoped Apple Silicon capacity is provisioned, it must compile
 and lint the Rust and Swift components, inspect the helper entitlement, and
 exercise protocol/configuration failure paths. Before deployment, that physical
 runner must also execute the ignored
-`native_runner_process_e2e` test with the seven `AUTOMATA_MACOS_VM_*` artifact
+`macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_shell_job`
+test with the seven `AUTOMATA_MACOS_VM_*` artifact
 variables. That test verifies no Ethernet device, no host helper path,
 memory/vCPU sizing, the sealed process ceiling, shell/output behavior, and
 clone cleanup. Deployment qualification must additionally inject
@@ -286,6 +287,7 @@ AUTOMATA_MACOS_VM_TEMPLATE_MANIFEST=/Volumes/AutomataVM/templates/macos-15-arm64
 AUTOMATA_MACOS_VM_TEMPLATE_SHA256=<manifest-sha256> \
 AUTOMATA_MACOS_VM_STORAGE_ROOT=/Volumes/AutomataVM/e2e-state \
 AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID=<uppercase-volume-uuid> \
-cargo test --locked -p automata-ci-runner --test native_runner_process_e2e -- \
+cargo test --locked -p automata-ci-runner --test runner -- \
+  macos_vm_runner_process_e2e::shipped_runner_process_executes_a_claimed_isolated_shell_job \
   --ignored --nocapture --test-threads=1
 ```

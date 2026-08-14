@@ -259,27 +259,6 @@ fn decimal_digits(value: usize) -> usize {
     }
 }
 
-#[cfg(test)]
-mod limit_contract_tests {
-    use super::{DecodeLimitRejection, MAX_DERIVED_TEXT_BYTES, derived_text_byte_rejection};
-
-    #[test]
-    fn derived_text_byte_limit_has_exact_boundaries() {
-        assert_eq!(
-            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES - 1),
-            None
-        );
-        assert_eq!(
-            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES),
-            None
-        );
-        assert_eq!(
-            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES + 1),
-            Some(DecodeLimitRejection::DerivedTextBytes)
-        );
-    }
-}
-
 pub(super) fn field_name(entry: &YamlMappingEntry) -> Option<&str> {
     entry.key.as_scalar().map(|scalar| scalar.decoded.as_str())
 }
@@ -320,4 +299,25 @@ pub(super) fn valid_identifier(value: &str) -> bool {
     (first.is_ascii_alphabetic() || first == '_')
         && characters
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{DecodeLimitRejection, MAX_DERIVED_TEXT_BYTES, derived_text_byte_rejection};
+
+    #[test]
+    fn derived_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            derived_text_byte_rejection(MAX_DERIVED_TEXT_BYTES, MAX_DERIVED_TEXT_BYTES + 1),
+            Some(DecodeLimitRejection::DerivedTextBytes)
+        );
+    }
 }
