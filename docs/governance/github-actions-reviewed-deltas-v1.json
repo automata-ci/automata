@@ -29,6 +29,13 @@
         "foundation-integration-owner",
         "workflow-language-owner"
       ],
+      "runner_baseline": {
+        "baseline_commit": "98aabcd429c4e8402406c56ce2d26387fed3b9ce",
+        "baseline_release": "v2.336.0",
+        "javascript_runtime": "node24-24.18.0",
+        "release_url": "https://github.com/actions/runner/releases/tag/v2.336.0",
+        "repository": "actions/runner"
+      },
       "source_revision": "github/docs@18a2a21176f910cec8cace6a9027158303161929+actions/runner@98aabcd429c4e8402406c56ce2d26387fed3b9ce"
     },
     {
@@ -45,6 +52,7 @@
         "results-owner",
         "runtime-owner"
       ],
+      "runner_baseline": null,
       "source_revision": "actions/runner@35e45850b519df66a669e2c91e0917804a33d0c7"
     }
   ],

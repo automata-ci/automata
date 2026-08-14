@@ -30,10 +30,15 @@ prerequisite may use `#[ignore]` only when it declares a machine-checked CI lane
 whose workflow invokes the named runner and whose exact Cargo command selects
 the package/test set with `--ignored`. The managed-secret lifecycle fixtures,
 for example, are tied to the PostgreSQL lane rather than merely existing in the
-source tree. Job, step, environment,
-runner-selection, and resource fields are extracted in their defining function
-scope, so identical YAML keys such as job-level and step-level `uses` cannot be
-silently assigned to the same feature. It also extracts every
+source tree. Job, step, environment, runner-selection, resource,
+action-runtime, and container fields are extracted in their defining function
+scope. Container field scopes are crossed with every source-discovered
+`ContainerKind` caller, and action field scopes are tied to the runtime dispatch
+call graph. Identical keys such as job-level and step-level `uses`, Docker and
+composite `env`, or JavaScript and Docker `pre-if` therefore retain separate
+owners; genuinely shared dispatch fields name a sorted set of owners. Adding a
+caller or a new function that accepts already-known field names still changes
+the discovered surface inventory and fails CI. The validator also extracts every
 `AdmissionRejection` and `ExecutorErrorKind` variant from the runner-runtime
 port and requires a stable classification and feature owner. The provider
 event inventory is separately extracted from authenticated webhook
@@ -42,6 +47,30 @@ rejected decoder-only profile; adding a normalizer arm fails CI until its
 feature mapping is reviewed. The compatibility table in
 [`docs/compatibility.md`](../compatibility.md) is checked for exact area and
 status equality with the registry.
+
+The governed decoder source grammar is intentionally closed. Action field keys
+must flow through the censused `key_eq`/`Fields`/scalar helpers; an exact `==`
+check may only repeat a field already established by `key_eq`, and selector
+variables may not be passed through alternate comparison methods or macros.
+`YamlMappingEntry::key()` may appear only in its exact governed declaration or
+helper forms, while `key_scalar()` is limited to nonempty-key validation and
+diagnostic location access.
+The action parser and workflow decoder have a closed inventory of functions
+that can read, construct, return, or receive `YamlMappingEntry` keys. Every
+allowed key-bearing scope is token-anchored to its reviewed semantics, including
+the central `key_eq`/`field_name` normalizers, mapping attachment, mapping
+projection, and unknown-field preservation. Changing one of those flows or
+adding a side helper fails before decoder inventories are evaluated.
+The few scalar helpers that forward a dynamic key are checked by exact helper,
+argument, and parameter edges. Container `field_name(...)` calls must be the
+direct scrutinee of their governed match (or a direct alias used only once as
+that scrutinee). Runtime dispatch must derive exactly one `runtime` value from
+the governed `using` scalar and may use it only in the enumerated canonical
+case-insensitive comparisons; the original `using` value is otherwise limited
+to that extraction and its diagnostic location. Fields may be normal canonical
+string literals or typed local/module constants that resolve to one. Raw
+strings, mutable/local aliases, alternate selector comparisons, and other
+unparsed forms fail CI instead of disappearing from the inventory.
 
 An attributed fixture is scoped evidence for the semantic fragments recorded
 beside it; it is not, by itself, proof of every sentence in a compatibility
@@ -85,7 +114,14 @@ canonical ISO 8601 date, and it must name at least two distinct canonical human
 reviewer IDs. Source revisions are one or more lowercase GitHub `owner/repo`
 names pinned to full 40-character object IDs. Every delta also binds at least
 one sorted reference-snapshot ID; a review record with no immutable reference
-link cannot satisfy the replacement gate.
+link cannot satisfy the replacement gate. An `approved-baseline` record also
+contains the complete runner baseline object; exactly one record must match the
+current snapshot, every snapshot reference and category, and the exact set of
+immutable source revisions. A non-baseline decision must set that object to
+`null`. Runner reference URLs and the canonical release URL are checked against
+the recorded commit and release. If any runner-baseline field changes relative
+to the merge base, the matching approval must be a newly added record; editing
+an old approval in place cannot authorize the advance.
 
 To replace a pin:
 

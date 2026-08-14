@@ -2,41 +2,195 @@
   "compatibility_document": "docs/compatibility.md",
   "decoder_inventory": [
     {
-      "extractor": "action-metadata",
+      "extractor": "action-function-fields",
       "fields": {
-        "args": "container-actions",
+        "steps": "javascript-and-local-composite-actions",
+        "using": "javascript-and-local-composite-actions"
+      },
+      "function": "decode_composite",
+      "id": "action-composite-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
         "continue-on-error": "javascript-and-local-composite-actions",
-        "default": "javascript-and-local-composite-actions",
-        "deprecationMessage": "javascript-and-local-composite-actions",
-        "description": "javascript-and-local-composite-actions",
-        "entrypoint": "container-actions",
         "env": "javascript-and-local-composite-actions",
         "id": "javascript-and-local-composite-actions",
         "if": "javascript-and-local-composite-actions",
-        "image": "container-actions",
-        "inputs": "javascript-and-local-composite-actions",
-        "main": "javascript-and-local-composite-actions",
         "name": "javascript-and-local-composite-actions",
-        "outputs": "javascript-and-local-composite-actions",
-        "plugin": "javascript-and-local-composite-actions",
-        "post": "javascript-and-local-composite-actions",
-        "post-entrypoint": "container-actions",
-        "post-if": "javascript-and-local-composite-actions",
-        "pre": "javascript-and-local-composite-actions",
-        "pre-entrypoint": "container-actions",
-        "pre-if": "javascript-and-local-composite-actions",
-        "required": "javascript-and-local-composite-actions",
         "run": "javascript-and-local-composite-actions",
-        "runs": "javascript-and-local-composite-actions",
         "shell": "javascript-and-local-composite-actions",
-        "steps": "javascript-and-local-composite-actions",
+        "working-directory": "javascript-and-local-composite-actions"
+      },
+      "function": "decode_composite_run_step",
+      "id": "action-composite-run-step-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "continue-on-error": "javascript-and-local-composite-actions",
+        "env": "javascript-and-local-composite-actions",
+        "id": "javascript-and-local-composite-actions",
+        "if": "javascript-and-local-composite-actions",
+        "name": "javascript-and-local-composite-actions",
+        "run": "javascript-and-local-composite-actions",
+        "shell": "javascript-and-local-composite-actions",
         "uses": "javascript-and-local-composite-actions",
-        "using": "javascript-and-local-composite-actions",
-        "value": "javascript-and-local-composite-actions",
         "with": "javascript-and-local-composite-actions",
         "working-directory": "javascript-and-local-composite-actions"
       },
-      "id": "action-metadata-fields",
+      "function": "decode_composite_step",
+      "id": "action-composite-step-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "continue-on-error": "javascript-and-local-composite-actions",
+        "env": "javascript-and-local-composite-actions",
+        "id": "javascript-and-local-composite-actions",
+        "if": "javascript-and-local-composite-actions",
+        "name": "javascript-and-local-composite-actions",
+        "uses": "javascript-and-local-composite-actions",
+        "with": "javascript-and-local-composite-actions"
+      },
+      "function": "decode_composite_uses_step",
+      "id": "action-composite-uses-step-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "args": "container-actions",
+        "entrypoint": "container-actions",
+        "env": "container-actions",
+        "image": "container-actions",
+        "post-entrypoint": "container-actions",
+        "post-if": "container-actions",
+        "pre-entrypoint": "container-actions",
+        "pre-if": "container-actions",
+        "using": "container-actions"
+      },
+      "function": "decode_docker",
+      "id": "action-docker-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "default": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "deprecationMessage": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "description": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "required": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ]
+      },
+      "function": "decode_inputs",
+      "id": "action-input-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "main": "javascript-and-local-composite-actions",
+        "post": "javascript-and-local-composite-actions",
+        "post-if": "javascript-and-local-composite-actions",
+        "pre": "javascript-and-local-composite-actions",
+        "pre-if": "javascript-and-local-composite-actions",
+        "using": "javascript-and-local-composite-actions"
+      },
+      "function": "decode_javascript",
+      "id": "action-javascript-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "description": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "value": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ]
+      },
+      "function": "decode_outputs",
+      "id": "action-output-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "description": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "inputs": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "name": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "outputs": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "runs": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ]
+      },
+      "function": "decode_root",
+      "id": "action-root-fields",
+      "path": "crates/automata-ci-action-github/src/decoder.rs"
+    },
+    {
+      "extractor": "action-function-fields",
+      "fields": {
+        "args": "container-actions",
+        "entrypoint": "container-actions",
+        "env": "container-actions",
+        "image": "container-actions",
+        "main": "javascript-and-local-composite-actions",
+        "plugin": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "post": "javascript-and-local-composite-actions",
+        "post-entrypoint": "container-actions",
+        "post-if": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "pre": "javascript-and-local-composite-actions",
+        "pre-entrypoint": "container-actions",
+        "pre-if": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ],
+        "steps": "javascript-and-local-composite-actions",
+        "using": [
+          "container-actions",
+          "javascript-and-local-composite-actions"
+        ]
+      },
+      "function": "decode_runs",
+      "id": "action-runs-fields",
       "path": "crates/automata-ci-action-github/src/decoder.rs"
     },
     {
@@ -53,19 +207,60 @@
       "path": "crates/automata-ci-action-github/src/decoder.rs"
     },
     {
-      "extractor": "some-match-arms",
+      "extractor": "container-kind-function-fields",
+      "fields": {
+        "password": "job-containers",
+        "username": "job-containers"
+      },
+      "function": "container_credentials",
+      "id": "job-container-credential-fields",
+      "kind": "Job",
+      "path": "crates/automata-ci-workflow-github/src/decode/container.rs",
+      "surface_function": "job_container"
+    },
+    {
+      "extractor": "container-kind-function-fields",
+      "fields": {
+        "credentials": "job-containers",
+        "env": "job-containers",
+        "image": "job-containers",
+        "options": "job-containers",
+        "ports": "job-containers",
+        "volumes": "job-containers"
+      },
+      "function": "ContainerFields::decode_entry",
+      "id": "job-container-fields",
+      "kind": "Job",
+      "path": "crates/automata-ci-workflow-github/src/decode/container.rs",
+      "surface_function": "job_container"
+    },
+    {
+      "extractor": "container-kind-function-fields",
+      "fields": {
+        "password": "service-containers",
+        "username": "service-containers"
+      },
+      "function": "container_credentials",
+      "id": "service-container-credential-fields",
+      "kind": "Service",
+      "path": "crates/automata-ci-workflow-github/src/decode/container.rs",
+      "surface_function": "job_services"
+    },
+    {
+      "extractor": "container-kind-function-fields",
       "fields": {
         "credentials": "service-containers",
         "env": "service-containers",
         "image": "service-containers",
         "options": "service-containers",
-        "password": "service-containers",
         "ports": "service-containers",
-        "username": "service-containers",
         "volumes": "service-containers"
       },
-      "id": "container-fields",
-      "path": "crates/automata-ci-workflow-github/src/decode/container.rs"
+      "function": "ContainerFields::decode_entry",
+      "id": "service-container-fields",
+      "kind": "Service",
+      "path": "crates/automata-ci-workflow-github/src/decode/container.rs",
+      "surface_function": "job_services"
     },
     {
       "extractor": "some-match-arms",
