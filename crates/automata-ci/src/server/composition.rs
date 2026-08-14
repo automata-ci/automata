@@ -25,6 +25,9 @@ use automata_ci_core::RunId;
 use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_protocol::ProtocolLimits;
+use automata_ci_provisioning::{ProvisioningWorkloadAuthenticator, WorkspaceProvisioner};
+use automata_ci_provisioning_grpc::{ManagementGrpcServer, ManagementServerTlsConfig};
+use automata_ci_provisioning_postgres::PostgresWorkspaceProvisioner;
 use automata_ci_results_github::{
     ArtifactRepository, ArtifactService, CacheLimits, CacheRepository, CacheService,
     GithubCacheApi, GithubCacheHttpLimits, GithubResultsApi, GithubResultsHttpLimits,
@@ -128,6 +131,7 @@ use super::managed_secret_delivery::{
 };
 use super::protected_environment_gate::ProtectedEnvironmentLeaseGate;
 use super::protected_environment_review::OperationalProtectedEnvironmentReviewBackend;
+use super::provisioning_workload_auth::PinnedProvisioningWorkloadAuthenticator;
 use super::secret_cleanup::{
     BuiltinSecretCleanupLoop, BuiltinSecretCleanupPorts, SecretCleanupClock,
     SystemSecretCleanupClock,
@@ -155,6 +159,7 @@ const MAX_GITHUB_APP_PRIVATE_KEY_PEM_BYTES: usize = 32 * 1_024;
 
 pub(crate) struct ProductionComponents {
     pub(crate) runner_server: RunnerControlServer,
+    pub(crate) management_server: Option<ManagementGrpcServer>,
     pub(crate) readiness_monitor: ReadinessMonitor,
     pub(crate) maintenance_loop: ControlPlaneMaintenanceLoop,
     pub(crate) logical_run_finalization: LogicalRunFinalizationService,
@@ -179,6 +184,7 @@ impl fmt::Debug for ProductionComponents {
         formatter
             .debug_struct("ProductionComponents")
             .field("runner_server", &self.runner_server)
+            .field("management_server", &self.management_server)
             .field("readiness_monitor", &self.readiness_monitor)
             .field("maintenance_loop", &self.maintenance_loop)
             .field("logical_run_finalization", &self.logical_run_finalization)
@@ -217,6 +223,7 @@ impl ProductionComponents {
     pub(crate) async fn initialize(
         config: &ServerConfig,
         runner_listener: TcpListener,
+        management_listener: Option<TcpListener>,
         readiness: &Readiness,
         metrics: &ControlPlaneMetrics,
     ) -> Result<Self, ServerCompositionError> {
@@ -231,6 +238,8 @@ impl ProductionComponents {
         // the migrator on every readiness tick repeatedly acquires migration
         // locks and emits expected duplicate-table diagnostics under SQLx.
         store.migrate().await?;
+        let management_server =
+            build_management_server(config, management_listener, store.as_ref())?;
         let workflow_clock: Arc<dyn AdmissionClock> = Arc::new(SystemAdmissionClock);
         let logical_run_finalization_repository: Arc<dyn LogicalRunFinalizationRepository> =
             store.clone();
@@ -523,6 +532,7 @@ impl ProductionComponents {
             });
         Ok(Self {
             runner_server,
+            management_server,
             readiness_monitor,
             maintenance_loop,
             logical_run_finalization,
@@ -542,6 +552,43 @@ impl ProductionComponents {
             web_fallback_context,
         })
     }
+}
+
+fn build_management_server(
+    config: &ServerConfig,
+    listener: Option<TcpListener>,
+    store: &PostgresStore,
+) -> Result<Option<ManagementGrpcServer>, ServerCompositionError> {
+    let (config, listener) = match (config.management(), listener) {
+        (None, None) => return Ok(None),
+        (Some(config), Some(listener)) => (config, listener),
+        (None, Some(_)) | (Some(_), None) => {
+            return Err(ServerCompositionError::InvalidManagementConfiguration);
+        }
+    };
+
+    let mut client_ca = config.load_client_ca_certificate_pem()?;
+    let mut server_certificate = config.load_server_certificate_pem()?;
+    let tls = ManagementServerTlsConfig::new(
+        std::mem::take(&mut *client_ca),
+        std::mem::take(&mut *server_certificate),
+        config.load_server_private_key_pem()?,
+    )
+    .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
+    let authenticator: Arc<dyn ProvisioningWorkloadAuthenticator> =
+        Arc::new(PinnedProvisioningWorkloadAuthenticator::new(
+            config.authority().clone(),
+            config.client_certificate_sha256().to_vec(),
+        ));
+    let provisioner: Arc<dyn WorkspaceProvisioner> = Arc::new(PostgresWorkspaceProvisioner::new(
+        store.postgres_pool().clone(),
+    ));
+    Ok(Some(ManagementGrpcServer::new(
+        listener,
+        tls,
+        authenticator,
+        provisioner,
+    )))
 }
 
 async fn verify_runner_capability_readiness(
@@ -1920,6 +1967,9 @@ pub enum ServerCompositionError {
     /// A PEM source was malformed, empty, excessive, or contained multiple keys.
     #[error("runner TLS PEM material is invalid")]
     InvalidTlsPem,
+    /// The private management listener's TLS identity or product wiring was invalid.
+    #[error("management listener configuration is invalid")]
+    InvalidManagementConfiguration,
     /// The reviewed TLS/transport policy rejected the supplied configuration.
     #[error(transparent)]
     Transport(#[from] TransportConfigurationError),

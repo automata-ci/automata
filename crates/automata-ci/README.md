@@ -24,19 +24,30 @@ This page is the configuration reference.
 
 ## Server listeners
 
-Each server replica binds three mandatory sockets and, when configured, one
-private metrics socket before it starts:
+Each server replica binds three mandatory sockets and, when configured,
+private management and metrics sockets before it starts:
 
 | Option | Default | Traffic |
 | --- | --- | --- |
 | `--listen` | `127.0.0.1:8080` | Human API, health, readiness, GitHub webhook, and SSR |
 | `--results-listen` | `127.0.0.1:8081` | GitHub Actions Results-compatible requests |
 | `--runner-listen` | `127.0.0.1:9090` | Direct mutual-TLS runner protocol over HTTP/2 |
+| `--management-listen` | disabled | Private mutual-TLS shard-management gRPC |
 | `--metrics-listen` | disabled | Loopback-only Prometheus/OpenMetrics endpoint |
 
 The runner listener must validate client certificates directly. Do not pass a
 runner identity through reverse-proxy headers. A proxy-terminated runner
 transport would require a separate adapter and trust contract.
+
+The management listener is opt-in and is not needed by a standalone
+self-hosted installation. Enabling it requires one stable authority ID, shard
+ID, exact delegated-actor HTTPS issuer, dedicated client CA, server identity,
+and one or more SHA-256 pins for allowed leaf client certificates. mTLS first
+validates the client chain; the leaf pin then maps that verified connection to
+the configured provisioning authority. Supply both old and new pins during a
+bounded certificate-rotation overlap. This listener connects the public
+workspace-provisioning gRPC contract directly to the same PostgreSQL database
+used by the other replicas in the shard, reusing this replica's existing pool.
 
 When managed-secret encryption is configured, `--runner-public-url` is also
 required. It is the exact HTTPS origin configured as each runner's
@@ -62,7 +73,7 @@ private-interface bind.
 `automata server`:
 
 1. validates configuration and secret references;
-2. binds the three mandatory listeners and the optional metrics listener;
+2. binds the three mandatory listeners and optional management and metrics listeners;
 3. connects to PostgreSQL and applies embedded migrations;
 4. verifies durable runner capabilities against this replica;
 5. initializes the immutable S3 adapter;

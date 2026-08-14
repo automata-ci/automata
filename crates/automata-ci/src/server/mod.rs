@@ -16,6 +16,7 @@ mod managed_secret_delivery;
 pub(crate) mod metrics;
 mod protected_environment_gate;
 mod protected_environment_review;
+mod provisioning_workload_auth;
 mod readiness;
 mod secret_cleanup;
 mod secret_custody;
@@ -29,6 +30,8 @@ use std::{future::Future, net::SocketAddr, pin::Pin, time::Duration};
 
 use anyhow::{Context as _, Result};
 use automata_ci_blob::BlobStoreErrorKind;
+use automata_ci_provisioning_grpc::ManagementGrpcServer;
+use automata_ci_runner_transport::RunnerControlServer;
 use automata_ci_store::{
     LogicalInstanceResultStoreError, LogicalInstanceResultValueError, LogicalJobResultStoreError,
     LogicalJobResultValueError, StoreError,
@@ -55,8 +58,9 @@ use composition::ProductionComponents;
 pub use composition::ServerCompositionError;
 pub use config::{
     AuthEncryptionConfig, BootstrapConfig, ControlPlaneEncryptionConfig, HumanAuthConfig,
-    SecretEncryptionConfig, SecretEncryptionLoadError, SecretLoadError, SecretSource, ServerConfig,
-    ServerConfigError, VersionedSecretSource, VersionedSecretSourceParseError,
+    ManagementConfig, SecretEncryptionConfig, SecretEncryptionLoadError, SecretLoadError,
+    SecretSource, ServerConfig, ServerConfigError, VersionedSecretSource,
+    VersionedSecretSourceParseError,
 };
 pub use github_oidc::{GithubOidcConfig, GithubOidcProductError};
 pub use github_provider::{
@@ -114,10 +118,12 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
     let BoundListeners {
         http_listener,
         runner_listener,
+        management_listener,
         results_listener,
         metrics_listener,
         http_address,
         runner_address,
+        management_address,
         results_address,
         metrics_address,
     } = BoundListeners::bind(&config).await?;
@@ -140,8 +146,13 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
         metrics_cancellation,
         state_sampler_receiver,
     );
-    let initialization =
-        ProductionComponents::initialize(&config, runner_listener, &readiness, &metrics);
+    let initialization = ProductionComponents::initialize(
+        &config,
+        runner_listener,
+        management_listener,
+        &readiness,
+        &metrics,
+    );
     let components =
         match race_initialization(initialization, &mut metrics_http, &process_cancellation).await {
             InitializationRace::Initialization(Ok(components)) => components,
@@ -216,6 +227,7 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
     info!(
         http_address = %http_address,
         runner_address = %runner_address,
+        management_address = ?management_address,
         results_address = %results_address,
         metrics_address = ?metrics_address,
         results_public_url = %config.results_public_endpoint.url(),
@@ -257,10 +269,12 @@ fn router_with_optional_github_webhook(
 struct BoundListeners {
     http_listener: TcpListener,
     runner_listener: TcpListener,
+    management_listener: Option<TcpListener>,
     results_listener: TcpListener,
     metrics_listener: Option<TcpListener>,
     http_address: SocketAddr,
     runner_address: SocketAddr,
+    management_address: Option<SocketAddr>,
     results_address: SocketAddr,
     metrics_address: Option<SocketAddr>,
 }
@@ -273,6 +287,15 @@ impl BoundListeners {
         let runner_listener = TcpListener::bind(config.runner_listen)
             .await
             .context("failed to bind runner-control listener")?;
+        let management_listener = if let Some(management) = config.management() {
+            Some(
+                TcpListener::bind(management.listen)
+                    .await
+                    .context("failed to bind management listener")?,
+            )
+        } else {
+            None
+        };
         let results_listener = TcpListener::bind(config.results_listen)
             .await
             .context("failed to bind Results listener")?;
@@ -292,6 +315,11 @@ impl BoundListeners {
             runner_address: runner_listener
                 .local_addr()
                 .context("failed to inspect runner-control listener")?,
+            management_address: management_listener
+                .as_ref()
+                .map(TcpListener::local_addr)
+                .transpose()
+                .context("failed to inspect management listener")?,
             results_address: results_listener
                 .local_addr()
                 .context("failed to inspect Results listener")?,
@@ -302,6 +330,7 @@ impl BoundListeners {
                 .context("failed to inspect metrics listener")?,
             http_listener,
             runner_listener,
+            management_listener,
             results_listener,
             metrics_listener,
         })
@@ -421,6 +450,7 @@ where
     } = services;
     let mut components = components;
     let github_provider = components.github_provider.take();
+    let management_server = components.management_server.take();
     let http_cancellation = cancellation.clone();
     let runner_cancellation = cancellation.child_token();
     let results_cancellation = cancellation.child_token();
@@ -441,13 +471,11 @@ where
             .await
             .map_err(|_| ManagedServiceError::HumanHttp)
     };
-    let runner = async move {
-        components
-            .runner_server
-            .serve(runner_cancellation)
-            .await
-            .map_err(|_| ManagedServiceError::RunnerControl)
-    };
+    let runner = run_machine_listeners(
+        components.runner_server,
+        management_server,
+        runner_cancellation,
+    );
     let results_api =
         results_router_with_deadline(components.results_api.clone(), RESULTS_HTTP_REQUEST_TIMEOUT);
     let results = async move {
@@ -525,6 +553,93 @@ where
     )
     .await;
     result.context("control-plane service supervision failed")
+}
+
+#[derive(Clone, Copy)]
+enum MachineListener {
+    RunnerControl,
+    Management,
+}
+
+impl MachineListener {
+    const fn failure(self) -> ManagedServiceError {
+        match self {
+            Self::RunnerControl => ManagedServiceError::RunnerControl,
+            Self::Management => ManagedServiceError::ManagementGrpc,
+        }
+    }
+}
+
+async fn run_machine_listeners(
+    runner: RunnerControlServer,
+    management: Option<ManagementGrpcServer>,
+    cancellation: CancellationToken,
+) -> Result<(), ManagedServiceError> {
+    let Some(management) = management else {
+        return runner
+            .serve(cancellation)
+            .await
+            .map_err(|_| ManagedServiceError::RunnerControl);
+    };
+
+    let runner_cancellation = cancellation.clone();
+    let management_cancellation = cancellation.clone();
+    let runner = async move {
+        runner
+            .serve(runner_cancellation)
+            .await
+            .map_err(|_| ManagedServiceError::RunnerControl)
+    };
+    let management = async move {
+        management
+            .serve(management_cancellation)
+            .await
+            .map_err(|_| ManagedServiceError::ManagementGrpc)
+    };
+    supervise_machine_listener_futures(runner, management, cancellation).await
+}
+
+async fn supervise_machine_listener_futures<R, M>(
+    runner: R,
+    management: M,
+    cancellation: CancellationToken,
+) -> Result<(), ManagedServiceError>
+where
+    R: Future<Output = Result<(), ManagedServiceError>>,
+    M: Future<Output = Result<(), ManagedServiceError>>,
+{
+    tokio::pin!(runner);
+    tokio::pin!(management);
+
+    let (first_listener, first_result, sibling_result, shutdown_requested) = tokio::select! {
+        result = &mut runner => {
+            let shutdown_requested = cancellation.is_cancelled();
+            cancellation.cancel();
+            (
+                MachineListener::RunnerControl,
+                result,
+                management.await,
+                shutdown_requested,
+            )
+        }
+        result = &mut management => {
+            let shutdown_requested = cancellation.is_cancelled();
+            cancellation.cancel();
+            (
+                MachineListener::Management,
+                result,
+                runner.await,
+                shutdown_requested,
+            )
+        }
+    };
+    first_result?;
+    sibling_result?;
+    if shutdown_requested {
+        Ok(())
+    } else {
+        Err(first_listener.failure())
+    }
 }
 
 async fn run_autonomous_workflow(
@@ -886,6 +1001,9 @@ pub enum ManagedServiceError {
     /// The runner-control listener failed.
     #[error("runner-control service failed")]
     RunnerControl,
+    /// The private mTLS shard-management listener failed.
+    #[error("management gRPC service failed")]
+    ManagementGrpc,
     /// The GitHub Actions Results HTTP listener failed.
     #[error("Results HTTP service failed")]
     ResultsHttp,
@@ -1732,5 +1850,58 @@ mod tests {
         .await
         .expect("cancelled retry wait must finish immediately");
         assert!(!completed);
+    }
+
+    #[tokio::test]
+    async fn management_failure_cancels_and_drains_runner_control() {
+        let cancellation = CancellationToken::new();
+        let runner_cancellation = cancellation.clone();
+        let runner_drained = Arc::new(AtomicBool::new(false));
+        let runner_drained_task = Arc::clone(&runner_drained);
+        let runner = async move {
+            runner_cancellation.cancelled().await;
+            runner_drained_task.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let management = async { Err(ManagedServiceError::ManagementGrpc) };
+
+        let result = supervise_machine_listener_futures(runner, management, cancellation).await;
+
+        assert_eq!(result, Err(ManagedServiceError::ManagementGrpc));
+        assert!(runner_drained.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn process_shutdown_drains_both_machine_listeners_cleanly() {
+        let cancellation = CancellationToken::new();
+        let runner_cancellation = cancellation.clone();
+        let management_cancellation = cancellation.clone();
+        let runner_drained = Arc::new(AtomicBool::new(false));
+        let management_drained = Arc::new(AtomicBool::new(false));
+        let runner_drained_task = Arc::clone(&runner_drained);
+        let management_drained_task = Arc::clone(&management_drained);
+        let runner = async move {
+            runner_cancellation.cancelled().await;
+            runner_drained_task.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let management = async move {
+            management_cancellation.cancelled().await;
+            management_drained_task.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let shutdown = cancellation.clone();
+        let task = tokio::spawn(supervise_machine_listener_futures(
+            runner,
+            management,
+            cancellation,
+        ));
+
+        shutdown.cancel();
+        let result = task.await.expect("machine listener supervisor joins");
+
+        assert_eq!(result, Ok(()));
+        assert!(runner_drained.load(Ordering::SeqCst));
+        assert!(management_drained.load(Ordering::SeqCst));
     }
 }

@@ -8,11 +8,12 @@ scope-checks the domain command, and calls the transport-neutral provisioning
 port.
 
 The server accepts a pre-bound listener so the product composition root retains
-ownership of startup ordering and port conflicts. It is not yet wired into the
-Automata binary. The durable transaction is implemented by
-`automata-ci-provisioning-postgres`; listener configuration and process
-composition remain a separate product change, so Core does not advertise an
-unconfigured management endpoint.
+ownership of startup ordering and port conflicts. The Automata binary composes
+it only when a complete private management-listener configuration is supplied;
+standalone self-hosted deployments expose no placeholder endpoint. The product
+maps a dedicated-CA-verified leaf certificate through an exact SHA-256 pin to a
+stable shard-scoped authority, and supplies the durable
+`automata-ci-provisioning-postgres` transaction adapter.
 
 Cargo generates the private Rust wire module into `OUT_DIR` with Protox and
 Tonic. Building therefore needs no separately installed `protoc` or Buf binary,

@@ -604,6 +604,70 @@ pub struct ServerArgs {
     )]
     pub runner_server_key_source: SecretSource,
 
+    /// Optional private mTLS gRPC listen address for shard management.
+    ///
+    /// Omitting this option disables the management listener and preserves the
+    /// standalone self-hosted topology. Enabling it requires every related
+    /// authority, fingerprint, and TLS option below.
+    #[arg(long, env = "AUTOMATA_MANAGEMENT_LISTEN", value_name = "ADDR")]
+    pub management_listen: Option<SocketAddr>,
+
+    /// Immutable identity of the Core shard served by this deployment.
+    #[arg(long, env = "AUTOMATA_MANAGEMENT_SHARD_ID", value_name = "SHARD")]
+    pub management_shard_id: Option<String>,
+
+    /// Stable identity of the workload allowed to provision this shard.
+    #[arg(
+        long,
+        env = "AUTOMATA_MANAGEMENT_AUTHORITY_ID",
+        value_name = "AUTHORITY"
+    )]
+    pub management_authority_id: Option<String>,
+
+    /// Exact HTTPS issuer accepted for delegated actor identities.
+    #[arg(
+        long,
+        env = "AUTOMATA_MANAGEMENT_DELEGATED_ACTOR_ISSUER",
+        value_name = "ORIGIN"
+    )]
+    pub management_delegated_actor_issuer: Option<String>,
+
+    /// SHA-256 fingerprint of an allowed leaf client certificate, in hex.
+    ///
+    /// Repeat the option, or provide a comma-separated environment value, to
+    /// overlap old and new certificates during rotation.
+    #[arg(
+        long = "management-client-cert-sha256",
+        env = "AUTOMATA_MANAGEMENT_CLIENT_CERT_SHA256",
+        value_name = "HEX",
+        value_delimiter = ','
+    )]
+    pub management_client_certificate_sha256: Vec<String>,
+
+    /// PEM CA bundle used exclusively to authenticate management clients.
+    #[arg(
+        long = "management-client-ca-cert-source",
+        env = "AUTOMATA_MANAGEMENT_CLIENT_CA_CERT_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub management_client_ca_certificate_source: Option<SecretSource>,
+
+    /// PEM chain reference for the private management server identity.
+    #[arg(
+        long = "management-server-cert-source",
+        env = "AUTOMATA_MANAGEMENT_SERVER_CERT_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub management_server_certificate_source: Option<SecretSource>,
+
+    /// PEM private-key reference for the private management server identity.
+    #[arg(
+        long,
+        env = "AUTOMATA_MANAGEMENT_SERVER_KEY_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub management_server_key_source: Option<SecretSource>,
+
     /// Interval between database and immutable object-store readiness probes.
     #[arg(
         long,

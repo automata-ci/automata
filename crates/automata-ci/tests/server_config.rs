@@ -1128,3 +1128,123 @@ fn maintenance_policy_rejects_unbounded_values_and_a_one_tick_resume_window() {
         Err(ServerConfigError::InvalidMaintenancePolicy)
     ));
 }
+
+#[test]
+fn private_management_listener_is_disabled_by_default() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+    ])
+    .expect("CLI syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+
+    let config = ServerConfig::from_args(&args).expect("standalone server configuration");
+    assert!(config.management().is_none());
+}
+
+#[test]
+fn private_management_listener_requires_one_complete_authority_and_tls_policy() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--management-listen",
+        "127.0.0.1:9443",
+    ])
+    .expect("partial management syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidManagementConfiguration)
+    ));
+}
+
+#[test]
+fn private_management_listener_accepts_bounded_certificate_rotation_overlap() {
+    let old_fingerprint = "11".repeat(32);
+    let new_fingerprint = "aB".repeat(32);
+    let arguments = vec![
+        "automata".to_owned(),
+        "server".to_owned(),
+        "--results-public-url".to_owned(),
+        "https://results.example.test/".to_owned(),
+        "--management-listen".to_owned(),
+        "127.0.0.1:9443".to_owned(),
+        "--management-shard-id".to_owned(),
+        "shard-a".to_owned(),
+        "--management-authority-id".to_owned(),
+        "automata-cloud".to_owned(),
+        "--management-delegated-actor-issuer".to_owned(),
+        "https://cloud.example.test".to_owned(),
+        "--management-client-cert-sha256".to_owned(),
+        format!("{old_fingerprint},{new_fingerprint}"),
+        "--management-client-ca-cert-source".to_owned(),
+        "file:/run/automata/management-client-ca.pem".to_owned(),
+        "--management-server-cert-source".to_owned(),
+        "file:/run/automata/management-server.pem".to_owned(),
+        "--management-server-key-source".to_owned(),
+        "file:/run/automata/management-server-key.pem".to_owned(),
+    ];
+    let cli = Cli::try_parse_from(arguments).expect("complete management syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+
+    let config = ServerConfig::from_args(&args).expect("complete management configuration");
+    let management = config.management().expect("management is enabled");
+    assert_eq!(management.authority().id().as_str(), "automata-cloud");
+    assert_eq!(management.authority().shard_id().as_str(), "shard-a");
+    assert_eq!(
+        management.authority().delegated_actor_issuer().as_str(),
+        "https://cloud.example.test"
+    );
+}
+
+#[test]
+fn private_management_listener_rejects_malformed_or_duplicate_leaf_pins() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--management-listen",
+        "127.0.0.1:9443",
+        "--management-shard-id",
+        "shard-a",
+        "--management-authority-id",
+        "automata-cloud",
+        "--management-delegated-actor-issuer",
+        "https://cloud.example.test",
+        "--management-client-cert-sha256",
+        "not-a-sha256-fingerprint",
+        "--management-client-ca-cert-source",
+        "env:AUTOMATA_TEST_MANAGEMENT_CLIENT_CA",
+        "--management-server-cert-source",
+        "env:AUTOMATA_TEST_MANAGEMENT_SERVER_CERT",
+        "--management-server-key-source",
+        "env:AUTOMATA_TEST_MANAGEMENT_SERVER_KEY",
+    ])
+    .expect("invalid fingerprint remains a configuration concern");
+    let Command::Server(mut args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidManagementConfiguration)
+    ));
+
+    let duplicate = "22".repeat(32);
+    args.management_client_certificate_sha256 = vec![duplicate.clone(), duplicate];
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidManagementConfiguration)
+    ));
+}
