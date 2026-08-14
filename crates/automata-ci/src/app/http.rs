@@ -9,7 +9,7 @@ use axum::{
     error_handling::HandleErrorLayer,
     extract::OriginalUri,
     http::{
-        HeaderName, HeaderValue, StatusCode,
+        HeaderName, HeaderValue, Method, StatusCode,
         header::{CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE},
     },
     middleware,
@@ -370,9 +370,19 @@ fn finalize_combined_router_with_policy(
 }
 
 async fn harden_http_response(request: axum::extract::Request, next: middleware::Next) -> Response {
+    let is_successful_setup_get =
+        request.method() == Method::GET && request.uri().path() == "/setup";
     let mut response = next.run(request).await;
+    let setup_referrer_policy = is_successful_setup_get && response.status().is_success();
     let headers = response.headers_mut();
-    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        REFERRER_POLICY,
+        HeaderValue::from_static(if setup_referrer_policy {
+            "same-origin"
+        } else {
+            "no-referrer"
+        }),
+    );
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     response
 }
@@ -571,6 +581,7 @@ mod tests {
             .await
             .expect("armed setup response");
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[REFERRER_POLICY], "same-origin");
 
         for _ in 0..2 {
             let response = router
@@ -597,6 +608,7 @@ mod tests {
             .await
             .expect("withdrawn setup response");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[REFERRER_POLICY], "no-referrer");
     }
 
     #[tokio::test]
