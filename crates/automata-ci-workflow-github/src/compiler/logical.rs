@@ -224,6 +224,9 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
     let workflow = request.source_plan.workflow();
     context.reject_extensions(workflow.extensions());
     let event = compile_event(request.event, &request.selection, &mut context);
+    if !matches!(event, CompiledEvent::Selected { .. }) {
+        return finish_compilation(event, None, context.diagnostics);
+    }
     let source = compile_source(&context);
     let name = compile_workflow_name(workflow.name(), &mut context);
     let mut workflow_references = BTreeMap::new();
