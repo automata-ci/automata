@@ -1,30 +1,85 @@
 use std::fmt::Write as _;
 
-use automata_ci_core::{JobConclusion, JobResult, StepResult};
-use automata_ci_github::{GithubCheckModelError, GithubCheckOutput};
+use automata_ci_core::{
+    JobConclusion, JobResult, Sha256Digest, StepAnnotation, StepAnnotationLevel,
+    StepAnnotationProperty, StepResult,
+};
+use automata_ci_github::{
+    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckModelError, GithubCheckOutput,
+};
+use sha2::{Digest as _, Sha256};
 
 const MAX_PRESENTATION_TEXT_BYTES: usize = 60 * 1_024;
 const TRUNCATION_MARKER: &str = "\n\n_Additional step detail was truncated._";
+const PRESENTATION_DIGEST_DOMAIN: &[u8] = b"automata.github-check-presentation.v1\0";
 
-pub(super) fn terminal_output(
+pub(super) struct GithubTerminalPresentation {
+    output: GithubCheckOutput,
+    annotations: Vec<GithubCheckAnnotation>,
+    digest: Sha256Digest,
+    #[cfg_attr(not(test), allow(dead_code))]
+    omitted_annotations: usize,
+}
+
+impl GithubTerminalPresentation {
+    pub(super) const fn output(&self) -> &GithubCheckOutput {
+        &self.output
+    }
+
+    pub(super) fn annotations(&self) -> &[GithubCheckAnnotation] {
+        &self.annotations
+    }
+
+    pub(super) const fn digest(&self) -> Sha256Digest {
+        self.digest
+    }
+
+    #[cfg(test)]
+    pub(super) const fn omitted_annotations(&self) -> usize {
+        self.omitted_annotations
+    }
+}
+
+pub(super) fn terminal_presentation(
     result: &JobResult,
     details_url: &str,
-) -> Result<GithubCheckOutput, GithubCheckModelError> {
+) -> Result<GithubTerminalPresentation, GithubCheckModelError> {
     let mut counts = ConclusionCounts::default();
     for step in result.steps() {
         counts.observe(step.conclusion());
     }
+    let (annotations, omitted_annotations) = render_annotations(result.steps());
+    let omission = if omitted_annotations == 0 {
+        String::new()
+    } else {
+        format!(
+            "\n\n{omitted_annotations} {} could not be attached to a canonical source location and remain visible in Automata.",
+            if omitted_annotations == 1 {
+                "diagnostic"
+            } else {
+                "diagnostics"
+            }
+        )
+    };
     let summary = format!(
-        "{}\n\n{}\n\n[Open this job in Automata]({details_url})",
+        "{}\n\n{}{}\n\n[Open this job in Automata]({details_url})",
         conclusion_summary(result.conclusion()),
         counts.summary(result.steps().len()),
+        omission,
     );
     let text = render_step_details(result.steps());
-    GithubCheckOutput::new(
+    let output = GithubCheckOutput::new(
         conclusion_title(result.conclusion()),
         summary,
         (!text.is_empty()).then_some(text),
-    )
+    )?;
+    let digest = presentation_digest(&output, &annotations, omitted_annotations);
+    Ok(GithubTerminalPresentation {
+        output,
+        annotations,
+        digest,
+        omitted_annotations,
+    })
 }
 
 #[derive(Default)]
@@ -58,6 +113,102 @@ impl ConclusionCounts {
             self.skipped,
         )
     }
+}
+
+fn render_annotations(steps: &[StepResult]) -> (Vec<GithubCheckAnnotation>, usize) {
+    let mut converted = Vec::new();
+    let mut omitted = 0_usize;
+    for step in steps {
+        for annotation in step.annotations() {
+            match render_annotation(annotation) {
+                Some(annotation) => converted.push(annotation),
+                None => omitted = omitted.saturating_add(1),
+            }
+        }
+    }
+    (converted, omitted)
+}
+
+fn render_annotation(annotation: &StepAnnotation) -> Option<GithubCheckAnnotation> {
+    let path = annotation_property(annotation, "file")?.replace('\\', "/");
+    if path.as_bytes().get(1) == Some(&b':') {
+        return None;
+    }
+    let start_line = positive_decimal(annotation_property(annotation, "line")?)?;
+    let end_line = optional_positive_property(annotation, "endLine")
+        .ok()?
+        .unwrap_or(start_line);
+    let start_column = optional_positive_property(annotation, "col").ok()?;
+    let end_column = optional_positive_property(annotation, "endColumn").ok()?;
+    let level = match annotation.level() {
+        StepAnnotationLevel::Error => GithubCheckAnnotationLevel::Failure,
+        StepAnnotationLevel::Warning => GithubCheckAnnotationLevel::Warning,
+        StepAnnotationLevel::Notice => GithubCheckAnnotationLevel::Notice,
+    };
+    GithubCheckAnnotation::new(
+        path,
+        start_line,
+        end_line,
+        start_column,
+        end_column,
+        level,
+        annotation.message().to_owned(),
+        annotation_property(annotation, "title").map(str::to_owned),
+    )
+    .ok()
+}
+
+fn annotation_property<'a>(annotation: &'a StepAnnotation, name: &str) -> Option<&'a str> {
+    annotation
+        .properties()
+        .iter()
+        .find(|property| property.name().eq_ignore_ascii_case(name))
+        .map(StepAnnotationProperty::value)
+}
+
+fn positive_decimal(value: &str) -> Option<u32> {
+    let parsed = value.parse::<u32>().ok()?;
+    (parsed > 0 && parsed.to_string() == value).then_some(parsed)
+}
+
+fn optional_positive_property(annotation: &StepAnnotation, name: &str) -> Result<Option<u32>, ()> {
+    match annotation_property(annotation, name) {
+        None => Ok(None),
+        Some(value) => positive_decimal(value).map(Some).ok_or(()),
+    }
+}
+
+fn presentation_digest(
+    output: &GithubCheckOutput,
+    annotations: &[GithubCheckAnnotation],
+    omitted_annotations: usize,
+) -> Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(PRESENTATION_DIGEST_DOMAIN);
+    hash_text(&mut hasher, output.title());
+    hash_text(&mut hasher, output.summary());
+    hash_text(&mut hasher, output.text().unwrap_or_default());
+    hasher.update(
+        u64::try_from(omitted_annotations)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    for annotation in annotations {
+        let encoded = serde_json::to_vec(annotation)
+            .expect("validated GitHub annotations always serialize to JSON");
+        hasher.update(
+            u64::try_from(encoded.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        hasher.update(encoded);
+    }
+    Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn hash_text(hasher: &mut Sha256, value: &str) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 fn render_step_details(steps: &[StepResult]) -> String {
@@ -201,7 +352,8 @@ fn pluralized(count: usize, singular: &str, plural: &str) -> String {
 #[cfg(test)]
 mod tests {
     use automata_ci_core::{
-        AttemptId, JobConclusion, JobResult, JobSecretExposure, StepId, StepResult, UnixMillis,
+        AttemptId, JobConclusion, JobResult, JobSecretExposure, StepAnnotation,
+        StepAnnotationLevel, StepAnnotationProperty, StepId, StepResult, UnixMillis,
     };
 
     use super::*;
@@ -233,8 +385,9 @@ mod tests {
         ]);
         result.validate().expect("result");
 
-        let output =
-            terminal_output(&result, "https://ci.example/runs/1/jobs/2").expect("GitHub output");
+        let presentation = terminal_presentation(&result, "https://ci.example/runs/1/jobs/2")
+            .expect("GitHub output");
+        let output = presentation.output();
         assert_eq!(output.title(), "Failed");
         assert!(output.summary().contains("2 steps"));
         assert!(output.summary().contains("1 passed, 1 failed"));
@@ -269,10 +422,65 @@ mod tests {
         ]);
         result.validate().expect("result");
 
-        let output = terminal_output(&result, "https://ci.example/job").expect("output");
-        let text = output.text().expect("details");
+        let presentation =
+            terminal_presentation(&result, "https://ci.example/job").expect("output");
+        let text = presentation.output().text().expect("details");
         assert!(text.len() <= MAX_PRESENTATION_TEXT_BYTES);
         assert!(text.ends_with(TRUNCATION_MARKER));
         assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn annotations_are_ordered_normalized_and_invalid_locations_are_counted() {
+        let result = JobResult::new(
+            AttemptId::new(),
+            JobConclusion::Failure,
+            JobSecretExposure::Secretless,
+            UnixMillis::new(2_000),
+        )
+        .with_steps(vec![
+            StepResult::new(
+                StepId::new("test").expect("step"),
+                JobConclusion::Failure,
+                JobConclusion::Failure,
+                UnixMillis::new(1_000),
+                UnixMillis::new(2_000),
+            )
+            .with_annotations(vec![
+                StepAnnotation::new(
+                    StepAnnotationLevel::Error,
+                    "masked failure",
+                    vec![
+                        StepAnnotationProperty::new("file", "src\\lib.rs"),
+                        StepAnnotationProperty::new("line", "7"),
+                        StepAnnotationProperty::new("col", "2"),
+                        StepAnnotationProperty::new("endColumn", "9"),
+                        StepAnnotationProperty::new("title", "compiler"),
+                    ],
+                ),
+                StepAnnotation::new(
+                    StepAnnotationLevel::Warning,
+                    "outside repository",
+                    vec![
+                        StepAnnotationProperty::new("file", "../secret"),
+                        StepAnnotationProperty::new("line", "1"),
+                    ],
+                ),
+            ]),
+        ]);
+        result.validate().expect("result");
+
+        let presentation =
+            terminal_presentation(&result, "https://ci.example/job").expect("presentation");
+        assert_eq!(presentation.annotations().len(), 1);
+        let annotation = &presentation.annotations()[0];
+        assert_eq!(annotation.path(), "src/lib.rs");
+        assert_eq!(annotation.start_line(), 7);
+        assert_eq!(annotation.start_column(), Some(2));
+        assert_eq!(annotation.end_column(), Some(9));
+        assert_eq!(annotation.level(), GithubCheckAnnotationLevel::Failure);
+        assert_eq!(presentation.omitted_annotations(), 1);
+        assert!(presentation.output().summary().contains("1 diagnostic"));
+        assert_ne!(presentation.digest(), Sha256Digest::from_bytes([0; 32]));
     }
 }

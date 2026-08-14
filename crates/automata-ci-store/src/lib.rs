@@ -86,9 +86,11 @@ pub use error::{
     AttemptCommandError, AttemptSnapshotError, AttemptStoreError, RepositoryOperationError,
 };
 pub use github_checks::{
-    BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
+    AdvanceGithubCheckAnnotations, BeginGithubCheckRunCreate, BindGithubCheckRun,
+    BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
-    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
+    ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
+    CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
     GithubCheckConclusion, GithubCheckCreateReconciliation, GithubCheckDesiredProjection,
     GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
@@ -96,11 +98,12 @@ pub use github_checks::{
     GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
     GithubCheckSubjectOrigin, GithubCheckSubjectReceipt, GithubCheckSubjectRepository,
     GithubCheckSubjectTarget, GithubCheckSuiteId, GithubCheckTerminalCause,
-    GithubCheckTerminalizationRepository, GithubCheckValueError,
+    GithubCheckTerminalizationRepository, GithubCheckValueError, InitializeGithubCheckPresentation,
     MAX_GITHUB_CHECK_CREATE_RECONCILE_GRACE_MILLIS, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
     MAX_GITHUB_CHECK_PROJECTION_CLAIM_MILLIS, MAX_GITHUB_CHECK_PROJECTION_RETRY_MILLIS,
     RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckRunCreate, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, StartGithubCheckProjection, TerminalizeGithubCheck,
+    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, StartGithubCheckProjection,
+    TerminalizeGithubCheck,
 };
 pub use github_job_runtime_authority::{
     GithubJobRuntimeAuthorityEvidence, GithubJobRuntimeAuthorityExecution,

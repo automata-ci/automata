@@ -20,11 +20,11 @@ pub use changed_files::{
     GithubPushDiffRequest, MAX_COMPLETE_GITHUB_COMPARE_FILES,
 };
 pub use checks::{
-    GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateIndeterminate,
-    GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl, GithubCheckExternalId,
-    GithubCheckModelError, GithubCheckName, GithubCheckOutput, GithubCheckRetryEvidence,
-    GithubCheckRun, GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
-    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
+    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckConclusion,
+    GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
+    GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckOutput,
+    GithubCheckRetryEvidence, GithubCheckRun, GithubCheckRunCreateOutcome, GithubCheckRunId,
+    GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
     GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
     GithubObservedCheckConclusion,
 };

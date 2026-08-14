@@ -14,8 +14,8 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
 use automata_ci_core::{
-    AttemptId, JobConclusion, JobId, JobResult, JobSecretExposure, RunId, Sha256Digest, StepId,
-    StepResult, UnixMillis,
+    AttemptId, JobConclusion, JobId, JobResult, JobSecretExposure, RunId, Sha256Digest,
+    StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepId, StepResult, UnixMillis,
 };
 use automata_ci_github::{GithubHttpEndpoint, GithubHttpLimits};
 use automata_ci_github_delivery::{
@@ -26,9 +26,11 @@ use automata_ci_github_delivery::{
 };
 use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
-    BeginGithubCheckRunCreate, BindGithubCheckRun, BindGithubCheckSuite,
+    AdvanceGithubCheckAnnotations, BeginGithubCheckRunCreate, BindGithubCheckRun,
+    BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
     BlockGithubCheckProjectionForCredentialRejection, ClaimGithubCheckProjection,
-    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, GithubCheckAppId,
+    ClaimedGithubCheckProjection, ClearGithubCheckAnnotationUncertainty,
+    CompleteGithubCheckProjection, GithubCheckAnnotationProgress, GithubCheckAppId,
     GithubCheckCreateReconciliation, GithubCheckDesiredProjection, GithubCheckDetailsTarget,
     GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
@@ -38,10 +40,10 @@ use automata_ci_store::{
     GithubServerServiceAction, GithubServerServiceAuthorityId,
     GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
     GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceHandoffId,
-    GithubServerServiceRevision, GithubServerServiceWorkerId, ProviderConnectionId,
-    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
+    GithubServerServiceRevision, GithubServerServiceWorkerId, InitializeGithubCheckPresentation,
+    ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
     ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, TenantScope,
+    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, TenantScope,
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -100,6 +102,7 @@ struct FakeOutbox {
     claim_time_offset: AtomicI64,
     claim_delay_millis: AtomicUsize,
     terminal_result: Mutex<Option<BlobDescriptor>>,
+    annotation_progress: Mutex<GithubCheckAnnotationProgress>,
     credential_rejection_blocks: Mutex<Vec<BlockGithubCheckProjectionForCredentialRejection>>,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -121,6 +124,7 @@ impl FakeOutbox {
             claim_time_offset: AtomicI64::new(0),
             claim_delay_millis: AtomicUsize::new(0),
             terminal_result: Mutex::new(None),
+            annotation_progress: Mutex::new(GithubCheckAnnotationProgress::default()),
             credential_rejection_blocks: Mutex::new(Vec::new()),
             events,
         }
@@ -209,6 +213,10 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
                 .lock()
                 .expect("terminal result lock")
                 .clone(),
+            *self
+                .annotation_progress
+                .lock()
+                .expect("annotation progress lock"),
             started_at,
             completed_at,
             claimed_at,
@@ -314,6 +322,117 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             GithubCheckCreateReconciliation::Ambiguous => "ambiguous".to_owned(),
         };
         self.event(format!("store:resolve:{outcome}"));
+        Self::receipt(
+            request.claim().subject_id(),
+            GithubCheckDesiredProjection::Queued,
+        )
+    }
+
+    async fn initialize_github_check_presentation(
+        &self,
+        request: InitializeGithubCheckPresentation,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+        self.event(format!(
+            "store:annotations:initialize:{}",
+            request.annotation_count()
+        ));
+        let mut progress = self
+            .annotation_progress
+            .lock()
+            .expect("annotation progress lock");
+        if progress.presentation_digest().is_none() {
+            *progress = GithubCheckAnnotationProgress::from_durable_parts(
+                Some(request.digest()),
+                request.annotation_count(),
+                0,
+                None,
+            )
+            .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        }
+        Ok(*progress)
+    }
+
+    async fn advance_github_check_annotations(
+        &self,
+        request: AdvanceGithubCheckAnnotations,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+        self.event(format!(
+            "store:annotations:advance:{}:{}",
+            request.from(),
+            request.to()
+        ));
+        let mut progress = self
+            .annotation_progress
+            .lock()
+            .expect("annotation progress lock");
+        if progress.presentation_digest() != Some(request.digest())
+            || progress.next() != request.from()
+        {
+            return Err(GithubCheckStoreError::ProjectionMismatch);
+        }
+        *progress = GithubCheckAnnotationProgress::from_durable_parts(
+            Some(request.digest()),
+            progress.total(),
+            request.to(),
+            None,
+        )
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        Ok(*progress)
+    }
+
+    async fn retry_uncertain_github_check_annotations(
+        &self,
+        request: RetryUncertainGithubCheckAnnotations,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
+        self.event(format!(
+            "store:annotations:uncertain:{}:{}",
+            request.from(),
+            request.batch_size()
+        ));
+        let mut progress = self
+            .annotation_progress
+            .lock()
+            .expect("annotation progress lock");
+        *progress = GithubCheckAnnotationProgress::from_durable_parts(
+            Some(request.digest()),
+            progress.total(),
+            request.from(),
+            Some(request.batch_size()),
+        )
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        Self::receipt(
+            request.claim().subject_id(),
+            GithubCheckDesiredProjection::Queued,
+        )
+    }
+
+    async fn clear_github_check_annotation_uncertainty(
+        &self,
+        request: ClearGithubCheckAnnotationUncertainty,
+    ) -> Result<GithubCheckAnnotationProgress, GithubCheckStoreError> {
+        self.event("store:annotations:clear_uncertainty");
+        let mut progress = self
+            .annotation_progress
+            .lock()
+            .expect("annotation progress lock");
+        if progress.uncertain_batch_size() != Some(request.batch_size()) {
+            return Err(GithubCheckStoreError::ProjectionMismatch);
+        }
+        *progress = GithubCheckAnnotationProgress::from_durable_parts(
+            Some(request.digest()),
+            progress.total(),
+            request.from(),
+            None,
+        )
+        .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        Ok(*progress)
+    }
+
+    async fn block_github_check_annotation_mismatch(
+        &self,
+        request: BlockGithubCheckAnnotationMismatch,
+    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
+        self.event("store:block:annotation_mismatch");
         Self::receipt(
             request.claim().subject_id(),
             GithubCheckDesiredProjection::Queued,
@@ -1169,6 +1288,102 @@ async fn terminal_job_publishes_verified_step_markdown_and_exact_details_link() 
 }
 
 #[tokio::test]
+async fn terminal_annotations_are_published_in_durable_fifty_item_batches() {
+    let dashboard_run_id = RunId::new();
+    let dashboard_job_id = JobId::new();
+    let details_url = format!(
+        "https://ci.automata.example/automata-ci/automata/actions/runs/{dashboard_run_id}/jobs/{dashboard_job_id}"
+    );
+    let completed = ResponseSpec::json(
+        200,
+        run_json_with_details(41, "completed", Some("failure"), &details_url),
+    );
+    let harness = Harness::new(
+        [claim_for_target(
+            GithubCheckProjectionAction::Publish,
+            GithubCheckDesiredProjection::Terminal(GithubCheckTerminalCause::WorkflowFailure),
+            2,
+            Some(suite_id()),
+            Some(run_id()),
+            GithubCheckDetailsTarget::Job {
+                run_id: dashboard_run_id,
+                job_id: dashboard_job_id,
+            },
+        )],
+        vec![
+            ResponseSpec::json(
+                200,
+                run_json_with_details(41, "in_progress", None, &details_url),
+            ),
+            completed.clone(),
+            completed.clone(),
+            completed,
+        ],
+        CredentialMode::Exact,
+    )
+    .await;
+    let annotations = (1..=51)
+        .map(|line| {
+            StepAnnotation::new(
+                StepAnnotationLevel::Error,
+                format!("failure {line}"),
+                vec![
+                    StepAnnotationProperty::new("file", "src/lib.rs"),
+                    StepAnnotationProperty::new("line", line.to_string()),
+                ],
+            )
+        })
+        .collect();
+    let result = JobResult::new(
+        AttemptId::new(),
+        JobConclusion::Failure,
+        JobSecretExposure::Secretless,
+        UnixMillis::new(999),
+    )
+    .with_steps(vec![
+        StepResult::new(
+            StepId::new("test").expect("step ID"),
+            JobConclusion::Failure,
+            JobConclusion::Failure,
+            UnixMillis::new(300),
+            UnixMillis::new(999),
+        )
+        .with_annotations(annotations),
+    ]);
+    result.validate().expect("terminal result");
+    harness.install_terminal_result(&result).await;
+
+    assert!(matches!(
+        harness.run().await.expect("terminal publication"),
+        GithubChecksPublisherOutcome::Advanced(_)
+    ));
+    let requests = harness.server.requests();
+    assert_eq!(methods(&requests), ["GET", "PATCH", "PATCH", "PATCH"]);
+    assert_eq!(
+        request_json(&requests[2])["output"]["annotations"]
+            .as_array()
+            .expect("first batch")
+            .len(),
+        50
+    );
+    assert_eq!(
+        request_json(&requests[3])["output"]["annotations"]
+            .as_array()
+            .expect("second batch")
+            .len(),
+        1
+    );
+    assert_eq!(
+        harness
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("store:annotations:advance"))
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn exact_terminal_provider_state_does_not_require_the_result_blob_on_recovery() {
     let dashboard_run_id = RunId::new();
     let dashboard_job_id = JobId::new();
@@ -1204,6 +1419,17 @@ async fn exact_terminal_provider_state_does_not_require_the_result_blob_on_recov
         100,
         MediaType::new(automata_ci_store::HUMAN_JOB_RESULT_MEDIA_TYPE).expect("result media type"),
     ));
+    *harness
+        .outbox
+        .annotation_progress
+        .lock()
+        .expect("annotation progress lock") = GithubCheckAnnotationProgress::from_durable_parts(
+        Some(Sha256Digest::from_bytes([9; 32])),
+        0,
+        0,
+        None,
+    )
+    .expect("complete annotation progress");
 
     assert!(matches!(
         harness.run().await.expect("idempotent recovery"),

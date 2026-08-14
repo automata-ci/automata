@@ -4,12 +4,12 @@ use std::time::Duration;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
-    GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateIndeterminateKind,
-    GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckModelError, GithubCheckName,
-    GithubCheckOutput, GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
-    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
-    GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint,
-    GithubHttpLimits, GithubObservedCheckConclusion,
+    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckConclusion,
+    GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl, GithubCheckExternalId,
+    GithubCheckModelError, GithubCheckName, GithubCheckOutput, GithubCheckRunCreateOutcome,
+    GithubCheckRunId, GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
+    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
+    GithubHttpEndpoint, GithubHttpLimits, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use serde_json::{Value, json};
@@ -109,6 +109,20 @@ fn list_url(server: &FixtureServer, page: u64) -> Url {
     url
 }
 
+fn annotation(path: &str, line: u32, message: &str) -> GithubCheckAnnotation {
+    GithubCheckAnnotation::new(
+        path,
+        line,
+        line,
+        None,
+        None,
+        GithubCheckAnnotationLevel::Failure,
+        message,
+        Some("compiler".to_owned()),
+    )
+    .expect("annotation")
+}
+
 #[tokio::test]
 async fn check_suite_creation_preserves_the_exact_200_and_201_distinction() {
     let server = FixtureServer::spawn().await;
@@ -159,6 +173,120 @@ async fn check_suite_creation_preserves_the_exact_200_and_201_distinction() {
             json!({"head_sha": SHA})
         );
     }
+}
+
+#[tokio::test]
+async fn annotation_batches_are_bounded_and_preserve_exact_source_locations() {
+    let server = FixtureServer::spawn().await;
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        exact_run_value(41, "completed", Some("failure")).to_string(),
+    ));
+    let output = GithubCheckOutput::new(
+        "Failed",
+        "One source diagnostic",
+        Some("See the full run in Automata.".to_owned()),
+    )
+    .expect("output");
+    let annotations = [GithubCheckAnnotation::new(
+        "src/lib.rs",
+        7,
+        7,
+        Some(3),
+        Some(9),
+        GithubCheckAnnotationLevel::Failure,
+        "type mismatch",
+        Some("compiler".to_owned()),
+    )
+    .expect("annotation")];
+
+    server
+        .endpoint()
+        .append_check_run_annotations(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &identity(),
+            GithubCheckConclusion::Failure,
+            &output,
+            &annotations,
+            &token(),
+        )
+        .await
+        .expect("annotation append");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].uri, "/api/repos/acme/widget/check-runs/41");
+    let body: Value = serde_json::from_slice(&requests[0].body).expect("request JSON");
+    assert_eq!(body["output"]["title"], "Failed");
+    assert_eq!(body["output"]["annotations"][0]["path"], "src/lib.rs");
+    assert_eq!(body["output"]["annotations"][0]["start_line"], 7);
+    assert_eq!(body["output"]["annotations"][0]["start_column"], 3);
+    assert_eq!(
+        body["output"]["annotations"][0]["annotation_level"],
+        "failure"
+    );
+
+    let oversized = vec![annotation("src/lib.rs", 1, "failure"); 51];
+    assert_eq!(
+        server
+            .endpoint()
+            .append_check_run_annotations(
+                &repository(),
+                GithubCheckRunId::new(41).expect("run id"),
+                &identity(),
+                GithubCheckConclusion::Failure,
+                &output,
+                &oversized,
+                &token(),
+            )
+            .await,
+        Err(GithubChecksError::InvalidRequest)
+    );
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn annotation_reconciliation_fully_paginates_same_origin_results() {
+    let server = FixtureServer::spawn().await;
+    let page_two =
+        server.url("api/repos/acme/widget/check-runs/41/annotations?per_page=100&page=2");
+    server.enqueue(
+        ResponseSpec::json(
+            axum::http::StatusCode::OK,
+            json!([{
+                "path": "src/lib.rs", "start_line": 7, "end_line": 7,
+                "start_column": null, "end_column": null,
+                "annotation_level": "failure", "message": "first", "title": "compiler"
+            }])
+            .to_string(),
+        )
+        .header("link", format!("<{page_two}>; rel=\"next\"")),
+    );
+    server.enqueue(ResponseSpec::json(
+        axum::http::StatusCode::OK,
+        json!([{
+            "path": "src/main.rs", "start_line": 9, "end_line": 10,
+            "start_column": null, "end_column": null,
+            "annotation_level": "warning", "message": "second", "title": null
+        }])
+        .to_string(),
+    ));
+
+    let annotations = server
+        .endpoint()
+        .list_check_run_annotations(
+            &repository(),
+            GithubCheckRunId::new(41).expect("run id"),
+            &token(),
+        )
+        .await
+        .expect("annotation list");
+    assert_eq!(annotations.len(), 2);
+    assert_eq!(annotations[0].path(), "src/lib.rs");
+    assert_eq!(annotations[1].level(), GithubCheckAnnotationLevel::Warning);
+    assert_eq!(server.requests().len(), 2);
 }
 
 #[tokio::test]

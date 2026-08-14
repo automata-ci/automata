@@ -15,14 +15,17 @@ Implemented to date:
 - verified immutable `JobResult` evidence carried by terminal job claims;
 - deterministic bounded terminal Markdown with conclusion counts, step
   timelines, retained masked summaries, and UTF-8-safe truncation;
+- deterministic source-annotation conversion with repository-relative path
+  confinement, explicit omission counts, and 50-item GitHub batches;
+- a durable presentation digest, monotonic annotation cursor, and exact
+  paginated reconciliation for possibly accepted annotation updates;
 - idempotent terminal recovery that does not reload result evidence once GitHub
   already reports the exact desired conclusion.
 
-Still intentionally pending are durable annotation batching/reconciliation,
-GitHub and browser rerun controls, optional commit-status/deployment
-projections, and the rollout observability described below. Those pieces
-require their own durable idempotency state and must not be simulated with
-unsafe best-effort provider mutations.
+Still intentionally pending are GitHub and browser rerun controls, optional
+commit-status/deployment projections, and the rollout observability described
+below. Those pieces require their own durable idempotency state and must not be
+simulated with unsafe best-effort provider mutations.
 
 ## Outcome
 
