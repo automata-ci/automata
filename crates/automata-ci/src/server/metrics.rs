@@ -67,6 +67,7 @@ use crate::{
             GITHUB_REPOSITORY_SECRET_RESOLUTION_PATH, REPOSITORY_SECRET_BY_NAME_PATH,
             REPOSITORY_SECRET_PATH, REPOSITORY_SECRETS_PATH,
         },
+        shard_capabilities::SHARD_CAPABILITIES_PATH,
         workflow_rerun_api::WORKFLOW_RERUN_PATH,
     },
     build_info::BuildInfo,
@@ -102,9 +103,10 @@ const RBAC_SETTINGS_ROUTE: &str = "/settings/access/{rbac}";
 const GITHUB_DEVICE_ROUTE: &str = "/api/v1/auth/device/{operation}";
 const REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE: &str =
     "/{owner}/{repository}/settings/secrets/{mutation}";
-const HTTP_ROUTE_LABELS: [&str; 43] = [
+const HTTP_ROUTE_LABELS: [&str; 44] = [
     "/healthz",
     "/readyz",
+    SHARD_CAPABILITIES_PATH,
     "/",
     "/setup",
     "/repositories",
@@ -1781,6 +1783,7 @@ fn http_route(matched_path: Option<&str>) -> &'static str {
     match matched_path {
         Some("/healthz") => "/healthz",
         Some("/readyz") => "/readyz",
+        Some(SHARD_CAPABILITIES_PATH) => SHARD_CAPABILITIES_PATH,
         Some("/") => "/",
         Some("/setup") => "/setup",
         Some("/repositories") => "/repositories",
@@ -2548,6 +2551,7 @@ mod tests {
             BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH,
             RUNNER_ENROLLMENTS_PATH,
             RUNNER_ENROLLMENT_REDEEM_PATH,
+            SHARD_CAPABILITIES_PATH,
         ];
 
         for route in operational_routes {
