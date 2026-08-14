@@ -1199,8 +1199,8 @@ impl GithubCheckProjectionOutbox for PostgresStore {
         sqlx::query(
             r"
             INSERT INTO github_check_annotation_progress (
-                subject_id, presentation_digest, total_annotations,
-                next_annotation, uncertain_batch_size, updated_at_ms
+                subject_id, presentation_digest, annotation_total,
+                annotation_next, uncertain_batch_size, updated_at_ms
             )
             SELECT outbox.subject_id, $4, $5, 0, NULL, $6
             FROM github_check_projection_outbox AS outbox
@@ -1230,15 +1230,15 @@ impl GithubCheckProjectionOutbox for PostgresStore {
         let row = sqlx::query(
             r"
             SELECT progress.presentation_digest AS annotation_presentation_digest,
-                   progress.total_annotations AS annotation_total,
-                   progress.next_annotation AS annotation_next,
+                   progress.annotation_total,
+                   progress.annotation_next,
                    progress.uncertain_batch_size AS annotation_uncertain_batch_size
             FROM github_check_annotation_progress AS progress
             JOIN github_check_projection_outbox AS outbox
               ON outbox.subject_id = progress.subject_id
             WHERE progress.subject_id = $1
               AND progress.presentation_digest = $4
-              AND progress.total_annotations = $5
+              AND progress.annotation_total = $5
               AND outbox.state = 'claimed'
               AND outbox.claim_owner_id = $2
               AND outbox.claim_fence = $3
@@ -1268,7 +1268,7 @@ impl GithubCheckProjectionOutbox for PostgresStore {
         let row = sqlx::query(
             r"
             UPDATE github_check_annotation_progress AS progress
-            SET next_annotation = $6,
+            SET annotation_next = $6,
                 uncertain_batch_size = NULL,
                 updated_at_ms = $7
             FROM github_check_projection_outbox AS outbox
@@ -1281,13 +1281,13 @@ impl GithubCheckProjectionOutbox for PostgresStore {
               AND outbox.claimed_at_ms <= $7
               AND outbox.claim_expires_at_ms > $7
               AND progress.presentation_digest = $4
-              AND progress.next_annotation = $5
-              AND progress.total_annotations >= $6
+              AND progress.annotation_next = $5
+              AND progress.annotation_total >= $6
               AND (progress.uncertain_batch_size IS NULL
                    OR progress.uncertain_batch_size = $6 - $5)
             RETURNING progress.presentation_digest AS annotation_presentation_digest,
-                      progress.total_annotations AS annotation_total,
-                      progress.next_annotation AS annotation_next,
+                      progress.annotation_total,
+                      progress.annotation_next,
                       progress.uncertain_batch_size AS annotation_uncertain_batch_size
             ",
         )
@@ -1326,9 +1326,9 @@ impl GithubCheckProjectionOutbox for PostgresStore {
                   AND claimed.claimed_at_ms <= $7
                   AND claimed.claim_expires_at_ms > $7
                   AND progress.presentation_digest = $4
-                  AND progress.next_annotation = $5
+                  AND progress.annotation_next = $5
                   AND progress.uncertain_batch_size IS NULL
-                  AND progress.next_annotation + $6 <= progress.total_annotations
+                  AND progress.annotation_next + $6 <= progress.annotation_total
                 RETURNING progress.subject_id
             )
             UPDATE github_check_projection_outbox AS outbox
@@ -1385,11 +1385,11 @@ impl GithubCheckProjectionOutbox for PostgresStore {
               AND outbox.claimed_at_ms <= $7
               AND outbox.claim_expires_at_ms > $7
               AND progress.presentation_digest = $4
-              AND progress.next_annotation = $5
+              AND progress.annotation_next = $5
               AND progress.uncertain_batch_size = $6
             RETURNING progress.presentation_digest AS annotation_presentation_digest,
-                      progress.total_annotations AS annotation_total,
-                      progress.next_annotation AS annotation_next,
+                      progress.annotation_total,
+                      progress.annotation_next,
                       progress.uncertain_batch_size AS annotation_uncertain_batch_size
             ",
         )
@@ -1495,7 +1495,7 @@ impl GithubCheckProjectionOutbox for PostgresStore {
                         SELECT 1
                         FROM github_check_annotation_progress AS progress
                         WHERE progress.subject_id = outbox.subject_id
-                          AND progress.next_annotation = progress.total_annotations
+                          AND progress.annotation_next = progress.annotation_total
                           AND progress.uncertain_batch_size IS NULL
                     )
                   )
