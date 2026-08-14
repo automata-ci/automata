@@ -46,6 +46,7 @@ const MAX_GITHUB_CLIENT_SECRET_BYTES: usize = 16 * 1024;
 const MAX_BOOTSTRAP_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_CONFORMANCE_EXPORT_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_MANAGEMENT_CLIENT_CERTIFICATES: usize = 8;
+const MAX_DELEGATED_ACTOR_JWKS_URL_BYTES: usize = 2_048;
 const SECRET_ENCRYPTION_KEY_BYTES: usize = 32;
 const SESSION_HASH_KEY_BYTES: usize = 32;
 const MIN_BOOTSTRAP_TOKEN_BYTES: usize = 32;
@@ -345,6 +346,7 @@ pub struct ServerConfig {
 pub struct ManagementConfig {
     pub(crate) listen: SocketAddr,
     authority: ProvisioningAuthority,
+    delegated_actor_jwks_url: Url,
     client_certificate_sha256: Vec<[u8; 32]>,
     client_ca_certificate: SecretSource,
     server_certificate: SecretSource,
@@ -355,6 +357,11 @@ impl ManagementConfig {
     /// Returns the stable authority and its exact shard and delegated-issuer scope.
     pub const fn authority(&self) -> &ProvisioningAuthority {
         &self.authority
+    }
+
+    /// Returns the exact, deployment-configured delegated actor key endpoint.
+    pub const fn delegated_actor_jwks_url(&self) -> &Url {
+        &self.delegated_actor_jwks_url
     }
 
     pub(crate) fn client_certificate_sha256(&self) -> &[[u8; 32]] {
@@ -868,6 +875,8 @@ fn management_configuration(
         || args.management_shard_id.is_some()
         || args.management_authority_id.is_some()
         || args.management_delegated_actor_issuer.is_some()
+        || args.management_delegated_actor_jwks_url.is_some()
+        || args.management_delegated_actor_jwks_allow_loopback_http
         || !args.management_client_certificate_sha256.is_empty()
         || args.management_client_ca_certificate_source.is_some()
         || args.management_server_certificate_source.is_some()
@@ -904,6 +913,18 @@ fn management_configuration(
             DelegatedActorIssuer::new(value.to_owned())
                 .map_err(|_| ServerConfigError::InvalidManagementConfiguration)
         })?;
+    let delegated_actor_jwks_url = args
+        .management_delegated_actor_jwks_url
+        .as_deref()
+        .filter(|value| value.len() <= MAX_DELEGATED_ACTOR_JWKS_URL_BYTES)
+        .ok_or(ServerConfigError::InvalidManagementConfiguration)
+        .and_then(|value| {
+            Url::parse(value).map_err(|_| ServerConfigError::InvalidManagementConfiguration)
+        })?;
+    validate_delegated_actor_jwks_url(
+        &delegated_actor_jwks_url,
+        args.management_delegated_actor_jwks_allow_loopback_http,
+    )?;
     if args.management_client_certificate_sha256.is_empty()
         || args.management_client_certificate_sha256.len() > MAX_MANAGEMENT_CLIENT_CERTIFICATES
     {
@@ -933,11 +954,37 @@ fn management_configuration(
     Ok(Some(ManagementConfig {
         listen,
         authority: ProvisioningAuthority::new(authority_id, shard_id, delegated_actor_issuer),
+        delegated_actor_jwks_url,
         client_certificate_sha256: unique_fingerprints.into_iter().collect(),
         client_ca_certificate,
         server_certificate,
         server_private_key,
     }))
+}
+
+fn validate_delegated_actor_jwks_url(
+    url: &Url,
+    allow_loopback_http: bool,
+) -> Result<(), ServerConfigError> {
+    let has_safe_shape = url.host().is_some()
+        && url.port_or_known_default().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none();
+    let transport_allowed = match url.scheme() {
+        "https" => true,
+        "http" if allow_loopback_http => match url.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(_)) | None => false,
+        },
+        _ => false,
+    };
+    if !has_safe_shape || !transport_allowed {
+        return Err(ServerConfigError::InvalidManagementConfiguration);
+    }
+    Ok(())
 }
 
 fn decode_sha256_fingerprint(encoded: &str) -> Option<[u8; 32]> {

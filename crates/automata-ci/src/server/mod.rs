@@ -214,9 +214,15 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
                 None => router,
             };
             let router = match config.management() {
-                Some(management) => router.merge(crate::app::shard_capabilities::router(
-                    management.authority().shard_id(),
-                )),
+                Some(management) => {
+                    let router = router.merge(crate::app::shard_capabilities::router(
+                        management.authority().shard_id(),
+                    ));
+                    match components.delegated_actor_api.clone() {
+                        Some(delegated_actor_api) => router.merge(delegated_actor_api),
+                        None => router,
+                    }
+                }
                 None => router,
             };
             let router = router_with_optional_github_webhook(router, github_provider_ingress);

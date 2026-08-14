@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod delegated_actor;
 mod github_mapping_management;
 mod github_membership;
 mod installation;
@@ -15,6 +16,7 @@ mod session;
 mod sign_in;
 mod support;
 
+pub use delegated_actor::PostgresDelegatedActorResolver;
 pub use github_mapping_management::PostgresGithubMappingManagementRepository;
 pub use github_membership::PostgresGithubMembershipRepository;
 pub use installation::PostgresInstallationRepository;

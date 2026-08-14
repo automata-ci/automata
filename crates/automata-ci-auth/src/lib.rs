@@ -8,6 +8,8 @@
 
 /// Role-based and resource-scoped authorization policy contracts.
 pub mod authorization;
+/// Short-lived identities delegated by an external control-plane authority.
+pub mod delegated_actor;
 /// GitHub-backed human authentication flows and provider ports.
 pub mod github;
 /// Numeric GitHub organization/team role-mapping management contracts.
