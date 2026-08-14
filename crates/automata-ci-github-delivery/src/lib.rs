@@ -416,7 +416,61 @@ impl AcceptedGithubRepositoryDispatch {
     }
 }
 
-/// Verified GitHub webhook ingress backed by immutable object and inbox ports.
+/// Durable repositories used by authenticated GitHub webhook ingress.
+#[derive(Clone)]
+pub struct GithubDeliveryRepositories {
+    deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
+    repository_dispatches: Option<Arc<dyn GithubRepositoryDispatchEvidenceRepository>>,
+    check_reruns: Option<Arc<dyn GithubCheckRerunRepository>>,
+}
+
+impl GithubDeliveryRepositories {
+    /// Creates the required webhook-evidence repository set.
+    #[must_use]
+    pub fn new(deliveries: Arc<dyn GithubSubjectEvidenceRepository>) -> Self {
+        Self {
+            deliveries,
+            repository_dispatches: None,
+            check_reruns: None,
+        }
+    }
+
+    /// Adds durable custom-dispatch pre-resolution.
+    #[must_use]
+    pub fn with_repository_dispatches(
+        mut self,
+        repository: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
+    ) -> Self {
+        self.repository_dispatches = Some(repository);
+        self
+    }
+
+    /// Adds durable GitHub-native Check rerun admission.
+    #[must_use]
+    pub fn with_check_reruns(mut self, repository: Arc<dyn GithubCheckRerunRepository>) -> Self {
+        self.check_reruns = Some(repository);
+        self
+    }
+}
+
+impl fmt::Debug for GithubDeliveryRepositories {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubDeliveryRepositories")
+            .field("deliveries", &"configured")
+            .field(
+                "repository_dispatches",
+                &self.repository_dispatches.as_ref().map(|_| "configured"),
+            )
+            .field(
+                "check_reruns",
+                &self.check_reruns.as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
+}
+
+/// Authenticated GitHub webhook ingress with one explicit repository set.
 pub struct GithubDeliveryIngress {
     verifier: GithubWebhookVerifier,
     verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
@@ -444,90 +498,9 @@ impl GithubDeliveryIngress {
     pub fn new(
         verifier: GithubWebhookVerifier,
         verifier_revision: GithubServerServiceRevision,
-        connections: Vec<GithubDeliveryConnection>,
-        objects: Arc<dyn ImmutableBlobStore>,
-        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
-        clock: Arc<dyn GithubDeliveryClock>,
-    ) -> Result<Self, GithubDeliveryConfigurationError> {
-        Self::build(
-            verifier,
-            verifier_revision,
-            connections,
-            objects,
-            deliveries,
-            None,
-            None,
-            clock,
-        )
-    }
-
-    /// Constructs an ingress with durable custom-dispatch pre-resolution.
-    ///
-    /// The dedicated repository-dispatch port is narrow: it persists signed
-    /// event evidence and authority pins but cannot expose credentials or make
-    /// provider API calls.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same bounded registry errors as [`Self::new`].
-    pub fn new_with_repository_dispatch(
-        verifier: GithubWebhookVerifier,
-        verifier_revision: GithubServerServiceRevision,
-        connections: Vec<GithubDeliveryConnection>,
-        objects: Arc<dyn ImmutableBlobStore>,
-        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
-        repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
-        clock: Arc<dyn GithubDeliveryClock>,
-    ) -> Result<Self, GithubDeliveryConfigurationError> {
-        Self::build(
-            verifier,
-            verifier_revision,
-            connections,
-            objects,
-            deliveries,
-            Some(repository_dispatches),
-            None,
-            clock,
-        )
-    }
-
-    /// Constructs an ingress with custom dispatches and GitHub-native rerun controls.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same bounded registry errors as [`Self::new`].
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_controls(
-        verifier: GithubWebhookVerifier,
-        verifier_revision: GithubServerServiceRevision,
-        connections: Vec<GithubDeliveryConnection>,
-        objects: Arc<dyn ImmutableBlobStore>,
-        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
-        repository_dispatches: Arc<dyn GithubRepositoryDispatchEvidenceRepository>,
-        check_reruns: Arc<dyn GithubCheckRerunRepository>,
-        clock: Arc<dyn GithubDeliveryClock>,
-    ) -> Result<Self, GithubDeliveryConfigurationError> {
-        Self::build(
-            verifier,
-            verifier_revision,
-            connections,
-            objects,
-            deliveries,
-            Some(repository_dispatches),
-            Some(check_reruns),
-            clock,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build(
-        verifier: GithubWebhookVerifier,
-        verifier_revision: GithubServerServiceRevision,
         mut connections: Vec<GithubDeliveryConnection>,
         objects: Arc<dyn ImmutableBlobStore>,
-        deliveries: Arc<dyn GithubSubjectEvidenceRepository>,
-        repository_dispatches: Option<Arc<dyn GithubRepositoryDispatchEvidenceRepository>>,
-        check_reruns: Option<Arc<dyn GithubCheckRerunRepository>>,
+        repositories: GithubDeliveryRepositories,
         clock: Arc<dyn GithubDeliveryClock>,
     ) -> Result<Self, GithubDeliveryConfigurationError> {
         if connections.is_empty() {
@@ -581,9 +554,9 @@ impl GithubDeliveryIngress {
             connections: connections.into(),
             connection_by_selector,
             objects,
-            deliveries,
-            repository_dispatches,
-            check_reruns,
+            deliveries: repositories.deliveries,
+            repository_dispatches: repositories.repository_dispatches,
+            check_reruns: repositories.check_reruns,
             clock,
         })
     }

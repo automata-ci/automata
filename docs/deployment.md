@@ -288,6 +288,23 @@ additionally use an HTTP root URL on a literal loopback address. Workflow Checks
 link to the repository activity page, workflow-run Checks link to the exact run,
 and job Checks link to the exact concrete job.
 
+Use the provider-facing evaluated job name when configuring a branch-protection
+required check or ruleset. Required names must be unique across workflows and
+matrix expansions because GitHub matches the Check Run name, not Automata's
+workflow path. When GitHub offers multiple Apps as the source for the same
+name, select the Automata GitHub App explicitly. Rich Checks are Automata's only
+commit/PR result projection. Do not configure or expect a second Commit Status
+API context for the same result.
+
+Subscribe the App webhook to `check_run` and `check_suite` in addition to the
+configured trigger events. Completed Automata Checks expose native re-run
+buttons; their signed webhook payload is resolved against the exact App,
+installation, repository, SHA, suite, Check Run, external ID, and current
+Automata user authority before the existing idempotent rerun transaction runs.
+GitHub provides no iframe slot for an external CI dashboard, so do not weaken
+Automata's `frame-ancestors 'none'` policy. The supported native UX is rich
+Check output and annotations plus exact external Details links.
+
 The optional top-level `schedule` object controls the separate periodic
 workflow scheduler; omitting it uses the documented example defaults. It
 enumerates only current manifests in stable order, resolves the configured

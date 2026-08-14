@@ -4,13 +4,13 @@ use std::time::Duration;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
-    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckConclusion,
-    GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl, GithubCheckExternalId,
-    GithubCheckModelError, GithubCheckName, GithubCheckOutput, GithubCheckRequestedAction,
-    GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
-    GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
-    GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint,
-    GithubHttpLimits, GithubObservedCheckConclusion,
+    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
+    GithubCheckConclusion, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
+    GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckOutput,
+    GithubCheckRequestedAction, GithubCheckRunCreateOutcome, GithubCheckRunId,
+    GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
+    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
+    GithubHttpEndpoint, GithubHttpLimits, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use serde_json::{Value, json};
@@ -702,9 +702,14 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
-            GithubCheckConclusion::Success,
-            Some(&lifecycle_timestamp()),
-            &lifecycle_timestamp(),
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                None,
+                &[],
+            )
+            .expect("completion"),
             &token(),
         )
         .await
@@ -718,9 +723,14 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
-            GithubCheckConclusion::Success,
-            Some(&lifecycle_timestamp()),
-            &lifecycle_timestamp(),
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                None,
+                &[],
+            )
+            .expect("completion"),
             &token(),
         )
         .await
@@ -733,14 +743,18 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
     )
     .expect("custom output");
     endpoint
-        .complete_check_run_with_output(
+        .complete_check_run(
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
-            GithubCheckConclusion::Success,
-            Some(&lifecycle_timestamp()),
-            &lifecycle_timestamp(),
-            &custom_output,
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                Some(&custom_output),
+                &[],
+            )
+            .expect("completion"),
             &token(),
         )
         .await
@@ -752,14 +766,18 @@ async fn terminal_patch_sends_completion_time_and_native_output_and_validates_ex
     )
     .expect("requested action")];
     endpoint
-        .complete_check_run_with_actions(
+        .complete_check_run(
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
-            GithubCheckConclusion::Success,
-            Some(&lifecycle_timestamp()),
-            &lifecycle_timestamp(),
-            &actions,
+            GithubCheckCompletion::new(
+                GithubCheckConclusion::Success,
+                Some(&lifecycle_timestamp()),
+                &lifecycle_timestamp(),
+                None,
+                &actions,
+            )
+            .expect("completion"),
             &token(),
         )
         .await
@@ -1148,7 +1166,7 @@ async fn list_rejects_query_scope_mismatch_duplicate_ids_and_total_count_drift()
 }
 
 #[tokio::test]
-async fn provider_statuses_map_without_reading_or_exposing_bodies() {
+async fn provider_http_failures_map_without_reading_or_exposing_bodies() {
     let server = FixtureServer::spawn().await;
     let statuses = [
         axum::http::StatusCode::UNAUTHORIZED,

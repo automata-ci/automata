@@ -17,8 +17,6 @@ pub(super) struct GithubTerminalPresentation {
     output: GithubCheckOutput,
     annotations: Vec<GithubCheckAnnotation>,
     digest: Sha256Digest,
-    #[cfg_attr(not(test), allow(dead_code))]
-    omitted_annotations: usize,
 }
 
 impl GithubTerminalPresentation {
@@ -32,11 +30,6 @@ impl GithubTerminalPresentation {
 
     pub(super) const fn digest(&self) -> Sha256Digest {
         self.digest
-    }
-
-    #[cfg(test)]
-    pub(super) const fn omitted_annotations(&self) -> usize {
-        self.omitted_annotations
     }
 }
 
@@ -78,7 +71,6 @@ pub(super) fn terminal_presentation(
         output,
         annotations,
         digest,
-        omitted_annotations,
     })
 }
 
@@ -479,8 +471,56 @@ mod tests {
         assert_eq!(annotation.start_column(), Some(2));
         assert_eq!(annotation.end_column(), Some(9));
         assert_eq!(annotation.level(), GithubCheckAnnotationLevel::Failure);
-        assert_eq!(presentation.omitted_annotations(), 1);
         assert!(presentation.output().summary().contains("1 diagnostic"));
         assert_ne!(presentation.digest(), Sha256Digest::from_bytes([0; 32]));
+    }
+
+    #[test]
+    fn maximum_annotation_fixture_is_complete_deterministic_and_ordered() {
+        let annotations = (1..=automata_ci_core::MAX_JOB_RESULT_ANNOTATIONS)
+            .map(|line| {
+                StepAnnotation::new(
+                    StepAnnotationLevel::Notice,
+                    format!("diagnostic {line}"),
+                    vec![
+                        StepAnnotationProperty::new("file", "src/generated.rs"),
+                        StepAnnotationProperty::new("line", line.to_string()),
+                    ],
+                )
+            })
+            .collect();
+        let result = JobResult::new(
+            AttemptId::new(),
+            JobConclusion::Failure,
+            JobSecretExposure::Secretless,
+            UnixMillis::new(2_000),
+        )
+        .with_steps(vec![
+            StepResult::new(
+                StepId::new("diagnostics").expect("step"),
+                JobConclusion::Failure,
+                JobConclusion::Failure,
+                UnixMillis::new(1_000),
+                UnixMillis::new(2_000),
+            )
+            .with_annotations(annotations),
+        ]);
+        result.validate().expect("maximum result fixture");
+
+        let first =
+            terminal_presentation(&result, "https://ci.example/job").expect("first presentation");
+        let second =
+            terminal_presentation(&result, "https://ci.example/job").expect("second presentation");
+        assert_eq!(
+            first.annotations().len(),
+            automata_ci_core::MAX_JOB_RESULT_ANNOTATIONS
+        );
+        assert_eq!(first.annotations()[0].start_line(), 1);
+        assert_eq!(
+            first.annotations()[automata_ci_core::MAX_JOB_RESULT_ANNOTATIONS - 1].start_line(),
+            u32::try_from(automata_ci_core::MAX_JOB_RESULT_ANNOTATIONS).expect("fixture fits u32")
+        );
+        assert_eq!(first.digest(), second.digest());
+        assert_eq!(first.annotations(), second.annotations());
     }
 }

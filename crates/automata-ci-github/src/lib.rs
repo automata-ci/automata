@@ -1,4 +1,5 @@
-//! Hardened GitHub authentication, repository, Checks, and verified webhook boundaries.
+//! Hardened GitHub authentication, repository, Checks, status, deployment, and
+//! verified webhook boundaries.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -20,10 +21,10 @@ pub use changed_files::{
     GithubPushDiffRequest, MAX_COMPLETE_GITHUB_COMPARE_FILES,
 };
 pub use checks::{
-    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckConclusion,
-    GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
-    GithubCheckExternalId, GithubCheckModelError, GithubCheckName, GithubCheckOutput,
-    GithubCheckRequestedAction, GithubCheckRetryEvidence, GithubCheckRun,
+    GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
+    GithubCheckConclusion, GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind,
+    GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckModelError, GithubCheckName,
+    GithubCheckOutput, GithubCheckRequestedAction, GithubCheckRetryEvidence, GithubCheckRun,
     GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
     GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
     GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,

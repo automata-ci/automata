@@ -45,8 +45,8 @@ use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksPublisher, GithubChecksPublisherConfig,
     GithubChecksPublisherError, GithubChecksPublisherOutcome, GithubDeliveryClock,
     GithubDeliveryConfigurationError, GithubDeliveryConnection, GithubDeliveryIngress,
-    GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceError,
-    GithubDeliverySourceCredentialProvider, GithubDeliveryWorkerConfig,
+    GithubDeliveryRepositories, GithubDeliveryService, GithubDeliveryServiceConfig,
+    GithubDeliveryServiceError, GithubDeliverySourceCredentialProvider, GithubDeliveryWorkerConfig,
     GithubDeliveryWorkerConfigurationError, GithubDeliveryWorkflowAdmissionProcessor,
     GithubDeliveryWorkflowProcessor, GithubPushChangedFilesProvider,
     GithubRestPushChangedFilesProvider, GithubScheduleClock,
@@ -736,14 +736,14 @@ impl GithubProviderRuntimeBuilder {
             store.clone();
         let check_reruns: Arc<dyn automata_ci_store::GithubCheckRerunRepository> = store;
         let ingress = Arc::new(
-            GithubDeliveryIngress::new_with_controls(
+            GithubDeliveryIngress::new(
                 verifier,
                 config.webhook().verifier_revision(),
                 plan.into_connections(),
                 blobs,
-                subject_evidence,
-                repository_dispatches,
-                check_reruns,
+                GithubDeliveryRepositories::new(subject_evidence)
+                    .with_repository_dispatches(repository_dispatches)
+                    .with_check_reruns(check_reruns),
                 delivery_clock,
             )
             .map_err(GithubProviderRuntimeBuildError::Ingress)?,
@@ -1210,15 +1210,30 @@ async fn run_checks_loop(
                     return Ok(());
                 }
             }
-            Ok(
-                GithubChecksPublisherOutcome::Advanced(_)
-                | GithubChecksPublisherOutcome::RetryScheduled(_)
-                | GithubChecksPublisherOutcome::ReconciliationRequired(_)
-                | GithubChecksPublisherOutcome::Blocked(_),
-            ) => {
+            Ok(GithubChecksPublisherOutcome::Advanced(_)) => {
+                tracing::debug!(?connection, "GitHub Check projection advanced");
+                let _ = sweep.observe(false);
+            }
+            Ok(GithubChecksPublisherOutcome::RetryScheduled(_)) => {
+                tracing::warn!(
+                    ?connection,
+                    "GitHub Check projection scheduled a durable retry"
+                );
+                let _ = sweep.observe(false);
+            }
+            Ok(GithubChecksPublisherOutcome::ReconciliationRequired(_)) => {
+                tracing::warn!(?connection, "GitHub Check creation requires reconciliation");
+                let _ = sweep.observe(false);
+            }
+            Ok(GithubChecksPublisherOutcome::Blocked(_)) => {
+                tracing::error!(
+                    ?connection,
+                    "GitHub Check projection blocked on provider mismatch"
+                );
                 let _ = sweep.observe(false);
             }
             Err(GithubChecksPublisherError::Store(GithubCheckStoreError::Operation(_))) => {
+                tracing::warn!(?connection, "GitHub Check projection store is unavailable");
                 let _ = sweep.observe(false);
                 if sleep_or_stop(idle_delay, &stop).await {
                     return Ok(());

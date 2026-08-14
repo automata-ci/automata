@@ -104,18 +104,19 @@ async fn accept_github_webhook(
     let (parts, body) = request.into_parts();
     let raw_body = collect_raw_body(body).await?;
     ensure_before_deadline(deadline)?;
-    match ingress_route {
-        GithubWebhookIngressRoute::AuthenticatedEvent => {
-            registry.accept(&parts.headers, raw_body).await.map(|_| ())
-        }
+    let accepted_controls = match ingress_route {
+        GithubWebhookIngressRoute::AuthenticatedEvent => registry
+            .accept(&parts.headers, raw_body)
+            .await
+            .map(|_| None),
         GithubWebhookIngressRoute::RepositoryDispatch => registry
             .accept_repository_dispatch(&parts.headers, raw_body)
             .await
-            .map(|_| ()),
+            .map(|_| None),
         GithubWebhookIngressRoute::CheckControl => registry
             .accept_check_rerun(&parts.headers, raw_body)
             .await
-            .map(|_| ()),
+            .map(Some),
     }
     .map_err(|error| {
         let outcome = GithubWebhookHttpOutcome::from_ingress(error);
@@ -131,6 +132,9 @@ async fn accept_github_webhook(
         }
         outcome
     })?;
+    if let Some(count) = accepted_controls {
+        tracing::info!(rerun_count = count, "GitHub Check rerun control accepted");
+    }
     ensure_before_deadline(deadline)?;
     Ok(())
 }

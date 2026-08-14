@@ -104,7 +104,7 @@ const RBAC_SETTINGS_ROUTE: &str = "/settings/access/{rbac}";
 const GITHUB_DEVICE_ROUTE: &str = "/api/v1/auth/device/{operation}";
 const REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE: &str =
     "/{owner}/{repository}/settings/secrets/{mutation}";
-const HTTP_ROUTE_LABELS: [&str; 45] = [
+const HTTP_ROUTE_LABELS: [&str; 46] = [
     "/healthz",
     "/readyz",
     SHARD_CAPABILITIES_PATH,

@@ -12,7 +12,7 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{BlobStoreErrorKind, ImmutableBlobStore};
 use automata_ci_core::{JobConclusion, JobResult, UnixMillis};
 use automata_ci_github::{
-    GithubCheckAppId as HttpAppId, GithubCheckConclusion as HttpConclusion,
+    GithubCheckAppId as HttpAppId, GithubCheckCompletion, GithubCheckConclusion as HttpConclusion,
     GithubCheckCreateIndeterminate, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
     GithubCheckExternalId, GithubCheckName as HttpCheckName, GithubCheckRequestedAction,
     GithubCheckRetryEvidence, GithubCheckRun, GithubCheckRunCreateOutcome,
@@ -1125,34 +1125,24 @@ impl GithubChecksPublisher {
             GithubCheckRunState::Queued | GithubCheckRunState::InProgress => {}
         }
         let actions = requested_actions(claimed)?;
-        let publish_result = if let Some(presentation) = presentation {
-            self.endpoint
-                .complete_check_run_with_output_and_actions(
-                    credential.repository(),
-                    update.run_id,
-                    update.identity,
-                    conclusion,
-                    update.started_at,
-                    update.completed_at,
-                    presentation.output(),
-                    &actions,
-                    credential.token(),
-                )
-                .await
-        } else {
-            self.endpoint
-                .complete_check_run_with_actions(
-                    credential.repository(),
-                    update.run_id,
-                    update.identity,
-                    conclusion,
-                    update.started_at,
-                    update.completed_at,
-                    &actions,
-                    credential.token(),
-                )
-                .await
-        };
+        let completion = GithubCheckCompletion::new(
+            conclusion,
+            update.started_at,
+            update.completed_at,
+            presentation.map(checks_presentation::GithubTerminalPresentation::output),
+            &actions,
+        )
+        .map_err(|_| GithubChecksPublisherError::InvariantViolation)?;
+        let publish_result = self
+            .endpoint
+            .complete_check_run(
+                credential.repository(),
+                update.run_id,
+                update.identity,
+                completion,
+                credential.token(),
+            )
+            .await;
         match publish_result {
             Ok(_) => Ok(None),
             Err(error) => self

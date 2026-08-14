@@ -49,7 +49,7 @@ use uuid::Uuid;
 use super::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliveryConfigurationError,
     GithubDeliveryConnection, GithubDeliveryIngress, GithubDeliveryIngressError,
-    MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_event_request_digest,
+    GithubDeliveryRepositories, MAX_GITHUB_DELIVERY_CONNECTIONS, canonical_event_request_digest,
 };
 
 const SECRET: &[u8] = b"delivery-test-secret";
@@ -726,7 +726,7 @@ fn registry(
         GithubServerServiceRevision::new(1).expect("verifier revision"),
         connections,
         Arc::new(RecordingBlobStore::default()),
-        Arc::new(RecordingDeliveryAcceptance::default()),
+        GithubDeliveryRepositories::new(Arc::new(RecordingDeliveryAcceptance::default())),
         Arc::new(FixedClock(UnixMillis::new(100))),
     )
 }
@@ -754,7 +754,7 @@ fn ingress_for_connections_at_revision(
         GithubServerServiceRevision::new(verifier_revision).expect("verifier revision"),
         connections,
         objects,
-        deliveries,
+        GithubDeliveryRepositories::new(deliveries),
         clock,
     )
     .expect("fixture registry is valid")
@@ -1138,13 +1138,13 @@ async fn repository_dispatch_ingress_pins_raw_event_authority_and_exact_replay()
     .expect("fixture connection")
     .with_default_branch_ref("refs/heads/main")
     .expect("configured default branch");
-    let ingress = GithubDeliveryIngress::new_with_repository_dispatch(
+    let ingress = GithubDeliveryIngress::new(
         GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
         GithubServerServiceRevision::new(1).expect("verifier revision"),
         vec![configured],
         objects.clone(),
-        deliveries.clone(),
-        dispatches.clone(),
+        GithubDeliveryRepositories::new(deliveries.clone())
+            .with_repository_dispatches(dispatches.clone()),
         Arc::new(FixedClock(UnixMillis::new(100))),
     )
     .expect("dispatch ingress");
@@ -1228,14 +1228,14 @@ async fn check_run_control_preserves_exact_signed_identity_for_rerun_authorizati
     .expect("fixture connection")
     .with_default_branch_ref("refs/heads/main")
     .expect("configured default branch");
-    let ingress = GithubDeliveryIngress::new_with_controls(
+    let ingress = GithubDeliveryIngress::new(
         GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
         GithubServerServiceRevision::new(1).expect("verifier revision"),
         vec![configured],
         objects.clone(),
-        deliveries.clone(),
-        dispatches,
-        reruns.clone(),
+        GithubDeliveryRepositories::new(deliveries.clone())
+            .with_repository_dispatches(dispatches)
+            .with_check_reruns(reruns.clone()),
         Arc::new(FixedClock(UnixMillis::new(100))),
     )
     .expect("control ingress");
@@ -1285,13 +1285,13 @@ async fn repository_dispatch_default_branch_mismatch_performs_no_writes() {
     .expect("fixture connection")
     .with_default_branch_ref("refs/heads/main")
     .expect("configured default branch");
-    let ingress = GithubDeliveryIngress::new_with_repository_dispatch(
+    let ingress = GithubDeliveryIngress::new(
         GithubWebhookVerifier::new(SECRET).expect("fixture verifier"),
         GithubServerServiceRevision::new(1).expect("verifier revision"),
         vec![configured],
         objects.clone(),
-        deliveries.clone(),
-        dispatches.clone(),
+        GithubDeliveryRepositories::new(deliveries.clone())
+            .with_repository_dispatches(dispatches.clone()),
         Arc::new(FixedClock(UnixMillis::new(100))),
     )
     .expect("dispatch ingress");
@@ -1916,7 +1916,7 @@ async fn object_and_request_digest_are_byte_deterministic() {
 }
 
 #[tokio::test]
-async fn generic_ingress_persists_typed_event_coordinates_without_legacy_aliasing() {
+async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_aliasing() {
     for (body, event_name, delivery_id, expected_kind, expected_ref) in [
         (
             fixture_body(),

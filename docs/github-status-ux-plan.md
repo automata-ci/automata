@@ -1,8 +1,8 @@
 # GitHub status and run UX plan
 
-Status: implementation in progress. This document records the researched
-GitHub platform boundary, the gaps in Automata's current implementation, and
-the complete phased delivery plan.
+Status: core implementation complete. This document records the researched
+GitHub platform boundary, the implemented architecture, and future native UX
+work that adds a distinct capability rather than a second projection path.
 
 Implemented to date:
 
@@ -27,10 +27,10 @@ Implemented to date:
   resolution, current Automata authorization, and native rerun controls;
 - lifecycle-specific requested-action buttons on completed Check Runs.
 
-Still intentionally pending are optional commit-status/deployment projections
-and the rollout observability described below. Those pieces require their own
-durable idempotency state and must not be simulated with unsafe best-effort
-provider mutations.
+GitHub Checks are the sole commit/PR result projection. Automata does not carry
+an unused Commit Status API path or publish duplicate status rows. GitHub
+deployments remain a separate future environment feature and will
+be added only with a complete durable product path and independent authority.
 
 ## Outcome
 
@@ -46,8 +46,8 @@ An Automata run should feel native from a pull request or commit:
 4. The Automata page updates while the job is running and shows live logs when
    the viewer has log access.
 5. GitHub-native rerun controls call Automata's durable rerun machinery.
-6. Legacy commit statuses and GitHub deployments are projected only where they
-   add a distinct compatibility or environment UX benefit.
+6. Checks remain the single source of commit/PR status. Environment deployments
+   may be added later only as a distinct environment-history feature.
 
 Target service objectives after rollout:
 
@@ -81,10 +81,11 @@ line, in Files changed. GitHub automatically associates a Check Run with the
 App's suite for the repository and SHA. Current documented limits include
 50,000 Check Runs per suite and 1,000 Check Runs with the same name in a suite.
 
-Commit statuses are a smaller, separate compatibility surface: one context can
-be `pending`, `success`, `failure`, or `error`, with a short description and
-`target_url`. They do not populate the pull request Checks tab and should not
-duplicate every rich Check by default.
+The Commit Status API is a smaller, separate surface: one context can be
+`pending`, `success`, `failure`, or `error`, with a short description and
+`target_url`. It does not populate the pull request Checks tab. Automata does
+not use it because doing so would create a second, less capable representation
+of the same result.
 
 Deployments are also separate. For jobs that genuinely target a declared
 environment, a deployment and its evolving status can provide repository
@@ -141,25 +142,20 @@ The existing foundation is strong:
 - the durable rerun backend already supports whole-workflow, failed-job, and
   selected-job reruns.
 
-The user-visible gaps are concentrated rather than architectural:
+This implementation closes the prior user-visible gaps:
 
-1. Check create/start/complete payloads deliberately omit all output,
-   timestamps, annotations, actions, images, and presentation validation.
-2. The durable Check subject remembers only the latest state-transition time;
-   it does not preserve distinct start and completion timestamps or a frozen
-   presentation revision.
-3. The exact job URL is implemented as a raw-log page. Its read boundary checks
-   log publication first. A job can therefore be dashboard-readable but return
-   404 from **Details** because logs are private, unavailable, or not yet
-   created.
-4. An unauthenticated deep link to a private resource receives the same 404 as
-   a missing resource. This is safe against enumeration but offers no sign-in
-   handoff.
-5. Running run/job pages require a manual refresh; the hydrated React client
-   does not poll or stream state.
-6. webhook ingress normalizes `push`, `pull_request`, `merge_group`, and
-   `repository_dispatch`, but not `check_run`/`check_suite` rerun actions.
-7. no optional commit-status, deployment-status, or badge projector exists.
+1. create/start/complete payloads now include bounded native output, durable
+   timestamps, annotations, lifecycle-valid actions, and strict validation;
+2. Check subjects retain distinct start/completion time and deterministic
+   presentation/annotation progress;
+3. exact job URLs now render metadata independently from log authorization;
+4. anonymous private deep links use a non-enumerating sign-in return flow;
+5. visible nonterminal pages update through bounded same-origin polling; and
+6. signed `check_run`/`check_suite` controls resolve to the durable rerun path.
+
+Environment deployment history and status badges are separate future product
+features. No partial provider client or runtime scaffolding is retained for
+them.
 
 ## Design decisions
 
@@ -258,29 +254,21 @@ idempotency operation ID derived from the GitHub delivery ID plus action and
 Check identity. A successful rerun creates a fresh Automata physical run and
 fresh per-attempt Check Runs; it does not rewrite immutable old results.
 
-### Statuses and deployments are opt-in projections
+### Checks are the only commit-result projection
 
-Do not publish a commit status for every Check by default. Add a repository
-manifest mode:
+Automata publishes no Commit Status API rows. Checks already provide lifecycle,
+Markdown, annotations, actions, timestamps, and exact Details links; a second
+status representation would be less capable and create ambiguous required-check
+configuration.
 
-- `checks_only` (default);
-- `checks_with_aggregate_status` for systems/rulesets that still require one
-  legacy context.
-
-The optional context is stable (for example `automata/ci`), uses the exact run
-URL as `target_url`, and maps any active work to pending, aggregate success to
-success, user/test failure to failure, and provider/system uncertainty to
-error. It requires a separately manifest-pinned `statuses:write` authority and
-its own append-only/idempotent projector; it must never silently share Checks
-authority.
-
-Deployment projection is enabled only for jobs with a resolved workflow
-environment and only after environment compatibility/security work is
-complete. Create with the exact SHA, `auto_merge:false`, and
-`required_contexts:[]`; publish queued/in-progress/terminal statuses with the
-job URL as `log_url` and a validated environment URL when the job emits one.
-This requires separately reviewed `deployments:write` authority and webhook
-loop prevention.
+GitHub deployments are not another result projection. A future deployment
+feature may represent only jobs with a resolved workflow environment, after the
+environment product model is complete. It must arrive as one complete vertical
+slice: durable identity/outbox state, exact SHA, environment-only admission,
+queued/running/terminal status, job `log_url`, validated `environment_url`,
+independent `deployments:write` authority, and webhook loop prevention. Until
+then there is no partial deployment API scaffolding in the runtime or provider
+library.
 
 ## Delivery phases
 
@@ -415,12 +403,10 @@ Acceptance:
 - GitHub rerequest produces a fresh run and new exact Details links;
 - old Check output remains immutable and auditable.
 
-### Phase 5 — Compatibility status, deployments, and badges
+### Phase 5 — Environment deployments and badges
 
 Work:
 
-- add the default-off aggregate commit-status projector and independently
-  pinned `statuses:write` manifest authority;
 - add environment-only deployment/deployment-status projection and independently
   pinned `deployments:write` authority;
 - add repository/workflow badge endpoints derived from durable latest ref state,
@@ -431,8 +417,7 @@ Work:
 
 Acceptance:
 
-- default installations show Checks only, with no duplicate legacy row;
-- opt-in legacy status has a working exact target URL and closed state mapping;
+- commit/PR results continue to have exactly one Checks-based representation;
 - environment jobs appear in GitHub deployment history with correct log and
   environment URLs; non-environment jobs never do;
 - badge responses are deterministic, cache bounded, and do not reveal private
@@ -504,7 +489,7 @@ Roll out behind independently reversible flags:
 3. timestamps and output, initially without annotations/actions;
 4. annotation batching;
 5. rerequest/actions;
-6. opt-in statuses and deployments.
+6. environment deployments, once the complete environment product path exists.
 
 During each provider phase, shadow-build and validate the desired presentation
 before enabling mutation. Compare Automata durable state with GitHub readback
@@ -523,8 +508,8 @@ pressure.
 - GitHub and Automata rerun controls use the same durable, audited operation.
 - every mutation is restart-safe and rate-limit aware; annotation append
   ambiguity is reconciled rather than blindly retried.
-- optional statuses and deployments add no duplicate default UX and use only
-  their separately granted permissions.
+- commit/PR results have one Checks-based projection; any future environment
+  deployment path is separately authorized and does not duplicate it.
 - documentation clearly states the remaining unavoidable divergence: Automata
   is a GitHub App using Checks and its own run UI, not a producer of native
   GitHub Actions run records or an iframe inside GitHub.
