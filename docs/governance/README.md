@@ -37,15 +37,34 @@ python3 scripts/ci/tests/foundation-governance.test.py
 The validator rejects unknown fields, non-canonical JSON, duplicate or
 unsorted identifiers, missing owners and paths, source/version drift, migration
 inventory drift, and limit entries without exact attributed Rust tests. Each
-registered limit also binds its reason code and three distinct fragments in a
-real test for `limit - 1`, `limit`, and `limit + 1`.
+source and test binding is located in executable Rust or TypeScript tokens;
+comments, ordinary/raw/template/regex literals, Rust token-quoting macros such
+as `stringify!`/`quote!`, and fake declarations or tests inside them are not
+evidence. Rust declarations behind a `cfg` predicate that
+requires `test` are excluded from the production census, while production-
+capable predicates such as `any(test, unix)` and `not(test)` remain censused.
+Source filenames are not treated as cfg evidence: a production-capable
+`src/tests.rs` remains in the census. Each registered limit also binds its
+reason code and three distinct fragments in a
+real test for `limit - 1`, `limit`, and `limit + 1`. Those labels are checked
+against the complete arithmetic expression rooted at the declared source
+constant (or an exact evaluated integer) as the direct value exercised by the
+governed operation, not inferred from fragment names or an unrelated boolean
+branch. A
+test-local `value_alias` must bind directly to that source value. The narrow
+`successor-attempt` relation is available when a stateful test proves the
+at-limit state before negatively asserting a declared operation on that same
+receiver. Aliases and successor receivers cannot be shadowed, rebound, or
+reassigned between the declaration/base and governed evidence.
 
 ## Changing a format
 
 The format owner coordinates the version, reader policy, fixtures, and tests
 in one change. Every `version` source must bind the declared version; `evidence`
 sources bind related generated or encoding material without masquerading as a
-version. Named, attributed Rust tests are part of each entry. Update the
+version. Non-declaration constructors such as `Self::v1()` and
+`Self::constant(1)` are accepted only when the helper body is source-bound to
+the same direct value. Named, attributed Rust tests are part of each entry. Update the
 implementation first, then update the registry to the same exact evidence.
 An initial sequenced v1 may use `exact-current-only` without a prior reader. A
 sequenced version above v1 must choose one explicit policy. A
@@ -58,8 +77,27 @@ incomplete prior-version coverage; compatibility must not be inferred from
 permissive deserialization, and a breaking change must not masquerade as a
 reader migration. Each prior-version test binding names the invoked reader and
 binds three distinct fragments inside the attributed test body: the prior
-version, the reader call, and the asserted outcome. Comments and helper
-functions outside the attributed test cannot satisfy those bindings.
+version, the reader call, and the asserted outcome. The exact prior token must
+flow directly into the declared reader argument (or through a structured
+`version_input` with an explicit reader-argument index), and the asserted
+success/rejection operation must apply directly to that reader result through a
+closed assertion grammar. Comments, literals, unrelated status markers, and
+arbitrary assertion macros cannot satisfy those bindings; the one external
+rejection helper is accepted only when its body directly compares the reader
+result with the declared rejected response.
+
+Canonical `vN` tokens are sequenced automatically. Compact ordinal tokens such
+as `bw1`, `dp1`, and `p1` declare a closed `version_sequence` with kind
+`prefix-ordinal` and their exact stable nonnumeric prefix. This makes `bw2`
+require `bw1` evidence without guessing that unrelated digit-ending opaque
+tokens (for example hashes or dates) are compatibility ordinals. Each of the
+three sequence requirements is independently anchored to its stable format ID
+and discovered source declaration; retaining either anchor preserves the gate.
+The `bw`, `dp`, and `p` token families are also reserved compact sequences at
+the token level, including discovered declarations proposed for
+`format_exclusions`. Renaming only the registry ID, refactoring only the source
+declaration, changing both identities together, or moving the declaration into
+`format_exclusions` therefore cannot remove compatibility enforcement.
 
 ## Changing the store schema
 

@@ -237,7 +237,7 @@
       ],
       "tests": [
         {
-          "contains": "extended[\"schema\"] = serde_json::json!(2);",
+          "contains": "serde_json::json!(2);",
           "function": "cancel_job_command_payload_is_exact_versioned_and_closed_to_extensions",
           "path": "crates/automata-ci-store/tests/g1_api.rs"
         }
@@ -257,7 +257,7 @@
       ],
       "tests": [
         {
-          "contains": "[ \"$3\" = credential-schema ] && [ \"$4\" = automata-ci.cli-session.v1 ]",
+          "contains": "let program = write_test_program(&root, &script);",
           "function": "secret_tool_subprocess_uses_exact_unique_attributes_and_readback",
           "path": "crates/automata-ci/src/cli/credential_store.rs"
         }
@@ -347,7 +347,7 @@
           "path": "crates/automata-ci-core/tests/job_result_validation.rs"
         },
         {
-          "contains": "encoded_ack[\"schema_version\"] = serde_json::json!(u16::MAX);",
+          "contains": "decoded_ack.validate(),",
           "function": "log_frame_and_ack_schemas_reject_noncurrent_versions",
           "path": "crates/automata-ci-core/tests/log_contract.rs"
         }
@@ -387,7 +387,7 @@
       ],
       "tests": [
         {
-          "contains": "encoded[\"schema_version\"] = serde_json::json!(2);",
+          "contains": "serde_json::json!(2);",
           "function": "deserialization_revalidates_schema_and_rejects_unknown_fields",
           "path": "crates/automata-ci-core/tests/expression_program.rs"
         }
@@ -407,12 +407,16 @@
       ],
       "tests": [
         {
-          "contains": "format!(\"bw2~{suffix}\")",
+          "contains": "let suffix = format!(",
           "function": "browser_and_device_proofs_reject_forward_versions_with_valid_remaining_fields",
           "path": "crates/automata-ci-auth/tests/github_login_service.rs"
         }
       ],
-      "version": "bw1"
+      "version": "bw1",
+      "version_sequence": {
+        "kind": "prefix-ordinal",
+        "prefix": "bw"
+      }
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -427,12 +431,16 @@
       ],
       "tests": [
         {
-          "contains": "format!(\"dp2~{suffix}\")",
+          "contains": "let suffix = format!(",
           "function": "browser_and_device_proofs_reject_forward_versions_with_valid_remaining_fields",
           "path": "crates/automata-ci-auth/tests/github_login_service.rs"
         }
       ],
-      "version": "dp1"
+      "version": "dp1",
+      "version_sequence": {
+        "kind": "prefix-ordinal",
+        "prefix": "dp"
+      }
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -467,17 +475,17 @@
       ],
       "tests": [
         {
-          "contains": "\"application/json\"",
+          "contains": "GithubStoredPushError::UnexpectedMediaType",
           "function": "durable_coordinates_and_stale_body_bytes_fail_before_normalization",
           "path": "crates/automata-ci-github/tests/stored_push_rehydration.rs"
         },
         {
-          "contains": "\"application/vnd.automata.github-authenticated-event+json\"",
+          "contains": "GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,",
           "function": "durable_event_v1_rejects_envelope_drift_and_duplicate_json",
           "path": "crates/automata-ci-github/tests/webhook_event_normalization.rs"
         },
         {
-          "contains": ".expect(\"schema version has room for a forward-version test\")",
+          "contains": ".checked_add(1)",
           "function": "authenticated_event_envelope_rejects_noncurrent_schemas",
           "path": "crates/automata-ci-store/src/postgres/github_subject_evidence.rs"
         }
@@ -497,7 +505,7 @@
       ],
       "tests": [
         {
-          "contains": "forward dialect must fail closed",
+          "contains": "GithubExpressionEvaluationErrorKind::UnsupportedProgram",
           "function": "evaluator_rejects_forward_workflow_dialect_version",
           "path": "crates/automata-ci-expression-github/tests/evaluator.rs"
         }
@@ -542,7 +550,12 @@
               "path": "crates/automata-ci/tests/github_provider_config.rs",
               "reader_call": "load_value(\"schema.json\", &value)",
               "reader_symbol": "load_value",
-              "version": "for unsupported in [0, 1, 3, u16::MAX] {"
+              "version": "for unsupported in [0, 1, 3, u16::MAX] {",
+              "version_input": {
+                "contains": "value[\"schema\"] = json!(unsupported);",
+                "identifier": "value",
+                "reader_argument": 1
+              }
             }
           ],
           "version": 1
@@ -590,14 +603,9 @@
       "owner": "store",
       "sources": [
         {
-          "contains": "\"application/vnd.automata.github-repository-archive+gzip\";",
-          "path": "crates/automata-ci-store/src/github_schedule.rs",
-          "role": "version"
-        },
-        {
           "contains": "pub const GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE: &str =",
           "path": "crates/automata-ci-store/src/github_schedule.rs",
-          "role": "evidence"
+          "role": "version"
         }
       ],
       "tests": [
@@ -677,7 +685,12 @@
               "path": "crates/automata-ci-sandbox-guest/tests/behavior.rs",
               "reader_call": "exchange(&socket, &unsupported).await",
               "reader_symbol": "exchange",
-              "version": "for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {"
+              "version": "for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {",
+              "version_input": {
+                "contains": "protocol: unsupported_protocol,",
+                "identifier": "unsupported",
+                "reader_argument": 1
+              }
             }
           ],
           "version": 1
@@ -807,7 +820,7 @@
       ],
       "tests": [
         {
-          "contains": "let forward_schema = WRAP_SCHEMA.checked_add(1).expect(\"test schema\");",
+          "contains": "Err(KeyEncryptionError::AuthenticationFailed)",
           "function": "local_wrapped_key_rejects_forward_wrap_schema",
           "path": "crates/automata-ci-key-management/src/local.rs"
         }
@@ -887,7 +900,7 @@
       ],
       "tests": [
         {
-          "contains": "value[\"schema_version\"] = serde_json::json!(",
+          "contains": ".checked_add(1)",
           "function": "serde_rejects_forward_overlay_schema",
           "path": "crates/automata-ci-protocol/src/message/managed_secret.rs"
         }
@@ -927,12 +940,16 @@
       ],
       "tests": [
         {
-          "contains": "for version in [\"p0\", \"p2\"]",
+          "contains": "let opaque = current.opaque().replacen(HANDLE_VERSION, version, 1);",
           "function": "sandbox_handle_reader_rejects_noncurrent_versions",
           "path": "crates/automata-ci-sandbox-podman/src/naming.rs"
         }
       ],
-      "version": "p1"
+      "version": "p1",
+      "version_sequence": {
+        "kind": "prefix-ordinal",
+        "prefix": "p"
+      }
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -972,7 +989,7 @@
       ],
       "tests": [
         {
-          "contains": "assert_eq!(TIMING_RECORD_SCHEMA, \"automata-postgres-test-timing/v1\");",
+          "contains": "TIMING_RECORD_SCHEMA",
           "function": "timing_record_schema_is_exact_v1",
           "path": "crates/automata-ci-postgres-test-support/src/timing.rs"
         }
@@ -990,7 +1007,7 @@
           "role": "version"
         },
         {
-          "contains": "// This file is @generated by prost-build.",
+          "contains": "pub struct RunnerFrame {",
           "path": "crates/automata-ci-protocol-protobuf/src/generated/automata.runner.v1.rs",
           "role": "evidence"
         },
@@ -1007,7 +1024,7 @@
       ],
       "tests": [
         {
-          "contains": "assert_eq!(values.get(\"package\"), Some(&\"automata.runner.v1\"));",
+          "contains": "assert_eq!(values.len(), 16,",
           "function": "reviewed_schema_dto_and_generator_provenance_is_exact",
           "path": "crates/automata-ci-protocol-protobuf/tests/codegen_contract.rs"
         },
@@ -1072,7 +1089,7 @@
       ],
       "tests": [
         {
-          "contains": "lease_offer_fallback_version = 2",
+          "contains": "let primary_schema = primary_response.schema();",
           "function": "lease_offer_fallback_projection_corruption_fails_closed_before_replay",
           "path": "crates/automata-ci-store/tests/postgres_runner_clock.rs"
         }
@@ -1092,7 +1109,7 @@
       ],
       "tests": [
         {
-          "contains": "document[\"schema\"] = serde_json::json!(STAGE_SCHEMA + 1);",
+          "contains": ".validate_schema()",
           "function": "request_stage_reader_rejects_noncurrent_schema_versions",
           "path": "crates/automata-ci-runner/src/enrollment/custody.rs"
         }
@@ -1157,7 +1174,12 @@
               "path": "crates/automata-ci-runner/tests/runner_product_config.rs",
               "reader_call": "parse_value(&document)",
               "reader_symbol": "parse_value",
-              "version": "for unsupported in [0, 1, u16::MAX] {"
+              "version": "for unsupported in [0, 1, u16::MAX] {",
+              "version_input": {
+                "contains": "document[\"schema_version\"] = serde_json::json!(unsupported);",
+                "identifier": "document",
+                "reader_argument": 0
+              }
             }
           ],
           "version": 1
@@ -1172,7 +1194,7 @@
       ],
       "tests": [
         {
-          "contains": "document[\"schema_version\"] = serde_json::json!(unsupported);",
+          "contains": "RunnerProductConfigError::UnsupportedSchema",
           "function": "only_the_current_product_schema_is_accepted",
           "path": "crates/automata-ci-runner/tests/runner_product_config.rs"
         }
@@ -1242,7 +1264,7 @@
       ],
       "tests": [
         {
-          "contains": "value[\"payload\"][\"runtime_authorities\"][\"schema_version\"] = serde_json::json!(",
+          "contains": "RuntimeAuthorityError::UnsupportedSchema",
           "function": "runtime_authority_bundle_rejects_forward_schema",
           "path": "crates/automata-ci-protocol/tests/capability_version_skew.rs"
         }
@@ -1282,7 +1304,7 @@
           "path": "crates/automata-ci-store/src/postgres/durable_schema.rs"
         },
         {
-          "contains": "SET canary_schema = 2",
+          "contains": "Err(SecretCustodyRepositoryError::CorruptData)",
           "function": "noncurrent_canary_schema_fails_closed",
           "path": "crates/automata-ci-store/tests/postgres_secret_custody.rs"
         }
@@ -1317,7 +1339,7 @@
       ],
       "tests": [
         {
-          "contains": "parse(&[\"serve-v2\", \"tcp|10.0.0.2|80|0\"])",
+          "contains": "Err(ProxyError::Usage)",
           "function": "rejects_noncurrent_command_protocol",
           "path": "crates/automata-ci-service-proxy/src/config.rs"
         }
@@ -1340,7 +1362,7 @@
           "role": "evidence"
         },
         {
-          "contains": "{{\\\"version\\\":{SERVICE_PROXY_STATUS_SCHEMA_VERSION},\\\"ports\\\":[{}]}}",
+          "contains": "let canonical = format!(",
           "path": "crates/automata-ci-sandbox-podman/src/service_proxy.rs",
           "role": "evidence"
         },
@@ -1350,14 +1372,14 @@
           "role": "version"
         },
         {
-          "contains": "{{\\\"version\\\":{SERVICE_PROXY_STATUS_SCHEMA_VERSION},\\\"ports\\\":[",
+          "contains": "status.push_str(&format!(",
           "path": "crates/automata-ci-service-proxy/src/status.rs",
           "role": "evidence"
         }
       ],
       "tests": [
         {
-          "contains": "b\"{\\\"version\\\":2,\\\"ports\\\":[41001,41002]}\\n\"",
+          "contains": "Some(vec![41001, 41002])",
           "function": "status_is_current_only_canonical_and_exactly_sized",
           "path": "crates/automata-ci-sandbox-podman/src/service_proxy.rs"
         }
@@ -1377,7 +1399,7 @@
       ],
       "tests": [
         {
-          "contains": "format!(\"v2~key~{valid_secret}\")",
+          "contains": "InvalidSessionCredential",
           "function": "parser_accepts_only_one_bounded_canonical_format",
           "path": "crates/automata-ci-auth/tests/session_credential.rs"
         }
@@ -1397,7 +1419,7 @@
       ],
       "tests": [
         {
-          "contains": "orchestration_schema = 2",
+          "contains": "let run_id = command.run_id().as_uuid();",
           "function": "logical_admission_replay_rejects_forward_plan_and_orchestration_schemas",
           "path": "crates/automata-ci-store/tests/postgres_logical_orchestration.rs"
         }
@@ -1417,7 +1439,7 @@
       ],
       "tests": [
         {
-          "contains": "authority_evidence_schema = 2",
+          "contains": "Err(ManagedSecretAuthorityStoreError::CorruptData)",
           "function": "delivery_operation_replay_rejects_a_forward_authority_schema",
           "path": "crates/automata-ci-store/tests/postgres_managed_secret_authority.rs"
         }
@@ -1437,7 +1459,7 @@
       ],
       "tests": [
         {
-          "contains": "plaintext_schema = 2",
+          "contains": "Err(GithubRuntimeAuthorityStoreError::CorruptData)",
           "function": "ready_authority_reader_rejects_a_forward_protected_payload_schema",
           "path": "crates/automata-ci-store/tests/postgres_runtime_authority.rs"
         }
@@ -1457,7 +1479,7 @@
       ],
       "tests": [
         {
-          "contains": "plaintext_schema = 2",
+          "contains": "Err(GithubServerServiceStoreError::CorruptData)",
           "function": "handoff_replay_rejects_a_forward_protected_plaintext_schema",
           "path": "crates/automata-ci-store/tests/postgres_github_service_authority.rs"
         }
@@ -1487,7 +1509,7 @@
           "path": "crates/automata-ci-store/src/postgres/g1.rs"
         },
         {
-          "contains": "publication_safety_schema = 2",
+          "contains": "assert_legacy_corruption(&database.store().admit_workflow(legacy).await);",
           "function": "exact_replay_rejects_tampered_publication_snapshot_evidence",
           "path": "crates/automata-ci-store/tests/postgres_run_publication_snapshot.rs"
         },
@@ -1517,7 +1539,7 @@
       ],
       "tests": [
         {
-          "contains": "setPath(input, [\"schemaVersion\"], 2);",
+          "contains": "validateRenderRequest(input)",
           "function": "rejectsNoncurrentRenderRequestSchema",
           "path": "ui/tests/unit/validation.test.ts"
         }
@@ -1562,7 +1584,7 @@
       ],
       "tests": [
         {
-          "contains": "\"nested workflow contract version must fail closed at {path:?}\"",
+          "contains": "serde_json::from_value::<WorkflowPlan>(noncurrent).is_err()",
           "function": "nested_expression_and_strategy_versions_fail_closed",
           "path": "crates/automata-ci-core/tests/logical_workflow_plan.rs"
         }
@@ -1607,12 +1629,12 @@
       ],
       "tests": [
         {
-          "contains": "WorkflowPlanVersion::new(WORKFLOW_PLAN_SCHEMA_VERSION).expect(\"current\"),",
+          "contains": "assert!(WorkflowPlanVersion::new(2).is_err());",
           "function": "only_the_current_version_and_required_logical_body_decode",
           "path": "crates/automata-ci-core/tests/logical_workflow_plan.rs"
         },
         {
-          "contains": "plan_schema = 2",
+          "contains": "let run_id = command.run_id().as_uuid();",
           "function": "logical_admission_replay_rejects_forward_plan_and_orchestration_schemas",
           "path": "crates/automata-ci-store/tests/postgres_logical_orchestration.rs"
         }
@@ -1642,7 +1664,7 @@
       ],
       "tests": [
         {
-          "contains": "application/vnd.automata.event.v2+json",
+          "contains": "assert!(!workflow_event_media_type_is_current(media_type));",
           "function": "workflow_event_reader_rejects_noncurrent_media_types",
           "path": "crates/automata-ci-workflow-service/src/lib.rs"
         }
@@ -1687,7 +1709,7 @@
           "path": "crates/automata-ci-store/src/workflow_runtime_policy.rs"
         },
         {
-          "contains": "document[\"schema\"] = serde_json::json!(unsupported);",
+          "contains": "let mut document = current.clone();",
           "function": "missing_sections_and_noncurrent_schemas_fail_closed",
           "path": "crates/automata-ci-store/src/workflow_runtime_policy.rs"
         }
@@ -1707,7 +1729,7 @@
       ],
       "tests": [
         {
-          "contains": "workspace_schema[\"workspace\"][\"schema\"] = serde_json::json!(unsupported);",
+          "contains": "let mut workspace_schema = current.clone();",
           "function": "missing_sections_and_noncurrent_schemas_fail_closed",
           "path": "crates/automata-ci-store/src/workflow_runtime_policy.rs"
         }
@@ -1727,7 +1749,7 @@
       ],
       "tests": [
         {
-          "contains": "application/vnd.github-actions.workflow.v2+yaml",
+          "contains": "assert!(!github_workflow_media_type_is_current(media_type));",
           "function": "github_workflow_source_reader_rejects_noncurrent_media_types",
           "path": "crates/automata-ci-workflow-service/src/lib.rs"
         }
@@ -1752,7 +1774,7 @@
       ],
       "tests": [
         {
-          "contains": "\"fixture must bind workflow expression and strategy versions\"",
+          "contains": "paths.len() >= 2",
           "function": "nested_expression_and_strategy_versions_fail_closed",
           "path": "crates/automata-ci-core/tests/logical_workflow_plan.rs"
         }
@@ -1777,7 +1799,7 @@
       ],
       "tests": [
         {
-          "contains": "derivation[\"workspace\"][\"derivation\"] = serde_json::json!(unsupported);",
+          "contains": "let mut derivation = current.clone();",
           "function": "missing_sections_and_noncurrent_schemas_fail_closed",
           "path": "crates/automata-ci-store/src/workflow_runtime_policy.rs"
         }
@@ -2920,7 +2942,7 @@
       "uses": [
         {
           "constant": "MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS",
-          "contains": "for _ in 0..MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS {",
+          "contains": "for attempt in 0..MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS {",
           "path": "crates/automata-ci-auth/src/github/login_service.rs"
         },
         {
@@ -3041,7 +3063,8 @@
         {
           "constant": "MAX_DISPLAY_NAME_LENGTH",
           "contains": "validate_identity_text(display_name, \"display name\", MAX_DISPLAY_NAME_LENGTH, true)?;",
-          "path": "crates/automata-ci-auth/src/human.rs"
+          "path": "crates/automata-ci-auth/src/human.rs",
+          "scope": "AuthenticatedHuman::new"
         },
         {
           "constant": "MAX_IDENTIFIER_LENGTH",
@@ -3051,7 +3074,8 @@
         {
           "constant": "MAX_LOGIN_LENGTH",
           "contains": "validate_identity_text(&login, \"provider login\", MAX_LOGIN_LENGTH, false)?;",
-          "path": "crates/automata-ci-auth/src/human.rs"
+          "path": "crates/automata-ci-auth/src/human.rs",
+          "scope": "AuthenticatedHuman::new"
         }
       ]
     },
@@ -3161,7 +3185,8 @@
         {
           "constant": "MAX_DISPLAY_NAME_BYTES",
           "contains": "if !is_safe_management_text(value, MAX_DISPLAY_NAME_BYTES) {",
-          "path": "crates/automata-ci-auth/src/management.rs"
+          "path": "crates/automata-ci-auth/src/management.rs",
+          "scope": "validate_display_name"
         },
         {
           "constant": "MAX_PAGE_SIZE",
@@ -9712,7 +9737,12 @@
         "plus_one": {
           "contains": "assert!(!budget.enter(\"one-too-deep\".to_owned()));",
           "function": "composite_runtime_budgets_fail_before_unbounded_work",
-          "path": "crates/automata-ci-job-executor-github/src/executor.rs"
+          "path": "crates/automata-ci-job-executor-github/src/executor.rs",
+          "relation": {
+            "base": "assert_eq!(budget.active.len(), MAX_ACTION_NESTING_DEPTH);",
+            "kind": "successor-attempt",
+            "operation": "budget.enter"
+          }
         }
       },
       "classification": "github",
@@ -11413,6 +11443,10 @@
           "contains": "plan_value_with_matrix(&matrix, boundary + 1)",
           "function": "matrix_expansion_limit_accepts_minus_one_and_boundary_but_rejects_plus_one",
           "path": "crates/automata-ci-core/tests/logical_workflow_plan.rs"
+        },
+        "value_alias": {
+          "contains": "let boundary = u16::try_from(MAX_MATRIX_EXPANSION).expect(\"matrix limit fits u16\");",
+          "identifier": "boundary"
         }
       },
       "classification": "github",
@@ -14855,7 +14889,7 @@
       "owner": "workflow",
       "reason_code": "github.compile.too_many_workflow_dispatch_inputs",
       "reason_source": {
-        "contains": "\"github.compile.too_many_workflow_dispatch_inputs\",",
+        "contains": "context.semantic(",
         "path": "crates/automata-ci-workflow-github/src/compiler/trigger.rs"
       },
       "source": {

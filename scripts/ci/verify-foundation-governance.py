@@ -61,6 +61,26 @@ FORMAT_COMPATIBILITY_POLICIES = {
     "exact-current-only",
     "generated-v1-package",
 }
+REQUIRED_FORMAT_ID_VERSION_SEQUENCES = {
+    "github-browser-proof": "bw",
+    "github-device-proof": "dp",
+    "podman-sandbox-handle": "p",
+}
+REQUIRED_FORMAT_SOURCE_VERSION_SEQUENCES = {
+    (
+        "crates/automata-ci-auth/src/github/login_service.rs",
+        "BROWSER_PROOF_VERSION",
+    ): "bw",
+    (
+        "crates/automata-ci-auth/src/github/login_service.rs",
+        "DEVICE_PROOF_VERSION",
+    ): "dp",
+    (
+        "crates/automata-ci-sandbox-podman/src/naming.rs",
+        "HANDLE_VERSION",
+    ): "p",
+}
+REQUIRED_COMPACT_VERSION_PREFIXES = {"bw", "dp", "p"}
 GITHUB_LIMIT_IDS = {
     "github.cache.deletes-per-minute",
     "github.cache.downloads-per-minute",
@@ -173,8 +193,17 @@ PRODUCTION_MEDIA_COMPARISON = re.compile(
     r"\s*(?:==|!=|<>|=)\s*(?:\\?[\"'])(?:application|text)/"
 )
 PRODUCTION_TEST_CFG = re.compile(
-    r"(?m)^\s*#\[\s*cfg\s*\([^]]*\btest\b[^]]*\)\s*\]"
+    r"(?m)^[ \t]*#\[\s*cfg\s*\("
 )
+RUST_RAW_STRING_START = re.compile(r'(?:b|c)?r(?P<hashes>#{0,255})"')
+RUST_BYTE_RAW_STRING_START = re.compile(r'(?:b)?r(?P<hashes>#{0,255})"')
+RUST_CHARACTER_LITERAL = re.compile(r"(?:b)?'(?:\\.|[^\\'\r\n])'")
+RUST_QUOTED_STRING_START = re.compile(r'(?:b|c)?"')
+RUST_NONEXECUTING_MACRO = re.compile(
+    r"(?<![A-Za-z0-9_])(?:(?:[A-Za-z_][A-Za-z0-9_]*)::)*"
+    r"(?:stringify|quote|quote_spanned)!\s*(?P<opening>[({\[])"
+)
+_TEST_ONLY_EXTERNAL_MODULE_CACHE: dict[Path, set[Path]] = {}
 
 
 class GovernanceError(ValueError):
@@ -392,11 +421,20 @@ def _validate_sources(
             contents = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             _fail(f"cannot read source binding {relative}: {error}")
-        occurrences = contents.count(fragment)
+        if path.suffix in {".rs", ".ts", ".tsx"}:
+            occurrences = len(
+                _executable_fragment_offsets(
+                    contents,
+                    fragment,
+                    typescript=path.suffix in {".ts", ".tsx"},
+                )
+            )
+        else:
+            occurrences = contents.count(fragment)
         if occurrences != 1:
             _fail(
                 f"{source_context} fragment must occur exactly once in {relative}; "
-                f"found {occurrences}"
+                f"found {occurrences} outside comments and literals"
             )
         fragments.append(fragment)
         identities.append((relative, fragment))
@@ -405,24 +443,202 @@ def _validate_sources(
     return fragments
 
 
+def _expanded_declaration_binding(
+    repository_root: Path,
+    source: dict[str, Any],
+    fragment: str,
+) -> str:
+    """Expand an executable declaration header to its complete initializer."""
+
+    relative = source["path"]
+    path = repository_root / relative
+    typescript = path.suffix in {".ts", ".tsx"}
+    declaration_pattern = (
+        TYPESCRIPT_CONSTANT_DECLARATION if typescript else RUST_CONSTANT_DECLARATION
+    )
+    fragment_code = (
+        _typescript_executable_source(fragment)
+        if typescript
+        else _rust_executable_source(fragment)
+    )
+    registered = declaration_pattern.search(fragment_code)
+    if registered is None:
+        return fragment
+    contents = path.read_text(encoding="utf-8")
+    classified = (
+        _typescript_executable_source(contents)
+        if typescript
+        else _rust_executable_source(contents)
+    )
+    matches = [
+        match
+        for match in declaration_pattern.finditer(classified)
+        if match.group("name") == registered.group("name")
+    ]
+    if len(matches) != 1:
+        return fragment
+    return _constant_declaration_fragment(
+        contents,
+        matches[0],
+        classified_source=classified,
+    )
+
+
+def _validate_reason_source_binding(
+    repository_root: Path,
+    raw_source: Any,
+    reason_code: str,
+    context: str,
+) -> str:
+    """Bind a reason to one executable source fragment or matching call argument."""
+
+    source = _object(raw_source, {"contains", "path"}, context)
+    relative = _string(source["path"], f"{context}.path")
+    path = _existing_path(
+        repository_root,
+        relative,
+        f"{context}.path",
+        kind="file",
+    )
+    fragment = _string(source["contains"], f"{context}.contains")
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        _fail(f"cannot read reason source {relative}: {error}")
+    typescript = path.suffix in {".ts", ".tsx"}
+    offsets = _executable_fragment_offsets(
+        contents,
+        fragment,
+        typescript=typescript,
+    )
+    if len(offsets) == 1 and _fragment_binds_reason(fragment, reason_code):
+        return fragment
+    if typescript:
+        _fail(
+            f"{context} does not bind declared reason code {reason_code!r}: "
+            "contains must occur exactly once in executable source"
+        )
+
+    fragment_code = _rust_executable_source(fragment)
+    if not fragment_code.rstrip().endswith("("):
+        _fail(
+            f"{context} does not bind declared reason code {reason_code!r}: "
+            "contains must be an executable reason expression or call prefix"
+        )
+    classified = _rust_executable_source(contents)
+    candidates: list[str] = []
+    for offset in offsets:
+        opening = offset + fragment_code.rfind("(")
+        closing = _matching_parenthesis(classified, opening)
+        if closing is None:
+            continue
+        candidate = contents[offset : closing + 1]
+        if _fragment_binds_reason(candidate, reason_code):
+            candidates.append(candidate)
+    if len(candidates) != 1:
+        _fail(
+            f"{context} does not bind declared reason code {reason_code!r}: contains "
+            "must identify exactly one executable call with that designated first argument"
+        )
+    return candidates[0]
+
+
 def _fragment_binds_integer(fragment: str, value: int) -> bool:
-    if value == 1 and "NonZeroU16::MIN" in fragment:
-        return True
-    normalized = fragment.replace("_", "")
-    numeric_literal = re.search(
-        rf"(?<![A-Za-z0-9_]){value}(?![A-Za-z0-9_])",
-        normalized,
+    # An integer claim is a closed value expression.  Type widths, helper
+    # names, dead statements, and arguments to arbitrary transforming const
+    # functions are not evidence for the value produced by a declaration.
+    code = _rust_executable_source(fragment)
+    rust_declaration = re.search(
+        r"^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+"
+        r"[A-Z][A-Z0-9_]*\s*:\s*(?P<type>[^=\r\n]+)\s*=",
+        code,
+        flags=re.MULTILINE,
     )
-    version_identifier = re.search(
-        rf"(?<![A-Za-z0-9_])v{value}(?![A-Za-z0-9_])",
-        normalized,
-        flags=re.IGNORECASE,
+    other_declaration = None if rust_declaration is not None else re.search(
+        r"^\s*(?:(?:export\s+)?const|let|var)\s+"
+        r"[A-Za-z_][A-Za-z0-9_]*(?:\s*:[^=;\r\n]+)?\s*=",
+        code,
+        flags=re.MULTILINE,
     )
-    if numeric_literal is not None or version_identifier is not None:
-        return True
-    if "const" not in fragment or "=" not in fragment:
+    declaration = rust_declaration or other_declaration
+    if declaration is None:
+        direct = code.strip().rstrip(";").strip()
+        literal = re.fullmatch(
+            r"(?P<digits>[0-9][0-9_]*)(?:u|i)(?:8|16|32|64|128|size)?",
+            direct,
+        ) or re.fullmatch(r"(?P<digits>[0-9][0-9_]*)", direct)
+        if literal is not None:
+            return int(literal.group("digits").replace("_", "")) == value
+        if value == 1 and direct == "Self(NonZeroU16::MIN)":
+            return True
+        constant = re.fullmatch(r"Self::constant\((?P<digits>[0-9][0-9_]*)\)", direct)
+        if constant is not None:
+            return int(constant.group("digits").replace("_", "")) == value
+        named = re.fullmatch(r"Self::v(?P<ordinal>[1-9][0-9]*)\(\)", direct)
+        if named is not None:
+            return int(named.group("ordinal")) == value
+        package = re.fullmatch(
+            r"package\s+[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
+            r"\.v(?P<ordinal>[1-9][0-9]*)",
+            direct,
+        )
+        if package is not None:
+            return int(package.group("ordinal")) == value
+        comparison = re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_.]*(?:\s*\(\s*\))?\s*"
+            r"(?:==|!=|<=|>=|<|>)\s*"
+            r"(?P<digits>[0-9][0-9_]*)(?:(?:u|i)(?:8|16|32|64|128|size))?",
+            direct,
+        )
+        if comparison is not None:
+            return int(comparison.group("digits").replace("_", "")) == value
+        loop = re.fullmatch(
+            r"for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s*\[(?P<items>[^\]]+)\]\s*\{",
+            direct,
+        )
+        if loop is None:
+            return False
+        for item in loop.group("items").split(","):
+            literal_item = re.fullmatch(
+                r"\s*(?P<digits>[0-9][0-9_]*)(?:(?:u|i)(?:8|16|32|64|128|size))?\s*",
+                item,
+            )
+            if literal_item is not None and int(
+                literal_item.group("digits").replace("_", "")
+            ) == value:
+                return True
         return False
-    expression = fragment.partition("=")[2].rsplit(";", 1)[0].strip()
+
+    if code[: declaration.start()].strip():
+        return False
+    typescript = rust_declaration is None and re.search(
+        r"\b(?:export\s+)?const\b|\bvar\b", declaration.group(0)
+    ) is not None
+    candidate = _binding_initializer(fragment, typescript=typescript)
+    if candidate is None:
+        return False
+    expression = (
+        _typescript_executable_source(candidate)
+        if typescript
+        else _rust_executable_source(candidate)
+    ).strip()
+    if typescript:
+        expression = re.sub(r"\s+as\s+const\s*$", "", expression)
+    if value == 1 and expression == "NonZeroU16::MIN":
+        return True
+
+    declared_type = rust_declaration.group("type") if rust_declaration is not None else None
+    wrapper = re.fullmatch(
+        r"(?P<constructor>[A-Z][A-Za-z0-9_]*)\s*\((?P<argument>.*)\)",
+        expression,
+        flags=re.DOTALL,
+    )
+    if wrapper is not None:
+        type_leaf = declared_type.strip().rsplit("::", 1)[-1] if declared_type else None
+        if wrapper.group("constructor") != type_leaf:
+            return False
+        expression = wrapper.group("argument").strip()
+
     expression = re.sub(
         r"(?<=\d)_(?:u|i)(?:8|16|32|64|128|size)\b|"
         r"(?<=\d)(?:u|i)(?:8|16|32|64|128|size)\b",
@@ -475,8 +691,76 @@ def _format_version(value: Any, context: str) -> int | str:
     return token
 
 
-def _prior_format_versions(version: int | str) -> list[int | str] | None:
+def _required_compact_version_prefix(version: int | str) -> str | None:
+    """Return a reserved compact ordinal prefix, if the token uses one."""
+
+    if not isinstance(version, str):
+        return None
+    compact = re.fullmatch(
+        r"(?P<prefix>[A-Za-z][A-Za-z_-]*?)(?P<ordinal>[1-9][0-9]*)",
+        version,
+    )
+    if compact is None or compact.group("prefix") not in REQUIRED_COMPACT_VERSION_PREFIXES:
+        return None
+    return compact.group("prefix")
+
+
+def _explicit_prior_format_versions(
+    version: int | str,
+    raw_sequence: Any,
+    context: str,
+    expected_prefix: str | None,
+) -> list[str]:
+    """Validate an explicitly declared compact ordinal sequence."""
+
+    sequence = _object(raw_sequence, {"kind", "prefix"}, context)
+    kind = _string(sequence["kind"], f"{context}.kind", identifier=True)
+    if kind != "prefix-ordinal":
+        _fail(f"{context}.kind must be 'prefix-ordinal'")
+    prefix = _string(sequence["prefix"], f"{context}.prefix")
+    if re.fullmatch(r"[A-Za-z][A-Za-z._:+/-]{0,63}", prefix) is None:
+        _fail(
+            f"{context}.prefix must be a stable nonnumeric canonical token prefix"
+        )
+    if not isinstance(version, str):
+        _fail(f"{context} requires a string format version")
+    match = re.fullmatch(rf"{re.escape(prefix)}(?P<ordinal>[1-9][0-9]*)", version)
+    if match is None:
+        _fail(
+            f"{context}.prefix {prefix!r} must match declared version {version!r} "
+            "followed by one positive ordinal"
+        )
+    if expected_prefix is not None and prefix != expected_prefix:
+        _fail(
+            f"{context}.prefix must remain {expected_prefix!r} for this governed format"
+        )
+    ordinal = int(match.group("ordinal"))
+    if ordinal > 65535:
+        _fail(f"{context} ordinal must be at most 65535")
+    return [f"{prefix}{prior}" for prior in range(1, ordinal)]
+
+
+def _prior_format_versions(
+    version: int | str,
+    sequence: Any | None = None,
+    *,
+    context: str = "version_sequence",
+    required_prefix: str | None = None,
+) -> list[int | str] | None:
     """Returns every required prior token for a monotonically versioned format."""
+
+    if sequence is not None:
+        return _explicit_prior_format_versions(
+            version,
+            sequence,
+            context,
+            required_prefix,
+        )
+    if required_prefix is not None:
+        _fail(
+            f"{context} is required with prefix {required_prefix!r} for this "
+            "governed compact ordinal format"
+        )
 
     if isinstance(version, int):
         return list(range(1, version))
@@ -489,27 +773,306 @@ def _prior_format_versions(version: int | str) -> list[int | str] | None:
     if match is None:
         return None
     ordinal = int(match.group("ordinal"))
+    if ordinal > 65535:
+        _fail("sequenced format ordinal must be at most 65535")
     return [
         f"{match.group('prefix')}{prior}{match.group('suffix')}"
         for prior in range(1, ordinal)
     ]
 
 
-def _fragment_binds_version(fragment: str, version: int | str) -> bool:
+def _direct_string_literals(source: str, *, typescript: bool = False) -> list[str]:
+    """Return top-level literal contents, excluding quote-like text nested in literals."""
+
+    scan = _mask_source_comments(source, typescript=typescript)
+    values: list[str] = []
+    index = 0
+    while index < len(scan):
+        if not typescript:
+            raw_string = RUST_RAW_STRING_START.match(scan, index)
+            if raw_string is not None:
+                terminator = '"' + raw_string.group("hashes")
+                content_start = raw_string.end()
+                end = scan.find(terminator, content_start)
+                if end < 0:
+                    return values
+                values.append(scan[content_start:end])
+                index = end + len(terminator)
+                continue
+            character = RUST_CHARACTER_LITERAL.match(scan, index)
+            if character is not None:
+                index = character.end()
+                continue
+            quoted = RUST_QUOTED_STRING_START.match(scan, index)
+            if quoted is None:
+                index += 1
+                continue
+            quote = '"'
+            content_start = quoted.end()
+        else:
+            if scan[index] not in {'"', "'", "`"}:
+                index += 1
+                continue
+            quote = scan[index]
+            content_start = index + 1
+
+        index = content_start
+        while index < len(scan):
+            if scan[index] == "\\":
+                index += 2
+            elif scan[index] == quote:
+                values.append(scan[content_start:index])
+                index += 1
+                break
+            else:
+                index += 1
+    return values
+
+
+def _balanced_statement_terminator(code: str, start: int) -> int | None:
+    """Return the first semicolon outside balanced (), [], and {} groups."""
+
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    stack: list[str] = []
+    for index in range(start, len(code)):
+        character = code[index]
+        if character in closing_for:
+            stack.append(closing_for[character])
+        elif character in closing_for.values():
+            if not stack or character != stack.pop():
+                return None
+        elif character == ";" and not stack:
+            return index
+    return None
+
+
+def _binding_initializer(
+    fragment: str,
+    *,
+    typescript: bool = False,
+) -> str | None:
+    """Return a local/constant binding RHS, excluding its terminating semicolon."""
+
+    code = (
+        _typescript_executable_source(fragment)
+        if typescript
+        else _rust_executable_source(fragment)
+    )
+    if typescript:
+        pattern = re.compile(
+            r"(?m)^\s*(?:(?:export\s+)?const|let|var)\s+"
+            r"[A-Za-z_][A-Za-z0-9_]*(?:\s*:[^=;\r\n]+)?\s*="
+        )
+    else:
+        pattern = re.compile(
+            r"(?m)^\s*(?:(?:pub(?:\([^)]*\))?\s+)?const\s+"
+            r"[A-Za-z_][A-Za-z0-9_]*\s*:[^=\r\n]+|let\s+(?:mut\s+)?"
+            r"[A-Za-z_][A-Za-z0-9_]*(?:\s*:[^=;\r\n]+)?)\s*="
+        )
+    binding = pattern.search(code)
+    if binding is None:
+        return None
+    end = _balanced_statement_terminator(code, binding.end())
+    if end is None:
+        end = len(fragment)
+    elif code[end + 1 :].strip():
+        # A value claim is one binding, not an arbitrary multi-statement
+        # fragment containing a convenient initializer.
+        return None
+    return fragment[binding.end() : end].strip()
+
+
+def _direct_string_binding_equals(
+    fragment: str,
+    value: str,
+    *,
+    typescript: bool = False,
+) -> bool:
+    initializer = _binding_initializer(fragment, typescript=typescript)
+    if initializer is None:
+        return False
+    executable = (
+        _typescript_executable_source(initializer)
+        if typescript
+        else _rust_executable_source(initializer)
+    )
+    return (
+        executable.strip() == ""
+        and _direct_string_literals(initializer, typescript=typescript) == [value]
+    )
+
+
+def _fragment_binds_version(
+    fragment: str,
+    version: int | str,
+    *,
+    typescript: bool = False,
+) -> bool:
     if isinstance(version, int):
-        return _fragment_binds_integer(fragment, version)
-    return f'"{version}"' in fragment
+        classified = (
+            _typescript_executable_source(fragment)
+            if typescript
+            else _rust_executable_source(fragment)
+        )
+        return _fragment_binds_integer(classified, version)
+    if _binding_initializer(fragment, typescript=typescript) is not None:
+        return _direct_string_binding_equals(
+            fragment,
+            version,
+            typescript=typescript,
+        )
+    return version in _direct_string_literals(fragment, typescript=typescript)
 
 
 def _fragment_binds_reason(fragment: str, reason_code: str) -> bool:
     if "::" not in reason_code:
-        return f'"{reason_code}"' in fragment
-    return (
-        re.search(
-            rf"(?<![A-Za-z0-9_]){re.escape(reason_code)}(?![A-Za-z0-9_])",
-            fragment,
+        first_argument = _first_call_argument(fragment)
+        return first_argument is not None and _direct_string_binding_equals(
+            f"let reason = {first_argument};",
+            reason_code,
         )
-        is not None
+    code = _rust_executable_source(fragment).strip()
+    reason = rf"(?<![A-Za-z0-9_]){re.escape(reason_code)}(?![A-Za-z0-9_])"
+    if len(re.findall(reason, code)) != 1:
+        return False
+    terminator = _balanced_statement_terminator(code, 0)
+    if terminator is not None and code[terminator + 1 :].strip():
+        return False
+    direct_return = re.match(
+        rf"return\s+(?:Err|Some)\s*\(\s*{reason}",
+        code,
+    )
+    if direct_return is not None:
+        return True
+    ok_or = re.search(
+        rf"\.ok_or\s*\(\s*{reason}\s*\)",
+        code,
+    )
+    return ok_or is not None
+
+
+def _first_call_argument(fragment: str) -> str | None:
+    """Return the first argument of a balanced executable Rust call."""
+
+    code = _rust_executable_source(fragment)
+    opening = code.find("(")
+    if opening < 0:
+        return None
+    round_depth = 1
+    square_depth = 0
+    brace_depth = 0
+    index = opening + 1
+    while index < len(code):
+        character = code[index]
+        if character == "(":
+            round_depth += 1
+        elif character == ")":
+            round_depth -= 1
+            if round_depth == 0:
+                return fragment[opening + 1 : index].strip()
+        elif character == "[":
+            square_depth += 1
+        elif character == "]":
+            square_depth -= 1
+        elif character == "{":
+            brace_depth += 1
+        elif character == "}":
+            brace_depth -= 1
+        elif (
+            character == ","
+            and round_depth == 1
+            and square_depth == 0
+            and brace_depth == 0
+        ):
+            return fragment[opening + 1 : index].strip()
+        index += 1
+    return None
+
+
+def _call_arguments(
+    fragment: str,
+    *,
+    typescript: bool = False,
+) -> list[str] | None:
+    """Return top-level arguments from the first executable call in a fragment."""
+
+    code = (
+        _typescript_executable_source(fragment)
+        if typescript
+        else _rust_executable_source(fragment)
+    )
+    opening = code.find("(")
+    if opening < 0:
+        return None
+    closing = _matching_parenthesis(code, opening)
+    if closing is None:
+        return None
+    arguments: list[str] = []
+    start = opening + 1
+    round_depth = square_depth = brace_depth = 0
+    for index in range(start, closing):
+        character = code[index]
+        if character == "(":
+            round_depth += 1
+        elif character == ")":
+            round_depth -= 1
+        elif character == "[":
+            square_depth += 1
+        elif character == "]":
+            square_depth -= 1
+        elif character == "{":
+            brace_depth += 1
+        elif character == "}":
+            brace_depth -= 1
+        elif (
+            character == ","
+            and round_depth == 0
+            and square_depth == 0
+            and brace_depth == 0
+        ):
+            arguments.append(fragment[start:index].strip())
+            start = index + 1
+    tail = fragment[start:closing].strip()
+    if tail or arguments:
+        arguments.append(tail)
+    return arguments
+
+
+def _expression_is_direct_identifier(
+    expression: str,
+    identifier: str,
+    *,
+    typescript: bool = False,
+) -> bool:
+    """Accept an identifier itself or a single-argument value constructor around it."""
+
+    code = (
+        _typescript_executable_source(expression)
+        if typescript
+        else _rust_executable_source(expression)
+    ).strip().rstrip(",;").strip()
+    code = re.sub(r"^&\s*(?:mut\s+)?", "", code).strip()
+    token = rf"{re.escape(identifier)}"
+    if re.fullmatch(token, code):
+        return True
+    while code.startswith("("):
+        closing = _matching_parenthesis(code, 0)
+        if closing != len(code) - 1:
+            break
+        code = code[1:-1].strip()
+        if re.fullmatch(token, code):
+            return True
+    arguments = _call_arguments(code, typescript=typescript)
+    if arguments is None or len(arguments) != 1:
+        return False
+    opening = code.find("(")
+    closing = _matching_parenthesis(code, opening)
+    if closing is None or code[closing + 1 :].strip() not in {"", ".await"}:
+        return False
+    return _expression_is_direct_identifier(
+        arguments[0],
+        identifier,
+        typescript=typescript,
     )
 
 
@@ -518,57 +1081,60 @@ def _braced_function_section(
     match: re.Match[str],
     function: str,
     context: str,
+    *,
+    classified_source: str | None = None,
 ) -> str:
-    body_start = source.find("{", match.end())
+    scan_source = source if classified_source is None else classified_source
+    body_start = scan_source.find("{", match.end())
     if body_start < 0:
         _fail(f"{context} cannot locate body for test function {function!r}")
 
     depth = 1
     index = body_start + 1
-    while index < len(source) and depth:
-        if source.startswith("//", index):
-            newline = source.find("\n", index + 2)
-            index = len(source) if newline < 0 else newline + 1
+    while index < len(scan_source) and depth:
+        if scan_source.startswith("//", index):
+            newline = scan_source.find("\n", index + 2)
+            index = len(scan_source) if newline < 0 else newline + 1
             continue
-        if source.startswith("/*", index):
+        if scan_source.startswith("/*", index):
             comment_depth = 1
             index += 2
-            while index < len(source) and comment_depth:
-                if source.startswith("/*", index):
+            while index < len(scan_source) and comment_depth:
+                if scan_source.startswith("/*", index):
                     comment_depth += 1
                     index += 2
-                elif source.startswith("*/", index):
+                elif scan_source.startswith("*/", index):
                     comment_depth -= 1
                     index += 2
                 else:
                     index += 1
             continue
 
-        raw_string = re.match(r'(?:b)?r(?P<hashes>#{0,255})"', source[index:])
+        raw_string = RUST_BYTE_RAW_STRING_START.match(scan_source, index)
         if raw_string is not None:
             terminator = '"' + raw_string.group("hashes")
-            end = source.find(terminator, index + raw_string.end())
-            index = len(source) if end < 0 else end + len(terminator)
+            end = scan_source.find(terminator, raw_string.end())
+            index = len(scan_source) if end < 0 else end + len(terminator)
             continue
-        if source.startswith('b"', index) or source[index] == '"':
-            index += 2 if source.startswith('b"', index) else 1
-            while index < len(source):
-                if source[index] == "\\":
+        if scan_source.startswith('b"', index) or scan_source[index] == '"':
+            index += 2 if scan_source.startswith('b"', index) else 1
+            while index < len(scan_source):
+                if scan_source[index] == "\\":
                     index += 2
-                elif source[index] == '"':
+                elif scan_source[index] == '"':
                     index += 1
                     break
                 else:
                     index += 1
             continue
-        character = re.match(r"(?:b)?'(?:\\.|[^\\'\r\n])'", source[index:])
+        character = RUST_CHARACTER_LITERAL.match(scan_source, index)
         if character is not None:
-            index += character.end()
+            index = character.end()
             continue
 
-        if source[index] == "{":
+        if scan_source[index] == "{":
             depth += 1
-        elif source[index] == "}":
+        elif scan_source[index] == "}":
             depth -= 1
         index += 1
     if depth:
@@ -578,26 +1144,37 @@ def _braced_function_section(
 
 
 def _rust_test_section(source: str, function: str, context: str) -> str:
-    pattern = re.compile(RUST_TEST_FUNCTION.format(name=re.escape(function)))
-    match = pattern.search(source)
+    match = _rust_test_declaration_match(source, function)
     if match is None or RUST_TEST_ATTRIBUTE.search(match.group("attributes")) is None:
         _fail(f"{context} names missing test function {function!r} with a test attribute")
-    return _braced_function_section(source, match, function, context)
+    return _braced_function_section(
+        source,
+        match,
+        function,
+        context,
+        classified_source=_rust_executable_source(source),
+    )
 
 
 def _typescript_test_section(source: str, function: str, context: str) -> str:
     pattern = re.compile(TYPESCRIPT_TEST_FUNCTION.format(name=re.escape(function)))
-    match = pattern.search(source)
+    classified = _typescript_executable_source(source)
+    match = pattern.search(classified)
     registration = re.compile(
-        rf"\b(?:it|test)\s*\(\s*(['\"]).*?\1\s*,\s*{re.escape(function)}\s*,?\s*\)",
-        re.DOTALL,
+        rf"\b(?:it|test)\s*\(\s*,\s*{re.escape(function)}\s*,?\s*\)"
     )
-    if match is None or registration.search(source) is None:
+    if match is None or registration.search(classified) is None:
         _fail(
             f"{context} names missing TypeScript test function {function!r} "
             "registered with it() or test()"
         )
-    return _braced_function_section(source, match, function, context)
+    return _braced_function_section(
+        source,
+        match,
+        function,
+        context,
+        classified_source=classified,
+    )
 
 
 def _bound_test_section(path: Path, source: str, function: str, context: str) -> str:
@@ -608,30 +1185,76 @@ def _bound_test_section(path: Path, source: str, function: str, context: str) ->
     _fail(f"{context}.path must name a Rust or TypeScript test source")
 
 
+def _typescript_regex_literal_end(source: str, start: int) -> int | None:
+    """Return the end of a contextually plausible JavaScript regex literal."""
+
+    if (
+        start >= len(source)
+        or source[start] != "/"
+        or source.startswith(("//", "/*"), start)
+    ):
+        return None
+    prefix = source[:start].rstrip()
+    if prefix and prefix[-1] not in "([{,:;=!?&|+-*%^~<>" and re.search(
+        r"\b(?:return|case|throw|delete|typeof|void|new|yield|await)\s*$",
+        prefix,
+    ) is None:
+        return None
+    index = start + 1
+    in_character_class = False
+    while index < len(source):
+        character = source[index]
+        if character in {"\r", "\n"}:
+            return None
+        if character == "\\":
+            index += 2
+            continue
+        if character == "[":
+            in_character_class = True
+        elif character == "]":
+            in_character_class = False
+        elif character == "/" and not in_character_class:
+            index += 1
+            while index < len(source) and source[index].isalpha():
+                index += 1
+            return index
+        index += 1
+    return None
+
+
 def _mask_source_comments(source: str, *, typescript: bool = False) -> str:
-    """Mask comments while retaining byte offsets, strings, and line endings."""
+    """Mask comments in linear time while preserving source offsets."""
 
     masked = list(source)
     index = 0
     while index < len(source):
-        raw_string = re.match(r'(?:b|c)?r(?P<hashes>#{0,255})"', source[index:])
-        if raw_string is not None:
-            terminator = '"' + raw_string.group("hashes")
-            end = source.find(terminator, index + raw_string.end())
-            index = len(source) if end < 0 else end + len(terminator)
-            continue
-        rust_character = re.match(r"(?:b)?'(?:\\.|[^\\'\r\n])'", source[index:])
-        if rust_character is not None and not typescript:
-            index += rust_character.end()
-            continue
-        is_quoted = (
-            source.startswith('b"', index)
-            or source[index] in {'"', "`"}
-            or (typescript and source[index] == "'")
-        )
-        if is_quoted:
-            quote = source[index + 1] if source.startswith('b"', index) else source[index]
-            index += 2 if source.startswith('b"', index) else 1
+        if not typescript:
+            raw_string = RUST_RAW_STRING_START.match(source, index)
+            if raw_string is not None:
+                terminator = '"' + raw_string.group("hashes")
+                end = source.find(terminator, raw_string.end())
+                index = len(source) if end < 0 else end + len(terminator)
+                continue
+            character = RUST_CHARACTER_LITERAL.match(source, index)
+            if character is not None:
+                index = character.end()
+                continue
+            quoted = RUST_QUOTED_STRING_START.match(source, index)
+            if quoted is not None:
+                quote = '"'
+                index = quoted.end()
+                while index < len(source):
+                    if source[index] == "\\":
+                        index += 2
+                    elif source[index] == quote:
+                        index += 1
+                        break
+                    else:
+                        index += 1
+                continue
+        elif source[index] in {'"', "'", "`"}:
+            quote = source[index]
+            index += 1
             while index < len(source):
                 if source[index] == "\\":
                     index += 2
@@ -641,6 +1264,12 @@ def _mask_source_comments(source: str, *, typescript: bool = False) -> str:
                 else:
                     index += 1
             continue
+
+        if typescript:
+            regex_end = _typescript_regex_literal_end(source, index)
+            if regex_end is not None:
+                index = regex_end
+                continue
         if source.startswith("//", index):
             end = source.find("\n", index + 2)
             end = len(source) if end < 0 else end
@@ -670,6 +1299,134 @@ def _mask_source_comments(source: str, *, typescript: bool = False) -> str:
     return "".join(masked)
 
 
+def _mask_rust_literals(source: str) -> str:
+    """Mask Rust literals in linear time while preserving source offsets."""
+
+    masked = list(source)
+    index = 0
+    while index < len(source):
+        raw_string = RUST_RAW_STRING_START.match(source, index)
+        if raw_string is not None:
+            start = index
+            terminator = '"' + raw_string.group("hashes")
+            end = source.find(terminator, raw_string.end())
+            index = len(source) if end < 0 else end + len(terminator)
+        else:
+            character = RUST_CHARACTER_LITERAL.match(source, index)
+            if character is not None:
+                start = index
+                index = character.end()
+            else:
+                quoted = RUST_QUOTED_STRING_START.match(source, index)
+                if quoted is None:
+                    index += 1
+                    continue
+                start = index
+                index = quoted.end()
+                while index < len(source):
+                    if source[index] == "\\":
+                        index += 2
+                    elif source[index] == '"':
+                        index += 1
+                        break
+                    else:
+                        index += 1
+        for offset in range(start, min(index, len(masked))):
+            if masked[offset] not in {"\r", "\n"}:
+                masked[offset] = " "
+    return "".join(masked)
+
+
+def _mask_typescript_literals(source: str) -> str:
+    """Mask TypeScript quoted and template literals while retaining offsets."""
+
+    masked = list(source)
+    index = 0
+    while index < len(source):
+        regex_end = _typescript_regex_literal_end(source, index)
+        if regex_end is not None:
+            for offset in range(index, regex_end):
+                if masked[offset] not in {"\r", "\n"}:
+                    masked[offset] = " "
+            index = regex_end
+            continue
+        if source[index] not in {'"', "'", "`"}:
+            index += 1
+            continue
+        start = index
+        quote = source[index]
+        index += 1
+        while index < len(source):
+            if source[index] == "\\":
+                index += 2
+            elif source[index] == quote:
+                index += 1
+                break
+            else:
+                index += 1
+        for offset in range(start, min(index, len(masked))):
+            if masked[offset] not in {"\r", "\n"}:
+                masked[offset] = " "
+    return "".join(masked)
+
+
+def _mask_rust_nonexecuting_macro_tokens(source: str) -> str:
+    """Mask token trees that quote Rust syntax instead of executing it."""
+
+    classified = _mask_rust_literals(_mask_source_comments(source))
+    masked = list(classified)
+    closing_for = {"(": ")", "[": "]", "{": "}"}
+    opening_tokens = set(closing_for)
+    closing_tokens = set(closing_for.values())
+    for macro in RUST_NONEXECUTING_MACRO.finditer(classified):
+        stack = [macro.group("opening")]
+        index = macro.end()
+        while index < len(classified) and stack:
+            character = classified[index]
+            if character in opening_tokens:
+                stack.append(character)
+            elif character in closing_tokens:
+                if character != closing_for[stack[-1]]:
+                    break
+                stack.pop()
+            index += 1
+        if stack:
+            # An unterminated quote-like token tree is not executable evidence.
+            index = len(classified)
+        for offset in range(macro.start(), index):
+            if masked[offset] not in {"\r", "\n"}:
+                masked[offset] = " "
+    return "".join(masked)
+
+
+@functools.lru_cache(maxsize=512)
+def _rust_executable_source(source: str) -> str:
+    """Mask non-executing Rust lexical regions while retaining source offsets."""
+
+    return _mask_rust_nonexecuting_macro_tokens(source)
+
+
+@functools.lru_cache(maxsize=512)
+def _typescript_executable_source(source: str) -> str:
+    """Mask TypeScript comments and literals while retaining source offsets."""
+
+    return _mask_typescript_literals(_mask_source_comments(source, typescript=True))
+
+
+def _rust_test_declaration_match(
+    source: str, function: str
+) -> re.Match[str] | None:
+    pattern = re.compile(RUST_TEST_FUNCTION.format(name=re.escape(function)))
+    return pattern.search(_rust_executable_source(source))
+
+
+def _rust_function_declaration_match(
+    source: str, function: str
+) -> re.Match[str] | None:
+    pattern = re.compile(RUST_FUNCTION.format(name=re.escape(function)))
+    return pattern.search(_rust_executable_source(source))
+
+
 def _validate_test_bindings(repository_root: Path, values: Any, context: str) -> None:
     bindings = _array(values, context, nonempty=True)
     identities: list[str] = []
@@ -692,10 +1449,23 @@ def _validate_test_bindings(repository_root: Path, values: Any, context: str) ->
             _fail(f"cannot read format test {relative}: {error}")
         section = _bound_test_section(path, source, function, binding_context)
         fragment = _string(binding["contains"], f"{binding_context}.contains")
-        if section.count(fragment) != 1:
+        typescript = path.suffix in {".ts", ".tsx"}
+        if _fragment_contains_literal(fragment, typescript=typescript):
+            _fail(
+                f"{binding_context}.contains must contain only executable tokens; "
+                "claimed evidence exists only inside a literal otherwise"
+            )
+        occurrences = len(
+            _executable_fragment_offsets(
+                section,
+                fragment,
+                typescript=typescript,
+            )
+        )
+        if occurrences != 1:
             _fail(
                 f"{binding_context}.contains must occur exactly once in test "
-                f"{function!r}"
+                f"{function!r} outside comments and literals"
             )
         identities.append(f"{relative}::{function}")
     _sorted_unique(identities, context)
@@ -714,8 +1484,15 @@ def _validate_prior_reader_tests(
         binding_context = f"{context}[{index}]"
         binding = _object(
             raw_binding,
-            {"function", "outcome", "path", "reader_call", "version"},
+            {
+                "function",
+                "outcome",
+                "path",
+                "reader_call",
+                "version",
+            },
             binding_context,
+            optional={"version_input"},
         )
         relative = _string(binding["path"], f"{binding_context}.path")
         function = _string(binding["function"], f"{binding_context}.function")
@@ -740,24 +1517,35 @@ def _validate_prior_reader_tests(
                 f"{binding_context} must use distinct version, reader_call, and "
                 "outcome fragments"
             )
-        if not _fragment_binds_version(version_fragment, version):
+        if not _fragment_binds_version(
+            version_fragment,
+            version,
+            typescript=path.suffix in {".ts", ".tsx"},
+        ):
             _fail(f"{binding_context}.version must bind prior version {version}")
-        if re.search(rf"\b{re.escape(reader_symbol)}\s*\(", reader_call) is None:
+        typescript = path.suffix in {".ts", ".tsx"}
+        executable_reader_call = (
+            _typescript_executable_source(reader_call)
+            if typescript
+            else _rust_executable_source(reader_call)
+        )
+        if re.search(
+            rf"\b{re.escape(reader_symbol)}\s*\(", executable_reader_call
+        ) is None:
             _fail(
                 f"{binding_context}.reader_call must invoke declared reader "
                 f"{reader_symbol!r}"
             )
-        if reader_call not in outcome or re.search(
-            r"(?:\bassert(?:_[A-Za-z0-9_]+)?!\s*\(|\bmatches!\s*\(|"
-            r"\.expect(?:_err)?\s*\()",
+        if not _outcome_asserts_reader_call(
             outcome,
-        ) is None:
+            reader_call,
+            typescript=typescript,
+        ):
             _fail(
                 f"{binding_context}.outcome must assert the declared reader_call result"
             )
         if path.suffix == ".rs":
-            pattern = re.compile(RUST_TEST_FUNCTION.format(name=re.escape(function)))
-            match = pattern.search(source)
+            match = _rust_test_declaration_match(source, function)
             if match is None:
                 _fail(f"{binding_context} names missing Rust test function {function!r}")
             attributes = match.group("attributes")
@@ -768,17 +1556,42 @@ def _validate_prior_reader_tests(
                 )
         body_start = section.find("{")
         body = section[body_start + 1 : -1] if body_start >= 0 else ""
-        code = _mask_source_comments(body, typescript=path.suffix in {".ts", ".tsx"})
         for label, fragment in (
             ("version", version_fragment),
             ("reader_call", reader_call),
             ("outcome", outcome),
         ):
-            if code.count(fragment) != 1:
+            occurrences = len(
+                _executable_fragment_offsets(
+                    body,
+                    fragment,
+                    typescript=path.suffix in {".ts", ".tsx"},
+                )
+            )
+            if occurrences != 1:
                 _fail(
                     f"{binding_context}.{label} must occur exactly once inside the "
-                    "compatibility-reader test body outside comments"
+                    "compatibility-reader test body outside comments and literals"
                 )
+        _validate_prior_version_dataflow(
+            body,
+            binding,
+            version_fragment,
+            reader_call,
+            binding_context,
+            typescript=typescript,
+        )
+        if not _outcome_has_expected_polarity(
+            body,
+            outcome,
+            reader_call,
+            rejection=False,
+            typescript=typescript,
+        ):
+            _fail(
+                f"{binding_context}.outcome must prove successful prior-version "
+                "reader acceptance"
+            )
         identities.append(f"{relative}::{function}")
     _sorted_unique(identities, context)
 
@@ -821,9 +1634,7 @@ def _validate_prior_version_readers(
             reader_source = reader_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             _fail(f"cannot read compatibility reader source {reader_path}: {error}")
-        reader_match = re.compile(RUST_FUNCTION.format(name=re.escape(symbol))).search(
-            reader_source
-        )
+        reader_match = _rust_function_declaration_match(reader_source, symbol)
         if reader_match is None:
             _fail(f"{reader_context}.reader.symbol names no Rust function {symbol!r}")
         reader_section = _braced_function_section(
@@ -831,11 +1642,12 @@ def _validate_prior_version_readers(
             reader_match,
             symbol,
             f"{reader_context}.reader",
+            classified_source=_rust_executable_source(reader_source),
         )
-        if _mask_source_comments(reader_section).count(fragment) != 1:
+        if len(_executable_fragment_offsets(reader_section, fragment)) != 1:
             _fail(
                 f"{reader_context}.reader fragment must occur exactly once inside "
-                f"declared reader {symbol!r} outside comments"
+                f"declared reader {symbol!r} outside comments and literals"
             )
         _validate_prior_reader_tests(
             repository_root,
@@ -872,6 +1684,7 @@ def _validate_prior_rejection_tests(
                 "version",
             },
             binding_context,
+            optional={"version_input"},
         )
         relative = _string(binding["path"], f"{binding_context}.path")
         function = _string(binding["function"], f"{binding_context}.function")
@@ -900,26 +1713,47 @@ def _validate_prior_rejection_tests(
                 f"{binding_context} must use distinct version, reader_call, and "
                 "outcome fragments"
             )
-        if not _fragment_binds_version(version_fragment, version):
+        if not _fragment_binds_version(
+            version_fragment,
+            version,
+            typescript=path.suffix in {".ts", ".tsx"},
+        ):
             _fail(f"{binding_context}.version must bind prior version {version}")
-        if re.search(rf"\b{re.escape(reader_symbol)}\s*\(", reader_call) is None:
+        typescript = path.suffix in {".ts", ".tsx"}
+        executable_reader_call = (
+            _typescript_executable_source(reader_call)
+            if typescript
+            else _rust_executable_source(reader_call)
+        )
+        if re.search(
+            rf"\b{re.escape(reader_symbol)}\s*\(", executable_reader_call
+        ) is None:
             _fail(
                 f"{binding_context}.reader_call must invoke declared test reader "
                 f"{reader_symbol!r}"
             )
-        if reader_call not in outcome or re.search(
-            r"(?:\bassert(?:_[A-Za-z0-9_]+)?!\s*\(|\bassert_[A-Za-z0-9_]+\s*\(|"
-            r"\bmatches!\s*\(|"
-            r"\.expect(?:_err)?\s*\()",
+        if not _outcome_asserts_reader_call(
             outcome,
-        ) is None:
+            reader_call,
+            typescript=typescript,
+        ):
             _fail(
                 f"{binding_context}.outcome must assert the declared reader_call "
                 "is rejected"
             )
+        if typescript or not _reviewed_rejection_helper(source, outcome):
+            outcome_code = (
+                _typescript_executable_source(outcome)
+                if typescript
+                else _rust_executable_source(outcome)
+            )
+            if outcome_code.lstrip().startswith("assert_rejected"):
+                _fail(
+                    f"{binding_context}.outcome assert_rejected helper must directly "
+                    "compare its reader result to the declared rejection"
+                )
         if path.suffix == ".rs":
-            pattern = re.compile(RUST_TEST_FUNCTION.format(name=re.escape(function)))
-            match = pattern.search(source)
+            match = _rust_test_declaration_match(source, function)
             if match is None:
                 _fail(f"{binding_context} names missing Rust test function {function!r}")
             attributes = match.group("attributes")
@@ -930,17 +1764,41 @@ def _validate_prior_rejection_tests(
                 )
         body_start = section.find("{")
         body = section[body_start + 1 : -1] if body_start >= 0 else ""
-        code = _mask_source_comments(body, typescript=path.suffix in {".ts", ".tsx"})
         for label, fragment in (
             ("version", version_fragment),
             ("reader_call", reader_call),
             ("outcome", outcome),
         ):
-            if code.count(fragment) != 1:
+            occurrences = len(
+                _executable_fragment_offsets(
+                    body,
+                    fragment,
+                    typescript=path.suffix in {".ts", ".tsx"},
+                )
+            )
+            if occurrences != 1:
                 _fail(
                     f"{binding_context}.{label} must occur exactly once inside the "
-                    "prior-version rejection test body outside comments"
+                    "prior-version rejection test body outside comments and literals"
                 )
+        _validate_prior_version_dataflow(
+            body,
+            binding,
+            version_fragment,
+            reader_call,
+            binding_context,
+            typescript=typescript,
+        )
+        if not _outcome_has_expected_polarity(
+            body,
+            outcome,
+            reader_call,
+            rejection=True,
+            typescript=typescript,
+        ):
+            _fail(
+                f"{binding_context}.outcome must prove prior-version rejection"
+            )
         identities.append(f"{relative}::{function}")
     _sorted_unique(identities, context)
 
@@ -973,6 +1831,15 @@ def _validate_prior_version_rejections(
             [{"contains": source["contains"], "path": source["path"]}],
             f"{rejection_context}.rejection",
         )[0]
+        rejection_code = _rust_executable_source(fragment)
+        if re.search(r"\b(?:if|match)\b", rejection_code) is None or re.search(
+            r"(?:!=|==|<=|>=|(?<![<>=])<(?![<>=])|(?<![<>=])>(?![<>=]))",
+            rejection_code,
+        ) is None:
+            _fail(
+                f"{rejection_context}.rejection must contain executable "
+                "fail-closed comparison control"
+            )
         rejection_path = _existing_path(
             repository_root,
             _string(source["path"], f"{rejection_context}.rejection.path"),
@@ -983,9 +1850,7 @@ def _validate_prior_version_rejections(
             rejection_source = rejection_path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as error:
             _fail(f"cannot read prior-version rejection source {rejection_path}: {error}")
-        rejection_match = re.compile(RUST_FUNCTION.format(name=re.escape(symbol))).search(
-            rejection_source
-        )
+        rejection_match = _rust_function_declaration_match(rejection_source, symbol)
         if rejection_match is None:
             _fail(
                 f"{rejection_context}.rejection.symbol names no Rust function {symbol!r}"
@@ -995,11 +1860,12 @@ def _validate_prior_version_rejections(
             rejection_match,
             symbol,
             f"{rejection_context}.rejection",
+            classified_source=_rust_executable_source(rejection_source),
         )
-        if _mask_source_comments(rejection_section).count(fragment) != 1:
+        if len(_executable_fragment_offsets(rejection_section, fragment)) != 1:
             _fail(
                 f"{rejection_context}.rejection fragment must occur exactly once inside "
-                f"declared rejection function {symbol!r} outside comments"
+                f"declared rejection function {symbol!r} outside comments and literals"
             )
         _validate_prior_rejection_tests(
             repository_root,
@@ -1012,6 +1878,76 @@ def _validate_prior_version_rejections(
             f"{context} must cover every rejected prior version: expected "
             f"{expected_versions}, found {actual_versions}"
         )
+
+
+def _version_helper_call_is_source_bound(
+    repository_root: Path,
+    source: dict[str, Any],
+    fragment: str,
+    version: int | str,
+) -> bool:
+    """Anchor reviewed non-declaration version calls to their helper bodies."""
+
+    if not isinstance(version, int) or source["path"].endswith((".ts", ".tsx")):
+        return True
+    code = _rust_executable_source(fragment).strip().rstrip(";").strip()
+    constant = re.fullmatch(
+        r"Self::constant\((?P<ordinal>[1-9][0-9_]*)\)", code
+    )
+    named = re.fullmatch(r"Self::v(?P<ordinal>[1-9][0-9]*)\(\)", code)
+    if constant is None and named is None:
+        return True
+    match = constant or named
+    assert match is not None
+    if int(match.group("ordinal").replace("_", "")) != version:
+        return False
+    helper_name = "constant" if constant is not None else f"v{version}"
+    path = repository_root / source["path"]
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    classified = _rust_executable_source(contents)
+    helper_pattern = re.compile(
+        rf"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+fn\s+"
+        rf"{re.escape(helper_name)}\s*\("
+    )
+    helpers = list(helper_pattern.finditer(classified))
+    if len(helpers) != 1:
+        return False
+    section = _braced_function_section(
+        contents,
+        helpers[0],
+        helper_name,
+        "format version helper",
+        classified_source=classified,
+    )
+    opening = section.find("(")
+    closing = _matching_parenthesis(_rust_executable_source(section), opening)
+    body_opening = section.find("{", closing + 1 if closing is not None else 0)
+    if opening < 0 or closing is None or body_opening < 0:
+        return False
+    body = re.sub(
+        r"\s+", "", _rust_executable_source(section[body_opening + 1 : -1])
+    ).rstrip(";")
+    if named is not None:
+        return body == "Self(NonZeroU16::MIN)" or body == f"Self({version})"
+
+    parameters = _call_arguments(f"f{section[opening : closing + 1]}")
+    if parameters is None or len(parameters) != 1:
+        return False
+    parameter = re.fullmatch(
+        r"\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*u16\s*",
+        _rust_executable_source(parameters[0]),
+    )
+    if parameter is None:
+        return False
+    name = re.escape(parameter.group("name"))
+    return re.fullmatch(
+        rf"matchNonZeroU16::new\({name}\)\{{Some\((?P<inner>[A-Za-z_]"
+        rf"[A-Za-z0-9_]*)\)=>Self\((?P=inner)\),None=>unreachable!\(\),?\}}",
+        body,
+    ) is not None
 
 
 def _validate_format_sources(
@@ -1037,7 +1973,21 @@ def _validate_format_sources(
         fragment = fragments[0]
         if role == "version":
             version_binding_count += 1
-            if not _fragment_binds_version(fragment, version):
+            version_fragment = _expanded_declaration_binding(
+                repository_root,
+                source,
+                fragment,
+            )
+            if not _fragment_binds_version(
+                version_fragment,
+                version,
+                typescript=source["path"].endswith((".ts", ".tsx")),
+            ) or not _version_helper_call_is_source_bound(
+                repository_root,
+                source,
+                version_fragment,
+                version,
+            ):
                 _fail(f"{source_context} does not bind declared version {version}")
         identities.append((_string(source["path"], f"{source_context}.path"), fragment))
     if version_binding_count == 0:
@@ -1103,9 +2053,14 @@ def _validate_formats(repository_root: Path, values: Any, owner_ids: set[str]) -
             raw_format,
             {"compatibility_policy", "id", "owner", "sources", "tests", "version"},
             context,
-            optional={"prior_version_readers", "prior_version_rejections"},
+            optional={
+                "prior_version_readers",
+                "prior_version_rejections",
+                "version_sequence",
+            },
         )
-        format_ids.append(_string(format_contract["id"], f"{context}.id", identifier=True))
+        format_id = _string(format_contract["id"], f"{context}.id", identifier=True)
+        format_ids.append(format_id)
         _validate_owner_reference(format_contract["owner"], owner_ids, f"{context}.owner")
         compatibility_policy = _string(
             format_contract["compatibility_policy"],
@@ -1124,7 +2079,41 @@ def _validate_formats(repository_root: Path, values: Any, owner_ids: set[str]) -
             version,
             f"{context}.sources",
         )
-        prior_versions = _prior_format_versions(version)
+        required_prefixes: set[str] = set()
+        for source in format_contract["sources"]:
+            fragment = source["contains"]
+            if source["path"].endswith((".ts", ".tsx")):
+                declaration = TYPESCRIPT_CONSTANT_DECLARATION.search(
+                    _typescript_executable_source(fragment)
+                )
+            else:
+                declaration = RUST_CONSTANT_DECLARATION.search(
+                    _rust_executable_source(fragment)
+                )
+            if declaration is None:
+                continue
+            identity = (source["path"], declaration.group("name"))
+            required_prefix = REQUIRED_FORMAT_SOURCE_VERSION_SEQUENCES.get(identity)
+            if required_prefix is not None:
+                required_prefixes.add(required_prefix)
+        id_prefix = REQUIRED_FORMAT_ID_VERSION_SEQUENCES.get(format_id)
+        if id_prefix is not None:
+            required_prefixes.add(id_prefix)
+        compact_prefix = _required_compact_version_prefix(version)
+        if compact_prefix is not None:
+            required_prefixes.add(compact_prefix)
+        if len(required_prefixes) > 1:
+            _fail(
+                f"{context} identity and sources require conflicting compact "
+                "version sequences"
+            )
+        required_prefix = next(iter(required_prefixes), None)
+        prior_versions = _prior_format_versions(
+            version,
+            format_contract.get("version_sequence"),
+            context=f"{context}.version_sequence",
+            required_prefix=required_prefix,
+        )
         if prior_versions:
             if compatibility_policy == "backward-compatible":
                 if "prior_version_readers" not in format_contract:
@@ -1187,10 +2176,18 @@ def _validate_formats(repository_root: Path, values: Any, owner_ids: set[str]) -
     _sorted_unique(format_ids, "format IDs")
 
 
-def _constant_declaration_fragment(source: str, match: re.Match[str]) -> str:
-    end = source.find(";", match.end())
-    if end < 0:
-        end = source.find("\n", match.end())
+def _constant_declaration_fragment(
+    source: str,
+    match: re.Match[str],
+    *,
+    classified_source: str | None = None,
+) -> str:
+    scan_source = source if classified_source is None else classified_source
+    terminator = _balanced_statement_terminator(scan_source, match.end())
+    if terminator is None:
+        end = scan_source.find("\n", match.end())
+    else:
+        end = terminator
     if end < 0:
         end = len(source)
     else:
@@ -1221,16 +2218,25 @@ def _is_format_declaration(name: str, declaration: str = "") -> bool:
 def _format_declarations(repository_root: Path) -> set[tuple[str, str]]:
     declarations: set[tuple[str, str]] = set()
     crates = repository_root / "crates"
+    test_only_modules = _test_only_external_rust_module_paths(repository_root)
     for path in sorted(crates.glob("*/src/**/*.rs")):
         if path.is_symlink() or not path.is_file():
             _fail(f"format discovery encountered a non-regular Rust source: {path}")
-        if _is_test_only_rust_source(path):
+        # Filenames such as `tests.rs` are conventional, not proof that the
+        # module is test-only.  Only a module edge whose cfg predicate requires
+        # `test` may remove a source file from the production census.
+        if path.resolve() in test_only_modules:
             continue
         source = _production_source(path)
+        classified = _rust_executable_source(source)
         relative = path.relative_to(repository_root).as_posix()
-        for match in RUST_CONSTANT_DECLARATION.finditer(source):
+        for match in RUST_CONSTANT_DECLARATION.finditer(classified):
             name = match.group("name")
-            declaration = _constant_declaration_fragment(source, match)
+            declaration = _constant_declaration_fragment(
+                source,
+                match,
+                classified_source=classified,
+            )
             if _is_format_declaration(name, declaration):
                 declarations.add((relative, name))
     ui = repository_root / "ui" / "src"
@@ -1241,10 +2247,15 @@ def _format_declarations(repository_root: Path) -> set[tuple[str, str]]:
             if path.name.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx")):
                 continue
             source = path.read_text(encoding="utf-8")
+            classified = _typescript_executable_source(source)
             relative = path.relative_to(repository_root).as_posix()
-            for match in TYPESCRIPT_CONSTANT_DECLARATION.finditer(source):
+            for match in TYPESCRIPT_CONSTANT_DECLARATION.finditer(classified):
                 name = match.group("name")
-                declaration = _constant_declaration_fragment(source, match)
+                declaration = _constant_declaration_fragment(
+                    source,
+                    match,
+                    classified_source=classified,
+                )
                 if _is_format_declaration(name, declaration):
                     declarations.add((relative, name))
     return declarations
@@ -1255,9 +2266,14 @@ def _registered_format_declarations(values: Any) -> set[tuple[str, str]]:
     for raw_format in values:
         for source in raw_format["sources"]:
             fragment = source["contains"]
-            match = RUST_CONSTANT_DECLARATION.search(fragment)
-            if match is None:
-                match = TYPESCRIPT_CONSTANT_DECLARATION.search(fragment)
+            if source["path"].endswith((".ts", ".tsx")):
+                match = TYPESCRIPT_CONSTANT_DECLARATION.search(
+                    _typescript_executable_source(fragment)
+                )
+            else:
+                match = RUST_CONSTANT_DECLARATION.search(
+                    _rust_executable_source(fragment)
+                )
             if match is not None and _is_format_declaration(match.group("name"), fragment):
                 declarations.add((source["path"], match.group("name")))
     return declarations
@@ -1293,15 +2309,53 @@ def _validate_format_exclusions(
             if path.suffix in {".ts", ".tsx"}
             else RUST_CONSTANT_DECLARATION
         )
-        if not any(
-            match.group("name") == constant
+        classified = (
+            _typescript_executable_source(source)
+            if path.suffix in {".ts", ".tsx"}
+            else _rust_executable_source(source)
+        )
+        matching_declarations = [
+            _constant_declaration_fragment(
+                source,
+                match,
+                classified_source=classified,
+            )
+            for match in declaration_pattern.finditer(classified)
+            if match.group("name") == constant
             and _is_format_declaration(
                 match.group("name"),
-                _constant_declaration_fragment(source, match),
+                _constant_declaration_fragment(
+                    source,
+                    match,
+                    classified_source=classified,
+                ),
             )
-            for match in declaration_pattern.finditer(source)
-        ):
+        ]
+        if len(matching_declarations) != 1:
             _fail(f"{context} does not bind a discovered format declaration")
+        declaration = matching_declarations[0]
+        initializer = _binding_initializer(
+            declaration,
+            typescript=path.suffix in {".ts", ".tsx"},
+        )
+        if initializer is not None:
+            executable_initializer = (
+                _typescript_executable_source(initializer)
+                if path.suffix in {".ts", ".tsx"}
+                else _rust_executable_source(initializer)
+            )
+            literals = _direct_string_literals(
+                initializer,
+                typescript=path.suffix in {".ts", ".tsx"},
+            )
+            if executable_initializer.strip() == "" and len(literals) == 1:
+                compact_prefix = _required_compact_version_prefix(literals[0])
+                if compact_prefix is not None:
+                    _fail(
+                        f"{context} cannot exclude reserved compact ordinal token "
+                        f"{literals[0]!r}; register it with version_sequence prefix "
+                        f"{compact_prefix!r}"
+                    )
         excluded.append((relative, constant))
     if len(excluded) != len(set(excluded)):
         _fail("format exclusions must be unique")
@@ -1309,10 +2363,19 @@ def _validate_format_exclusions(
         _fail("format exclusions must be sorted by path and constant")
 
     registered = _registered_format_declarations(formats)
+    discovered = _format_declarations(repository_root)
+    missing_required = sorted(
+        set(REQUIRED_FORMAT_SOURCE_VERSION_SEQUENCES).intersection(discovered)
+        - registered
+    )
+    if missing_required:
+        _fail(
+            "required compact ordinal declarations must remain registered formats: "
+            f"{missing_required}"
+        )
     overlap = registered.intersection(excluded)
     if overlap:
         _fail(f"format declarations cannot be both registered and excluded: {sorted(overlap)}")
-    discovered = _format_declarations(repository_root)
     accounted = registered.union(excluded)
     missing = sorted(discovered - accounted)
     stale = sorted(accounted - discovered)
@@ -1320,13 +2383,6 @@ def _validate_format_exclusions(
         _fail(f"unregistered format declarations: {missing}")
     if stale:
         _fail(f"stale registered or excluded format declarations: {stale}")
-
-
-def _is_test_only_rust_source(path: Path) -> bool:
-    stem = path.stem.lower()
-    return stem in {"test", "tests"} or stem.endswith(("_test", "_tests")) or any(
-        part.lower() == "tests" for part in path.parts
-    )
 
 
 def _validate_migrations(repository_root: Path, value: Any, owner_ids: set[str]) -> None:
@@ -1638,17 +2694,12 @@ def _validate_store_migration_format_map(
 
 def _production_format_sources(repository_root: Path) -> list[Path]:
     sources: list[Path] = []
+    test_only_modules = _test_only_external_rust_module_paths(repository_root)
     crates = repository_root / "crates"
     if crates.is_dir():
         for path in crates.glob("*/src/**/*.rs"):
-            relative_parts = path.relative_to(repository_root).parts
-            if (
-                "tests" in relative_parts
-                or path.name in {"test.rs", "tests.rs"}
-                or path.name.endswith("_tests.rs")
-            ):
-                continue
-            sources.append(path)
+            if path.resolve() not in test_only_modules:
+                sources.append(path)
     ui = repository_root / "ui" / "src"
     if ui.is_dir():
         for suffix in ("*.ts", "*.tsx"):
@@ -1665,84 +2716,141 @@ def _production_source(path: Path) -> str:
     except (OSError, UnicodeError) as error:
         _fail(f"cannot read production format surface {path}: {error}")
     if path.suffix == ".rs":
-        source = _mask_rust_test_modules(source)
+        source = _mask_rust_test_only_items(source)
         source = _mask_rust_test_functions(source)
     return source
 
 
-def _matching_rust_brace(source: str, opening: int) -> int | None:
-    depth = 1
-    index = opening + 1
-    while index < len(source):
-        if source.startswith("//", index):
-            newline = source.find("\n", index + 2)
-            index = len(source) if newline < 0 else newline + 1
-            continue
-        if source.startswith("/*", index):
-            comment_depth = 1
-            index += 2
-            while index < len(source) and comment_depth:
-                if source.startswith("/*", index):
-                    comment_depth += 1
-                    index += 2
-                elif source.startswith("*/", index):
-                    comment_depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            continue
+def _matching_rust_brace(classified_source: str, opening: int) -> int | None:
+    """Match braces in comment/literal-masked Rust source."""
 
-        raw_string = re.match(r'(?:b|c)?r(?P<hashes>#{0,255})"', source[index:])
-        if raw_string is not None:
-            terminator = '"' + raw_string.group("hashes")
-            end = source.find(terminator, index + raw_string.end())
-            index = len(source) if end < 0 else end + len(terminator)
-            continue
-        if source[index] == '"':
-            index += 1
-            while index < len(source):
-                if source[index] == "\\":
-                    index += 2
-                elif source[index] == '"':
-                    index += 1
-                    break
-                else:
-                    index += 1
-            continue
-        character_literal = re.match(r"'(?:\\.|[^\\'\r\n])'", source[index:])
-        if character_literal is not None:
-            index += character_literal.end()
-            continue
-        if source[index] == "{":
+    depth = 1
+    for index in range(opening + 1, len(classified_source)):
+        if classified_source[index] == "{":
             depth += 1
-        elif source[index] == "}":
+        elif classified_source[index] == "}":
             depth -= 1
             if depth == 0:
                 return index
+    return None
+
+
+def _split_cfg_arguments(value: str) -> list[str]:
+    arguments: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(value):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        elif character == "," and depth == 0:
+            arguments.append(value[start:index].strip())
+            start = index + 1
+    arguments.append(value[start:].strip())
+    return [argument for argument in arguments if argument]
+
+
+def _cfg_predicate_requires_test(predicate: str) -> bool:
+    """Return true only when a supported cfg predicate logically requires test."""
+
+    predicate = predicate.strip()
+    if predicate == "test":
+        return True
+    function = re.fullmatch(
+        r"(?P<name>all|any|not)\s*\((?P<arguments>.*)\)",
+        predicate,
+        flags=re.DOTALL,
+    )
+    if function is None:
+        return False
+    arguments = _split_cfg_arguments(function.group("arguments"))
+    name = function.group("name")
+    if name == "all":
+        # One mandatory test conjunct makes the whole item test-only.
+        return any(_cfg_predicate_requires_test(argument) for argument in arguments)
+    if name == "any":
+        # An `any` item is test-only only if every possible branch is test-only.
+        return bool(arguments) and all(
+            _cfg_predicate_requires_test(argument) for argument in arguments
+        )
+    # In particular, `not(test)` is production-capable.  Treat more complex
+    # negations conservatively as production rather than hiding declarations.
+    return False
+
+
+def _rust_item_end(classified: str, start: int) -> int | None:
+    """Locate the end of one Rust item in comment/literal-masked source."""
+
+    round_depth = 0
+    square_depth = 0
+    index = start
+    while index < len(classified):
+        character = classified[index]
+        if character == "(":
+            round_depth += 1
+        elif character == ")":
+            round_depth = max(0, round_depth - 1)
+        elif character == "[":
+            square_depth += 1
+        elif character == "]":
+            square_depth = max(0, square_depth - 1)
+        elif round_depth == 0 and square_depth == 0:
+            if character == ";":
+                return index + 1
+            if character == "{":
+                closing = _matching_rust_brace(classified, index)
+                return None if closing is None else closing + 1
         index += 1
     return None
 
 
-def _mask_rust_test_modules(source: str) -> str:
+def _rust_test_only_item_spans(source: str) -> list[tuple[int, int]]:
+    classified = _rust_executable_source(source)
     spans: list[tuple[int, int]] = []
-    module_pattern = re.compile(
-        r"\s*(?:#\[[^]]+\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
-        r"mod\s+[A-Za-z_][A-Za-z0-9_]*\s*(?P<delimiter>[{;])",
-        flags=re.MULTILINE,
-    )
-    for configuration in PRODUCTION_TEST_CFG.finditer(source):
-        module = module_pattern.match(source, configuration.end())
-        if module is None:
+    for configuration in PRODUCTION_TEST_CFG.finditer(classified):
+        opening = configuration.end() - 1
+        closing = _matching_parenthesis(classified, opening)
+        if closing is None or _cfg_predicate_requires_test(
+            classified[opening + 1 : closing]
+        ) is False:
             continue
-        if module.group("delimiter") == ";":
-            end = module.end()
-        else:
-            closing = _matching_rust_brace(source, module.end() - 1)
-            if closing is None:
-                _fail("cannot locate the end of a cfg(test) Rust module")
-            end = closing + 1
-        spans.append((configuration.start(), end))
+        attribute_end = classified.find("]", closing + 1)
+        if attribute_end < 0:
+            _fail("cannot locate the end of a cfg(test) Rust attribute")
+        item_start = attribute_end + 1
+        while True:
+            item_start += len(classified[item_start:]) - len(
+                classified[item_start:].lstrip()
+            )
+            if not classified.startswith("#[", item_start):
+                break
+            next_attribute_end = classified.find("]", item_start + 2)
+            if next_attribute_end < 0:
+                _fail("cannot locate the end of a cfg(test) Rust item attribute")
+            item_start = next_attribute_end + 1
+        # `cfg` is also legal on fields, match arms, and statements.  Those are
+        # not standalone Rust items and masking them with an item brace search
+        # can swallow the surrounding production impl.  Only the item forms
+        # that can themselves own governed declarations belong in this census
+        # filter; literals/comments were already masked before this match.
+        item_prefix = classified[item_start:]
+        if re.match(
+            r"(?:(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?(?:async\s+)?"
+            r"(?:const\s+)?(?:fn|const|static|mod|impl|struct|enum|union|trait|"
+            r"type|use|extern|macro_rules)\b)",
+            item_prefix,
+        ) is None:
+            continue
+        item_end = _rust_item_end(classified, item_start)
+        if item_end is None:
+            _fail("cannot locate the end of a cfg(test)-only Rust item")
+        spans.append((configuration.start(), item_end))
+    return spans
 
+
+def _mask_rust_test_only_items(source: str) -> str:
+    spans = _rust_test_only_item_spans(source)
     if not spans:
         return source
     masked = list(source)
@@ -1753,23 +2861,82 @@ def _mask_rust_test_modules(source: str) -> str:
     return "".join(masked)
 
 
+def _mask_rust_test_modules(source: str) -> str:
+    """Backward-compatible name for the complete cfg(test)-item masker."""
+
+    return _mask_rust_test_only_items(source)
+
+
+def _test_only_external_rust_module_paths(repository_root: Path) -> set[Path]:
+    """Discover external modules reachable only through a required-test cfg."""
+
+    cached = _TEST_ONLY_EXTERNAL_MODULE_CACHE.get(repository_root)
+    if cached is not None:
+        return cached
+    modules: set[Path] = set()
+    crates = repository_root / "crates"
+    if not crates.is_dir():
+        return modules
+    for parent in sorted(crates.glob("*/src/**/*.rs")):
+        if not parent.is_file() or parent.is_symlink():
+            continue
+        try:
+            source = parent.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            _fail(f"cannot inspect cfg(test) external Rust module {parent}: {error}")
+        # Most source files have no external modules.  Raw text is only a
+        # prefilter; every candidate is still confirmed by the executable
+        # lexer and cfg predicate parser below.
+        if "cfg" not in source or re.search(r"\bmod\s+\w+\s*;", source) is None:
+            continue
+        for start, end in _rust_test_only_item_spans(source):
+            item = source[start:end]
+            module = re.search(
+                r"\bmod\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;\s*$",
+                _mask_source_comments(item),
+            )
+            if module is None:
+                continue
+            explicit_path = re.search(
+                r"#\[\s*path\s*=\s*\"(?P<path>[^\"\r\n]+)\"\s*\]",
+                item,
+            )
+            candidates: list[Path]
+            if explicit_path is not None:
+                candidates = [parent.parent / explicit_path.group("path")]
+            else:
+                name = module.group("name")
+                candidates = [parent.parent / f"{name}.rs", parent.parent / name / "mod.rs"]
+                if parent.stem not in {"lib", "main", "mod"}:
+                    candidates.extend(
+                        [
+                            parent.parent / parent.stem / f"{name}.rs",
+                            parent.parent / parent.stem / name / "mod.rs",
+                        ]
+                    )
+            modules.update(candidate.resolve() for candidate in candidates if candidate.is_file())
+    _TEST_ONLY_EXTERNAL_MODULE_CACHE[repository_root] = modules
+    return modules
+
+
 def _mask_rust_test_functions(source: str) -> str:
     spans: list[tuple[int, int]] = []
+    classified = _rust_executable_source(source)
     function_pattern = re.compile(
         r"(?m)^(?P<attributes>(?:[ \t]*#\[[^]]+\][ \t]*\r?\n)+)"
         r"[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+"
         r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\("
     )
-    for function in function_pattern.finditer(source):
+    for function in function_pattern.finditer(classified):
         if RUST_TEST_ATTRIBUTE.search(function.group("attributes")) is None:
             continue
-        opening = source.find("{", function.end())
+        opening = classified.find("{", function.end())
         if opening < 0:
             _fail(
                 f"cannot locate the body of Rust test function "
                 f"{function.group('name')!r}"
             )
-        closing = _matching_rust_brace(source, opening)
+        closing = _matching_rust_brace(classified, opening)
         if closing is None:
             _fail(
                 f"cannot locate the end of Rust test function "
@@ -1980,6 +3147,785 @@ def _validate_production_durable_format_literals(
         )
 
 
+BOUNDARY_RELATION_OFFSETS = {"minus_one": -1, "at": 0, "plus_one": 1}
+RUST_INTEGER_LITERAL = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<digits>[0-9](?:_?[0-9])*)"
+    r"(?:_?(?:u|i)(?:8|16|32|64|128|size))?(?![A-Za-z0-9_])"
+)
+
+
+def _boundary_code(fragment: str) -> str:
+    return _rust_executable_source(fragment)
+
+
+def _executable_fragment_offsets(
+    section: str,
+    fragment: str,
+    *,
+    typescript: bool = False,
+) -> list[int]:
+    """Locate exact fragment occurrences whose first token is executable code."""
+
+    first_token = next(
+        (offset for offset, character in enumerate(fragment) if not character.isspace()),
+        None,
+    )
+    if first_token is None:
+        return []
+    classified_code = (
+        _typescript_executable_source(section)
+        if typescript
+        else _boundary_code(section)
+    )
+    offsets: list[int] = []
+    start = section.find(fragment)
+    while start >= 0:
+        token_position = start + first_token
+        if classified_code[token_position] == section[token_position]:
+            offsets.append(start)
+        start = section.find(fragment, start + 1)
+    return offsets
+
+
+def _fragment_contains_literal(fragment: str, *, typescript: bool = False) -> bool:
+    comments_masked = _mask_source_comments(fragment, typescript=typescript)
+    executable = (
+        _typescript_executable_source(fragment)
+        if typescript
+        else _rust_executable_source(fragment)
+    )
+    return comments_masked != executable
+
+
+def _direct_reader_status_operation(
+    outcome: str,
+    reader_call: str,
+    *,
+    typescript: bool = False,
+) -> str | None:
+    """Return a closed status operation applied directly to one reader result."""
+
+    call_offsets = _executable_fragment_offsets(
+        outcome,
+        reader_call,
+        typescript=typescript,
+    )
+    if len(call_offsets) != 1:
+        return None
+    call_start = call_offsets[0]
+    call_end = call_start + len(reader_call)
+    code = (
+        _typescript_executable_source(outcome)
+        if typescript
+        else _rust_executable_source(outcome)
+    )
+    tail = code[call_end:]
+    status = re.match(r"\s*\.(?P<name>is_ok|is_err)\s*\(\s*\)", tail)
+    if status is not None:
+        if re.fullmatch(r"\s*assert!\s*\(\s*", code[:call_start]) is None:
+            return None
+        if re.fullmatch(r"\s*\)\s*;?\s*", tail[status.end() :]) is None:
+            return None
+        return status.group("name")
+
+    expectation = re.match(r"\s*\.(?P<name>expect|expect_err)\s*\(", tail)
+    if expectation is None or code[:call_start].strip():
+        return None
+    opening = call_end + expectation.end() - 1
+    closing = _matching_parenthesis(code, opening)
+    if closing is None or re.fullmatch(r"\s*[,;]?\s*", code[closing + 1 :]) is None:
+        return None
+    return expectation.group("name")
+
+
+def _outcome_asserts_reader_call(
+    outcome: str,
+    reader_call: str,
+    *,
+    typescript: bool = False,
+) -> bool:
+    """Require the reader result to be the direct subject of an assertion operation."""
+
+    call_offsets = _executable_fragment_offsets(
+        outcome,
+        reader_call,
+        typescript=typescript,
+    )
+    if len(call_offsets) != 1:
+        return False
+    code = (
+        _typescript_executable_source(outcome)
+        if typescript
+        else _rust_executable_source(outcome)
+    )
+    if _direct_reader_status_operation(
+        outcome,
+        reader_call,
+        typescript=typescript,
+    ) is not None:
+        return True
+    opening = code.find("(")
+    if opening < 0:
+        return False
+    operation = code[:opening].strip().rstrip("!").split("::")[-1]
+    if operation not in {"assert_eq", "assert_rejected"}:
+        return False
+    arguments = _call_arguments(outcome, typescript=typescript) or []
+    reader_normalized = re.sub(r"\s+", "", (
+        _typescript_executable_source(reader_call)
+        if typescript
+        else _rust_executable_source(reader_call)
+    ))
+    return any(
+        re.sub(
+            r"\s+",
+            "",
+            _typescript_executable_source(argument)
+            if typescript
+            else _rust_executable_source(argument),
+        )
+        == reader_normalized
+        for argument in arguments
+    )
+
+
+def _outcome_has_expected_polarity(
+    body: str,
+    outcome: str,
+    reader_call: str,
+    *,
+    rejection: bool,
+    typescript: bool = False,
+) -> bool:
+    """Verify that compatibility evidence proves acceptance or rejection as declared."""
+
+    code = (
+        _typescript_executable_source(outcome)
+        if typescript
+        else _rust_executable_source(outcome)
+    )
+    direct_status = _direct_reader_status_operation(
+        outcome,
+        reader_call,
+        typescript=typescript,
+    )
+    if direct_status is not None:
+        direct_rejection = direct_status in {"is_err", "expect_err"}
+        return direct_rejection if rejection else not direct_rejection
+
+    opening = code.find("(")
+    if opening < 0:
+        return False
+    operation = code[:opening].strip().rstrip("!").split("::")[-1].lower()
+    arguments = _call_arguments(outcome, typescript=typescript) or []
+    reader_normalized = re.sub(
+        r"\s+",
+        "",
+        _typescript_executable_source(reader_call)
+        if typescript
+        else _rust_executable_source(reader_call),
+    )
+    reader_arguments = [
+        index
+        for index, argument in enumerate(arguments)
+        if re.sub(
+            r"\s+",
+            "",
+            _typescript_executable_source(argument)
+            if typescript
+            else _rust_executable_source(argument),
+        )
+        == reader_normalized
+    ]
+    if len(reader_arguments) != 1:
+        return False
+    if operation == "assert_rejected":
+        return rejection
+    if operation != "assert_eq":
+        return False
+
+    expected_constructor = "Err" if rejection else "Ok"
+    opposite_constructor = "Ok" if rejection else "Err"
+    comparison_arguments = [
+        argument
+        for index, argument in enumerate(arguments)
+        if index != reader_arguments[0]
+    ]
+    comparison_code = " ".join(
+        _typescript_executable_source(argument)
+        if typescript
+        else _rust_executable_source(argument)
+        for argument in comparison_arguments
+    )
+    if re.search(rf"\b{opposite_constructor}\b", comparison_code):
+        return False
+    if re.search(rf"\b{expected_constructor}\b", comparison_code):
+        return True
+
+    body_code = (
+        _typescript_executable_source(body)
+        if typescript
+        else _rust_executable_source(body)
+    )
+    outcome_offsets = _executable_fragment_offsets(
+        body,
+        outcome,
+        typescript=typescript,
+    )
+    if len(outcome_offsets) != 1:
+        return False
+    prefix = body_code[: outcome_offsets[0]]
+    for identifier in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", comparison_code):
+        if re.search(
+            rf"\blet\s+(?:mut\s+)?{re.escape(identifier)}\b[^=;]*="
+            rf"\s*{expected_constructor}\b",
+            prefix,
+        ) is not None:
+            return True
+    return False
+
+
+def _reviewed_rejection_helper(source: str, outcome: str) -> bool:
+    """Verify the sole supported rejection helper consumes and compares its result."""
+
+    outcome_code = _rust_executable_source(outcome)
+    opening = outcome_code.find("(")
+    if opening < 0:
+        return False
+    operation = outcome_code[:opening].strip().rstrip("!").split("::")[-1]
+    if operation != "assert_rejected":
+        return True
+    helper = _rust_function_declaration_match(source, "assert_rejected")
+    if helper is None:
+        return False
+    section = _braced_function_section(
+        source,
+        helper,
+        "assert_rejected",
+        "prior-version rejection outcome helper",
+        classified_source=_rust_executable_source(source),
+    )
+    header_end = section.find("{")
+    header = _rust_executable_source(section[:header_end])
+    parameters_open = header.find("(")
+    parameters_close = _matching_parenthesis(header, parameters_open)
+    if parameters_open < 0 or parameters_close is None:
+        return False
+    parameters = _call_arguments(f"f({header[parameters_open + 1 : parameters_close]})")
+    if parameters is None or len(parameters) != 2:
+        return False
+    names: list[str] = []
+    for parameter in parameters:
+        match = re.fullmatch(
+            r"\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*.+",
+            _rust_executable_source(parameter),
+            flags=re.DOTALL,
+        )
+        if match is None:
+            return False
+        names.append(match.group("name"))
+    response, expected = names
+    body = section[header_end + 1 : -1]
+    body_code = _rust_executable_source(body)
+    assertion = re.fullmatch(
+        r"\s*assert_eq!\s*\((?P<arguments>.*)\)\s*;\s*",
+        body_code,
+        flags=re.DOTALL,
+    )
+    if assertion is None:
+        return False
+    arguments = _call_arguments(f"f({assertion.group('arguments')})")
+    if arguments is None or len(arguments) != 2:
+        return False
+    first = re.sub(r"\s+", "", _rust_executable_source(arguments[0]))
+    second = _rust_executable_source(arguments[1])
+    return (
+        first == response
+        and re.search(r"\bGuestResponse\s*::\s*Rejected\b", second) is not None
+        and re.search(rf"\bkind\s*:\s*{re.escape(expected)}\b", second) is not None
+    )
+
+
+def _prior_version_identifier(
+    fragment: str,
+    *,
+    typescript: bool = False,
+) -> str | None:
+    code = (
+        _typescript_executable_source(fragment)
+        if typescript
+        else _rust_executable_source(fragment)
+    )
+    patterns = (
+        r"\b(?:let|const)\s+(?:mut\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\b[^=;]*=",
+        r"\bfor\s+(?:\(\s*(?:let|const)\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+        r"\s+(?:in|of)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, code)
+        if match is not None:
+            return match.group("name")
+    return None
+
+
+def _validate_prior_version_dataflow(
+    body: str,
+    binding: dict[str, Any],
+    version_fragment: str,
+    reader_call: str,
+    context: str,
+    *,
+    typescript: bool = False,
+) -> None:
+    """Tie the prior-version token to the reader input exercised by the test."""
+
+    version_identifier = _prior_version_identifier(
+        version_fragment,
+        typescript=typescript,
+    )
+    if version_identifier is None:
+        _fail(f"{context}.version must declare or iterate a prior-version identifier")
+    reader_code = (
+        _typescript_executable_source(reader_call)
+        if typescript
+        else _rust_executable_source(reader_call)
+    )
+    reader_arguments = _call_arguments(reader_call, typescript=typescript)
+    if reader_arguments is None:
+        _fail(f"{context}.reader_call must be one statically checkable call")
+    direct_version_arguments = [
+        index
+        for index, argument in enumerate(reader_arguments)
+        if _expression_is_direct_identifier(
+            argument,
+            version_identifier,
+            typescript=typescript,
+        )
+    ]
+    if direct_version_arguments:
+        if len(direct_version_arguments) != 1:
+            _fail(
+                f"{context}.reader_call must consume prior-version identifier "
+                f"{version_identifier!r} in exactly one direct argument"
+            )
+        return
+    if "version_input" not in binding:
+        _fail(
+            f"{context}.version identifier {version_identifier!r} must flow into "
+            "reader_call or a declared version_input"
+        )
+    raw_input = _object(
+        binding["version_input"],
+        {"contains", "identifier", "reader_argument"},
+        f"{context}.version_input",
+    )
+    input_identifier = _string(
+        raw_input["identifier"],
+        f"{context}.version_input.identifier",
+    )
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", input_identifier) is None:
+        _fail(f"{context}.version_input.identifier must be a local variable name")
+    input_fragment = _string(
+        raw_input["contains"],
+        f"{context}.version_input.contains",
+    )
+    input_offsets = _executable_fragment_offsets(
+        body,
+        input_fragment,
+        typescript=typescript,
+    )
+    if len(input_offsets) != 1:
+        _fail(
+            f"{context}.version_input.contains must occur exactly once in the "
+            "test body outside comments and literals"
+        )
+    input_code = (
+        _typescript_executable_source(input_fragment)
+        if typescript
+        else _rust_executable_source(input_fragment)
+    )
+    assignment = input_code.find("=")
+    if assignment >= 0:
+        value_expression = input_fragment[assignment + 1 :].strip().rstrip(";").strip()
+    else:
+        field = re.fullmatch(
+            r"\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*(?P<value>.+?)\s*,?\s*",
+            input_fragment,
+            flags=re.DOTALL,
+        )
+        value_expression = "" if field is None else field.group("value")
+    if not _expression_is_direct_identifier(
+        value_expression,
+        version_identifier,
+        typescript=typescript,
+    ):
+        _fail(
+            f"{context}.version_input.contains value must be derived directly from "
+            f"prior-version identifier {version_identifier!r}"
+        )
+    reader_argument = raw_input["reader_argument"]
+    if type(reader_argument) is not int or reader_argument < 0:
+        _fail(f"{context}.version_input.reader_argument must be a non-negative integer")
+    if reader_argument >= len(reader_arguments) or not _expression_is_direct_identifier(
+        reader_arguments[reader_argument],
+        input_identifier,
+        typescript=typescript,
+    ):
+        _fail(
+            f"{context}.reader_call argument {reader_argument} must directly consume "
+            f"version_input identifier {input_identifier!r}"
+        )
+    input_pattern = rf"(?<![A-Za-z0-9_]){re.escape(input_identifier)}(?![A-Za-z0-9_])"
+    if re.search(input_pattern, input_code) is None:
+        body_code = (
+            _typescript_executable_source(body)
+            if typescript
+            else _rust_executable_source(body)
+        )
+        input_start = input_offsets[0]
+        declarations = list(
+            re.finditer(
+                rf"\b(?:let|const)\s+(?:mut\s+)?{re.escape(input_identifier)}\b"
+                r"[^=;]*=",
+                body_code[:input_start],
+            )
+        )
+        if not declarations:
+            _fail(
+                f"{context}.version_input.contains must initialize or mutate "
+                f"{input_identifier!r}"
+            )
+        terminator = body_code.find(";", declarations[-1].end())
+        if terminator < input_start:
+            _fail(
+                f"{context}.version_input.contains must be inside the initializer "
+                f"for {input_identifier!r}"
+            )
+    reader_offsets = _executable_fragment_offsets(
+        body,
+        reader_call,
+        typescript=typescript,
+    )
+    if len(reader_offsets) != 1 or input_offsets[0] >= reader_offsets[0]:
+        _fail(f"{context}.version_input must precede reader_call")
+
+
+def _boundary_symbol_offsets(
+    fragment: str,
+    symbols: list[str],
+    declared_value: int,
+) -> set[int]:
+    """Evaluate the complete call argument/expression containing each source symbol."""
+
+    code = _boundary_code(fragment)
+    pairs: list[tuple[int, int, bool]] = []
+    stack: list[tuple[int, bool]] = []
+    for index, character in enumerate(code):
+        if character == "(":
+            previous = index - 1
+            while previous >= 0 and code[previous].isspace():
+                previous -= 1
+            is_call = previous >= 0 and (
+                code[previous] in "!)]" or code[previous].isalnum() or code[previous] == "_"
+            )
+            stack.append((index, is_call))
+        elif character == ")" and stack:
+            opening, is_call = stack.pop()
+            pairs.append((opening, index, is_call))
+
+    def call_start(opening: int) -> int:
+        index = opening - 1
+        while index >= 0 and code[index].isspace():
+            index -= 1
+        while index >= 0 and (
+            code[index].isalnum() or code[index] in "_:.!"
+        ):
+            index -= 1
+        return index + 1
+
+    def argument_bounds(opening: int, closing: int, position: int) -> tuple[int, int] | None:
+        start = opening + 1
+        round_depth = square_depth = brace_depth = 0
+        boundaries = [start]
+        for index in range(start, closing):
+            character = code[index]
+            if character == "(":
+                round_depth += 1
+            elif character == ")":
+                round_depth -= 1
+            elif character == "[":
+                square_depth += 1
+            elif character == "]":
+                square_depth -= 1
+            elif character == "{":
+                brace_depth += 1
+            elif character == "}":
+                brace_depth -= 1
+            elif (
+                character == ","
+                and round_depth == 0
+                and square_depth == 0
+                and brace_depth == 0
+            ):
+                boundaries.extend((index, index + 1))
+        boundaries.append(closing)
+        for left, right in zip(boundaries[::2], boundaries[1::2], strict=True):
+            if left <= position < right:
+                return left, right
+        return None
+
+    def directly_wraps_call(region: str, inner: str) -> bool:
+        outer = re.sub(r"\s+", "", region)
+        target = re.sub(r"\s+", "", inner)
+        if outer == target:
+            return True
+        # Reviewed transparent wrappers preserve the direct result.  Boolean,
+        # comparison, arithmetic, and unrelated calls do not.
+        return re.fullmatch(
+            rf"[!&]*(?:\({re.escape(target)}\)|{re.escape(target)})"
+            r"(?:\?|\.await|\.(?:is_ok|is_err|is_some|is_none)\(\))*",
+            outer,
+        ) is not None
+
+    def containing_argument(position: int) -> str:
+        calls = [
+            (opening, closing)
+            for opening, closing, is_call in pairs
+            if is_call and opening < position < closing
+        ]
+        if not calls:
+            initializer = _binding_initializer(fragment)
+            if initializer is not None:
+                return _boundary_code(initializer).strip().rstrip(",;").strip()
+            return code.strip().rstrip(",;").strip()
+        opening, closing = max(calls, key=lambda pair: pair[0])
+        relation_bounds = argument_bounds(opening, closing, position)
+        if relation_bounds is None:
+            return ""
+        relation = code[relation_bounds[0] : relation_bounds[1]].strip()
+        inner_start = call_start(opening)
+        inner_end = closing + 1
+        for outer_opening, outer_closing in sorted(calls, key=lambda pair: pair[0], reverse=True):
+            if outer_opening == opening:
+                continue
+            bounds = argument_bounds(outer_opening, outer_closing, inner_start)
+            if bounds is None or not directly_wraps_call(
+                code[bounds[0] : bounds[1]],
+                code[inner_start:inner_end],
+            ):
+                return ""
+            inner_start = call_start(outer_opening)
+            inner_end = outer_closing + 1
+        return relation
+
+    def evaluate(expression: str) -> int | None:
+        normalized = expression
+        for symbol in symbols:
+            normalized = re.sub(
+                rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])",
+                str(declared_value),
+                normalized,
+            )
+        normalized = re.sub(
+            r"(?<=\d)_(?:u|i)(?:8|16|32|64|128|size)\b|"
+            r"(?<=\d)(?:u|i)(?:8|16|32|64|128|size)\b",
+            "",
+            normalized,
+        )
+        normalized = re.sub(r"(?<=\d)_(?=\d)", "", normalized)
+        try:
+            parsed = ast.parse(normalized, mode="eval")
+        except SyntaxError:
+            return None
+
+        def visit(node: ast.AST) -> int | None:
+            if isinstance(node, ast.Expression):
+                return visit(node.body)
+            if isinstance(node, ast.Constant) and type(node.value) is int:
+                return node.value
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+                operand = visit(node.operand)
+                if operand is None:
+                    return None
+                return operand if isinstance(node.op, ast.UAdd) else -operand
+            if isinstance(node, ast.BinOp) and isinstance(
+                node.op, (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
+            ):
+                left = visit(node.left)
+                right = visit(node.right)
+                if left is None or right is None:
+                    return None
+                if isinstance(node.op, ast.Add):
+                    return left + right
+                if isinstance(node.op, ast.Sub):
+                    return left - right
+                if isinstance(node.op, ast.Mult):
+                    return left * right
+                return None if right == 0 else left // right
+            return None
+
+        return visit(parsed)
+
+    offsets: set[int] = set()
+    expressions: set[str] = set()
+    for symbol in symbols:
+        for match in re.finditer(
+            rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])",
+            code,
+        ):
+            expressions.add(containing_argument(match.start()))
+    for expression in expressions:
+        resolved = evaluate(expression)
+        if resolved is not None:
+            offsets.add(resolved - declared_value)
+    return offsets
+
+
+def _is_single_boundary_expression(fragment: str) -> bool:
+    """Disallow a registered boundary fragment from smuggling a decoy statement."""
+
+    code = _boundary_code(fragment).strip()
+    semicolons = [index for index, character in enumerate(code) if character == ";"]
+    return not semicolons or (len(semicolons) == 1 and semicolons[0] == len(code) - 1)
+
+
+def _boundary_relation_offsets(
+    fragment: str,
+    symbols: list[str],
+    declared_value: int,
+) -> set[int]:
+    """Resolve a boundary fragment against a source constant, alias, or exact literal."""
+
+    symbol_offsets = _boundary_symbol_offsets(fragment, symbols, declared_value)
+    if symbol_offsets:
+        return symbol_offsets
+    code = _boundary_code(fragment)
+    initializer = _binding_initializer(fragment)
+    if initializer is not None:
+        literal_region = _boundary_code(initializer)
+    else:
+        opening = code.find("(")
+        closing = _matching_parenthesis(code, opening) if opening >= 0 else None
+        if (
+            opening < 0
+            or closing is None
+            or re.fullmatch(r"\s*;?\s*", code[closing + 1 :]) is None
+        ):
+            return set()
+        # Exact literal fallback is intentionally limited to the operands or
+        # arguments exercised by one complete call/assertion.  Type widths and
+        # unrelated declarations outside that operation are not evidence.
+        literal_region = code[opening + 1 : closing]
+    literal_values = {
+        int(match.group("digits").replace("_", ""))
+        for match in RUST_INTEGER_LITERAL.finditer(literal_region)
+    }
+    return {literal - declared_value for literal in literal_values}
+
+
+def _validate_boundary_value_alias(
+    raw_alias: Any,
+    source_symbol: str,
+    declared_value: int,
+    context: str,
+) -> tuple[str, str]:
+    alias = _object(raw_alias, {"contains", "identifier"}, context)
+    identifier = _string(alias["identifier"], f"{context}.identifier")
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier) is None:
+        _fail(f"{context}.identifier must be a Rust local variable name")
+    if identifier == source_symbol:
+        _fail(f"{context}.identifier must differ from the source constant")
+    fragment = _string(alias["contains"], f"{context}.contains")
+    declaration = re.fullmatch(
+        rf"\s*let\s+{re.escape(identifier)}\s*(?::[^=;\r\n]+)?="
+        r"\s*(?P<value>[^;]+);\s*",
+        _rust_executable_source(fragment),
+        flags=re.DOTALL,
+    )
+    if declaration is None:
+        _fail(f"{context}.contains must be the immutable alias declaration")
+    offsets = _boundary_relation_offsets(
+        declaration.group("value"),
+        [source_symbol],
+        declared_value,
+    )
+    if offsets != {0}:
+        _fail(
+            f"{context}.contains must bind {identifier!r} exactly to source constant "
+            f"{source_symbol!r} or its evaluated value"
+        )
+    return identifier, fragment
+
+
+def _rust_identifier_is_rebound(code: str, identifier: str) -> bool:
+    """Conservatively reject Rust binding/assignment forms for an identifier."""
+
+    escaped = re.escape(identifier)
+    token = rf"(?<![A-Za-z0-9_]){escaped}(?![A-Za-z0-9_])"
+    patterns = (
+        rf"\blet\b[^=;\r\n]*{token}[^=;\r\n]*=",
+        rf"\bfor\b[^;{{}}\r\n]*{token}[^;{{}}\r\n]*\bin\b",
+        rf"\|[^|\r\n]*{token}[^|\r\n]*\|",
+        rf"\bfn\b[^{{;]*\([^)]*{token}\s*:",
+        rf"\b(?:if|while)\s+let\b[^=;\r\n]*{token}[^=;\r\n]*=",
+        rf"(?:^|[,({{])[^=>;\r\n]*{token}[^=>;\r\n]*=>",
+        rf"{token}\s*(?:[+\-*/%]?=(?!=))",
+        rf"{token}\s*@",
+    )
+    return any(re.search(pattern, code, flags=re.MULTILINE) for pattern in patterns)
+
+
+def _successor_base_binds_receiver_at_limit(
+    fragment: str,
+    receiver: str,
+    symbols: list[str],
+    declared_value: int,
+) -> bool:
+    """Require a single equality assertion tying receiver state to the limit."""
+
+    assertion = re.fullmatch(
+        r"\s*assert_eq!\s*\(\s*(?P<left>[^,;]+?)\s*,"
+        r"\s*(?P<right>[^,;]+?)\s*,?\s*\)\s*;\s*",
+        _boundary_code(fragment),
+        flags=re.DOTALL,
+    )
+    if assertion is None:
+        return False
+    receiver_expression = re.compile(
+        rf"\s*{re.escape(receiver)}"
+        r"(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*\([^,;]*\))?)+\s*",
+        flags=re.DOTALL,
+    )
+    left = assertion.group("left")
+    right = assertion.group("right")
+    return (
+        receiver_expression.fullmatch(left) is not None
+        and _boundary_relation_offsets(right, symbols, declared_value) == {0}
+    ) or (
+        receiver_expression.fullmatch(right) is not None
+        and _boundary_relation_offsets(left, symbols, declared_value) == {0}
+    )
+
+
+def _is_direct_negative_successor_assertion(fragment: str, operation: str) -> bool:
+    """Accept only `assert!(!receiver.method(...));` for successor failure."""
+
+    receiver, _, method = operation.partition(".")
+    call = rf"{re.escape(receiver)}\s*\.\s*{re.escape(method)}"
+    code = _boundary_code(fragment)
+    prefix = re.match(
+        rf"\s*assert!\s*\(\s*!\s*{call}\s*\(",
+        code,
+        flags=re.DOTALL,
+    )
+    if prefix is None:
+        return False
+    call_close = _matching_parenthesis(code, prefix.end() - 1)
+    return call_close is not None and re.fullmatch(
+        r"\s*\)\s*;\s*", code[call_close + 1 :]
+    ) is not None
+
+
 def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) -> None:
     limits = _array(values, "limits", nonempty=True)
     limit_ids: list[str] = []
@@ -2023,12 +3969,13 @@ def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) ->
                 "or a typed Rust error variant"
             )
         reason_codes.append(reason_code)
-        reason_fragments = _validate_sources(
+        reason_fragment = _validate_reason_source_binding(
             repository_root,
-            [limit_contract["reason_source"]],
-            f"{context}.reason_source_bindings",
+            limit_contract["reason_source"],
+            reason_code,
+            f"{context}.reason_source",
         )
-        if not _fragment_binds_reason(reason_fragments[0], reason_code):
+        if not _fragment_binds_reason(reason_fragment, reason_code):
             _fail(f"{context}.reason_source does not bind declared reason code {reason_code!r}")
         _string(limit_contract["unit"], f"{context}.unit", identifier=True)
         value = _positive_integer(limit_contract["value"], f"{context}.value")
@@ -2040,11 +3987,28 @@ def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) ->
         )
         if not _fragment_binds_integer(fragments[0], value):
             _fail(f"{context}.source does not bind declared value {value}")
+        source_declaration = RUST_LIMIT_DECLARATION.search(
+            _rust_executable_source(fragments[0])
+        )
+        if source_declaration is None:
+            _fail(f"{context}.source must bind a discoverable limit declaration")
+        source_symbol = source_declaration.group("name")
         boundaries = _object(
             limit_contract["boundary_tests"],
             {"at", "minus_one", "plus_one"},
             f"{context}.boundary_tests",
+            optional={"value_alias"},
         )
+        value_alias: tuple[str, str] | None = None
+        if "value_alias" in boundaries:
+            value_alias = _validate_boundary_value_alias(
+                boundaries["value_alias"],
+                source_symbol,
+                value,
+                f"{context}.boundary_tests.value_alias",
+            )
+
+        boundary_bindings: list[tuple[str, dict[str, Any], str, str, str]] = []
         boundary_identities: list[tuple[str, str, str]] = []
         for label in ("minus_one", "at", "plus_one"):
             boundary_context = f"{context}.boundary_tests.{label}"
@@ -2052,11 +4016,22 @@ def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) ->
                 boundaries[label],
                 {"contains", "function", "path"},
                 boundary_context,
+                optional={"relation"},
             )
             function = _string(binding["function"], f"{boundary_context}.function")
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", function) is None:
                 _fail(f"{boundary_context}.function must be a function name")
             relative = _string(binding["path"], f"{boundary_context}.path")
+            fragment = _string(binding["contains"], f"{boundary_context}.contains")
+            boundary_bindings.append(
+                (label, binding, function, relative, fragment)
+            )
+            boundary_identities.append((relative, function, fragment))
+        if len(set(boundary_identities)) != 3:
+            _fail(f"{context}.boundary_tests must use three distinct bindings")
+
+        for label, binding, function, relative, fragment in boundary_bindings:
+            boundary_context = f"{context}.boundary_tests.{label}"
             path = _existing_path(
                 repository_root,
                 relative,
@@ -2068,15 +4043,144 @@ def _validate_limits(repository_root: Path, values: Any, owner_ids: set[str]) ->
             except (OSError, UnicodeError) as error:
                 _fail(f"cannot read boundary test {relative}: {error}")
             section = _rust_test_section(source, function, boundary_context)
-            fragment = _string(binding["contains"], f"{boundary_context}.contains")
-            if section.count(fragment) != 1:
+            if not _is_single_boundary_expression(fragment):
+                _fail(
+                    f"{boundary_context}.contains must be one boundary expression, "
+                    "not multiple statements"
+                )
+            fragment_offsets = _executable_fragment_offsets(section, fragment)
+            if len(fragment_offsets) != 1:
                 _fail(
                     f"{boundary_context}.contains must occur exactly once in test "
-                    f"{function!r}"
+                    f"{function!r} outside comments and literals"
                 )
-            boundary_identities.append((relative, function, fragment))
-        if len(set(boundary_identities)) != 3:
-            _fail(f"{context}.boundary_tests must use three distinct bindings")
+            fragment_start = fragment_offsets[0]
+            symbols = [source_symbol]
+            if value_alias is not None:
+                alias_identifier, alias_fragment = value_alias
+                alias_offsets = _executable_fragment_offsets(section, alias_fragment)
+                if len(alias_offsets) != 1:
+                    _fail(
+                        f"{context}.boundary_tests.value_alias.contains must occur "
+                        f"exactly once in test {function!r} outside comments and literals"
+                    )
+                alias_start = alias_offsets[0]
+                if alias_start >= fragment_start:
+                    _fail(
+                        f"{context}.boundary_tests.value_alias must be declared before "
+                        f"{label} evidence"
+                    )
+                without_alias = list(_boundary_code(section))
+                for offset in range(alias_start, alias_start + len(alias_fragment)):
+                    if without_alias[offset] not in {"\r", "\n"}:
+                        without_alias[offset] = " "
+                remaining_code = "".join(without_alias)
+                if _rust_identifier_is_rebound(remaining_code, alias_identifier):
+                    _fail(
+                        f"{context}.boundary_tests.value_alias identifier "
+                        f"{alias_identifier!r} must not be shadowed or reassigned"
+                    )
+                symbols.append(alias_identifier)
+
+            expected_offset = BOUNDARY_RELATION_OFFSETS[label]
+            relation = binding.get("relation")
+            if relation is not None:
+                relation_binding = _object(
+                    relation,
+                    {"base", "kind", "operation"},
+                    f"{boundary_context}.relation",
+                )
+                kind = _string(
+                    relation_binding["kind"],
+                    f"{boundary_context}.relation.kind",
+                    identifier=True,
+                )
+                if kind != "successor-attempt":
+                    _fail(
+                        f"{boundary_context}.relation.kind must be 'successor-attempt'"
+                    )
+                if expected_offset != 1:
+                    _fail(
+                        f"{boundary_context}.relation successor-attempt is only valid "
+                        "for plus_one evidence"
+                    )
+                operation = _string(
+                    relation_binding["operation"],
+                    f"{boundary_context}.relation.operation",
+                )
+                if re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*",
+                    operation,
+                ) is None:
+                    _fail(
+                        f"{boundary_context}.relation.operation must be a receiver "
+                        "and method name"
+                    )
+                receiver = operation.partition(".")[0]
+                base = _string(
+                    relation_binding["base"],
+                    f"{boundary_context}.relation.base",
+                )
+                base_offsets = _executable_fragment_offsets(section, base)
+                if base == fragment or len(base_offsets) != 1:
+                    _fail(
+                        f"{boundary_context}.relation.base must be a distinct fragment "
+                        f"occurring exactly once in test {function!r} outside comments "
+                        "and literals"
+                    )
+                base_start = base_offsets[0]
+                if _boundary_relation_offsets(base, symbols, value) != {0}:
+                    _fail(
+                        f"{boundary_context}.relation.base must bind the declared "
+                        f"at-limit value of {source_symbol}"
+                    )
+                if not _successor_base_binds_receiver_at_limit(
+                    base,
+                    receiver,
+                    symbols,
+                    value,
+                ):
+                    _fail(
+                        f"{boundary_context}.relation.base must be a single equality "
+                        f"assertion tying operation receiver {receiver!r} to the "
+                        "declared at-limit value"
+                    )
+                if not _is_direct_negative_successor_assertion(fragment, operation):
+                    _fail(
+                        f"{boundary_context}.contains must negatively assert only the "
+                        f"directly invoked successor operation {operation!r}"
+                    )
+                between = _boundary_code(
+                    section[base_start + len(base) : fragment_start]
+                )
+                if _rust_identifier_is_rebound(between, receiver):
+                    _fail(
+                        f"{boundary_context}.relation operation receiver {receiver!r} "
+                        "must not be rebound between base and successor evidence"
+                    )
+                if base_start >= fragment_start:
+                    _fail(
+                        f"{boundary_context}.relation successor attempt must follow "
+                        "its at-limit base evidence"
+                    )
+
+            actual_offsets = _boundary_relation_offsets(fragment, symbols, value)
+            if actual_offsets:
+                if actual_offsets != {expected_offset}:
+                    _fail(
+                        f"{boundary_context}.contains must bind {source_symbol} at "
+                        f"offset {expected_offset}; found offsets {sorted(actual_offsets)}"
+                    )
+                if relation is not None:
+                    _fail(
+                        f"{boundary_context}.relation is only valid when contains does "
+                        "not directly bind the boundary value"
+                    )
+            elif relation is None:
+                _fail(
+                    f"{boundary_context}.contains must bind {source_symbol} at offset "
+                    f"{expected_offset}, an exact evaluated integer, or a verified alias"
+                )
     _sorted_unique(limit_ids, "limit IDs")
     if len(reason_codes) != len(set(reason_codes)):
         _fail("limit reason codes must be unique")
@@ -2194,6 +4298,7 @@ def _limit_declarations(
     """Discover candidate limits before consulting governance dispositions."""
 
     declarations: dict[tuple[str, str], str] = {}
+    test_only_modules = _test_only_external_rust_module_paths(repository_root)
     surface_paths = _array(surfaces, "limit_surfaces", nonempty=True)
     normalized_surfaces: list[str] = []
     for index, raw_surface in enumerate(surface_paths):
@@ -2205,12 +4310,24 @@ def _limit_declarations(
         for path in paths:
             if path.is_symlink() or not path.is_file():
                 _fail(f"{context} contains a non-regular Rust source: {path}")
-            if _is_test_only_rust_source(path):
+            relative_parts = path.relative_to(repository_root).parts
+            if (
+                len(relative_parts) >= 3
+                and relative_parts[0] == "crates"
+                and relative_parts[2] != "src"
+            ):
+                # Integration-test/bench/example trees are outside the declared
+                # production `crates/*/src/**/*.rs` census.  A file named
+                # `tests.rs` *inside* src remains production unless module
+                # reachability proves a required-test cfg edge.
+                continue
+            if path.resolve() in test_only_modules:
                 continue
             source = _production_source(path)
-            namespace_ranges = _rust_namespace_ranges(source)
+            classified = _rust_executable_source(source)
+            namespace_ranges = _rust_namespace_ranges(classified)
             path_relative = path.relative_to(repository_root).as_posix()
-            for match in RUST_LIMIT_DECLARATION.finditer(source):
+            for match in RUST_LIMIT_DECLARATION.finditer(classified):
                 name = match.group("name")
                 rust_type = match.group("type").strip()
                 if not _limit_candidate(name, rust_type):
@@ -2219,7 +4336,11 @@ def _limit_declarations(
                 identity = (path_relative, symbol)
                 if identity in declarations:
                     _fail(f"duplicate qualified limit declaration identity: {identity}")
-                declarations[identity] = _constant_declaration_fragment(source, match)
+                declarations[identity] = _constant_declaration_fragment(
+                    source,
+                    match,
+                    classified_source=classified,
+                )
     _sorted_unique(normalized_surfaces, "limit discovery surfaces")
     return declarations
 
@@ -2231,7 +4352,9 @@ def _registered_limit_declarations(
     declarations: set[tuple[str, str]] = set()
     for raw_limit in values:
         source = raw_limit["source"]
-        match = RUST_LIMIT_DECLARATION.search(source["contains"])
+        match = RUST_LIMIT_DECLARATION.search(
+            _rust_executable_source(source["contains"])
+        )
         if match is None:
             _fail(f"limit {raw_limit['id']} source must bind a discoverable limit declaration")
         matches = [
@@ -2387,7 +4510,7 @@ def _validate_limit_aliases(
                 f"{context}.tests",
             )
             bound = bound or re.search(
-                rf"\b{re.escape(source_name)}\b", _mask_source_comments(section)
+                rf"\b{re.escape(source_name)}\b", _rust_executable_source(section)
             ) is not None
         if not bound:
             _fail(f"{context}.tests do not exercise the alias source")
@@ -2464,10 +4587,11 @@ def _validate_limit_exclusions(
                 kind="file",
             )
             production = _production_source(use_path)
+            classified_production = _rust_executable_source(production)
             qualified_scope = use.get("scope")
             if qualified_scope is not None:
                 qualified_scope = _string(qualified_scope, f"{use_context}.scope")
-                ranges = _rust_namespace_ranges(production)
+                ranges = _rust_namespace_ranges(classified_production)
                 matching_scopes: list[str] = []
                 matching_sections: list[str] = []
                 for opening, closing, _ in ranges:
@@ -2486,12 +4610,14 @@ def _validate_limit_exclusions(
                 production_sections = matching_sections
             else:
                 production_sections = [production]
-            if not any(
-                any(fragment in line for line in section.splitlines())
+            occurrences = sum(
+                len(_executable_fragment_offsets(section, fragment))
                 for section in production_sections
-            ):
+            )
+            if occurrences < 1:
                 _fail(
-                    f"{use_context} must bind at least one production use outside test-only cfgs"
+                    f"{use_context} must bind at least one executable production use "
+                    "outside comments, literals, and test-only cfgs"
                 )
             if "::" in constant:
                 owner_scope = constant.rsplit("::", 1)[0]
@@ -2508,9 +4634,10 @@ def _validate_limit_exclusions(
             token = re.compile(
                 rf"(?<![A-Za-z0-9_]){re.escape(leaf)}(?![A-Za-z0-9_])"
             )
-            if token.search(_mask_source_comments(fragment)) is None:
+            executable_fragment = _rust_executable_source(fragment)
+            if token.search(executable_fragment) is None:
                 _fail(f"{use_context}.contains does not reference {constant}")
-            if re.search(rf"\bconst\s+{re.escape(leaf)}\b", fragment):
+            if re.search(rf"\bconst\s+{re.escape(leaf)}\b", executable_fragment):
                 _fail(f"{use_context}.contains must bind a use, not the declaration")
             used_constants.append(constant)
         if classification == "operational":
@@ -2785,6 +4912,9 @@ def validate_repository(
         _fail(f"repository root does not exist: {error}")
     if not root.is_dir():
         _fail("repository root must be a directory")
+    # Cache only within one coherent repository snapshot.  Mutation tests and
+    # subsequent validations must always rediscover changed cfg/module edges.
+    _TEST_ONLY_EXTERNAL_MODULE_CACHE.clear()
     registry = _existing_path(root, registry_path.as_posix(), "registry path", kind="file")
     document = _load_registry(registry)
 
