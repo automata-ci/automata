@@ -314,6 +314,7 @@ async fn insert_schedule_discovery_claim(
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
             $13, 1, 'claimed', $14, $15, $14, $14
         )
+        ON CONFLICT DO NOTHING
         ",
     )
     .bind(request.registry_id().as_uuid())
@@ -352,6 +353,7 @@ async fn insert_schedule_discovery_claim(
             )
             .map_err(|_| GithubScheduleStoreError::CorruptData)
         }
+        Ok(result) if result.rows_affected() == 0 => Err(GithubScheduleStoreError::Conflict),
         Ok(_) => Err(GithubScheduleStoreError::CorruptData),
         Err(error) if integrity_violation(&error) => Err(GithubScheduleStoreError::Conflict),
         Err(error) => Err(operation_error(error)),

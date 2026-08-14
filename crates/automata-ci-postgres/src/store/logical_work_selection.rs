@@ -975,6 +975,16 @@ async fn cleanup_receipts(
                       FROM logical_workflow_activation_work_quarantines AS quarantine
                       WHERE quarantine.selection_id = receipt.selection_id
                   )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM github_runtime_authority_issuances AS authority
+                      WHERE authority.preparation_selection_id = receipt.selection_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM github_runtime_authority_issuances AS authority
+                      WHERE authority.activation_selection_id = receipt.selection_id
+                  )
                 ORDER BY expires_at_ms, selection_id
                 FOR UPDATE SKIP LOCKED
                 LIMIT $2
@@ -1003,6 +1013,11 @@ async fn cleanup_receipts(
                       SELECT 1
                       FROM logical_workflow_materialization_work_quarantines AS quarantine
                       WHERE quarantine.selection_id = receipt.selection_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM github_runtime_authority_issuances AS authority
+                      WHERE authority.materialization_selection_id = receipt.selection_id
                   )
                 ORDER BY expires_at_ms, selection_id
                 FOR UPDATE SKIP LOCKED
