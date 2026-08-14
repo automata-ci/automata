@@ -53,6 +53,7 @@ const GIT_HEAD_REF_PREFIX: &str = "refs/heads/";
 const MAX_CURSOR_BYTES: usize = 512;
 const MAX_QUERY_BYTES: usize = 4 * 1_024;
 const PAGE_CACHE_CONTROL: &str = "no-store";
+const GITHUB_AUTHORIZATION_ORIGIN: &str = "https://github.com";
 const RBAC_USERS_RETURN_PATH: &str = "/settings/access/users";
 const RBAC_ROLES_RETURN_PATH: &str = "/settings/access/roles";
 const RBAC_DIRECT_BINDINGS_RETURN_PATH: &str = "/settings/access/direct-bindings";
@@ -1044,16 +1045,32 @@ async fn installation_setup(
             return internal_server_error();
         }
     };
-    let mut response = render(state, request_json, csp_nonce).await;
-    // A form POST uses the document's referrer policy when serializing its
-    // Origin header. `no-referrer` therefore produces `Origin: null`, which
-    // cannot satisfy the setup route's exact same-origin admission check.
-    // Keep every cross-origin request opaque while preserving this page's
-    // same-origin setup submission.
-    response.headers_mut().insert(
-        HeaderName::from_static("referrer-policy"),
-        HeaderValue::from_static("same-origin"),
+    let setup_csp = format!(
+        "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src data:; \
+         form-action 'self' {GITHUB_AUTHORIZATION_ORIGIN}; frame-ancestors 'none'; \
+         img-src 'self' data:; script-src 'self' 'nonce-{csp_nonce}'; style-src 'self'"
     );
+    let Ok(setup_csp) = HeaderValue::from_str(&setup_csp) else {
+        error!("failed to construct the setup-page content security policy");
+        return internal_server_error();
+    };
+    let mut response = render(state, request_json, csp_nonce).await;
+    if response.status() == StatusCode::OK {
+        // Browsers apply `form-action` across the POST redirect chain. Permit
+        // only the fixed GitHub authorization origin in addition to the local
+        // setup receiver; every other rendered form remains same-origin only.
+        response.headers_mut().insert(
+            HeaderName::from_static("content-security-policy"),
+            setup_csp,
+        );
+        // A form POST uses the document's referrer policy when serializing its
+        // Origin header. `no-referrer` therefore produces `Origin: null`, which
+        // cannot satisfy the setup route's exact same-origin admission check.
+        response.headers_mut().insert(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("same-origin"),
+        );
+    }
     response
 }
 
@@ -3457,6 +3474,13 @@ mod tests {
             .expect("CSP must be valid text");
         assert!(csp.contains(&format!("'nonce-{nonce}'")));
         assert!(csp.contains("frame-ancestors 'none'"));
+        if page["page"]["kind"] == "setup" {
+            assert!(csp.contains("form-action 'self' https://github.com"));
+            assert!(!csp.contains("form-action *"));
+        } else {
+            assert!(csp.contains("form-action 'self';"));
+            assert!(!csp.contains(GITHUB_AUTHORIZATION_ORIGIN));
+        }
     }
 
     fn assert_error_page_headers(response: &Response<Body>, status: StatusCode) {
