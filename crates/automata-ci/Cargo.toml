@@ -30,6 +30,7 @@ automata-ci-credential-github.workspace = true
 automata-ci-github.workspace = true
 automata-ci-github-delivery.workspace = true
 automata-ci-key-management.workspace = true
+automata-ci-local.workspace = true
 automata-ci-metrics.workspace = true
 automata-ci-oidc-github.workspace = true
 automata-ci-oidc-github-control.workspace = true

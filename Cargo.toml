@@ -19,6 +19,7 @@ members = [
     "crates/automata-ci-github-runtime",
     "crates/automata-ci-job-executor-github",
     "crates/automata-ci-key-management",
+    "crates/automata-ci-local",
     "crates/automata-ci-metrics",
     "crates/automata-ci-oidc-github",
     "crates/automata-ci-oidc-github-control",
@@ -90,6 +91,7 @@ automata-ci-github-delivery = { path = "crates/automata-ci-github-delivery", ver
 automata-ci-github-runtime = { path = "crates/automata-ci-github-runtime", version = "0.1.0" }
 automata-ci-job-executor-github = { path = "crates/automata-ci-job-executor-github", version = "0.1.0" }
 automata-ci-key-management = { path = "crates/automata-ci-key-management", version = "0.1.0" }
+automata-ci-local = { path = "crates/automata-ci-local", version = "0.1.0" }
 automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
 automata-ci-oidc-github = { path = "crates/automata-ci-oidc-github", version = "0.1.0" }
 automata-ci-oidc-github-control = { path = "crates/automata-ci-oidc-github-control", version = "0.1.0" }

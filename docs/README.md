@@ -9,7 +9,7 @@ The quickest ways in are:
 | --- | --- |
 | Build from source and inspect the interface | [Getting started](getting-started.md) |
 | Check support for a workflow feature | [Compatibility](compatibility.md) |
-| Start the durable local composition | [Control-plane setup](deployment.md) |
+| Follow the current manual Arch development assembly | [Control-plane setup](deployment.md) |
 | Prepare a Linux execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
 
 The [hosted UI demo](https://automata-ci.github.io/automata/) uses sample data.
@@ -49,6 +49,9 @@ It does not connect to repositories or execute workflows.
   lanes, corpus graduation, and evidence handoff for those work packages.
 - [Implementation plan](implementation-plan.md) tracks completed foundations
   and the acceptance gates that still block a release.
+- [Local installation and deployment roadmap](maintainers/roadmaps/local-installation.md)
+  records the accepted cross-platform evaluation architecture, merge
+  checkpoints, host qualification gates, and later deployment tracks.
 - [Ubuntu 24.04 execution profile](../images/github-hosted-ubuntu-24.04-x64/README.md)
   describes the immutable runner image and its publication policy.
 - [React SSR UI](../ui/README.md) explains the build-time frontend and embedded

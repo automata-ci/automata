@@ -36,10 +36,10 @@ use clap::{CommandFactory, FromArgMatches, Parser, error::ErrorKind};
 
 pub use commands::{
     AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport,
-    EnvironmentReviewArgs, EnvironmentReviewDecision, OperatorArgs, PreviewArgs, RerunArgs,
-    RerunSelection, RunnerArgs, RunnerCommand, RunnerTokenArgs, SecretArgs, SecretCommand,
-    SecretCreateArgs, SecretDeleteArgs, SecretListArgs, SecretProviderArgs, SecretProviderCommand,
-    ServerArgs,
+    EnvironmentReviewArgs, EnvironmentReviewDecision, LocalArgs, LocalCommand,
+    LocalContainerEngine, LocalDoctorArgs, OperatorArgs, PreviewArgs, RerunArgs, RerunSelection,
+    RunnerArgs, RunnerCommand, RunnerTokenArgs, SecretArgs, SecretCommand, SecretCreateArgs,
+    SecretDeleteArgs, SecretListArgs, SecretProviderArgs, SecretProviderCommand, ServerArgs,
 };
 pub use output::OutputFormat;
 pub use values::{RepositoryRef, SecretScope};

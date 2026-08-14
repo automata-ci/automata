@@ -232,8 +232,10 @@ before applying the firewall policy.
 ## Workflow admission and autonomous progress
 
 The server exposes no local bearer workflow ingress. Configure the exact GitHub
-provider registry below to admit supported signed `push` webhooks for
-`.ci/workflows/ci.yml` on `refs/heads/main`.
+provider registry below to admit supported signed GitHub webhook deliveries.
+For an admitted revision, `all_direct` workflow discovery selects every direct
+lowercase `.yml` or `.yaml` file under `.ci/workflows/`; nested paths, other
+extensions, and unauthenticated revisions are rejected.
 
 Admission validates and persists immutable workflow evidence asynchronously.
 Its durable receipt does not mean a job has finished: the mandatory autonomous
@@ -385,13 +387,15 @@ compatibility mode.
 
 The GitHub App webhook URL is the public Automata origin plus
 `/webhooks/github`. Configure GitHub with the same HMAC secret referenced by the
-manifest, subscribe it to `push` events, and grant `checks:write` for every
-entry plus `contents:read` only for Private source. The current manifest and
-delivery contract admit only `.ci/workflows/ci.yml` on
-`refs/heads/main` for the `push` event; another workflow, ref, or event is
-rejected rather than silently generalized. Rotations advance the relevant
-configuration, verifier, manifest, policy, and authority revisions rather than
-reusing an old identity with changed bytes.
+manifest, subscribe only to the supported `push`, `pull_request`, `merge_group`,
+and `repository_dispatch` events selected for the installation. The App's
+registration-wide permissions are Checks write, Contents read, Pull requests
+read, and Merge queues read; Automata's private-source authority remains scoped
+separately per repository. Each event must satisfy its exact configured
+source-selection policy; an unconfigured event, source, or revision is rejected
+rather than silently generalized. Rotations advance the relevant configuration,
+verifier, manifest, policy, and authority revisions rather than reusing an old
+identity with changed bytes.
 
 ## Repository publication
 

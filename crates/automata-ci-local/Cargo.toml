@@ -1,0 +1,28 @@
+[package]
+name = "automata-ci-local"
+description = "Cross-platform local installation lifecycle for Automata"
+publish.workspace = true
+readme = "README.md"
+keywords = ["ci", "github-actions", "local-development", "containers"]
+categories = ["development-tools"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+processkit.workspace = true
+
+[lints]
+workspace = true

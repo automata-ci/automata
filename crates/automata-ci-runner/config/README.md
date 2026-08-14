@@ -175,8 +175,8 @@ The three `runner.local-N.example.json` files assume:
 - durable journal and spool state below `/var/lib/automata-runner`;
 - Linux 6.4 or newer with three dedicated, bounded `tmpfs,noswap` mounts at
   `/run/automata_runner_1` through `/run/automata_runner_3`;
-- distinct TLS leaves/keys and spool keys below each
-  `/etc/automata-runner/instances/N` boundary;
+- dynamically enrolled TLS leaves/keys and operator-provisioned spool keys below
+  each `/etc/automata-runner/instances/N` boundary;
 - a control-plane runner listener reachable at the configured HTTPS URL;
 - the same RustFS bucket and prefix used by the server;
 - the pinned Ubuntu 24.04 OCI image is available by its exact digest; and
@@ -395,15 +395,16 @@ retries a mutable tag. The checked-in local example intentionally omits the
 field because the repository does not hardcode an unpublished or machine-local
 candidate digest.
 
-## 2. Provision runner inputs
+## 2. Provision runner inputs and enroll identity
 
-Each instance `N` expects:
+Before enrollment, each instance `N` expects:
 
-- `/etc/automata-runner/instances/N/tls/server-ca.pem` — server trust roots;
-- `/etc/automata-runner/instances/N/tls/runner.pem` — that instance's unique
-  runner certificate chain;
-- `/etc/automata-runner/instances/N/tls/runner-key.pem` — that instance's
-  unique private key, owned by the runner account with mode `0600`;
+- its reviewed JSON configuration installed at
+  `/etc/automata-runner/instances/N/runner.json`, root-owned with mode `0640`,
+  grouped to that runner's service group, and containing the final identity
+  and paths;
+- an empty `/etc/automata-runner/instances/N/tls` directory with mode `0700`,
+  owned by the exact `automata-runner-N` account that will run the daemon;
 - `/etc/automata-runner/instances/N/secrets/spool-key-v1.hex` — that instance's
   unique 64-hexadecimal-character key, owned by the runner account with mode
   `0600`;
@@ -420,11 +421,24 @@ Each instance `N` expects:
 - exact root-owned Podman, conmon, crun, catatonit, and seccomp-profile paths
   matching the JSON configuration.
 
-Before starting the host, follow the control-plane guide's
-[runner enrollment](https://github.com/automata-ci/automata/blob/main/docs/deployment.md#enroll-the-three-runners)
-for all three configurations. Create a separate one-use token for each process;
-each runner generates its private key locally, submits its canonical capability
-document, and installs the returned client-only chain and server roots.
+The TLS files are enrollment outputs, not inputs to issue or install manually.
+Run each enrollment as that instance's exact service account, using the same
+installed configuration, stable runner name, and account that systemd will use.
+Enrollment creates its private key and private recovery state inside the TLS
+directory, submits its canonical capability document, and installs
+`server-ca.pem`, `runner.pem`, and `runner-key.pem` there. Keep the parent
+instance path on trusted, non-group-writable ancestors, but do not make the TLS
+directory root-owned or group-writable. Never enroll as root or as an operator
+account and then copy the private key into place.
+
+Follow the host guide's
+[three-account dynamic enrollment procedure](../../../deploy/runner-host/README.md#dynamically-enroll-three-independent-identities)
+for all three configurations. It mints a separate one-use token for each
+process and starts the services only after every enrollment succeeds. If an
+enrollment is interrupted, repeat the same command as the same account with
+the same server, configuration, and runner name and with standard input from
+`/dev/null`. The private stage retains the original token and key; do not mint
+a replacement token or delete the stage.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service
@@ -472,15 +486,13 @@ GitHub origins and must leave `map_github_server_to_host_gateway` disabled.
 
 ## 4. Start the runner
 
-Run the installed binary as the dedicated account:
-
-```console
-automata-runner run \
-  --config /path/to/runner.local.json
-```
-
-The checked-in JSON uses conventional service paths and may be run directly
-only when those exact assumptions are true.
+After all three identities are enrolled, start and verify the checked-in
+systemd services as described in the
+[three-process host guide](../../../deploy/runner-host/README.md#start-and-observe-the-trio).
+Its `automata-runner run` process uses the exact service account and installed
+configuration that owned enrollment. The checked-in JSON uses conventional
+service paths; do not start it under a different account or before all of its
+host-path and mount assumptions are true.
 
 Public source repositories and actions use anonymous access. When the exact
 GitHub provider registry is configured, a materialized Standard job may instead

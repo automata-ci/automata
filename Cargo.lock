@@ -226,6 +226,7 @@ dependencies = [
  "automata-ci-github",
  "automata-ci-github-delivery",
  "automata-ci-key-management",
+ "automata-ci-local",
  "automata-ci-metrics",
  "automata-ci-oidc-github",
  "automata-ci-oidc-github-control",
@@ -576,6 +577,17 @@ dependencies = [
  "static_assertions",
  "thiserror",
  "zeroize",
+]
+
+[[package]]
+name = "automata-ci-local"
+version = "0.1.0"
+dependencies = [
+ "processkit",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
