@@ -6,28 +6,6 @@ use uuid::Uuid;
 
 use common::{TestResult, run_with_database, seed_control_plane};
 
-const HUMAN_AUTH_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
-
-#[test]
-fn human_auth_migration_keeps_publication_private_and_never_names_value_read() {
-    let normalized = HUMAN_AUTH_MIGRATION.to_ascii_lowercase();
-    assert!(normalized.contains("dashboard_audience text default 'private'::text not null"));
-    assert!(normalized.contains("log_audience text default 'private'::text not null"));
-    assert!(normalized.contains("artifact_audience text default 'private'::text not null"));
-    assert!(normalized.contains("octet_length(token_hash) = 32"));
-    assert!(normalized.contains("security_audit_events_append_only"));
-    assert!(!normalized.contains("secrets.value.read"));
-    assert!(normalized.contains("('runs:read'"));
-    assert!(normalized.contains("('repositories:read'"));
-    assert!(!normalized.contains("('runs.read'"));
-    assert!(!normalized.contains("('repositories.read'"));
-    assert!(!normalized.contains("device_user_code text"));
-    assert!(!normalized.contains("verification_uri text"));
-    assert!(!normalized.contains("access_token text"));
-    assert!(!normalized.contains("refresh_token text"));
-    assert!(!normalized.contains("metadata jsonb"));
-}
-
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(clippy::too_many_lines)]

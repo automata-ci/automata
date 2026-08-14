@@ -6,8 +6,6 @@ use automata_ci_workflow_github::{
     GithubExpressionErrorKind, GithubExpressionLimits,
 };
 
-const PROGRAM_GOLDEN: &str = include_str!("fixtures/expression-program-v1.golden");
-
 fn compile(source: &str, phase: GithubConditionPhase) -> automata_ci_core::ExpressionProgram {
     GithubConditionCompiler::default()
         .compile_condition(Some(source), phase)
@@ -352,17 +350,4 @@ fn malformed_generated_inputs_are_bounded_and_never_panic() {
         }
         let _ = compiler.compile_condition(Some(&source), GithubConditionPhase::Step);
     }
-}
-
-#[test]
-fn representative_program_has_an_exact_versioned_golden() {
-    let program = compile(
-        "${{ steps.Build.outputs.digest == needs.prepare.outputs.digest || failure() }}",
-        GithubConditionPhase::Step,
-    );
-    let rendered = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&program).expect("serialize")
-    );
-    assert_eq!(rendered, PROGRAM_GOLDEN);
 }

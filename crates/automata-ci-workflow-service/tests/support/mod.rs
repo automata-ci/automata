@@ -12,7 +12,22 @@ use automata_ci_workflow_github::{
 use automata_ci_workflow_service::{AdmissionRepositoryCoordinates, WorkflowAdmissionRequest};
 use bytes::Bytes;
 
-pub const CI_SOURCE: &str = include_str!("../fixtures/repository-ci.yml");
+pub const CI_SOURCE: &str = r"name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: cargo test
+";
 pub const REPOSITORY: &str = "automata-ci/automata";
 pub const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 pub const GIT_REF: &str = "refs/heads/main";

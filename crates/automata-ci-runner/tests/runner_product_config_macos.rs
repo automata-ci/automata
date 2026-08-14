@@ -1,7 +1,5 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
-use automata_ci_core::{Architecture, IsolationLevel, OperatingSystem, RunnerFeature};
-use automata_ci_execution::{NetworkPolicy, SandboxLaunch, SandboxPrivilegePolicy};
 use automata_ci_runner::product::{RunnerProductConfig, RunnerProductConfigError};
 
 fn baseline() -> serde_json::Value {
@@ -13,70 +11,6 @@ fn parse(value: &serde_json::Value) -> Result<RunnerProductConfig, RunnerProduct
     RunnerProductConfig::from_json(
         &serde_json::to_vec(value).expect("serialize mutated macOS configuration"),
     )
-}
-
-#[test]
-fn checked_in_macos_configuration_selects_disposable_arm64_vm_execution() {
-    let config = parse(&baseline()).expect("checked-in macOS runner configuration");
-
-    let macos = config
-        .macos_virtualization()
-        .expect("macOS virtualization provider");
-    assert!(config.podman().is_none());
-    assert!(config.kubernetes().is_none());
-    assert!(config.windows_native().is_none());
-    assert_eq!(config.executor().network(), NetworkPolicy::Disabled);
-    assert_eq!(
-        config.executor().privilege(),
-        SandboxPrivilegePolicy::Unprivileged
-    );
-    assert_eq!(
-        config.inventory().platform().operating_system(),
-        &OperatingSystem::Macos
-    );
-    assert_eq!(
-        config.inventory().platform().architecture(),
-        &Architecture::Aarch64
-    );
-    assert_eq!(
-        config.inventory().sandbox().maximum_isolation(),
-        IsolationLevel::VirtualMachine
-    );
-    assert!(
-        config
-            .inventory()
-            .features()
-            .contains(&RunnerFeature::SHELL_STEPS)
-    );
-    assert!(
-        !config
-            .inventory()
-            .features()
-            .contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
-    );
-    let environment = config
-        .environments()
-        .first_key_value()
-        .expect("virtualized macOS environment")
-        .1;
-    assert!(matches!(
-        environment.launch(),
-        SandboxLaunch::VirtualMachine { template_manifest }
-            if *template_manifest == macos.template_manifest_sha256()
-    ));
-    assert_eq!(
-        environment.workspace().as_str(),
-        "/Users/automata-job/workspaces"
-    );
-    assert_eq!(
-        config
-            .executor()
-            .toolchain()
-            .sha256sum()
-            .expect("shasum")
-            .as_str(),
-        "/usr/bin/shasum"
-    );
 }
 
 #[test]

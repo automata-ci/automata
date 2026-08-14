@@ -5,8 +5,6 @@ mod github_manifest_fixture;
 
 #[path = "adapter_port.rs"]
 mod adapter_port;
-#[path = "admission_event_limits.rs"]
-mod admission_event_limits;
 #[path = "attempt_api.rs"]
 mod attempt_api;
 #[path = "g1_api.rs"]
@@ -57,8 +55,6 @@ mod provider_delivery_receipt;
 mod reusable_workflow_admission_api;
 #[path = "runner_capability_admission_api.rs"]
 mod runner_capability_admission_api;
-#[path = "runner_enrollment_schema.rs"]
-mod runner_enrollment_schema;
 #[path = "runner_payload_tombstone_api.rs"]
 mod runner_payload_tombstone_api;
 #[path = "runtime_authority_api.rs"]

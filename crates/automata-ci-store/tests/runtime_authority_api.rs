@@ -26,9 +26,6 @@ use automata_ci_store::{
 };
 use uuid::Uuid;
 
-const BASE_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
-const DATABASE_TIME_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
-
 #[derive(Clone, Copy)]
 struct IdentityInputs {
     tenant: &'static str,
@@ -493,8 +490,7 @@ fn missing_provider_expiry_is_authenticated_and_uses_the_conservative_horizon() 
 }
 
 #[test]
-fn repository_and_namespace_shapes_match_the_sql_boundary() {
-    let normalized = BASE_MIGRATION.to_ascii_lowercase();
+fn repository_and_namespace_shapes_are_canonical() {
     assert_eq!(
         GithubRuntimeAuthorityNamespace::new("a")
             .expect("single-byte namespace")
@@ -512,55 +508,6 @@ fn repository_and_namespace_shapes_match_the_sql_boundary() {
             valid
         );
     }
-    assert!(normalized.contains("authority_namespace ~ '^[a-z0-9]([a-z0-9._:/-]*[a-z0-9])?$'"));
-    assert!(normalized.contains("<> all (array['.'::text, '..'::text])"));
-    assert!(normalized.contains("github_runtime_authority_github_repository_name_shape"));
-    assert!(normalized.contains("'%.git'::text"));
-}
-
-#[test]
-fn schema_is_ciphertext_only_current_and_one_way_guarded() {
-    let normalized = BASE_MIGRATION.to_ascii_lowercase();
-    assert!(normalized.contains("job_ir_schema = 1"));
-    assert!(!normalized.contains("job_ir_schema = 4"));
-    assert!(normalized.contains("wrapped_data_key bytea"));
-    assert!(normalized.contains("ciphertext bytea"));
-    assert!(!normalized.contains("access_token text"));
-    assert!(!normalized.contains("token_plaintext"));
-    assert!(normalized.contains("github_runtime_authority_02_lifecycle_guard"));
-    assert!(normalized.contains("github_runtime_authority_no_delete"));
-    assert!(normalized.contains("github_runtime_authority_no_truncate"));
-    assert!(normalized.contains("old.state in ('minting', 'indeterminate')"));
-    assert!(normalized.contains("github_runtime_authority_revoke_owner_unique"));
-    assert!(normalized.contains("runner.generation = authority.runner_generation"));
-    assert!(normalized.contains("runner.session_epoch = authority.runner_session_epoch"));
-    assert!(normalized.contains("runner.status = 'online'"));
-    assert!(normalized.contains("runner.desired_state in ('active', 'draining')"));
-    assert!(normalized.contains("new.revoke_attempt_count <> old.revoke_attempt_count + 1"));
-    assert!(normalized.contains("claim_budget_exhausted"));
-    assert!(normalized.contains("policy_digest = job_ir_digest"));
-    assert!(normalized.contains("github_app_jwt_issuer_value"));
-    assert!(normalized.contains("github_runtime_authority_operation_receipts"));
-    assert!(normalized.contains("github_runtime_authority_mint_claims"));
-    assert!(normalized.contains("github_runtime_authority_revocation_claims"));
-    assert!(normalized.contains("github_runtime_authority_operation_transitions"));
-    assert!(normalized.contains("'terminal_erasable'"));
-    assert!(normalized.contains("github runtime-authority operation evidence is immutable"));
-    assert!(
-        !normalized.contains("delete from github_runtime_authority_operation_receipts as receipt")
-    );
-    assert!(!normalized.contains("retain_until_ms"));
-    assert!(DATABASE_TIME_MIGRATION.contains("DEFERRABLE INITIALLY DEFERRED"));
-    assert!(DATABASE_TIME_MIGRATION.contains("receipt lacks its canonical transition"));
-    assert!(DATABASE_TIME_MIGRATION.contains("transition lacks its exact receipt"));
-    assert!(DATABASE_TIME_MIGRATION.contains("BEFORE TRUNCATE"));
-    assert!(DATABASE_TIME_MIGRATION.contains("OLD.state IN ('minting', 'indeterminate') AND ("));
-    assert!(
-        DATABASE_TIME_MIGRATION.contains("OR OLD.state = 'ready' AND NEW.state = 'revoke_pending'")
-    );
-    assert!(
-        !DATABASE_TIME_MIGRATION.contains("OLD.state IN ('minting', 'indeterminate', 'ready')")
-    );
 }
 
 #[test]

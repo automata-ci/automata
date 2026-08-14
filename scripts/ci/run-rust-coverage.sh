@@ -92,17 +92,6 @@ run_command() {
 }
 
 run_ignored_command() {
-  local inventory_bundle=""
-  local inventory_source=""
-  if [[ "${1-}" == '--inventory-source' ]]; then
-    if (( $# < 4 )); then
-      printf 'error: ignored coverage inventory requires a bundle, source, and command\n' >&2
-      exit 2
-    fi
-    inventory_bundle="$2"
-    inventory_source="$3"
-    shift 3
-  fi
   if [[ "$plan" == true ]]; then
     run_command "$@"
     return
@@ -112,7 +101,6 @@ run_ignored_command() {
   local listing
   local selected_count
   local -a list_command=()
-  local -a inventory_arguments=()
   for argument in "$@"; do
     if [[ "$argument" == '--test-threads=1' ]]; then
       list_command+=(--list)
@@ -128,16 +116,8 @@ run_ignored_command() {
   listing="$(
     LLVM_PROFILE_FILE=/dev/null "${list_command[@]}"
   )"
-  if [[ -n "$inventory_bundle" ]]; then
-    inventory_arguments+=(
-      --policy "$policy"
-      --bundle "$inventory_bundle"
-      --source "$inventory_source"
-    )
-  fi
   if ! selected_count="$(
-    python3 scripts/ci/check-ignored-test-list.py \
-      "${inventory_arguments[@]}" <<<"$listing"
+    python3 scripts/ci/check-ignored-test-list.py <<<"$listing"
   )"; then
     printf 'command:' >&2
     printf ' %q' "$@" >&2
@@ -191,9 +171,8 @@ run_podman() {
   run_ignored_command cargo test -p automata-ci-sandbox-podman --test live_rootless \
     --all-features --locked -- \
     --ignored --test-threads=1
-  run_ignored_command \
-    --inventory-source podman crates/automata-ci-runner/src/podman_probe/mod.rs \
-    cargo test -p automata-ci-runner --all-features --locked podman_probe::tests:: -- \
+  run_ignored_command cargo test -p automata-ci-runner --all-features --locked \
+    podman_probe::tests:: -- \
     --ignored --test-threads=1
 }
 

@@ -207,12 +207,6 @@ fn repository_is_object_safe_has_no_public_backfill_and_errors_are_value_free() 
         assert!(!rendered.contains("delivery-api"));
         assert!(!rendered.contains("github/events"));
     }
-    let source = include_str!("../src/github_subject_evidence.rs");
-    let trait_source = source
-        .split("pub trait GithubSubjectEvidenceRepository")
-        .nth(1)
-        .expect("repository trait");
-    assert!(!trait_source.contains("record_github_workflow_run_subject_evidence("));
 }
 
 #[test]

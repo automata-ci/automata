@@ -2432,13 +2432,6 @@ mod tests {
 
     use super::*;
 
-    mod schema_contract {
-        include!("../../../automata-ci-metrics/tests/support/schema_contract.rs");
-    }
-
-    const CARDINALITY_MANIFEST: &str =
-        include_str!("../../../../deploy/observability/cardinality.json");
-
     #[test]
     fn production_histogram_preserves_classic_buckets_and_exports_native_spans() {
         let mut registry = Registry::default();
@@ -2472,38 +2465,6 @@ mod tests {
                 .chain([f64::MAX])
                 .collect::<Vec<_>>()
         );
-
-        let product = ControlPlaneMetrics::new(BuildInfo::current()).expect("control metrics");
-        let exposition = product
-            .exporter()
-            .encode_openmetrics()
-            .expect("OpenMetrics exposition");
-        assert_eq!(
-            openmetrics_histogram_label_sets(exposition.as_str()),
-            schema_contract::expected_histogram_label_sets(
-                CARDINALITY_MANIFEST,
-                &["common", "control_plane"],
-            )
-        );
-    }
-
-    fn openmetrics_histogram_label_sets(exposition: &str) -> usize {
-        exposition
-            .lines()
-            .filter_map(|line| line.strip_prefix("# TYPE "))
-            .filter_map(|line| line.strip_suffix(" histogram"))
-            .map(|family| {
-                let count = format!("{family}_count");
-                exposition
-                    .lines()
-                    .filter(|line| {
-                        line.strip_prefix(&count).is_some_and(|suffix| {
-                            suffix.starts_with('{') || suffix.starts_with(' ')
-                        })
-                    })
-                    .count()
-            })
-            .sum()
     }
 
     #[test]

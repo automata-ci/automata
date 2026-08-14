@@ -118,8 +118,6 @@ case "${mode}" in
     regenerate)
         cp -- "${candidate}" "${checked_in}"
         echo "regenerated ${checked_in}"
-        echo "review the diff and update proto/automata/runner/v1/PROVENANCE.sha256"
-        sha256sum "${schema}" "${checked_in}"
         ;;
 esac
 

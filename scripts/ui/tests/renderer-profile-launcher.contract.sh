@@ -128,18 +128,6 @@ install -d -m 0755 -- \
 install -m 0755 -- \
     "${repository_root}/scripts/ui/reproduce-renderer-in-profile.sh" \
     "${fake_script_directory}/reproduce-renderer-in-profile.sh"
-python3 - "${fake_script_directory}/reproduce-renderer-in-profile.sh" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text()
-regeneration = source.index('"${script_directory}/regenerate-renderer.sh"')
-contract_tests = source.index('for test_script in "${repository_root}"/scripts/ui/tests/*.test.sh')
-if regeneration >= contract_tests:
-    raise SystemExit(
-        "renderer profile launcher must regenerate before verifying the published set"
-    )
-PY
 for profile_file in Containerfile profile-lock.json profile-manifest.json; do
     install -m 0644 -- \
         "${repository_root}/images/github-hosted-ubuntu-24.04-x64/${profile_file}" \

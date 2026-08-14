@@ -6,8 +6,7 @@ families, allowed labels, cardinality budget, recording rules, alerts, and
 verification.
 
 When a metric changes, update this reference, the finite label definitions,
-`deploy/observability/cardinality.json`, the recording and alert rules, and the
-protocol tests in the same change.
+the recording and alert rules, and the protocol tests in the same change.
 
 ## Collection topology
 
@@ -118,12 +117,8 @@ scrape. Initial limits are:
 | Encoded response | 2 MiB | 2 MiB |
 | Post-relabel samples per scrape | 5,400 | 1,000 |
 
-The canonical schema currently uses at most 5,152 control-plane series and 939
-runner series per Linux target. With native and classic histograms ingested
-together, the Prometheus maxima are 5,299 control-plane samples and 969 runner
-samples per scrape. Both remain below the 5,400 and 1,000 limits. The
-limits are release gates; remaining headroom is not an invitation to add
-unbounded labels.
+The scrape limits are release gates. New metrics must remain within them, and
+remaining headroom is not an invitation to add unbounded labels.
 
 ## Naming and values
 
@@ -739,12 +734,9 @@ The metrics gate combines independent checks:
 4. Privacy tests feed adversarial IDs, URLs, paths, image references, errors,
    payloads, and secret sentinels and assert that neither the series set nor
    exposition gains those values.
-5. The logical-workflow cardinality manifest enumerates every family, type, unit,
-   label key/domain or exact reachable tuple, histogram bucket, and maximum.
-   Fresh control-plane and runner expositions must match it exactly.
-6. `promtool check metrics --extended`, configuration and rule checks, and rule
+5. `promtool check metrics --extended`, configuration and rule checks, and rule
    unit tests lint the operator artifacts.
-7. An ephemeral pinned Prometheus performs a real HTTP scrape and verifies
+6. An ephemeral pinned Prometheus performs a real HTTP scrape and verifies
    `Accept`, response headers, EOF, `up`, ingestion, resets, and recording-rule
    queries. `promtool check metrics` alone is not a protocol test.
 

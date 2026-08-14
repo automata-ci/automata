@@ -24,8 +24,6 @@ remote-write endpoint, cluster label, and runbook host before deployment.
   node_exporter textfile-collector document; it does not run on runner hosts.
 - `targets/*.json` are development target files. Inventory identity belongs in
   these target labels, not in application metric labels.
-- `cardinality.json` computes the implemented schema's maximum series per
-  family and enforces the control-plane and runner budgets.
 - `rules/automata-ci-recording.yml` contains reset-aware fleet aggregations.
 - `rules/automata-ci-alerts.yml` contains symptom-oriented starter alerts.
 - `rules/tests/automata-ci.test.yml` is executed with `promtool test rules`.
@@ -48,8 +46,8 @@ available, or the pinned Prometheus container when an explicitly selected
 container runtime is available. CI additionally starts a real Prometheus and
 scrapes the shared exporter fixture endpoint; parser-only linting cannot
 validate HTTP content negotiation, response headers, terminal EOF, or `up`.
-The control-plane and runner product schemas are independently enforced by
-their exact Rust exposition tests.
+The control-plane and runner exporters are covered by executable protocol,
+privacy, and bounded-cardinality tests.
 
 Current `promtool check metrics` uses the legacy text parser and rejects
 OpenMetrics-only `info` and `UNIT` directives. The wrapper therefore feeds it a

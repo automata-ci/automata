@@ -21,20 +21,6 @@ It is under active implementation, has no GitHub counterpart, and is not part
 of the supported compatibility surface. Standard workflows should use GitHub's
 `group` and `cancel-in-progress` fields.
 
-## Updating the repository CI fixture
-
-The repository CI fixture is an exact byte-for-byte mirror. After changing
-`.ci/workflows/ci.yml`, copy and verify it with:
-
-```console
-cp .ci/workflows/ci.yml crates/automata-ci-workflow-github/tests/fixtures/repository-ci.yml
-cargo test -p automata-ci-workflow-github --test ci_workflow --locked
-```
-
-The first test fails if the mirror differs from the canonical workflow. Other
-compiler and service tests deliberately expose unsupported end-to-end features;
-do not regenerate or weaken them to hide a compatibility failure.
-
 - [Compatibility documentation](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md)
 - API documentation: run `cargo doc -p automata-ci-workflow-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

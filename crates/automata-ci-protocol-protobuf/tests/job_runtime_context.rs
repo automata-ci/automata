@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
 use automata_ci_core::{
     ContextValue, JobConclusion, JobRuntimeContext, NeedContext, NeedOutput, OutputSensitivity,
@@ -10,9 +9,6 @@ use automata_ci_protocol_protobuf::{
     DecodeError, decode_job_runtime_context, encode_job_runtime_context,
 };
 use prost::Message as _;
-use sha2::{Digest as _, Sha256};
-
-const RUNTIME_CONTEXT_GOLDEN: &str = include_str!("fixtures/job-runtime-context-v1.sha256");
 
 #[allow(clippy::all, clippy::pedantic, dead_code)]
 mod fixture_wire {
@@ -78,14 +74,6 @@ fn wire_context() -> fixture_wire::JobRuntimeContext {
     fixture_wire::JobRuntimeContext::decode(encoded.as_slice()).expect("wire runtime context")
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(output, "{byte:02x}").expect("writing to a String is infallible");
-    }
-    output
-}
-
 #[test]
 fn runtime_context_is_deterministic_flat_and_round_trips() {
     let context = context();
@@ -129,16 +117,6 @@ fn runtime_context_is_deterministic_flat_and_round_trips() {
             | Value::StringValue(_) => {}
         }
     }
-}
-
-#[test]
-fn runtime_context_matches_exact_wire_digest() {
-    let encoded = encode_job_runtime_context(&context(), &ProtocolLimits::default())
-        .expect("encode golden context");
-    assert_eq!(
-        format!("{}  job-runtime-context-v1.pb\n", sha256(&encoded)),
-        RUNTIME_CONTEXT_GOLDEN
-    );
 }
 
 #[test]

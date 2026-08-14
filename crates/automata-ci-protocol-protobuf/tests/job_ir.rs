@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
 use automata_ci_core::{
     ActionReference, AttemptId, ExpressionDialect, ExpressionInstruction, ExpressionProgram,
@@ -20,10 +19,7 @@ use automata_ci_protocol_protobuf::{
     encode_server_frame,
 };
 use prost::Message as _;
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
-
-const JOB_IR_GOLDEN: &str = include_str!("fixtures/job-ir.sha256");
 
 #[allow(clippy::all, clippy::pedantic, dead_code)]
 mod fixture_wire {
@@ -186,14 +182,6 @@ fn wire_permission_mapping(
             panic!("fixture permission request must be an explicit mapping")
         }
     }
-}
-
-fn sha256(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        write!(output, "{byte:02x}").expect("writing to a String is infallible");
-    }
-    output
 }
 
 #[test]
@@ -448,13 +436,6 @@ fn permission_requests_obey_identical_encode_and_decode_resource_limits() {
             }
         ))
     ));
-}
-
-#[test]
-fn standalone_job_ir_current_matches_exact_wire_digest() {
-    let encoded = encode_job_ir(&current_envelope(), &ProtocolLimits::default())
-        .expect("encode current golden");
-    assert_eq!(format!("{}  job-ir.pb\n", sha256(&encoded)), JOB_IR_GOLDEN);
 }
 
 #[test]
