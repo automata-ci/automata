@@ -23958,6 +23958,19 @@ CREATE TABLE concurrency_groups (
     CONSTRAINT concurrency_groups_key_nonempty CHECK ((length(normalized_key) > 0))
 );
 
+CREATE TABLE delegated_actor_identities (
+    issuer text NOT NULL,
+    subject uuid NOT NULL,
+    principal_id uuid NOT NULL,
+    display_name text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    updated_at_ms bigint NOT NULL,
+    CONSTRAINT delegated_actor_identities_display_name_shape CHECK ((((char_length(display_name) >= 1) AND (char_length(display_name) <= 255)) AND (btrim(display_name) = display_name) AND (display_name !~ '[[:cntrl:]]'::text))),
+    CONSTRAINT delegated_actor_identities_issuer_shape CHECK ((((octet_length(issuer) >= 9) AND (octet_length(issuer) <= 2048)) AND (issuer ~ '^https://'::text) AND (issuer !~ '[[:cntrl:][:space:]]'::text))),
+    CONSTRAINT delegated_actor_identities_subject_non_nil CHECK ((subject <> '00000000-0000-0000-0000-000000000000'::uuid)),
+    CONSTRAINT delegated_actor_identities_time_monotonic CHECK (((created_at_ms >= 0) AND (updated_at_ms >= created_at_ms)))
+);
+
 CREATE TABLE github_actions_cache_block_commits (
     entry_id uuid NOT NULL,
     list_digest bytea NOT NULL,
@@ -26496,6 +26509,30 @@ CREATE TABLE tenants (
     CONSTRAINT tenants_login_admission_mode CHECK ((login_admission_mode = ANY (ARRAY['restricted'::text, 'open_sign_in'::text])))
 );
 
+CREATE TABLE workspace_provisioning_operations (
+    authority_id text NOT NULL,
+    operation_id uuid NOT NULL,
+    shard_id text NOT NULL,
+    workspace_id text NOT NULL,
+    workspace_display_name text NOT NULL,
+    initial_owner_issuer text NOT NULL,
+    initial_owner_subject uuid NOT NULL,
+    initial_owner_display_name text NOT NULL,
+    state text DEFAULT 'pending'::text NOT NULL,
+    initial_owner_principal_id uuid,
+    created_at_ms bigint NOT NULL,
+    provisioned_at_ms bigint,
+    CONSTRAINT workspace_provisioning_operations_authority_shape CHECK ((((octet_length(authority_id) >= 1) AND (octet_length(authority_id) <= 255)) AND (authority_id !~ '[[:space:][:cntrl:]]'::text))),
+    CONSTRAINT workspace_provisioning_operations_display_name_shape CHECK (((char_length(workspace_display_name) >= 1) AND (char_length(workspace_display_name) <= 255) AND (btrim(workspace_display_name) = workspace_display_name) AND (workspace_display_name !~ '[[:cntrl:]]'::text) AND (char_length(initial_owner_display_name) >= 1) AND (char_length(initial_owner_display_name) <= 255) AND (btrim(initial_owner_display_name) = initial_owner_display_name) AND (initial_owner_display_name !~ '[[:cntrl:]]'::text))),
+    CONSTRAINT workspace_provisioning_operations_ids_non_nil CHECK (((operation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (initial_owner_subject <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((initial_owner_principal_id IS NULL) OR (initial_owner_principal_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
+    CONSTRAINT workspace_provisioning_operations_issuer_shape CHECK ((((octet_length(initial_owner_issuer) >= 9) AND (octet_length(initial_owner_issuer) <= 2048)) AND (initial_owner_issuer ~ '^https://'::text) AND (initial_owner_issuer !~ '[[:cntrl:][:space:]]'::text))),
+    CONSTRAINT workspace_provisioning_operations_shard_shape CHECK ((((octet_length(shard_id) >= 1) AND (octet_length(shard_id) <= 63)) AND (shard_id ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'::text))),
+    CONSTRAINT workspace_provisioning_operations_state CHECK ((state = ANY (ARRAY['pending'::text, 'completed'::text]))),
+    CONSTRAINT workspace_provisioning_operations_state_shape CHECK (((((state = 'pending'::text) AND (initial_owner_principal_id IS NULL) AND (provisioned_at_ms IS NULL)) OR ((state = 'completed'::text) AND (initial_owner_principal_id IS NOT NULL) AND (provisioned_at_ms >= created_at_ms))) IS TRUE)),
+    CONSTRAINT workspace_provisioning_operations_time_nonnegative CHECK ((created_at_ms >= 0)),
+    CONSTRAINT workspace_provisioning_operations_workspace_shape CHECK ((((octet_length(workspace_id) = 36) AND (workspace_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text))))
+);
+
 CREATE TABLE workflow_admission_receipts (
     tenant_id text NOT NULL,
     idempotency_kind text NOT NULL,
@@ -28468,6 +28505,15 @@ ALTER TABLE ONLY github_workflow_run_subject_evidence
 ALTER TABLE ONLY github_workflow_run_subject_evidence
     ADD CONSTRAINT github_workflow_run_subject_evidence_primary_key PRIMARY KEY (repository_id, run_id);
 
+ALTER TABLE ONLY delegated_actor_identities
+    ADD CONSTRAINT delegated_actor_identities_pkey PRIMARY KEY (issuer, subject);
+
+ALTER TABLE ONLY delegated_actor_identities
+    ADD CONSTRAINT delegated_actor_identities_principal_key UNIQUE (principal_id);
+
+ALTER TABLE ONLY delegated_actor_identities
+    ADD CONSTRAINT delegated_actor_identities_mapping_key UNIQUE (issuer, subject, principal_id);
+
 ALTER TABLE ONLY human_auth_installation_state
     ADD CONSTRAINT human_auth_installation_state_pkey PRIMARY KEY (singleton);
 
@@ -28854,6 +28900,9 @@ ALTER TABLE ONLY tenant_human_memberships
 
 ALTER TABLE ONLY tenants
     ADD CONSTRAINT tenants_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY workspace_provisioning_operations
+    ADD CONSTRAINT workspace_provisioning_operations_pkey PRIMARY KEY (authority_id, operation_id);
 
 ALTER TABLE ONLY workflow_admission_receipts
     ADD CONSTRAINT workflow_admission_receipts_primary_key PRIMARY KEY (tenant_id, idempotency_kind, idempotency_key);
@@ -31196,6 +31245,9 @@ ALTER TABLE ONLY github_workflow_run_subject_evidence
 ALTER TABLE ONLY github_workflow_run_subject_evidence
     ADD CONSTRAINT github_workflow_run_subject_evidence_workflow FOREIGN KEY (repository_id, workflow_id) REFERENCES workflow_definitions(repository_id, id) ON DELETE RESTRICT;
 
+ALTER TABLE ONLY delegated_actor_identities
+    ADD CONSTRAINT delegated_actor_identities_principal_id_fkey FOREIGN KEY (principal_id) REFERENCES human_principals(id) ON DELETE RESTRICT;
+
 ALTER TABLE ONLY human_auth_installation_state
     ADD CONSTRAINT human_auth_installation_state_identity FOREIGN KEY (configured_principal_id, expected_provider_id, expected_provider_subject) REFERENCES human_provider_identities(principal_id, provider_id, provider_subject) ON DELETE RESTRICT;
 
@@ -31687,6 +31739,12 @@ ALTER TABLE ONLY tenant_human_memberships
 
 ALTER TABLE ONLY tenant_human_memberships
     ADD CONSTRAINT tenant_human_memberships_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY workspace_provisioning_operations
+    ADD CONSTRAINT workspace_provisioning_operations_identity FOREIGN KEY (initial_owner_issuer, initial_owner_subject, initial_owner_principal_id) REFERENCES delegated_actor_identities(issuer, subject, principal_id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY workspace_provisioning_operations
+    ADD CONSTRAINT workspace_provisioning_operations_workspace FOREIGN KEY (workspace_id) REFERENCES tenants(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE ONLY workflow_admission_receipts
     ADD CONSTRAINT workflow_admission_receipts_repository_tenant FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id) ON DELETE RESTRICT;

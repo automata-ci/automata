@@ -9,8 +9,10 @@ port.
 
 The server accepts a pre-bound listener so the product composition root retains
 ownership of startup ordering and port conflicts. It is not yet wired into the
-Automata binary: that happens with the durable workspace provisioning adapter,
-so Core never advertises an endpoint that cannot perform its transaction.
+Automata binary. The durable transaction is implemented by
+`automata-ci-provisioning-postgres`; listener configuration and process
+composition remain a separate product change, so Core does not advertise an
+unconfigured management endpoint.
 
 Cargo generates the private Rust wire module into `OUT_DIR` with Protox and
 Tonic. Building therefore needs no separately installed `protoc` or Buf binary,

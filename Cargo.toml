@@ -30,6 +30,7 @@ members = [
     "crates/automata-ci-protocol-protobuf",
     "crates/automata-ci-provisioning",
     "crates/automata-ci-provisioning-grpc",
+    "crates/automata-ci-provisioning-postgres",
     "crates/automata-ci-results-github",
     "crates/automata-ci-runner",
     "crates/automata-ci-runner-auth",
@@ -105,6 +106,7 @@ automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0"
 automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf", version = "0.1.0" }
 automata-ci-provisioning = { path = "crates/automata-ci-provisioning", version = "0.1.0" }
 automata-ci-provisioning-grpc = { path = "crates/automata-ci-provisioning-grpc", version = "0.1.0" }
+automata-ci-provisioning-postgres = { path = "crates/automata-ci-provisioning-postgres", version = "0.1.0" }
 automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
 automata-ci-runner-auth = { path = "crates/automata-ci-runner-auth", version = "0.1.0" }
 automata-ci-runner-auth-postgres = { path = "crates/automata-ci-runner-auth-postgres", version = "0.1.0" }

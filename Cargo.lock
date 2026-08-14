@@ -729,6 +729,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "automata-ci-provisioning-postgres"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-postgres-test-support",
+ "automata-ci-provisioning",
+ "automata-ci-store",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "automata-ci-results-github"
 version = "0.1.0"
 dependencies = [
