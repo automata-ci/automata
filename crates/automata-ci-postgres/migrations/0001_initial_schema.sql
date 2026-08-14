@@ -24148,7 +24148,7 @@ END)),
 );
 
 CREATE TABLE github_check_annotation_progress (
-    subject_id uuid PRIMARY KEY REFERENCES github_check_subjects(id) ON DELETE RESTRICT,
+    subject_id uuid PRIMARY KEY,
     presentation_digest bytea NOT NULL,
     annotation_total integer NOT NULL,
     annotation_next integer DEFAULT 0 NOT NULL,
@@ -26547,6 +26547,66 @@ CREATE TABLE workspace_provisioning_operations (
     CONSTRAINT workspace_provisioning_operations_state_shape CHECK (((((state = 'pending'::text) AND (initial_owner_principal_id IS NULL) AND (provisioned_at_ms IS NULL)) OR ((state = 'completed'::text) AND (initial_owner_principal_id IS NOT NULL) AND (provisioned_at_ms >= created_at_ms))) IS TRUE)),
     CONSTRAINT workspace_provisioning_operations_time_nonnegative CHECK ((created_at_ms >= 0)),
     CONSTRAINT workspace_provisioning_operations_workspace_shape CHECK ((((octet_length(workspace_id) = 36) AND (workspace_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::text))))
+);
+
+CREATE TABLE workspace_management_bindings (
+    workspace_id text PRIMARY KEY,
+    authority_id text NOT NULL,
+    shard_id text NOT NULL,
+    created_at_ms bigint NOT NULL,
+    CONSTRAINT workspace_management_bindings_authority_shape CHECK ((((octet_length(authority_id) >= 1) AND (octet_length(authority_id) <= 255)) AND (authority_id !~ '[[:space:][:cntrl:]]'::text))),
+    CONSTRAINT workspace_management_bindings_shard_shape CHECK ((((octet_length(shard_id) >= 1) AND (octet_length(shard_id) <= 63)) AND (shard_id ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'::text))),
+    CONSTRAINT workspace_management_bindings_time_nonnegative CHECK ((created_at_ms >= 0)),
+    CONSTRAINT workspace_management_bindings_exact_authority UNIQUE (workspace_id, authority_id, shard_id)
+);
+
+CREATE TABLE workspace_entitlement_operations (
+    authority_id text NOT NULL,
+    operation_id uuid NOT NULL,
+    shard_id text NOT NULL,
+    workspace_id text NOT NULL,
+    revision bigint NOT NULL,
+    policy_kind text NOT NULL,
+    compute_limit_ms bigint,
+    valid_for_ms bigint,
+    applied_at_ms bigint NOT NULL,
+    expires_at_ms bigint,
+    CONSTRAINT workspace_entitlement_operations_pkey PRIMARY KEY (authority_id, operation_id),
+    CONSTRAINT workspace_entitlement_operations_exact_revision UNIQUE (authority_id, operation_id, workspace_id, revision),
+    CONSTRAINT workspace_entitlement_operations_workspace_revision_unique UNIQUE (workspace_id, revision),
+    CONSTRAINT workspace_entitlement_operations_binding FOREIGN KEY (workspace_id, authority_id, shard_id) REFERENCES workspace_management_bindings(workspace_id, authority_id, shard_id) ON DELETE RESTRICT,
+    CONSTRAINT workspace_entitlement_operations_ids_non_nil CHECK ((operation_id <> '00000000-0000-0000-0000-000000000000'::uuid)),
+    CONSTRAINT workspace_entitlement_operations_revision_positive CHECK ((revision > 0)),
+    CONSTRAINT workspace_entitlement_operations_policy CHECK ((policy_kind = ANY (ARRAY['capped'::text, 'uncapped'::text, 'paused'::text]))),
+    CONSTRAINT workspace_entitlement_operations_policy_shape CHECK (((((policy_kind = 'capped'::text) AND (compute_limit_ms > 0)) OR ((policy_kind = ANY (ARRAY['uncapped'::text, 'paused'::text])) AND (compute_limit_ms IS NULL) AND (valid_for_ms IS NULL) AND (expires_at_ms IS NULL))) IS TRUE)),
+    CONSTRAINT workspace_entitlement_operations_validity_shape CHECK (((((valid_for_ms IS NULL) AND (expires_at_ms IS NULL)) OR ((valid_for_ms > 0) AND (expires_at_ms = applied_at_ms + valid_for_ms))) IS TRUE)),
+    CONSTRAINT workspace_entitlement_operations_time_nonnegative CHECK ((applied_at_ms >= 0))
+);
+
+CREATE TABLE workspace_execution_entitlements (
+    workspace_id text PRIMARY KEY,
+    authority_id text NOT NULL,
+    shard_id text NOT NULL,
+    revision bigint NOT NULL,
+    operation_id uuid NOT NULL,
+    policy_kind text NOT NULL,
+    compute_limit_ms bigint,
+    valid_for_ms bigint,
+    consumed_compute_ms bigint DEFAULT 0 NOT NULL,
+    state text NOT NULL,
+    applied_at_ms bigint NOT NULL,
+    expires_at_ms bigint,
+    exhausted_at_ms bigint,
+    CONSTRAINT workspace_execution_entitlements_binding FOREIGN KEY (workspace_id, authority_id, shard_id) REFERENCES workspace_management_bindings(workspace_id, authority_id, shard_id) ON DELETE RESTRICT,
+    CONSTRAINT workspace_execution_entitlements_operation FOREIGN KEY (authority_id, operation_id, workspace_id, revision) REFERENCES workspace_entitlement_operations(authority_id, operation_id, workspace_id, revision) ON DELETE RESTRICT,
+    CONSTRAINT workspace_execution_entitlements_revision_positive CHECK ((revision > 0)),
+    CONSTRAINT workspace_execution_entitlements_compute_nonnegative CHECK ((consumed_compute_ms >= 0)),
+    CONSTRAINT workspace_execution_entitlements_policy CHECK ((policy_kind = ANY (ARRAY['capped'::text, 'uncapped'::text, 'paused'::text]))),
+    CONSTRAINT workspace_execution_entitlements_policy_shape CHECK (((((policy_kind = 'capped'::text) AND (compute_limit_ms > 0)) OR ((policy_kind = ANY (ARRAY['uncapped'::text, 'paused'::text])) AND (compute_limit_ms IS NULL) AND (valid_for_ms IS NULL) AND (expires_at_ms IS NULL))) IS TRUE)),
+    CONSTRAINT workspace_execution_entitlements_validity_shape CHECK (((((valid_for_ms IS NULL) AND (expires_at_ms IS NULL)) OR ((valid_for_ms > 0) AND (expires_at_ms = applied_at_ms + valid_for_ms))) IS TRUE)),
+    CONSTRAINT workspace_execution_entitlements_state CHECK ((state = ANY (ARRAY['active'::text, 'paused'::text, 'exhausted'::text]))),
+    CONSTRAINT workspace_execution_entitlements_state_shape CHECK (((((state = 'active'::text) AND (policy_kind <> 'paused'::text) AND (exhausted_at_ms IS NULL)) OR ((state = 'paused'::text) AND (policy_kind = 'paused'::text) AND (consumed_compute_ms = 0) AND (exhausted_at_ms IS NULL)) OR ((state = 'exhausted'::text) AND (policy_kind = 'capped'::text) AND (exhausted_at_ms >= applied_at_ms))) IS TRUE)),
+    CONSTRAINT workspace_execution_entitlements_time_nonnegative CHECK ((applied_at_ms >= 0))
 );
 
 CREATE TABLE workflow_admission_receipts (
@@ -30934,6 +30994,9 @@ ALTER TABLE ONLY github_actions_cache_blocks
 ALTER TABLE ONLY github_check_projection_outbox
     ADD CONSTRAINT github_check_projection_outbox_subject_id_fkey FOREIGN KEY (subject_id) REFERENCES github_check_subjects(id) ON DELETE RESTRICT;
 
+ALTER TABLE ONLY github_check_annotation_progress
+    ADD CONSTRAINT github_check_annotation_progress_subject_id_fkey FOREIGN KEY (subject_id) REFERENCES github_check_subjects(id) ON DELETE RESTRICT;
+
 ALTER TABLE ONLY github_check_subjects
     ADD CONSTRAINT github_check_subjects_repository_run FOREIGN KEY (repository_id, workflow_run_id) REFERENCES workflow_runs(repository_id, id) ON DELETE RESTRICT;
 
@@ -31761,6 +31824,9 @@ ALTER TABLE ONLY workspace_provisioning_operations
 
 ALTER TABLE ONLY workspace_provisioning_operations
     ADD CONSTRAINT workspace_provisioning_operations_workspace FOREIGN KEY (workspace_id) REFERENCES tenants(id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY workspace_management_bindings
+    ADD CONSTRAINT workspace_management_bindings_workspace FOREIGN KEY (workspace_id) REFERENCES tenants(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY workflow_admission_receipts
     ADD CONSTRAINT workflow_admission_receipts_repository_tenant FOREIGN KEY (tenant_id, repository_id) REFERENCES repositories(tenant_id, id) ON DELETE RESTRICT;

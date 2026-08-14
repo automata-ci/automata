@@ -10,11 +10,14 @@
 use std::{fmt, sync::Arc};
 
 use automata_ci_provisioning::{
-    AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
-    OperationId, ProvisionWorkspaceCommand, ProvisionWorkspaceResult,
-    ProvisioningAuthenticationError, ProvisioningFailure, ProvisioningFailureKind,
-    ProvisioningWorkloadAuthenticator, ShardId, WorkloadAuthenticationEvidence, WorkspaceId,
-    WorkspaceProvisioner,
+    ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
+    AuthorizedApplyWorkspaceEntitlement, AuthorizedProvisionWorkspace, ComputeSeconds,
+    DelegatedActorIssuer, DisplayName, EntitlementDurationSeconds, EntitlementFailure,
+    EntitlementFailureKind, EntitlementRevision, ExternalAccountSubject, OperationId,
+    ProvisionWorkspaceCommand, ProvisionWorkspaceResult, ProvisioningAuthenticationError,
+    ProvisioningFailure, ProvisioningFailureKind, ProvisioningWorkloadAuthenticator, ShardId,
+    WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier, WorkspaceExecutionEntitlement,
+    WorkspaceId, WorkspaceProvisioner,
 };
 use bytes::Bytes;
 use prost::Message as _;
@@ -38,6 +41,8 @@ const MAX_SERVER_CERTIFICATE_PEM_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SERVER_PRIVATE_KEY_PEM_BYTES: usize = 1024 * 1024;
 const FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ProvisionWorkspaceFailure";
+const ENTITLEMENT_FAILURE_TYPE_URL: &str =
+    "type.googleapis.com/automata.management.v1.ApplyWorkspaceEntitlementFailure";
 
 /// Bounded PEM inputs for an mTLS-only management listener.
 pub struct ManagementServerTlsConfig {
@@ -109,6 +114,7 @@ pub struct ManagementGrpcServer {
     tls: ManagementServerTlsConfig,
     authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
     provisioner: Arc<dyn WorkspaceProvisioner>,
+    entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
 }
 
 impl ManagementGrpcServer {
@@ -118,12 +124,14 @@ impl ManagementGrpcServer {
         tls: ManagementServerTlsConfig,
         authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
         provisioner: Arc<dyn WorkspaceProvisioner>,
+        entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
     ) -> Self {
         Self {
             listener,
             tls,
             authenticator,
             provisioner,
+            entitlement_applier,
         }
     }
 
@@ -140,6 +148,7 @@ impl ManagementGrpcServer {
         let adapter = ManagementGrpcAdapter {
             authenticator: self.authenticator,
             provisioner: self.provisioner,
+            entitlement_applier: self.entitlement_applier,
         };
         let service =
             wire::shard_management_service_server::ShardManagementServiceServer::new(adapter)
@@ -166,6 +175,7 @@ impl fmt::Debug for ManagementGrpcServer {
             .field("tls", &self.tls)
             .field("authenticator", &self.authenticator)
             .field("provisioner", &self.provisioner)
+            .field("entitlement_applier", &self.entitlement_applier)
             .finish_non_exhaustive()
     }
 }
@@ -174,6 +184,7 @@ impl fmt::Debug for ManagementGrpcServer {
 struct ManagementGrpcAdapter {
     authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
     provisioner: Arc<dyn WorkspaceProvisioner>,
+    entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
 }
 
 impl fmt::Debug for ManagementGrpcAdapter {
@@ -182,6 +193,7 @@ impl fmt::Debug for ManagementGrpcAdapter {
             .debug_struct("ManagementGrpcAdapter")
             .field("authenticator", &self.authenticator)
             .field("provisioner", &self.provisioner)
+            .field("entitlement_applier", &self.entitlement_applier)
             .finish()
     }
 }
@@ -245,6 +257,63 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
         }
         Ok(Response::new(encode_result(&result)))
     }
+
+    async fn apply_workspace_entitlement(
+        &self,
+        request: Request<wire::ApplyWorkspaceEntitlementRequest>,
+    ) -> Result<Response<wire::ApplyWorkspaceEntitlementResponse>, Status> {
+        let certificates = request
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("workload authentication is required"))?;
+        let evidence = WorkloadAuthenticationEvidence::new(
+            certificates
+                .iter()
+                .map(|certificate| certificate.as_ref().to_vec())
+                .collect(),
+        )
+        .map_err(authentication_status)?;
+        let authority = self
+            .authenticator
+            .authenticate(&evidence)
+            .await
+            .map_err(authentication_status)?;
+        let command = decode_entitlement_command(request.into_inner()).map_err(|()| {
+            entitlement_contract_status(
+                Code::InvalidArgument,
+                wire::ApplyWorkspaceEntitlementFailureReason::InvalidRequest,
+                "workspace entitlement request is invalid",
+            )
+        })?;
+        let authorized = AuthorizedApplyWorkspaceEntitlement::authorize(authority, command)
+            .map_err(|_| {
+                entitlement_contract_status(
+                    Code::PermissionDenied,
+                    wire::ApplyWorkspaceEntitlementFailureReason::Forbidden,
+                    "workspace entitlement is outside the workload authority",
+                )
+            })?;
+        let expected_operation_id = authorized.command().operation_id();
+        let expected_shard_id = authorized.command().shard_id().clone();
+        let expected_workspace_id = authorized.command().workspace_id();
+        let expected_revision = authorized.command().revision();
+        let result = self
+            .entitlement_applier
+            .apply(authorized)
+            .await
+            .map_err(entitlement_status)?;
+        if result.operation_id() != expected_operation_id
+            || result.shard_id() != &expected_shard_id
+            || result.workspace_id() != expected_workspace_id
+            || result.revision() != expected_revision
+        {
+            return Err(entitlement_contract_status(
+                Code::Internal,
+                wire::ApplyWorkspaceEntitlementFailureReason::InternalError,
+                "workspace entitlement application returned an inconsistent result",
+            ));
+        }
+        Ok(Response::new(encode_entitlement_result(&result)))
+    }
 }
 
 fn decode_command(
@@ -275,6 +344,61 @@ fn encode_result(result: &ProvisionWorkspaceResult) -> wire::ProvisionWorkspaceR
             nanos: i32::try_from(provisioned_at.nanoseconds())
                 .expect("validated nanoseconds fit i32"),
         }),
+    }
+}
+
+fn decode_entitlement_command(
+    request: wire::ApplyWorkspaceEntitlementRequest,
+) -> Result<ApplyWorkspaceEntitlementCommand, ()> {
+    let execution = request.execution.ok_or(())?.policy.ok_or(())?;
+    let execution = match execution {
+        wire::workspace_execution_entitlement::Policy::Capped(capped) => {
+            let compute_seconds = ComputeSeconds::new(capped.compute_seconds).map_err(|_| ())?;
+            let valid_for = capped
+                .valid_for
+                .map(|duration| {
+                    if duration.seconds <= 0 || duration.nanos != 0 {
+                        return Err(());
+                    }
+                    EntitlementDurationSeconds::new(
+                        u64::try_from(duration.seconds).map_err(|_| ())?,
+                    )
+                    .map_err(|_| ())
+                })
+                .transpose()?;
+            WorkspaceExecutionEntitlement::capped(compute_seconds, valid_for)
+        }
+        wire::workspace_execution_entitlement::Policy::Uncapped(_) => {
+            WorkspaceExecutionEntitlement::Uncapped
+        }
+        wire::workspace_execution_entitlement::Policy::Paused(_) => {
+            WorkspaceExecutionEntitlement::Paused
+        }
+    };
+    Ok(ApplyWorkspaceEntitlementCommand::new(
+        OperationId::parse(&request.operation_id).map_err(|_| ())?,
+        ShardId::new(request.shard_id).map_err(|_| ())?,
+        WorkspaceId::parse(&request.workspace_id).map_err(|_| ())?,
+        EntitlementRevision::new(request.revision).map_err(|_| ())?,
+        execution,
+    ))
+}
+
+fn encode_entitlement_result(
+    result: &ApplyWorkspaceEntitlementResult,
+) -> wire::ApplyWorkspaceEntitlementResponse {
+    let timestamp =
+        |value: automata_ci_provisioning::EntitlementTimestamp| prost_types::Timestamp {
+            seconds: value.seconds(),
+            nanos: i32::try_from(value.nanoseconds()).expect("validated nanoseconds fit i32"),
+        };
+    wire::ApplyWorkspaceEntitlementResponse {
+        operation_id: result.operation_id().to_string(),
+        shard_id: result.shard_id().as_str().to_owned(),
+        workspace_id: result.workspace_id().to_string(),
+        revision: result.revision().get(),
+        applied_at: Some(timestamp(result.applied_at())),
+        expires_at: result.expires_at().map(timestamp),
     }
 }
 
@@ -330,6 +454,42 @@ fn provisioning_status(error: &ProvisioningFailure) -> Status {
     contract_status(code, reason, message, request_id)
 }
 
+fn entitlement_status(error: EntitlementFailure) -> Status {
+    let (code, reason, message) = match error.kind() {
+        EntitlementFailureKind::OperationConflict => (
+            Code::Aborted,
+            wire::ApplyWorkspaceEntitlementFailureReason::OperationConflict,
+            "entitlement operation conflicts with its durable receipt",
+        ),
+        EntitlementFailureKind::StaleRevision => (
+            Code::FailedPrecondition,
+            wire::ApplyWorkspaceEntitlementFailureReason::StaleRevision,
+            "entitlement revision is stale",
+        ),
+        EntitlementFailureKind::WorkspaceUnavailable => (
+            Code::PermissionDenied,
+            wire::ApplyWorkspaceEntitlementFailureReason::WorkspaceUnavailable,
+            "workspace is unavailable to this management authority",
+        ),
+        EntitlementFailureKind::RateLimited => (
+            Code::ResourceExhausted,
+            wire::ApplyWorkspaceEntitlementFailureReason::RateLimited,
+            "workspace entitlement mutation rate is exhausted",
+        ),
+        EntitlementFailureKind::Internal => (
+            Code::Internal,
+            wire::ApplyWorkspaceEntitlementFailureReason::InternalError,
+            "workspace entitlement application failed internally",
+        ),
+        EntitlementFailureKind::TemporarilyUnavailable => (
+            Code::Unavailable,
+            wire::ApplyWorkspaceEntitlementFailureReason::TemporarilyUnavailable,
+            "workspace entitlement application is temporarily unavailable",
+        ),
+    };
+    entitlement_contract_status(code, reason, message)
+}
+
 fn contract_status(
     code: Code,
     reason: wire::ProvisionWorkspaceFailureReason,
@@ -345,6 +505,25 @@ fn contract_status(
         message: message.to_owned(),
         details: vec![prost_types::Any {
             type_url: FAILURE_TYPE_URL.to_owned(),
+            value: detail.encode_to_vec(),
+        }],
+    };
+    Status::with_details(code, message, Bytes::from(rich_status.encode_to_vec()))
+}
+
+fn entitlement_contract_status(
+    code: Code,
+    reason: wire::ApplyWorkspaceEntitlementFailureReason,
+    message: &'static str,
+) -> Status {
+    let detail = wire::ApplyWorkspaceEntitlementFailure {
+        reason: reason as i32,
+    };
+    let rich_status = tonic_types::pb::Status {
+        code: code as i32,
+        message: message.to_owned(),
+        details: vec![prost_types::Any {
+            type_url: ENTITLEMENT_FAILURE_TYPE_URL.to_owned(),
             value: detail.encode_to_vec(),
         }],
     };
@@ -386,8 +565,8 @@ mod tests {
 
     use super::*;
     use automata_ci_provisioning::{
-        InitialOwnerPrincipalId, ProvisionedAt, ProvisioningAuthenticationFuture,
-        ProvisioningAuthority, WorkspaceProvisioningFuture,
+        EntitlementApplicationFuture, EntitlementTimestamp, InitialOwnerPrincipalId, ProvisionedAt,
+        ProvisioningAuthenticationFuture, ProvisioningAuthority, WorkspaceProvisioningFuture,
     };
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose,
@@ -541,6 +720,46 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RecordingEntitlementApplier {
+        calls: AtomicUsize,
+        result: ApplyWorkspaceEntitlementResult,
+    }
+
+    impl RecordingEntitlementApplier {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                result: ApplyWorkspaceEntitlementResult::new(
+                    OperationId::parse("77777777-7777-4777-8777-777777777777").unwrap(),
+                    ShardId::new("prod-us-east-1-001").unwrap(),
+                    WorkspaceId::parse("22222222-2222-4222-8222-222222222222").unwrap(),
+                    EntitlementRevision::new(1).unwrap(),
+                    EntitlementTimestamp::new(1_786_500_100, 0).unwrap(),
+                    Some(EntitlementTimestamp::new(1_787_104_900, 0).unwrap()),
+                ),
+            }
+        }
+    }
+
+    impl WorkspaceEntitlementApplier for RecordingEntitlementApplier {
+        fn apply(
+            &self,
+            request: AuthorizedApplyWorkspaceEntitlement,
+        ) -> EntitlementApplicationFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.command().revision().get(), 1);
+            assert_eq!(
+                request.command().execution(),
+                WorkspaceExecutionEntitlement::capped(
+                    ComputeSeconds::new(6_000).unwrap(),
+                    Some(EntitlementDurationSeconds::new(604_800).unwrap())
+                )
+            );
+            Box::pin(future::ready(Ok(self.result.clone())))
+        }
+    }
+
     fn valid_wire_request() -> wire::ProvisionWorkspaceRequest {
         wire::ProvisionWorkspaceRequest {
             operation_id: "55555555-5555-4555-8555-555555555555".to_owned(),
@@ -553,6 +772,26 @@ mod tests {
                 issuer: "https://cloud.automata.example".to_owned(),
                 subject: "11111111-1111-4111-8111-111111111111".to_owned(),
                 display_name: "The Octocat".to_owned(),
+            }),
+        }
+    }
+
+    fn valid_entitlement_wire_request() -> wire::ApplyWorkspaceEntitlementRequest {
+        wire::ApplyWorkspaceEntitlementRequest {
+            operation_id: "77777777-7777-4777-8777-777777777777".to_owned(),
+            shard_id: "prod-us-east-1-001".to_owned(),
+            workspace_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            revision: 1,
+            execution: Some(wire::WorkspaceExecutionEntitlement {
+                policy: Some(wire::workspace_execution_entitlement::Policy::Capped(
+                    wire::CappedWorkspaceExecution {
+                        compute_seconds: 6_000,
+                        valid_for: Some(prost_types::Duration {
+                            seconds: 604_800,
+                            nanos: 0,
+                        }),
+                    },
+                )),
             }),
         }
     }
@@ -580,6 +819,37 @@ mod tests {
         let mut request = valid_wire_request();
         request.operation_id = "55555555555545558555555555555555".to_owned();
         assert!(decode_command(request).is_err());
+    }
+
+    #[test]
+    fn entitlement_wire_request_decodes_a_workspace_aggregate() {
+        let command = decode_entitlement_command(valid_entitlement_wire_request()).unwrap();
+        assert_eq!(command.revision().get(), 1);
+        assert_eq!(
+            command.execution(),
+            WorkspaceExecutionEntitlement::capped(
+                ComputeSeconds::new(6_000).unwrap(),
+                Some(EntitlementDurationSeconds::new(604_800).unwrap())
+            )
+        );
+    }
+
+    #[test]
+    fn entitlement_rejects_fractional_or_missing_policy() {
+        let mut request = valid_entitlement_wire_request();
+        let Some(wire::workspace_execution_entitlement::Policy::Capped(capped)) = request
+            .execution
+            .as_mut()
+            .and_then(|value| value.policy.as_mut())
+        else {
+            panic!("capped fixture")
+        };
+        capped.valid_for.as_mut().expect("duration").nanos = 1;
+        assert!(decode_entitlement_command(request).is_err());
+
+        let mut request = valid_entitlement_wire_request();
+        request.execution = None;
+        assert!(decode_entitlement_command(request).is_err());
     }
 
     #[test]
@@ -650,6 +920,7 @@ mod tests {
         let address = listener.local_addr().expect("listener address");
         let authenticator = Arc::new(RecordingAuthenticator::new());
         let provisioner = Arc::new(RecordingProvisioner::new());
+        let entitlement_applier = Arc::new(RecordingEntitlementApplier::new());
         let server = ManagementGrpcServer::new(
             listener,
             ManagementServerTlsConfig::new(
@@ -660,6 +931,7 @@ mod tests {
             .unwrap(),
             authenticator.clone(),
             provisioner.clone(),
+            entitlement_applier.clone(),
         );
         let cancellation = CancellationToken::new();
         let server_cancellation = cancellation.clone();
@@ -734,8 +1006,25 @@ mod tests {
             response.into_inner().initial_owner_principal_id,
             "66666666-6666-4666-8666-666666666666"
         );
-        assert_eq!(authenticator.calls.load(Ordering::SeqCst), 1);
         assert_eq!(provisioner.calls.load(Ordering::SeqCst), 1);
+
+        client.ready().await.expect("ready entitlement client");
+        let entitlement: Response<wire::ApplyWorkspaceEntitlementResponse> = client
+            .unary(
+                Request::new(valid_entitlement_wire_request()),
+                tonic::codegen::http::uri::PathAndQuery::from_static(
+                    "/automata.management.v1.ShardManagementService/ApplyWorkspaceEntitlement",
+                ),
+                tonic_prost::ProstCodec::<
+                    wire::ApplyWorkspaceEntitlementRequest,
+                    wire::ApplyWorkspaceEntitlementResponse,
+                >::default(),
+            )
+            .await
+            .expect("successful entitlement RPC");
+        assert_eq!(entitlement.into_inner().revision, 1);
+        assert_eq!(entitlement_applier.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(authenticator.calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             *authenticator.leaf_der.lock().expect("leaf lock"),
             Some(pki.client.leaf_der)

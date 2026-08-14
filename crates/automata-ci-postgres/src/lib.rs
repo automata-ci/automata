@@ -6,7 +6,7 @@ mod migration;
 
 /// Human authentication, authorization, and runner-enrollment adapters.
 pub mod auth;
-/// Atomic workspace-provisioning adapter.
+/// Atomic external workspace-management adapters.
 pub mod provisioning;
 /// Durable runner-machine authentication adapter.
 pub mod runner_auth;

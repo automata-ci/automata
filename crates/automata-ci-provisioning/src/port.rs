@@ -3,8 +3,9 @@ use std::{fmt, future::Future, pin::Pin};
 use thiserror::Error;
 
 use crate::{
-    AuthorizedProvisionWorkspace, ProvisionWorkspaceResult, ProvisioningAuthority,
-    ProvisioningFailure,
+    ApplyWorkspaceEntitlementResult, AuthorizedApplyWorkspaceEntitlement,
+    AuthorizedProvisionWorkspace, EntitlementFailure, ProvisionWorkspaceResult,
+    ProvisioningAuthority, ProvisioningFailure,
 };
 
 const MAX_CERTIFICATE_COUNT: usize = 32;
@@ -112,6 +113,28 @@ pub type WorkspaceProvisioningFuture<'a> = Pin<
 pub trait WorkspaceProvisioner: fmt::Debug + Send + Sync {
     /// Applies one authorized workspace provisioning command.
     fn provision(&self, request: AuthorizedProvisionWorkspace) -> WorkspaceProvisioningFuture<'_>;
+}
+
+/// Boxed durable workspace entitlement operation.
+pub type EntitlementApplicationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<ApplyWorkspaceEntitlementResult, EntitlementFailure>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Atomic, idempotent workspace entitlement application port.
+///
+/// Implementations must verify the workspace's durable external-management
+/// binding, reject stale revisions, and commit the current snapshot and stable
+/// operation response in one transaction.
+pub trait WorkspaceEntitlementApplier: fmt::Debug + Send + Sync {
+    /// Applies one authorized complete entitlement snapshot.
+    fn apply(
+        &self,
+        request: AuthorizedApplyWorkspaceEntitlement,
+    ) -> EntitlementApplicationFuture<'_>;
 }
 
 #[cfg(test)]

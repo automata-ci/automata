@@ -32,7 +32,7 @@ use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_postgres::{
     auth::{PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository},
-    provisioning::PostgresWorkspaceProvisioner,
+    provisioning::{PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner},
     runner_auth::PostgresRunnerMachineDirectory,
     secret::PostgresSecretProvider,
     store::{
@@ -41,7 +41,9 @@ use automata_ci_postgres::{
     },
 };
 use automata_ci_protocol::ProtocolLimits;
-use automata_ci_provisioning::{ProvisioningWorkloadAuthenticator, WorkspaceProvisioner};
+use automata_ci_provisioning::{
+    ProvisioningWorkloadAuthenticator, WorkspaceEntitlementApplier, WorkspaceProvisioner,
+};
 use automata_ci_provisioning_grpc::{ManagementGrpcServer, ManagementServerTlsConfig};
 use automata_ci_results_github::{
     ArtifactRepository, ArtifactService, CacheLimits, CacheRepository, CacheService,
@@ -615,11 +617,15 @@ fn build_management_server(
     let provisioner: Arc<dyn WorkspaceProvisioner> = Arc::new(PostgresWorkspaceProvisioner::new(
         store.postgres_pool().clone(),
     ));
+    let entitlement_applier: Arc<dyn WorkspaceEntitlementApplier> = Arc::new(
+        PostgresWorkspaceEntitlementApplier::new(store.postgres_pool().clone()),
+    );
     Ok(Some(ManagementGrpcServer::new(
         listener,
         tls,
         authenticator,
         provisioner,
+        entitlement_applier,
     )))
 }
 

@@ -12,6 +12,10 @@ use automata_ci_provisioning::{
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod entitlement;
+
+pub use entitlement::PostgresWorkspaceEntitlementApplier;
+
 const WORKSPACE_OWNER_ROLE_NAME: &str = "workspace-owner";
 const WORKSPACE_OWNER_ROLE_DISPLAY_NAME: &str = "Workspace owner";
 const WORKSPACE_PROVISIONED_AUDIT_ACTION: &str = "workspace.provisioned";
@@ -107,6 +111,20 @@ impl PostgresWorkspaceProvisioner {
         if tenant_inserted.rows_affected() != 1 {
             return Err(failure(ProvisioningFailureKind::WorkspaceConflict));
         }
+        sqlx::query(
+            r"
+            INSERT INTO workspace_management_bindings (
+                workspace_id, authority_id, shard_id, created_at_ms
+            ) VALUES ($1,$2,$3,$4)
+            ",
+        )
+        .bind(&workspace_text)
+        .bind(authority_id)
+        .bind(shard_id.as_str())
+        .bind(created_at_ms)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_failure)?;
 
         let principal_id = resolve_or_create_principal(
             &mut transaction,
