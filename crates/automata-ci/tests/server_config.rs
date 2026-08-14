@@ -215,6 +215,42 @@ fn server_configuration_validates_non_secret_endpoint_fields() {
 }
 
 #[test]
+fn server_configuration_accepts_one_exact_s3_kms_key_identity() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--s3-kms-key-id",
+        "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000001",
+    ])
+    .expect("S3 KMS identity syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    ServerConfig::from_args(&args).expect("exact non-secret KMS identity must be accepted");
+
+    for invalid in ["", " leading-space", "line\nbreak"] {
+        let cli = Cli::try_parse_from([
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--s3-kms-key-id",
+            invalid,
+        ])
+        .expect("value validation belongs to server configuration");
+        let Command::Server(args) = cli.command else {
+            panic!("server command expected");
+        };
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidS3Encryption)
+        ));
+    }
+}
+
+#[test]
 fn human_auth_configuration_is_atomic_and_derives_a_fixed_callback() {
     let args = configured_human_auth_args();
     let config = ServerConfig::from_args(&args).expect("complete secure auth configuration");

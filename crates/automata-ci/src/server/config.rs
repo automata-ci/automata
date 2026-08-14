@@ -17,6 +17,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use automata_ci_auth::{github::GithubClientId, installation::InstallationTenant};
+use automata_ci_blob_s3::S3AtRestEncryption;
 use automata_ci_key_management::{
     KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes as KeySecretBytes,
 };
@@ -319,6 +320,7 @@ pub struct ServerConfig {
     pub(crate) s3_bucket: String,
     pub(crate) s3_prefix: Option<String>,
     pub(crate) s3_force_path_style: bool,
+    pub(crate) s3_at_rest_encryption: S3AtRestEncryption,
     pub(crate) s3_allow_loopback_http: bool,
     pub(crate) s3_operation_timeout: Duration,
     pub(crate) s3_access_key: SecretSource,
@@ -625,6 +627,7 @@ impl ServerConfig {
         validate_fallback_tenant(&args.fallback_tenant_id)?;
         let s3_endpoint =
             Url::parse(&args.s3_endpoint).map_err(|_| ServerConfigError::InvalidS3Endpoint)?;
+        let s3_at_rest_encryption = s3_at_rest_encryption(args.s3_kms_key_id.as_deref())?;
         if args.database_max_connections == 0 {
             return Err(ServerConfigError::InvalidDatabaseConnections);
         }
@@ -696,6 +699,7 @@ impl ServerConfig {
             s3_bucket: args.s3_bucket.clone(),
             s3_prefix: args.s3_prefix.clone(),
             s3_force_path_style: args.s3_force_path_style,
+            s3_at_rest_encryption,
             s3_allow_loopback_http: args.s3_allow_loopback_http,
             s3_operation_timeout,
             s3_access_key: args.s3_access_key_source.clone(),
@@ -1058,6 +1062,16 @@ fn load_exact_bytes(
     Ok(bytes)
 }
 
+fn s3_at_rest_encryption(
+    kms_key_id: Option<&str>,
+) -> Result<S3AtRestEncryption, ServerConfigError> {
+    kms_key_id
+        .map(S3AtRestEncryption::aws_kms)
+        .transpose()
+        .map_err(|_| ServerConfigError::InvalidS3Encryption)
+        .map(|encryption| encryption.unwrap_or_else(S3AtRestEncryption::aes256))
+}
+
 fn human_auth_configuration(
     args: &ServerArgs,
 ) -> Result<Option<HumanAuthConfig>, ServerConfigError> {
@@ -1328,6 +1342,9 @@ pub enum ServerConfigError {
     /// The S3 endpoint is not an absolute URL.
     #[error("S3 endpoint is not a valid URL")]
     InvalidS3Endpoint,
+    /// The configured server-side encryption key identity is malformed.
+    #[error("S3 server-side encryption configuration is invalid")]
+    InvalidS3Encryption,
     /// The `PostgreSQL` pool size is zero.
     #[error("database maximum connections must be greater than zero")]
     InvalidDatabaseConnections,
