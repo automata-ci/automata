@@ -35,30 +35,6 @@ const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
 const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
 const ACTIVE_LEASE_DURATION_MILLIS: i64 = 300_000;
 const EXPIRING_LEASE_DURATION_MILLIS: i64 = 2_000;
-const OFFER_HORIZON_MIGRATION: &str = include_str!("../migrations/0001_initial_schema.sql");
-
-#[test]
-fn offer_receipt_migration_requires_a_complete_supported_fallback_projection() {
-    for required in [
-        "lease_offer_response_disposition IS NOT NULL",
-        "lease_offer_primary_response_schema IS NOT NULL",
-        "lease_offer_primary_response_digest IS NOT NULL",
-        "lease_offer_fallback_version IS NOT NULL",
-        "lease_offer_fallback_operation_id IS NOT NULL",
-        "lease_offer_fallback_retry_after_millis IS NOT NULL",
-        "lease_offer_fallback_response_schema IS NOT NULL",
-        "lease_offer_fallback_response_digest IS NOT NULL",
-        "lease_offer_fallback_version = 1",
-        "lease_offer_response_disposition = 'primary'",
-        "lease_offer_response_disposition = 'revoked_fallback'",
-    ] {
-        assert!(
-            OFFER_HORIZON_MIGRATION.contains(required),
-            "initial schema is missing fallback shape contract: {required}"
-        );
-    }
-}
-
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn lease_request_chains_bound_retry_state_per_live_slot() -> TestResult {

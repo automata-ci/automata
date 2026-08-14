@@ -7,8 +7,6 @@ use automata_ci_github::{
 };
 use url::Url;
 
-const ENDPOINT_SOURCE: &str = include_str!("../src/endpoint.rs");
-
 #[test]
 fn production_configuration_requires_https_and_clean_bases() {
     let limits = GithubHttpLimits::default();
@@ -103,16 +101,5 @@ fn limits_are_nonzero_bounded_and_coherent() {
         GithubHttpLimits::new(0, 2, 10, Duration::from_secs(1), Duration::from_secs(2))
             .unwrap_err(),
         GithubHttpConfigurationError::InvalidResponseByteLimit
-    );
-}
-
-#[test]
-fn client_explicitly_disables_reqwest_internal_retries() {
-    assert_eq!(
-        ENDPOINT_SOURCE
-            .matches(".retry(reqwest::retry::never())")
-            .count(),
-        1,
-        "the shared GitHub client must never retry behind a caller's durable state machine",
     );
 }

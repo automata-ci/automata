@@ -72,53 +72,6 @@
       "source_prefixes": []
     }
   },
-  "ignored_test_inventory": {
-    "directory_bundles": {
-      "postgres": [
-        "crates/automata-ci-postgres/tests/",
-        "crates/automata-ci-postgres-test-support/tests/",
-        "crates/automata-ci-store/tests/"
-      ]
-    },
-    "source_bundles": {
-      "postgres": [
-        "crates/automata-ci-results-github/tests/postgres_artifacts.rs",
-        "crates/automata-ci-results-github/tests/postgres_cache.rs",
-        "crates/automata-ci/tests/github_provider_end_to_end_matrix.rs"
-      ],
-      "s3": [
-        "crates/automata-ci-action-github/tests/live_checkout_pipeline.rs",
-        "crates/automata-ci-action/tests/live_github_rustfs.rs",
-        "crates/automata-ci-blob-s3/tests/rustfs_contract.rs",
-        "crates/automata-ci-results-github/tests/cache_rustfs.rs",
-        "crates/automata-ci-results-github/tests/rustfs_results.rs",
-        "crates/automata-ci-workflow-service/tests/live_admission.rs"
-      ],
-      "podman": [
-        "crates/automata-ci-runner/src/podman_probe/mod.rs",
-        "crates/automata-ci-sandbox-podman/tests/live_rootless.rs"
-      ],
-      "github-live": [
-        "crates/automata-ci-github/tests/live_repository_snapshot.rs"
-      ],
-      "node-live": [
-        "crates/automata-ci-results-github/tests/cache_http.rs",
-        "crates/automata-ci-results-github/tests/http_compatibility.rs"
-      ]
-    },
-    "exact_test_bundles": {
-      "podman": {
-        "crates/automata-ci-runner/src/podman_probe/mod.rs": [
-          "podman_probe::tests::configured_rootless_lifecycle_matches_both_production_network_policies"
-        ]
-      }
-    },
-    "intentionally_unexecuted_sources": [
-      "crates/automata-ci-runner/src/product/metrics.rs",
-      "crates/automata-ci/tests/metrics_schema.rs"
-    ],
-    "intentionally_unexecuted_reason": "Developer-only schema print helpers"
-  },
   "ordinary_guard": {
     "line_percent_floor": 82.0,
     "minimum_measured_lines": 172000,

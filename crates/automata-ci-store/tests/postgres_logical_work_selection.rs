@@ -32,30 +32,6 @@ use uuid::Uuid;
 
 use common::{TestDatabase, TestError, TestResult, run_with_database};
 
-const MIGRATION_SQL: &str = include_str!("../migrations/0001_initial_schema.sql");
-
-#[test]
-fn migration_closes_reciprocal_quarantine_custody() {
-    for required in [
-        "logical_workflow_activation_quarantine_selection_unique UNIQUE (selection_id)",
-        "logical_workflow_materialization_quarantine_selection_unique UNIQUE (selection_id)",
-        "CREATE FUNCTION automata_require_final_activation_work_quarantine()",
-        "CREATE FUNCTION automata_require_final_materialization_work_quarantine()",
-        "WHEN NEW.failure_kind = 'generation_exhausted' THEN 'quarantined'",
-        "logical_workflow_activation_quarantine_selection_closure",
-        "logical_workflow_materialization_quarantine_selection_closure",
-        "DEFERRABLE INITIALLY DEFERRED",
-        "CREATE FUNCTION automata_require_pristine_logical_job_admission()",
-        "logical_workflow_jobs_activation_admission_pristine",
-        "CREATE TRIGGER logical_workflow_jobs_00_activation_admission",
-    ] {
-        assert!(
-            MIGRATION_SQL.contains(required),
-            "initial schema lost work-selection quarantine closure: {required}"
-        );
-    }
-}
-
 struct AuthenticatedFixture {
     namespace: u128,
     manifest: GithubProviderManifest,

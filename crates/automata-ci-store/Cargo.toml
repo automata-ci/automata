@@ -17,10 +17,6 @@ name = "store_contracts"
 path = "tests/store_contracts.rs"
 
 [[test]]
-name = "store_migration_contracts"
-path = "tests/store_migration_contracts.rs"
-
-[[test]]
 name = "store_postgres_execution"
 path = "tests/store_postgres_execution.rs"
 

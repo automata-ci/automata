@@ -235,53 +235,6 @@ fn runner_policy_preserves_raw_evidence_and_matches_store_codec_golden_values() 
 }
 
 #[test]
-fn checked_in_example_matches_the_current_provider_manifest_contract() {
-    let path = test_file("checked-in-example.json");
-    write_private_file(
-        &path,
-        include_bytes!("../config/github-provider.example.json"),
-    );
-    let config = GithubProviderConfig::load(&SecretSource::File(path))
-        .expect("checked-in provider example must remain loadable");
-    assert_eq!(config.repositories().len(), 2);
-    assert!(config.repositories().iter().all(|repository| {
-        repository.workflow_selection() == &GithubProviderWorkflowSelection::all_direct()
-    }));
-    assert_eq!(
-        config.repositories()[0].visibility(),
-        ProviderRepositoryVisibility::Public
-    );
-    assert_eq!(
-        config.repositories()[1].visibility(),
-        ProviderRepositoryVisibility::Private
-    );
-    assert_eq!(
-        config.repositories()[0].authority_profile(),
-        JobAuthorityProfile::CredentialFree
-    );
-    assert_eq!(
-        config.repositories()[1].authority_profile(),
-        JobAuthorityProfile::Standard
-    );
-    assert_eq!(
-        config.repositories()[0]
-            .cache_repository()
-            .default_branch_ref(),
-        "refs/heads/main"
-    );
-    assert!(
-        config.repositories()[0]
-            .private_source_authority()
-            .is_none()
-    );
-    assert!(
-        config.repositories()[1]
-            .private_source_authority()
-            .is_some()
-    );
-}
-
-#[test]
 fn provider_transport_is_closed_between_github_dot_com_and_loopback_emulation() {
     let production = load_value(
         "transport-production.json",

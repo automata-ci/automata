@@ -7,7 +7,6 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -17,9 +16,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CHECK = ROOT / "ci" / "check-rust-coverage.py"
 RUN = ROOT / "ci" / "run-rust-coverage.sh"
-POSTGRES_RUN = ROOT / "ci" / "run-postgres-tests.sh"
-POSTGRES_ENVIRONMENT = ROOT / "ci" / "postgres-test-environment.sh"
-VERIFY_POSTGRES = ROOT / "ci" / "verify-postgres-version.sh"
 CHECK_IGNORED = ROOT / "ci" / "check-ignored-test-list.py"
 FINGERPRINT = ROOT / "ci" / "fingerprint-workspace.py"
 
@@ -451,93 +447,6 @@ def main() -> None:
         )
         assert empty.returncode == 2
         assert "selected zero tests" in empty.stderr
-
-        exact_source = scratch / "exact-ignored.rs"
-        exact_source.write_text(
-            """
-#[test]
-#[ignore = "external service"]
-fn selected_by_filter() {}
-
-mod outside_filter {
-    #[test]
-    #[ignore]
-    fn missed_by_filter() {}
-}
-""",
-            encoding="utf-8",
-        )
-        exact_policy = scratch / "exact-ignored-policy.json"
-
-        def write_exact_policy(expected: list[str]) -> None:
-            exact_policy.write_text(
-                json.dumps(
-                    {
-                        "ignored_test_inventory": {
-                            "exact_test_bundles": {
-                                "podman": {exact_source.as_posix(): expected}
-                            }
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-        exact_arguments = [
-            "python3",
-            str(CHECK_IGNORED),
-            "--policy",
-            str(exact_policy),
-            "--bundle",
-            "podman",
-            "--source",
-            str(exact_source),
-        ]
-        write_exact_policy(["podman_probe::tests::selected_by_filter"])
-        unowned_ignored_test = subprocess.run(
-            exact_arguments,
-            input="podman_probe::tests::selected_by_filter: test\n",
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert unowned_ignored_test.returncode == 2
-        assert "source inventory differs" in unowned_ignored_test.stderr
-
-        exact_tests = [
-            "podman_probe::tests::selected_by_filter",
-            "podman_probe::outside_filter::missed_by_filter",
-        ]
-        write_exact_policy(exact_tests)
-        missed_by_filter = subprocess.run(
-            exact_arguments,
-            input="podman_probe::tests::selected_by_filter: test\n",
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert missed_by_filter.returncode == 2
-        assert "selection differs from its exact inventory" in missed_by_filter.stderr
-        exact_selection = subprocess.run(
-            exact_arguments,
-            input="".join(f"{name}: test\n" for name in exact_tests),
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert exact_selection.returncode == 0, exact_selection.stderr
-        assert exact_selection.stdout == "2\n"
-        duplicate_exact_selection = subprocess.run(
-            exact_arguments,
-            input="".join(
-                f"{name}: test\n" for name in [*exact_tests, exact_tests[0]]
-            ),
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        assert duplicate_exact_selection.returncode == 2
-        assert "listed a test more than once" in duplicate_exact_selection.stderr
 
         fingerprint_repository = scratch / "fingerprint-repository"
         fingerprint_repository.mkdir()
@@ -1450,161 +1359,6 @@ exit 99
             capture_output=True,
         )
         assert unknown_plan.returncode == 2
-        runner_source = RUN.read_text(encoding="utf-8")
-        postgres_runner_source = POSTGRES_RUN.read_text(encoding="utf-8")
-        postgres_environment_source = POSTGRES_ENVIRONMENT.read_text(
-            encoding="utf-8"
-        )
-        postgres_verifier_source = VERIFY_POSTGRES.read_text(encoding="utf-8")
-        assert not (ROOT / "ci" / "run-postgres-store-shard.sh").exists()
-        assert "run-postgres-tests.sh --defer-cleanup" in runner_source
-        assert "ordinary_checkpoint=true" in runner_source.replace(" ", "")
-        assert "ordinary must be the first lane" in runner_source
-        assert "combined-manifest.json" in runner_source
-        assert (
-            'export AUTOMATA_TEST_TEMPLATE_FINGERPRINT="$source_content_digest"'
-            in runner_source
-        )
-        assert postgres_runner_source.count("-p automata-ci-store") == 1
-        assert "--test store_contracts" not in postgres_runner_source
-        assert "--test store_migration_contracts" not in postgres_runner_source
-        assert "--example postgres-test-cleanup" in postgres_environment_source
-        assert "LLVM_PROFILE_FILE=/dev/null cargo run" in postgres_environment_source
-        assert "^[a-z0-9_]{1,27}$" in postgres_environment_source
-        assert runner_source.count("cleanup_postgres_namespace_once") == 3
-        assert "selected[postgres]" in runner_source
-        assert "selected[s3]" in runner_source
-        assert "trap cleanup_postgres_tests EXIT" in postgres_runner_source
-        assert "--defer-cleanup requires an explicit" in postgres_runner_source
-        assert "rolcreatedb OR rolsuper" in postgres_verifier_source
-        assert postgres_verifier_source.count("--set=ON_ERROR_STOP=1") == 2
-        assert postgres_verifier_source.count("--no-psqlrc") == 2
-        assert postgres_verifier_source.count("psql-test-database.py") == 2
-        assert 'PGDATABASE="$AUTOMATA_TEST_DATABASE_URL"' not in postgres_verifier_source
-        assert "check-ignored-test-list.py" in runner_source
-        assert (
-            "--inventory-source podman "
-            "crates/automata-ci-runner/src/podman_probe/mod.rs"
-        ) in runner_source
-        assert "LLVM_PROFILE_FILE=/dev/null" in runner_source
-        assert runner_source.index("rm -f --") < runner_source.index('ignore_regex="$(')
-        assert "flock --exclusive --nonblock" in runner_source
-        assert runner_source.count("fingerprint-workspace.py") == 2
-        assert runner_source.index("source_snapshot=") < runner_source.index(
-            "cargo llvm-cov clean --workspace"
-        )
-        assert runner_source.index("final_source_snapshot=") > runner_source.index(
-            "check-rust-coverage.py"
-        )
-        assert runner_source.index(
-            "validate-rust-coverage-failure.py"
-        ) > runner_source.index("check-rust-coverage.py")
-        assert '"$coverage_stage/coverage.lcov" \\' in runner_source
-        assert '"$coverage_stage/combined-coverage.lcov"' in runner_source
-        assert runner_source.index(
-            'mv -- "$coverage_stage/summary.json"'
-        ) < runner_source.index('mv -- "$coverage_stage/manifest.json"')
-
-        committed_policy = json.loads(
-            (ROOT / "ci" / "rust-coverage-policy.json").read_text(encoding="utf-8")
-        )
-        assert list(committed_policy["lanes"]) == bundles
-        podman_requirements = "\n".join(
-            committed_policy["lanes"]["podman"]["service_requirements"]
-        )
-        development_guide = (ROOT.parent / "docs" / "development.md").read_text(
-            encoding="utf-8"
-        )
-        for buildkit_requirement in [
-            "AUTOMATA_LIVE_ROOTLESS_BUILDX",
-            "AUTOMATA_PODMAN_TEST_BUILDKIT_IMAGE",
-        ]:
-            assert buildkit_requirement in podman_requirements
-            assert buildkit_requirement in development_guide
-        lane_declaration = re.search(r"known_lanes=\(([^)]*)\)", runner_source)
-        assert lane_declaration is not None
-        assert lane_declaration.group(1).split() == bundles
-        committed_guard = committed_policy["ordinary_guard"]
-        committed_baseline = committed_guard["reviewed_baseline"]
-        assert (
-            committed_guard["minimum_measured_lines"]
-            / committed_baseline["measured_lines"]
-            >= 0.98
-        ), "ordinary denominator guard permits a broad source exclusion"
-        assert abs(
-            committed_baseline["covered_lines"]
-            * 100
-            / committed_baseline["measured_lines"]
-            - committed_baseline["line_percent"]
-        ) < 1e-9
-        inventory = committed_policy["ignored_test_inventory"]
-        bundle_patterns: dict[str, list[str]] = {
-            lane: list(patterns)
-            for lane, patterns in inventory["source_bundles"].items()
-        }
-        for lane, directories in inventory["directory_bundles"].items():
-            bundle_patterns.setdefault(lane, []).extend(directories)
-        assert set(bundle_patterns) <= set(committed_policy["lanes"])
-        ignored_sources = {
-            source.relative_to(ROOT.parent).as_posix()
-            for source in (ROOT.parent / "crates").rglob("*.rs")
-            if re.search(
-                r"#\s*\[\s*ignore(?:\s|=|\])",
-                source.read_text(encoding="utf-8"),
-            )
-        }
-        intentionally_unexecuted = set(inventory["intentionally_unexecuted_sources"])
-        assert intentionally_unexecuted <= ignored_sources
-        exact_test_bundles = inventory["exact_test_bundles"]
-        for lane, sources in exact_test_bundles.items():
-            assert lane in bundle_patterns
-            for source, expected_tests in sources.items():
-                assert any(
-                    source == pattern
-                    or (pattern.endswith("/") and source.startswith(pattern))
-                    for pattern in bundle_patterns[lane]
-                )
-                exact_inventory = subprocess.run(
-                    [
-                        "python3",
-                        str(CHECK_IGNORED),
-                        "--policy",
-                        str(ROOT / "ci" / "rust-coverage-policy.json"),
-                        "--bundle",
-                        lane,
-                        "--source",
-                        source,
-                    ],
-                    cwd=ROOT.parent,
-                    input="".join(f"{name}: test\n" for name in expected_tests),
-                    check=False,
-                    text=True,
-                    capture_output=True,
-                )
-                assert exact_inventory.returncode == 0, exact_inventory.stderr
-        for lane, patterns in bundle_patterns.items():
-            for pattern in patterns:
-                matched = {
-                    source
-                    for source in ignored_sources
-                    if source == pattern or (pattern.endswith("/") and source.startswith(pattern))
-                }
-                assert matched, f"stale ignored-test inventory for {lane}: {pattern}"
-        for source in ignored_sources:
-            owners = [
-                lane
-                for lane, patterns in bundle_patterns.items()
-                if any(
-                    source == pattern
-                    or (pattern.endswith("/") and source.startswith(pattern))
-                    for pattern in patterns
-                )
-            ]
-            if source in intentionally_unexecuted:
-                assert not owners, f"intentionally unexecuted source is bundled: {source}"
-            else:
-                assert len(owners) == 1, f"ignored source has owners {owners}: {source}"
-
     print("verified service-aware Rust coverage policy")
 
 

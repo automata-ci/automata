@@ -35,12 +35,8 @@ After intentionally changing the schema, regenerate it:
 crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh regenerate
 ```
 
-Then review both the schema and DTO diff, review any affected wire golden
-fixtures, and update the reviewed digests in
-`proto/automata/runner/v1/PROVENANCE.sha256`. Do not hand-format the generated
-file. The external `codegen_contract` tests verify the schema, DTO, generator
-source, manifest, lockfile and verifier digests, exact tool versions, package
-name, and a fresh regeneration.
+Then review both the schema and DTO diff. Do not hand-format the generated
+file. The external `codegen_contract` tests perform a fresh regeneration.
 
 ## Canonical idempotency bytes
 

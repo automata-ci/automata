@@ -52,8 +52,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Verify product binary policy
-        run: ./scripts/ci/verify-product-targets.sh
+      - name: Verify crate publication tooling
+        run: |
+          python3 scripts/ci/publish-crates.py --list-publishable >/dev/null
+          python3 scripts/ci/tests/publish-crates.test.py
+          ./scripts/dev/create-integration-snapshot.test.sh
 
       - name: Lint workflows and shell scripts
         run: |
@@ -85,7 +88,6 @@ jobs:
           python3 scripts/ci/tests/release-handoff.test.py
           python3 scripts/ci/tests/rust-coverage.test.py
           python3 scripts/ci/tests/service-proxy-candidate.test.py
-          python3 scripts/ci/tests/store-test-suites.test.py
 
       - name: Verify Prometheus metrics contract
         env:

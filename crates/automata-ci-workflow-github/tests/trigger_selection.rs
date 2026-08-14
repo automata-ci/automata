@@ -6,7 +6,7 @@ use automata_ci_workflow_github::{
     GithubEventMetadata, GithubWorkflowCompiler, WorkflowNotSelectedReason,
 };
 
-const EXACT_REPOSITORY_CI: &str = include_str!("fixtures/repository-ci.yml");
+const FILTERED_WORKFLOW: &str = "on:\n  push:\n    branches: [main]\n  pull_request:\n  workflow_dispatch:\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
 
 fn event(name: &str, git_ref: &str) -> WorkflowEventProvenance {
     WorkflowEventProvenance::new("github", name)
@@ -69,9 +69,9 @@ fn assert_not_selected(report: &CompilationReport, reason: WorkflowNotSelectedRe
 }
 
 #[test]
-fn exact_repository_ci_selects_only_live_main_pushes() {
+fn filtered_workflow_selects_only_live_main_pushes() {
     let main = compile(
-        EXACT_REPOSITORY_CI,
+        FILTERED_WORKFLOW,
         event("push", "refs/heads/main"),
         Some(GithubEventMetadata::push(false)),
     );
@@ -95,7 +95,7 @@ fn exact_repository_ci_selects_only_live_main_pushes() {
         ),
     ] {
         assert_not_selected(
-            &compile(EXACT_REPOSITORY_CI, event("push", git_ref), Some(metadata)),
+            &compile(FILTERED_WORKFLOW, event("push", git_ref), Some(metadata)),
             reason,
         );
     }
@@ -174,10 +174,10 @@ fn repository_dispatch_requires_exact_bounded_metadata() {
 }
 
 #[test]
-fn exact_repository_ci_uses_github_default_pull_request_actions() {
+fn pull_requests_use_github_default_actions() {
     for action in ["opened", "synchronize", "reopened"] {
         let report = compile(
-            EXACT_REPOSITORY_CI,
+            FILTERED_WORKFLOW,
             event("pull_request", "refs/pull/42/merge"),
             Some(GithubEventMetadata::pull_request(action, "main")),
         );
@@ -190,7 +190,7 @@ fn exact_repository_ci_uses_github_default_pull_request_actions() {
 
     assert_not_selected(
         &compile(
-            EXACT_REPOSITORY_CI,
+            FILTERED_WORKFLOW,
             event("pull_request", "refs/pull/42/merge"),
             Some(GithubEventMetadata::pull_request("closed", "main")),
         ),
@@ -439,13 +439,13 @@ fn push_and_pull_request_fail_closed_without_verified_metadata() {
         ("pull_request", "refs/pull/42/merge"),
     ] {
         assert_rejected_with(
-            &compile(EXACT_REPOSITORY_CI, event(name, git_ref), None),
+            &compile(FILTERED_WORKFLOW, event(name, git_ref), None),
             "github.compile.event_metadata_required",
         );
     }
 
     let dispatch = compile(
-        EXACT_REPOSITORY_CI,
+        FILTERED_WORKFLOW,
         event("workflow_dispatch", "refs/heads/main"),
         None,
     );
@@ -454,7 +454,7 @@ fn push_and_pull_request_fail_closed_without_verified_metadata() {
 
 #[test]
 fn preselected_recompilation_validates_the_exact_trigger_span() {
-    let parsed = support::parse(EXACT_REPOSITORY_CI);
+    let parsed = support::parse(FILTERED_WORKFLOW);
     assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
     let initial = GithubWorkflowCompiler::new().compile(
         CompileWorkflowRequest::new(
@@ -472,7 +472,7 @@ fn preselected_recompilation_validates_the_exact_trigger_span() {
     assert!(replay.is_accepted(), "{:#?}", replay.diagnostics());
     assert_eq!(replay.plan(), Some(plan));
 
-    let shifted_source = format!("\n{EXACT_REPOSITORY_CI}");
+    let shifted_source = format!("\n{FILTERED_WORKFLOW}");
     let shifted = support::parse(&shifted_source);
     assert!(shifted.is_accepted(), "{:#?}", shifted.diagnostics());
     assert_rejected_with(
