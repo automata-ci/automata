@@ -117,7 +117,7 @@ async fn resolves_current_core_membership_and_direct_rbac() -> TestResult {
                 .map(automata_ci_auth::human::PrincipalId::as_str),
             Some(PRINCIPAL_ID)
         );
-        assert_eq!(snapshot.authorization().authorization_revision(), Some(7));
+        assert_eq!(snapshot.authorization().authorization_revision(), Some(8));
         let grants = snapshot
             .authorization()
             .role_grants()

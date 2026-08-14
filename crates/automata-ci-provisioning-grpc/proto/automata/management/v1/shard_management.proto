@@ -3,6 +3,7 @@ syntax = "proto3";
 package automata.management.v1;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
 
 // Administers one Automata Core shard on behalf of an authorized external
 // control plane. This service is not exposed to browsers, runners, or human
@@ -12,6 +13,13 @@ service ShardManagementService {
   // Replaying the same operation and semantic request returns the original
   // stable response without repeating effects.
   rpc ProvisionWorkspace(ProvisionWorkspaceRequest) returns (ProvisionWorkspaceResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  // Applies a complete, monotonically revisioned execution-entitlement
+  // snapshot to a workspace managed by this external authority. This is a
+  // workspace aggregate, not a per-job rolling execution lease.
+  rpc ApplyWorkspaceEntitlement(ApplyWorkspaceEntitlementRequest) returns (ApplyWorkspaceEntitlementResponse) {
     option idempotency_level = IDEMPOTENT;
   }
 }
@@ -95,4 +103,88 @@ message ProvisionWorkspaceFailure {
 
   // Opaque request correlation identifier safe to expose to the caller.
   string request_id = 2;
+}
+
+// A finite aggregate compute allowance. Core accounts actual execution and
+// may exceed the allowance by a small bounded amount while it observes the
+// threshold and delivers cancellation. That enforcement tolerance does not
+// increase the configured allowance.
+message CappedWorkspaceExecution {
+  // Positive aggregate compute allowance at whole-second API granularity.
+  uint64 compute_seconds = 1;
+
+  // Optional positive relative lifetime. Core anchors this duration to its
+  // database time when the revision commits and returns the resulting deadline.
+  google.protobuf.Duration valid_for = 2;
+}
+
+// Metered execution with no Core-enforced aggregate compute ceiling.
+message UncappedWorkspaceExecution {}
+
+// Execution is disabled. Core rejects new work and cancels active work when
+// enforcement observes this policy.
+message PausedWorkspaceExecution {}
+
+// Complete execution policy for one workspace entitlement revision.
+message WorkspaceExecutionEntitlement {
+  oneof policy {
+    CappedWorkspaceExecution capped = 1;
+    UncappedWorkspaceExecution uncapped = 2;
+    PausedWorkspaceExecution paused = 3;
+  }
+}
+
+// Durable, idempotent request to replace one workspace's entitlement snapshot.
+message ApplyWorkspaceEntitlementRequest {
+  // Stable non-nil canonical lower-case UUID generated before the first
+  // network attempt and reused across every retry.
+  string operation_id = 1;
+
+  // Expected immutable shard identity, already verified through capability
+  // discovery.
+  string shard_id = 2;
+
+  // Externally managed workspace as a non-nil canonical lower-case UUID.
+  string workspace_id = 3;
+
+  // Positive, monotonically increasing workspace revision. Gaps are allowed;
+  // a revision at or below the current value is stale.
+  uint64 revision = 4;
+
+  // Complete execution policy replacing the prior policy.
+  WorkspaceExecutionEntitlement execution = 5;
+}
+
+// Stable result stored by Core in the entitlement transaction.
+message ApplyWorkspaceEntitlementResponse {
+  string operation_id = 1;
+  string shard_id = 2;
+  string workspace_id = 3;
+  uint64 revision = 4;
+
+  // Canonical Core database time. This value remains stable on replay.
+  google.protobuf.Timestamp applied_at = 5;
+
+  // Present only when the applied snapshot has a relative validity period.
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+// Stable machine-readable reason attached to a failed entitlement RPC.
+enum ApplyWorkspaceEntitlementFailureReason {
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_UNSPECIFIED = 0;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_INVALID_REQUEST = 1;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_UNAUTHENTICATED = 2;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_FORBIDDEN = 3;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_STALE_REVISION = 5;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_WORKSPACE_UNAVAILABLE = 6;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_RATE_LIMITED = 7;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_INTERNAL_ERROR = 8;
+  APPLY_WORKSPACE_ENTITLEMENT_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 9;
+}
+
+// Typed detail carried in google.rpc.Status.details after Core can safely
+// construct contract-specific details.
+message ApplyWorkspaceEntitlementFailure {
+  ApplyWorkspaceEntitlementFailureReason reason = 1;
 }

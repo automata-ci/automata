@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! Transport-neutral workspace provisioning for an Automata Core shard.
+//! Transport-neutral external management for an Automata Core shard.
 //!
 //! The external control plane authenticates independently of the human it is
 //! installing. A transport maps verified workload evidence to a stable
@@ -10,11 +10,19 @@
 //!
 //! Certificate rotations do not alter the authority ID. Durable adapters must
 //! namespace idempotency by that stable authority and the operation ID, never by
-//! a certificate, connection, pod, or replica.
+//! a certificate, connection, pod, or replica. Workspace entitlement snapshots
+//! use the same authority and remain independent of Cloud billing concepts.
 
+mod entitlement;
 mod model;
 mod port;
 
+pub use entitlement::{
+    ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
+    AuthorizedApplyWorkspaceEntitlement, ComputeSeconds, EntitlementAuthorizationError,
+    EntitlementDurationSeconds, EntitlementFailure, EntitlementFailureKind, EntitlementRevision,
+    EntitlementTimestamp, EntitlementValueError, WorkspaceExecutionEntitlement,
+};
 pub use model::{
     AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
     InitialOwnerPrincipalId, OperationId, ProvisionWorkspaceCommand, ProvisionWorkspaceResult,
@@ -23,7 +31,8 @@ pub use model::{
     ShardId, WorkspaceId,
 };
 pub use port::{
-    ProvisioningAuthenticationError, ProvisioningAuthenticationFuture,
-    ProvisioningWorkloadAuthenticator, WorkloadAuthenticationEvidence, WorkspaceProvisioner,
+    EntitlementApplicationFuture, ProvisioningAuthenticationError,
+    ProvisioningAuthenticationFuture, ProvisioningWorkloadAuthenticator,
+    WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier, WorkspaceProvisioner,
     WorkspaceProvisioningFuture,
 };

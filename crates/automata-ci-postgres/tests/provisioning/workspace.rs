@@ -90,20 +90,21 @@ async fn provisioning_is_atomic_replayable_and_conflict_safe() -> TestResult {
             ProvisioningFailureKind::WorkspaceConflict
         );
 
-        let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(
+        let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
             r"
             SELECT
               (SELECT count(*) FROM workspace_provisioning_operations),
               (SELECT count(*) FROM tenants),
               (SELECT count(*) FROM delegated_actor_identities),
               (SELECT count(*) FROM tenant_human_memberships),
+              (SELECT count(*) FROM workspace_management_bindings),
               (SELECT count(*) FROM security_audit_events
                WHERE action='workspace.provisioned')
             ",
         )
         .fetch_one(database.pool())
         .await?;
-        assert_eq!(counts, (1, 1, 1, 1, 1));
+        assert_eq!(counts, (1, 1, 1, 1, 1, 1));
 
         let role_permission_counts: (i64, i64) = sqlx::query_as(
             r"
