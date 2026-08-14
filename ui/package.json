@@ -2,7 +2,22 @@
   "name": "@automata/ui",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "files": [
+    "dist/package"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/package/public.d.ts",
+      "import": "./dist/package/index.js"
+    },
+    "./styles.css": "./dist/package/styles.css",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": [
+    "./dist/package/styles.css"
+  ],
   "engines": {
     "node": "^22.13.0 || >=24.0.0"
   },
@@ -23,17 +38,19 @@
     "test:watch": "vitest",
     "build:client": "vite build",
     "build:ssr": "vite build --ssr src/entry-server.tsx",
+    "build:package": "vite build --config vite.package.config.ts && tsc --project tsconfig.package.json && node scripts/assemble-package.mjs",
     "verify:build": "node scripts/verify-build.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
     "verify:preview": "node scripts/verify-preview-build.mjs",
-    "build": "npm run clean:production && npm run typecheck && npm run build:client && npm run build:ssr && npm run verify:build",
+    "build": "npm run clean:production && npm run typecheck && npm run build:client && npm run build:ssr && npm run build:package && npm run verify:build && npm run verify:package",
     "check": "npm run test && npm run build"
   },
-  "dependencies": {
-    "@phosphor-icons/web": "2.1.2",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
+  "peerDependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@phosphor-icons/web": "2.1.2",
     "@playwright/test": "1.62.1",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
@@ -41,6 +58,8 @@
     "@vitejs/plugin-react": "6.0.5",
     "@vitest/coverage-v8": "4.1.10",
     "jsdom": "30.0.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "typescript": "7.0.2",
     "vite": "8.2.1",
     "vitest": "4.1.10"
