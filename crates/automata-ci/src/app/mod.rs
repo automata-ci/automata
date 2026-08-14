@@ -1,5 +1,6 @@
 mod api_security;
 pub(crate) mod conformance_api;
+pub(crate) mod delegated_actor_api;
 mod form;
 pub(crate) mod github_auth;
 pub mod http;

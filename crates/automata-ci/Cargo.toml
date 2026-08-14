@@ -57,6 +57,7 @@ getrandom.workspace = true
 futures.workspace = true
 http.workspace = true
 reqwest.workspace = true
+ring.workspace = true
 rcgen.workspace = true
 prometheus-client.workspace = true
 rustls.workspace = true
@@ -87,7 +88,6 @@ automata-ci-postgres-test-support.workspace = true
 automata-ci-scm.workspace = true
 pem-rfc7468.workspace = true
 rcgen.workspace = true
-ring.workspace = true
 sqlx.workspace = true
 tar.workspace = true
 

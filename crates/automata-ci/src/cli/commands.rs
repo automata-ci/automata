@@ -640,6 +640,22 @@ pub struct ServerArgs {
     )]
     pub management_delegated_actor_issuer: Option<String>,
 
+    /// Exact JWKS endpoint used to verify delegated actor assertions.
+    #[arg(
+        long,
+        env = "AUTOMATA_MANAGEMENT_DELEGATED_ACTOR_JWKS_URL",
+        value_name = "URL"
+    )]
+    pub management_delegated_actor_jwks_url: Option<String>,
+
+    /// Permit a literal loopback HTTP JWKS endpoint for local development.
+    #[arg(
+        long,
+        env = "AUTOMATA_MANAGEMENT_DELEGATED_ACTOR_JWKS_ALLOW_LOOPBACK_HTTP",
+        default_value_t = false
+    )]
+    pub management_delegated_actor_jwks_allow_loopback_http: bool,
+
     /// SHA-256 fingerprint of an allowed leaf client certificate, in hex.
     ///
     /// Repeat the option, or provide a comma-separated environment value, to

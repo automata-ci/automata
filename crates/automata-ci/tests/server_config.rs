@@ -1220,6 +1220,8 @@ fn private_management_listener_accepts_bounded_certificate_rotation_overlap() {
         "automata-cloud".to_owned(),
         "--management-delegated-actor-issuer".to_owned(),
         "https://cloud.example.test".to_owned(),
+        "--management-delegated-actor-jwks-url".to_owned(),
+        "https://cloud.example.test/.well-known/jwks.json".to_owned(),
         "--management-client-cert-sha256".to_owned(),
         format!("{old_fingerprint},{new_fingerprint}"),
         "--management-client-ca-cert-source".to_owned(),
@@ -1242,6 +1244,53 @@ fn private_management_listener_accepts_bounded_certificate_rotation_overlap() {
         management.authority().delegated_actor_issuer().as_str(),
         "https://cloud.example.test"
     );
+    assert_eq!(
+        management.delegated_actor_jwks_url().as_str(),
+        "https://cloud.example.test/.well-known/jwks.json"
+    );
+}
+
+#[test]
+fn delegated_actor_jwks_plaintext_is_limited_to_explicit_literal_loopback() {
+    let mut arguments = vec![
+        "automata".to_owned(),
+        "server".to_owned(),
+        "--results-public-url".to_owned(),
+        "https://results.example.test/".to_owned(),
+        "--management-listen".to_owned(),
+        "127.0.0.1:9443".to_owned(),
+        "--management-shard-id".to_owned(),
+        "shard-a".to_owned(),
+        "--management-authority-id".to_owned(),
+        "automata-cloud".to_owned(),
+        "--management-delegated-actor-issuer".to_owned(),
+        "https://cloud.example.test".to_owned(),
+        "--management-delegated-actor-jwks-url".to_owned(),
+        "http://127.0.0.1:8080/.well-known/jwks.json".to_owned(),
+        "--management-client-cert-sha256".to_owned(),
+        "11".repeat(32),
+        "--management-client-ca-cert-source".to_owned(),
+        "file:/run/automata/management-client-ca.pem".to_owned(),
+        "--management-server-cert-source".to_owned(),
+        "file:/run/automata/management-server.pem".to_owned(),
+        "--management-server-key-source".to_owned(),
+        "file:/run/automata/management-server-key.pem".to_owned(),
+    ];
+    let cli = Cli::try_parse_from(arguments.clone()).expect("JWKS syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidManagementConfiguration)
+    ));
+
+    arguments.push("--management-delegated-actor-jwks-allow-loopback-http".to_owned());
+    let cli = Cli::try_parse_from(arguments).expect("loopback opt-in syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(ServerConfig::from_args(&args).is_ok());
 }
 
 #[test]

@@ -12,7 +12,9 @@ use automata_ci_auth::{
     session::SessionKind,
     time::{Clock, SystemClock},
 };
-use automata_ci_auth_postgres::PostgresHumanRbacManagementRepository;
+use automata_ci_auth_postgres::{
+    PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
+};
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
 use automata_ci_blob_s3::{
     S3BlobStore, S3BlobStoreConfig, S3BlobStoreConfigError, StaticS3Credentials,
@@ -99,6 +101,9 @@ use super::{
 };
 use crate::app::{
     conformance_api::{conformance_api_router, deployment_conformance_api_router},
+    delegated_actor_api::{
+        DelegatedActorVerifier, DelegatedActorVerifierConfig, router as delegated_actor_api_router,
+    },
     github_auth::{
         GithubAuthHttpState, GithubProviderOrigin, GithubSetupHttpState,
         OperationalGithubAuthBackend, router as github_auth_router,
@@ -170,6 +175,7 @@ pub(crate) struct ProductionComponents {
     pub(crate) secret_mutation_recovery_loop: Option<SecretMutationRecoveryLoop>,
     pub(crate) state_sampler: ControlPlaneStateSampler,
     pub(crate) human_api: Router,
+    pub(crate) delegated_actor_api: Option<Router>,
     pub(crate) human_request_authentication: Option<HumanRequestAuthentication>,
     pub(crate) rbac_web_data: Option<Arc<dyn RbacWebData>>,
     pub(crate) setup_page_availability: Option<Arc<dyn SetupPageAvailability>>,
@@ -198,6 +204,7 @@ impl fmt::Debug for ProductionComponents {
             )
             .field("state_sampler", &self.state_sampler)
             .field("human_api", &self.human_api)
+            .field("delegated_actor_api", &self.delegated_actor_api)
             .field(
                 "human_request_authentication",
                 &self.human_request_authentication,
@@ -238,6 +245,26 @@ impl ProductionComponents {
         // the migrator on every readiness tick repeatedly acquires migration
         // locks and emits expected duplicate-table diagnostics under SQLx.
         store.migrate().await?;
+        let delegated_actor_api = config
+            .management()
+            .map(|management| -> Result<Router, ServerCompositionError> {
+                let verifier = DelegatedActorVerifier::new(DelegatedActorVerifierConfig {
+                    issuer: management
+                        .authority()
+                        .delegated_actor_issuer()
+                        .as_str()
+                        .to_owned(),
+                    audience: management.authority().shard_id().as_str().to_owned(),
+                    jwks_url: management.delegated_actor_jwks_url().clone(),
+                })
+                .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
+                let resolver: Arc<dyn automata_ci_auth::delegated_actor::DelegatedActorResolver> =
+                    Arc::new(PostgresDelegatedActorResolver::new(
+                        store.postgres_pool().clone(),
+                    ));
+                Ok(delegated_actor_api_router(Arc::new(verifier), resolver))
+            })
+            .transpose()?;
         let management_server =
             build_management_server(config, management_listener, store.as_ref())?;
         let workflow_clock: Arc<dyn AdmissionClock> = Arc::new(SystemAdmissionClock);
@@ -544,6 +571,7 @@ impl ProductionComponents {
             secret_mutation_recovery_loop,
             state_sampler,
             human_api: human.router,
+            delegated_actor_api,
             human_request_authentication: human.request_authentication,
             rbac_web_data: human.rbac_web_data,
             setup_page_availability: human.setup_page_availability,

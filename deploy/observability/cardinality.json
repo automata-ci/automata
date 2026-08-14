@@ -581,6 +581,8 @@
                 "/auth/github/login",
                 "/auth/logout",
                 "/healthz",
+                "/internal/v1/capabilities",
+                "/internal/v1/workspaces/{workspace_id}/viewer",
                 "/readyz",
                 "/repositories",
                 "/settings/access/{rbac}",
@@ -600,7 +602,7 @@
               ]
             }
           ],
-          "maximum_series": 645,
+          "maximum_series": 675,
           "name": "automata_ci_control_plane_http_request_duration_seconds",
           "type": "histogram",
           "unit": "seconds"
@@ -641,6 +643,8 @@
                 "/auth/github/login",
                 "/auth/logout",
                 "/healthz",
+                "/internal/v1/capabilities",
+                "/internal/v1/workspaces/{workspace_id}/viewer",
                 "/readyz",
                 "/repositories",
                 "/settings/access/{rbac}",
@@ -660,7 +664,7 @@
               ]
             }
           ],
-          "maximum_series": 43,
+          "maximum_series": 45,
           "name": "automata_ci_control_plane_http_requests_in_flight",
           "type": "gauge"
         },
@@ -713,6 +717,8 @@
                 "/auth/github/login",
                 "/auth/logout",
                 "/healthz",
+                "/internal/v1/capabilities",
+                "/internal/v1/workspaces/{workspace_id}/viewer",
                 "/readyz",
                 "/repositories",
                 "/settings/access/{rbac}",
@@ -743,7 +749,7 @@
               ]
             }
           ],
-          "maximum_series": 2064,
+          "maximum_series": 2160,
           "name": "automata_ci_control_plane_http_requests_total",
           "type": "counter"
         },

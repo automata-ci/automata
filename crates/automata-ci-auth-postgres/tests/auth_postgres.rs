@@ -4,6 +4,8 @@ mod support;
 
 #[path = "postgres_cli_session_activation.rs"]
 mod postgres_cli_session_activation;
+#[path = "postgres_delegated_actor.rs"]
+mod postgres_delegated_actor;
 #[path = "postgres_github_mapping_management.rs"]
 mod postgres_github_mapping_management;
 #[path = "postgres_github_membership.rs"]
