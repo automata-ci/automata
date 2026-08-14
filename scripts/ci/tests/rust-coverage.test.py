@@ -1417,7 +1417,7 @@ exit 99
             "cargo test --workspace",
             "-p automata-ci-store --test store_postgres_execution",
             "-p automata-ci-postgres-test-support --test postgres_18",
-            "-p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test auth_postgres --test runner_auth_postgres --test secret_postgres",
+            "-p automata-ci-postgres --test postgres",
             "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
             "--test github_provider_end_to_end_matrix",
             "--test rustfs_contract",

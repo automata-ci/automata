@@ -320,7 +320,7 @@ test(
     );
     assert.match(
       commands[2],
-      /-p automata-ci-auth-postgres -p automata-ci-runner-auth-postgres -p automata-ci-secret-postgres --test auth_postgres --test runner_auth_postgres --test secret_postgres .*--ignored --test-threads=4$/,
+      /-p automata-ci-postgres --test postgres .*--ignored --test-threads=4$/,
     );
     assert.match(
       commands[3],
@@ -340,10 +340,8 @@ test(
     assert.doesNotMatch(runner, /--list|check-ignored-test-list\.py/);
 
     const broadDatabasePackages = new Set([
-      "automata-ci-auth-postgres",
+      "automata-ci-postgres",
       "automata-ci-postgres-test-support",
-      "automata-ci-runner-auth-postgres",
-      "automata-ci-secret-postgres",
       "automata-ci-store",
     ]);
     const explicitDatabaseTargets = new Map([
@@ -378,13 +376,15 @@ test(
         "tests",
         `${relativePath} is not an integration-test target`,
       );
-      assert.equal(
-        parts.length,
-        4,
+      const packageName = parts[1];
+      const testTarget =
+        packageName === "automata-ci-postgres"
+          ? "postgres"
+          : path.basename(parts[3], ".rs");
+      assert.ok(
+        parts.length === 4 || packageName === "automata-ci-postgres",
         `${relativePath} needs an explicit CI target mapping`,
       );
-      const packageName = parts[1];
-      const testTarget = path.basename(parts[3], ".rs");
       const suite = `${packageName}/${testTarget}`;
       databaseOnlySuites.add(suite);
       assert.ok(

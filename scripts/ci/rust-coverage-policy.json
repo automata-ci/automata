@@ -32,12 +32,10 @@
         "PostgreSQL 18 via AUTOMATA_TEST_DATABASE_URL"
       ],
       "source_prefixes": [
-        "crates/automata-ci-auth-postgres/src/",
+        "crates/automata-ci-postgres/src/",
         "crates/automata-ci-postgres-test-support/src/",
         "crates/automata-ci-results-github/src/cache_postgres.rs",
         "crates/automata-ci-results-github/src/postgres.rs",
-        "crates/automata-ci-runner-auth-postgres/src/",
-        "crates/automata-ci-secret-postgres/src/",
         "crates/automata-ci-store/src/postgres.rs",
         "crates/automata-ci-store/src/postgres/"
       ]
@@ -77,10 +75,8 @@
   "ignored_test_inventory": {
     "directory_bundles": {
       "postgres": [
-        "crates/automata-ci-auth-postgres/tests/",
+        "crates/automata-ci-postgres/tests/",
         "crates/automata-ci-postgres-test-support/tests/",
-        "crates/automata-ci-runner-auth-postgres/tests/",
-        "crates/automata-ci-secret-postgres/tests/",
         "crates/automata-ci-store/tests/"
       ]
     },

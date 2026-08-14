@@ -116,14 +116,10 @@ run_bounded_tests cargo test \
   --ignored \
   --test-threads=1
 
-printf 'PostgreSQL lane: adapter packages\n' >&2
+printf 'PostgreSQL lane: product adapters\n' >&2
 run_bounded_tests cargo test \
-  -p automata-ci-auth-postgres \
-  -p automata-ci-runner-auth-postgres \
-  -p automata-ci-secret-postgres \
-  --test auth_postgres \
-  --test runner_auth_postgres \
-  --test secret_postgres \
+  -p automata-ci-postgres \
+  --test postgres \
   --all-features \
   --locked \
   -- \
