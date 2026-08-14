@@ -57,6 +57,10 @@ const OTHER_SECRET: &[u8] = b"rotated-delivery-test-secret";
 const FINGERPRINT_SECRET: &[u8] = b"0123456789abcdef0123456789abcdef";
 const BEFORE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const AFTER_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+const AFTER_COMMIT_BYTES: [u8; 20] = [
+    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+    0x01, 0x23, 0x45, 0x67,
+];
 const PULL_REQUEST_MERGE_COMMIT: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const CONNECTION_UUID: Uuid = Uuid::from_u128(0x57d02be9_1ac4_4780_a573_48d21621c2de);
 const INSTALLATION_ID: u64 = 4_242;
@@ -1981,7 +1985,7 @@ async fn generic_ingress_persists_typed_event_coordinates_without_event_kind_ali
         let event = requests[0].authenticated_event();
         assert_eq!(event.kind(), expected_kind);
         assert_eq!(event.git_ref(), expected_ref);
-        assert_eq!(requests[0].head_sha().as_str(), AFTER_COMMIT);
+        assert_eq!(requests[0].head_sha().as_bytes(), AFTER_COMMIT_BYTES);
         assert_eq!(requests[0].delivery().identity().delivery_id(), delivery_id);
     }
 }
