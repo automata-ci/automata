@@ -21,6 +21,7 @@ ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time = { workspace = true, features = ["formatting"] }
 url.workspace = true
 zeroize.workspace = true
 

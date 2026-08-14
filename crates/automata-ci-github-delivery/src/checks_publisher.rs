@@ -16,8 +16,8 @@ use automata_ci_github::{
     GithubCheckExternalId, GithubCheckName as HttpCheckName, GithubCheckRetryEvidence,
     GithubCheckRun, GithubCheckRunCreateOutcome, GithubCheckRunId as HttpRunId,
     GithubCheckRunIdentity, GithubCheckRunReconciliation, GithubCheckRunState,
-    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId as HttpSuiteId, GithubChecksError,
-    GithubHttpEndpoint, GithubObservedCheckConclusion,
+    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId as HttpSuiteId, GithubCheckTimestamp,
+    GithubChecksError, GithubHttpEndpoint, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId as ScmRepositoryId};
 use automata_ci_store::{
@@ -935,6 +935,16 @@ impl GithubChecksPublisher {
             .run_id()
             .ok_or(GithubChecksPublisherError::InvalidClaim)?;
         let http_run_id = http_run_id(run_id)?;
+        let started_at = claimed
+            .started_at()
+            .map(|value| GithubCheckTimestamp::from_unix_millis(value.get()))
+            .transpose()
+            .map_err(|_| GithubChecksPublisherError::InvariantViolation)?;
+        let completed_at = claimed
+            .completed_at()
+            .map(|value| GithubCheckTimestamp::from_unix_millis(value.get()))
+            .transpose()
+            .map_err(|_| GithubChecksPublisherError::InvariantViolation)?;
         let current = match self
             .endpoint
             .get_check_run(
@@ -961,6 +971,9 @@ impl GithubChecksPublisher {
                             credential.repository(),
                             http_run_id,
                             &identity,
+                            started_at
+                                .as_ref()
+                                .ok_or(GithubChecksPublisherError::InvariantViolation)?,
                             credential.token(),
                         )
                         .await
@@ -986,6 +999,10 @@ impl GithubChecksPublisher {
                                 http_run_id,
                                 &identity,
                                 conclusion,
+                                started_at.as_ref(),
+                                completed_at
+                                    .as_ref()
+                                    .ok_or(GithubChecksPublisherError::InvariantViolation)?,
                                 credential.token(),
                             )
                             .await

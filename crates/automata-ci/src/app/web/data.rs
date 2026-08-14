@@ -1119,6 +1119,8 @@ pub(crate) struct JobLogPage {
     pub(crate) previous_navigation_job_id: Option<JobId>,
     pub(crate) next_navigation_job_id: Option<JobId>,
     pub(crate) job: JobSummary,
+    /// Authorization state for the independently protected log collection.
+    pub(crate) log_visibility: CollectionVisibility,
     pub(crate) lines: Vec<LogLine>,
     pub(crate) previous_cursor: Option<String>,
     pub(crate) next_cursor: Option<String>,

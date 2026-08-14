@@ -12,6 +12,7 @@ import {
 } from "../../src/serialization";
 import { RENDER_REQUEST_LIMITS } from "../../src/validation";
 import {
+  deepLinkSignInRequest,
   directBindingListRequest,
   jobLogRequest,
   PRIMARY_JOB_ID,
@@ -34,6 +35,19 @@ import {
 const LOG_RESULT_COUNT_TEST_ID = "job-log-result-count";
 
 describe("server rendering", () => {
+  it("renders the generic deep-link handoff with an exact POST return path", () => {
+    const rendered = new DOMParser().parseFromString(
+      renderPage(deepLinkSignInRequest),
+      "text/html",
+    );
+    const form = rendered.querySelector('form[action="/auth/github/login"]');
+    expect(rendered.body.textContent).toContain("Sign in to view this run");
+    expect(form?.getAttribute("method")).toBe("post");
+    expect(
+      form?.querySelector<HTMLInputElement>('input[name="return_path"]')?.value,
+    ).toBe(deepLinkSignInRequest.page.shell.signIn?.returnPath);
+  });
+
   it("renders the repository directory with honest destinations and no repository header", () => {
     const rendered = new DOMParser().parseFromString(
       renderPage(repositoryDirectoryRequest),
@@ -1076,7 +1090,77 @@ describe("server rendering", () => {
 
 describe("hydration", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("polls a running job in place and stops after its terminal snapshot", async () => {
+    if (jobLogRequest.page.kind !== "job-log") {
+      throw new Error("The job-log fixture is unavailable");
+    }
+    const page = jobLogRequest.page;
+    const terminalStatus = { label: "Succeeded", tone: "success" } as const;
+    const terminalRequest: RenderRequest = {
+      ...jobLogRequest,
+      page: {
+        ...page,
+        jobs: page.jobs.map((job) =>
+          job.id === page.job.id
+            ? { ...job, status: terminalStatus }
+            : job,
+        ),
+        job: {
+          ...page.job,
+          status: terminalStatus,
+          durationLabel: "3m 9s",
+        },
+        lines: page.lines.map((line, index) =>
+          index === 1 ? { ...line, text: "Operating System: updated live" } : line,
+        ),
+        notice: null,
+      },
+    };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) =>
+      new Response(JSON.stringify(terminalRequest), {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          ETag: '"sha256-terminal"',
+        },
+      }),
+    );
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    document.open();
+    document.write(renderPage(jobLogRequest));
+    document.close();
+    const parsedRequest = readRenderRequest(document);
+
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    await act(async () => {
+      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      `${page.job.href}/snapshot`,
+    );
+    expect(document.querySelector(".heading-status .status")?.textContent).toContain(
+      "Succeeded",
+    );
+    expect(document.querySelector(".log-output")?.textContent).toContain(
+      "Operating System: updated live",
+    );
+    expect(document.querySelector(".log-page-heading > a.button")).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await act(async () => root?.unmount());
   });
 
   it.each([

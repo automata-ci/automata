@@ -24,6 +24,7 @@ use axum::routing::{get, post};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 use tracing::error;
 
@@ -267,6 +268,10 @@ fn router_with_optional_rbac_data(
         .route(
             "/{owner}/{repository}/actions/runs/{run_id}/jobs/{job_id}",
             get(job_log),
+        )
+        .route(
+            "/{owner}/{repository}/actions/runs/{run_id}/jobs/{job_id}/snapshot",
+            get(job_log_snapshot),
         )
         .route(
             "/{owner}/{repository}/actions/runs/{run_id}/artifacts/{artifact_id}",
@@ -1356,6 +1361,36 @@ async fn job_log(
         .await
     {
         Ok(Some(data)) => data,
+        Ok(None) if context.viewer().is_none() && context.sign_in_action().is_some() => {
+            let mut return_path = format!(
+                "/{}/{}/actions/runs/{run_id}/jobs/{job_id}",
+                repository_path.owner, repository_path.name
+            );
+            if let Some(query) = raw_query.as_deref().filter(|query| !query.is_empty()) {
+                return_path.push('?');
+                return_path.push_str(query);
+            }
+            let csp_nonce = match new_csp_nonce() {
+                Ok(nonce) => nonce,
+                Err(error) => {
+                    error!(%error, "failed to generate a CSP nonce");
+                    return internal_server_error();
+                }
+            };
+            let request_json = match model::deep_link_sign_in(
+                client_assets(),
+                csp_nonce.clone(),
+                &context,
+                return_path,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    error!(%error, "failed to assemble deep-link sign-in page");
+                    return internal_server_error();
+                }
+            };
+            return render(state, request_json, csp_nonce).await;
+        }
         Ok(None) => return not_found(),
         Err(error) => return data_error_response(error),
     };
@@ -1389,6 +1424,82 @@ async fn job_log(
         }
     };
     render(state, request_json, csp_nonce).await
+}
+
+async fn job_log_snapshot(
+    State(state): State<WebState>,
+    context: Option<Extension<RequestContext>>,
+    csrf: Option<Extension<Arc<CsrfToken>>>,
+    path: Result<Path<(String, String, String, String)>, PathRejection>,
+    request_headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    query: Result<Query<JobLogQuery>, QueryRejection>,
+) -> Response<Body> {
+    let (Ok(Path((owner, repository, run_id, job_id))), Ok(Query(query))) = (path, query) else {
+        return bad_request();
+    };
+    if !valid_raw_query_encoding(raw_query.as_deref()) {
+        return bad_request();
+    }
+    let Some(repository_path) = repository_path(owner, repository) else {
+        return bad_request();
+    };
+    let Some(run_id) = parse_run_id(&run_id) else {
+        return bad_request();
+    };
+    let Some(job_id) = parse_job_id(&job_id) else {
+        return bad_request();
+    };
+    let Some((search, cursor)) = validate_log_query(query) else {
+        return bad_request();
+    };
+    let context = request_context(&state, context);
+    let csrf = csrf.map(|Extension(csrf)| csrf);
+    let ShellMutationResolution::Valid(mutation) = shell_mutation(&context, csrf.as_deref()) else {
+        return internal_server_error();
+    };
+    let request = JobLogRequest {
+        cursor,
+        limit: LOG_PAGE_SIZE,
+        maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
+    };
+    let data = match state
+        .data
+        .job_log(&context, &repository_path, run_id, job_id, &request)
+        .await
+    {
+        Ok(Some(data)) => data,
+        // This endpoint is consumed only after the viewer has loaded the HTML
+        // page. A generic 404 on expired/changed authority preserves the same
+        // non-enumerating boundary without returning login HTML to `fetch`.
+        Ok(None) => return not_found(),
+        Err(error) => return data_error_response(error),
+    };
+    if !repository_matches(&data.repository, &repository_path)
+        || data.run.id != run_id
+        || data.job.id != job_id
+    {
+        error!("job snapshot data did not preserve its requested scope");
+        return internal_server_error();
+    }
+    let request_json = match model::job_log(
+        client_assets(),
+        // The snapshot is JSON rather than executable HTML, but using the same
+        // validated model builder keeps its shape and limits identical.
+        "snapshot".to_owned(),
+        &context,
+        mutation,
+        &search,
+        request.cursor.as_deref(),
+        data,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            error!(%error, "failed to assemble job snapshot");
+            return internal_server_error();
+        }
+    };
+    json_snapshot_response(request_json, &request_headers)
 }
 
 async fn artifact(
@@ -1833,6 +1944,43 @@ fn if_none_match_matches(value: &HeaderValue, etag: &str) -> bool {
                     .is_some_and(|candidate| candidate == etag)
         })
     })
+}
+
+fn json_snapshot_response(body: String, request_headers: &HeaderMap) -> Response<Body> {
+    let digest = Sha256::digest(body.as_bytes());
+    let mut etag = String::with_capacity(2 + "sha256-".len() + digest.len() * 2);
+    etag.push('"');
+    etag.push_str("sha256-");
+    for byte in digest {
+        write!(&mut etag, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    etag.push('"');
+
+    let not_modified = request_headers
+        .get(IF_NONE_MATCH)
+        .is_some_and(|value| if_none_match_matches(value, &etag));
+    let mut response = if not_modified {
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::NOT_MODIFIED;
+        response
+    } else {
+        Response::new(Body::from(body))
+    };
+    let headers = response.headers_mut();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static(PAGE_CACHE_CONTROL));
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    let Ok(etag) = HeaderValue::from_str(&etag) else {
+        return internal_server_error();
+    };
+    headers.insert(ETAG, etag);
+    response
 }
 
 fn artifact_response(download: super::data::ArtifactDownload) -> Response<Body> {
@@ -2951,6 +3099,7 @@ mod tests {
             previous_navigation_job_id: None,
             next_navigation_job_id: None,
             job,
+            log_visibility: CollectionVisibility::Full,
             lines: vec![
                 LogLine {
                     sequence: 38,
@@ -4720,6 +4869,100 @@ mod tests {
                 maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn job_snapshot_is_bounded_no_store_json_with_conditional_revalidation() {
+        let (app, renderer, data) = test_router(FakeOutcome::Found);
+        let uri = format!(
+            "/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}/snapshot?q=retry%20warning&cursor=log_20"
+        );
+        let response = get(&app, &uri).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(response.headers()[CACHE_CONTROL], PAGE_CACHE_CONTROL);
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        let etag = response.headers()[ETAG]
+            .to_str()
+            .expect("snapshot ETag")
+            .to_owned();
+        assert!(etag.starts_with("\"sha256-"));
+        let body = to_bytes(response.into_body(), 8 * 1_024 * 1_024)
+            .await
+            .expect("snapshot body");
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&body).expect("snapshot render request");
+        assert_eq!(snapshot["page"]["kind"], "job-log");
+        assert_eq!(snapshot["page"]["job"]["id"], JOB_ID);
+        assert_eq!(snapshot["page"]["search"]["query"], "retry warning");
+        assert_eq!(snapshot["page"]["pagination"]["currentCursor"], "log_20");
+        assert!(renderer.requests().is_empty());
+
+        let not_modified = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri(&uri)
+                    .header(IF_NONE_MATCH, &etag)
+                    .body(Body::empty())
+                    .expect("conditional snapshot request"),
+            )
+            .await
+            .expect("snapshot route");
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified.headers()[ETAG], etag);
+        assert_eq!(not_modified.headers()[CACHE_CONTROL], PAGE_CACHE_CONTROL);
+        assert!(
+            to_bytes(not_modified.into_body(), 1)
+                .await
+                .expect("empty 304 body")
+                .is_empty()
+        );
+        assert_eq!(data.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn anonymous_missing_and_denied_job_links_share_an_exact_sign_in_handoff() {
+        for outcome in [FakeOutcome::Missing, FakeOutcome::Unauthorized] {
+            let (app, renderer, data) = test_router(outcome);
+            let context = RequestContext::new(
+                TenantId::new("acme-production").expect("tenant"),
+                AuthorizationContext::anonymous(),
+                None,
+                Some(crate::app::github_auth::GITHUB_WEB_BEGIN_PATH.to_owned()),
+            )
+            .expect("anonymous sign-in context");
+            let app = app.layer(Extension(context));
+            let uri = format!(
+                "/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{JOB_ID}?q=retry%20warning"
+            );
+
+            let response = get(&app, &uri).await;
+            let page = renderer.page();
+
+            assert_page_headers(&response, &page);
+            assert_eq!(page["page"]["kind"], "deep-link-sign-in");
+            assert_eq!(
+                page["page"]["shell"]["signIn"]["action"],
+                crate::app::github_auth::GITHUB_WEB_BEGIN_PATH
+            );
+            assert_eq!(page["page"]["shell"]["signIn"]["returnPath"], uri);
+            assert_eq!(
+                data.calls(),
+                vec![RecordedCall::JobLog {
+                    repository: repository_path(),
+                    run_id: run_id(),
+                    job_id: job_id(),
+                    cursor: None,
+                    limit: LOG_PAGE_SIZE,
+                    maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
+                }]
+            );
+        }
     }
 
     #[tokio::test]

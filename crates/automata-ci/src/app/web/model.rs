@@ -453,10 +453,17 @@ struct JobLogPage {
     jobs: Vec<JobLogNavigationItem>,
     navigation_pagination: Pagination,
     job: JobLogJob,
+    log_visibility: &'static str,
     search: JobLogSearch,
     lines: Vec<JobLogLine>,
     notice: Option<&'static str>,
     pagination: JobLogPagination,
+}
+
+#[derive(Debug, Serialize)]
+struct DeepLinkSignInPage {
+    kind: &'static str,
+    shell: Shell,
 }
 
 #[derive(Debug, Serialize)]
@@ -2044,6 +2051,7 @@ pub(super) fn job_log(
             jobs: navigation,
             navigation_pagination,
             job: selected_job,
+            log_visibility: collection_visibility(data.log_visibility),
             search: JobLogSearch {
                 action: job_href.clone(),
                 query: query.to_owned(),
@@ -2052,6 +2060,32 @@ pub(super) fn job_log(
             lines,
             notice,
             pagination,
+        },
+    )
+}
+
+pub(super) fn deep_link_sign_in(
+    assets: ClientAssetManifest,
+    csp_nonce: String,
+    context: &RequestContext,
+    return_path: String,
+) -> Result<String, ModelError> {
+    if context.viewer().is_some() || context.sign_in_action().is_none() {
+        return Err(ModelError::InvalidData);
+    }
+    let return_path = LoginReturnPath::new(return_path).map_err(|_| ModelError::InvalidData)?;
+    serialize_request(
+        assets,
+        csp_nonce,
+        DeepLinkSignInPage {
+            kind: "deep-link-sign-in",
+            shell: global_shell(
+                context,
+                None,
+                REPOSITORIES_PATH,
+                &return_path,
+                "Sign in to view this run · Automata".to_owned(),
+            )?,
         },
     )
 }
@@ -2082,7 +2116,11 @@ fn valid_job_log_data(data: &JobLogData) -> bool {
             .is_some_and(|job| {
                 job.name == data.job.name && job.status == data.job.status && job.logs_available
             })
-        && data.job.logs_available
+        && (data.log_visibility == CollectionVisibility::Full) == data.job.logs_available
+        && (data.log_visibility == CollectionVisibility::Full
+            || (data.lines.is_empty()
+                && data.previous_cursor.is_none()
+                && data.next_cursor.is_none()))
         && data.lines.len() <= super::data::LOG_PAGE_SIZE
         && decoded_bytes.is_some_and(|bytes| bytes <= LOG_PAGE_DECODED_BYTES)
         && data.lines.iter().all(|line| {
@@ -2647,10 +2685,10 @@ fn status(value: DataStatus) -> Status {
 
 const fn job_log_notice(status: DataStatus) -> Option<&'static str> {
     match status {
-        DataStatus::Queued => Some("This job is queued. Refresh to check for logs."),
-        DataStatus::InProgress => {
-            Some("This job is still running. Refresh to load newly committed logs.")
-        }
+        DataStatus::Queued => Some("This job is queued. This page updates automatically."),
+        DataStatus::InProgress => Some(
+            "This job is still running. This page updates automatically as logs are committed.",
+        ),
         _ => None,
     }
 }
@@ -4605,11 +4643,13 @@ mod tests {
     fn job_log_notice_tracks_lifecycle_instead_of_pagination() {
         assert_eq!(
             job_log_notice(DataStatus::Queued),
-            Some("This job is queued. Refresh to check for logs.")
+            Some("This job is queued. This page updates automatically.")
         );
         assert_eq!(
             job_log_notice(DataStatus::InProgress),
-            Some("This job is still running. Refresh to load newly committed logs.")
+            Some(
+                "This job is still running. This page updates automatically as logs are committed."
+            )
         );
         for terminal in [
             DataStatus::Succeeded,

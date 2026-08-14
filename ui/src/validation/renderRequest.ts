@@ -1,5 +1,6 @@
 import type { RenderRequest } from "../models";
 import { validateJobLogPage } from "./jobLogModel";
+import { validateDeepLinkSignInPage } from "./deepLinkSignInModel";
 import { validateRepositoryDirectoryPage } from "./repositoryDirectoryModel";
 import { validateRepositorySettingsPage } from "./repositorySettingsModel";
 import { validateRepositorySecretsPage } from "./repositorySecretsModel";
@@ -93,6 +94,8 @@ function validatePage(value: unknown, path: string): void {
     validateRunDetailPage(page, path);
   } else if (kind === "job-log") {
     validateJobLogPage(page, path);
+  } else if (kind === "deep-link-sign-in") {
+    validateDeepLinkSignInPage(page, path);
   } else if (kind === "repository-settings") {
     validateRepositorySettingsPage(page, path);
   } else if (kind === "repository-secrets") {
