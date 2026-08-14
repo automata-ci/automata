@@ -16,7 +16,7 @@ use automata_ci_store::{
     ProtectedGithubServerServiceCredential, ProviderConnectionId, ProviderInstallationId,
     ProviderRepositoryId, ReconcileExpiredGithubServerServiceMint, RepositoryId, TenantScope,
 };
-use sqlx::{PgPool, migrate::Migrate as _};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::support::{TestClock, TestDatabase, TestResult, run_with_unmigrated_database};
@@ -342,15 +342,7 @@ async fn late_ready_result_is_retained_revoke_only_and_replays() -> TestResult {
 }
 
 async fn apply_authority_migrations(database: &TestDatabase) -> TestResult {
-    let mut connection = database.pool().acquire().await?;
-    connection
-        .ensure_migrations_table(MIGRATOR.table_name.as_ref())
-        .await?;
-    for migration in MIGRATOR.iter().filter(|migration| migration.version <= 32) {
-        connection
-            .apply(MIGRATOR.table_name.as_ref(), migration)
-            .await?;
-    }
+    MIGRATOR.run(database.pool()).await?;
     Ok(())
 }
 
