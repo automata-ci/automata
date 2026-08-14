@@ -38,10 +38,7 @@ mod receipt;
 mod reconciliation;
 mod reusable_workflow_admission;
 mod reusable_workflow_runtime;
-mod routing;
 mod runnable;
-mod runner_capability_admission;
-mod runner_control;
 mod runner_payload;
 mod runtime_authority;
 mod secret_custody;
@@ -337,14 +334,13 @@ pub use operation::{
     BeginLeaseRequest, BegunLeaseRequest, ClaimCommandError, ClaimRejection, ClaimedAttempt,
     CompleteLeaseRequest, LeaseOfferCompletionError, LeaseRequestCompletion, LeaseRequestKey,
     LeaseRequestKeyError, NoWorkLeaseRequest, REVOKED_LEASE_OFFER_FALLBACK_VERSION,
-    RevokedLeaseOfferFallback, RunnerClaimRepository, RunnerLeaseRequestRepository,
-    TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
+    RevokedLeaseOfferFallback, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
 };
 pub use outbox::{
     AcknowledgeRunnerCommands, CommandCursor, CommandReplayDisposition, CommandReplayLimit,
     CommandReplayPage, CommandSequence, CommandValueError, DurableRunnerCommand,
-    EnqueueRunnerCommand, MAX_COMMAND_REPLAY_BYTES, MAX_COMMAND_REPLAY_LIMIT, RunnerCommandOutbox,
-    RunnerCommandPayload,
+    EnqueueRunnerCommand, LeaseOfferCommandIdentity, MAX_COMMAND_REPLAY_BYTES,
+    MAX_COMMAND_REPLAY_LIMIT, RunnerCommandPayload,
 };
 pub use plan::{
     JobDependency, JobDependencyError, JobIrMetadata, JobIrMetadataError, WorkflowPlanRepository,
@@ -381,8 +377,8 @@ pub use publication::{
     UpdateRepositoryPublication, UpdateRepositoryPublicationOutcome,
 };
 pub use receipt::{
-    RunnerOperationKind, RunnerOperationReceipt, RunnerOperationReceiptRepository,
-    RunnerOperationRequest, RunnerOperationResponse, RunnerReceiptValueError,
+    RunnerOperationKind, RunnerOperationReceipt, RunnerOperationRequest, RunnerOperationResponse,
+    RunnerReceiptValueError,
 };
 pub use reconciliation::{RunReconciliation, RunReconciliationRepository, WorkflowRunStatus};
 pub use reusable_workflow_admission::{
@@ -401,25 +397,9 @@ pub use reusable_workflow_runtime::{
     ReusableWorkflowRuntimeStoreError, ReusableWorkflowRuntimeValueError,
     ReusableWorkflowSecretBindingEvidence,
 };
-pub use routing::{
-    RoutingSnapshotError, RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot,
-    RunnerSlotAvailability, RunnerSlotAvailabilityRepository,
-};
 pub use runnable::{
-    MAX_RUNNABLE_SCAN_LIMIT, RunnableAttempt, RunnableAttemptError, RunnableAttemptRepository,
-    RunnableCursorAdvance, RunnableQueueKey, RunnableScanError, RunnableScanLimit,
-    RunnableScanPage, RunnableScanRequest,
-};
-pub use runner_capability_admission::{
-    RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository, RunnerCapabilityReadiness,
-};
-pub use runner_control::{
-    CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-    CommitRunnerLogSegment, CommitRunnerTerminalResult, CurrentRunnerSession,
-    CurrentRunnerSessionRepository, LeaseOfferClaim, LeaseOfferClaimStatus,
-    LeaseOfferCommandIdentity, LeaseResponseAction, PublishLeaseOffer, PublishedLeaseOffer,
-    RawLogDisposition, RunnerControlTransactionRepository, RunnerControlValueError,
-    RunnerLeaseOfferRepository, RunnerLogAdmission, RunnerLogAdmissionRequest,
+    MAX_RUNNABLE_SCAN_LIMIT, RunnableAttempt, RunnableAttemptError, RunnableCursorAdvance,
+    RunnableQueueKey, RunnableScanError, RunnableScanLimit, RunnableScanPage, RunnableScanRequest,
 };
 pub use runner_payload::{RunnerPayloadTombstone, RunnerPayloadTombstoneReason};
 pub use runtime_authority::{
@@ -488,7 +468,7 @@ pub use secret_management::{
 };
 pub use session::{
     CloseRunnerSession, HeartbeatRunnerSession, OpenRunnerSession, ResumeRunnerSession,
-    RunnerSessionFence, RunnerSessionRepository, RunnerSessionSnapshot, RunnerSessionSnapshotError,
+    RunnerSessionFence, RunnerSessionSnapshot, RunnerSessionSnapshotError,
 };
 pub use snapshot::{AttemptSnapshot, AttemptSnapshotBuilder};
 pub use store_error::StoreError;

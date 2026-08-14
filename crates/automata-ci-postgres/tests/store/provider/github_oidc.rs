@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
 use automata_ci_core::{
     Architecture, ContextValue, FencingToken, JobContentReference, JobExecutionContext, JobId,
     JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobPermissionRequest,
@@ -60,9 +61,8 @@ use automata_ci_store::{
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
     RegisterProviderDeliveryWorkflowInventory, ReserveGithubOidcAuthority, RetainGithubOidcKey,
     ReusableSecretPermission, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
-    RunnerSessionRepository as _, StableRunnerSlot, StoreError, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowPlanRepository as _, WorkflowSnapshotId,
-    github_oidc_rs256_public_key_fingerprint,
+    StableRunnerSlot, StoreError, TenantScope, WorkflowAdmissionIdempotency,
+    WorkflowPlanRepository as _, WorkflowSnapshotId, github_oidc_rs256_public_key_fingerprint,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

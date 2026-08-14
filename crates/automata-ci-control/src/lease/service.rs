@@ -14,16 +14,17 @@ use automata_ci_core::{
 use automata_ci_protocol::{LeaseRequest, ProtocolVersion, RunnerSlotOrdinal};
 use automata_ci_store::{
     ClaimRejection, JobIrMetadata, LeaseRequestKey, NoWorkLeaseRequest, RoutingDocument,
-    RunnableAttempt, RunnableScanPage, RunnableScanRequest, RunnerRoutingSnapshot,
-    RunnerSessionFence, RunnerSlotAvailability, StableRunnerSlot, TryClaimAttempt, TryClaimOutcome,
-    TryClaimReceipt,
+    RunnableAttempt, RunnableScanPage, RunnableScanRequest, RunnerSessionFence, StableRunnerSlot,
+    TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
 };
 
 use super::{
     CapabilityDocument, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,
     LeasePollFailure, LeasePollInvariant, LeasePollObservation, LeasePollObserver,
     LeasePollRepository, RequestCorrelationError, RunnableAttemptGate,
-    RunnableAttemptGateDisposition, observer::NOOP_LEASE_POLL_OBSERVER,
+    RunnableAttemptGateDisposition,
+    observer::NOOP_LEASE_POLL_OBSERVER,
+    routing::{RunnerRoutingSnapshot, RunnerSlotAvailability},
 };
 
 /// Exact authenticated connection context established before request dispatch.

@@ -1,9 +1,7 @@
-use async_trait::async_trait;
 use automata_ci_core::{JobIrVersion, RunnerId, RunnerSessionId, UnixMillis};
 
 use crate::{
     CommandCursor, RoutingDocument, RunnerGeneration, RunnerProtocolVersion, SessionEpoch,
-    StoreError,
 };
 
 /// Immutable identity fence for one authenticated runner connection.
@@ -339,37 +337,4 @@ pub enum RunnerSessionSnapshotError {
     HeartbeatBeforeConnection,
     #[error("runner session disconnect precedes its last heartbeat")]
     DisconnectBeforeHeartbeat,
-}
-
-/// Durable session lifecycle port used after runner machine authentication.
-#[async_trait]
-pub trait RunnerSessionRepository: Send + Sync {
-    /// Atomically replaces any prior live connection and allocates a new epoch.
-    async fn open_session(
-        &self,
-        request: OpenRunnerSession,
-    ) -> Result<RunnerSessionSnapshot, StoreError>;
-
-    /// Ends the exact authenticated epoch; stale epochs cannot close a newer one.
-    async fn close_session(&self, request: CloseRunnerSession) -> Result<(), StoreError>;
-
-    /// Updates the exact live fence without allocating a new session epoch.
-    ///
-    /// Implementations keep the durable heartbeat monotonic when concurrent
-    /// trusted observations acquire the fence in reverse sampling order.
-    async fn heartbeat_session(
-        &self,
-        request: HeartbeatRunnerSession,
-    ) -> Result<RunnerSessionSnapshot, StoreError>;
-
-    /// Resumes an already-live durable epoch by authenticated runner identity.
-    async fn resume_session(
-        &self,
-        request: ResumeRunnerSession,
-    ) -> Result<RunnerSessionSnapshot, StoreError>;
-
-    async fn get_session(
-        &self,
-        fence: RunnerSessionFence,
-    ) -> Result<RunnerSessionSnapshot, StoreError>;
 }

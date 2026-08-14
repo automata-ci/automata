@@ -1,4 +1,23 @@
 use automata_ci_auth::{authorization::SecretExposureClass, human::TenantId};
+use automata_ci_control::{
+    lease::repository::{
+        RunnableAttemptRepository as _, RunnerClaimRepository as _,
+        RunnerLeaseRequestRepository as _,
+    },
+    runner_control::{
+        durable::{
+            CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
+            CommitRunnerLogSegment, CommitRunnerTerminalResult, CurrentRunnerSession,
+            CurrentRunnerSessionRepository as _, LeaseOfferClaimStatus, LeaseResponseAction,
+            PublishLeaseOffer, RawLogDisposition, RunnerControlTransactionRepository as _,
+            RunnerLeaseOfferRepository as _, RunnerLogAdmission, RunnerLogAdmissionRequest,
+        },
+        repository::{
+            RunnerCommandOutbox as _, RunnerOperationReceiptRepository as _,
+            RunnerSessionRepository as _,
+        },
+    },
+};
 use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, JobConclusion, JobLifecycle, Lease, LeaseGuard,
     LeaseId, LogSequence, LogStreamId, OperationId, Sha256Digest, UnixMillis,
@@ -7,20 +26,13 @@ use automata_ci_store::{
     AcknowledgeRunnerCommands, BeginLeaseRequest, CANCEL_JOB_COMMAND_KIND,
     CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor, CancellationReason,
     CancellationRepository as _, CloseRunnerSession, CommandCursor, CommandSequence,
-    CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-    CommitRunnerLogSegment, CommitRunnerTerminalResult, CompleteLeaseRequest,
-    ControlPlaneMaintenanceRepository as _, ControlPlaneMaintenanceRequest, CurrentRunnerSession,
-    CurrentRunnerSessionRepository as _, DocumentSchema, EnqueueRunnerCommand,
-    InternalAttemptRepository as _, JobIrMetadata, LeaseFailureLimit, LeaseOfferClaimStatus,
-    LeaseOfferCommandIdentity, LeaseRequestKey, LeaseResponseAction, MaintenanceBatchSize,
-    NoWorkLeaseRequest, ObjectKey, OpenRunnerSession, PublishLeaseOffer, QueuedAttempt,
-    RawLogDisposition, RenewLease, RequestCancellation, RunnableAttemptRepository as _,
-    RunnableScanLimit, RunnableScanRequest, RunnerClaimRepository as _, RunnerCommandOutbox as _,
-    RunnerCommandPayload, RunnerControlTransactionRepository as _, RunnerGeneration,
-    RunnerLeaseOfferRepository as _, RunnerLeaseRequestRepository as _, RunnerLogAdmission,
-    RunnerLogAdmissionRequest, RunnerOperationKind, RunnerOperationReceiptRepository as _,
-    RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion,
-    RunnerSessionRepository as _, StableRunnerSlot, StaleSessionTimeoutMillis, StoreError,
+    CompleteLeaseRequest, ControlPlaneMaintenanceRepository as _, ControlPlaneMaintenanceRequest,
+    DocumentSchema, EnqueueRunnerCommand, InternalAttemptRepository as _, JobIrMetadata,
+    LeaseFailureLimit, LeaseOfferCommandIdentity, LeaseRequestKey, MaintenanceBatchSize,
+    NoWorkLeaseRequest, ObjectKey, OpenRunnerSession, QueuedAttempt, RenewLease,
+    RequestCancellation, RunnableScanLimit, RunnableScanRequest, RunnerCommandPayload,
+    RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
+    RunnerProtocolVersion, StableRunnerSlot, StaleSessionTimeoutMillis, StoreError,
     TryClaimAttempt, TryClaimOutcome,
 };
 

@@ -2,6 +2,7 @@ use crate::github_manifest_fixture;
 
 use std::time::Duration;
 
+use automata_ci_control::runner_control::repository::RunnerCommandOutbox as _;
 use automata_ci_core::{
     Architecture, JobAuthorityProfile, JobId, JobIrVersion, JobLifecycle, OperatingSystem,
     OperationId, RunId, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
@@ -31,9 +32,9 @@ use automata_ci_store::{
     ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RegisterProviderDeliveryWorkflowInventory, RunnerCommandOutbox as _, RunnerCommandPayload,
-    RunnerDesiredState, RunnerGeneration, RunnerObservedState, RunnerOperationKind,
-    RunnerSessionFence, RunnerSessionState, SessionEpoch, TenantScope, WORKFLOW_ADMISSION_EPOCH,
+    RegisterProviderDeliveryWorkflowInventory, RunnerCommandPayload, RunnerDesiredState,
+    RunnerGeneration, RunnerObservedState, RunnerOperationKind, RunnerSessionFence,
+    RunnerSessionState, SessionEpoch, TenantScope, WORKFLOW_ADMISSION_EPOCH,
     WorkflowAdmissionIdempotency, WorkflowRunStatus, WorkflowSnapshotId,
 };
 use uuid::Uuid;

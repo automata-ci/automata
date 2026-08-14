@@ -23,17 +23,21 @@ use automata_ci_protocol::{
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_store::{
     CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload,
-    CommandSequence as StoreCommandSequence, CurrentRunnerSession, CurrentRunnerSessionRepository,
-    DocumentSchema, DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata,
-    LeaseOfferClaim as StoreLeaseOfferClaim, LeaseOfferClaimStatus as StoreLeaseOfferClaimStatus,
-    LeaseOfferCommandIdentity as StoreLeaseOfferCommandIdentity, PublishLeaseOffer,
-    PublishedLeaseOffer, RunnerCommandPayload, RunnerGeneration, RunnerLeaseOfferRepository,
-    RunnerOperationKind, RunnerOperationRequest, RunnerProtocolVersion, RunnerSessionFence,
-    StableRunnerSlot,
+    CommandSequence as StoreCommandSequence, DocumentSchema, DurableRunnerCommand,
+    EnqueueRunnerCommand, JobIrMetadata,
+    LeaseOfferCommandIdentity as StoreLeaseOfferCommandIdentity, RunnerCommandPayload,
+    RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerProtocolVersion,
+    RunnerSessionFence, StableRunnerSlot,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
+
+use super::durable::{
+    CurrentRunnerSession, CurrentRunnerSessionRepository, LeaseOfferClaim as StoreLeaseOfferClaim,
+    LeaseOfferClaimStatus as StoreLeaseOfferClaimStatus, PublishLeaseOffer, PublishedLeaseOffer,
+    RunnerLeaseOfferRepository,
+};
 
 /// Immutable media type used for standalone protobuf `JobIR` objects.
 pub const JOB_IR_PROTOBUF_MEDIA_TYPE: &str = "application/vnd.automata.job-ir.protobuf";

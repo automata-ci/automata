@@ -3,20 +3,55 @@ use std::{
     num::{NonZeroU16, NonZeroU64},
 };
 
-use async_trait::async_trait;
 use automata_ci_core::{OperationId, Sha256Digest, UnixMillis};
 use thiserror::Error;
 use zeroize::Zeroize as _;
 
-use crate::{
-    DocumentSchema, RunnerOperationKind, RunnerSessionFence, StoreError, value::sha256_digest,
-};
+use crate::{DocumentSchema, RunnerOperationKind, RunnerSessionFence, value::sha256_digest};
 
 const MAX_COMMAND_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum commands returned by one bounded outbox replay.
 pub const MAX_COMMAND_REPLAY_LIMIT: u16 = 256;
 /// Maximum aggregate command payload bytes returned by one outbox replay.
 pub const MAX_COMMAND_REPLAY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Exact server-command identity used to resolve a replay to one typed offer publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LeaseOfferCommandIdentity {
+    session: RunnerSessionFence,
+    operation_id: OperationId,
+    sequence: CommandSequence,
+}
+
+impl LeaseOfferCommandIdentity {
+    #[must_use]
+    pub const fn new(
+        session: RunnerSessionFence,
+        operation_id: OperationId,
+        sequence: CommandSequence,
+    ) -> Self {
+        Self {
+            session,
+            operation_id,
+            sequence,
+        }
+    }
+
+    #[must_use]
+    pub const fn session(self) -> RunnerSessionFence {
+        self.session
+    }
+
+    #[must_use]
+    pub const fn operation_id(self) -> OperationId {
+        self.operation_id
+    }
+
+    #[must_use]
+    pub const fn sequence(self) -> CommandSequence {
+        self.sequence
+    }
+}
 
 /// Whether one fixed-total replay transaction proved that no later candidate exists.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -365,27 +400,4 @@ pub enum CommandValueError {
     InvalidPayloadSize { size: usize, maximum: usize },
     #[error("server command replay limit must be in 1..={maximum}")]
     InvalidReplayLimit { maximum: u16 },
-}
-
-/// Durable server-command delivery and cumulative acknowledgement port.
-#[async_trait]
-pub trait RunnerCommandOutbox: Send + Sync {
-    async fn enqueue_command(
-        &self,
-        command: EnqueueRunnerCommand,
-    ) -> Result<DurableRunnerCommand, StoreError>;
-
-    async fn replay_commands(
-        &self,
-        session: RunnerSessionFence,
-        after: CommandCursor,
-        limit: CommandReplayLimit,
-    ) -> Result<CommandReplayPage, StoreError>;
-
-    /// Advances the cumulative cursor. Duplicate/older cursors are idempotent;
-    /// a cursor beyond the largest allocated sequence is rejected.
-    async fn acknowledge_commands(
-        &self,
-        acknowledgement: AcknowledgeRunnerCommands,
-    ) -> Result<CommandCursor, StoreError>;
 }

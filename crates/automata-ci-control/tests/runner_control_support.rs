@@ -16,6 +16,7 @@ use automata_ci_blob::{
 };
 use automata_ci_control::lease::{
     AuthenticatedRunnerSession, LeaseClock, LeasePollError, LeasePollOutcome,
+    repository::RunnerLeaseRequestRepository,
 };
 use automata_ci_control::runner_control::{
     AuthorizedRunnerRegistration, ControlIdGenerator, ControlPortError, JobIrObjectReader,
@@ -23,6 +24,12 @@ use automata_ci_control::runner_control::{
     LeaseOfferPublishOutcome, LeaseOfferReplayResolution, LeasePoller,
     RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
     RuntimeAuthorityIssuer,
+    durable::{
+        CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
+        CommitRunnerLogSegment, CommitRunnerTerminalResult, LeaseResponseAction, RawLogDisposition,
+        RunnerControlTransactionRepository, RunnerLogAdmission, RunnerLogAdmissionRequest,
+    },
+    repository::{RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository},
 };
 use automata_ci_core::{
     AttemptId, JobId, JobIrVersion, Lease, OperationId, RunId, RunnerId, RunnerSessionId,
@@ -34,15 +41,11 @@ use automata_ci_protocol::{
 use automata_ci_store::{
     AcknowledgeRunnerCommands, BeginLeaseRequest, BegunLeaseRequest, CommandCursor,
     CommandReplayDisposition, CommandReplayLimit, CommandReplayPage, CommandSequence,
-    CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-    CommitRunnerLogSegment, CommitRunnerTerminalResult, CompleteLeaseRequest, DurableRunnerCommand,
-    EnqueueRunnerCommand, HeartbeatRunnerSession, JobIrMetadata, LeaseOfferCommandIdentity,
-    LeaseRequestCompletion, LeaseResponseAction, OpenRunnerSession, RawLogDisposition, RenewLease,
-    ResumeRunnerSession, RunnerCommandOutbox, RunnerControlTransactionRepository,
-    RunnerLeaseRequestRepository, RunnerLogAdmission, RunnerLogAdmissionRequest,
-    RunnerOperationReceipt, RunnerOperationReceiptRepository, RunnerOperationRequest,
-    RunnerOperationResponse, RunnerSessionFence, RunnerSessionRepository, RunnerSessionSnapshot,
-    StableRunnerSlot, StoreError,
+    CompleteLeaseRequest, DurableRunnerCommand, EnqueueRunnerCommand, HeartbeatRunnerSession,
+    JobIrMetadata, LeaseOfferCommandIdentity, LeaseRequestCompletion, OpenRunnerSession,
+    RenewLease, ResumeRunnerSession, RunnerOperationReceipt, RunnerOperationRequest,
+    RunnerOperationResponse, RunnerSessionFence, RunnerSessionSnapshot, StableRunnerSlot,
+    StoreError,
 };
 
 #[derive(Debug, Default)]

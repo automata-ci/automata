@@ -2,6 +2,7 @@ use crate::github_manifest_fixture;
 
 use std::collections::BTreeMap;
 
+use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
 use automata_ci_core::{
     Architecture, CompiledValueTemplate, ContextValue, JobAuthorityProfile, JobConclusion,
     JobContentReference, JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope,
@@ -50,9 +51,8 @@ use automata_ci_store::{
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, PublishLogicalJobActivation, ReusableSecretPermission,
-    RoutingDocument, RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence,
-    RunnerSessionRepository as _, StoreError, TenantScope, WorkflowAdmissionIdempotency,
-    WorkflowSnapshotId,
+    RoutingDocument, RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, StoreError,
+    TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

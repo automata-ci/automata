@@ -7,7 +7,11 @@ use automata_ci_auth::{
     },
     time::{Clock, UnixTimestamp},
 };
-use automata_ci_control::runner_control::{DesiredRunnerState, RunnerRegistrationAuthorizer as _};
+use automata_ci_control::runner_control::{
+    DesiredRunnerState, RunnerRegistrationAuthorizer as _,
+    durable::{CurrentRunnerSession, CurrentRunnerSessionRepository as _},
+    repository::RunnerSessionRepository as _,
+};
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
@@ -18,10 +22,7 @@ use automata_ci_runner_auth::{
     DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits, RunnerMachineDirectory,
     RunnerMachineDirectoryError,
 };
-use automata_ci_store::{
-    CommandCursor, CurrentRunnerSession, CurrentRunnerSessionRepository as _,
-    HeartbeatRunnerSession, RunnerGeneration, RunnerSessionRepository as _, StoreError,
-};
+use automata_ci_store::{CommandCursor, HeartbeatRunnerSession, RunnerGeneration, StoreError};
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;

@@ -2,6 +2,16 @@ use crate::support::{
     SeedData, TestDatabase, TestResult, run_with_database, runner_capability_document,
     seed_control_plane,
 };
+use automata_ci_control::{
+    lease::repository::{
+        RunnableAttemptRepository as _, RunnerClaimRepository as _,
+        RunnerLeaseRequestRepository as _,
+    },
+    runner_control::{
+        durable::{CommitCommandAcknowledgement, RunnerControlTransactionRepository as _},
+        repository::{RunnerCommandOutbox as _, RunnerSessionRepository as _},
+    },
+};
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, LeaseGuard, LeaseId, OperationId, QueuePolicy,
     RunId, RunnerRequirements, Sha256Digest, UnixMillis, WorkflowId,
@@ -10,13 +20,10 @@ use automata_ci_store::{
     AcknowledgeRunnerCommands, AdmissionObject, AdmissionRepository, AdmitWorkflowRun,
     AdmittedWorkflowJob, BeginLeaseRequest, CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA,
     CancelJobCommandPayload, CancellationRepository as _, CommandCursor, CommandReplayLimit,
-    CommitCommandAcknowledgement, DocumentSchema, HumanRunScope, HumanWorkflowReadRepository as _,
-    LeaseRequestKey, ObjectKey, OpenRunnerSession, RepositoryId, RoutingDocument,
-    RunnableAttemptRepository as _, RunnableScanLimit, RunnableScanRequest,
-    RunnerClaimRepository as _, RunnerCommandOutbox as _, RunnerControlTransactionRepository as _,
-    RunnerGeneration, RunnerLeaseRequestRepository as _, RunnerOperationKind,
-    RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion,
-    RunnerSessionRepository as _, StableRunnerSlot, StoreError, TenantScope, TryClaimAttempt,
+    DocumentSchema, HumanRunScope, HumanWorkflowReadRepository as _, LeaseRequestKey, ObjectKey,
+    OpenRunnerSession, RepositoryId, RoutingDocument, RunnableScanLimit, RunnableScanRequest,
+    RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
+    RunnerProtocolVersion, StableRunnerSlot, StoreError, TenantScope, TryClaimAttempt,
     TryClaimOutcome, WorkflowAdmissionIdempotency, WorkflowAdmissionRepository as _,
     WorkflowConcurrency, WorkflowSnapshotId,
 };

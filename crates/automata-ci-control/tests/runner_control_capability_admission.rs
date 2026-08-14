@@ -1,4 +1,4 @@
-use automata_ci_store::{
+use automata_ci_control::runner_control::capability_admission::{
     RunnerCapabilityAdmissionError, RunnerCapabilityAdmissionRepository, RunnerCapabilityReadiness,
 };
 

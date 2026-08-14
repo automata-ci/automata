@@ -5,6 +5,11 @@ use automata_ci_control::lease::{
     AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig,
     LeasePollObservation, LeasePollObserver, LeasePollOutcome, LeasePollRepository,
     LeasePollService, LeaseTimeToLive, RunnableAttemptGate, RunnableAttemptGateDisposition,
+    repository::{RunnableAttemptRepository, RunnerClaimRepository},
+    routing::{
+        RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSlotAvailability,
+        RunnerSlotAvailabilityRepository,
+    },
 };
 use automata_ci_control::scheduling::DeterministicScheduler;
 use automata_ci_core::{
@@ -17,10 +22,8 @@ use automata_ci_core::{
 use automata_ci_protocol::{LeaseRequest, MessageHeader, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal};
 use automata_ci_store::{
     AttemptAssignment, JobIrMetadata, NoWorkLeaseRequest, ObjectKey, RoutingDocument, RoutingLabel,
-    RunnableAttempt, RunnableAttemptRepository, RunnableScanLimit, RunnableScanPage,
-    RunnableScanRequest, RunnerClaimRepository, RunnerGeneration, RunnerGroupId,
-    RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSessionFence, RunnerSlotAvailability,
-    RunnerSlotAvailabilityRepository, RunnerSlotCount, SessionEpoch, StableRunnerSlot, StoreError,
+    RunnableAttempt, RunnableScanLimit, RunnableScanPage, RunnableScanRequest, RunnerGeneration,
+    RunnerSessionFence, RunnerSlotCount, SessionEpoch, StableRunnerSlot, StoreError,
     TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
 };
 

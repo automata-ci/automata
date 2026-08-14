@@ -1,11 +1,11 @@
 use std::{fmt, time::SystemTime};
 
+use super::{
+    repository::{RunnableAttemptRepository, RunnerClaimRepository},
+    routing::{RunnerRoutingRepository, RunnerSlotAvailabilityRepository},
+};
 use async_trait::async_trait;
 use automata_ci_core::{AttemptId, LeaseId, UnixMillis};
-use automata_ci_store::{
-    RunnableAttemptRepository, RunnerClaimRepository, RunnerRoutingRepository,
-    RunnerSlotAvailabilityRepository,
-};
 
 /// Composite, object-safe durable port used by the G1 lease-poll service.
 ///
