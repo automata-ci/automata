@@ -175,6 +175,14 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             fence,
         )
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
+        let desired_updated_at = UnixMillis::new(claimed_at.get().saturating_sub(1));
+        let (started_at, completed_at) = match template.desired {
+            GithubCheckDesiredProjection::Queued => (None, None),
+            GithubCheckDesiredProjection::InProgress => (Some(desired_updated_at), None),
+            GithubCheckDesiredProjection::Terminal(_) => {
+                (Some(desired_updated_at), Some(desired_updated_at))
+            }
+        };
         ClaimedGithubCheckProjection::from_durable_parts(
             claim,
             template.action,
@@ -187,6 +195,10 @@ impl GithubCheckProjectionOutbox for FakeOutbox {
             template.revision,
             template.suite_id,
             template.run_id,
+            UnixMillis::new(claimed_at.get().saturating_sub(2)),
+            desired_updated_at,
+            started_at,
+            completed_at,
             claimed_at,
             expires_at,
         )

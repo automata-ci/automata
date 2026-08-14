@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import type { JobLogLineModel, JobLogPageModel } from "../models";
 import { ActionsLayout } from "../components/ActionsLayout";
@@ -15,6 +15,7 @@ import {
 } from "../components/textInputConstraints";
 import { durationCopy, startTimeCopy } from "../presentation/runPresentation";
 import { encodeQueryComponent } from "../queryEncoding";
+import { parseRenderRequest } from "../serialization";
 import { RENDER_REQUEST_LIMITS } from "../validation/limits";
 
 export interface JobLogPageProps {
@@ -26,107 +27,203 @@ const LOG_OUTPUT_ID = "job-log-output";
 const LOG_RESULT_COUNT_ID = "job-log-result-count";
 
 export function JobLogPage({ model, shellUtility }: JobLogPageProps) {
+  const [liveModel, setLiveModel] = useState(model);
   const [query, setQuery] = useState(model.search.query);
   const normalizedQuery = normalizeQuery(query);
   const visibleLines = useMemo(
-    () => filterLogLines(model.lines, normalizedQuery),
-    [model.lines, normalizedQuery],
+    () => filterLogLines(liveModel.lines, normalizedQuery),
+    [liveModel.lines, normalizedQuery],
   );
   const resultLabel =
     normalizedQuery.length === 0
-      ? model.pagination.label
+      ? liveModel.pagination.label
       : matchingLineCount(visibleLines.length);
   const canRefresh =
-    model.job.status.tone === "queued" || model.job.status.tone === "running";
+    liveModel.job.status.tone === "queued" ||
+    liveModel.job.status.tone === "running";
   const navigationQuery = isValidLogQuery(query)
     ? query.trim()
-    : model.search.query;
+    : liveModel.search.query;
   const refreshHref = logQueryHref(
-    model.search.action,
+    liveModel.search.action,
     navigationQuery,
-    model.pagination.currentCursor,
+    liveModel.pagination.currentCursor,
   );
-  const clearHref = logQueryHref(
-    model.search.clearHref,
-    "",
+  useEffect(() => {
+    if (!canRefresh) {
+      return undefined;
+    }
+    const controller = new AbortController();
+    let timeout: number | undefined;
+    let etag: string | null = null;
+    let delay = 2_000;
+    const snapshotHref = logQueryHref(
+      `${model.job.href}/snapshot`,
+      model.search.query,
+      model.pagination.currentCursor,
+    );
+    const schedule = (nextDelay = delay) => {
+      window.clearTimeout(timeout);
+      if (document.visibilityState === "visible") {
+        timeout = window.setTimeout(async () => {
+          try {
+            const headers = new Headers();
+            headers.set("Accept", "application/json");
+            if (etag !== null) {
+              headers.set("If-None-Match", etag);
+            }
+            const response = await fetch(snapshotHref, {
+              credentials: "same-origin",
+              headers,
+              signal: controller.signal,
+            });
+            if (response.status === 304) {
+              delay = 2_000;
+              schedule();
+              return;
+            }
+            if (!response.ok) {
+              throw new Error(`job snapshot returned ${response.status}`);
+            }
+            const next = parseRenderRequest(await response.text());
+            if (
+              next.page.kind !== "job-log" ||
+              next.page.job.id !== model.job.id ||
+              next.page.job.href !== model.job.href ||
+              next.page.run.href !== model.run.href
+            ) {
+              throw new Error("job snapshot changed request scope");
+            }
+            etag = response.headers.get("ETag");
+            delay = 2_000;
+            setLiveModel(next.page);
+            if (
+              next.page.job.status.tone === "queued" ||
+              next.page.job.status.tone === "running"
+            ) {
+              schedule();
+            }
+          } catch (error) {
+            if (controller.signal.aborted) {
+              return;
+            }
+            delay = Math.min(delay * 2, 30_000);
+            schedule(delay);
+          }
+        }, nextDelay);
+      }
+    };
+    const visibilityChanged = () => {
+      window.clearTimeout(timeout);
+      if (document.visibilityState === "visible") {
+        schedule(0);
+      }
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    schedule();
+    return () => {
+      document.removeEventListener("visibilitychange", visibilityChanged);
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [
+    canRefresh,
+    model.job.href,
+    model.job.id,
     model.pagination.currentCursor,
+    model.run.href,
+    model.search.query,
+  ]);
+  const clearHref = logQueryHref(
+    liveModel.search.clearHref,
+    "",
+    liveModel.pagination.currentCursor,
   );
   const pagination = useMemo(
     () => ({
-      label: model.pagination.label,
+      label: liveModel.pagination.label,
       previousHref: cursorHref(
-        model.search.action,
+        liveModel.search.action,
         navigationQuery,
-        model.pagination.previousCursor,
+        liveModel.pagination.previousCursor,
       ),
       nextHref: cursorHref(
-        model.search.action,
+        liveModel.search.action,
         navigationQuery,
-        model.pagination.nextCursor,
+        liveModel.pagination.nextCursor,
       ),
     }),
-    [model.pagination, model.search.action, navigationQuery],
+    [liveModel.pagination, liveModel.search.action, navigationQuery],
   );
 
   return (
     <Shell
-      shell={model.shell}
-      repository={model.repository}
+      shell={liveModel.shell}
+      repository={liveModel.repository}
       utility={shellUtility}
     >
       <main className="layout-wide page">
         <ActionsLayout
           navigation={
             <RunNavigation
-              jobs={model.jobs}
+              jobs={liveModel.jobs}
               jobsVisibility="full"
-              pagination={model.navigationPagination}
-              selectedJobId={model.job.id}
-              summaryHref={model.run.href}
+              pagination={liveModel.navigationPagination}
+              selectedJobId={liveModel.job.id}
+              summaryHref={liveModel.run.href}
             />
           }
         >
           <Breadcrumbs
             items={[
-              { href: model.repository.runsHref, label: "Actions" },
-              { href: model.run.workflowHref, label: model.run.workflowName },
-              { href: model.run.href, label: `Run #${model.run.number}` },
-              { href: null, label: model.job.name },
+              { href: liveModel.repository.runsHref, label: "Actions" },
+              {
+                href: liveModel.run.workflowHref,
+                label: liveModel.run.workflowName,
+              },
+              {
+                href: liveModel.run.href,
+                label: `Run #${liveModel.run.number}`,
+              },
+              { href: null, label: liveModel.job.name },
             ]}
           />
 
           <header className="page-heading page-heading--run log-page-heading">
             <div>
               <div className="heading-status">
-                <StatusBadge status={model.job.status} />
-                <span>Run attempt {model.run.attempt}</span>
-                <span>Job attempt {model.job.attempt}</span>
-                {model.job.startedAt === null ? (
-                  <span>{startTimeCopy(model.job.status)}</span>
+                <StatusBadge status={liveModel.job.status} />
+                <span>Run attempt {liveModel.run.attempt}</span>
+                <span>Job attempt {liveModel.job.attempt}</span>
+                {liveModel.job.startedAt === null ? (
+                  <span>{startTimeCopy(liveModel.job.status)}</span>
                 ) : (
                   <span>
                     Started{" "}
-                    <time dateTime={model.job.startedAt.iso}>
-                      {model.job.startedAt.label}
+                    <time dateTime={liveModel.job.startedAt.iso}>
+                      {liveModel.job.startedAt.label}
                     </time>
                   </span>
                 )}
-                {model.job.status.tone === "queued" &&
-                model.job.durationLabel === null ? null : (
+                {liveModel.job.status.tone === "queued" &&
+                liveModel.job.durationLabel === null ? null : (
                   <span>
-                    {durationCopy(model.job.status, model.job.durationLabel)}
+                    {durationCopy(
+                      liveModel.job.status,
+                      liveModel.job.durationLabel,
+                    )}
                   </span>
                 )}
               </div>
-              <h1>{model.job.name}</h1>
+              <h1>{liveModel.job.name}</h1>
               <p>
-                <a href={model.run.href}>
-                  Run #{model.run.number}: {model.run.name}
+                <a href={liveModel.run.href}>
+                  Run #{liveModel.run.number}: {liveModel.run.name}
                 </a>
-                {model.job.runnerLabel === null ? null : (
+                {liveModel.job.runnerLabel === null ? null : (
                   <>
                     <MetadataSeparator />
-                    {model.job.runnerLabel}
+                    {liveModel.job.runnerLabel}
                   </>
                 )}
               </p>
@@ -149,86 +246,96 @@ export function JobLogPage({ model, shellUtility }: JobLogPageProps) {
                   {resultLabel}
                 </span>
               </div>
-              <form
-                action={model.search.action}
-                aria-label="Search job logs"
-                className="log-search-form"
-                method="get"
-                role="search"
-              >
-                {model.pagination.currentCursor === null ? null : (
-                  <input
-                    name="cursor"
-                    type="hidden"
-                    value={model.pagination.currentCursor}
-                  />
-                )}
-                <div className="filter-search log-search">
-                  <Icon name="search" />
-                  <label className="sr-only" htmlFor="log-search">
-                    Search job logs
-                  </label>
-                  <input
-                    autoCapitalize="none"
-                    autoComplete="off"
-                    autoCorrect="off"
-                    aria-controls={LOG_OUTPUT_ID}
-                    aria-describedby={LOG_RESULT_COUNT_ID}
-                    id="log-search"
-                    maxLength={RENDER_REQUEST_LIMITS.shortTextLength}
-                    name="q"
-                    onChange={(event) => setQuery(event.currentTarget.value)}
-                    onInput={(event) =>
-                      enforceLogQueryValidity(event.currentTarget)
-                    }
-                    placeholder="Search logs"
-                    spellCheck={false}
-                    type="search"
-                    value={query}
-                  />
-                </div>
-                <button className="button" type="submit">
-                  Search
-                </button>
-                {query.trim().length === 0 ? null : (
-                  <a className="text-link" href={clearHref}>
-                    Clear search
-                  </a>
-                )}
-              </form>
+              {liveModel.logVisibility === "full" ? (
+                <form
+                  action={liveModel.search.action}
+                  aria-label="Search job logs"
+                  className="log-search-form"
+                  method="get"
+                  role="search"
+                >
+                  {liveModel.pagination.currentCursor === null ? null : (
+                    <input
+                      name="cursor"
+                      type="hidden"
+                      value={liveModel.pagination.currentCursor}
+                    />
+                  )}
+                  <div className="filter-search log-search">
+                    <Icon name="search" />
+                    <label className="sr-only" htmlFor="log-search">
+                      Search job logs
+                    </label>
+                    <input
+                      autoCapitalize="none"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      aria-controls={LOG_OUTPUT_ID}
+                      aria-describedby={LOG_RESULT_COUNT_ID}
+                      id="log-search"
+                      maxLength={RENDER_REQUEST_LIMITS.shortTextLength}
+                      name="q"
+                      onChange={(event) => setQuery(event.currentTarget.value)}
+                      onInput={(event) =>
+                        enforceLogQueryValidity(event.currentTarget)
+                      }
+                      placeholder="Search logs"
+                      spellCheck={false}
+                      type="search"
+                      value={query}
+                    />
+                  </div>
+                  <button className="button" type="submit">
+                    Search
+                  </button>
+                  {query.trim().length === 0 ? null : (
+                    <a className="text-link" href={clearHref}>
+                      Clear search
+                    </a>
+                  )}
+                </form>
+              ) : null}
             </div>
 
-            {model.notice === null ? null : (
+            {liveModel.notice === null ? null : (
               <p className="log-notice" role="status">
-                {model.notice}
+                {liveModel.notice}
               </p>
             )}
 
-            <div
-              aria-label={`${model.job.name} output`}
-              className="log-output"
-              id={LOG_OUTPUT_ID}
-              role="region"
-              tabIndex={0}
-            >
-              {visibleLines.length === 0 ? (
-                <p className="log-output__empty">
-                  {normalizedQuery.length === 0
-                    ? "No log lines are available on this page."
-                    : "No log lines on this page match your search."}
-                </p>
-              ) : (
-                visibleLines.map((line) => (
-                  <LogLine key={line.id} line={line} />
-                ))
-              )}
-            </div>
+            {liveModel.logVisibility === "restricted" ? (
+              <p className="log-output__empty" role="status">
+                Logs are unavailable or you do not have permission to view them.
+              </p>
+            ) : (
+              <div
+                aria-label={`${liveModel.job.name} output`}
+                className="log-output"
+                id={LOG_OUTPUT_ID}
+                role="region"
+                tabIndex={0}
+              >
+                {visibleLines.length === 0 ? (
+                  <p className="log-output__empty">
+                    {normalizedQuery.length === 0
+                      ? "No log lines are available on this page."
+                      : "No log lines on this page match your search."}
+                  </p>
+                ) : (
+                  visibleLines.map((line) => (
+                    <LogLine key={line.id} line={line} />
+                  ))
+                )}
+              </div>
+            )}
 
-            <Pagination
-              label="Job log pages"
-              pagination={pagination}
-              variant="log"
-            />
+            {liveModel.logVisibility === "full" ? (
+              <Pagination
+                label="Job log pages"
+                pagination={pagination}
+                variant="log"
+              />
+            ) : null}
           </section>
         </ActionsLayout>
       </main>

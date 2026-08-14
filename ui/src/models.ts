@@ -268,10 +268,16 @@ export interface JobLogPageModel {
   readonly jobs: readonly JobLogNavigationItemModel[];
   readonly navigationPagination: PaginationModel;
   readonly job: JobLogJobModel;
+  readonly logVisibility: ResultCollectionVisibility;
   readonly search: JobLogSearchModel;
   readonly lines: readonly JobLogLineModel[];
   readonly notice: string | null;
   readonly pagination: JobLogPaginationModel;
+}
+
+export interface DeepLinkSignInPageModel {
+  readonly kind: "deep-link-sign-in";
+  readonly shell: ShellModel;
 }
 
 export type PublicationAudience = "private" | "authenticated" | "public";
@@ -623,6 +629,7 @@ export type PageModel =
   | RunListPageModel
   | RunDetailPageModel
   | JobLogPageModel
+  | DeepLinkSignInPageModel
   | RepositorySettingsPageModel
   | RepositorySecretsPageModel
   | UserListPageModel

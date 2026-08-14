@@ -345,6 +345,7 @@ export function previewJobLog(
       startedAt: selectedJob.startedAt,
       durationLabel: selectedJob.durationLabel,
     },
+    logVisibility: "full",
     search: {
       action: jobHref,
       query,
@@ -516,7 +517,7 @@ function logNotice(job: JobModel, lineCount: number): string {
     return "No log output was recorded for this job.";
   }
   return job.status.tone === "running"
-    ? "This job is still running. Refresh to load newly committed log entries."
+    ? "This job is still running. This page updates automatically as logs are committed."
     : "Log entries are shown as one ordered job-wide stream.";
 }
 

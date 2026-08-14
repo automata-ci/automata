@@ -25,7 +25,7 @@ pub use checks::{
     GithubCheckModelError, GithubCheckName, GithubCheckRetryEvidence, GithubCheckRun,
     GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
     GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuite,
-    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubChecksError,
+    GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
     GithubObservedCheckConclusion,
 };
 pub use config::{

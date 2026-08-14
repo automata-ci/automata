@@ -251,6 +251,10 @@ fn prepare_projection(
         1,
         Some(GithubCheckSuiteId::new(19).expect("suite")),
         None,
+        UnixMillis::new(claimed_at.saturating_sub(2)),
+        UnixMillis::new(claimed_at.saturating_sub(1)),
+        None,
+        None,
         UnixMillis::new(claimed_at),
         UnixMillis::new(expires_at),
     )
@@ -333,11 +337,19 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
         2,
         Some(suite),
         Some(run),
+        UnixMillis::new(50),
+        UnixMillis::new(75),
+        Some(UnixMillis::new(75)),
+        None,
         UnixMillis::new(100),
         UnixMillis::new(200),
     )
     .expect("complete durable claim");
     assert_eq!(claimed.claimed_at(), UnixMillis::new(100));
+    assert_eq!(claimed.created_at(), UnixMillis::new(50));
+    assert_eq!(claimed.desired_updated_at(), UnixMillis::new(75));
+    assert_eq!(claimed.started_at(), Some(UnixMillis::new(75)));
+    assert_eq!(claimed.completed_at(), None);
     assert_eq!(claimed.expires_at(), UnixMillis::new(200));
     assert_eq!(claimed.checks_authority(), &authority);
 
@@ -353,6 +365,10 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
             GithubCheckDesiredProjection::InProgress,
             2,
             Some(suite),
+            None,
+            UnixMillis::new(50),
+            UnixMillis::new(75),
+            Some(UnixMillis::new(75)),
             None,
             UnixMillis::new(100),
             UnixMillis::new(200),
@@ -370,6 +386,10 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
             external_id,
             GithubCheckDesiredProjection::Queued,
             (i64::MAX as u64) + 1,
+            None,
+            None,
+            UnixMillis::new(50),
+            UnixMillis::new(75),
             None,
             None,
             UnixMillis::new(100),
@@ -404,6 +424,10 @@ fn claimed_projection_rejects_cross_tenant_authority_selector() {
             claimed.desired_revision(),
             claimed.suite_id(),
             claimed.run_id(),
+            claimed.created_at(),
+            claimed.desired_updated_at(),
+            claimed.started_at(),
+            claimed.completed_at(),
             claimed.claimed_at(),
             claimed.expires_at(),
         ),

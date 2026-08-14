@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { PageModel } from "./models";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { JobLogPage } from "./pages/JobLogPage";
+import { DeepLinkSignInPage } from "./pages/DeepLinkSignInPage";
 import { RepositoryDirectoryPage } from "./pages/RepositoryDirectoryPage";
 import { RepositorySettingsPage } from "./pages/RepositorySettingsPage";
 import { RepositorySecretsPage } from "./pages/RepositorySecretsPage";
@@ -33,6 +34,8 @@ export function App({ page, shellUtility }: AppProps) {
       return <RunDetailPage model={page} shellUtility={utility} />;
     case "job-log":
       return <JobLogPage model={page} shellUtility={utility} />;
+    case "deep-link-sign-in":
+      return <DeepLinkSignInPage model={page} shellUtility={utility} />;
     case "repository-settings":
       return <RepositorySettingsPage model={page} shellUtility={utility} />;
     case "repository-secrets":

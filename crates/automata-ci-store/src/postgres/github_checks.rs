@@ -359,6 +359,12 @@ const CLAIM_LOCKED_DELIVERY_PROJECTION_SQL: &str = r"
         subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
         subject.desired_revision, subject.created_at_ms,
         subject.desired_updated_at_ms,
+        (SELECT attempt.started_at_ms
+           FROM job_attempts AS attempt
+          WHERE attempt.id = subject.job_attempt_id) AS job_started_at_ms,
+        (SELECT terminal.completed_at_ms
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -433,6 +439,12 @@ const CLAIM_LOCKED_SCHEDULE_PROJECTION_SQL: &str = r"
         subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
         subject.desired_revision, subject.created_at_ms,
         subject.desired_updated_at_ms,
+        (SELECT attempt.started_at_ms
+           FROM job_attempts AS attempt
+          WHERE attempt.id = subject.job_attempt_id) AS job_started_at_ms,
+        (SELECT terminal.completed_at_ms
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -508,6 +520,12 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
         subject.desired_state, subject.desired_conclusion, subject.terminal_cause,
         subject.desired_revision, subject.created_at_ms,
         subject.desired_updated_at_ms,
+        (SELECT attempt.started_at_ms
+           FROM job_attempts AS attempt
+          WHERE attempt.id = subject.job_attempt_id) AS job_started_at_ms,
+        (SELECT terminal.completed_at_ms
+           FROM attempt_terminal_results AS terminal
+          WHERE terminal.attempt_id = subject.job_attempt_id) AS job_completed_at_ms,
         evidence.checks_authority_id,
         evidence.checks_authority_identity_digest,
         evidence.checks_authority_app_configuration_revision,
@@ -1457,6 +1475,19 @@ fn decode_claimed(
         .map(GithubCheckRunId::new)
         .transpose()
         .map_err(|_| GithubCheckStoreError::CorruptData)?;
+    let job_started_at = optional_unix_millis_column(row, "job_started_at_ms")?;
+    let job_completed_at = optional_unix_millis_column(row, "job_completed_at_ms")?;
+    let (started_at, completed_at) = match subject.receipt.desired() {
+        GithubCheckDesiredProjection::Queued => (None, None),
+        GithubCheckDesiredProjection::InProgress => (
+            Some(job_started_at.unwrap_or(subject.desired_updated_at)),
+            None,
+        ),
+        GithubCheckDesiredProjection::Terminal(_) => (
+            Some(job_started_at.unwrap_or(subject.created_at)),
+            Some(job_completed_at.unwrap_or(subject.desired_updated_at)),
+        ),
+    };
     ClaimedGithubCheckProjection::from_durable_parts(
         claim,
         action,
@@ -1469,6 +1500,10 @@ fn decode_claimed(
         subject.receipt.desired_revision(),
         suite_id,
         run_id,
+        subject.created_at,
+        subject.desired_updated_at,
+        started_at,
+        completed_at,
         unix_millis_column(row, "claimed_at_ms")?,
         unix_millis_column(row, "claim_expires_at_ms")?,
     )

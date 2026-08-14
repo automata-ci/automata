@@ -60,6 +60,7 @@ export function validateJobLogPage(value: unknown, path: string): void {
     "jobs",
     "navigationPagination",
     "job",
+    "logVisibility",
     "search",
     "lines",
     "notice",
@@ -91,6 +92,11 @@ export function validateJobLogPage(value: unknown, path: string): void {
   });
 
   const selectedJob = validateSelectedJob(page.job, `${path}.job`);
+  const logVisibility = expectOneOf(
+    page.logVisibility,
+    `${path}.logVisibility`,
+    ["full", "restricted"],
+  );
   const navigationJob = jobsById.get(selectedJob.id);
   if (navigationJob === undefined) {
     invalid(`${path}.job.id`, "an ID present in jobs");
@@ -107,6 +113,9 @@ export function validateJobLogPage(value: unknown, path: string): void {
 
   const linesPath = `${path}.lines`;
   const lines = expectArray(page.lines, linesPath, RENDER_REQUEST_LIMITS.logLineCount);
+  if (logVisibility === "restricted" && lines.length !== 0) {
+    invalid(linesPath, "an empty restricted log collection");
+  }
   const seenLineIds = new Set<string>();
   let previousLine: LogLineIdentity | null = null;
   lines.forEach((line, index) => {

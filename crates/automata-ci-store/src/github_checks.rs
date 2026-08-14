@@ -920,6 +920,10 @@ pub struct ClaimedGithubCheckProjection {
     desired_revision: NonZeroU64,
     suite_id: Option<GithubCheckSuiteId>,
     run_id: Option<GithubCheckRunId>,
+    created_at: UnixMillis,
+    desired_updated_at: UnixMillis,
+    started_at: Option<UnixMillis>,
+    completed_at: Option<UnixMillis>,
     claimed_at: UnixMillis,
     expires_at: UnixMillis,
 }
@@ -947,6 +951,10 @@ impl ClaimedGithubCheckProjection {
         desired_revision: u64,
         suite_id: Option<GithubCheckSuiteId>,
         run_id: Option<GithubCheckRunId>,
+        created_at: UnixMillis,
+        desired_updated_at: UnixMillis,
+        started_at: Option<UnixMillis>,
+        completed_at: Option<UnixMillis>,
         claimed_at: UnixMillis,
         expires_at: UnixMillis,
     ) -> Result<Self, GithubCheckValueError> {
@@ -994,6 +1002,23 @@ impl ClaimedGithubCheckProjection {
             return Err(GithubCheckValueError::InvalidProjectionBinding);
         }
         validate_claim_interval(claimed_at, expires_at)?;
+        validate_timestamp(created_at, "GitHub Check creation time")?;
+        validate_timestamp(desired_updated_at, "GitHub Check desired update time")?;
+        if desired_updated_at < created_at || desired_updated_at > claimed_at {
+            return Err(GithubCheckValueError::InvalidClaimInterval);
+        }
+        if started_at.is_some_and(|value| value < created_at || value > claimed_at)
+            || completed_at
+                .is_some_and(|value| value < started_at.unwrap_or(created_at) || value > claimed_at)
+            || !matches!(
+                (desired, started_at, completed_at),
+                (GithubCheckDesiredProjection::Queued, None, None)
+                    | (GithubCheckDesiredProjection::InProgress, Some(_), None)
+                    | (GithubCheckDesiredProjection::Terminal(_), _, Some(_))
+            )
+        {
+            return Err(GithubCheckValueError::InvalidClaimInterval);
+        }
         Ok(Self {
             claim,
             action,
@@ -1006,6 +1031,10 @@ impl ClaimedGithubCheckProjection {
             desired_revision,
             suite_id,
             run_id,
+            created_at,
+            desired_updated_at,
+            started_at,
+            completed_at,
             claimed_at,
             expires_at,
         })
@@ -1065,6 +1094,26 @@ impl ClaimedGithubCheckProjection {
     #[must_use]
     pub const fn run_id(&self) -> Option<GithubCheckRunId> {
         self.run_id
+    }
+    /// Returns the durable time at which the Check first became queued.
+    #[must_use]
+    pub const fn created_at(&self) -> UnixMillis {
+        self.created_at
+    }
+    /// Returns the exact time of the desired lifecycle revision frozen by this claim.
+    #[must_use]
+    pub const fn desired_updated_at(&self) -> UnixMillis {
+        self.desired_updated_at
+    }
+    /// Returns the durable attempt start represented by this Check revision.
+    #[must_use]
+    pub const fn started_at(&self) -> Option<UnixMillis> {
+        self.started_at
+    }
+    /// Returns the durable terminal completion represented by this Check revision.
+    #[must_use]
+    pub const fn completed_at(&self) -> Option<UnixMillis> {
+        self.completed_at
     }
     /// Returns the durable time at which this exact fence was claimed.
     #[must_use]

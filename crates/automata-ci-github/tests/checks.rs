@@ -8,8 +8,8 @@ use automata_ci_github::{
     GithubCheckDetailsUrl, GithubCheckExternalId, GithubCheckModelError, GithubCheckName,
     GithubCheckRunCreateOutcome, GithubCheckRunId, GithubCheckRunIdentity,
     GithubCheckRunReconciliation, GithubCheckRunState, GithubCheckSuiteCreateOutcome,
-    GithubCheckSuiteId, GithubChecksError, GithubHttpEndpoint, GithubHttpLimits,
-    GithubObservedCheckConclusion,
+    GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint,
+    GithubHttpLimits, GithubObservedCheckConclusion,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use serde_json::{Value, json};
@@ -38,6 +38,10 @@ fn revision() -> ExactRevision {
 
 fn token() -> SecretString {
     SecretString::new(TOKEN).expect("token")
+}
+
+fn lifecycle_timestamp() -> GithubCheckTimestamp {
+    GithubCheckTimestamp::from_unix_millis(1_786_666_505_000).expect("timestamp")
 }
 
 fn identity() -> GithubCheckRunIdentity {
@@ -261,17 +265,14 @@ async fn check_run_creation_sends_only_bounded_identity_and_accepts_exact_201() 
             "head_sha": SHA,
             "status": "queued",
             "external_id": EXTERNAL_ID,
-            "details_url": DETAILS_URL
+            "details_url": DETAILS_URL,
+            "output": {
+                "title": "Queued",
+                "summary": format!("Waiting for a runner.\n\n[Open this job in Automata]({DETAILS_URL})")
+            }
         })
     );
-    for forbidden in [
-        "output",
-        "annotations",
-        "actions",
-        "images",
-        "logs",
-        "artifacts",
-    ] {
+    for forbidden in ["annotations", "actions", "images", "logs", "artifacts"] {
         assert!(body.get(forbidden).is_none(), "forbidden field {forbidden}");
     }
 }
@@ -547,7 +548,7 @@ async fn get_validates_id_app_sha_name_external_suite_status_and_conclusion() {
 }
 
 #[tokio::test]
-async fn terminal_patch_can_send_only_terminal_state_and_validates_exact_response() {
+async fn terminal_patch_sends_completion_time_and_native_output_and_validates_exact_response() {
     let server = FixtureServer::spawn().await;
     server.enqueue(ResponseSpec::json(
         axum::http::StatusCode::OK,
@@ -564,6 +565,8 @@ async fn terminal_patch_can_send_only_terminal_state_and_validates_exact_respons
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
             GithubCheckConclusion::Success,
+            Some(&lifecycle_timestamp()),
+            &lifecycle_timestamp(),
             &token(),
         )
         .await
@@ -578,6 +581,8 @@ async fn terminal_patch_can_send_only_terminal_state_and_validates_exact_respons
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
             GithubCheckConclusion::Success,
+            Some(&lifecycle_timestamp()),
+            &lifecycle_timestamp(),
             &token(),
         )
         .await
@@ -590,13 +595,22 @@ async fn terminal_patch_can_send_only_terminal_state_and_validates_exact_respons
     let body: Value = serde_json::from_slice(&requests[0].body).expect("patch JSON");
     assert_eq!(
         body,
-        json!({"status": "completed", "conclusion": "success"})
+        json!({
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-08-14T00:15:05Z",
+            "completed_at": "2026-08-14T00:15:05Z",
+            "output": {
+                "title": "Passed",
+                "summary": format!("The job completed successfully.\n\n[Open this job in Automata]({DETAILS_URL})")
+            }
+        })
     );
-    assert_eq!(body.as_object().expect("object").len(), 2);
+    assert_eq!(body.as_object().expect("object").len(), 5);
 }
 
 #[tokio::test]
-async fn in_progress_patch_sends_only_the_nonterminal_state_and_validates_exact_response() {
+async fn in_progress_patch_sends_start_time_and_native_output_and_validates_exact_response() {
     let server = FixtureServer::spawn().await;
     server.enqueue(ResponseSpec::json(
         axum::http::StatusCode::OK,
@@ -612,6 +626,7 @@ async fn in_progress_patch_sends_only_the_nonterminal_state_and_validates_exact_
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
+            &lifecycle_timestamp(),
             &token(),
         )
         .await
@@ -622,6 +637,7 @@ async fn in_progress_patch_sends_only_the_nonterminal_state_and_validates_exact_
             &repository(),
             GithubCheckRunId::new(41).expect("run id"),
             &identity(),
+            &lifecycle_timestamp(),
             &token(),
         )
         .await
@@ -632,8 +648,18 @@ async fn in_progress_patch_sends_only_the_nonterminal_state_and_validates_exact_
     assert_eq!(requests[0].method, "PATCH");
     assert_eq!(requests[0].uri, "/api/repos/acme/widget/check-runs/41");
     let body: Value = serde_json::from_slice(&requests[0].body).expect("patch JSON");
-    assert_eq!(body, json!({"status": "in_progress"}));
-    assert_eq!(body.as_object().expect("object").len(), 1);
+    assert_eq!(
+        body,
+        json!({
+            "status": "in_progress",
+            "started_at": "2026-08-14T00:15:05Z",
+            "output": {
+                "title": "Running",
+                "summary": format!("This job is running. Live progress and logs are available in Automata.\n\n[Open this job in Automata]({DETAILS_URL})")
+            }
+        })
+    );
+    assert_eq!(body.as_object().expect("object").len(), 3);
 }
 
 #[tokio::test]
@@ -1041,6 +1067,17 @@ fn bounded_models_and_diagnostics_are_redacted() {
     assert_eq!(
         GithubCheckExternalId::new("x".repeat(1_025)),
         Err(GithubCheckModelError::InvalidExternalId)
+    );
+    assert_eq!(
+        GithubCheckTimestamp::from_unix_millis(-1),
+        Err(GithubCheckModelError::InvalidTimestamp)
+    );
+    let fractional_timestamp =
+        GithubCheckTimestamp::from_unix_millis(1_786_666_505_123).expect("timestamp");
+    assert_eq!(fractional_timestamp.as_str(), "2026-08-14T00:15:05.123Z");
+    assert_eq!(
+        format!("{fractional_timestamp:?}"),
+        "GithubCheckTimestamp([validated])"
     );
 
     let name = GithubCheckName::new(NAME).expect("name");

@@ -334,6 +334,7 @@ export const jobLogRequest: RenderRequest = {
       },
       durationLabel: null,
     },
+    logVisibility: "full",
     search: {
       action: `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}`,
       query: "",
@@ -363,12 +364,32 @@ export const jobLogRequest: RenderRequest = {
       },
     ],
     notice:
-      "This job is still running. Refresh to load newly committed log segments.",
+      "This job is still running. This page updates automatically as logs are committed.",
     pagination: {
       currentCursor: null,
       previousCursor: null,
       nextCursor: "next",
       label: "3 log lines",
+    },
+  },
+};
+
+export const deepLinkSignInRequest: RenderRequest = {
+  ...common,
+  page: {
+    kind: "deep-link-sign-in",
+    shell: {
+      ...shell,
+      signIn: {
+        action: "/auth/github/login",
+        returnPath: `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/jobs/${PRIMARY_JOB_ID}`,
+      },
+      signOut: null,
+      documentTitle: "Sign in to view this run · Automata",
+      viewer: null,
+      navigation: [
+        { label: "Repositories", href: "/repositories", current: true },
+      ],
     },
   },
 };

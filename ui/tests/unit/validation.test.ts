@@ -8,6 +8,7 @@ import {
   validateRenderRequest,
 } from "../../src/validation";
 import {
+  deepLinkSignInRequest,
   directBindingListRequest,
   jobLogRequest,
   PRIMARY_RUN_ID,
@@ -122,6 +123,7 @@ describe("render request validation", () => {
     ["run-list", runListRequest],
     ["run-detail", runDetailRequest],
     ["job-log", jobLogRequest],
+    ["deep-link-sign-in", deepLinkSignInRequest],
     ["repository-settings", repositorySettingsRequest],
   ])("deeply accepts the complete %s contract", (_kind, request) => {
     expect(parseRenderRequest(JSON.stringify(request))).toEqual(request);

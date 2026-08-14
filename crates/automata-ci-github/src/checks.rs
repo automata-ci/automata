@@ -8,6 +8,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::Url;
 
 use crate::{
@@ -213,6 +214,44 @@ impl fmt::Debug for GithubCheckDetailsUrl {
     }
 }
 
+/// Canonical UTC timestamp accepted by GitHub's Checks API.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GithubCheckTimestamp(String);
+
+impl GithubCheckTimestamp {
+    /// Formats a non-negative Unix millisecond instant as RFC 3339 UTC.
+    ///
+    /// # Errors
+    ///
+    /// Rejects negative or out-of-range instants.
+    pub fn from_unix_millis(value: i64) -> Result<Self, GithubCheckModelError> {
+        if value < 0 {
+            return Err(GithubCheckModelError::InvalidTimestamp);
+        }
+        let nanos = i128::from(value)
+            .checked_mul(1_000_000)
+            .ok_or(GithubCheckModelError::InvalidTimestamp)?;
+        let instant = OffsetDateTime::from_unix_timestamp_nanos(nanos)
+            .map_err(|_| GithubCheckModelError::InvalidTimestamp)?;
+        let value = instant
+            .format(&Rfc3339)
+            .map_err(|_| GithubCheckModelError::InvalidTimestamp)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the canonical provider value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for GithubCheckTimestamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GithubCheckTimestamp([validated])")
+    }
+}
+
 /// Immutable identity expected on every response for one Automata Check Run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubCheckRunIdentity {
@@ -311,6 +350,32 @@ impl GithubCheckConclusion {
             Self::Success => "success",
             Self::Skipped => "skipped",
             Self::TimedOut => "timed_out",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::ActionRequired => "Action required",
+            Self::Cancelled => "Cancelled",
+            Self::Failure => "Failed",
+            Self::Neutral => "Completed",
+            Self::Success => "Passed",
+            Self::Skipped => "Skipped",
+            Self::TimedOut => "Timed out",
+        }
+    }
+
+    const fn summary(self) -> &'static str {
+        match self {
+            Self::ActionRequired => "Automata needs attention.",
+            Self::Cancelled => "The job was cancelled.",
+            Self::Failure => "The job failed. Diagnostics and logs are available in Automata.",
+            Self::Neutral => "The job completed with a neutral result.",
+            Self::Success => "The job completed successfully.",
+            Self::Skipped => "The job was skipped.",
+            Self::TimedOut => {
+                "The job timed out. Its last recorded progress is available in Automata."
+            }
         }
     }
 }
@@ -523,6 +588,9 @@ pub enum GithubCheckModelError {
     /// A Check Run details URL violates the bounded absolute-URL policy.
     #[error("the GitHub Check Run details URL is invalid")]
     InvalidDetailsUrl,
+    /// A lifecycle timestamp was negative or outside RFC 3339's range.
+    #[error("invalid GitHub Check timestamp")]
+    InvalidTimestamp,
 }
 
 /// Sanitized failure at the GitHub Checks HTTP boundary.
@@ -582,17 +650,30 @@ struct CreateRunBody<'a> {
     status: &'static str,
     external_id: &'a str,
     details_url: &'a str,
+    output: CheckOutputBody<'a>,
 }
 
 #[derive(Serialize)]
-struct StartRunBody {
+struct StartRunBody<'a> {
     status: &'static str,
+    started_at: &'a str,
+    output: CheckOutputBody<'a>,
 }
 
 #[derive(Serialize)]
-struct CompleteRunBody {
+struct CompleteRunBody<'a> {
     status: &'static str,
     conclusion: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<&'a str>,
+    completed_at: &'a str,
+    output: CheckOutputBody<'a>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct CheckOutputBody<'a> {
+    title: &'a str,
+    summary: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -763,7 +844,7 @@ impl GithubHttpEndpoint {
             .transpose()
     }
 
-    /// Creates one queued Check Run with no output, annotations, actions, or images.
+    /// Creates one queued Check Run with a native summary and exact Details link.
     ///
     /// The POST is issued once. Any possibly-applied transport or provider outcome
     /// is explicit and must be reconciled with [`Self::reconcile_check_run_creation`].
@@ -779,12 +860,17 @@ impl GithubHttpEndpoint {
         server_service_token: &SecretString,
     ) -> Result<GithubCheckRunCreateOutcome, GithubChecksError> {
         let endpoint = self.checks_repository_url(repository, &["check-runs"])?;
+        let summary = check_summary("Waiting for a runner.", identity.details_url.as_str());
         let body = CreateRunBody {
             name: identity.name.as_str(),
             head_sha: identity.head_sha.as_str(),
             status: "queued",
             external_id: identity.external_id.as_str(),
             details_url: identity.details_url.as_str(),
+            output: CheckOutputBody {
+                title: "Queued",
+                summary: &summary,
+            },
         };
         let Ok(response) =
             authenticated_checks_request(self.client.post(endpoint), server_service_token)?
@@ -960,9 +1046,8 @@ impl GithubHttpEndpoint {
 
     /// Advances one exact queued Check Run to `in_progress`.
     ///
-    /// No output, annotations, actions, images, names, links, timestamps, logs,
-    /// artifacts, or terminal conclusion can be sent by this method. Repeating
-    /// the same exact state assignment is safe after a transport ambiguity.
+    /// Includes the durable execution start time and a compact native summary.
+    /// Repeating the same exact state assignment is safe after a transport ambiguity.
     ///
     /// # Errors
     ///
@@ -973,12 +1058,22 @@ impl GithubHttpEndpoint {
         repository: &RepositoryId,
         run_id: GithubCheckRunId,
         identity: &GithubCheckRunIdentity,
+        started_at: &GithubCheckTimestamp,
         server_service_token: &SecretString,
     ) -> Result<GithubCheckRun, GithubChecksError> {
         let run_id_segment = run_id.get().to_string();
         let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
+        let summary = check_summary(
+            "This job is running. Live progress and logs are available in Automata.",
+            identity.details_url.as_str(),
+        );
         let body = StartRunBody {
             status: "in_progress",
+            started_at: started_at.as_str(),
+            output: CheckOutputBody {
+                title: "Running",
+                summary: &summary,
+            },
         };
         let response =
             authenticated_checks_request(self.client.patch(endpoint), server_service_token)?
@@ -999,10 +1094,7 @@ impl GithubHttpEndpoint {
         Ok(into_public_run(&run, identity))
     }
 
-    /// Publishes only an immutable terminal status and conclusion for an exact run.
-    ///
-    /// No output, annotations, actions, images, names, links, logs, artifacts, or
-    /// other mutable presentation fields can be sent by this method.
+    /// Publishes an immutable terminal state, completion time, and native summary.
     ///
     /// # Errors
     ///
@@ -1014,13 +1106,22 @@ impl GithubHttpEndpoint {
         run_id: GithubCheckRunId,
         identity: &GithubCheckRunIdentity,
         conclusion: GithubCheckConclusion,
+        started_at: Option<&GithubCheckTimestamp>,
+        completed_at: &GithubCheckTimestamp,
         server_service_token: &SecretString,
     ) -> Result<GithubCheckRun, GithubChecksError> {
         let run_id_segment = run_id.get().to_string();
         let endpoint = self.checks_repository_url(repository, &["check-runs", &run_id_segment])?;
+        let summary = check_summary(conclusion.summary(), identity.details_url.as_str());
         let body = CompleteRunBody {
             status: "completed",
             conclusion: conclusion.as_str(),
+            started_at: started_at.map(GithubCheckTimestamp::as_str),
+            completed_at: completed_at.as_str(),
+            output: CheckOutputBody {
+                title: conclusion.title(),
+                summary: &summary,
+            },
         };
         let response =
             authenticated_checks_request(self.client.patch(endpoint), server_service_token)?
@@ -1091,6 +1192,10 @@ impl GithubHttpEndpoint {
         let wire: RunResponse = decode_json(&response.body).map_err(map_endpoint_error)?;
         validate_run(wire)
     }
+}
+
+fn check_summary(message: &str, details_url: &str) -> String {
+    format!("{message}\n\n[Open this job in Automata]({details_url})")
 }
 
 fn validate_suite(
