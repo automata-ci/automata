@@ -50,11 +50,15 @@ in a centralized contracts directory.
 
 Core does not synchronously consult Cloud while admitting jobs. Cloud pushes
 durable configuration such as entitlement snapshots to Core. Core records
-usage in a transactional outbox and delivers bounded, idempotent batches to
-Cloud asynchronously.
+immutable usage events transactionally. An authorized external control plane
+pulls bounded pages from a stable, opaque cursor and commits its continuation
+cursor atomically with idempotent event ingestion. Core does not make outbound
+calls to Cloud.
 
 The initial management schema is
 [`automata.management.v1.ShardManagementService`](../../crates/automata-ci-provisioning-grpc/proto/automata/management/v1/shard_management.proto).
+The usage feed is
+[`automata.management.v1.ShardUsageExportService`](../../crates/automata-ci-provisioning-grpc/proto/automata/management/v1/shard_usage.proto).
 
 ## Consequences
 

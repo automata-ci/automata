@@ -1,11 +1,14 @@
 # automata-ci-provisioning-grpc
 
-This crate owns and serves the public
+This crate owns the public
 [`automata.management.v1.ShardManagementService`](proto/automata/management/v1/shard_management.proto)
-schema over gRPC/HTTP/2. It requires a client certificate at the TLS handshake,
-authenticates that verified certificate chain for every request, validates and
-scope-checks the domain command, and calls transport-neutral workspace
-provisioning or entitlement-application ports.
+and
+[`automata.management.v1.ShardUsageExportService`](proto/automata/management/v1/shard_usage.proto)
+schemas over gRPC/HTTP/2. The currently composed management service requires a
+client certificate at the TLS handshake, authenticates that verified
+certificate chain for every request, validates and scope-checks the domain
+command, and calls transport-neutral workspace provisioning or
+entitlement-application ports.
 
 The server accepts a pre-bound listener so the product composition root retains
 ownership of startup ordering and port conflicts. The Automata binary composes
@@ -16,6 +19,12 @@ stable shard-scoped authority, and supplies the durable
 `automata-ci-postgres` management transaction adapters. Entitlement snapshots
 are complete, monotonically revisioned workspace aggregates; the contract does
 not allocate rolling per-job budget slices.
+
+The usage-export schema defines an authority-scoped, cursor-paginated feed of
+immutable actual-execution facts. It is intentionally not registered or
+advertised yet. A later change will add the durable feed adapter and compose the
+service atomically with Core accounting before capability discovery announces
+support.
 
 Cargo generates the private Rust wire module into `OUT_DIR` with Protox and
 Tonic. Building therefore needs no separately installed `protoc` or Buf binary,
