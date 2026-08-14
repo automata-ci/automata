@@ -2,17 +2,18 @@ use std::{fmt, time::Instant};
 
 use async_trait::async_trait;
 use automata_ci_github::{
-    GithubHttpEndpoint, GithubPushDiffAuthority, GithubPushDiffError, GithubPushDiffOutcome,
-    GithubPushDiffRange, GithubPushDiffRequest, GithubPushRefKind, GithubRepositoryVisibility,
-    VerifiedGithubPush,
+    GithubHttpEndpoint, GithubPullRequestDiffError, GithubPullRequestDiffOutcome,
+    GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffError,
+    GithubPushDiffOutcome, GithubPushDiffRange, GithubPushDiffRequest, GithubPushRefKind,
+    GithubRepositoryVisibility, VerifiedGithubPullRequest, VerifiedGithubPush,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use automata_ci_store::ProviderRepositoryVisibility;
 use automata_ci_workflow_github::GithubChangedFiles;
 
 use crate::{
-    GithubPushChangedFilesAuthority, GithubPushChangedFilesError, GithubPushChangedFilesProvider,
-    GithubPushChangedFilesRequest,
+    GithubPullRequestChangedFilesRequest, GithubPushChangedFilesAuthority,
+    GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
 };
 
 /// Product-composed delivery adapter for GitHub's bounded Compare REST evidence.
@@ -52,6 +53,32 @@ impl GithubRestPushChangedFilesProvider {
             .map_err(map_http_error)?;
         translate_outcome(outcome)
     }
+
+    async fn resolve_pull_request(
+        &self,
+        request: &GithubPullRequestChangedFilesRequest<'_>,
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+        validate_pull_request_delivery_binding(request)?;
+        let pull_request = request.pull_request();
+        let repository = RepositoryId::new(pull_request.repository().full_name())
+            .map_err(|_| GithubPushChangedFilesError::InvalidEvidence)?;
+        let authority = push_authority(request.authority());
+        let deadline = Instant::now()
+            .checked_add(self.endpoint.trusted_origins().limits().request_timeout())
+            .ok_or(GithubPushChangedFilesError::Unavailable)?;
+        let outcome = self
+            .endpoint
+            .pull_request_changed_files(GithubPullRequestDiffRequest::new(
+                &repository,
+                pull_request.base_revision(),
+                pull_request.head_revision(),
+                authority,
+                deadline,
+            ))
+            .await
+            .map_err(map_pull_request_http_error)?;
+        Ok(translate_pull_request_outcome(outcome))
+    }
 }
 
 impl fmt::Debug for GithubRestPushChangedFilesProvider {
@@ -70,6 +97,13 @@ impl GithubPushChangedFilesProvider for GithubRestPushChangedFilesProvider {
         request: GithubPushChangedFilesRequest<'_>,
     ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
         self.resolve(&request).await
+    }
+
+    async fn pull_request_changed_files(
+        &self,
+        request: GithubPullRequestChangedFilesRequest<'_>,
+    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+        self.resolve_pull_request(&request).await
     }
 }
 
@@ -102,6 +136,56 @@ fn validate_delivery_binding(
         || identity.repository_id().get() != push.repository().id().get()
         || identity.installation_id().get() != push.installation_id().get()
         || request.required_through() <= request.observed_at()
+    {
+        return Err(GithubPushChangedFilesError::InvalidEvidence);
+    }
+    Ok(())
+}
+
+fn validate_pull_request_delivery_binding(
+    request: &GithubPullRequestChangedFilesRequest<'_>,
+) -> Result<(), GithubPushChangedFilesError> {
+    let pull_request = request.pull_request();
+    validate_common_delivery_binding(
+        request.identity(),
+        pull_request,
+        request.authority(),
+        request.observed_at(),
+        request.required_through(),
+    )
+}
+
+fn validate_common_delivery_binding(
+    identity: &automata_ci_store::ProviderDeliveryIdentity,
+    pull_request: &VerifiedGithubPullRequest,
+    authority: &GithubPushChangedFilesAuthority<'_>,
+    observed_at: automata_ci_core::UnixMillis,
+    required_through: automata_ci_core::UnixMillis,
+) -> Result<(), GithubPushChangedFilesError> {
+    if identity.provider() != "github" || identity.delivery_id() != pull_request.delivery_id() {
+        return Err(GithubPushChangedFilesError::InvalidEvidence);
+    }
+    let visibility_matches = matches!(
+        (
+            identity.repository_visibility(),
+            pull_request.repository().visibility(),
+            authority,
+        ),
+        (
+            ProviderRepositoryVisibility::Public,
+            GithubRepositoryVisibility::Public,
+            GithubPushChangedFilesAuthority::PublicAnonymous,
+        ) | (
+            ProviderRepositoryVisibility::Private,
+            GithubRepositoryVisibility::Private,
+            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(_),
+        )
+    );
+    if !visibility_matches
+        || identity.repository_identity() != pull_request.repository().full_name()
+        || identity.repository_id().get() != pull_request.repository().id().get()
+        || identity.installation_id().get() != pull_request.installation_id().get()
+        || required_through <= observed_at
     {
         return Err(GithubPushChangedFilesError::InvalidEvidence);
     }
@@ -161,9 +245,24 @@ fn translate_outcome(
     }
 }
 
+fn translate_pull_request_outcome(outcome: GithubPullRequestDiffOutcome) -> GithubChangedFiles {
+    match outcome {
+        GithubPullRequestDiffOutcome::Complete(evidence) => {
+            GithubChangedFiles::complete(evidence.into_changed_paths())
+        }
+        _ => GithubChangedFiles::bypass_path_filters(),
+    }
+}
+
 fn map_http_error(error: GithubPushDiffError) -> GithubPushChangedFilesError {
     match error {
         GithubPushDiffError::Unavailable => GithubPushChangedFilesError::Unavailable,
+    }
+}
+
+fn map_pull_request_http_error(error: GithubPullRequestDiffError) -> GithubPushChangedFilesError {
+    match error {
+        GithubPullRequestDiffError::Unavailable => GithubPushChangedFilesError::Unavailable,
     }
 }
 

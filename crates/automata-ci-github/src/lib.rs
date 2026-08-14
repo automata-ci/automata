@@ -16,9 +16,11 @@ mod webhook;
 mod webhook_event;
 
 pub use changed_files::{
-    GithubCompletePushDiff, GithubPushDiffAuthority, GithubPushDiffError,
-    GithubPushDiffIncompleteReason, GithubPushDiffOutcome, GithubPushDiffRange,
-    GithubPushDiffRequest, MAX_COMPLETE_GITHUB_COMPARE_FILES,
+    GithubCompletePullRequestDiff, GithubCompletePushDiff, GithubPullRequestDiffAuthority,
+    GithubPullRequestDiffError, GithubPullRequestDiffOutcome, GithubPullRequestDiffRequest,
+    GithubPushDiffAuthority, GithubPushDiffError, GithubPushDiffIncompleteReason,
+    GithubPushDiffOutcome, GithubPushDiffRange, GithubPushDiffRequest,
+    MAX_COMPLETE_GITHUB_COMPARE_FILES,
 };
 pub use checks::{
     GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,

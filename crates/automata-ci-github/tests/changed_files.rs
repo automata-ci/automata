@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
-    GithubHttpEndpoint, GithubHttpLimits, GithubPushDiffAuthority, GithubPushDiffError,
+    GithubHttpEndpoint, GithubHttpLimits, GithubPullRequestDiffOutcome,
+    GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffError,
     GithubPushDiffIncompleteReason, GithubPushDiffOutcome, GithubPushDiffRange,
     GithubPushDiffRequest, MAX_COMPLETE_GITHUB_COMPARE_FILES,
 };
@@ -55,6 +56,20 @@ fn compare_page(
     serde_json::to_string(&body).expect("comparison JSON")
 }
 
+fn pull_request_compare_page(base: &str, merge_base: &str, head: &str, files: &[Value]) -> String {
+    serde_json::to_string(&json!({
+        "status": "diverged",
+        "ahead_by": 1,
+        "behind_by": 2,
+        "total_commits": 1,
+        "base_commit": {"sha": base},
+        "merge_base_commit": {"sha": merge_base},
+        "commits": [{"sha": head}],
+        "files": files,
+    }))
+    .expect("pull-request comparison JSON")
+}
+
 async fn existing_diff<'a>(
     endpoint: &'a GithubHttpEndpoint,
     repository: &'a RepositoryId,
@@ -75,6 +90,77 @@ async fn existing_diff<'a>(
             Instant::now() + Duration::from_secs(2),
         ))
         .await
+}
+
+async fn pull_request_diff<'a>(
+    endpoint: &'a GithubHttpEndpoint,
+    repository: &'a RepositoryId,
+    base: &'a ExactRevision,
+    head: &'a ExactRevision,
+) -> GithubPullRequestDiffOutcome {
+    endpoint
+        .pull_request_changed_files(GithubPullRequestDiffRequest::new(
+            repository,
+            base,
+            head,
+            GithubPushDiffAuthority::PublicAnonymous,
+            Instant::now() + Duration::from_secs(2),
+        ))
+        .await
+        .expect("pull-request comparison")
+}
+
+#[tokio::test]
+async fn pull_request_three_dot_comparison_accepts_divergence_and_binds_exact_revisions() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_compare_page(
+            BEFORE,
+            OTHER,
+            AFTER,
+            &[
+                changed_file("web/index.html", "modified"),
+                changed_file("src/lib.rs", "added"),
+            ],
+        ),
+    ));
+    let repository = repository();
+    let base = revision(BEFORE);
+    let head = revision(AFTER);
+
+    let outcome = pull_request_diff(&fixture.endpoint(), &repository, &base, &head).await;
+    let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
+        panic!("expected complete pull-request comparison");
+    };
+    assert_eq!(evidence.base(), &base);
+    assert_eq!(evidence.head(), &head);
+    assert_eq!(evidence.changed_paths(), ["src/lib.rs", "web/index.html"]);
+    assert_eq!(fixture.requests().len(), 1);
+    assert_eq!(
+        fixture.requests()[0].uri,
+        format!("/api/repos/octo-org/private-repo/compare/{BEFORE}...{AFTER}?per_page=100&page=1")
+    );
+}
+
+#[tokio::test]
+async fn pull_request_comparison_rejects_a_response_not_ending_at_signed_head() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_compare_page(BEFORE, OTHER, OTHER, &[]),
+    ));
+    let outcome = pull_request_diff(
+        &fixture.endpoint(),
+        &repository(),
+        &revision(BEFORE),
+        &revision(AFTER),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        GithubPullRequestDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::InvalidEvidence)
+    );
 }
 
 #[tokio::test]
