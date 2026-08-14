@@ -950,6 +950,8 @@ async fn cleanup_receipts(
                 SELECT selection_id
                 FROM logical_workflow_activation_work_selections AS receipt
                 WHERE expires_at_ms <= $1 AND requested_at_ms < $1
+                  -- Completed orchestration remains the immutable lineage for
+                  -- a first runner offer that may be delayed behind other jobs.
                   AND NOT EXISTS (
                       SELECT 1
                       FROM logical_workflow_activation_preparation_claims AS preparation
@@ -958,7 +960,6 @@ async fn cleanup_receipts(
                         AND preparation.origin_selection_id = receipt.selection_id
                         AND preparation.generation >= receipt.generation
                         AND preparation.descriptor_digest = receipt.authority_digest
-                        AND preparation.state = 'preparing'
                   )
                   AND NOT EXISTS (
                       SELECT 1
@@ -968,7 +969,6 @@ async fn cleanup_receipts(
                         AND job.activation_origin_selection_id = receipt.selection_id
                         AND job.activation_fence >= receipt.generation
                         AND job.activation_input_digest = receipt.authority_digest
-                        AND job.state = 'activating'
                   )
                   AND NOT EXISTS (
                       SELECT 1
@@ -1000,6 +1000,8 @@ async fn cleanup_receipts(
                 SELECT selection_id
                 FROM logical_workflow_materialization_work_selections AS receipt
                 WHERE expires_at_ms <= $1 AND requested_at_ms < $1
+                  -- Materialized jobs may wait beyond the selection lease
+                  -- before their first runtime authority is issued.
                   AND NOT EXISTS (
                       SELECT 1
                       FROM logical_workflow_materialization_claims AS claim
@@ -1007,7 +1009,6 @@ async fn cleanup_receipts(
                         AND claim.origin_selection_id = receipt.selection_id
                         AND claim.generation >= receipt.generation
                         AND claim.descriptor_digest = receipt.authority_digest
-                        AND claim.state = 'materializing'
                   )
                   AND NOT EXISTS (
                       SELECT 1
