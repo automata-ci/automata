@@ -1723,6 +1723,82 @@ async fn public_resolution_is_exact_and_rejects_every_execution_substitution() -
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn delayed_first_authority_issue_retains_completed_selection_lineage() -> TestResult {
+    run_with_database(|database| async move {
+        const FROZEN_NOW: i64 = 2_300_000_000_000;
+        let clock = install_database_test_clock(&database, FROZEN_NOW).await?;
+        let (execution, manifest) =
+            seed_execution(&database, 150_000, ProviderRepositoryVisibility::Public).await?;
+
+        set_database_test_clock(&clock, FROZEN_NOW + 240_000).await?;
+        for _ in 0..2 {
+            let observed_at = database_now(&database).await?;
+            let activation = database
+                .store()
+                .claim_next_logical_job_orchestration(ClaimNextLogicalJobOrchestration::new(
+                    LogicalWorkSelectionId::from_uuid(Uuid::new_v4())?,
+                    LogicalActivationWorkerId::from_uuid(Uuid::new_v4())?,
+                    observed_at,
+                    60_000,
+                )?)
+                .await?;
+            assert!(matches!(
+                activation,
+                LogicalJobOrchestrationSelectionOutcome::Idle
+            ));
+
+            let materialization = database
+                .store()
+                .claim_next_logical_instance_materialization(
+                    ClaimNextLogicalInstanceMaterialization::new(
+                        LogicalWorkSelectionId::from_uuid(Uuid::new_v4())?,
+                        LogicalMaterializationWorkerId::from_uuid(Uuid::new_v4())?,
+                        observed_at,
+                        60_000,
+                    )?,
+                )
+                .await?;
+            assert!(matches!(
+                materialization,
+                LogicalInstanceMaterializationSelectionOutcome::Idle
+            ));
+        }
+
+        let retained: (i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*)::BIGINT
+                 FROM logical_workflow_activation_work_selections AS selection
+                 JOIN logical_workflow_concrete_jobs AS concrete
+                   ON concrete.run_id = selection.run_id
+                  AND concrete.invocation_id = selection.invocation_id
+                  AND concrete.logical_job_id = selection.logical_job_id
+                 WHERE concrete.job_id = $1 AND selection.outcome = 'claimed'),
+                (SELECT count(*)::BIGINT
+                 FROM logical_workflow_materialization_work_selections AS selection
+                 JOIN logical_workflow_materialization_claims AS materialization
+                   ON materialization.origin_selection_id = selection.selection_id
+                 WHERE materialization.expected_job_id = $1
+                   AND selection.outcome = 'claimed')
+            ",
+        )
+        .bind(execution.job_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(retained, (2, 1));
+
+        let resolution = database
+            .store()
+            .resolve_github_job_runtime_authority(&execution)
+            .await?;
+        exact_standard_identity(resolution, &execution, &manifest)?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn private_resolution_requires_and_returns_the_exact_historical_installation() -> TestResult {
     run_with_database(|database| async move {
         let (execution, manifest) =
