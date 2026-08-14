@@ -5,7 +5,8 @@ crate groups concrete adapters behind five domain namespaces:
 
 - `auth` persists encrypted login state, sessions, provider tokens, GitHub
   authority, installation state, RBAC management, and runner enrollment;
-- `provisioning` atomically creates a workspace and its initial owner;
+- `provisioning` atomically creates a workspace and its initial owner, applies
+  entitlement snapshots, and reads authority-scoped immutable usage feeds;
 - `runner_auth` resolves server-owned runner-machine authority; and
 - `secret` stores the built-in provider's envelope-encrypted secret values;
 - `store` implements the durable workflow, runner, publication, and managed

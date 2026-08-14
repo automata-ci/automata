@@ -13,8 +13,10 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod entitlement;
+mod usage;
 
 pub use entitlement::PostgresWorkspaceEntitlementApplier;
+pub use usage::PostgresWorkspaceUsageExporter;
 
 const WORKSPACE_OWNER_ROLE_NAME: &str = "workspace-owner";
 const WORKSPACE_OWNER_ROLE_DISPLAY_NAME: &str = "Workspace owner";
