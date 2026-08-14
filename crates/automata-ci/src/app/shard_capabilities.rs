@@ -19,6 +19,7 @@ pub const SHARD_CAPABILITIES_PATH: &str = "/internal/v1/capabilities";
 
 const CAPABILITY_DOCUMENT_VERSION: u8 = 1;
 const CORE_HTTP_PROTOCOL_VERSION: u8 = 1;
+const MANAGEMENT_GRPC_PROTOCOL_VERSION: u8 = 1;
 
 #[derive(Clone, Debug)]
 struct ShardCapabilitiesState {
@@ -38,6 +39,7 @@ struct ShardCapabilities {
 #[derive(Debug, Serialize)]
 struct Protocols {
     core_http: [u8; 1],
+    management_grpc: [u8; 1],
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +63,7 @@ async fn capabilities(State(state): State<ShardCapabilitiesState>) -> Response {
             release: BuildInfo::current(),
             protocols: Protocols {
                 core_http: [CORE_HTTP_PROTOCOL_VERSION],
+                management_grpc: [MANAGEMENT_GRPC_PROTOCOL_VERSION],
             },
             public_endpoints: PublicEndpoints {},
             server_time_ms: unix_time_millis(),
@@ -115,7 +118,10 @@ mod tests {
         assert_eq!(document["shard_id"], "eu-test-1");
         assert_eq!(document["release"]["version"], BuildInfo::current().version);
         assert_eq!(document["release"]["commit"], BuildInfo::current().commit);
-        assert_eq!(document["protocols"], serde_json::json!({"core_http": [1]}));
+        assert_eq!(
+            document["protocols"],
+            serde_json::json!({"core_http": [1], "management_grpc": [1]})
+        );
         assert_eq!(document["public_endpoints"], serde_json::json!({}));
         assert!(
             document["server_time_ms"]
