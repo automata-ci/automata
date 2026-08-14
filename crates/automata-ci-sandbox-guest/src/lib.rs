@@ -73,7 +73,7 @@ const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_COMMAND_TIMEOUT_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 #[cfg(any(unix, windows))]
 const MAX_EXECUTION_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
-#[cfg(any(unix, windows))]
+#[cfg(windows)]
 const MAX_PROCESS_LIMIT: u32 = 1_000_000;
 #[cfg(unix)]
 const MAX_REPLAY_ENTRIES: usize = 256;

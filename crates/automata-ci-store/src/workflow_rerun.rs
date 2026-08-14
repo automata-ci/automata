@@ -15,7 +15,7 @@ use crate::{LogicalWorkflowJobId, RepositoryId, StoreError};
 
 /// Maximum physical attempts after the original run and its 50 allowed reruns.
 pub const MAX_WORKFLOW_RERUN_ATTEMPTS: u32 = 51;
-/// Database-time retention horizon for starting a rerun of a terminal run.
+/// Repository-authoritative retention horizon for rerunning a terminal run.
 pub const MAX_WORKFLOW_RERUN_AGE_MILLIS: i64 = 2_592_000_000;
 const MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES: usize = 100;
 
@@ -71,7 +71,7 @@ pub enum WorkflowRerunSelection {
 ///
 /// The actor is intentionally not treated as historical run metadata. An
 /// executable adapter must reauthorize it for `runs:rerun` while holding the
-/// source run and idempotency receipt rows, then record it as the new attempt's
+/// source run and idempotency receipt records, then record it as the new attempt's
 /// triggering actor and security-audit subject.
 #[derive(Clone, Eq, PartialEq)]
 pub struct RerunWorkflow {
@@ -257,6 +257,7 @@ impl RerunWorkflowByName {
         self.operation_id
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn into_resolved(
         self,
         repository_id: RepositoryId,
@@ -436,7 +437,7 @@ pub enum WorkflowRerunStoreError {
     /// The source physical attempt was not terminal and complete.
     #[error("workflow rerun source is not terminal")]
     SourceNotTerminal,
-    /// The source terminal result is beyond the database-time retention horizon.
+    /// The source terminal result is beyond the repository-time retention horizon.
     #[error("workflow rerun source is older than the retention horizon")]
     SourceExpired,
     /// The grouped provider-visible run exhausted its physical attempt budget.

@@ -31,7 +31,7 @@ use automata_ci_postgres::auth::{
     PostgresHumanSessionRepository, PostgresHumanSignInFinalizer, PostgresInstallationRepository,
     PostgresLoginTransactionRepository, PostgresRequestAuthenticationResolver,
 };
-use automata_ci_store::PostgresStore;
+use automata_ci_postgres::store::PostgresStore;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use zeroize::{Zeroize as _, Zeroizing};

@@ -24,11 +24,11 @@ pub enum CommandReplayDisposition {
     /// Every candidate visible after the durable cursor was inspected.
     #[default]
     Exhausted,
-    /// A fixed row or byte ceiling stopped inspection before exhaustion was proven.
+    /// A fixed record or byte ceiling stopped inspection before exhaustion was proven.
     Saturated,
 }
 
-/// Positive, defensively bounded command replay row count.
+/// Positive, defensively bounded command replay record count.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandReplayLimit(NonZeroU16);
 
@@ -62,7 +62,7 @@ impl CommandReplayLimit {
 pub struct CommandSequence(NonZeroU64);
 
 impl CommandSequence {
-    /// Creates a positive sequence representable by `PostgreSQL` `BIGINT`.
+    /// Creates a positive sequence within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///

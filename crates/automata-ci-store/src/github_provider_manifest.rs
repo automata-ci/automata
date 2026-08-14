@@ -177,7 +177,7 @@ const REPOSITORY_ID_DOMAIN: &[u8] = b"automata.admission.repository.v1\0";
 pub const GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN: &[u8] =
     b"automata.store.github-webhook-verifier-fingerprint.v1\0";
 
-/// Positive immutable provider-manifest revision representable by `BIGINT`.
+/// Positive immutable provider-manifest revision within the signed 64-bit storage boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GithubProviderManifestRevision(NonZeroU64);
 
@@ -186,7 +186,7 @@ impl GithubProviderManifestRevision {
     ///
     /// # Errors
     ///
-    /// Rejects zero and values outside `PostgreSQL`'s signed `BIGINT` range.
+    /// Rejects zero and values outside the signed 64-bit storage boundary.
     pub fn new(value: u64) -> Result<Self, GithubProviderManifestValueError> {
         let value = NonZeroU64::new(value)
             .filter(|value| i64::try_from(value.get()).is_ok())
@@ -198,10 +198,6 @@ impl GithubProviderManifestRevision {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated manifest revision fits BIGINT")
     }
 }
 
@@ -925,12 +921,12 @@ impl GithubProviderManifest {
     pub const fn runner_policy(&self) -> &GithubProviderRunnerPolicyObject {
         &self.runner_policy
     }
-    /// Returns the independent sequential relational runtime-policy revision.
+    /// Returns the independent sequential repository runtime-policy revision.
     #[must_use]
     pub const fn runtime_policy_revision(&self) -> WorkflowRuntimePolicyRevision {
         self.runtime_policy_revision
     }
-    /// Returns the domain-separated semantic digest of the relational policy.
+    /// Returns the domain-separated semantic digest of the repository policy.
     #[must_use]
     pub const fn runtime_policy_digest(&self) -> Sha256Digest {
         self.runtime_policy_digest
@@ -1043,6 +1039,7 @@ impl GithubProviderManifest {
             && identity.repository_identity() == self.github_repository_name.as_str()
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_durable_parts(
         manifest: Self,
         expected_repository_id: RepositoryId,
@@ -1054,6 +1051,7 @@ impl GithubProviderManifest {
         Ok(manifest)
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn same_connection_identity(&self, other: &Self) -> bool {
         self.tenant == other.tenant
             && self.repository_id == other.repository_id
@@ -1067,6 +1065,7 @@ impl GithubProviderManifest {
             && self.origins == other.origins
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn valid_successor_of(&self, prior: &Self) -> bool {
         let Some(expected_revision) = prior.revision.get().checked_add(1) else {
             return false;
@@ -1226,7 +1225,7 @@ pub struct BootstrapGithubProviderManifest {
 
 /// One exact repository bootstrap pair committed under a single repository lock.
 ///
-/// The canonical runner-policy object and relational semantic policy are two
+/// The canonical runner-policy object and repository semantic policy are two
 /// distinct identities. This request proves that both describe the same typed
 /// policy while retaining both identities in the historical manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1240,7 +1239,7 @@ impl BootstrapGithubProviderRepository {
     ///
     /// # Errors
     ///
-    /// Rejects cross-repository pairs, mismatched relational pins, a manifest
+    /// Rejects cross-repository pairs, mismatched repository pins, a manifest
     /// object that is not the canonical encoding of the typed policy, or two
     /// different caller observations for one convergence operation.
     pub fn new(
@@ -1271,7 +1270,7 @@ impl BootstrapGithubProviderRepository {
         })
     }
 
-    /// Returns the exact relational policy registration.
+    /// Returns the exact repository policy registration.
     #[must_use]
     pub const fn runtime_policy(&self) -> &RegisterWorkflowRuntimePolicy {
         &self.runtime_policy
@@ -1325,6 +1324,7 @@ pub struct GithubProviderManifestRecord {
 }
 
 impl GithubProviderManifestRecord {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn new(
         manifest: GithubProviderManifest,
         registered_at: UnixMillis,
@@ -1379,6 +1379,7 @@ pub struct GithubProviderRepositoryBootstrapReceipt {
 }
 
 impl GithubProviderRepositoryBootstrapReceipt {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn new(
         runtime_policy: WorkflowRuntimePolicyReceipt,
         manifest: GithubProviderManifestBootstrapReceipt,
@@ -1397,7 +1398,7 @@ impl GithubProviderRepositoryBootstrapReceipt {
         })
     }
 
-    /// Returns the exact relational runtime-policy receipt.
+    /// Returns the exact repository runtime-policy receipt.
     #[must_use]
     pub const fn runtime_policy(&self) -> &WorkflowRuntimePolicyReceipt {
         &self.runtime_policy
@@ -1411,6 +1412,7 @@ impl GithubProviderRepositoryBootstrapReceipt {
 }
 
 impl GithubProviderManifestBootstrapReceipt {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn new(
         current: GithubProviderManifestRecord,
         replay: bool,
@@ -1493,7 +1495,7 @@ pub enum GithubProviderManifestValueError {
 /// Startup and read boundary for immutable provider-manifest revisions.
 #[async_trait]
 pub trait GithubProviderManifestRepository: Send + Sync {
-    /// Atomically registers/selects one relational policy and the exact
+    /// Atomically registers/selects one repository policy and the exact
     /// historical manifest that names it.
     async fn bootstrap_github_provider_repository(
         &self,

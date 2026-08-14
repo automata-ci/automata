@@ -27,13 +27,6 @@ pub enum JobEnvironmentRequirement {
 }
 
 impl JobEnvironmentRequirement {
-    pub(crate) const fn kind(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Environment(_) => "environment",
-        }
-    }
-
     /// Returns the template digest for an environment-bearing job.
     #[must_use]
     pub const fn template_digest(self) -> Option<Sha256Digest> {
@@ -228,15 +221,6 @@ pub enum JobEventTrust {
     Untrusted,
 }
 
-impl JobEventTrust {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Trusted => "trusted",
-            Self::Untrusted => "untrusted",
-        }
-    }
-}
-
 /// Closed source classification for secret policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobSourceKind {
@@ -248,16 +232,6 @@ pub enum JobSourceKind {
     Dependabot,
 }
 
-impl JobSourceKind {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::SameRepository => "same_repository",
-            Self::Fork => "fork",
-            Self::Dependabot => "dependabot",
-        }
-    }
-}
-
 /// Reusable callers expose secrets only through an explicit reduced binding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReusableSecretPermission {
@@ -265,15 +239,6 @@ pub enum ReusableSecretPermission {
     None,
     /// The caller explicitly forwarded the referenced names.
     Explicit,
-}
-
-impl ReusableSecretPermission {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Explicit => "explicit",
-        }
-    }
 }
 
 /// Selection and approval request for one exact concrete attempt.
@@ -339,7 +304,10 @@ impl PrepareJobEnvironment {
             approval_expires_at,
         })
     }
+}
 
+#[cfg(feature = "adapter-spi")]
+impl PrepareJobEnvironment {
     pub(crate) const fn tenant(&self) -> &TenantScope {
         &self.tenant
     }
@@ -381,15 +349,6 @@ pub enum EnvironmentReviewDecision {
     Reject,
 }
 
-impl EnvironmentReviewDecision {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Approve => "approve",
-            Self::Reject => "reject",
-        }
-    }
-}
-
 /// One authenticated review of the gate for an attempt.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ReviewJobEnvironment {
@@ -421,7 +380,10 @@ impl ReviewJobEnvironment {
             decision,
         })
     }
+}
 
+#[cfg(feature = "adapter-spi")]
+impl ReviewJobEnvironment {
     pub(crate) const fn actor(&self) -> &ManagementActor {
         &self.actor
     }
@@ -500,6 +462,10 @@ impl SecretLeaseAuthority {
     pub(crate) fn canonical_name(&self) -> &str {
         &self.canonical_name
     }
+}
+
+#[cfg(feature = "adapter-spi")]
+impl SecretLeaseAuthority {
     pub(crate) const fn grant_id(&self) -> Uuid {
         self.grant_id
     }
@@ -555,7 +521,10 @@ impl BindLeasedJobSecrets {
             expires_at,
         })
     }
+}
 
+#[cfg(feature = "adapter-spi")]
+impl BindLeasedJobSecrets {
     pub(crate) const fn tenant(&self) -> &TenantScope {
         &self.tenant
     }
@@ -620,7 +589,10 @@ impl IssueLeasedJobSecretGrants {
             expires_at,
         })
     }
+}
 
+#[cfg(feature = "adapter-spi")]
+impl IssueLeasedJobSecretGrants {
     pub(crate) const fn tenant(&self) -> &TenantScope {
         &self.tenant
     }
@@ -668,7 +640,10 @@ impl InspectLeasedJobSecretBindings {
         }
         Ok(Self { tenant, lease })
     }
+}
 
+#[cfg(feature = "adapter-spi")]
+impl InspectLeasedJobSecretBindings {
     pub(crate) const fn tenant(&self) -> &TenantScope {
         &self.tenant
     }
@@ -686,6 +661,7 @@ pub struct IssuedLeasedJobSecretBinding {
 }
 
 impl IssuedLeasedJobSecretBinding {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn new(canonical_name: String, binding: SecretBinding) -> Self {
         Self {
             canonical_name,
@@ -853,7 +829,7 @@ pub enum ProtectedEnvironmentStoreError {
     /// A replay disagreed with immutable evidence.
     #[error("protected environment request conflicts with durable evidence")]
     Conflict,
-    /// Durable rows violate the adapter's closed contract.
+    /// Durable records violate the adapter's closed contract.
     #[error("protected environment data is corrupt")]
     CorruptData,
 }

@@ -31,7 +31,7 @@ const EVALUATED_OUTPUTS_DIGEST_DOMAIN: &[u8] = b"automata.store.reusable-evaluat
 /// Maximum caller-visible or callee-declared outputs at one call boundary.
 pub const MAX_REUSABLE_CALL_OUTPUTS: usize = 256;
 
-/// One immutable input-binding row used to verify runtime evaluation.
+/// One immutable input-binding record used to verify runtime evaluation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReusableWorkflowInputBindingEvidence {
     key: String,
@@ -41,7 +41,7 @@ pub struct ReusableWorkflowInputBindingEvidence {
 }
 
 impl ReusableWorkflowInputBindingEvidence {
-    /// Creates one typed input-evidence row returned by a repository adapter.
+    /// Creates one typed input-evidence record returned by a repository adapter.
     #[must_use]
     pub fn new(
         key: impl Into<String>,
@@ -957,13 +957,13 @@ pub enum ReusableWorkflowRuntimeValueError {
 /// Sanitized durable reusable runtime failure.
 #[derive(Debug, Error)]
 pub enum ReusableWorkflowRuntimeStoreError {
-    /// The relational backend failed or returned malformed current data.
+    /// The repository backend failed or returned malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The callsite is absent, cross-scope, stale, or not dependency-ready.
     #[error("reusable workflow call target is not ready")]
     NotReady,
-    /// A prior operation or callsite row disagrees with this exact request.
+    /// A prior operation or callsite record disagrees with this exact request.
     #[error("reusable workflow request conflicts with durable evidence")]
     Conflict,
     /// Completion is waiting for every child logical result.

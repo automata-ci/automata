@@ -126,7 +126,7 @@ clickjacking-prone.
 The existing foundation is strong:
 
 - `crates/automata-ci-store/src/github_checks.rs` and
-  `src/postgres/github_checks.rs` persist fenced Check subjects and a durable,
+  `crates/automata-ci-postgres/src/store/github_checks.rs` persist fenced Check subjects and a durable,
   restart-safe projection outbox.
 - `crates/automata-ci-github/src/checks.rs` creates/reconciles an exact Check
   Suite and Check Run, validates App/suite/SHA/name/external ID/details URL, and
@@ -315,8 +315,8 @@ Primary files:
 
 - `crates/automata-ci-core/src/job/result.rs`
 - `crates/automata-ci-store/src/github_checks.rs`
-- `crates/automata-ci-store/src/postgres/github_checks.rs`
-- `crates/automata-ci-store/migrations/0001_initial_schema.sql`
+- `crates/automata-ci-postgres/src/store/github_checks.rs`
+- `crates/automata-ci-postgres/migrations/0001_initial_schema.sql`
 - `crates/automata-ci-github/src/checks.rs`
 - `crates/automata-ci-github-delivery/src/checks_publisher.rs`
 - their focused integration tests

@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{RunReconciliation, StoreError};
 
-/// Largest number of rows handled per work category in one maintenance pass.
+/// Largest number of records handled per work category in one maintenance pass.
 pub const MAX_MAINTENANCE_BATCH_SIZE: u16 = 1_000;
 
 /// Positive, defensively bounded maintenance work limit.
@@ -163,6 +163,7 @@ pub struct ExpiredAttemptMaintenance {
 }
 
 impl ExpiredAttemptMaintenance {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn new(
         attempt_id: AttemptId,
         disposition: ExpiredAttemptDisposition,
@@ -205,6 +206,7 @@ pub struct ControlPlaneMaintenanceReport {
 }
 
 impl ControlPlaneMaintenanceReport {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn new(
         expired_attempts: Vec<ExpiredAttemptMaintenance>,
         skipped_blocked_attempts: u16,

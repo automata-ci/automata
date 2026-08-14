@@ -35,6 +35,10 @@ use automata_ci_postgres::{
     provisioning::PostgresWorkspaceProvisioner,
     runner_auth::PostgresRunnerMachineDirectory,
     secret::PostgresSecretProvider,
+    store::{
+        PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
+        PostgresStoreError,
+    },
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_provisioning::{ProvisioningWorkloadAuthenticator, WorkspaceProvisioner};
@@ -61,15 +65,14 @@ use automata_ci_store::{
     LogicalJobResultWorkerId, LogicalMaterializationRepository, LogicalMaterializationWorkerId,
     LogicalRunFinalizationRepository, LogicalRunFinalizationWorkerId,
     LogicalWorkSelectionRepository, LogicalWorkflowAdmissionRepository,
-    ManagedSecretAuthorityRepository, PostgresSecretCustodyRepository,
-    PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
-    ProtectedEnvironmentRepository, RepositoryPublicationRepository,
-    RepositorySecretManagementReadRepository, RepositorySecretManagementRepository,
-    ReusableWorkflowRuntimeRepository, RunnerCapabilityAdmissionRepository as _,
-    RunnerCapabilityReadiness, RunnerCommandOutbox, RunnerControlTransactionRepository,
-    RunnerLeaseOfferRepository, RunnerLeaseRequestRepository, RunnerOperationReceiptRepository,
-    RunnerSessionRepository, SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository,
-    SecretMutationRecoveryRepository, TenantScope, WorkflowRerunRepository,
+    ManagedSecretAuthorityRepository, ProtectedEnvironmentRepository,
+    RepositoryPublicationRepository, RepositorySecretManagementReadRepository,
+    RepositorySecretManagementRepository, ReusableWorkflowRuntimeRepository,
+    RunnerCapabilityAdmissionRepository as _, RunnerCapabilityReadiness, RunnerCommandOutbox,
+    RunnerControlTransactionRepository, RunnerLeaseOfferRepository, RunnerLeaseRequestRepository,
+    RunnerOperationReceiptRepository, RunnerSessionRepository, SecretCleanupWorkerId,
+    SecretCustodyKeySet, SecretCustodyRepository, SecretMutationRecoveryRepository, TenantScope,
+    WorkflowRerunRepository,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,

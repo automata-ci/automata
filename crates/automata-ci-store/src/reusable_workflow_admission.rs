@@ -129,7 +129,7 @@ impl AdmittedReusableInputKind {
     }
 }
 
-/// One typed, value-free reusable input ledger row.
+/// One typed, value-free reusable input ledger record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmittedReusableInput {
     key: String,
@@ -139,7 +139,7 @@ pub struct AdmittedReusableInput {
 }
 
 impl AdmittedReusableInput {
-    /// Creates one input ledger row.
+    /// Creates one input ledger record.
     #[must_use]
     pub fn new(
         key: impl Into<String>,
@@ -218,7 +218,7 @@ pub struct AdmittedReusableOutput {
 }
 
 impl AdmittedReusableOutput {
-    /// Creates one output contract row.
+    /// Creates one output contract record.
     #[must_use]
     pub fn new(key: impl Into<String>, sensitivity: OutputSensitivity) -> Self {
         Self {
@@ -552,7 +552,8 @@ pub struct AdmittedReusableWorkflowExpansion {
 }
 
 impl AdmittedReusableWorkflowExpansion {
-    /// Creates a complete graph. The database revalidates counts, cycles, and reductions at commit.
+    /// Creates a complete graph. The repository revalidates counts, cycles,
+    /// and reductions at commit.
     #[must_use]
     pub fn new(
         digest: Sha256Digest,
@@ -597,28 +598,5 @@ impl AdmittedReusableWorkflowExpansion {
             .map(AdmittedReusableInvocation::depth)
             .max()
             .unwrap_or(0)
-    }
-}
-
-pub(crate) const fn input_type_name(value: InvocationInputType) -> &'static str {
-    match value {
-        InvocationInputType::Boolean => "boolean",
-        InvocationInputType::Number => "number",
-        InvocationInputType::String => "string",
-    }
-}
-
-pub(crate) const fn permission_level_name(value: PermissionLevel) -> &'static str {
-    match value {
-        PermissionLevel::None => "none",
-        PermissionLevel::Read => "read",
-        PermissionLevel::Write => "write",
-    }
-}
-
-pub(crate) const fn sensitivity_name(value: OutputSensitivity) -> &'static str {
-    match value {
-        OutputSensitivity::Public => "public",
-        OutputSensitivity::SecretDerived => "secret_derived",
     }
 }

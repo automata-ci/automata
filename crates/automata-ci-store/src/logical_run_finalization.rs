@@ -55,7 +55,7 @@ impl LogicalRunFinalizationWorkerId {
 pub struct LogicalRunFinalizationGeneration(NonZeroU64);
 
 impl LogicalRunFinalizationGeneration {
-    /// Constructs a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -71,10 +71,6 @@ impl LogicalRunFinalizationGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated run-finalization generation fits in i64")
     }
 }
 
@@ -181,15 +177,6 @@ pub enum LogicalRunFinalizationOpenState {
     Active,
 }
 
-impl LogicalRunFinalizationOpenState {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Active => "active",
-        }
-    }
-}
-
 /// Workflow-run status pinned before logical finalization.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LogicalRunFinalizationWorkflowStatus {
@@ -200,16 +187,6 @@ pub enum LogicalRunFinalizationWorkflowStatus {
     /// Repository concurrency or another trusted server action cancelled the
     /// run before logical aggregation finished.
     Cancelled,
-}
-
-impl LogicalRunFinalizationWorkflowStatus {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Queued => "queued",
-            Self::InProgress => "in_progress",
-            Self::Cancelled => "cancelled",
-        }
-    }
 }
 
 /// Exact immutable logical-job result evidence contributing to a run result.
@@ -235,7 +212,7 @@ pub struct LogicalRunJobResultEvidence {
 }
 
 impl LogicalRunJobResultEvidence {
-    /// Rehydrates one complete immutable logical-job result row.
+    /// Rehydrates one complete immutable logical-job result record.
     ///
     /// # Errors
     ///
@@ -402,8 +379,8 @@ impl LogicalRunFinalizationDescriptor {
     /// Rehydrates a complete current root-invocation result snapshot.
     ///
     /// Empty job sets are deliberately invalid: current logical admission
-    /// requires at least one job, so treating zero rows as vacuous readiness
-    /// would turn relational corruption into a successful or skipped run.
+    /// requires at least one job, so treating zero records as vacuous readiness
+    /// would turn durable-state corruption into a successful or skipped run.
     ///
     /// # Errors
     ///
@@ -894,7 +871,7 @@ pub enum LogicalRunFinalizationValueError {
 /// Durable claim or finalization failure.
 #[derive(Debug, Error)]
 pub enum LogicalRunFinalizationStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The monotonic claim generation cannot advance.

@@ -22,9 +22,9 @@ use crate::{
     RepositoryId, RepositoryOperationError, Sha256Digest, TenantScope,
 };
 
-/// Maximum duration of one pre-mint database claim.
+/// Maximum duration of one pre-mint repository claim.
 pub const MAX_GITHUB_SERVICE_MINT_CLAIM_MILLIS: i64 = 2 * 60 * 1_000;
-/// Maximum duration of one revocation database claim.
+/// Maximum duration of one revocation repository claim.
 pub const MAX_GITHUB_SERVICE_REVOKE_CLAIM_MILLIS: i64 = 2 * 60 * 1_000;
 /// Maximum provider request interval admitted by the durable boundary.
 pub const MAX_GITHUB_SERVICE_REQUEST_MILLIS: i64 = 2 * 60 * 1_000;
@@ -116,7 +116,7 @@ macro_rules! positive_bigint {
         pub struct $name(NonZeroU64);
 
         impl $name {
-            /// Constructs a positive value representable by `PostgreSQL` `BIGINT`.
+            /// Constructs a positive value within the signed 64-bit storage boundary.
             ///
             /// # Errors
             ///
@@ -134,9 +134,6 @@ macro_rules! positive_bigint {
                 self.0.get()
             }
 
-            pub(crate) fn as_i64(self) -> i64 {
-                i64::try_from(self.get()).expect("validated value fits BIGINT")
-            }
         }
     };
 }
@@ -210,14 +207,6 @@ impl GithubServerServiceJwtIssuer {
             Self::AppId => "app_id",
         }
     }
-
-    pub(crate) fn from_durable(value: &str) -> Result<Self, GithubServerServiceValueError> {
-        match value {
-            "app_client_id" => Ok(Self::AppClientId),
-            "app_id" => Ok(Self::AppId),
-            _ => Err(GithubServerServiceValueError::InvalidJwtIssuer),
-        }
-    }
 }
 
 /// Closed least-authority GitHub installation credential policy.
@@ -257,14 +246,6 @@ impl GithubServerServiceScope {
         digest.update([0]);
         digest.update(self.permissions_json().as_bytes());
         Sha256Digest::from_bytes(digest.finalize().into())
-    }
-
-    pub(crate) fn from_durable(value: &str) -> Result<Self, GithubServerServiceValueError> {
-        match value {
-            "checks_write" => Ok(Self::ChecksWrite),
-            "private_repository_source_read" => Ok(Self::PrivateRepositorySourceRead),
-            _ => Err(GithubServerServiceValueError::InvalidScope),
-        }
     }
 }
 
@@ -557,17 +538,6 @@ pub enum GithubServerServiceAuthorityState {
     Retired,
 }
 
-impl GithubServerServiceAuthorityState {
-    pub(crate) fn from_durable(value: &str) -> Result<Self, GithubServerServiceValueError> {
-        match value {
-            "active" => Ok(Self::Active),
-            "retiring" => Ok(Self::Retiring),
-            "retired" => Ok(Self::Retired),
-            _ => Err(GithubServerServiceValueError::InvalidAuthorityDescriptor),
-        }
-    }
-}
-
 /// Complete descriptor including its mutable lifecycle pointers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubServerServiceAuthorityDescriptor {
@@ -787,41 +757,6 @@ pub enum GithubServerServiceIssuanceState {
     Rejected,
     /// Provider revocation or conservative expiry permits erased custody.
     Revoked,
-}
-
-impl GithubServerServiceIssuanceState {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Claimed => "claimed",
-            Self::Minting => "minting",
-            Self::MintRetryPending => "mint_retry",
-            Self::Indeterminate => "indeterminate",
-            Self::Ready => "ready",
-            Self::RevokePending => "revoke_pending",
-            Self::RevokeClaimed => "revoke_claimed",
-            Self::RevokeRetryPending => "revoke_retry",
-            Self::Quarantined => "quarantined",
-            Self::Rejected => "rejected",
-            Self::Revoked => "revoked",
-        }
-    }
-
-    pub(crate) fn from_durable(value: &str) -> Result<Self, GithubServerServiceValueError> {
-        match value {
-            "claimed" => Ok(Self::Claimed),
-            "minting" => Ok(Self::Minting),
-            "mint_retry" => Ok(Self::MintRetryPending),
-            "indeterminate" => Ok(Self::Indeterminate),
-            "ready" => Ok(Self::Ready),
-            "revoke_pending" => Ok(Self::RevokePending),
-            "revoke_claimed" => Ok(Self::RevokeClaimed),
-            "revoke_retry" => Ok(Self::RevokeRetryPending),
-            "quarantined" => Ok(Self::Quarantined),
-            "rejected" => Ok(Self::Rejected),
-            "revoked" => Ok(Self::Revoked),
-            _ => Err(GithubServerServiceValueError::InvalidIssuanceReceipt),
-        }
-    }
 }
 
 /// Value-free durable issuance projection.
@@ -1328,6 +1263,7 @@ pub struct GithubServerServiceMintStart {
 }
 
 impl GithubServerServiceMintStart {
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_request(
         request: &BeginGithubServerServiceMint,
         receipt: GithubServerServiceIssuanceReceipt,
@@ -1939,20 +1875,6 @@ impl GithubServerServiceAction {
             | Self::DiscoverPrivateRepositorySchedules => {
                 MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS
             }
-        }
-    }
-    pub(crate) fn from_durable(value: &str) -> Result<Self, GithubServerServiceValueError> {
-        match value {
-            "ensure_check_suite" => Ok(Self::EnsureCheckSuite),
-            "create_check_run" => Ok(Self::CreateCheckRun),
-            "reconcile_check_run" => Ok(Self::ReconcileCheckRun),
-            "publish_check_run" => Ok(Self::PublishCheckRun),
-            "fetch_private_repository_revision" => Ok(Self::FetchPrivateRepositoryRevision),
-            "fetch_private_repository_changed_files" => {
-                Ok(Self::FetchPrivateRepositoryChangedFiles)
-            }
-            "discover_private_repository_schedules" => Ok(Self::DiscoverPrivateRepositorySchedules),
-            _ => Err(GithubServerServiceValueError::InvalidAction),
         }
     }
 }
@@ -2732,7 +2654,7 @@ pub enum GithubServerServiceMaintenanceOutcome {
     Revocation(Box<ClaimedGithubServerServiceRevocation>),
     /// One stale/expired generation was deterministically reduced in-store.
     Reduced {
-        /// Exact immutable descriptor selector for the reduced row.
+        /// Exact immutable descriptor selector for the reduced record.
         selector: GithubServerServiceAuthoritySelector,
         /// Value-free durable lifecycle result.
         receipt: GithubServerServiceIssuanceReceipt,
@@ -2745,7 +2667,7 @@ pub enum GithubServerServiceStoreError {
     /// Backend operation failed without exposing credential values.
     #[error(transparent)]
     Operation(#[from] RepositoryOperationError),
-    /// Durable rows violate the current-only contract.
+    /// Durable records violate the current-only contract.
     #[error("durable GitHub server-service authority data is corrupt")]
     CorruptData,
     /// Exact descriptor ID or provider scope conflicts with immutable state.
@@ -2927,7 +2849,7 @@ pub trait GithubServerServiceAuthorityRepository: Send + Sync {
         &self,
         request: EraseExpiredGithubServerServiceIssuance,
     ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError>;
-    /// Atomically discovers and claims/reduces one due tenant maintenance row.
+    /// Atomically discovers and claims/reduces one due tenant maintenance record.
     async fn claim_next_github_server_service_maintenance(
         &self,
         request: ClaimNextGithubServerServiceMaintenance,

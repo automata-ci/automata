@@ -1,16 +1,13 @@
-# PostgreSQL integration tests
+# Store contract tests
 
-The repository tests are ignored by the default test run because they require
-a live PostgreSQL server. Run them explicitly against a disposable database or
-a role that may create schemas:
+`store_contracts` contains source-only and in-memory contracts for Store values
+and repository ports. It does not require PostgreSQL:
 
 ```sh
-AUTOMATA_TEST_DATABASE_URL='postgresql://user:password@127.0.0.1:5432/database' \
-  cargo test -p automata-ci-store --locked --all-targets -- \
-    --include-ignored --test-threads=1
+cargo test -p automata-ci-store --test store_contracts --all-features --locked
 ```
 
-Each test creates a collision-resistant `automata_test_<uuid>` schema, scopes
-every pooled connection to that schema, and drops only that exact schema after
-the scenario. The harness also performs cleanup before propagating assertion
-panics. Tests never truncate shared tables or use filesystem temporary paths.
+The concrete Store adapter, canonical migration, schema contracts, and live
+database suites are owned by `automata-ci-postgres/tests`. Run those through
+`scripts/ci/run-postgres-tests.sh` so they share the repository's bounded,
+namespace-isolated PostgreSQL harness.

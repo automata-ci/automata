@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::{
     fs::File,
     io::{Read as _, Write as _},
+    os::unix::fs::MetadataExt as _,
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -650,7 +651,6 @@ fn validate_file_metadata(file: &File, private: bool) -> Result<()> {
     if !metadata.is_file() {
         bail!("runner enrollment state is not a regular file");
     }
-    use std::os::unix::fs::MetadataExt as _;
     if metadata.nlink() != 1
         || metadata.uid() != rustix::process::geteuid().as_raw()
         || (private && metadata.mode() & 0o077 != 0)

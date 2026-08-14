@@ -33,9 +33,9 @@ use crate::{
     StableRunnerSlot, TenantScope,
 };
 
-/// Maximum time held by a pre-mint database claim.
+/// Maximum time held by a pre-mint repository claim.
 pub const MAX_GITHUB_AUTHORITY_MINT_CLAIM_MILLIS: i64 = 2 * 60 * 1_000;
-/// Maximum time held by a revocation database claim.
+/// Maximum time held by a revocation repository claim.
 pub const MAX_GITHUB_AUTHORITY_REVOKE_CLAIM_MILLIS: i64 = 2 * 60 * 1_000;
 /// Maximum provider-request deadline interval accepted by the durable boundary.
 pub const MAX_GITHUB_AUTHORITY_REQUEST_MILLIS: i64 = 2 * 60 * 1_000;
@@ -55,7 +55,7 @@ pub const MAX_GITHUB_AUTHORITY_MINT_ATTEMPTS: u16 = 32;
 pub const MAX_GITHUB_AUTHORITY_REVOKE_ATTEMPTS: u16 = 64;
 /// Maximum protected runtime-authority plaintext size.
 pub const MAX_GITHUB_RUNTIME_AUTHORITY_PLAINTEXT_BYTES: u64 = 64 * 1024;
-/// Maximum rows changed by one reconciliation transaction.
+/// Maximum records changed by one reconciliation transaction.
 pub const MAX_GITHUB_AUTHORITY_RECONCILE_BATCH: u16 = 512;
 
 const MAX_GITHUB_REPOSITORY_OWNER_BYTES: usize = 39;
@@ -100,7 +100,7 @@ impl GithubRuntimeAuthorityKey {
     }
 }
 
-/// Durable worker identity used only to fence short database claims.
+/// Durable worker identity used only to fence short repository claims.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GithubRuntimeAuthorityWorkerId(Uuid);
 
@@ -124,12 +124,12 @@ impl GithubRuntimeAuthorityWorkerId {
     }
 }
 
-/// Monotonic fence of a mint or revocation database claim.
+/// Monotonic fence of a mint or revocation repository claim.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GithubRuntimeAuthorityClaimFence(NonZeroU64);
 
 impl GithubRuntimeAuthorityClaimFence {
-    /// Constructs a positive claim fence representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive claim fence within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -147,10 +147,6 @@ impl GithubRuntimeAuthorityClaimFence {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated claim fence fits in i64")
     }
 }
 
@@ -243,7 +239,7 @@ impl GithubRuntimeAuthorityNamespace {
 pub struct GithubRepositoryId(NonZeroU64);
 
 impl GithubRepositoryId {
-    /// Constructs a positive provider identity representable by `BIGINT`.
+    /// Constructs a positive provider identity within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -261,10 +257,6 @@ impl GithubRepositoryId {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated GitHub repository ID fits in i64")
     }
 }
 
@@ -328,7 +320,7 @@ impl GithubRuntimeAuthorityPreparationSelectionTail {
     pub const fn descriptor_digest(self) -> Sha256Digest {
         self.descriptor_digest
     }
-    /// Returns the current preparation tail's database-issued start.
+    /// Returns the current preparation tail's repository-issued start.
     #[must_use]
     pub const fn claimed_at(self) -> UnixMillis {
         self.claimed_at
@@ -400,7 +392,7 @@ impl GithubRuntimeAuthorityActivationSelectionTail {
     pub const fn activation_input_digest(self) -> Sha256Digest {
         self.activation_input_digest
     }
-    /// Returns the current activation tail's database-issued start.
+    /// Returns the current activation tail's repository-issued start.
     #[must_use]
     pub const fn claimed_at(self) -> UnixMillis {
         self.claimed_at
@@ -472,7 +464,7 @@ impl GithubRuntimeAuthorityMaterializationSelectionTail {
     pub const fn descriptor_digest(self) -> Sha256Digest {
         self.descriptor_digest
     }
-    /// Returns the current materialization tail's database-issued start.
+    /// Returns the current materialization tail's repository-issued start.
     #[must_use]
     pub const fn claimed_at(self) -> UnixMillis {
         self.claimed_at
@@ -1139,20 +1131,6 @@ pub enum GithubRuntimeAuthorityCorruptionKind {
     CryptographicFailure,
 }
 
-impl GithubRuntimeAuthorityCorruptionKind {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::InvalidEnvelope => "invalid_envelope",
-            Self::UnsupportedEnvelopeSchema => "unsupported_envelope_schema",
-            Self::EnvelopeAuthenticationFailed => "envelope_authentication_failed",
-            Self::InvalidWrappedDataKey => "invalid_wrapped_data_key",
-            Self::UnknownWrappingKey => "unknown_wrapping_key",
-            Self::RetiredWrappingKey => "retired_wrapping_key",
-            Self::CryptographicFailure => "cryptographic_failure",
-        }
-    }
-}
-
 /// Compact durable state receipt containing no protected content.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GithubRuntimeAuthorityReceipt {
@@ -1474,7 +1452,7 @@ impl ClaimedGithubRuntimeAuthorityMint {
 /// Exact mint custody used to authenticate erasure of an unprotected token.
 ///
 /// This request deliberately contains no caller-selected observation time.
-/// Only the repository's locked database-time observation may prove that an
+/// Only the repository's locked time observation may prove that an
 /// ambiguous post-provider token has crossed its conservative expiry horizon.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticateGithubRuntimeAuthorityUnprotectedErasure {
@@ -2057,7 +2035,7 @@ impl ReconcileGithubRuntimeAuthorities {
     pub const fn observed_at(self) -> UnixMillis {
         self.observed_at
     }
-    /// Returns the validated maximum number of rows the transaction may change.
+    /// Returns the validated maximum number of records the transaction may change.
     #[must_use]
     pub const fn batch_size(self) -> u16 {
         self.batch_size.get()
@@ -2087,7 +2065,7 @@ impl GithubRuntimeAuthorityReconciliationReport {
     pub const fn mint_retries_rejected(self) -> u16 {
         self.mint_retries_rejected
     }
-    /// Returns abandoned `minting` rows reduced to indeterminate custody.
+    /// Returns abandoned `minting` records reduced to indeterminate custody.
     #[must_use]
     pub const fn minting_marked_indeterminate(self) -> u16 {
         self.minting_marked_indeterminate
@@ -2261,8 +2239,8 @@ impl ClaimedGithubRuntimeAuthorityRevocation {
 ///
 /// The request carries no plaintext. It binds the live revocation claim to the
 /// authenticated authority identity and envelope metadata and asks Store to
-/// decide whether the complete provider request still fits using `PostgreSQL`
-/// time sampled after the authority graph and issuance row are locked.
+/// decide whether the complete provider request still fits using repository
+/// time sampled after the authority graph and issuance record are locked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RevalidateGithubRuntimeAuthorityRevocation {
     key: GithubRuntimeAuthorityKey,
@@ -2358,7 +2336,7 @@ impl RevalidateGithubRuntimeAuthorityRevocation {
     }
 }
 
-/// `PostgreSQL`-time result of the exact post-decrypt revocation check.
+/// Repository-time result of the exact post-decrypt revocation check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RevalidatedGithubRuntimeAuthorityRevocation {
     observed_at: UnixMillis,
@@ -2399,7 +2377,7 @@ impl RevalidatedGithubRuntimeAuthorityRevocation {
         })
     }
 
-    /// Returns the `PostgreSQL` observation sampled after every required lock.
+    /// Returns the repository observation sampled after every required lock.
     #[must_use]
     pub const fn observed_at(self) -> UnixMillis {
         self.observed_at
@@ -2495,7 +2473,7 @@ impl RetryGithubRuntimeAuthorityRevocation {
     pub const fn fence(&self) -> GithubRuntimeAuthorityClaimFence {
         self.fence
     }
-    /// Returns the immutable revocation predecessor's database-issued start.
+    /// Returns the immutable revocation predecessor's repository-issued start.
     #[must_use]
     pub const fn claimed_at(&self) -> UnixMillis {
         self.claimed_at
@@ -2574,7 +2552,7 @@ impl DeferGithubRuntimeAuthorityRevocation {
     pub const fn fence(&self) -> GithubRuntimeAuthorityClaimFence {
         self.fence
     }
-    /// Returns the immutable revocation predecessor's database-issued start.
+    /// Returns the immutable revocation predecessor's repository-issued start.
     #[must_use]
     pub const fn claimed_at(&self) -> UnixMillis {
         self.claimed_at
@@ -2648,7 +2626,7 @@ impl ConfirmGithubRuntimeAuthorityRevocation {
     pub const fn fence(self) -> GithubRuntimeAuthorityClaimFence {
         self.fence
     }
-    /// Returns the immutable revocation predecessor's database-issued start.
+    /// Returns the immutable revocation predecessor's repository-issued start.
     #[must_use]
     pub const fn claimed_at(self) -> UnixMillis {
         self.claimed_at
@@ -2671,7 +2649,7 @@ pub enum GithubRuntimeAuthorityStoreError {
     /// The backing repository operation failed without exposing credential data.
     #[error(transparent)]
     Operation(#[from] RepositoryOperationError),
-    /// Durable rows violate the current-only runtime-authority contract.
+    /// Durable records violate the current-only runtime-authority contract.
     #[error("durable GitHub runtime-authority data is corrupt")]
     CorruptData,
     /// An exact key already exists with different immutable identity evidence.
@@ -2686,7 +2664,7 @@ pub enum GithubRuntimeAuthorityStoreError {
     /// Quarantine did not match the exact protected envelope and live state.
     #[error("GitHub runtime-authority quarantine observation was rejected")]
     QuarantineRejected,
-    /// A new positive database claim fence cannot be represented safely.
+    /// A new positive repository claim fence cannot be represented safely.
     #[error("GitHub runtime-authority claim fence is exhausted")]
     FenceExhausted,
     /// The closed mint or revocation attempt ceiling has been reached.
@@ -2708,7 +2686,7 @@ pub enum GithubRuntimeAuthorityValueError {
     /// A required UUID identity used the nil sentinel.
     #[error("runtime-authority identity field is nil: {0}")]
     NilIdentity(&'static str),
-    /// A numeric GitHub repository identity is zero or exceeds `BIGINT`.
+    /// A numeric GitHub repository identity is zero or exceeds the signed 64-bit boundary.
     #[error("GitHub repository ID must be a positive BIGINT")]
     InvalidGithubRepositoryId,
     /// Repository name evidence is not canonical bounded `owner/repository`.
@@ -2804,7 +2782,7 @@ pub trait GithubRuntimeAuthorityRepository: Send + Sync {
     /// Authenticates when an unprotected post-provider token is safe to erase.
     ///
     /// Adapters must lock the request's complete graph, issuance, and exact
-    /// mint predecessor before sampling database time. `None` means exact
+    /// mint predecessor before sampling repository time. `None` means exact
     /// minting or indeterminate custody remains inside its conservative
     /// horizon. `Some` is returned only after the exact issuance is durably
     /// terminal with the indeterminate-expiry reason. Protected or otherwise
@@ -2888,7 +2866,7 @@ pub trait GithubRuntimeAuthorityRepository: Send + Sync {
     ) -> Result<Option<ClaimedGithubRuntimeAuthorityRevocation>, GithubRuntimeAuthorityStoreError>;
 
     /// Revalidates the exact claim immediately after KMS decrypt and before
-    /// provider I/O using `PostgreSQL` time under the full graph and row locks.
+    /// provider I/O using repository time under the full graph and record locks.
     ///
     /// `None` means the owner, fence, protected metadata, or live claim no
     /// longer matches. A present result distinguishes a live claim whose

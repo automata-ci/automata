@@ -7,7 +7,10 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::secret::PostgresSecretProvider;
+use automata_ci_postgres::{
+    secret::PostgresSecretProvider,
+    store::{PostgresSecretCustodyRepository, PostgresSecretManagementRepository},
+};
 use automata_ci_secret::{
     CreateSecretVersionRequest, CreatedSecretVersion, DestroySecretVersionRequest,
     ExistingSecretVersion, ProviderErrorKind, ProviderHealth, ProviderOperationContext,
@@ -22,8 +25,7 @@ use automata_ci_store::{
     ClaimBuiltinSecretCleanup, ClaimBuiltinSecretCleanupOutcome, CompleteBuiltinSecretCleanup,
     CompleteBuiltinSecretCleanupOutcome, ConfirmRepositorySecretVersionMutation,
     ConfirmRepositorySecretVersionMutationOutcome, DeleteRepositorySecret,
-    DeleteRepositorySecretOutcome, PostgresSecretCustodyRepository,
-    PostgresSecretManagementRepository, RepositoryId, RepositorySecretId,
+    DeleteRepositorySecretOutcome, RepositoryId, RepositorySecretId,
     RepositorySecretManagementRepository, RepositorySecretMutationId, RepositorySecretName,
     RepositorySecretProviderMutationResult, RepositorySecretVersionId,
     RepositorySecretVersionMutationReservation, ReserveRepositorySecretVersionMutation,

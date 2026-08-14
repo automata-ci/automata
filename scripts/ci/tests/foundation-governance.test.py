@@ -52,7 +52,7 @@ class FoundationGovernanceTests(unittest.TestCase):
                 "    assert!(!accept(MAX_TEST_ITEMS + 1));\n"
                 "}\n"
             ),
-            "crates/automata-ci-store/migrations/0001_initial_schema.sql": "SELECT 1;\n",
+            "crates/automata-ci-postgres/migrations/0001_initial_schema.sql": "SELECT 1;\n",
         }
         for relative, contents in files.items():
             path = self.root / relative
@@ -153,7 +153,7 @@ class FoundationGovernanceTests(unittest.TestCase):
             ],
             "migrations": {
                 "current": ["0001_initial_schema.sql"],
-                "directory": "crates/automata-ci-store/migrations",
+                "directory": "crates/automata-ci-postgres/migrations",
                 "mode": "greenfield-canonical-baseline",
                 "next_sequence": None,
                 "owner": "store",
@@ -609,7 +609,7 @@ class FoundationGovernanceTests(unittest.TestCase):
         migration = (
             self.root
             / "crates"
-            / "automata-ci-store"
+            / "automata-ci-postgres"
             / "migrations"
             / "0002_unregistered.sql"
         )
@@ -621,7 +621,7 @@ class FoundationGovernanceTests(unittest.TestCase):
         migration = (
             self.root
             / "crates"
-            / "automata-ci-store"
+            / "automata-ci-postgres"
             / "migrations"
             / "0001_initial_schema.sql"
         )
@@ -633,7 +633,7 @@ class FoundationGovernanceTests(unittest.TestCase):
         migration = (
             self.root
             / "crates"
-            / "automata-ci-store"
+            / "automata-ci-postgres"
             / "migrations"
             / "0001_initial_schema.sql"
         )
@@ -650,7 +650,7 @@ class FoundationGovernanceTests(unittest.TestCase):
         migration = (
             self.root
             / "crates"
-            / "automata-ci-store"
+            / "automata-ci-postgres"
             / "migrations"
             / "0001_initial_schema.sql"
         )
@@ -686,7 +686,7 @@ class FoundationGovernanceTests(unittest.TestCase):
         migration = (
             self.root
             / "crates"
-            / "automata-ci-store"
+            / "automata-ci-postgres"
             / "migrations"
             / "0001_initial_schema.sql"
         )
@@ -722,7 +722,7 @@ class FoundationGovernanceTests(unittest.TestCase):
         migration = (
             self.root
             / "crates"
-            / "automata-ci-store"
+            / "automata-ci-postgres"
             / "migrations"
             / "0001_initial_schema.sql"
         )
@@ -739,7 +739,7 @@ class FoundationGovernanceTests(unittest.TestCase):
         migration = (
             self.root
             / "crates"
-            / "automata-ci-store"
+            / "automata-ci-postgres"
             / "migrations"
             / "0001_initial_schema.sql"
         )

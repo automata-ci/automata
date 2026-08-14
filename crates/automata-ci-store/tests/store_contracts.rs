@@ -47,8 +47,6 @@ mod maintenance_api;
 mod managed_secret_authority_api;
 #[path = "observability_api.rs"]
 mod observability_api;
-#[path = "postgres_schema_bindings.rs"]
-mod postgres_schema_bindings;
 #[path = "provider_delivery_api.rs"]
 mod provider_delivery_api;
 #[path = "provider_delivery_receipt.rs"]

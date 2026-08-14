@@ -2403,8 +2403,8 @@ def _validate_migrations(repository_root: Path, value: Any, owner_ids: set[str])
     mode = _string(migrations["mode"], "migrations.mode", identifier=True)
     if mode != "greenfield-canonical-baseline":
         _fail("migrations.mode must be 'greenfield-canonical-baseline'")
-    if migrations["directory"] != "crates/automata-ci-store/migrations":
-        _fail("migrations.directory must be 'crates/automata-ci-store/migrations'")
+    if migrations["directory"] != "crates/automata-ci-postgres/migrations":
+        _fail("migrations.directory must be 'crates/automata-ci-postgres/migrations'")
     directory = _existing_path(
         repository_root,
         migrations["directory"],

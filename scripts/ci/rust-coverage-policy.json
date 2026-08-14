@@ -35,9 +35,7 @@
         "crates/automata-ci-postgres/src/",
         "crates/automata-ci-postgres-test-support/src/",
         "crates/automata-ci-results-github/src/cache_postgres.rs",
-        "crates/automata-ci-results-github/src/postgres.rs",
-        "crates/automata-ci-store/src/postgres.rs",
-        "crates/automata-ci-store/src/postgres/"
+        "crates/automata-ci-results-github/src/postgres.rs"
       ]
     },
     "s3": {

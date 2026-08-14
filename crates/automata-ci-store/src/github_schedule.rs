@@ -83,7 +83,7 @@ uuid_identity!(/// Durable scheduler worker identity.
 pub struct GithubScheduleClaimFence(u64);
 
 impl GithubScheduleClaimFence {
-    /// Rehydrates a positive fence representable by `BIGINT`.
+    /// Rehydrates a positive fence within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -614,7 +614,7 @@ impl GithubScheduleRegistryReceipt {
         self.registry_id
     }
 
-    /// Returns the authoritative database registration time.
+    /// Returns the authoritative repository registration time.
     #[must_use]
     pub const fn registered_at(self) -> UnixMillis {
         self.registered_at
@@ -767,7 +767,7 @@ pub struct ClaimedGithubScheduleFire {
 }
 
 impl ClaimedGithubScheduleFire {
-    /// Rehydrates a complete checked claim from durable rows.
+    /// Rehydrates a complete checked claim from durable records.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn from_durable_parts(
@@ -1064,7 +1064,7 @@ impl GithubScheduleFireReceipt {
         self.fire_id
     }
 
-    /// Returns the authoritative database observation.
+    /// Returns the authoritative repository observation.
     #[must_use]
     pub const fn recorded_at(self) -> UnixMillis {
         self.recorded_at
@@ -1086,7 +1086,7 @@ pub trait GithubScheduleRepository: fmt::Debug + Send + Sync {
         request: RegisterGithubScheduleRegistry,
     ) -> Result<GithubScheduleRegistryReceipt, GithubScheduleStoreError>;
 
-    /// Claims at most one due fire using database time and lease fencing.
+    /// Claims at most one due fire using repository time and lease fencing.
     async fn claim_due_github_schedule_fire(
         &self,
         request: ClaimDueGithubScheduleFire,
@@ -1173,7 +1173,7 @@ pub enum GithubScheduleStoreError {
     /// The claim is stale, expired, or belongs to a different worker/fence.
     #[error("GitHub schedule fire claim was rejected")]
     ClaimRejected,
-    /// Durable schedule rows violate a domain invariant.
+    /// Durable schedule records violate a domain invariant.
     #[error("GitHub schedule durable evidence is corrupt")]
     CorruptData,
     /// Backend operation failed.

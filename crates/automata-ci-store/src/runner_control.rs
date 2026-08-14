@@ -1012,8 +1012,8 @@ pub trait RunnerControlTransactionRepository: Send + Sync {
     /// Bounds a proposed renewal to the exact fenced attempt's current runtime authority.
     ///
     /// Implementations must return a request with identical attempt, session,
-    /// and guard coordinates, rebased to the post-lock database observation
-    /// and expiry. A GitHub authority row that exists but is not current and
+    /// and guard coordinates, rebased to the post-lock repository observation
+    /// and expiry. A GitHub authority record that exists but is not current and
     /// Ready fails closed; absence means the attempt has no GitHub runtime-
     /// authority ceiling. The ceiling applies only while the reported
     /// lifecycle can expose repository credentials; `Finalizing` continues

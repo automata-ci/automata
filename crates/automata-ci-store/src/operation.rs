@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use automata_ci_core::{
-    AttemptId, FencingToken, JobLifecycle, Lease, LeaseId, OperationId, UnixMillis,
-};
+use automata_ci_core::{AttemptId, JobLifecycle, Lease, LeaseId, OperationId, UnixMillis};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -588,6 +586,7 @@ impl TryClaimAttempt {
         self.request_key.request_digest()
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn cursor(&self) -> RunnableCursorAdvance {
         self.cursor
     }
@@ -632,6 +631,7 @@ impl NoWorkLeaseRequest {
         self.observed_at
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn cursor(&self) -> RunnableCursorAdvance {
         self.cursor
     }
@@ -794,11 +794,4 @@ pub trait RunnerClaimRepository: Send + Sync {
         &self,
         request: NoWorkLeaseRequest,
     ) -> Result<TryClaimReceipt, StoreError>;
-}
-
-pub(crate) fn decode_fencing_token(value: i64) -> Result<FencingToken, StoreError> {
-    let value = u64::try_from(value)
-        .map_err(|_| StoreError::corrupt_data("negative fencing token in claim receipt"))?;
-    FencingToken::new(value)
-        .map_err(|error| StoreError::corrupt_data(format!("invalid fencing token: {error}")))
 }

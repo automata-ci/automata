@@ -6,9 +6,9 @@ use uuid::Uuid;
 
 use crate::{GithubRepositoryName, RepositoryId, TenantScope};
 
-/// Stable identifier seeded for the built-in encrypted `PostgreSQL` provider.
+/// Stable identifier reserved for the built-in encrypted secret provider.
 pub const BUILTIN_SECRET_PROVIDER_ID: &str = "builtin";
-/// Maximum number of secret metadata rows returned by one management read.
+/// Maximum number of secret metadata records returned by one management read.
 pub const MAX_SECRET_METADATA_PAGE_SIZE: u16 = 100;
 /// Maximum number of attempts retained by the durable cleanup outbox.
 pub const MAX_SECRET_CLEANUP_ATTEMPTS: u16 = 100;
@@ -143,7 +143,7 @@ impl SecretMetadataPageSize {
         Ok(Self(value))
     }
 
-    /// Returns the requested row count.
+    /// Returns the requested record count.
     #[must_use]
     pub const fn get(self) -> u16 {
         self.0
@@ -279,7 +279,7 @@ impl RepositorySecretMetadataPage {
         }
     }
 
-    /// Returns metadata rows; values and provider handles can never be present.
+    /// Returns metadata records; values and provider handles can never be present.
     #[must_use]
     pub fn records(&self) -> &[RepositorySecretMetadata] {
         &self.records
@@ -348,7 +348,7 @@ pub struct BuiltinSecretProviderInspection {
 }
 
 impl BuiltinSecretProviderInspection {
-    /// Rehydrates one validated durable provider row and its authorization
+    /// Rehydrates one validated durable provider record and its authorization
     /// decision. Activation evidence is derived rather than supplied, so it is
     /// impossible to attach a mismatched revision or expose it for active state.
     #[must_use]
@@ -407,7 +407,7 @@ pub struct BuiltinSecretProviderMetadata {
 }
 
 impl BuiltinSecretProviderMetadata {
-    /// Rehydrates a validated built-in provider row.
+    /// Rehydrates a validated built-in provider record.
     #[must_use]
     pub const fn new(
         state: BuiltinSecretProviderState,
@@ -481,7 +481,7 @@ pub enum ActivateBuiltinSecretProviderOutcome {
     Forbidden,
     /// The exact session authorization generation is no longer current.
     SessionStale,
-    /// The required seeded provider row does not exist.
+    /// The required seeded provider record does not exist.
     NotFound,
     /// The provider revision changed since it was read.
     RevisionConflict { current: ManagementRevision },
@@ -516,7 +516,7 @@ pub enum InspectBuiltinSecretProviderOutcome {
     Forbidden,
     /// The exact session authorization generation is no longer current.
     SessionStale,
-    /// The seeded built-in provider row is absent.
+    /// The seeded built-in provider record is absent.
     NotFound,
 }
 
@@ -798,7 +798,7 @@ pub enum RepositorySecretMutationKind {
 ///
 /// Deliberately absent is the secret value. The application retains the
 /// move-only plaintext, invokes the exact returned built-in target outside the
-/// SQL transaction, and then confirms the provider result with
+/// repository transaction, and then confirms the provider result with
 /// [`ConfirmRepositorySecretVersionMutation`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReserveRepositorySecretVersionMutation {
@@ -1384,7 +1384,7 @@ pub struct BuiltinSecretCleanupTask {
 }
 
 impl BuiltinSecretCleanupTask {
-    /// Rehydrates an exact built-in destruction task from validated durable rows.
+    /// Rehydrates an exact built-in destruction task from validated durable records.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub const fn new(
@@ -2080,7 +2080,7 @@ pub trait SecretMutationRecoveryRepository: std::fmt::Debug + Send + Sync {
     ) -> Result<RecoverSecretMutationReservationOutcome, SecretManagementRepositoryError>;
 }
 
-/// Sanitized persistence failure with no SQL text, value, locator, or handle.
+/// Sanitized persistence failure with no backend query text, value, locator, or handle.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum SecretManagementRepositoryError {
     #[error("secret management request is invalid")]

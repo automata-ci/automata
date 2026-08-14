@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot, StoreError};
 
-/// Maximum rows returned by one scheduler queue scan.
+/// Maximum records returned by one scheduler queue scan.
 pub const MAX_RUNNABLE_SCAN_LIMIT: u16 = 1000;
 
 /// Bounded scheduler scan size.
@@ -135,10 +135,12 @@ impl RunnableCursorAdvance {
         self.slot
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn routing_fingerprint(self) -> Sha256Digest {
         self.routing_fingerprint
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn expected_version(self) -> u64 {
         self.expected_version
     }
@@ -147,12 +149,13 @@ impl RunnableCursorAdvance {
         self.through
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) const fn cycle_upper(self) -> Option<RunnableQueueKey> {
         self.cycle_upper
     }
 }
 
-/// Database-derived candidate whose run, cancellation, concurrency, queue,
+/// Repository-derived candidate whose run, cancellation, concurrency, queue,
 /// and default-success dependency gates all passed at scan time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnableAttempt {
@@ -241,8 +244,8 @@ impl RunnableScanPage {
     /// Constructs a page at a storage-adapter boundary.
     ///
     /// The candidates must be strictly ordered and no candidate may exceed the
-    /// finite cycle high-water mark. Cursor versions use `PostgreSQL`'s signed
-    /// `BIGINT` range.
+    /// finite cycle high-water mark. Cursor versions use the signed 64-bit
+    /// storage boundary.
     ///
     /// # Errors
     ///

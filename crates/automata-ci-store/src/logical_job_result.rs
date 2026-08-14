@@ -2,8 +2,8 @@
 //!
 //! Repository claims authenticate the exact current logical workflow object,
 //! ordered instance-result/output evidence, and direct prerequisite closure.
-//! The plan blob is loaded, canonically decoded, and revalidated outside SQL
-//! before a sensitivity-safe aggregate is committed.
+//! The plan blob is loaded, canonically decoded, and revalidated outside a
+//! repository transaction before a sensitivity-safe aggregate is committed.
 
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
@@ -93,7 +93,7 @@ impl LogicalJobResultSelectionId {
 pub struct LogicalJobResultGeneration(NonZeroU64);
 
 impl LogicalJobResultGeneration {
-    /// Constructs a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -109,10 +109,6 @@ impl LogicalJobResultGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated logical-result generation fits in i64")
     }
 }
 
@@ -931,7 +927,7 @@ pub enum LogicalJobResultClaimNextOutcome {
     Claimed(ClaimedLogicalJobResult),
     /// The selected job was finalized before this selection was replayed.
     Finalized(LogicalJobResultReceipt),
-    /// Deterministically corrupt target-local relational evidence was isolated.
+    /// Deterministically corrupt target-local durable evidence was isolated.
     Quarantined,
     /// No ready job was available without waiting on another worker.
     Idle,
@@ -940,7 +936,7 @@ pub enum LogicalJobResultClaimNextOutcome {
 /// Closed, value-free reason for isolating one logical-job result target.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LogicalJobResultQuarantineKind {
-    /// Durable relational evidence was internally inconsistent.
+    /// Durable evidence was internally inconsistent.
     RelationalEvidence,
     /// An immutable object could not be loaded with its exact descriptor.
     ObjectEvidence,
@@ -1036,6 +1032,7 @@ impl LogicalJobResultOutput {
         }
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_durable(
         name: WorkflowOutputKey,
         sensitivity: OutputSensitivity,
@@ -1444,7 +1441,7 @@ pub enum LogicalJobResultValueError {
     /// Instance evidence was missing or inconsistent with activation.
     #[error("logical job-result instance evidence is incomplete")]
     IncompleteInstanceEvidence,
-    /// One immutable instance evidence row was invalid.
+    /// One immutable instance evidence record was invalid.
     #[error("logical job-result instance evidence is invalid")]
     InvalidInstanceEvidence,
     /// One classified instance output was invalid.
@@ -1488,7 +1485,7 @@ pub enum LogicalJobResultValueError {
 /// Durable claim or finalization failure.
 #[derive(Debug, Error)]
 pub enum LogicalJobResultStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The target is absent, cross-tenant, non-current, or unsupported.
@@ -1500,10 +1497,10 @@ pub enum LogicalJobResultStoreError {
     /// Commit did not own the exact current live fence.
     #[error("logical job-result claim fence was rejected")]
     ClaimRejected,
-    /// A new claim's caller observation was not corroborated by database time.
+    /// A new claim's caller observation was not corroborated by repository time.
     #[error("logical job-result claim time exceeds the allowed database clock skew")]
     ClaimClockSkew,
-    /// A new or exactly replayed claim is no longer live at database time.
+    /// A new or exactly replayed claim is no longer live at repository time.
     #[error("logical job-result claim has expired")]
     ClaimExpired,
     /// Commit disagreed with immutable durable finalization evidence.
@@ -1515,7 +1512,7 @@ pub enum LogicalJobResultStoreError {
     /// The bounded replay horizon has closed for this selection request.
     #[error("logical job-result selection replay horizon has closed")]
     SelectionExpired,
-    /// The caller observation is not corroborated by authoritative database time.
+    /// The caller observation is not corroborated by authoritative repository time.
     #[error("logical job-result selection time exceeds the allowed database clock skew")]
     SelectionClockSkew,
 }
@@ -1523,7 +1520,7 @@ pub enum LogicalJobResultStoreError {
 /// Persistence boundary for current logical-job result aggregation.
 #[async_trait]
 pub trait LogicalJobResultRepository: fmt::Debug + Send + Sync {
-    /// Globally selects at most one ready job using nonblocking row locking.
+    /// Globally selects at most one ready job using nonblocking record locking.
     async fn claim_next_logical_job_result(
         &self,
         request: ClaimNextLogicalJobResult,

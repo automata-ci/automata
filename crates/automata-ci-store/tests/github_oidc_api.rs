@@ -1,25 +1,20 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, Lease, LeaseId, RunId, RunnerId, RunnerSessionId,
     Sha256Digest, UnixMillis, WorkflowId,
 };
-use automata_ci_oidc_github::{OidcAuthorityId, OidcIssuanceRepository, OidcKeyId, RsaPublicJwk};
+use automata_ci_oidc_github::{OidcAuthorityId, OidcKeyId, RsaPublicJwk};
 use automata_ci_store::{
     GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN, GithubOidcAuthorityProposal,
-    GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
-    GithubOidcCurrentnessClockError, GithubOidcExecutionIdentity, GithubOidcKeyDeadline,
+    GithubOidcCurrentPolicy, GithubOidcExecutionIdentity, GithubOidcKeyDeadline,
     GithubOidcKeyRetentionRepository, GithubOidcKeyUse, GithubOidcLoadedKey, GithubOidcStoreError,
     GithubOidcSubjectPolicyMode, GithubOidcSubjectPolicyRevision, JobIrMetadata,
     MAXIMUM_OIDC_KEYS_PER_KEYRING, MAXIMUM_REQUEST_BEARER_CLOCK_SKEW_SECONDS,
-    OIDC_JWKS_CACHE_SECONDS, ObjectKey, PostgresGithubOidcAuthorityRepository,
-    PostgresGithubOidcIssuanceRepository, PostgresStore, ReserveGithubOidcAuthority,
-    RetainGithubOidcKey, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
+    OIDC_JWKS_CACHE_SECONDS, ObjectKey, ReserveGithubOidcAuthority, RetainGithubOidcKey,
+    RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
     github_oidc_rs256_public_key_fingerprint,
 };
 use sha2::{Digest as _, Sha256};
-use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 const RSA_MODULUS: &str = "3EB2d40ghnbyGr9du8XI5MMt_dHBRJlGaIQzk_fgMxwAxiToz5Ck540SPVcosHkRC-YjGIXjhwDSOlSJ9kxsoQRM5venRhsZeQWeuo_82S95k6CFguafVLvOSmFKltf5obDHo6DBxum_C_1jc4ZTJGEi1K7AV33qhJ_qZfAMI8K8a6xIpkXtcpTDU-yxTrdFQF5yzW7cVqyoXjHbcxIIS2UMVZTMJ3Hv5pgDxe9eYhVlxkBO0oZn89jVVMSfKnThlsj02cd9N5doFuJEKB5NTYGG9E7uWnOEq_jddN-NNa8hU1PTSqpzwIdDs1ZBet2wmNl5Wr1KI981Rkp2FTvPkw";
@@ -361,68 +356,4 @@ async fn readiness_rejects_unfingerprinted_durable_keys() {
             .await,
         Err(GithubOidcStoreError::CorruptData)
     );
-}
-
-#[tokio::test]
-async fn postgres_adapter_requires_bounded_signing_metadata_and_is_object_safe() {
-    fn assert_ports(
-        _: &dyn GithubOidcAuthorityRepository,
-        _: &dyn GithubOidcKeyRetentionRepository,
-        _: &dyn OidcIssuanceRepository,
-    ) {
-    }
-    let _ = assert_ports;
-
-    let pool = PgPoolOptions::new()
-        .connect_lazy("postgresql://postgres:do-not-render@127.0.0.1/automata")
-        .expect("lazy pool");
-    let store = PostgresStore::from_postgres_pool(pool);
-    let clock: Arc<dyn GithubOidcCurrentnessClock> = Arc::new(FixedCurrentnessClock);
-    let signing = GithubOidcLoadedKey::new(
-        GithubOidcKeyUse::IdTokenSigning,
-        OidcKeyId::new("rsa-current").expect("key ID"),
-        digest(8),
-    );
-    let current_policy = current_policy();
-    let adapter = PostgresGithubOidcIssuanceRepository::new(
-        store.clone(),
-        current_policy,
-        [signing.clone()],
-        Arc::clone(&clock),
-    )
-    .expect("configured adapter");
-    let authority = PostgresGithubOidcAuthorityRepository::new(store.clone(), Arc::clone(&clock));
-    assert_ports(&authority, &store, &adapter);
-    let rendered = format!("{adapter:?}");
-    assert!(rendered.contains("rsa-current"));
-    assert!(!rendered.contains("do-not-render"));
-    assert!(
-        PostgresGithubOidcIssuanceRepository::new(
-            store.clone(),
-            current_policy,
-            [],
-            Arc::clone(&clock),
-        )
-        .is_err(),
-        "an empty signing set must fail closed"
-    );
-    assert!(
-        PostgresGithubOidcIssuanceRepository::new(
-            store,
-            current_policy,
-            [signing.clone(), signing],
-            clock,
-        )
-        .is_err(),
-        "duplicate IDs must fail closed"
-    );
-}
-
-#[derive(Debug)]
-struct FixedCurrentnessClock;
-
-impl GithubOidcCurrentnessClock for FixedCurrentnessClock {
-    fn now_millis(&self) -> Result<UnixMillis, GithubOidcCurrentnessClockError> {
-        Ok(UnixMillis::new(12_500))
-    }
 }

@@ -323,7 +323,7 @@ fn validate_lease_interval(
 ///
 /// These ID-only operations are intentionally not suitable for tenant-facing
 /// HTTP or CLI handlers. Such handlers must use [`TenantAttemptQuery`], which
-/// enforces tenant scope in the database query itself.
+/// enforces tenant scope in the repository operation itself.
 #[async_trait]
 pub trait InternalAttemptRepository: Send + Sync {
     async fn insert_queued(&self, attempt: QueuedAttempt) -> Result<(), AttemptStoreError>;

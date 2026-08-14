@@ -454,7 +454,7 @@
       "sources": [
         {
           "contains": "const AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION: i16 = 1;",
-          "path": "crates/automata-ci-store/src/postgres/github_subject_evidence.rs",
+          "path": "crates/automata-ci-postgres/src/store/github_subject_evidence.rs",
           "role": "version"
         },
         {
@@ -492,7 +492,7 @@
         {
           "contains": ".checked_add(1)",
           "function": "authenticated_event_envelope_rejects_noncurrent_schemas",
-          "path": "crates/automata-ci-store/src/postgres/github_subject_evidence.rs"
+          "path": "crates/automata-ci-postgres/src/store/github_subject_evidence.rs"
         }
       ],
       "version": 1
@@ -1109,7 +1109,7 @@
         {
           "contains": "let primary_schema = primary_response.schema();",
           "function": "lease_offer_fallback_projection_corruption_fails_closed_before_replay",
-          "path": "crates/automata-ci-store/tests/postgres_runner_clock.rs"
+          "path": "crates/automata-ci-postgres/tests/store/execution/runner_clock.rs"
         }
       ],
       "version": 1
@@ -1324,17 +1324,17 @@
         },
         {
           "contains": ".bind(schemas.secret_custody_canary_i32)",
-          "path": "crates/automata-ci-store/src/postgres/secret_custody.rs",
+          "path": "crates/automata-ci-postgres/src/store/secret_custody.rs",
           "role": "evidence"
         },
         {
           "contains": "if !is_current_secret_custody_canary_schema(",
-          "path": "crates/automata-ci-store/src/postgres/secret_custody.rs",
+          "path": "crates/automata-ci-postgres/src/store/secret_custody.rs",
           "role": "evidence"
         },
         {
           "contains": "schema == current_durable_schemas().secret_custody_canary_i32",
-          "path": "crates/automata-ci-store/src/postgres/durable_schema.rs",
+          "path": "crates/automata-ci-postgres/src/store/durable_schema.rs",
           "role": "evidence"
         }
       ],
@@ -1342,12 +1342,12 @@
         {
           "contains": "assert!(!is_current_secret_custody_canary_schema(current + 1));",
           "function": "secret_custody_canary_reader_rejects_noncurrent_schema",
-          "path": "crates/automata-ci-store/src/postgres/durable_schema.rs"
+          "path": "crates/automata-ci-postgres/src/store/durable_schema.rs"
         },
         {
           "contains": "Err(SecretCustodyRepositoryError::CorruptData)",
           "function": "noncurrent_canary_schema_fails_closed",
-          "path": "crates/automata-ci-store/tests/postgres_secret_custody.rs"
+          "path": "crates/automata-ci-postgres/tests/store/security/secret_custody.rs"
         }
       ],
       "version": 1
@@ -1497,7 +1497,7 @@
         {
           "contains": "let run_id = command.run_id().as_uuid();",
           "function": "logical_admission_replay_rejects_forward_plan_and_orchestration_schemas",
-          "path": "crates/automata-ci-store/tests/postgres_logical_orchestration.rs"
+          "path": "crates/automata-ci-postgres/tests/store/orchestration/logical_orchestration.rs"
         }
       ],
       "version": 1
@@ -1517,7 +1517,7 @@
         {
           "contains": "Err(ManagedSecretAuthorityStoreError::CorruptData)",
           "function": "delivery_operation_replay_rejects_a_forward_authority_schema",
-          "path": "crates/automata-ci-store/tests/postgres_managed_secret_authority.rs"
+          "path": "crates/automata-ci-postgres/tests/store/security/managed_secret_authority.rs"
         }
       ],
       "version": 1
@@ -1537,7 +1537,7 @@
         {
           "contains": "Err(GithubRuntimeAuthorityStoreError::CorruptData)",
           "function": "ready_authority_reader_rejects_a_forward_protected_payload_schema",
-          "path": "crates/automata-ci-store/tests/postgres_runtime_authority.rs"
+          "path": "crates/automata-ci-postgres/tests/store/execution/runtime_authority.rs"
         }
       ],
       "version": 1
@@ -1557,7 +1557,7 @@
         {
           "contains": "Err(GithubServerServiceStoreError::CorruptData)",
           "function": "handoff_replay_rejects_a_forward_protected_plaintext_schema",
-          "path": "crates/automata-ci-store/tests/postgres_github_service_authority.rs"
+          "path": "crates/automata-ci-postgres/tests/store/provider/github_service_authority.rs"
         }
       ],
       "version": 1
@@ -1582,12 +1582,12 @@
         {
           "contains": "for schema in [0, 2]",
           "function": "runner_log_reader_rejects_noncurrent_publication_safety_schema",
-          "path": "crates/automata-ci-store/src/postgres/g1.rs"
+          "path": "crates/automata-ci-postgres/src/store/g1.rs"
         },
         {
           "contains": "assert_legacy_corruption(&database.store().admit_workflow(legacy).await);",
           "function": "exact_replay_rejects_tampered_publication_snapshot_evidence",
-          "path": "crates/automata-ci-store/tests/postgres_run_publication_snapshot.rs"
+          "path": "crates/automata-ci-postgres/tests/store/provider/run_publication_snapshot.rs"
         },
         {
           "contains": "for schema in [0, 2]",
@@ -1736,7 +1736,7 @@
         {
           "contains": "let run_id = command.run_id().as_uuid();",
           "function": "logical_admission_replay_rejects_forward_plan_and_orchestration_schemas",
-          "path": "crates/automata-ci-store/tests/postgres_logical_orchestration.rs"
+          "path": "crates/automata-ci-postgres/tests/store/orchestration/logical_orchestration.rs"
         }
       ],
       "version": 1
@@ -4977,6 +4977,347 @@
     {
       "classification": "operational",
       "constants": [
+        "MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/admission.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP",
+          "contains": "if count >= MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP {",
+          "path": "crates/automata-ci-postgres/src/store/admission.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "validate_header_shape::MAX_ATTEMPTS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/conformance.rs",
+      "phase": "external",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "validate_header_shape::MAX_ATTEMPTS",
+          "contains": "ConformanceDeliveryState::RetryPending => (1..MAX_ATTEMPTS).contains(&attempts),",
+          "path": "crates/automata-ci-postgres/src/store/conformance.rs",
+          "scope": "validate_header_shape"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/github_checks.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS",
+          "contains": "< database_now.saturating_sub(MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS)",
+          "path": "crates/automata-ci-postgres/src/store/github_checks.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/github_service_authority.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS",
+          "contains": "< database_now.saturating_sub(MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS)",
+          "path": "crates/automata-ci-postgres/src/store/github_service_authority.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "verify_selected_activation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/logical_activation.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "verify_selected_activation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES",
+          "contains": "for _ in 0..MAX_RENEWAL_CHAIN_EDGES {",
+          "path": "crates/automata-ci-postgres/src/store/logical_activation.rs",
+          "scope": "verify_selected_activation_renewal_lineage"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "verify_selected_preparation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/logical_activation_preparation.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "verify_selected_preparation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES",
+          "contains": "for _ in 0..MAX_RENEWAL_CHAIN_EDGES {",
+          "path": "crates/automata-ci-postgres/src/store/logical_activation_preparation.rs",
+          "scope": "verify_selected_preparation_renewal_lineage"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_SELECTION_CLOCK_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/logical_instance_result.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_SELECTION_CLOCK_SKEW_MILLIS",
+          "contains": "if request.observed_at().get() < database_now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)",
+          "path": "crates/automata-ci-postgres/src/store/logical_instance_result.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_SELECTION_CLOCK_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/logical_job_result.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_SELECTION_CLOCK_SKEW_MILLIS",
+          "contains": "if request.observed_at().get() < database_now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)",
+          "path": "crates/automata-ci-postgres/src/store/logical_job_result.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "verify_selected_materialization_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/logical_materialization.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "verify_selected_materialization_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES",
+          "contains": "for _ in 0..MAX_RENEWAL_CHAIN_EDGES {",
+          "path": "crates/automata-ci-postgres/src/store/logical_materialization.rs",
+          "scope": "verify_selected_materialization_renewal_lineage"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_LOGICAL_RUN_FINALIZATION_CLOCK_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/logical_run_finalization.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_LOGICAL_RUN_FINALIZATION_CLOCK_SKEW_MILLIS",
+          "contains": "observed_at.get() >= database_now.saturating_sub(MAX_LOGICAL_RUN_FINALIZATION_CLOCK_SKEW_MILLIS)",
+          "path": "crates/automata-ci-postgres/src/store/logical_run_finalization.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "CLEANUP_BATCH_SIZE",
+        "DISCOVERY_BATCH_SIZE",
+        "MAX_SELECTION_CLOCK_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/logical_work_selection.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "CLEANUP_BATCH_SIZE",
+          "contains": ".bind(CLEANUP_BATCH_SIZE)",
+          "path": "crates/automata-ci-postgres/src/store/logical_work_selection.rs"
+        },
+        {
+          "constant": "DISCOVERY_BATCH_SIZE",
+          "contains": "let discovery_limit = remaining_candidates.min(DISCOVERY_BATCH_SIZE);",
+          "path": "crates/automata-ci-postgres/src/store/logical_work_selection.rs"
+        },
+        {
+          "constant": "MAX_SELECTION_CLOCK_SKEW_MILLIS",
+          "contains": "if observed_at.get() < now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)",
+          "path": "crates/automata-ci-postgres/src/store/logical_work_selection.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_RUNNER_ATTEMPT_CALLER_CLOCK_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/mod.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_RUNNER_ATTEMPT_CALLER_CLOCK_SKEW_MILLIS",
+          "contains": "if caller_time.get().abs_diff(database_time.get()) > MAX_RUNNER_ATTEMPT_CALLER_CLOCK_SKEW_MILLIS",
+          "path": "crates/automata-ci-postgres/src/store/mod.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_CALLER_DATABASE_SKEW_MILLIS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/provider_delivery.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_CALLER_DATABASE_SKEW_MILLIS",
+          "contains": "observed_at.get().abs_diff(database_time.get()) <= MAX_CALLER_DATABASE_SKEW_MILLIS",
+          "path": "crates/automata-ci-postgres/src/store/provider_delivery.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/runner_capability_admission.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE",
+          "contains": "RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE.min(remaining_with_overflow_probe);",
+          "path": "crates/automata-ci-postgres/src/store/runner_capability_admission.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "REQUIRED_KEY_QUERY_BOUND"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/secret_custody.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "REQUIRED_KEY_QUERY_BOUND",
+          "contains": ".bind(REQUIRED_KEY_QUERY_BOUND)",
+          "path": "crates/automata-ci-postgres/src/store/secret_custody.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_DELETE_VERSIONS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/secret_management.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_DELETE_VERSIONS",
+          "contains": "(1..=MAX_DELETE_VERSIONS).contains(&version_count)",
+          "path": "crates/automata-ci-postgres/src/store/secret_management.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_ARTIFACT_BLOCKS",
+        "MAX_REPOSITORY_DISCOVERY_PERMISSIONS",
+        "MAX_REPOSITORY_DISCOVERY_SCOPES",
+        "MAX_REPOSITORY_RBAC_ROLE_NAMES",
+        "MAX_REPOSITORY_RBAC_ROWS",
+        "MAX_RUN_DETAIL_ARTIFACTS",
+        "MAX_RUN_DETAIL_JOBS"
+      ],
+      "owner": "store",
+      "path": "crates/automata-ci-postgres/src/store/web.rs",
+      "phase": "runtime",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_ARTIFACT_BLOCKS",
+          "contains": ".bind(i64::try_from(MAX_ARTIFACT_BLOCKS + 1).expect(\"artifact block bound fits BIGINT\"))",
+          "path": "crates/automata-ci-postgres/src/store/web.rs"
+        },
+        {
+          "constant": "MAX_REPOSITORY_DISCOVERY_PERMISSIONS",
+          "contains": "if permissions.is_empty() || permissions.len() > MAX_REPOSITORY_DISCOVERY_PERMISSIONS {",
+          "path": "crates/automata-ci-postgres/src/store/web.rs"
+        },
+        {
+          "constant": "MAX_REPOSITORY_DISCOVERY_SCOPES",
+          "contains": "MAX_REPOSITORY_DISCOVERY_SCOPES,",
+          "path": "crates/automata-ci-postgres/src/store/web.rs"
+        },
+        {
+          "constant": "MAX_REPOSITORY_RBAC_ROLE_NAMES",
+          "contains": "const MAX_REPOSITORY_RBAC_ROWS: usize = MAX_REPOSITORY_RBAC_ROLE_NAMES;",
+          "path": "crates/automata-ci-postgres/src/store/web.rs"
+        },
+        {
+          "constant": "MAX_REPOSITORY_RBAC_ROWS",
+          "contains": "MAX_REPOSITORY_RBAC_ROWS",
+          "path": "crates/automata-ci-postgres/src/store/web.rs"
+        },
+        {
+          "constant": "MAX_RUN_DETAIL_ARTIFACTS",
+          "contains": ".bind(i64::try_from(MAX_RUN_DETAIL_ARTIFACTS + 1).expect(\"artifact summary bound fits BIGINT\"))",
+          "path": "crates/automata-ci-postgres/src/store/web.rs"
+        },
+        {
+          "constant": "MAX_RUN_DETAIL_JOBS",
+          "contains": ".bind(i64::try_from(MAX_RUN_DETAIL_JOBS + 1).expect(\"job read bound fits BIGINT\"))",
+          "path": "crates/automata-ci-postgres/src/store/web.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
         "MAX_RUNTIME_AUTHORITIES",
         "MAX_RUNTIME_AUTHORITY_CREDENTIAL_BYTES",
         "MAX_RUNTIME_AUTHORITY_ENDPOINT_BYTES",
@@ -7475,347 +7816,6 @@
           "constant": "MAX_COMMAND_REPLAY_LIMIT",
           "contains": "if value > MAX_COMMAND_REPLAY_LIMIT {",
           "path": "crates/automata-ci-store/src/outbox.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_RUNNER_ATTEMPT_CALLER_CLOCK_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_RUNNER_ATTEMPT_CALLER_CLOCK_SKEW_MILLIS",
-          "contains": "if caller_time.get().abs_diff(database_time.get()) > MAX_RUNNER_ATTEMPT_CALLER_CLOCK_SKEW_MILLIS",
-          "path": "crates/automata-ci-store/src/postgres.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/admission.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP",
-          "contains": "if count >= MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP {",
-          "path": "crates/automata-ci-store/src/postgres/admission.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "validate_header_shape::MAX_ATTEMPTS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/conformance.rs",
-      "phase": "external",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "validate_header_shape::MAX_ATTEMPTS",
-          "contains": "ConformanceDeliveryState::RetryPending => (1..MAX_ATTEMPTS).contains(&attempts),",
-          "path": "crates/automata-ci-store/src/postgres/conformance.rs",
-          "scope": "validate_header_shape"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/github_checks.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS",
-          "contains": "< database_now.saturating_sub(MAX_GITHUB_CHECK_PROJECTION_CLOCK_SKEW_MILLIS)",
-          "path": "crates/automata-ci-store/src/postgres/github_checks.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/github_service_authority.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS",
-          "contains": "< database_now.saturating_sub(MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS)",
-          "path": "crates/automata-ci-store/src/postgres/github_service_authority.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "verify_selected_activation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/logical_activation.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "verify_selected_activation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES",
-          "contains": "for _ in 0..MAX_RENEWAL_CHAIN_EDGES {",
-          "path": "crates/automata-ci-store/src/postgres/logical_activation.rs",
-          "scope": "verify_selected_activation_renewal_lineage"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "verify_selected_preparation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/logical_activation_preparation.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "verify_selected_preparation_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES",
-          "contains": "for _ in 0..MAX_RENEWAL_CHAIN_EDGES {",
-          "path": "crates/automata-ci-store/src/postgres/logical_activation_preparation.rs",
-          "scope": "verify_selected_preparation_renewal_lineage"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_SELECTION_CLOCK_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/logical_instance_result.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_SELECTION_CLOCK_SKEW_MILLIS",
-          "contains": "if request.observed_at().get() < database_now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)",
-          "path": "crates/automata-ci-store/src/postgres/logical_instance_result.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_SELECTION_CLOCK_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/logical_job_result.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_SELECTION_CLOCK_SKEW_MILLIS",
-          "contains": "if request.observed_at().get() < database_now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)",
-          "path": "crates/automata-ci-store/src/postgres/logical_job_result.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "verify_selected_materialization_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/logical_materialization.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "verify_selected_materialization_renewal_lineage::MAX_RENEWAL_CHAIN_EDGES",
-          "contains": "for _ in 0..MAX_RENEWAL_CHAIN_EDGES {",
-          "path": "crates/automata-ci-store/src/postgres/logical_materialization.rs",
-          "scope": "verify_selected_materialization_renewal_lineage"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_LOGICAL_RUN_FINALIZATION_CLOCK_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/logical_run_finalization.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_LOGICAL_RUN_FINALIZATION_CLOCK_SKEW_MILLIS",
-          "contains": "observed_at.get() >= database_now.saturating_sub(MAX_LOGICAL_RUN_FINALIZATION_CLOCK_SKEW_MILLIS)",
-          "path": "crates/automata-ci-store/src/postgres/logical_run_finalization.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "CLEANUP_BATCH_SIZE",
-        "DISCOVERY_BATCH_SIZE",
-        "MAX_SELECTION_CLOCK_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/logical_work_selection.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "CLEANUP_BATCH_SIZE",
-          "contains": ".bind(CLEANUP_BATCH_SIZE)",
-          "path": "crates/automata-ci-store/src/postgres/logical_work_selection.rs"
-        },
-        {
-          "constant": "DISCOVERY_BATCH_SIZE",
-          "contains": "let discovery_limit = remaining_candidates.min(DISCOVERY_BATCH_SIZE);",
-          "path": "crates/automata-ci-store/src/postgres/logical_work_selection.rs"
-        },
-        {
-          "constant": "MAX_SELECTION_CLOCK_SKEW_MILLIS",
-          "contains": "if observed_at.get() < now.saturating_sub(MAX_SELECTION_CLOCK_SKEW_MILLIS)",
-          "path": "crates/automata-ci-store/src/postgres/logical_work_selection.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_CALLER_DATABASE_SKEW_MILLIS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/provider_delivery.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_CALLER_DATABASE_SKEW_MILLIS",
-          "contains": "observed_at.get().abs_diff(database_time.get()) <= MAX_CALLER_DATABASE_SKEW_MILLIS",
-          "path": "crates/automata-ci-store/src/postgres/provider_delivery.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/runner_capability_admission.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE",
-          "contains": "RUNNER_CAPABILITY_ADMISSION_BATCH_SIZE.min(remaining_with_overflow_probe);",
-          "path": "crates/automata-ci-store/src/postgres/runner_capability_admission.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "REQUIRED_KEY_QUERY_BOUND"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/secret_custody.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "REQUIRED_KEY_QUERY_BOUND",
-          "contains": ".bind(REQUIRED_KEY_QUERY_BOUND)",
-          "path": "crates/automata-ci-store/src/postgres/secret_custody.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_DELETE_VERSIONS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/secret_management.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_DELETE_VERSIONS",
-          "contains": "(1..=MAX_DELETE_VERSIONS).contains(&version_count)",
-          "path": "crates/automata-ci-store/src/postgres/secret_management.rs"
-        }
-      ]
-    },
-    {
-      "classification": "operational",
-      "constants": [
-        "MAX_ARTIFACT_BLOCKS",
-        "MAX_REPOSITORY_DISCOVERY_PERMISSIONS",
-        "MAX_REPOSITORY_DISCOVERY_SCOPES",
-        "MAX_REPOSITORY_RBAC_ROLE_NAMES",
-        "MAX_REPOSITORY_RBAC_ROWS",
-        "MAX_RUN_DETAIL_ARTIFACTS",
-        "MAX_RUN_DETAIL_JOBS"
-      ],
-      "owner": "store",
-      "path": "crates/automata-ci-store/src/postgres/web.rs",
-      "phase": "runtime",
-      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
-      "uses": [
-        {
-          "constant": "MAX_ARTIFACT_BLOCKS",
-          "contains": ".bind(i64::try_from(MAX_ARTIFACT_BLOCKS + 1).expect(\"artifact block bound fits BIGINT\"))",
-          "path": "crates/automata-ci-store/src/postgres/web.rs"
-        },
-        {
-          "constant": "MAX_REPOSITORY_DISCOVERY_PERMISSIONS",
-          "contains": "if permissions.is_empty() || permissions.len() > MAX_REPOSITORY_DISCOVERY_PERMISSIONS {",
-          "path": "crates/automata-ci-store/src/postgres/web.rs"
-        },
-        {
-          "constant": "MAX_REPOSITORY_DISCOVERY_SCOPES",
-          "contains": "MAX_REPOSITORY_DISCOVERY_SCOPES,",
-          "path": "crates/automata-ci-store/src/postgres/web.rs"
-        },
-        {
-          "constant": "MAX_REPOSITORY_RBAC_ROLE_NAMES",
-          "contains": "const MAX_REPOSITORY_RBAC_ROWS: usize = MAX_REPOSITORY_RBAC_ROLE_NAMES;",
-          "path": "crates/automata-ci-store/src/postgres/web.rs"
-        },
-        {
-          "constant": "MAX_REPOSITORY_RBAC_ROWS",
-          "contains": "MAX_REPOSITORY_RBAC_ROWS",
-          "path": "crates/automata-ci-store/src/postgres/web.rs"
-        },
-        {
-          "constant": "MAX_RUN_DETAIL_ARTIFACTS",
-          "contains": ".bind(i64::try_from(MAX_RUN_DETAIL_ARTIFACTS + 1).expect(\"artifact summary bound fits BIGINT\"))",
-          "path": "crates/automata-ci-store/src/postgres/web.rs"
-        },
-        {
-          "constant": "MAX_RUN_DETAIL_JOBS",
-          "contains": ".bind(i64::try_from(MAX_RUN_DETAIL_JOBS + 1).expect(\"job read bound fits BIGINT\"))",
-          "path": "crates/automata-ci-store/src/postgres/web.rs"
         }
       ]
     },
@@ -15962,7 +15962,7 @@
       "reason_code": "WorkflowRerunStoreError::AttemptLimitReached",
       "reason_source": {
         "contains": "next_workflow_rerun_attempt(maximum).ok_or(WorkflowRerunStoreError::AttemptLimitReached)",
-        "path": "crates/automata-ci-store/src/postgres/workflow_rerun.rs"
+        "path": "crates/automata-ci-postgres/src/store/workflow_rerun.rs"
       },
       "source": {
         "contains": "pub const MAX_WORKFLOW_RERUN_ATTEMPTS: u32 = 51;",
@@ -16010,7 +16010,7 @@
     "current": [
       "0001_initial_schema.sql"
     ],
-    "directory": "crates/automata-ci-store/migrations",
+    "directory": "crates/automata-ci-postgres/migrations",
     "mode": "greenfield-canonical-baseline",
     "next_sequence": null,
     "owner": "store",

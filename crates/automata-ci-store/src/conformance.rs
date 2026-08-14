@@ -124,6 +124,7 @@ pub struct ConformanceWorkflowResult {
 }
 
 impl ConformanceWorkflowResult {
+    #[cfg(feature = "adapter-spi")]
     #[must_use]
     pub(crate) fn new(workflow_path: String, outcome: ConformanceWorkflowOutcome) -> Self {
         Self {
@@ -158,6 +159,7 @@ pub struct ConformanceDelivery {
 }
 
 impl ConformanceDelivery {
+    #[cfg(feature = "adapter-spi")]
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub(crate) fn new(

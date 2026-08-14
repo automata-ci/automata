@@ -25,14 +25,16 @@ use automata_ci_oidc_github_control::{
     RandomGithubOidcAuthorityIdGenerator, ReserveGithubOidcRuntimeAuthority,
     ReservedGithubOidcRuntimeAuthority, UnavailableGithubOidcRuntimeAuthorityIssuer,
 };
+use automata_ci_postgres::store::{
+    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository, PostgresStore,
+};
 use automata_ci_results_github::ResultsPublicEndpoint;
 use automata_ci_store::{
     GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN, GithubOidcAuthorityProposal,
     GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
     GithubOidcCurrentnessClockError, GithubOidcExecutionIdentity, GithubOidcKeyUse,
     GithubOidcLoadedKey, GithubOidcStoreError, GithubOidcSubjectPolicyMode,
-    GithubOidcSubjectPolicyRevision, PostgresGithubOidcAuthorityRepository,
-    PostgresGithubOidcIssuanceRepository, PostgresStore, ReserveGithubOidcAuthority,
+    GithubOidcSubjectPolicyRevision, ReserveGithubOidcAuthority,
     github_oidc_rs256_public_key_fingerprint,
 };
 use axum::{

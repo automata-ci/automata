@@ -214,8 +214,8 @@ pub enum RunnerReceiptValueError {
 ///
 /// Callers must look up a receipt before executing a side effect and must use
 /// the same `OperationId` at the provider boundary. This generic two-call seam
-/// cannot by itself make an unrelated external side effect atomic with
-/// `PostgreSQL`. Operations such as [`crate::RunnerClaimRepository::try_claim`]
+/// cannot by itself make an unrelated external side effect atomic with durable
+/// repository state. Operations such as [`crate::RunnerClaimRepository::try_claim`]
 /// use a stronger, single-transaction specialized receipt.
 #[async_trait]
 pub trait RunnerOperationReceiptRepository: Send + Sync {

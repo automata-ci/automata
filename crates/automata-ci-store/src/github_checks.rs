@@ -65,7 +65,7 @@ macro_rules! positive_github_id {
         pub struct $name(NonZeroU64);
 
         impl $name {
-            /// Constructs a positive GitHub identifier representable by `BIGINT`.
+            /// Constructs a positive GitHub identifier within the signed 64-bit storage boundary.
             ///
             /// # Errors
             ///
@@ -85,9 +85,6 @@ macro_rules! positive_github_id {
                 self.0.get()
             }
 
-            pub(crate) fn as_i64(self) -> i64 {
-                i64::try_from(self.get()).expect("validated GitHub ID fits BIGINT")
-            }
         }
     };
 }
@@ -482,19 +479,6 @@ pub enum GithubCheckConclusion {
     TimedOut,
 }
 
-impl GithubCheckConclusion {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ActionRequired => "action_required",
-            Self::Cancelled => "cancelled",
-            Self::Failure => "failure",
-            Self::Success => "success",
-            Self::Skipped => "skipped",
-            Self::TimedOut => "timed_out",
-        }
-    }
-}
-
 /// Server-owned reason for terminalizing one desired Check projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GithubCheckTerminalCause {
@@ -525,18 +509,6 @@ impl GithubCheckTerminalCause {
             Self::WorkflowCancelled => GithubCheckConclusion::Cancelled,
             Self::WorkflowTimedOut => GithubCheckConclusion::TimedOut,
             Self::ProviderUnknown => GithubCheckConclusion::ActionRequired,
-        }
-    }
-
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::WorkflowSuccess => "workflow_success",
-            Self::WorkflowSkipped => "workflow_skipped",
-            Self::WorkflowFailure => "workflow_failure",
-            Self::WorkflowCancelled => "workflow_cancelled",
-            Self::WorkflowTimedOut => "workflow_timed_out",
-            Self::ProviderUnknown => "provider_unknown",
-            Self::SystemUnknown => "system_unknown",
         }
     }
 }
@@ -901,10 +873,6 @@ impl GithubCheckProjectionClaimFence {
     pub const fn fence(self) -> u64 {
         self.fence.get()
     }
-
-    pub(crate) fn fence_i64(self) -> i64 {
-        i64::try_from(self.fence()).expect("validated fence fits BIGINT")
-    }
 }
 
 /// Claimed provider-independent work plus exact external identity accumulated so far.
@@ -1013,7 +981,7 @@ impl ClaimedGithubCheckProjection {
     /// Rehydrates complete provider projection evidence under a durable claim.
     ///
     /// The external identity, action, attempt, revision, and claim interval
-    /// must describe one internally consistent current-only outbox row.
+    /// must describe one internally consistent current-only outbox record.
     ///
     /// # Errors
     ///
@@ -2032,13 +2000,13 @@ impl RetryGithubCheckProjection {
     }
 }
 
-/// Invalid GitHub Checks durability values rejected before SQL.
+/// Invalid GitHub Checks durability values rejected before persistence.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum GithubCheckValueError {
     /// A UUID identity used the nil sentinel.
     #[error("{0} must not use the nil UUID sentinel")]
     NilUuid(&'static str),
-    /// A numeric GitHub identity is zero or outside `BIGINT`.
+    /// A numeric GitHub identity is zero or outside the signed 64-bit storage boundary.
     #[error("{0} must be a positive identifier representable by BIGINT")]
     InvalidNumericId(&'static str),
     /// The Git commit identity is not an exact nonzero SHA-1 object ID.
@@ -2127,7 +2095,7 @@ pub enum GithubCheckStoreError {
     /// A fence counter reached the durable signed range limit.
     #[error("the GitHub Check projection fence is exhausted")]
     FenceExhausted,
-    /// Durable rows violate the current-only state model.
+    /// Durable records violate the current-only state model.
     #[error("durable GitHub Check data violates an Automata invariant")]
     CorruptData,
 }

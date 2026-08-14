@@ -1,4 +1,4 @@
-//! Database-time, replay-bounded selection for autonomous logical workers.
+//! Repository-time, replay-bounded selection for autonomous logical workers.
 
 use std::{fmt, num::NonZeroU64};
 
@@ -13,13 +13,13 @@ use crate::{
     LogicalInstanceMaterializationTarget, LogicalMaterializationWorkerId, StoreError,
 };
 
-/// Maximum database-issued selection lease.
+/// Maximum repository-issued selection lease.
 pub const MAX_LOGICAL_WORK_SELECTION_MILLIS: i64 = 5 * 60 * 1_000;
 /// Minimum requested selection lease, leaving bounded work before handoff.
 pub const MIN_LOGICAL_WORK_SELECTION_REQUEST_MILLIS: i64 = 2_000;
 /// Minimum authority remaining when a selected claim is handed to a worker.
 pub const MIN_LOGICAL_WORK_SELECTION_HANDOFF_MILLIS: i64 = 1_000;
-/// Minimum database-issued real-claim renewal request.
+/// Minimum repository-issued real-claim renewal request.
 ///
 /// This is intentionally greater than the handoff minimum so a renewal at
 /// the exact request boundary can still be returned with useful authority.
@@ -57,7 +57,7 @@ impl LogicalWorkSelectionId {
 pub struct LogicalWorkSelectionGeneration(NonZeroU64);
 
 impl LogicalWorkSelectionGeneration {
-    /// Constructs a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -73,10 +73,6 @@ impl LogicalWorkSelectionGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated work-selection generation fits BIGINT")
     }
 }
 
@@ -122,13 +118,13 @@ impl ClaimNextLogicalJobOrchestration {
         self.owner
     }
 
-    /// Returns caller time used only for bounded database-skew admission.
+    /// Returns caller time used only for bounded repository-clock-skew admission.
     #[must_use]
     pub const fn observed_at(&self) -> UnixMillis {
         self.observed_at
     }
 
-    /// Returns the requested database-issued lease duration.
+    /// Returns the requested repository-issued lease duration.
     #[must_use]
     pub const fn duration_ms(&self) -> i64 {
         self.duration_ms
@@ -223,13 +219,13 @@ impl SelectedLogicalJobOrchestration {
         self.authority_digest
     }
 
-    /// Returns the database-issued start.
+    /// Returns the repository-issued start.
     #[must_use]
     pub const fn claimed_at(&self) -> UnixMillis {
         self.claimed_at
     }
 
-    /// Returns the exclusive database-issued expiration.
+    /// Returns the exclusive repository-issued expiration.
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
@@ -291,13 +287,13 @@ impl ClaimNextLogicalInstanceMaterialization {
         self.owner
     }
 
-    /// Returns caller time used only for bounded database-skew admission.
+    /// Returns caller time used only for bounded repository-clock-skew admission.
     #[must_use]
     pub const fn observed_at(&self) -> UnixMillis {
         self.observed_at
     }
 
-    /// Returns the requested database-issued lease duration.
+    /// Returns the requested repository-issued lease duration.
     #[must_use]
     pub const fn duration_ms(&self) -> i64 {
         self.duration_ms
@@ -373,13 +369,13 @@ impl SelectedLogicalInstanceMaterialization {
         self.authority_digest
     }
 
-    /// Returns the database-issued start.
+    /// Returns the repository-issued start.
     #[must_use]
     pub const fn claimed_at(&self) -> UnixMillis {
         self.claimed_at
     }
 
-    /// Returns the exclusive database-issued expiration.
+    /// Returns the exclusive repository-issued expiration.
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
@@ -457,6 +453,7 @@ impl ConsumedSelectedLogicalJobOrchestration {
         Self::new_inner(selected, authority, validated_at, false)
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn new_repository_verified(
         selected: SelectedLogicalJobOrchestration,
         authority: ConsumedLogicalJobOrchestrationAuthority,
@@ -495,7 +492,7 @@ impl ConsumedSelectedLogicalJobOrchestration {
         &self.authority
     }
 
-    /// Returns the authoritative database observation immediately preceding handoff.
+    /// Returns the authoritative repository observation immediately preceding handoff.
     #[must_use]
     pub const fn validated_at(&self) -> UnixMillis {
         self.validated_at
@@ -534,6 +531,7 @@ impl ConsumedSelectedLogicalInstanceMaterialization {
         Self::new_inner(selected, authority, validated_at, false)
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn new_repository_verified(
         selected: SelectedLogicalInstanceMaterialization,
         authority: ClaimedLogicalInstanceMaterialization,
@@ -576,7 +574,7 @@ impl ConsumedSelectedLogicalInstanceMaterialization {
         &self.authority
     }
 
-    /// Returns the authoritative database observation immediately preceding handoff.
+    /// Returns the authoritative repository observation immediately preceding handoff.
     #[must_use]
     pub const fn validated_at(&self) -> UnixMillis {
         self.validated_at
@@ -600,7 +598,7 @@ impl ConsumeSelectedLogicalInstanceMaterialization {
 /// Closed, value-free reason for isolating selected work.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LogicalWorkQuarantineKind {
-    /// Durable relational evidence was internally inconsistent.
+    /// Durable evidence was internally inconsistent.
     RelationalEvidence,
     /// An immutable object was unavailable under its exact descriptor.
     ObjectEvidence,
@@ -697,13 +695,13 @@ pub enum LogicalWorkSelectionValueError {
     /// The selection identity used the nil sentinel.
     #[error("logical work selection ID must not be nil")]
     NilSelectionId,
-    /// A generation was zero or outside `PostgreSQL` `BIGINT`.
+    /// A generation was zero or outside the signed 64-bit storage boundary.
     #[error("logical work selection generation is invalid")]
     InvalidGeneration,
     /// Caller time or the requested duration was invalid.
     #[error("logical work selection request is invalid")]
     InvalidRequest,
-    /// A rehydrated database interval was empty or excessive.
+    /// A rehydrated repository interval was empty or excessive.
     #[error("logical work selection interval is invalid")]
     InvalidInterval,
     /// Consumed authority disagreed with its inert selection evidence.
@@ -714,7 +712,7 @@ pub enum LogicalWorkSelectionValueError {
 /// Durable selector failure.
 #[derive(Debug, Error)]
 pub enum LogicalWorkSelectionStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// One selection identity was replayed with different authority or bounds.
@@ -723,7 +721,7 @@ pub enum LogicalWorkSelectionStoreError {
     /// The exact replay horizon has closed.
     #[error("logical work selection replay horizon has closed")]
     SelectionExpired,
-    /// Caller time was not corroborated by authoritative database time.
+    /// Caller time was not corroborated by authoritative repository time.
     #[error("logical work selection time exceeds database clock skew")]
     SelectionClockSkew,
     /// A target's positive takeover generation is exhausted.

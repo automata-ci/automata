@@ -37,14 +37,14 @@ const COMMIT_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-com
 
 /// Positive server-assigned completion order within one logical job.
 ///
-/// The database assigns this value transactionally when the terminal attempt
+/// The repository assigns this value transactionally when the terminal attempt
 /// is inserted. It is therefore suitable for deterministic matrix-output
 /// selection without trusting runner clocks.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LogicalInstanceTerminalOrdinal(NonZeroU64);
 
 impl LogicalInstanceTerminalOrdinal {
-    /// Rehydrates a positive ordinal representable by `PostgreSQL` `BIGINT`.
+    /// Rehydrates a positive ordinal within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -60,10 +60,6 @@ impl LogicalInstanceTerminalOrdinal {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated terminal ordinal fits in i64")
     }
 }
 
@@ -124,7 +120,7 @@ impl LogicalInstanceResultSelectionId {
 pub struct LogicalInstanceResultGeneration(NonZeroU64);
 
 impl LogicalInstanceResultGeneration {
-    /// Constructs a positive generation representable by `PostgreSQL` `BIGINT`.
+    /// Constructs a positive generation within the signed 64-bit storage boundary.
     ///
     /// # Errors
     ///
@@ -140,10 +136,6 @@ impl LogicalInstanceResultGeneration {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    pub(crate) fn as_i64(self) -> i64 {
-        i64::try_from(self.get()).expect("validated instance-result generation fits in i64")
     }
 }
 
@@ -889,7 +881,7 @@ pub enum LogicalInstanceResultClaimNextOutcome {
     Claimed(ClaimedLogicalInstanceResult),
     /// The selected attempt was finalized before this selection was replayed.
     Finalized(LogicalInstanceResultReceipt),
-    /// Deterministically corrupt target-local relational evidence was isolated.
+    /// Deterministically corrupt target-local durable evidence was isolated.
     Quarantined,
     /// No due terminal attempt was available without waiting on another worker.
     Idle,
@@ -898,7 +890,7 @@ pub enum LogicalInstanceResultClaimNextOutcome {
 /// Closed, value-free reason for isolating one logical-instance result target.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LogicalInstanceResultQuarantineKind {
-    /// Durable relational evidence was internally inconsistent.
+    /// Durable evidence was internally inconsistent.
     RelationalEvidence,
     /// An immutable object could not be loaded with its exact descriptor.
     ObjectEvidence,
@@ -958,7 +950,7 @@ pub enum LogicalInstanceResultQuarantineOutcome {
     FenceRejected,
 }
 
-/// One sensitivity-safe output row persisted for a logical instance.
+/// One sensitivity-safe output record persisted for a logical instance.
 #[derive(Clone, Eq, PartialEq)]
 pub struct LogicalInstanceResultOutput {
     name: String,
@@ -999,6 +991,7 @@ impl LogicalInstanceResultOutput {
         self.public_value.as_deref()
     }
 
+    #[cfg(feature = "adapter-spi")]
     pub(crate) fn from_durable(
         name: String,
         sensitivity: OutputSensitivity,
@@ -1232,7 +1225,7 @@ impl CommitLogicalInstanceResult {
         self.secret_exposure
     }
 
-    /// Returns canonical name-sorted sensitivity-safe output rows.
+    /// Returns canonical name-sorted sensitivity-safe output records.
     #[must_use]
     pub fn outputs(&self) -> &[LogicalInstanceResultOutput] {
         &self.outputs
@@ -1441,10 +1434,10 @@ pub enum LogicalInstanceResultValueError {
     /// The claim interval was empty or exceeded its fixed bound.
     #[error("logical instance-result claim interval is invalid or too long")]
     InvalidClaimInterval,
-    /// The monotonic generation was zero or exceeded `PostgreSQL` `BIGINT`.
+    /// The monotonic generation was zero or exceeded the signed 64-bit storage boundary.
     #[error("logical instance-result generation is invalid")]
     InvalidGeneration,
-    /// The server terminal ordinal was zero or exceeded `PostgreSQL` `BIGINT`.
+    /// The server terminal ordinal was zero or exceeded the signed 64-bit storage boundary.
     #[error("logical instance-result terminal ordinal is invalid")]
     InvalidTerminalOrdinal,
     /// Durable matrix coordinates were outside the current bound.
@@ -1500,7 +1493,7 @@ pub enum LogicalInstanceResultValueError {
 /// Durable claim or finalization failure.
 #[derive(Debug, Error)]
 pub enum LogicalInstanceResultStoreError {
-    /// The relational store failed or contained malformed current data.
+    /// The repository failed or contained malformed current data.
     #[error(transparent)]
     Store(#[from] StoreError),
     /// The target is absent, cross-tenant, non-current, or nonterminal.
@@ -1512,7 +1505,7 @@ pub enum LogicalInstanceResultStoreError {
     /// Commit did not own the exact current live fence.
     #[error("logical instance-result claim fence was rejected")]
     ClaimRejected,
-    /// A new targeted claim was not corroborated by authoritative database time.
+    /// A new targeted claim was not corroborated by authoritative repository time.
     #[error("logical instance-result claim time exceeds the allowed database clock skew")]
     ClaimClockSkew,
     /// A targeted claim request or exact projecting fence has expired.
@@ -1527,7 +1520,7 @@ pub enum LogicalInstanceResultStoreError {
     /// The bounded replay horizon has closed for this selection request.
     #[error("logical instance-result selection replay horizon has closed")]
     SelectionExpired,
-    /// The caller observation is not corroborated by authoritative database time.
+    /// The caller observation is not corroborated by authoritative repository time.
     #[error("logical instance-result selection time exceeds the allowed database clock skew")]
     SelectionClockSkew,
 }
@@ -1535,7 +1528,7 @@ pub enum LogicalInstanceResultStoreError {
 /// Persistence boundary for current terminal-attempt projection.
 #[async_trait]
 pub trait LogicalInstanceResultRepository: fmt::Debug + Send + Sync {
-    /// Globally selects at most one due attempt using nonblocking row locking.
+    /// Globally selects at most one due attempt using nonblocking record locking.
     async fn claim_next_logical_instance_result(
         &self,
         request: ClaimNextLogicalInstanceResult,
