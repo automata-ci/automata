@@ -1101,7 +1101,7 @@ fn authenticated_event_coordinates(
         VerifiedGithubWebhook::PullRequest(pull_request) => (
             GithubAuthenticatedEventKind::PullRequest,
             pull_request.git_ref().to_owned(),
-            pull_request.merge_revision().as_str(),
+            pull_request.head_revision().as_str(),
         ),
         VerifiedGithubWebhook::MergeGroup(merge_group) => (
             GithubAuthenticatedEventKind::MergeGroup,

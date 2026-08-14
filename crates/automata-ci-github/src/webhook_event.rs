@@ -667,6 +667,10 @@ impl VerifiedGithubPullRequest {
     }
 
     /// Returns the merge-branch commit used as `GITHUB_SHA` for this event.
+    ///
+    /// GitHub may send `null` before it has materialized the pull-request merge
+    /// commit. In that case an unmerged event uses the exact head revision as
+    /// the deterministic execution fallback.
     #[must_use]
     pub const fn merge_revision(&self) -> &ExactRevision {
         &self.merge_revision
@@ -832,9 +836,25 @@ struct PullRequestPayload {
 struct PullRequestObjectPayload {
     number: u64,
     merged: bool,
-    merge_commit_sha: Option<String>,
+    #[serde(default)]
+    merge_commit_sha: PullRequestMergeCommitShaPayload,
     head: PullRequestBranchPayload,
     base: PullRequestBranchPayload,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PullRequestMergeCommitShaPayload {
+    Revision(String),
+    Null(()),
+    #[serde(skip)]
+    Missing,
+}
+
+impl Default for PullRequestMergeCommitShaPayload {
+    fn default() -> Self {
+        Self::Missing
+    }
 }
 
 #[derive(Deserialize)]
@@ -1071,11 +1091,18 @@ pub(crate) fn normalize_pull_request(
     let head_repository = payload.pull_request.head.repo.normalize()?;
     let head_revision = exact_revision(payload.pull_request.head.sha)?;
     let base_revision = exact_revision(payload.pull_request.base.sha)?;
-    let merge_revision = payload
-        .pull_request
-        .merge_commit_sha
-        .ok_or(GithubWebhookError::InvalidPayload)
-        .and_then(exact_revision)?;
+    let merge_revision = match payload.pull_request.merge_commit_sha {
+        PullRequestMergeCommitShaPayload::Revision(revision) => exact_revision(revision)?,
+        PullRequestMergeCommitShaPayload::Null(()) if !payload.pull_request.merged => {
+            head_revision.clone()
+        }
+        PullRequestMergeCommitShaPayload::Null(()) => {
+            return Err(GithubWebhookError::InvalidPayload);
+        }
+        PullRequestMergeCommitShaPayload::Missing => {
+            return Err(GithubWebhookError::InvalidPayload);
+        }
+    };
     let head_ref = normalize_branch_name(payload.pull_request.head.git_ref)?;
     let base_ref = normalize_branch_name(payload.pull_request.base.git_ref)?;
     if payload.pull_request.merged && action != GithubPullRequestAction::Closed {

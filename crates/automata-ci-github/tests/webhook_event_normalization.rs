@@ -144,6 +144,26 @@ fn merged_pull_request_uses_the_target_branch_workflow_ref() {
 }
 
 #[test]
+fn unmerged_pull_request_without_materialized_merge_revision_uses_head_revision() {
+    let mut payload = pull_request_payload();
+    payload["pull_request"]["merge_commit_sha"] = Value::Null;
+
+    let event = normalize_payload(&payload, "pull_request")
+        .expect("GitHub may not have materialized the merge revision yet");
+    let VerifiedGithubWebhook::PullRequest(event) = event else {
+        panic!("expected pull-request evidence");
+    };
+    assert!(!event.merged());
+    assert_eq!(event.head_revision().as_str(), HEAD_SHA);
+    assert_eq!(event.merge_revision().as_str(), HEAD_SHA);
+    assert_eq!(event.git_ref(), "refs/pull/7/merge");
+
+    payload["action"] = json!("closed");
+    payload["pull_request"]["merged"] = json!(true);
+    assert_invalid_pull_request(&payload);
+}
+
+#[test]
 fn merge_group_normalization_retains_exact_dispatch_evidence() {
     let body = encode(&merge_group_payload());
     let event =

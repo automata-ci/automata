@@ -115,6 +115,51 @@ fn event_absence_is_structured_non_selection_without_diagnostics() {
 }
 
 #[test]
+fn event_absence_does_not_compile_an_unrelated_workflow_body() {
+    let source = "on: workflow_dispatch\njobs:\n  test:\n    runs-on: linux\n    environment: production\n    steps:\n      - run: true\n";
+    assert_not_selected(
+        &compile(
+            source,
+            event("pull_request", "refs/pull/1/merge"),
+            Some(GithubEventMetadata::pull_request("opened", "main")),
+        ),
+        WorkflowNotSelectedReason::EventNotConfigured,
+    );
+}
+
+#[test]
+fn path_filter_demand_does_not_compile_the_workflow_body() {
+    let source = "on:\n  pull_request:\n    paths: [ui/**]\njobs:\n  test:\n    runs-on: linux\n    environment: production\n    steps:\n      - run: true\n";
+    let report = compile(
+        source,
+        event("pull_request", "refs/pull/1/merge"),
+        Some(GithubEventMetadata::pull_request("opened", "main")),
+    );
+    assert_eq!(
+        report.disposition(),
+        CompilationDisposition::RequiresChangedFiles
+    );
+    assert!(
+        report.diagnostics().is_empty(),
+        "{:#?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
+fn a_selected_event_still_rejects_an_unsupported_workflow_body() {
+    let source = "on: pull_request\njobs:\n  test:\n    runs-on: linux\n    environment: production\n    steps:\n      - run: true\n";
+    assert_rejected_with(
+        &compile(
+            source,
+            event("pull_request", "refs/pull/1/merge"),
+            Some(GithubEventMetadata::pull_request("opened", "main")),
+        ),
+        "github.compile.deployment_environment_unavailable",
+    );
+}
+
+#[test]
 fn repository_dispatch_types_select_only_the_exact_custom_event() {
     let filtered = "on:\n  repository_dispatch:\n    types: [synthetic_signal, secondary_signal]\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     let matching = compile(
