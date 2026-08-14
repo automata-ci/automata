@@ -74,6 +74,16 @@ fn main() -> ExitCode {
                 })
                 .map_or(ExitCode::FAILURE, |()| ExitCode::SUCCESS)
         }
+        "stdio-once" => runtime()
+            .and_then(|runtime| {
+                runtime
+                    .block_on(automata_ci_sandbox_guest::serve_stdio_once())
+                    .ok()
+            })
+            .map_or(ExitCode::FAILURE, |()| ExitCode::SUCCESS),
+        "keepalive" => loop {
+            std::thread::park();
+        },
         "probe" => {
             let Some(socket) = arguments.next().map(PathBuf::from) else {
                 return ExitCode::FAILURE;

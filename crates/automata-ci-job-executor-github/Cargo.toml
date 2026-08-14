@@ -44,6 +44,3 @@ zeroize.workspace = true
 automata-ci-runner-spool.workspace = true
 static_assertions.workspace = true
 tokio.workspace = true
-
-[target.'cfg(windows)'.dev-dependencies]
-automata-ci-sandbox-windows.workspace = true

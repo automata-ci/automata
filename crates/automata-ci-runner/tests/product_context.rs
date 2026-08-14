@@ -1148,7 +1148,7 @@ const fn expected_runner_arch() -> &'static str {
 
 const fn expected_workspace() -> &'static str {
     if cfg!(windows) {
-        r"C:\automata\native\workspaces\automata\automata"
+        r"C:\__w\automata\automata"
     } else if cfg!(target_os = "macos") {
         "/Users/automata-job/workspaces/automata/automata"
     } else {
@@ -1158,7 +1158,7 @@ const fn expected_workspace() -> &'static str {
 
 const fn expected_event_path() -> &'static str {
     if cfg!(windows) {
-        r"C:\automata\native\runner\attempts\fixture\event.json"
+        r"C:\automata\runner\attempts\fixture\event.json"
     } else if cfg!(target_os = "macos") {
         "/Users/automata-job/runner/attempts/fixture/event.json"
     } else {

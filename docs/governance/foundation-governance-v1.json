@@ -679,18 +679,18 @@
       "prior_version_rejections": [
         {
           "rejection": {
-            "contains": "let immediate_response = if request.protocol() != GUEST_PROTOCOL_VERSION {",
+            "contains": "if request.protocol() != GUEST_PROTOCOL_VERSION {",
             "path": "crates/automata-ci-sandbox-guest/src/lib.rs",
-            "symbol": "serve_connection"
+            "symbol": "immediate_rejection"
           },
           "tests": [
             {
-              "function": "listener_lifecycle_protocol_and_malformed_connections_fail_closed",
+              "function": "guest_protocol_v1_is_rejected",
               "outcome": "assert_rejected(exchange(&socket, &unsupported).await, expected_rejection);",
               "path": "crates/automata-ci-sandbox-guest/tests/behavior.rs",
               "reader_call": "exchange(&socket, &unsupported).await",
               "reader_symbol": "exchange",
-              "version": "for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {",
+              "version": "let unsupported_protocol = 1;",
               "version_input": {
                 "contains": "protocol: unsupported_protocol,",
                 "identifier": "unsupported",
@@ -699,23 +699,46 @@
             }
           ],
           "version": 1
+        },
+        {
+          "rejection": {
+            "contains": "if request.protocol() != GUEST_PROTOCOL_VERSION {",
+            "path": "crates/automata-ci-sandbox-guest/src/lib.rs",
+            "symbol": "immediate_rejection"
+          },
+          "tests": [
+            {
+              "function": "guest_protocol_v2_is_rejected",
+              "outcome": "assert_rejected(exchange(&socket, &unsupported).await, expected_rejection);",
+              "path": "crates/automata-ci-sandbox-guest/tests/behavior.rs",
+              "reader_call": "exchange(&socket, &unsupported).await",
+              "reader_symbol": "exchange",
+              "version": "let unsupported_protocol = 2;",
+              "version_input": {
+                "contains": "protocol: unsupported_protocol,",
+                "identifier": "unsupported",
+                "reader_argument": 1
+              }
+            }
+          ],
+          "version": 2
         }
       ],
       "sources": [
         {
-          "contains": "pub const GUEST_PROTOCOL_VERSION: u16 = 2;",
+          "contains": "pub const GUEST_PROTOCOL_VERSION: u16 = 3;",
           "path": "crates/automata-ci-sandbox-guest/src/lib.rs",
           "role": "version"
         }
       ],
       "tests": [
         {
-          "contains": "for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {",
-          "function": "listener_lifecycle_protocol_and_malformed_connections_fail_closed",
-          "path": "crates/automata-ci-sandbox-guest/tests/behavior.rs"
+          "contains": "for protocol in [1, 2] {",
+          "function": "protocol_v3_rejects_every_prior_wire_version",
+          "path": "crates/automata-ci-sandbox-guest/src/lib.rs"
         }
       ],
-      "version": 2
+      "version": 3
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -1169,7 +1192,7 @@
               "path": "crates/automata-ci-runner/tests/runner_product_config.rs",
               "reader_call": "parse_value(&document)",
               "reader_symbol": "parse_value",
-              "version": "for unsupported in [0, 1, u16::MAX] {",
+              "version": "for unsupported in [0, 1, 2, u16::MAX] {",
               "version_input": {
                 "contains": "document[\"schema_version\"] = serde_json::json!(unsupported);",
                 "identifier": "document",
@@ -1178,11 +1201,34 @@
             }
           ],
           "version": 1
+        },
+        {
+          "rejection": {
+            "contains": "if self.schema_version != RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION {",
+            "path": "crates/automata-ci-runner/src/product/config.rs",
+            "symbol": "validate"
+          },
+          "tests": [
+            {
+              "function": "previous_product_schema_is_rejected",
+              "outcome": "parse_value(&document).expect_err(\"previous schema must fail closed\"),",
+              "path": "crates/automata-ci-runner/tests/runner_product_config.rs",
+              "reader_call": "parse_value(&document)",
+              "reader_symbol": "parse_value",
+              "version": "let unsupported = 2;",
+              "version_input": {
+                "contains": "document[\"schema_version\"] = serde_json::json!(unsupported);",
+                "identifier": "document",
+                "reader_argument": 0
+              }
+            }
+          ],
+          "version": 2
         }
       ],
       "sources": [
         {
-          "contains": "pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 2;",
+          "contains": "pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 3;",
           "path": "crates/automata-ci-runner/src/product/config.rs",
           "role": "version"
         }
@@ -1194,7 +1240,7 @@
           "path": "crates/automata-ci-runner/tests/runner_product_config.rs"
         }
       ],
-      "version": 2
+      "version": 3
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -1575,6 +1621,30 @@
         }
       ],
       "version": 1
+    },
+    {
+      "compatibility_policy": "exact-current-only",
+      "id": "windows-hyperv-sandbox-handle",
+      "owner": "sandbox",
+      "sources": [
+        {
+          "contains": "const HANDLE_VERSION: &str = \"wh1\";",
+          "path": "crates/automata-ci-sandbox-windows/src/naming.rs",
+          "role": "version"
+        }
+      ],
+      "tests": [
+        {
+          "contains": "ResourceName::from_handle(&noncurrent, &provider)",
+          "function": "handles_round_trip_exact_identity_and_generation",
+          "path": "crates/automata-ci-sandbox-windows/src/naming.rs"
+        }
+      ],
+      "version": "wh1",
+      "version_sequence": {
+        "kind": "prefix-ordinal",
+        "prefix": "wh"
+      }
     },
     {
       "compatibility_policy": "exact-current-only",
@@ -5994,16 +6064,16 @@
     {
       "classification": "operational",
       "constants": [
-        "NATIVE_MAX_SHELL_PROBE_COUNT"
+        "MAX_SHELL_PROBE_COUNT"
       ],
       "owner": "runner-contract",
       "path": "crates/automata-ci-runner/src/product/profile_admission.rs",
-      "phase": "runtime",
+      "phase": "executor-admission",
       "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
       "uses": [
         {
-          "constant": "NATIVE_MAX_SHELL_PROBE_COUNT",
-          "contains": "copy: [OperationId; NATIVE_MAX_SHELL_PROBE_COUNT],",
+          "constant": "MAX_SHELL_PROBE_COUNT",
+          "contains": "copy: [OperationId; MAX_SHELL_PROBE_COUNT],",
           "path": "crates/automata-ci-runner/src/product/profile_admission.rs"
         }
       ]
@@ -6121,6 +6191,7 @@
         "MAX_GUEST_FRAME_BYTES",
         "MAX_OPERATION_ID_BYTES",
         "MAX_OUTPUT_DATA_RECORDS",
+        "MAX_PROCESS_LIMIT",
         "MAX_REPLAY_BYTES",
         "MAX_REPLAY_ENTRIES",
         "MAX_TARGET_PATH_BYTES"
@@ -6183,6 +6254,11 @@
         {
           "constant": "MAX_OUTPUT_DATA_RECORDS",
           "contains": "let can_store = records.len() < MAX_OUTPUT_DATA_RECORDS;",
+          "path": "crates/automata-ci-sandbox-guest/src/lib.rs"
+        },
+        {
+          "constant": "MAX_PROCESS_LIMIT",
+          "contains": ".filter(|value| (1..=MAX_PROCESS_LIMIT).contains(value))",
           "path": "crates/automata-ci-sandbox-guest/src/lib.rs"
         },
         {
@@ -6460,7 +6536,72 @@
     {
       "classification": "operational",
       "constants": [
-        "MAX_EVENT_BYTES"
+        "MAX_RUNTIME_ARGUMENTS",
+        "MAX_RUNTIME_ARGUMENT_UTF16",
+        "MAX_RUNTIME_INPUT_BYTES",
+        "MAX_RUNTIME_OUTPUT_BYTES",
+        "MAX_RUNTIME_PROGRAM_UTF16"
+      ],
+      "owner": "sandbox",
+      "path": "crates/automata-ci-sandbox-windows/src/command.rs",
+      "phase": "executor-admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_RUNTIME_ARGUMENTS",
+          "contains": "if arguments.len() > MAX_RUNTIME_ARGUMENTS",
+          "path": "crates/automata-ci-sandbox-windows/src/command.rs"
+        },
+        {
+          "constant": "MAX_RUNTIME_ARGUMENT_UTF16",
+          "contains": "|| argument_units.is_none_or(|units| units > MAX_RUNTIME_ARGUMENT_UTF16)",
+          "path": "crates/automata-ci-sandbox-windows/src/command.rs"
+        },
+        {
+          "constant": "MAX_RUNTIME_INPUT_BYTES",
+          "contains": "if stdin.len() > MAX_RUNTIME_INPUT_BYTES {",
+          "path": "crates/automata-ci-sandbox-windows/src/command.rs"
+        },
+        {
+          "constant": "MAX_RUNTIME_OUTPUT_BYTES",
+          "contains": "if output_limit == 0 || output_limit > MAX_RUNTIME_OUTPUT_BYTES {",
+          "path": "crates/automata-ci-sandbox-windows/src/command.rs"
+        },
+        {
+          "constant": "MAX_RUNTIME_PROGRAM_UTF16",
+          "contains": "|| program_units > MAX_RUNTIME_PROGRAM_UTF16",
+          "path": "crates/automata-ci-sandbox-windows/src/command.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_REPLAY_BYTES",
+        "MAX_REPLAY_ENTRIES"
+      ],
+      "owner": "sandbox",
+      "path": "crates/automata-ci-sandbox-windows/src/endpoint.rs",
+      "phase": "executor-admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "MAX_REPLAY_BYTES",
+          "contains": "if bytes > MAX_REPLAY_BYTES {",
+          "path": "crates/automata-ci-sandbox-windows/src/endpoint.rs"
+        },
+        {
+          "constant": "MAX_REPLAY_ENTRIES",
+          "contains": "while self.entries.len() >= MAX_REPLAY_ENTRIES",
+          "path": "crates/automata-ci-sandbox-windows/src/endpoint.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "MAX_EVENT_BYTES",
+        "MAX_JOURNAL_BYTES"
       ],
       "owner": "sandbox",
       "path": "crates/automata-ci-sandbox-windows/src/persistence.rs",
@@ -6471,6 +6612,58 @@
           "constant": "MAX_EVENT_BYTES",
           "contains": "if bytes.is_empty() || bytes.len() > MAX_EVENT_BYTES {",
           "path": "crates/automata-ci-sandbox-windows/src/persistence.rs"
+        },
+        {
+          "constant": "MAX_JOURNAL_BYTES",
+          "contains": "if journal.metadata()?.len() > MAX_JOURNAL_BYTES {",
+          "path": "crates/automata-ci-sandbox-windows/src/persistence.rs"
+        }
+      ]
+    },
+    {
+      "classification": "operational",
+      "constants": [
+        "CPU_LIMIT_LABEL",
+        "MAX_HOST_PATH_UTF16",
+        "MAX_PROCESS_LIMIT",
+        "MAX_RUNTIME_BINARY_BYTES",
+        "MEMORY_LIMIT_LABEL",
+        "PROCESS_LIMIT_LABEL"
+      ],
+      "owner": "sandbox",
+      "path": "crates/automata-ci-sandbox-windows/src/provider.rs",
+      "phase": "executor-admission",
+      "reason": "Internal product resource, retry, timing, pagination, or safety ceilings; these controls are operational policy, not GitHub parity claims.",
+      "uses": [
+        {
+          "constant": "CPU_LIMIT_LABEL",
+          "contains": "CPU_LIMIT_LABEL.to_owned(),",
+          "path": "crates/automata-ci-sandbox-windows/src/provider.rs"
+        },
+        {
+          "constant": "MAX_HOST_PATH_UTF16",
+          "contains": "|| text.encode_utf16().count() > MAX_HOST_PATH_UTF16",
+          "path": "crates/automata-ci-sandbox-windows/src/provider.rs"
+        },
+        {
+          "constant": "MAX_PROCESS_LIMIT",
+          "contains": ".filter(|value| (1..=MAX_PROCESS_LIMIT).contains(value))",
+          "path": "crates/automata-ci-sandbox-windows/src/provider.rs"
+        },
+        {
+          "constant": "MAX_RUNTIME_BINARY_BYTES",
+          "contains": "|| metadata.len() > MAX_RUNTIME_BINARY_BYTES",
+          "path": "crates/automata-ci-sandbox-windows/src/provider.rs"
+        },
+        {
+          "constant": "MEMORY_LIMIT_LABEL",
+          "contains": "MEMORY_LIMIT_LABEL.to_owned(),",
+          "path": "crates/automata-ci-sandbox-windows/src/provider.rs"
+        },
+        {
+          "constant": "PROCESS_LIMIT_LABEL",
+          "contains": "PROCESS_LIMIT_LABEL.to_owned(),",
+          "path": "crates/automata-ci-sandbox-windows/src/provider.rs"
         }
       ]
     },

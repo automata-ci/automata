@@ -176,13 +176,12 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
     let specs = fixture.provider.specs();
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].workspace().as_str(), r"D:\a\automata\automata");
-    assert_eq!(specs[0].network(), NetworkPolicy::Host);
-    assert_eq!(specs[0].root_filesystem(), RootFilesystemPolicy::Host);
-    assert_eq!(specs[0].privilege(), SandboxPrivilegePolicy::Host);
+    assert_eq!(specs[0].network(), NetworkPolicy::Disabled);
+    assert_eq!(specs[0].root_filesystem(), RootFilesystemPolicy::Writable);
+    assert_eq!(specs[0].privilege(), SandboxPrivilegePolicy::Unprivileged);
     assert!(
-        specs[0]
-            .scratch()
-            .is_some_and(|path| path.as_str().starts_with(r"D:\_automata\attempts\"))
+        specs[0].scratch().is_none(),
+        "a Hyper-V container must not expose host scratch storage"
     );
 }
 
@@ -267,7 +266,7 @@ async fn windows_rejects_unconfigured_bash_shell() {
         .executor
         .execute(fixture.request(job), events, ExecutionCancellation::new())
         .await
-        .expect_err("Bash is not implicitly provided by a native Windows profile");
+        .expect_err("Bash is not implicitly provided by a Windows container profile");
 
     assert_eq!(error.kind(), ExecutorErrorKind::Unsupported);
     let state = fixture.endpoint_state.lock().expect("endpoint lock");

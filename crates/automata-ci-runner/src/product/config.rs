@@ -15,7 +15,7 @@ use automata_ci_core::{
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionEnvironment,
     ImmutableImage, NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
-    SandboxPrivilegePolicy, TargetPath, TargetPlatform,
+    SandboxLaunch, SandboxPrivilegePolicy, TargetPath, TargetPlatform,
 };
 use automata_ci_github::{
     GithubHttpConfigurationError, GithubHttpEndpoint, GithubHttpLimits, GithubTrustedOrigins,
@@ -32,7 +32,7 @@ use super::files::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 2;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 3;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -139,7 +139,7 @@ impl RunnerProductConfig {
         &self.environments
     }
 
-    /// Returns the selected native or container execution provider policy.
+    /// Returns the selected execution-provider policy.
     #[must_use]
     pub const fn provider(&self) -> &RunnerProviderConfig {
         &self.provider
@@ -151,7 +151,7 @@ impl RunnerProductConfig {
         match &self.provider {
             RunnerProviderConfig::Podman(config) => Some(config),
             RunnerProviderConfig::Kubernetes(_)
-            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
     }
@@ -162,16 +162,16 @@ impl RunnerProductConfig {
         match &self.provider {
             RunnerProviderConfig::Kubernetes(config) => Some(config),
             RunnerProviderConfig::Podman(_)
-            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
     }
 
-    /// Returns trusted native-Windows provider policy when selected.
+    /// Returns Hyper-V-isolated Windows container policy when selected.
     #[must_use]
-    pub const fn windows_native(&self) -> Option<&WindowsNativeProductConfig> {
+    pub const fn windows_hyperv(&self) -> Option<&WindowsHyperVProductConfig> {
         match &self.provider {
-            RunnerProviderConfig::WindowsNative(config) => Some(config),
+            RunnerProviderConfig::WindowsHyperV(config) => Some(config),
             RunnerProviderConfig::Podman(_)
             | RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::MacosVirtualization(_) => None,
@@ -185,7 +185,7 @@ impl RunnerProductConfig {
             RunnerProviderConfig::MacosVirtualization(config) => Some(config),
             RunnerProviderConfig::Podman(_)
             | RunnerProviderConfig::Kubernetes(_)
-            | RunnerProviderConfig::WindowsNative(_) => None,
+            | RunnerProviderConfig::WindowsHyperV(_) => None,
         }
     }
 
@@ -254,7 +254,7 @@ pub struct StateRoots {
     journal: StateRoot,
     spool: SpoolRoot,
     podman: Option<PathBuf>,
-    windows_native: Option<PathBuf>,
+    windows_hyperv: Option<PathBuf>,
     macos_virtualization: Option<PathBuf>,
 }
 
@@ -276,7 +276,7 @@ impl StateRoots {
     pub fn provider(&self) -> Option<&Path> {
         self.podman
             .as_deref()
-            .or(self.windows_native.as_deref())
+            .or(self.windows_hyperv.as_deref())
             .or(self.macos_virtualization.as_deref())
     }
 
@@ -286,10 +286,10 @@ impl StateRoots {
         self.podman.as_deref()
     }
 
-    /// Returns the native-Windows durable state root when selected.
+    /// Returns the Hyper-V Windows provider state root when selected.
     #[must_use]
-    pub fn windows_native(&self) -> Option<&Path> {
-        self.windows_native.as_deref()
+    pub fn windows_hyperv(&self) -> Option<&Path> {
+        self.windows_hyperv.as_deref()
     }
 
     /// Returns the macOS virtual-machine durable state root when selected.
@@ -306,8 +306,8 @@ pub enum RunnerProviderConfig {
     Podman(PodmanProductConfig),
     /// Authenticated Kubernetes Pods on a dedicated Linux execution host.
     Kubernetes(KubernetesProductConfig),
-    /// Job Object-contained native processes for trusted Windows jobs.
-    WindowsNative(WindowsNativeProductConfig),
+    /// Fresh Hyper-V-isolated Windows containers.
+    WindowsHyperV(WindowsHyperVProductConfig),
     /// Disposable Virtualization.framework machines for untrusted macOS jobs.
     MacosVirtualization(MacosVirtualizationProductConfig),
 }
@@ -326,9 +326,40 @@ impl KubernetesProductConfig {
     }
 }
 
-/// Trusted native-Windows execution provider configuration.
+/// Pinned Hyper-V Windows container runtime and guest-agent configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WindowsNativeProductConfig;
+pub struct WindowsHyperVProductConfig {
+    runtime_executable: PathBuf,
+    runtime_sha256: Sha256Digest,
+    guest_agent_path: TargetPath,
+    operation_timeout: Duration,
+}
+
+impl WindowsHyperVProductConfig {
+    /// Returns the exact pinned Windows container CLI executable.
+    #[must_use]
+    pub fn runtime_executable(&self) -> &Path {
+        &self.runtime_executable
+    }
+
+    /// Returns the expected runtime executable digest.
+    #[must_use]
+    pub const fn runtime_sha256(&self) -> Sha256Digest {
+        self.runtime_sha256
+    }
+
+    /// Returns the exact in-image guest-agent executable path.
+    #[must_use]
+    pub const fn guest_agent_path(&self) -> &TargetPath {
+        &self.guest_agent_path
+    }
+
+    /// Returns the container lifecycle operation timeout.
+    #[must_use]
+    pub const fn operation_timeout(&self) -> Duration {
+        self.operation_timeout
+    }
+}
 
 /// Verified helper and immutable template policy for macOS virtual machines.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -966,7 +997,7 @@ pub enum RunnerProductConfigError {
 enum ProviderKind {
     Podman,
     Kubernetes,
-    WindowsNative,
+    WindowsHyperV,
     MacosVirtualization,
 }
 
@@ -985,7 +1016,7 @@ struct RawRunnerProductConfig {
     #[serde(default)]
     kubernetes: Option<RawKubernetesProductConfig>,
     #[serde(default)]
-    windows_native: Option<RawWindowsNativeProductConfig>,
+    windows_hyperv: Option<RawWindowsHyperVProductConfig>,
     #[serde(default)]
     macos_virtualization: Option<RawMacosVirtualizationProductConfig>,
     executor: RawExecutorProductConfig,
@@ -1004,12 +1035,12 @@ impl RawRunnerProductConfig {
         let provider_kind = match (
             &self.podman,
             &self.kubernetes,
-            &self.windows_native,
+            &self.windows_hyperv,
             &self.macos_virtualization,
         ) {
             (Some(_), None, None, None) => ProviderKind::Podman,
             (None, Some(_), None, None) => ProviderKind::Kubernetes,
-            (None, None, Some(_), None) => ProviderKind::WindowsNative,
+            (None, None, Some(_), None) => ProviderKind::WindowsHyperV,
             (None, None, None, Some(_)) => ProviderKind::MacosVirtualization,
             _ => return Err(RunnerProductConfigError::InvalidProvider),
         };
@@ -1026,7 +1057,7 @@ impl RawRunnerProductConfig {
         let provider = match (
             self.podman,
             self.kubernetes,
-            self.windows_native,
+            self.windows_hyperv,
             self.macos_virtualization,
         ) {
             (Some(raw), None, None, None) => {
@@ -1035,9 +1066,7 @@ impl RawRunnerProductConfig {
             (None, Some(raw), None, None) => {
                 RunnerProviderConfig::Kubernetes(raw.validate(&executor)?)
             }
-            (None, None, Some(_), None) => {
-                RunnerProviderConfig::WindowsNative(RawWindowsNativeProductConfig::validate()?)
-            }
+            (None, None, Some(raw), None) => RunnerProviderConfig::WindowsHyperV(raw.validate()?),
             (None, None, None, Some(raw)) => {
                 RunnerProviderConfig::MacosVirtualization(raw.validate()?)
             }
@@ -1080,7 +1109,7 @@ impl RawRunnerProductConfig {
                 podman.buildkit_runtime().is_some(),
             ),
             RunnerProviderConfig::Kubernetes(_)
-            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => (
                 automata_ci_sandbox_podman::JobContainerEngine::Disabled,
                 false,
@@ -1118,7 +1147,7 @@ impl RawRunnerProductConfig {
         }
         match &provider {
             RunnerProviderConfig::Podman(_)
-            | RunnerProviderConfig::WindowsNative(_)
+            | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => {
                 if inventory.resources_per_job().ephemeral_disk_bytes() != 0
                     || inventory.resources_per_job().gpu_count() != 0
@@ -1139,13 +1168,13 @@ impl RawRunnerProductConfig {
                 }
             }
         }
-        if matches!(&provider, RunnerProviderConfig::WindowsNative(_))
-            && !valid_windows_provider_topology(&state, &executor, &environments)
+        if matches!(&provider, RunnerProviderConfig::MacosVirtualization(_))
+            && !valid_macos_provider_topology(&state, &executor, &environments)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
-        if matches!(&provider, RunnerProviderConfig::MacosVirtualization(_))
-            && !valid_macos_provider_topology(&state, &executor, &environments)
+        if let RunnerProviderConfig::WindowsHyperV(windows) = &provider
+            && !valid_windows_hyperv_topology(&state, &executor, &environments, windows)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
@@ -1165,50 +1194,6 @@ impl RawRunnerProductConfig {
             metrics,
         })
     }
-}
-
-fn valid_windows_provider_topology(
-    state: &StateRoots,
-    executor: &ExecutorProductConfig,
-    environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
-) -> bool {
-    let Some(provider_root) = state
-        .provider()
-        .and_then(Path::to_str)
-        .map(|path| path.trim_end_matches('\\').to_ascii_lowercase())
-    else {
-        return false;
-    };
-    let strict_root = |path: &TargetPath| {
-        automata_ci_sandbox_windows::WindowsSandboxProviderOptions::new(PathBuf::from(
-            path.as_str(),
-        ))
-        .is_ok()
-    };
-    let strict_descendant = |path: &TargetPath| {
-        let normalized = path.as_str().trim_end_matches('\\').to_ascii_lowercase();
-        strict_root(path)
-            && normalized
-                .strip_prefix(&provider_root)
-                .is_some_and(|remainder| remainder.starts_with('\\'))
-    };
-    if !strict_descendant(executor.runner_root()) {
-        return false;
-    }
-    let runner_root = executor
-        .runner_root()
-        .as_str()
-        .trim_end_matches('\\')
-        .to_ascii_lowercase();
-    environments.values().all(|environment| {
-        let workspace = environment
-            .workspace()
-            .as_str()
-            .trim_end_matches('\\')
-            .to_ascii_lowercase();
-        strict_descendant(environment.workspace())
-            && !windows_roots_overlap(&workspace, &runner_root)
-    })
 }
 
 fn valid_macos_provider_topology(
@@ -1258,7 +1243,7 @@ struct RawStateRoots {
     #[serde(default)]
     podman: Option<PathBuf>,
     #[serde(default)]
-    windows_native: Option<PathBuf>,
+    windows_hyperv: Option<PathBuf>,
     #[serde(default)]
     macos_virtualization: Option<PathBuf>,
 }
@@ -1268,11 +1253,11 @@ impl RawStateRoots {
         let provider = match (
             provider_kind,
             self.podman.as_ref(),
-            self.windows_native.as_ref(),
+            self.windows_hyperv.as_ref(),
             self.macos_virtualization.as_ref(),
         ) {
             (ProviderKind::Podman, Some(provider), None, None)
-            | (ProviderKind::WindowsNative, None, Some(provider), None)
+            | (ProviderKind::WindowsHyperV, None, Some(provider), None)
             | (ProviderKind::MacosVirtualization, None, None, Some(provider)) => Some(provider),
             (ProviderKind::Kubernetes, None, None, None) => None,
             _ => return Err(RunnerProductConfigError::InvalidStateRoots),
@@ -1292,15 +1277,15 @@ impl RawStateRoots {
                     })
                 })
             }
-            ProviderKind::WindowsNative => {
+            ProviderKind::WindowsHyperV => {
                 let normalized = roots
                     .iter()
                     .map(|path| {
-                        automata_ci_sandbox_windows::WindowsSandboxProviderOptions::new(
-                            (*path).clone(),
-                        )
-                        .ok()?;
-                        Some(path.to_str()?.trim_end_matches('\\').to_ascii_lowercase())
+                        let path = path.to_str()?;
+                        if !valid_literal_windows_path(path, false) {
+                            return None;
+                        }
+                        Some(path.trim_end_matches('\\').to_ascii_lowercase())
                     })
                     .collect::<Option<Vec<_>>>();
                 normalized.is_none_or(|roots| {
@@ -1323,7 +1308,7 @@ impl RawStateRoots {
             journal,
             spool,
             podman: self.podman,
-            windows_native: self.windows_native,
+            windows_hyperv: self.windows_hyperv,
             macos_virtualization: self.macos_virtualization,
         })
     }
@@ -1337,6 +1322,109 @@ fn windows_roots_overlap(left: &str, right: &str) -> bool {
         || right
             .strip_prefix(left)
             .is_some_and(|remainder| remainder.starts_with('\\'))
+}
+
+fn valid_windows_hyperv_topology(
+    state: &StateRoots,
+    executor: &ExecutorProductConfig,
+    environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
+    windows: &WindowsHyperVProductConfig,
+) -> bool {
+    if state.windows_hyperv().is_none()
+        || executor.runner_root().platform() != TargetPlatform::Windows
+    {
+        return false;
+    }
+    let runner_root = executor
+        .runner_root()
+        .as_str()
+        .trim_end_matches('\\')
+        .to_ascii_lowercase();
+    let protected_paths = [
+        Some(executor.runner_root()),
+        Some(executor.home()),
+        Some(executor.temp()),
+        Some(executor.tool_cache()),
+        Some(windows.guest_agent_path()),
+        executor.toolchain().bash(),
+        executor.toolchain().sh(),
+        executor.toolchain().python(),
+        executor.toolchain().pwsh(),
+        executor.toolchain().powershell(),
+        executor.toolchain().cmd(),
+        executor.toolchain().install(),
+        executor.toolchain().tar(),
+        executor.toolchain().sha256sum(),
+        executor.toolchain().node12(),
+        executor.toolchain().node16(),
+        executor.toolchain().node20(),
+        executor.toolchain().node24(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|path| path.as_str().trim_end_matches('\\').to_ascii_lowercase())
+    .collect::<Vec<_>>();
+    environments.values().all(|environment| {
+        let SandboxLaunch::WindowsHyperVContainer { keepalive, .. } = environment.launch() else {
+            return false;
+        };
+        let workspace = environment
+            .workspace()
+            .as_str()
+            .trim_end_matches('\\')
+            .to_ascii_lowercase();
+        environment.workspace().platform() == TargetPlatform::Windows
+            && keepalive
+                .program()
+                .as_str()
+                .eq_ignore_ascii_case(windows.guest_agent_path().as_str())
+            && keepalive.arguments() == ["keepalive"]
+            && !windows_roots_overlap(&runner_root, &workspace)
+            && protected_paths
+                .iter()
+                .all(|protected| !windows_roots_overlap(&workspace, protected))
+    })
+}
+
+fn valid_literal_windows_path(value: &str, executable: bool) -> bool {
+    if value.len() < 4
+        || !value.is_ascii()
+        || value.contains('~')
+        || value.contains(['%', '"'])
+        || value.chars().any(char::is_control)
+        || TargetPath::windows(value.to_owned()).is_err()
+    {
+        return false;
+    }
+    let components = value[3..]
+        .split('\\')
+        .filter(|component| !component.is_empty());
+    let mut normal_components = 0_usize;
+    for component in components {
+        let stem = component.split('.').next().unwrap_or(component);
+        if component.ends_with([' ', '.'])
+            || component.contains(':')
+            || windows_component_is_reserved(stem)
+        {
+            return false;
+        }
+        normal_components += 1;
+    }
+    normal_components > usize::from(executable)
+        && (!executable
+            || value
+                .rsplit('\\')
+                .next()
+                .is_some_and(|name| name.to_ascii_lowercase().ends_with(".exe")))
+}
+
+fn windows_component_is_reserved(component: &str) -> bool {
+    let component = component.to_ascii_uppercase();
+    matches!(component.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || component
+            .strip_prefix("COM")
+            .or_else(|| component.strip_prefix("LPT"))
+            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
 }
 
 #[derive(Deserialize)]
@@ -1448,10 +1536,7 @@ impl RawInventory {
             || self.environment_profiles.len() > MAX_ENVIRONMENTS
             || (provider_kind == ProviderKind::MacosVirtualization
                 && self.environment_profiles.len() != 1)
-            || (matches!(
-                provider_kind,
-                ProviderKind::WindowsNative | ProviderKind::MacosVirtualization
-            ) && self.max_parallel_jobs != 1)
+            || (provider_kind == ProviderKind::MacosVirtualization && self.max_parallel_jobs != 1)
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
@@ -1483,9 +1568,9 @@ impl RawInventory {
                 return Err(RunnerProductConfigError::InvalidInventory);
             }
         }
-        if provider_kind == ProviderKind::WindowsNative
+        if provider_kind == ProviderKind::WindowsHyperV
             && environments.values().any(|environment| {
-                !valid_windows_process_environment(environment.default_environment(), executor)
+                !valid_windows_environment(environment.default_environment(), executor)
             })
         {
             return Err(RunnerProductConfigError::InvalidInventory);
@@ -1496,7 +1581,7 @@ impl RawInventory {
             (
                 ProviderKind::Podman | ProviderKind::Kubernetes,
                 OperatingSystem::Linux
-            ) | (ProviderKind::WindowsNative, OperatingSystem::Windows)
+            ) | (ProviderKind::WindowsHyperV, OperatingSystem::Windows)
                 | (ProviderKind::MacosVirtualization, OperatingSystem::Macos)
         ) {
             return Err(RunnerProductConfigError::InvalidProvider);
@@ -1578,12 +1663,7 @@ fn provider_capabilities(
                 ]),
             )
         }
-        ProviderKind::WindowsNative => (
-            SandboxCapabilities::new(IsolationLevel::Process, [SandboxFeature::CLEAN_WORKSPACE]),
-            BTreeSet::new(),
-            BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
-        ),
-        ProviderKind::MacosVirtualization => (
+        ProviderKind::WindowsHyperV | ProviderKind::MacosVirtualization => (
             SandboxCapabilities::new(
                 IsolationLevel::VirtualMachine,
                 [
@@ -1597,7 +1677,7 @@ fn provider_capabilities(
     }
 }
 
-fn valid_windows_process_environment(
+fn valid_windows_environment(
     environment: &ExecutionEnvironment,
     executor: &ExecutorProductConfig,
 ) -> bool {
@@ -1752,18 +1832,34 @@ impl RawEnvironment {
                 )
                 .map_err(|_| RunnerProductConfigError::InvalidInventory)
             }
-            ProviderKind::WindowsNative => {
-                if self.image.is_some()
-                    || self.keepalive_program.is_some()
-                    || !self.keepalive_arguments.is_empty()
-                    || self.workspace.contains('%')
+            ProviderKind::WindowsHyperV => {
+                let keepalive_program = self
+                    .keepalive_program
+                    .ok_or(RunnerProductConfigError::InvalidInventory)?;
+                if !valid_literal_windows_path(&self.workspace, false)
+                    || !valid_literal_windows_path(&keepalive_program, true)
                 {
                     return Err(RunnerProductConfigError::InvalidInventory);
                 }
+                let image = ImmutableImage::new(
+                    self.image
+                        .ok_or(RunnerProductConfigError::InvalidInventory)?,
+                )
+                .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                let keepalive_program = TargetPath::windows(keepalive_program)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
+                let keepalive = ExecutionArgv::new(keepalive_program, self.keepalive_arguments)
+                    .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
                 let workspace = TargetPath::windows(self.workspace)
                     .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
-                SandboxEnvironment::native(attestation, workspace, default_environment)
-                    .map_err(|_| RunnerProductConfigError::InvalidInventory)
+                SandboxEnvironment::windows_hyperv_container(
+                    attestation,
+                    image,
+                    keepalive,
+                    workspace,
+                    default_environment,
+                )
+                .map_err(|_| RunnerProductConfigError::InvalidInventory)
             }
             ProviderKind::MacosVirtualization => {
                 if self.image.is_some()
@@ -1808,14 +1904,43 @@ struct RawPodmanProductConfig {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawWindowsNativeProductConfig {}
+struct RawWindowsHyperVProductConfig {
+    runtime_executable: PathBuf,
+    runtime_sha256: String,
+    guest_agent_path: String,
+    operation_timeout_seconds: u64,
+}
 
-impl RawWindowsNativeProductConfig {
-    fn validate() -> Result<WindowsNativeProductConfig, RunnerProductConfigError> {
+impl RawWindowsHyperVProductConfig {
+    fn validate(self) -> Result<WindowsHyperVProductConfig, RunnerProductConfigError> {
         if std::env::consts::OS != "windows" {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
-        Ok(WindowsNativeProductConfig)
+        if validate_absolute_path(&self.runtime_executable).is_err()
+            || self
+                .runtime_executable
+                .to_str()
+                .is_none_or(|path| !valid_literal_windows_path(path, true))
+        {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        let runtime_sha256 = Sha256Digest::from_str(&self.runtime_sha256)
+            .map_err(|_| RunnerProductConfigError::InvalidProvider)?;
+        if !valid_literal_windows_path(&self.guest_agent_path, true) {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        let guest_agent_path = TargetPath::windows(self.guest_agent_path)
+            .map_err(|_| RunnerProductConfigError::InvalidProvider)?;
+        let operation_timeout = Duration::from_secs(self.operation_timeout_seconds);
+        if operation_timeout.is_zero() || operation_timeout > Duration::from_mins(10) {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        Ok(WindowsHyperVProductConfig {
+            runtime_executable: self.runtime_executable,
+            runtime_sha256,
+            guest_agent_path,
+            operation_timeout,
+        })
     }
 }
 
@@ -2228,10 +2353,10 @@ impl RawExecutorProductConfig {
                 _,
                 SandboxPrivilegePolicy::Host
             )
-        ) || (matches!(provider_kind, ProviderKind::WindowsNative)
-            && (network != NetworkPolicy::Host
-                || root_filesystem != RootFilesystemPolicy::Host
-                || privilege != SandboxPrivilegePolicy::Host))
+        ) || (matches!(provider_kind, ProviderKind::WindowsHyperV)
+            && (network != NetworkPolicy::Disabled
+                || root_filesystem != RootFilesystemPolicy::Writable
+                || privilege != SandboxPrivilegePolicy::Unprivileged))
             || (provider_kind == ProviderKind::MacosVirtualization
                 && (network != NetworkPolicy::Disabled
                     || root_filesystem != RootFilesystemPolicy::Writable
@@ -2252,7 +2377,7 @@ impl RawExecutorProductConfig {
             ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
                 ':'
             }
-            ProviderKind::WindowsNative => ';',
+            ProviderKind::WindowsHyperV => ';',
         };
         if target_is_root(&home)
             || target_is_root(&temp)
@@ -2299,14 +2424,14 @@ fn provider_target_path(
     value: impl Into<String>,
 ) -> Result<TargetPath, RunnerProductConfigError> {
     let value = value.into();
-    if provider_kind == ProviderKind::WindowsNative && value.contains('%') {
+    if provider_kind == ProviderKind::WindowsHyperV && !valid_literal_windows_path(&value, false) {
         return Err(RunnerProductConfigError::InvalidExecutor);
     }
     match provider_kind {
         ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
             TargetPath::posix(value)
         }
-        ProviderKind::WindowsNative => TargetPath::windows(value),
+        ProviderKind::WindowsHyperV => TargetPath::windows(value),
     }
     .map_err(|_| RunnerProductConfigError::InvalidExecutor)
 }
@@ -2367,7 +2492,7 @@ impl RawToolchainConfig {
                     && config.powershell.is_none()
                     && config.cmd.is_none()
             }
-            ProviderKind::WindowsNative => {
+            ProviderKind::WindowsHyperV => {
                 config.bash.is_none()
                     && config.sh.is_none()
                     && config.pwsh.is_some()
@@ -2378,6 +2503,7 @@ impl RawToolchainConfig {
                         config.pwsh.as_ref(),
                         config.powershell.as_ref(),
                         config.cmd.as_ref(),
+                        config.node24.as_ref(),
                     ]
                     .into_iter()
                     .flatten()

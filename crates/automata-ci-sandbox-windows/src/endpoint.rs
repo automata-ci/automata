@@ -1,100 +1,274 @@
 use std::{
-    collections::HashMap,
-    fmt, io,
-    path::PathBuf,
-    pin::Pin,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
-    },
-    task::{Context, Poll},
-    time::Duration,
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    fmt,
+    sync::{Arc, Mutex},
 };
 
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, ExecutionCommand, ExecutionEndpoint,
     ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord,
-    ExecutionOutputStream, ExecutionStage, ExecutionTermination, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
-    MAX_EXECUTION_OUTPUT_RECORDS, OperationId, SandboxCapability, SandboxHandle, SandboxState,
-    SignalRequest, WaitRequest,
+    ExecutionOutputStream, ExecutionSignal, ExecutionStage, ExecutionTermination, NeverCancelled,
+    OperationId, ProviderErrorKind, ProviderStage, SandboxCapability, SandboxHandle, SignalRequest,
+    WaitRequest,
 };
-use processkit::{Command, Outcome, OutputBufferPolicy, ProcessRunner as _};
-use tokio::io::AsyncWrite;
-
-use crate::{
-    filesystem::{
-        read_owned_file, require_directory, require_executable, resolve_owned_target,
-        write_owned_file,
-    },
-    provider::{ENDPOINT_CAPABILITIES, ProviderInner, SandboxEntry, case_unique_environment},
+use automata_ci_sandbox_guest::{
+    GUEST_PROTOCOL_VERSION, GuestOutputStream, GuestRejection, GuestRequest, GuestResponse,
+    GuestTermination,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use sha2::{Digest as _, Sha256};
 
-const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
-const KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+use crate::{error, naming::ResourceName, provider::ProviderInner};
+
+const ENDPOINT_CAPABILITIES: &[SandboxCapability] = &[
+    SandboxCapability::Exec,
+    SandboxCapability::Signal,
+    SandboxCapability::Wait,
+    SandboxCapability::CopyTo,
+    SandboxCapability::CopyFrom,
+    SandboxCapability::EnvironmentInjection,
+];
+const MAX_REPLAY_ENTRIES: usize = 256;
+const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
+const REPLAY_ENTRY_OVERHEAD: usize = 256;
 
 #[derive(Default)]
-pub(crate) struct EndpointState {
-    exec: HashMap<OperationId, ExecReplay>,
-    copy_to: HashMap<OperationId, CopyToReplay>,
-    copy_from: HashMap<OperationId, CopyFromReplay>,
+pub(crate) struct EndpointReplayCache {
+    entries: BTreeMap<ReplayKey, ReplayEntry>,
+    order: VecDeque<ReplayKey>,
+    bytes: usize,
 }
 
-struct ExecReplay {
-    request: ExecutionCommand,
-    result: Result<ExecutionOutput, ExecutionError>,
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct ReplayKey {
+    handle: String,
+    operation_id: OperationId,
 }
 
-struct CopyToReplay {
-    request: CopyToRequest,
-    result: Result<(), ExecutionError>,
-}
-
-struct CopyFromReplay {
-    request: CopyFromRequest,
-    result: Result<Vec<u8>, ExecutionError>,
+struct ReplayEntry {
+    fingerprint: [u8; 32],
+    result: ReplayResult,
+    bytes: usize,
 }
 
 #[derive(Clone)]
-pub(crate) struct WindowsExecutionEndpoint {
-    _provider: Arc<ProviderInner>,
-    entry: Arc<SandboxEntry>,
+enum ReplayResult {
+    Exec(Result<ExecutionOutput, ExecutionError>),
+    Signal(Result<(), ExecutionError>),
+    Wait(Result<i32, ExecutionError>),
+    CopyTo(Result<(), ExecutionError>),
+    CopyFrom(Result<Vec<u8>, ExecutionError>),
 }
 
-impl WindowsExecutionEndpoint {
-    pub(crate) const fn new(provider: Arc<ProviderInner>, entry: Arc<SandboxEntry>) -> Self {
+enum ReplayLookup {
+    Miss,
+    Conflict,
+    Match(ReplayResult),
+}
+
+impl EndpointReplayCache {
+    fn lookup(
+        &self,
+        handle: &SandboxHandle,
+        operation_id: OperationId,
+        fingerprint: &[u8; 32],
+    ) -> ReplayLookup {
+        let key = ReplayKey {
+            handle: handle.opaque().to_owned(),
+            operation_id,
+        };
+        self.entries.get(&key).map_or(ReplayLookup::Miss, |entry| {
+            if &entry.fingerprint == fingerprint {
+                ReplayLookup::Match(entry.result.clone())
+            } else {
+                ReplayLookup::Conflict
+            }
+        })
+    }
+
+    fn insert(
+        &mut self,
+        handle: &SandboxHandle,
+        operation_id: OperationId,
+        fingerprint: [u8; 32],
+        result: ReplayResult,
+    ) {
+        let bytes = replay_result_bytes(&result).saturating_add(REPLAY_ENTRY_OVERHEAD);
+        if bytes > MAX_REPLAY_BYTES {
+            return;
+        }
+        let key = ReplayKey {
+            handle: handle.opaque().to_owned(),
+            operation_id,
+        };
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+            self.order.retain(|candidate| candidate != &key);
+        }
+        while self.entries.len() >= MAX_REPLAY_ENTRIES
+            || self.bytes.saturating_add(bytes) > MAX_REPLAY_BYTES
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
+            }
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            ReplayEntry {
+                fingerprint,
+                result,
+                bytes,
+            },
+        );
+    }
+
+    pub(crate) fn remove_handle(&mut self, handle: &SandboxHandle) {
+        self.order.retain(|key| key.handle != handle.opaque());
+        self.entries.retain(|key, entry| {
+            if key.handle == handle.opaque() {
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
+                false
+            } else {
+                true
+            }
+        });
+    }
+}
+
+fn replay_result_bytes(result: &ReplayResult) -> usize {
+    match result {
+        ReplayResult::Exec(Ok(output)) => output
+            .stdout()
+            .len()
+            .saturating_add(output.stderr().len())
+            .saturating_mul(2),
+        ReplayResult::CopyFrom(Ok(bytes)) => bytes.len(),
+        ReplayResult::Exec(Err(_))
+        | ReplayResult::Signal(_)
+        | ReplayResult::Wait(_)
+        | ReplayResult::CopyTo(_)
+        | ReplayResult::CopyFrom(Err(_)) => 0,
+    }
+}
+
+pub(crate) struct WindowsHyperVExecutionEndpoint {
+    inner: Arc<ProviderInner>,
+    names: ResourceName,
+    handle: SandboxHandle,
+    operation_lock: Arc<Mutex<()>>,
+    process_limit: u32,
+}
+
+impl WindowsHyperVExecutionEndpoint {
+    pub(crate) fn new(
+        inner: Arc<ProviderInner>,
+        names: ResourceName,
+        operation_lock: Arc<Mutex<()>>,
+        process_limit: u32,
+    ) -> Self {
+        let handle = names.handle();
         Self {
-            _provider: provider,
-            entry,
+            inner,
+            names,
+            handle,
+            operation_lock,
+            process_limit,
         }
     }
 
-    fn require_running(&self, stage: ExecutionStage) -> Result<(), ExecutionError> {
-        match self.entry.state() {
-            Ok(SandboxState::Running) => Ok(()),
-            Ok(SandboxState::Absent) => Err(error(ExecutionErrorKind::NotFound, stage)),
-            Ok(_) => Err(error(ExecutionErrorKind::InvalidState, stage)),
-            Err(()) => Err(error(ExecutionErrorKind::LocalStorage, stage)),
+    fn request(
+        &self,
+        request: &GuestRequest,
+        timeout: std::time::Duration,
+        cancellation: &dyn Cancellation,
+        stage: ExecutionStage,
+    ) -> Result<GuestResponse, ExecutionError> {
+        let inspection = self
+            .inner
+            .inspect_owned(&self.names, cancellation)
+            .map_err(|failure| {
+                error::execution(error::provider_to_execution(failure.kind()), stage)
+            })?;
+        if inspection.state() != automata_ci_execution::SandboxState::Running {
+            return Err(error::execution(ExecutionErrorKind::InvalidState, stage));
         }
+        self.inner
+            .guest_request(
+                &self.names,
+                request,
+                timeout,
+                cancellation,
+                ProviderStage::Attach,
+            )
+            .map_err(|failure| {
+                if matches!(
+                    failure.kind(),
+                    ProviderErrorKind::Cancelled | ProviderErrorKind::TimedOut
+                ) {
+                    let _ = self.inner.terminate_container(&self.names, &NeverCancelled);
+                }
+                error::execution(error::provider_to_execution(failure.kind()), stage)
+            })
+    }
+
+    fn replay(
+        &self,
+        operation_id: OperationId,
+        fingerprint: &[u8; 32],
+        stage: ExecutionStage,
+    ) -> Result<Option<ReplayResult>, ExecutionError> {
+        let replay = self
+            .inner
+            .endpoint_replay
+            .lock()
+            .map_err(|_| error::execution(ExecutionErrorKind::LocalStorage, stage))?;
+        match replay.lookup(&self.handle, operation_id, fingerprint) {
+            ReplayLookup::Miss => Ok(None),
+            ReplayLookup::Match(result) => Ok(Some(result)),
+            ReplayLookup::Conflict => {
+                Err(error::execution(ExecutionErrorKind::BackendRejected, stage))
+            }
+        }
+    }
+
+    fn remember(
+        &self,
+        operation_id: OperationId,
+        fingerprint: [u8; 32],
+        result: ReplayResult,
+        stage: ExecutionStage,
+    ) -> Result<(), ExecutionError> {
+        self.inner
+            .endpoint_replay
+            .lock()
+            .map_err(|_| error::execution(ExecutionErrorKind::LocalStorage, stage))?
+            .insert(&self.handle, operation_id, fingerprint, result);
+        Ok(())
     }
 }
 
-impl fmt::Debug for WindowsExecutionEndpoint {
+impl fmt::Debug for WindowsHyperVExecutionEndpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("WindowsExecutionEndpoint")
-            .field("handle", &self.entry.handle)
-            .field("capabilities", &&ENDPOINT_CAPABILITIES[..])
+            .debug_struct("WindowsHyperVExecutionEndpoint")
+            .field("handle", &self.handle)
+            .field("capabilities", &ENDPOINT_CAPABILITIES)
             .finish_non_exhaustive()
     }
 }
 
-impl ExecutionEndpoint for WindowsExecutionEndpoint {
+impl ExecutionEndpoint for WindowsHyperVExecutionEndpoint {
     fn handle(&self) -> &SandboxHandle {
-        &self.entry.handle
+        &self.handle
     }
 
     fn capabilities(&self) -> &[SandboxCapability] {
-        &ENDPOINT_CAPABILITIES
+        ENDPOINT_CAPABILITIES
     }
 
     fn exec(
@@ -102,64 +276,106 @@ impl ExecutionEndpoint for WindowsExecutionEndpoint {
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
     ) -> Result<ExecutionOutput, ExecutionError> {
-        let _operation = self
-            .entry
-            .operation_lock
-            .lock()
-            .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec))?;
+        let _operation = self.operation_lock.lock().map_err(|_| {
+            error::execution(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec)
+        })?;
+        let fingerprint = exec_fingerprint(request);
+        if let Some(replay) =
+            self.replay(request.operation_id(), &fingerprint, ExecutionStage::Exec)?
         {
-            let state = self
-                .entry
-                .endpoint_state
-                .lock()
-                .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec))?;
-            if let Some(replay) = state.exec.get(&request.operation_id()) {
-                return if replay.request == *request {
-                    replay.result.clone()
-                } else {
-                    Err(error(
-                        ExecutionErrorKind::BackendRejected,
-                        ExecutionStage::Exec,
-                    ))
-                };
-            }
+            return match replay {
+                ReplayResult::Exec(result) => result,
+                ReplayResult::Signal(_)
+                | ReplayResult::Wait(_)
+                | ReplayResult::CopyTo(_)
+                | ReplayResult::CopyFrom(_) => Err(error::execution(
+                    ExecutionErrorKind::BackendRejected,
+                    ExecutionStage::Exec,
+                )),
+            };
         }
         let result = self.exec_once(request, cancellation);
-        let mut state = self
-            .entry
-            .endpoint_state
-            .lock()
-            .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec))?;
-        state.exec.insert(
+        self.remember(
             request.operation_id(),
-            ExecReplay {
-                request: request.clone(),
-                result: result.clone(),
-            },
-        );
+            fingerprint,
+            ReplayResult::Exec(result.clone()),
+            ExecutionStage::Exec,
+        )?;
         result
     }
 
     fn signal(
         &self,
-        _request: SignalRequest,
-        _cancellation: &dyn Cancellation,
+        request: SignalRequest,
+        cancellation: &dyn Cancellation,
     ) -> Result<(), ExecutionError> {
-        Err(error(
-            ExecutionErrorKind::UnsupportedCapability,
+        let _operation = self.operation_lock.lock().map_err(|_| {
+            error::execution(ExecutionErrorKind::LocalStorage, ExecutionStage::Signal)
+        })?;
+        let fingerprint = signal_fingerprint(request);
+        if let Some(replay) =
+            self.replay(request.operation_id(), &fingerprint, ExecutionStage::Signal)?
+        {
+            return match replay {
+                ReplayResult::Signal(result) => result,
+                ReplayResult::Exec(_)
+                | ReplayResult::Wait(_)
+                | ReplayResult::CopyTo(_)
+                | ReplayResult::CopyFrom(_) => Err(error::execution(
+                    ExecutionErrorKind::BackendRejected,
+                    ExecutionStage::Signal,
+                )),
+            };
+        }
+        let result = self.signal_once(request.signal(), cancellation);
+        self.remember(
+            request.operation_id(),
+            fingerprint,
+            ReplayResult::Signal(result),
             ExecutionStage::Signal,
-        ))
+        )?;
+        result
     }
 
     fn wait(
         &self,
-        _request: WaitRequest,
-        _cancellation: &dyn Cancellation,
+        request: WaitRequest,
+        cancellation: &dyn Cancellation,
     ) -> Result<i32, ExecutionError> {
-        Err(error(
-            ExecutionErrorKind::UnsupportedCapability,
+        let _operation = self.operation_lock.lock().map_err(|_| {
+            error::execution(ExecutionErrorKind::LocalStorage, ExecutionStage::Wait)
+        })?;
+        let fingerprint = wait_fingerprint(request);
+        if let Some(replay) =
+            self.replay(request.operation_id(), &fingerprint, ExecutionStage::Wait)?
+        {
+            return match replay {
+                ReplayResult::Wait(result) => result,
+                ReplayResult::Exec(_)
+                | ReplayResult::Signal(_)
+                | ReplayResult::CopyTo(_)
+                | ReplayResult::CopyFrom(_) => Err(error::execution(
+                    ExecutionErrorKind::BackendRejected,
+                    ExecutionStage::Wait,
+                )),
+            };
+        }
+        let result = self
+            .inner
+            .wait_container(&self.names, request.timeout(), cancellation)
+            .map_err(|failure| {
+                error::execution(
+                    error::provider_to_execution(failure.kind()),
+                    ExecutionStage::Wait,
+                )
+            });
+        self.remember(
+            request.operation_id(),
+            fingerprint,
+            ReplayResult::Wait(result),
             ExecutionStage::Wait,
-        ))
+        )?;
+        result
     }
 
     fn copy_to(
@@ -167,41 +383,31 @@ impl ExecutionEndpoint for WindowsExecutionEndpoint {
         request: &CopyToRequest,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ExecutionError> {
-        let _operation = self
-            .entry
-            .operation_lock
-            .lock()
-            .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyTo))?;
+        let _operation = self.operation_lock.lock().map_err(|_| {
+            error::execution(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyTo)
+        })?;
+        let fingerprint = copy_to_fingerprint(request);
+        if let Some(replay) =
+            self.replay(request.operation_id(), &fingerprint, ExecutionStage::CopyTo)?
         {
-            let state = self
-                .entry
-                .endpoint_state
-                .lock()
-                .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyTo))?;
-            if let Some(replay) = state.copy_to.get(&request.operation_id()) {
-                return if replay.request == *request {
-                    replay.result
-                } else {
-                    Err(error(
-                        ExecutionErrorKind::BackendRejected,
-                        ExecutionStage::CopyTo,
-                    ))
-                };
-            }
+            return match replay {
+                ReplayResult::CopyTo(result) => result,
+                ReplayResult::Exec(_)
+                | ReplayResult::Signal(_)
+                | ReplayResult::Wait(_)
+                | ReplayResult::CopyFrom(_) => Err(error::execution(
+                    ExecutionErrorKind::BackendRejected,
+                    ExecutionStage::CopyTo,
+                )),
+            };
         }
         let result = self.copy_to_once(request, cancellation);
-        let mut state = self
-            .entry
-            .endpoint_state
-            .lock()
-            .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyTo))?;
-        state.copy_to.insert(
+        self.remember(
             request.operation_id(),
-            CopyToReplay {
-                request: request.clone(),
-                result,
-            },
-        );
+            fingerprint,
+            ReplayResult::CopyTo(result),
+            ExecutionStage::CopyTo,
+        )?;
         result
     }
 
@@ -210,116 +416,127 @@ impl ExecutionEndpoint for WindowsExecutionEndpoint {
         request: &CopyFromRequest,
         cancellation: &dyn Cancellation,
     ) -> Result<Vec<u8>, ExecutionError> {
-        let _operation = self
-            .entry
-            .operation_lock
-            .lock()
-            .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyFrom))?;
-        {
-            let state =
-                self.entry.endpoint_state.lock().map_err(|_| {
-                    error(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyFrom)
-                })?;
-            if let Some(replay) = state.copy_from.get(&request.operation_id()) {
-                return if replay.request == *request {
-                    replay.result.clone()
-                } else {
-                    Err(error(
-                        ExecutionErrorKind::BackendRejected,
-                        ExecutionStage::CopyFrom,
-                    ))
-                };
-            }
+        let _operation = self.operation_lock.lock().map_err(|_| {
+            error::execution(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyFrom)
+        })?;
+        let fingerprint = copy_from_fingerprint(request);
+        if let Some(replay) = self.replay(
+            request.operation_id(),
+            &fingerprint,
+            ExecutionStage::CopyFrom,
+        )? {
+            return match replay {
+                ReplayResult::CopyFrom(result) => result,
+                ReplayResult::Exec(_)
+                | ReplayResult::Signal(_)
+                | ReplayResult::Wait(_)
+                | ReplayResult::CopyTo(_) => Err(error::execution(
+                    ExecutionErrorKind::BackendRejected,
+                    ExecutionStage::CopyFrom,
+                )),
+            };
         }
         let result = self.copy_from_once(request, cancellation);
-        let mut state = self
-            .entry
-            .endpoint_state
-            .lock()
-            .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::CopyFrom))?;
-        state.copy_from.insert(
+        self.remember(
             request.operation_id(),
-            CopyFromReplay {
-                request: request.clone(),
-                result: result.clone(),
-            },
-        );
+            fingerprint,
+            ReplayResult::CopyFrom(result.clone()),
+            ExecutionStage::CopyFrom,
+        )?;
         result
     }
 }
 
-impl WindowsExecutionEndpoint {
+impl WindowsHyperVExecutionEndpoint {
     fn exec_once(
         &self,
         request: &ExecutionCommand,
         cancellation: &dyn Cancellation,
     ) -> Result<ExecutionOutput, ExecutionError> {
-        self.require_running(ExecutionStage::Exec)?;
-        let program = require_executable(request.argv().program()).map_err(|error| {
-            filesystem_error(
-                &error,
-                ExecutionStage::Exec,
-                ExecutionErrorKind::BackendRejected,
-            )
+        let mut names = BTreeSet::new();
+        let mut environment = BTreeMap::new();
+        for variable in request.environment().values() {
+            if !names.insert(variable.name().as_str().to_ascii_lowercase()) {
+                return Err(error::execution(
+                    ExecutionErrorKind::InvalidEnvironment,
+                    ExecutionStage::Exec,
+                ));
+            }
+            environment.insert(
+                variable.name().as_str().to_owned(),
+                variable.value().expose().to_owned(),
+            );
+        }
+        let timeout_millis = u64::try_from(request.timeout().as_millis()).map_err(|_| {
+            error::execution(ExecutionErrorKind::InvalidEnvironment, ExecutionStage::Exec)
         })?;
-        let working_directory = resolve_owned_target(
-            request.working_directory(),
-            &self.entry.workspace,
-            &self.entry.scratch,
-        )
-        .map_err(|error| {
-            filesystem_error(
-                &error,
-                ExecutionStage::Exec,
-                ExecutionErrorKind::OwnershipMismatch,
-            )
-        })?;
-        require_directory(&working_directory).map_err(|error| {
-            filesystem_error(&error, ExecutionStage::Exec, ExecutionErrorKind::NotFound)
-        })?;
-        if !case_unique_environment(request.environment()) {
-            return Err(error(
-                ExecutionErrorKind::InvalidEnvironment,
-                ExecutionStage::Exec,
+        let guest = GuestRequest::Exec {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: request.operation_id().as_uuid().to_string(),
+            program: request.argv().program().as_str().to_owned(),
+            arguments: request.argv().arguments().to_vec(),
+            environment,
+            working_directory: request.working_directory().as_str().to_owned(),
+            timeout_millis,
+            output_limit: request.output_limit(),
+            process_limit: Some(self.process_limit),
+        };
+        let response = self.request(
+            &guest,
+            request
+                .timeout()
+                .saturating_add(self.inner.options.operation_timeout()),
+            cancellation,
+            ExecutionStage::Exec,
+        )?;
+        let output = response_to_output(response, request.output_limit())?;
+        if output.termination() == ExecutionTermination::TimedOut {
+            self.inner
+                .terminate_container(&self.names, &NeverCancelled)
+                .map_err(|failure| {
+                    error::execution(
+                        error::provider_to_execution(failure.kind()),
+                        ExecutionStage::Exec,
+                    )
+                })?;
+        }
+        Ok(output)
+    }
+
+    fn signal_once(
+        &self,
+        signal: ExecutionSignal,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), ExecutionError> {
+        let inspection = self
+            .inner
+            .inspect_owned(&self.names, cancellation)
+            .map_err(|failure| {
+                error::execution(
+                    error::provider_to_execution(failure.kind()),
+                    ExecutionStage::Signal,
+                )
+            })?;
+        if inspection.state() != automata_ci_execution::SandboxState::Running {
+            return Err(error::execution(
+                ExecutionErrorKind::InvalidState,
+                ExecutionStage::Signal,
             ));
         }
-        if cancellation.is_cancelled() {
-            return empty_output(ExecutionTermination::Cancelled);
-        }
-        let group = self
-            .entry
-            .group()
-            .map_err(|()| error(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec))?
-            .ok_or_else(|| error(ExecutionErrorKind::InvalidState, ExecutionStage::Exec))?;
-
-        let request = request.clone();
-        let joined = std::thread::scope(|scope| {
-            scope
-                .spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|_| {
-                            error(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec)
-                        })?;
-                    runtime.block_on(run_process(
-                        group,
-                        request,
-                        program,
-                        working_directory,
-                        cancellation,
-                    ))
-                })
-                .join()
-        });
-        joined.unwrap_or_else(|_| {
-            if let Ok(Some(group)) = self.entry.group() {
-                let _ = group.kill_all();
+        let result = match signal {
+            ExecutionSignal::Interrupt | ExecutionSignal::Terminate => {
+                return Err(error::execution(
+                    ExecutionErrorKind::UnsupportedCapability,
+                    ExecutionStage::Signal,
+                ));
             }
-            Err(error(
-                ExecutionErrorKind::BackendRejected,
-                ExecutionStage::Exec,
-            ))
+            ExecutionSignal::Kill => self.inner.terminate_container(&self.names, cancellation),
+        };
+        result.map_err(|failure| {
+            error::execution(
+                error::provider_to_execution(failure.kind()),
+                ExecutionStage::Signal,
+            )
         })
     }
 
@@ -328,26 +545,23 @@ impl WindowsExecutionEndpoint {
         request: &CopyToRequest,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ExecutionError> {
-        self.require_running(ExecutionStage::CopyTo)?;
-        if cancellation.is_cancelled() {
-            return Err(error(ExecutionErrorKind::Cancelled, ExecutionStage::CopyTo));
+        let guest = GuestRequest::WriteFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: request.operation_id().as_uuid().to_string(),
+            path: request.target().as_str().to_owned(),
+            content_base64: BASE64.encode(request.content()),
+        };
+        match self.request(
+            &guest,
+            self.inner.options.operation_timeout(),
+            cancellation,
+            ExecutionStage::CopyTo,
+        )? {
+            GuestResponse::WriteFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+            } => Ok(()),
+            response => Err(response_error(&response, ExecutionStage::CopyTo)),
         }
-        let path =
-            resolve_owned_target(request.target(), &self.entry.workspace, &self.entry.scratch)
-                .map_err(|error| {
-                    filesystem_error(
-                        &error,
-                        ExecutionStage::CopyTo,
-                        ExecutionErrorKind::OwnershipMismatch,
-                    )
-                })?;
-        write_owned_file(&path, request.content()).map_err(|error| {
-            filesystem_error(
-                &error,
-                ExecutionStage::CopyTo,
-                ExecutionErrorKind::LocalStorage,
-            )
-        })
     }
 
     fn copy_from_once(
@@ -355,336 +569,254 @@ impl WindowsExecutionEndpoint {
         request: &CopyFromRequest,
         cancellation: &dyn Cancellation,
     ) -> Result<Vec<u8>, ExecutionError> {
-        self.require_running(ExecutionStage::CopyFrom)?;
-        if cancellation.is_cancelled() {
-            return Err(error(
-                ExecutionErrorKind::Cancelled,
-                ExecutionStage::CopyFrom,
-            ));
-        }
-        let path =
-            resolve_owned_target(request.source(), &self.entry.workspace, &self.entry.scratch)
-                .map_err(|error| {
-                    filesystem_error(
-                        &error,
+        let guest = GuestRequest::ReadFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: request.operation_id().as_uuid().to_string(),
+            path: request.source().as_str().to_owned(),
+            byte_limit: request.byte_limit(),
+        };
+        match self.request(
+            &guest,
+            self.inner.options.operation_timeout(),
+            cancellation,
+            ExecutionStage::CopyFrom,
+        )? {
+            GuestResponse::ReadFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                content_base64,
+            } => {
+                let content = BASE64.decode(content_base64).map_err(|_| {
+                    error::execution(
+                        ExecutionErrorKind::BackendRejected,
                         ExecutionStage::CopyFrom,
-                        ExecutionErrorKind::OwnershipMismatch,
                     )
                 })?;
-        let content = read_owned_file(&path, request.byte_limit()).map_err(|error| {
-            filesystem_error(
-                &error,
-                ExecutionStage::CopyFrom,
-                ExecutionErrorKind::LocalStorage,
-            )
-        })?;
-        if cancellation.is_cancelled() {
-            return Err(error(
-                ExecutionErrorKind::Cancelled,
-                ExecutionStage::CopyFrom,
-            ));
+                if content.len() > request.byte_limit() {
+                    return Err(error::execution(
+                        ExecutionErrorKind::OutputLimitExceeded,
+                        ExecutionStage::CopyFrom,
+                    ));
+                }
+                Ok(content)
+            }
+            response => Err(response_error(&response, ExecutionStage::CopyFrom)),
         }
-        Ok(content)
     }
 }
 
-async fn run_process(
-    group: Arc<processkit::ProcessGroup>,
-    request: ExecutionCommand,
-    program: PathBuf,
-    working_directory: PathBuf,
-    cancellation: &dyn Cancellation,
+fn exec_fingerprint(request: &ExecutionCommand) -> [u8; 32] {
+    let mut hash = replay_hash(b"exec");
+    hash_field(
+        &mut hash,
+        request.operation_id().as_uuid().to_string().as_bytes(),
+    );
+    hash_field(&mut hash, request.argv().program().as_str().as_bytes());
+    for argument in request.argv().arguments() {
+        hash_field(&mut hash, argument.as_bytes());
+    }
+    hash_field(&mut hash, request.working_directory().as_str().as_bytes());
+    for variable in request.environment().values() {
+        hash_field(&mut hash, variable.name().as_str().as_bytes());
+        hash_field(&mut hash, variable.value().expose().as_bytes());
+    }
+    hash_field(&mut hash, &request.timeout().as_secs().to_be_bytes());
+    hash_field(&mut hash, &request.timeout().subsec_nanos().to_be_bytes());
+    hash_field(
+        &mut hash,
+        &u64::try_from(request.output_limit())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hash.finalize().into()
+}
+
+fn signal_fingerprint(request: SignalRequest) -> [u8; 32] {
+    let mut hash = replay_hash(b"signal");
+    hash_field(
+        &mut hash,
+        request.operation_id().as_uuid().to_string().as_bytes(),
+    );
+    let signal = match request.signal() {
+        ExecutionSignal::Interrupt => b"interrupt".as_slice(),
+        ExecutionSignal::Terminate => b"terminate".as_slice(),
+        ExecutionSignal::Kill => b"kill".as_slice(),
+    };
+    hash_field(&mut hash, signal);
+    hash.finalize().into()
+}
+
+fn wait_fingerprint(request: WaitRequest) -> [u8; 32] {
+    let mut hash = replay_hash(b"wait");
+    hash_field(
+        &mut hash,
+        request.operation_id().as_uuid().to_string().as_bytes(),
+    );
+    hash_field(&mut hash, &request.timeout().as_secs().to_be_bytes());
+    hash_field(&mut hash, &request.timeout().subsec_nanos().to_be_bytes());
+    hash.finalize().into()
+}
+
+fn copy_to_fingerprint(request: &CopyToRequest) -> [u8; 32] {
+    let mut hash = replay_hash(b"copy-to");
+    hash_field(
+        &mut hash,
+        request.operation_id().as_uuid().to_string().as_bytes(),
+    );
+    hash_field(&mut hash, request.target().as_str().as_bytes());
+    hash_field(&mut hash, request.content());
+    hash.finalize().into()
+}
+
+fn copy_from_fingerprint(request: &CopyFromRequest) -> [u8; 32] {
+    let mut hash = replay_hash(b"copy-from");
+    hash_field(
+        &mut hash,
+        request.operation_id().as_uuid().to_string().as_bytes(),
+    );
+    hash_field(&mut hash, request.source().as_str().as_bytes());
+    hash_field(
+        &mut hash,
+        &u64::try_from(request.byte_limit())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hash.finalize().into()
+}
+
+fn replay_hash(domain: &[u8]) -> Sha256 {
+    let mut hash = Sha256::new();
+    hash_field(&mut hash, b"automata.windows.endpoint-replay.v1");
+    hash_field(&mut hash, domain);
+    hash
+}
+
+fn hash_field(hash: &mut Sha256, value: &[u8]) {
+    hash.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hash.update(value);
+}
+
+fn response_to_output(
+    response: GuestResponse,
+    output_limit: usize,
 ) -> Result<ExecutionOutput, ExecutionError> {
-    let reason = Arc::new(AtomicU8::new(StopReason::Natural as u8));
-    let capture = Arc::new(Mutex::new(CaptureState::new(request.output_limit())));
-    let stdout = CaptureWriter::new(
-        ExecutionOutputStream::Stdout,
-        Arc::clone(&capture),
-        Arc::clone(&group),
-        Arc::clone(&reason),
-    );
-    let stderr = CaptureWriter::new(
-        ExecutionOutputStream::Stderr,
-        Arc::clone(&capture),
-        Arc::clone(&group),
-        Arc::clone(&reason),
-    );
-    let command = build_process_command(&request, program, working_directory, stdout, stderr);
-    let Ok(running) = group.start(&command).await else {
-        let _ = group.kill_all();
-        return Err(error(
-            ExecutionErrorKind::BackendRejected,
+    let GuestResponse::Exec {
+        protocol: GUEST_PROTOCOL_VERSION,
+        termination,
+        records,
+        truncated,
+    } = response
+    else {
+        return Err(response_error(&response, ExecutionStage::Exec));
+    };
+    let records = records
+        .into_iter()
+        .map(|record| {
+            let stream = match record.stream() {
+                GuestOutputStream::Stdout => ExecutionOutputStream::Stdout,
+                GuestOutputStream::Stderr => ExecutionOutputStream::Stderr,
+            };
+            if record.is_end_of_stream() {
+                Ok(ExecutionOutputRecord::end_of_stream(stream))
+            } else {
+                let bytes = record.data().map_err(|_| {
+                    error::execution(ExecutionErrorKind::BackendRejected, ExecutionStage::Exec)
+                })?;
+                ExecutionOutputRecord::data(stream, bytes).map_err(|_| {
+                    error::execution(
+                        ExecutionErrorKind::OutputLimitExceeded,
+                        ExecutionStage::Exec,
+                    )
+                })
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if records
+        .iter()
+        .try_fold(0_usize, |total, record| {
+            total.checked_add(record.bytes().len())
+        })
+        .is_none_or(|bytes| bytes > output_limit)
+    {
+        return Err(error::execution(
+            ExecutionErrorKind::OutputLimitExceeded,
             ExecutionStage::Exec,
         ));
+    }
+    let termination = match termination {
+        GuestTermination::Exited(code) => ExecutionTermination::Exited(code),
+        GuestTermination::Signalled => ExecutionTermination::Signalled,
+        GuestTermination::TimedOut => ExecutionTermination::TimedOut,
     };
-    let finished = running.output_string();
-    tokio::pin!(finished);
-    let deadline = tokio::time::sleep(request.timeout());
-    tokio::pin!(deadline);
-    let mut cancellation_poll = tokio::time::interval(CANCELLATION_POLL_INTERVAL);
-    cancellation_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ExecutionOutput::new(termination, records, truncated)
+        .map_err(|_| error::execution(ExecutionErrorKind::BackendRejected, ExecutionStage::Exec))
+}
 
-    let process_result = loop {
-        tokio::select! {
-            biased;
-            _ = cancellation_poll.tick() => {
-                if cancellation.is_cancelled() {
-                    reason.store(StopReason::Cancelled as u8, Ordering::SeqCst);
-                    group.kill_all().map_err(|_| {
-                        error(ExecutionErrorKind::BackendRejected, ExecutionStage::Exec)
-                    })?;
-                    break tokio::time::timeout(KILL_REAP_TIMEOUT, &mut finished).await.ok();
-                }
-            }
-            () = &mut deadline => {
-                let stop = if cancellation.is_cancelled() {
-                    StopReason::Cancelled
-                } else {
-                    StopReason::TimedOut
-                };
-                reason.store(stop as u8, Ordering::SeqCst);
-                group.kill_all().map_err(|_| {
-                    error(ExecutionErrorKind::BackendRejected, ExecutionStage::Exec)
-                })?;
-                break tokio::time::timeout(KILL_REAP_TIMEOUT, &mut finished).await.ok();
-            }
-            result = &mut finished => {
-                if cancellation.is_cancelled() {
-                    reason.store(StopReason::Cancelled as u8, Ordering::SeqCst);
-                    group.kill_all().map_err(|_| {
-                        error(ExecutionErrorKind::BackendRejected, ExecutionStage::Exec)
-                    })?;
-                }
-                break Some(result);
-            }
-        }
+fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionError {
+    let kind = match response {
+        GuestResponse::Rejected {
+            kind: GuestRejection::InvalidRequest,
+            ..
+        } => ExecutionErrorKind::InvalidEnvironment,
+        GuestResponse::Ready { .. }
+        | GuestResponse::Hello { .. }
+        | GuestResponse::Configured { .. }
+        | GuestResponse::Exec { .. }
+        | GuestResponse::WriteFile { .. }
+        | GuestResponse::ReadFile { .. }
+        | GuestResponse::Rejected { .. } => ExecutionErrorKind::BackendRejected,
     };
+    error::execution(kind, stage)
+}
 
-    let stop_reason = StopReason::from_u8(reason.load(Ordering::SeqCst));
-    let (termination, complete) = match (stop_reason, process_result) {
-        (StopReason::Cancelled, Some(Ok(_))) => (ExecutionTermination::Cancelled, true),
-        (StopReason::Cancelled, Some(Err(_)) | None) => (ExecutionTermination::Cancelled, false),
-        (StopReason::TimedOut, Some(Ok(_))) => (ExecutionTermination::TimedOut, true),
-        (StopReason::TimedOut, Some(Err(_)) | None) => (ExecutionTermination::TimedOut, false),
-        (StopReason::OutputLimit, Some(Ok(_))) => (ExecutionTermination::Signalled, true),
-        (StopReason::OutputLimit, Some(Err(_)) | None) => (ExecutionTermination::Signalled, false),
-        (StopReason::Natural, Some(Ok(result))) => (map_outcome(result.outcome()), true),
-        (StopReason::Natural, Some(Err(_)) | None) => {
-            let _ = group.kill_all();
-            return Err(error(
-                ExecutionErrorKind::BackendRejected,
-                ExecutionStage::Exec,
-            ));
+#[cfg(test)]
+mod tests {
+    use automata_ci_execution::{ExecutionSignal, SandboxGeneration};
+
+    use super::*;
+    use crate::naming::ResourceName;
+
+    #[test]
+    fn endpoint_replay_is_exact_bounded_and_generation_scoped() {
+        let names = ResourceName::for_create(
+            OperationId::new(),
+            SandboxGeneration::new(7).expect("generation"),
+        );
+        let handle = names.handle();
+        let operation_id = OperationId::new();
+        let request = SignalRequest::new(operation_id, ExecutionSignal::Kill);
+        let fingerprint = signal_fingerprint(request);
+        let mut replay = EndpointReplayCache::default();
+        replay.insert(
+            &handle,
+            operation_id,
+            fingerprint,
+            ReplayResult::Signal(Ok(())),
+        );
+        assert!(matches!(
+            replay.lookup(&handle, operation_id, &fingerprint),
+            ReplayLookup::Match(ReplayResult::Signal(Ok(())))
+        ));
+        let changed =
+            signal_fingerprint(SignalRequest::new(operation_id, ExecutionSignal::Terminate));
+        assert!(matches!(
+            replay.lookup(&handle, operation_id, &changed),
+            ReplayLookup::Conflict
+        ));
+
+        for _ in 0..=MAX_REPLAY_ENTRIES {
+            let operation_id = OperationId::new();
+            replay.insert(
+                &handle,
+                operation_id,
+                [0_u8; 32],
+                ReplayResult::Signal(Ok(())),
+            );
         }
-    };
-    let mut capture = capture
-        .lock()
-        .map_err(|_| error(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec))?;
-    capture.finish(
-        termination,
-        complete,
-        stop_reason == StopReason::OutputLimit || !complete,
-    )
-}
-
-fn build_process_command(
-    request: &ExecutionCommand,
-    program: PathBuf,
-    working_directory: PathBuf,
-    stdout: CaptureWriter,
-    stderr: CaptureWriter,
-) -> Command {
-    let mut command = Command::new(program)
-        .args(request.argv().arguments())
-        .current_dir(working_directory)
-        .env_clear()
-        .no_timeout()
-        .create_no_window()
-        .stdout_raw_tee(stdout)
-        .stderr_raw_tee(stderr)
-        .output_buffer(OutputBufferPolicy::bounded(0).with_max_bytes(request.output_limit()));
-    for variable in request.environment().values() {
-        command = command.env(variable.name().as_str(), variable.value().expose());
+        assert!(replay.entries.len() <= MAX_REPLAY_ENTRIES);
+        assert!(replay.bytes <= MAX_REPLAY_BYTES);
+        replay.remove_handle(&handle);
+        assert!(replay.entries.is_empty());
+        assert!(replay.order.is_empty());
+        assert_eq!(replay.bytes, 0);
     }
-    command
-}
-
-fn map_outcome(outcome: Outcome) -> ExecutionTermination {
-    if let Some(code) = outcome.code() {
-        ExecutionTermination::Exited(code)
-    } else if outcome.timed_out() {
-        ExecutionTermination::TimedOut
-    } else {
-        ExecutionTermination::Signalled
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-#[repr(u8)]
-enum StopReason {
-    Natural = 0,
-    Cancelled = 1,
-    TimedOut = 2,
-    OutputLimit = 3,
-}
-
-impl StopReason {
-    fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Cancelled,
-            2 => Self::TimedOut,
-            3 => Self::OutputLimit,
-            _ => Self::Natural,
-        }
-    }
-}
-
-struct CaptureWriter {
-    stream: ExecutionOutputStream,
-    capture: Arc<Mutex<CaptureState>>,
-    group: Arc<processkit::ProcessGroup>,
-    reason: Arc<AtomicU8>,
-}
-
-impl CaptureWriter {
-    const fn new(
-        stream: ExecutionOutputStream,
-        capture: Arc<Mutex<CaptureState>>,
-        group: Arc<processkit::ProcessGroup>,
-        reason: Arc<AtomicU8>,
-    ) -> Self {
-        Self {
-            stream,
-            capture,
-            group,
-            reason,
-        }
-    }
-}
-
-impl AsyncWrite for CaptureWriter {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
-        bytes: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if bytes.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        let Ok(mut capture) = self.capture.lock() else {
-            return Poll::Ready(Err(io::Error::other("execution output state poisoned")));
-        };
-        let remaining = capture.limit.saturating_sub(capture.bytes);
-        let record_capacity = MAX_EXECUTION_OUTPUT_RECORDS
-            .saturating_sub(2)
-            .saturating_sub(capture.records.len());
-        let record_bytes = record_capacity.saturating_mul(MAX_EXECUTION_OUTPUT_RECORD_BYTES);
-        let accepted = remaining.min(record_bytes).min(bytes.len());
-        for chunk in bytes[..accepted].chunks(MAX_EXECUTION_OUTPUT_RECORD_BYTES) {
-            let record = ExecutionOutputRecord::data(self.stream, chunk.to_vec())
-                .map_err(|_| io::Error::other("invalid execution output record"));
-            match record {
-                Ok(record) => capture.records.push(record),
-                Err(error) => return Poll::Ready(Err(error)),
-            }
-        }
-        capture.bytes += accepted;
-        if accepted != bytes.len() {
-            capture.truncated = true;
-            if self
-                .reason
-                .compare_exchange(
-                    StopReason::Natural as u8,
-                    StopReason::OutputLimit as u8,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                let _ = self.group.kill_all();
-            }
-        }
-        Poll::Ready(Ok(bytes.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-
-struct CaptureState {
-    records: Vec<ExecutionOutputRecord>,
-    bytes: usize,
-    limit: usize,
-    truncated: bool,
-}
-
-impl CaptureState {
-    const fn new(limit: usize) -> Self {
-        Self {
-            records: Vec::new(),
-            bytes: 0,
-            limit,
-            truncated: false,
-        }
-    }
-
-    fn finish(
-        &mut self,
-        termination: ExecutionTermination,
-        complete: bool,
-        force_truncated: bool,
-    ) -> Result<ExecutionOutput, ExecutionError> {
-        if complete {
-            self.records.push(ExecutionOutputRecord::end_of_stream(
-                ExecutionOutputStream::Stdout,
-            ));
-            self.records.push(ExecutionOutputRecord::end_of_stream(
-                ExecutionOutputStream::Stderr,
-            ));
-        }
-        let records = std::mem::take(&mut self.records);
-        ExecutionOutput::new(termination, records, self.truncated || force_truncated).map_err(
-            |_| {
-                error(
-                    ExecutionErrorKind::OutputLimitExceeded,
-                    ExecutionStage::Exec,
-                )
-            },
-        )
-    }
-}
-
-fn empty_output(termination: ExecutionTermination) -> Result<ExecutionOutput, ExecutionError> {
-    ExecutionOutput::new(
-        termination,
-        vec![
-            ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stdout),
-            ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stderr),
-        ],
-        false,
-    )
-    .map_err(|_| error(ExecutionErrorKind::BackendRejected, ExecutionStage::Exec))
-}
-
-fn filesystem_error(
-    source: &io::Error,
-    stage: ExecutionStage,
-    fallback: ExecutionErrorKind,
-) -> ExecutionError {
-    let kind = match source.kind() {
-        io::ErrorKind::NotFound => ExecutionErrorKind::NotFound,
-        io::ErrorKind::PermissionDenied => ExecutionErrorKind::OwnershipMismatch,
-        io::ErrorKind::FileTooLarge => ExecutionErrorKind::OutputLimitExceeded,
-        _ => fallback,
-    };
-    error(kind, stage)
-}
-
-const fn error(kind: ExecutionErrorKind, stage: ExecutionStage) -> ExecutionError {
-    ExecutionError::new(kind, stage)
 }

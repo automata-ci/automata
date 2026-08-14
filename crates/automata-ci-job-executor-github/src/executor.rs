@@ -6777,10 +6777,8 @@ fn job_workspace(
             }
             Ok(logical_workspace)
         }
-        (
-            TargetPlatform::Posix | TargetPlatform::Windows,
-            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. },
-        ) => {
+        (TargetPlatform::Posix, SandboxLaunch::VirtualMachine { .. })
+        | (TargetPlatform::Windows, SandboxLaunch::WindowsHyperVContainer { .. }) => {
             let relative = logical_workspace
                 .as_str()
                 .strip_prefix(LOGICAL_WORKSPACE_ROOT)
@@ -6788,7 +6786,13 @@ fn job_workspace(
                 .ok_or_else(invalid_job)?;
             child(environment.workspace(), relative)
         }
-        (TargetPlatform::Windows, SandboxLaunch::Container { .. }) => Err(invalid_job()),
+        (
+            TargetPlatform::Windows,
+            SandboxLaunch::Container { .. } | SandboxLaunch::VirtualMachine { .. },
+        )
+        | (TargetPlatform::Posix, SandboxLaunch::WindowsHyperVContainer { .. }) => {
+            Err(invalid_job())
+        }
     }
 }
 

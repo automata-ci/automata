@@ -182,6 +182,7 @@ fn exec_request(
         working_directory: working_directory.into(),
         timeout_millis,
         output_limit,
+        process_limit: None,
     }
 }
 
@@ -393,6 +394,32 @@ fn debug_views_redact_request_response_and_output_payloads() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guest_protocol_v1_is_rejected() {
+    let server = GuestServer::start("guest-protocol-v1-rejection").await;
+    let socket = server.socket.clone();
+    let unsupported_protocol = 1;
+    let unsupported = GuestRequest::Probe {
+        protocol: unsupported_protocol,
+        operation_id: FIRST_OPERATION.into(),
+    };
+    let expected_rejection = GuestRejection::UnsupportedProtocol;
+    assert_rejected(exchange(&socket, &unsupported).await, expected_rejection);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guest_protocol_v2_is_rejected() {
+    let server = GuestServer::start("guest-protocol-v2-rejection").await;
+    let socket = server.socket.clone();
+    let unsupported_protocol = 2;
+    let unsupported = GuestRequest::Probe {
+        protocol: unsupported_protocol,
+        operation_id: FIRST_OPERATION.into(),
+    };
+    let expected_rejection = GuestRejection::UnsupportedProtocol;
+    assert_rejected(exchange(&socket, &unsupported).await, expected_rejection);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn listener_lifecycle_protocol_and_malformed_connections_fail_closed() {
     let temp = TempDir::new("listener-lifecycle");
     let socket = temp.path().join("guest.sock");
@@ -402,7 +429,7 @@ async fn listener_lifecycle_protocol_and_malformed_connections_fail_closed() {
     assert!(probe(&socket));
 
     let expected_rejection = GuestRejection::UnsupportedProtocol;
-    for unsupported_protocol in [1, GUEST_PROTOCOL_VERSION + 1] {
+    for unsupported_protocol in [1, 2, GUEST_PROTOCOL_VERSION + 1] {
         let unsupported = GuestRequest::ReadFile {
             protocol: unsupported_protocol,
             operation_id: FIRST_OPERATION.into(),

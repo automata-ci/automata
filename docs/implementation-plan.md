@@ -9,14 +9,17 @@ The [compatibility page](compatibility.md) owns current support claims. The
 
 ## Current foundation
 
-As of 2026-08-11, the source tree contains:
+As of 2026-08-14, the source tree contains:
 
 - workflow parsing, expression evaluation, logical planning, bounded matrix
   expansion, and JobIR projection;
 - PostgreSQL admission, scheduling, leases, fencing, maintenance, result
   projection, and immutable numeric run aliases;
-- mTLS runner transport, provider admission, rootless Podman and trusted native
-  Windows execution, crash journals, and cleanup;
+- mTLS runner transport, provider admission, rootless Podman, and a
+  component-level Hyper-V-isolated Windows container provider with a
+  checksummed lifecycle journal and fail-closed startup reconciliation; Windows
+  trust routing, restricted engine management, independent recovery, and real
+  host acceptance remain open;
 - Results, artifact, and CacheService v2 boundaries backed by
   S3-compatible storage;
 - configured GitHub provider ingress, source delivery, authentication, Check
@@ -135,12 +138,20 @@ escape the isolation class advertised by their runner.
 
 ### G6: Windows, macOS, and fleet migration
 
-The initial trusted native Windows slice covers PowerShell and `cmd.exe` shell
-steps, an optional explicitly configured Python interpreter, and Job Object
-process containment with an explicit unchanged-host-identity policy.
-Restricted-token launch, broader Windows path and process semantics, services,
-Hyper-V isolation, signing environments, and parallel native jobs remain
-target-state work.
+The native Windows provider has been removed. The selected Windows direction is
+one fresh Hyper-V-isolated Windows container per job with no process-isolated,
+native, or full-VM fallback. The first Wave 1 component foundation provides
+closed configuration, digest-pinned image/runtime inputs, effective
+Hyper-V-isolation inspection, disabled networking, no host mounts, bounded
+guest execution, a checksummed lifecycle journal, and fail-closed provider
+startup reconciliation.
+
+That foundation is not a hostile-workload claim. The
+[Windows runner isolation plan](platforms/windows.md) keeps authenticated
+`EVT-01` -> `AUTH-02` -> `WIN-ISO-01` trust routing, a restricted
+container-management broker, independent recovery and real engine/host fault
+acceptance, managed egress, credential custody, dedicated host evidence,
+actions, and parallel capacity behind explicit gates.
 
 The macOS execution path is disposable Virtualization.framework VMs on ARM64;
 there is no native macOS provider. Complete the physical-host qualification,
@@ -155,10 +166,9 @@ gates have completed their agreed soak periods.
 
 ## Provider scope
 
-Rootless Podman on Linux, disposable macOS Virtualization.framework VMs, the
-experimental trusted native Windows slice, and an experimental Kubernetes
-adapter are current component paths. Kubernetes remains unavailable until its
-live cluster gate passes. The providers below are planned and must not appear
+Rootless Podman on Linux and disposable macOS Virtualization.framework VMs are
+current execution paths. The Hyper-V-isolated Windows container code is a
+component foundation only. Planned or unaccepted profiles below must not appear
 in runner capability inventory before their gates pass.
 
 | Provider | Planned use | Isolation boundary |
@@ -167,7 +177,7 @@ in runner capability inventory before their gates pass.
 | Kubernetes with Kata | VM-backed pod sandbox | One VM-backed pod per runner |
 | KubeVirt | VM fleet or job sandbox | One VMI per runner or job |
 | Linux native | Trusted jobs | Account, cgroup, and LSM policy |
-| Windows Hyper-V | Hostile Windows jobs | Disposable VM |
+| Windows Hyper-V container | Hostile Windows jobs after WIN-ISO acceptance | One fresh Hyper-V utility-VM-backed container per job |
 
 Kubernetes is not treated as “one workflow job equals one fixed Pod.” Dynamic
 container actions, sibling services, and a shared workspace require an

@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-sandbox-windows"
-description = "Trusted native Windows whole-job sandbox adapter for Automata"
+description = "Hyper-V-isolated Windows container sandbox adapter for Automata"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -16,13 +16,8 @@ workspace = true
 
 [dependencies]
 automata-ci-execution.workspace = true
-
-[target.'cfg(windows)'.dependencies]
-processkit.workspace = true
+automata-ci-sandbox-guest.workspace = true
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tokio.workspace = true
-
-[target.'cfg(windows)'.dev-dependencies]
-static_assertions.workspace = true

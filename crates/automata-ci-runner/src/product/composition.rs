@@ -38,7 +38,9 @@ use automata_ci_sandbox_podman::{
 use automata_ci_sandbox_podman::{
     PodmanCommandExecutor, RootlessPodmanProvider, SystemCommandExecutor,
 };
-use automata_ci_sandbox_windows::{WindowsSandboxProvider, WindowsSandboxProviderOptions};
+use automata_ci_sandbox_windows::{
+    WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions,
+};
 use automata_ci_scm::ScmProvider;
 use automata_ci_workflow_github::GithubConditionCompiler;
 use thiserror::Error;
@@ -133,7 +135,7 @@ pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), Run
     match config.provider() {
         RunnerProviderConfig::Podman(_) => run_podman(&config, shutdown).await,
         RunnerProviderConfig::Kubernetes(_) => run_kubernetes(&config, shutdown).await,
-        RunnerProviderConfig::WindowsNative(_) => run_windows_native(&config, shutdown).await,
+        RunnerProviderConfig::WindowsHyperV(_) => run_windows_hyperv(&config, shutdown).await,
         RunnerProviderConfig::MacosVirtualization(_) => {
             run_macos_virtualization(&config, shutdown).await
         }
@@ -224,7 +226,7 @@ async fn run_kubernetes(
     supervise_composition(config, composition, metrics_listener, shutdown).await
 }
 
-async fn run_windows_native(
+async fn run_windows_hyperv(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
 ) -> Result<(), RunnerProductError> {
@@ -673,9 +675,8 @@ fn admit_configured_environment_profiles(
     );
     let toolchain = config.executor().toolchain();
     let policy = match config.provider() {
-        RunnerProviderConfig::WindowsNative(_) => policy
-            .with_native_windows_shells(
-                config.executor().runner_root().clone(),
+        RunnerProviderConfig::WindowsHyperV(_) => policy
+            .with_windows_hyperv_shells(
                 toolchain
                     .pwsh()
                     .ok_or(RunnerProductError::ProviderConfiguration)?
@@ -907,16 +908,22 @@ fn build_windows_provider(
     config: &RunnerProductConfig,
     metrics: Option<&RunnerMetrics>,
 ) -> Result<Arc<dyn automata_ci_execution::SandboxProvider>, RunnerProductError> {
-    if config.windows_native().is_none() {
-        return Err(RunnerProductError::ProviderConfiguration);
-    }
+    let windows = config
+        .windows_hyperv()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
     let state_root = config
         .state()
-        .windows_native()
+        .windows_hyperv()
         .ok_or(RunnerProductError::ProviderConfiguration)?;
-    let options = WindowsSandboxProviderOptions::new(state_root.to_path_buf())?;
+    let options = WindowsHyperVContainerProviderOptions::new(
+        state_root.to_path_buf(),
+        windows.runtime_executable().to_path_buf(),
+        windows.runtime_sha256(),
+        windows.guest_agent_path().clone(),
+    )?
+    .with_operation_timeout(windows.operation_timeout())?;
     let provider: Arc<dyn automata_ci_execution::SandboxProvider> =
-        Arc::new(WindowsSandboxProvider::open(options)?);
+        Arc::new(WindowsHyperVContainerProvider::open(options)?);
     match metrics {
         Some(metrics) => Ok(metrics.instrument_sandbox_provider(provider)),
         None => Ok(provider),
@@ -1098,7 +1105,7 @@ fn build_toolchain(
                     .clone(),
             )?
         }
-        RunnerProviderConfig::WindowsNative(_) => StaticGithubToolchain::windows(
+        RunnerProviderConfig::WindowsHyperV(_) => StaticGithubToolchain::windows(
             configured
                 .pwsh()
                 .ok_or(RunnerProductError::ProviderConfiguration)?

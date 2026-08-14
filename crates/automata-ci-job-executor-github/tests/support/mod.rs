@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-#[cfg(windows)]
-use std::path::PathBuf;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
@@ -67,8 +65,6 @@ use automata_ci_runner_runtime::{
     ExecutionRequest, LogEvent,
 };
 use automata_ci_runner_spool::ProtectionId;
-#[cfg(windows)]
-use automata_ci_sandbox_windows::{WindowsSandboxProvider, WindowsSandboxProviderOptions};
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -84,69 +80,6 @@ pub struct Fixture {
     pub endpoint_state: Arc<Mutex<EndpointState>>,
     pub events: Arc<FakeEvents>,
     pub environment: SandboxEnvironment,
-}
-
-#[cfg(windows)]
-pub struct NativeWindowsFixture {
-    pub executor: GithubJobExecutor,
-    pub events: Arc<FakeEvents>,
-    pub environment: SandboxEnvironment,
-}
-
-#[cfg(windows)]
-impl NativeWindowsFixture {
-    pub fn new(
-        provider_root: PathBuf,
-        profile_workspace: TargetPath,
-        runner_root: TargetPath,
-        default_environment: ExecutionEnvironment,
-        toolchain: StaticGithubToolchain,
-    ) -> Self {
-        let environment =
-            SandboxEnvironment::native(windows_profile(), profile_workspace, default_environment)
-                .expect("valid native Windows environment");
-        let provider = Arc::new(
-            WindowsSandboxProvider::open(
-                WindowsSandboxProviderOptions::new(provider_root)
-                    .expect("valid native Windows provider root"),
-            )
-            .expect("native Windows provider opens"),
-        );
-        let catalog = Arc::new(
-            ImmutableSandboxEnvironmentCatalog::new([environment.clone()])
-                .expect("valid native Windows catalog"),
-        );
-        let ports = GithubJobExecutorPorts::new(
-            provider,
-            catalog,
-            Arc::new(FakeActionPreparer::new(Vec::new())),
-            Arc::new(FakeJobContent::default()),
-            Arc::new(FakeSecrets),
-            Arc::new(FakeContexts::windows_secretless()),
-            Arc::new(toolchain),
-            Arc::new(DeterministicOperationIds),
-            Arc::new(FakeClock::default()),
-        );
-        let config = GithubJobExecutorConfig::new(
-            ResourceLimits::new(2 * 1024 * 1024 * 1024, 2_000, 1_024).expect("valid resources"),
-            NetworkPolicy::Host,
-            RootFilesystemPolicy::Host,
-            SandboxPrivilegePolicy::Host,
-            Duration::from_mins(5),
-            4 * 1024 * 1024,
-            runner_root,
-        )
-        .expect("valid native Windows executor config");
-        Self {
-            executor: GithubJobExecutor::new(config, ports),
-            events: Arc::new(FakeEvents::default()),
-            environment,
-        }
-    }
-
-    pub fn request(&self, job: JobIrEnvelope) -> ExecutionRequest {
-        execution_request(self.environment.clone(), job)
-    }
 }
 
 impl Fixture {
@@ -538,9 +471,9 @@ impl Fixture {
                 target("/__automata"),
             ),
             TargetPlatform::Windows => (
-                NetworkPolicy::Host,
-                RootFilesystemPolicy::Host,
-                SandboxPrivilegePolicy::Host,
+                NetworkPolicy::Disabled,
+                RootFilesystemPolicy::Writable,
+                SandboxPrivilegePolicy::Unprivileged,
                 windows_target(r"D:\_automata"),
             ),
         };
@@ -1079,12 +1012,22 @@ fn sandbox_environment(default_environment: ExecutionEnvironment) -> SandboxEnvi
 }
 
 fn windows_sandbox_environment(default_environment: ExecutionEnvironment) -> SandboxEnvironment {
-    SandboxEnvironment::native(
+    SandboxEnvironment::windows_hyperv_container(
         windows_profile(),
+        ImmutableImage::new(format!(
+            "mcr.microsoft.com/windows/servercore@sha256:{}",
+            "b".repeat(64)
+        ))
+        .expect("valid pinned Windows image"),
+        ExecutionArgv::new(
+            windows_target(r"C:\automata\guest\automata-ci-sandbox-guest.exe"),
+            vec!["keepalive".to_owned()],
+        )
+        .expect("valid Windows keepalive"),
         windows_target(r"D:\a"),
         default_environment,
     )
-    .expect("valid native Windows environment")
+    .expect("valid Hyper-V Windows container environment")
 }
 
 fn event_reference() -> JobContentReference {
@@ -1535,14 +1478,17 @@ impl FakeProvider {
     ) -> Self {
         let id = ProviderId::new("fake").expect("valid provider");
         let handle = SandboxHandle::new(id.clone(), "sandbox-1").expect("valid handle");
-        let (network, filesystem) = match environment.workspace().platform() {
-            TargetPlatform::Posix => (
+        let (network, filesystem, administrator) = match environment.launch() {
+            automata_ci_execution::SandboxLaunch::WindowsHyperVContainer { .. }
+            | automata_ci_execution::SandboxLaunch::VirtualMachine { .. } => (
+                SandboxCapability::NetworkDisabled,
+                SandboxCapability::WritableRootFilesystem,
+                false,
+            ),
+            automata_ci_execution::SandboxLaunch::Container { .. } => (
                 SandboxCapability::PrivateEgress,
                 SandboxCapability::WritableRootFilesystem,
-            ),
-            TargetPlatform::Windows => (
-                SandboxCapability::HostNetwork,
-                SandboxCapability::HostFilesystem,
+                true,
             ),
         };
         let mut capabilities = vec![
@@ -1557,10 +1503,9 @@ impl FakeProvider {
             filesystem,
             SandboxCapability::ResourceLimits,
             SandboxCapability::ProcessLimits,
-            SandboxCapability::Administrator,
         ];
-        if environment.workspace().platform() == TargetPlatform::Windows {
-            capabilities.push(SandboxCapability::HostIdentity);
+        if administrator {
+            capabilities.push(SandboxCapability::Administrator);
         }
         if service_containers && environment.workspace().platform() == TargetPlatform::Posix {
             capabilities.push(SandboxCapability::ServiceContainers);

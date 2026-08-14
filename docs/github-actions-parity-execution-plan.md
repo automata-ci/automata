@@ -118,7 +118,9 @@ These files and contracts are merge hotspots. Assign one owner at a time.
 - `crates/automata-ci-job-executor-github/src/executor.rs`: lane R until the
   executor seam extraction lands.
 - `crates/automata-ci-sandbox-podman/src/provider.rs`: lane P.
-- `crates/automata-ci-sandbox-windows/**`: lane P.
+- `crates/automata-ci-sandbox-windows/**` and the Windows Hyper-V-container
+  broker/platform integration: lane P, with a security reviewer for every
+  privileged boundary.
 - `crates/automata-ci-runner/src/product/context.rs`: lane R. Lanes C and P
   provide input contracts and fixtures.
 - `crates/automata-ci-results-github/**`: lane X.
@@ -217,8 +219,11 @@ Run in parallel:
 - W: `WF-01`, `WF-02`, and `WF-03` as separate pull requests.
 - S: `MAT-01`, followed by the contract portion of `MAT-02`.
 - R: `RUN-01`, `RUN-02`, and `RUN-03` where file ownership permits.
-- P: `PLAT-01`, then the contract/toolchain portion of `WIN-01` after the
-  `RUN-02` shell contract is available.
+- P: land the component-foundation portions of `WIN-ISO-00`, `WIN-ISO-02`,
+  `WIN-ISO-04`, `WIN-ISO-05`, and `WIN-ISO-06` without advertising
+  Windows support. Complete `WIN-ISO-01` only after C lands `EVT-01` and
+  `AUTH-02`, then continue `PLAT-01`. Windows toolchain capability work
+  waits for the offline Hyper-V-container gate.
 - C: `EVT-01`, `AUTH-02`, `AUTH-03`, and then `EVT-02` as a
   contract-first sequence.
 - X: `RES-01` and `CHECK-01` contract work.
@@ -238,7 +243,9 @@ Exit criteria:
 - S: `MAT-02`, `MAT-03`, the contract portion of `DEP-01`, `SCH-02`, and then
   local reusable workflow proof `REU-01` under one store owner.
 - R: `LOG-01`, `LOG-02`, and `CAN-01`.
-- P: `CTR-01`, `CTR-02`, and `WIN-01` after shared contracts freeze.
+- P: `WIN-ISO-02`, `WIN-ISO-03`, and `WIN-ISO-04` on separate owned paths,
+  followed by `WIN-ISO-05` and `WIN-ISO-06`. Defer `CTR-01`/`CTR-02` unless
+  additional provider capacity exists.
 - C: `CFG-01`, `CFG-02`, `CFG-03`, and `EVT-03`; defer `EVT-04` until
   `ENV-01` is complete.
 - X: `ART-01`, `CACHE-01`, and the storage side of `RES-02`.
@@ -258,8 +265,12 @@ Exit criteria:
 - W/R/C: complete `WF-06` after `WF-04`, `AUTH-02`, and `CFG-02` merge.
 - R: `LOG-03`, `LOG-04`, `CAN-02`, `ACT-01`, and `ACT-02`; land `ACT-01`
   before the provider lane begins `WIN-02`.
-- P: `PROV-02`, `CTR-03`, `DKR-01`, and `WIN-02`; after X completes
-  `CACHE-03`, finish `WIN-03`.
+- P with C/X support: start `WIN-ISO-07`/`WIN-ISO-09` and `WIN-01` on
+  separate paths after the offline Hyper-V-container gate; land
+  `WIN-ISO-08` after the network/data boundary is ready, then `WIN-02` and
+  the `WIN-ISO-10` integration gate.
+  Continue `PROV-02`, `CTR-03`, and `DKR-01` only where ownership and staffing
+  do not delay the isolation critical path.
 - C: `ENV-01`, then `EVT-04`; continue with `ENV-02`, `OIDC-01`, and
   `EVT-05`.
 - X: `ART-02`, Linux client acceptance in `CACHE-02`, `CHECK-01`, and
@@ -268,7 +279,8 @@ Exit criteria:
 Exit criteria:
 
 - [ ] local and remote reusable workflows have immutable provenance;
-- [ ] job containers and Windows JavaScript/composite actions execute;
+- [ ] job containers execute, and Windows JavaScript/composite actions execute
+  inside the fresh Hyper-V-isolated container boundary;
 - [ ] cancellation runs eligible cleanup and posts;
 - [ ] protected environments release values only after approval;
 - [ ] detailed per-job Results and Checks exist;
@@ -277,7 +289,9 @@ Exit criteria:
 ### Wave 4: broader product surface
 
 - [ ] Run `GATE-01` and fix failures by owning lane.
-- [ ] Finish `CACHE-03`, then run `GATE-02` for Windows.
+- [ ] Build `IT-09` and begin `WIN-ISO-11`; do not close the security package
+  in this wave. Integration wave 5 must run the full hostile/fault matrix,
+  close `WIN-ISO-11`, then complete `WIN-03` → `GATE-02` → `WIN-ISO-12`.
 - [ ] Implement `DKR-02`, `BLD-01`, and `DCK-01`.
 - [ ] Run `GATE-06` after `GATE-01` and `DCK-01`; execute the independent
   hosted-Windows restoration gate `GATE-02` when its Windows dependencies are
@@ -310,8 +324,8 @@ permit a product feature to advertise support early.
 | 1 | Exercise admission over the locked corpus; build the `IT-03` mirror, authority, target, and report skeleton |
 | 2 | Complete canonical Automata observation, finish the `IT-07` Linux adapter, and prepare isolated `IT-04` Chalk evidence |
 | 3 | Finish live `IT-03`; graduate `IT-04`; begin `IT-05`; start other adapter contracts |
-| 4 | Complete `IT-05`/`IT-06`, feed `GATE-01`/`GATE-06`, and run ready `IT-09` Windows/`IT-10` Kubernetes adapters |
-| 5 | Run `IT-08` continuously; add `IT-11` macOS and `IT-12` fault topology when product prerequisites land; supply evidence to `GATE-02` through `GATE-05` |
+| 4 | Complete `IT-05`/`IT-06`, feed `GATE-01`/`GATE-06`, and build `IT-09` against the shipped Windows Hyper-V-container trust, lifecycle, and guest path; run ready `IT-10` Kubernetes adapters |
+| 5 | Run and graduate the full `IT-09` hostile, crash-transition, network, and cleanup matrix; close `WIN-ISO-11`, then `WIN-03` → `GATE-02` → `WIN-ISO-12`; run `IT-08` continuously and add `IT-11` macOS and `IT-12` fault topology when prerequisites land |
 
 ### Reduced-team serialization
 
@@ -322,10 +336,10 @@ schedule concurrently.
 | Wave | Five developers: combined W+S owner | Four developers: combined P+X owner |
 | --- | --- | --- |
 | 0 | `FND-01` → `SCH-01` | `FND-02` → `PROV-01` |
-| 1 | `WF-01` → `WF-02`; `WF-03` → `MAT-01` → `MAT-02` contract | `RES-01` → `PLAT-01` → `CHECK-01` contract → `WIN-01` contract |
-| 2 | `WF-04`/`WF-05` → `MAT-02` → `MAT-03` → `DEP-01` contract → `SCH-02` → `REU-01` | `RES-02` → `ART-01`/`CACHE-01` → `CTR-01` → `CTR-02` → finish `WIN-01` |
-| 3 | finish `DEP-01` → `REU-02` → `REU-03` → `REU-04`; review `WF-06` between store changes | `PROV-02` → `CTR-03`/`DKR-01` → `WIN-02` → `CACHE-03` → `WIN-03` |
-| 4 | close `GATE-01` failures before broader syntax or scheduling work | `GATE-01` → `DCK-01` → `GATE-06`; run `CACHE-03` → `GATE-02` independently and defer fleet/platform breadth |
+| 1 | `WF-01` → `WF-02`; `WF-03` → `MAT-01` → `MAT-02` contract | `RES-01` → `WIN-ISO-00` and component provider foundation; after C completes `EVT-01` → `AUTH-02`, finish `WIN-ISO-01` → `PLAT-01` |
+| 2 | `WF-04`/`WF-05` → `MAT-02` → `MAT-03` → `DEP-01` contract → `SCH-02` → `REU-01` | `RES-02` → `WIN-ISO-02`/`WIN-ISO-03`/`WIN-ISO-04` → `WIN-ISO-05` → `WIN-ISO-06` |
+| 3 | finish `DEP-01` → `REU-02` → `REU-03` → `REU-04`; review `WF-06` between store changes | `WIN-ISO-07` → `WIN-ISO-08`/`WIN-ISO-09` → `WIN-01` → `WIN-02` → `WIN-ISO-10` |
+| 4 | close `GATE-01` failures before broader syntax or scheduling work | build `IT-09`, then in integration wave 5 run it and serialize `WIN-ISO-11` → `WIN-03` → `GATE-02` → `WIN-ISO-12`; defer other fleet/platform breadth |
 
 For four developers, Developer 3 owns C packages and serializes authority work
 as `EVT-01` → `AUTH-02` → `AUTH-03` → `CFG-01` → `CFG-02` → `ENV-01`
@@ -374,7 +388,7 @@ stable across files so issues and pull requests can link to them.
 | 6 | [Event ingress, identity, secrets, environments, OIDC, and security](github-actions-parity/github-actions-parity-06-trust-security.md) | EVT-01, AUTH-01, AUTH-02, AUTH-03, CFG-01, CFG-02, CFG-03, ENV-01, ENV-02, OIDC-01, OIDC-02, SEC-01, SEC-02 |
 | 7 | [Triggers, dispatch, schedules, and event families](github-actions-parity/github-actions-parity-07-events.md) | EVT-02, EVT-03, EVT-04, EVT-05, EVT-06, EVT-07, EVT-08 |
 | 8 | [Results, Checks, artifacts, cache, and product UI](github-actions-parity/github-actions-parity-08-results.md) | RES-01, RES-02, CHECK-01, ART-01, ART-02, ART-03, CACHE-01, CACHE-02, UI-01 |
-| 9 | [Windows, Linux and macOS profiles, architectures, and cross-OS cache](github-actions-parity/github-actions-parity-09-platforms.md) | WIN-01, WIN-02, WIN-03, PLAT-01, PLAT-02, PLAT-03, PLAT-04, CACHE-03 |
+| 9 | [Windows, Linux and macOS profiles, architectures, and cross-OS cache](github-actions-parity/github-actions-parity-09-platforms.md) | WIN-ISO-00 through WIN-ISO-12, WIN-01, WIN-02, WIN-03, PLAT-01, PLAT-02, PLAT-03, PLAT-04, CACHE-03 |
 | 10 | [Operations, limits, runner fleet, and acceptance gates](github-actions-parity/github-actions-parity-10-operations-gates.md) | OPS-01, FLT-01, FLT-02, FLT-03, FLT-04, LIM-01, GATE-01, GATE-02, GATE-03, GATE-04, GATE-05, GATE-06 |
 | 11 | [Cross-repository integration tests](github-actions-parity/github-actions-parity-11-integration-tests.md) | IT-01, IT-02, IT-03, IT-04, IT-05, IT-06, IT-07, IT-08, IT-09, IT-10, IT-11, IT-12 |
 

@@ -28,6 +28,10 @@ It does not connect to repositories or execute workflows.
   current rootless Podman execution profile.
 - [macOS runner guide](platforms/macos.md) documents the disposable
   Virtualization.framework implementation and its deployment gates.
+- [Windows runner isolation plan](platforms/windows.md) defines the
+  Hyper-V-isolated Windows container-only direction, current component scope,
+  threat model, Windows API choices, implementation phases, and release gates
+  that still block hostile Windows workloads.
 - [Local durable services](../deploy/dev/README.md) starts PostgreSQL and RustFS
   for development and integration tests.
 - [`automata` control plane](../crates/automata-ci/README.md) documents listener

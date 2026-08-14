@@ -265,6 +265,7 @@ impl VmProcess {
             working_directory: "/".to_owned(),
             timeout_millis: duration_millis(PREPARE_TIMEOUT)?,
             output_limit: PREPARE_OUTPUT_BYTES,
+            process_limit: None,
         };
         let response = self
             .exchange(
@@ -398,7 +399,8 @@ fn framed_payload(frame: &[u8], maximum: usize) -> io::Result<&[u8]> {
 
 const fn response_protocol(response: &GuestResponse) -> u16 {
     match response {
-        GuestResponse::Hello { protocol, .. }
+        GuestResponse::Ready { protocol }
+        | GuestResponse::Hello { protocol, .. }
         | GuestResponse::Configured { protocol }
         | GuestResponse::Exec { protocol, .. }
         | GuestResponse::WriteFile { protocol }

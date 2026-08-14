@@ -83,35 +83,33 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
 }
 
 #[test]
-fn native_windows_profile_is_explicit_and_carries_exact_scratch_allowlist() {
-    let environment = SandboxEnvironment::native(
+fn windows_hyperv_container_profile_is_explicit_and_digest_pinned() {
+    const WINDOWS_IMAGE: &str = "mcr.microsoft.com/windows/servercore@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let environment = SandboxEnvironment::windows_hyperv_container(
         EnvironmentProfile::new(
-            EnvironmentProfileId::new("automata.dev/windows-native-x86-64-v1").expect("profile ID"),
+            EnvironmentProfileId::new("automata.dev/windows-2025-hyperv-v1").expect("profile ID"),
             Sha256Digest::from_bytes([0x22; 32]),
         ),
+        ImmutableImage::new(WINDOWS_IMAGE).expect("immutable Windows image"),
+        ExecutionArgv::new(
+            TargetPath::windows(r"C:\automata\guest\automata-ci-sandbox-guest.exe")
+                .expect("keepalive program"),
+            vec!["keepalive".to_owned()],
+        )
+        .expect("keepalive argv"),
         TargetPath::windows(r"C:\automata\workspaces").expect("workspace root"),
         ExecutionEnvironment::empty(),
     )
-    .expect("native profile");
+    .expect("Hyper-V container profile");
     assert!(matches!(
         environment.launch(),
-        automata_ci_execution::SandboxLaunch::Native
+        automata_ci_execution::SandboxLaunch::WindowsHyperVContainer { .. }
     ));
-    assert!(environment.image().is_none());
-    assert!(environment.keepalive().is_none());
-
-    let scratch = TargetPath::windows(r"C:\automata\scratch\attempt-7").expect("scratch");
-    let spec = SandboxSpec::new(
-        OperationId::new(),
-        SandboxGeneration::new(8).expect("generation"),
-        environment,
-        TargetPath::windows(r"C:\automata\workspaces\repository").expect("workspace"),
-        NetworkPolicy::Host,
-        RootFilesystemPolicy::Host,
-        ResourceLimits::new(512 * 1024 * 1024, 2_000, 256).expect("limits"),
-    )
-    .with_scratch(scratch.clone());
-    assert_eq!(spec.scratch(), Some(&scratch));
+    assert_eq!(
+        environment.image().expect("container image").reference(),
+        WINDOWS_IMAGE
+    );
+    assert!(environment.keepalive().is_some());
 }
 
 #[test]

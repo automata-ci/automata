@@ -9,7 +9,8 @@ current support; unchecked tasks in this file are planned work.
 
 **Accountable lane:** Lane P, with runner, security, and Results reviewers.
 
-**Package IDs:** WIN-01, WIN-02, WIN-03, PLAT-01, PLAT-02, PLAT-03, PLAT-04, CACHE-03.
+**Package IDs:** WIN-ISO-00 through WIN-ISO-12, WIN-01, WIN-02, WIN-03,
+PLAT-01, PLAT-02, PLAT-03, PLAT-04, CACHE-03.
 
 ## Related workstreams
 
@@ -24,20 +25,59 @@ definition of done.
 
 ## Current Windows boundary
 
-The Windows-native implementation is a source-only, unprovisionable trusted-host
-experiment for single-slot PowerShell, `cmd`, and optional Python `run:` steps.
-Job Objects provide process, CPU, and memory ceilings, but the job still uses
-host networking, the host filesystem, and the unchanged service identity. All
-action steps, job and service containers, and parallel jobs remain unsupported.
-Product configuration rejects reparse traversal of runner roots, but does not
-yet attest root DACL ownership or hard-link counts. It has no enrollment path or
-hosted release gate, so component tests are not product acceptance evidence.
+The Wave 1 source tree removes the native Windows provider and adds a
+component-level `windows-hyperv` provider. It creates a fresh Windows
+container with explicit Hyper-V isolation, disabled networking,
+`ContainerUser`, no host mounts, a digest-qualified image, bounded resources,
+and an in-image one-request guest executable. It inspects the effective runtime
+state before returning a handle and rejects process isolation or policy drift.
+
+That code is not yet production acceptance. It currently reaches the local
+container engine through a pinned CLI. Its synchronized provider journal and
+startup orphan check are component recovery, but they do not replace a
+restricted management broker, independent watchdog, or real engine/host fault
+evidence. Authenticated trust routing, managed egress, credential delivery, a
+signed image factory, and dedicated-host acceptance also remain open. Action
+steps, job and service containers, egress, devices, and parallel capacity
+remain unsupported.
+
+The detailed
+[Windows runner isolation plan](../platforms/windows.md) makes one fresh
+Hyper-V-isolated Windows container per job the only Windows direction. The
+blocking trust order is `EVT-01` -> `AUTH-02` -> `WIN-ISO-01`; component
+provider work may proceed offline but cannot advertise support before that
+route and the management/recovery gates pass.
 
 ## Work packages
 
+### WIN-ISO — Disposable Hyper-V-isolated Windows containers
+
+**Owner:** P with runner and security reviewers. **Size:** XXL.
+**Dependencies:** FND-03 provider contracts; WIN-ISO-01 specifically depends
+on EVT-01 and AUTH-02.
+
+The implementation is split into WIN-ISO-00 through WIN-ISO-12 in the
+[Windows runner isolation plan](../platforms/windows.md). It covers fail-closed
+trust-to-isolation placement, a least-privilege container-management broker, a
+signed immutable Windows image, engine/HCS/HCN lifecycle, a bounded guest
+executable, default-deny networking, credential and data boundaries, crash
+recovery, and adversarial Windows CI. The first Wave 1 pull request implements
+only the explicitly checked component-foundation portions of those packages.
+
+Acceptance:
+
+- [ ] Unknown, untrusted, public-fork, and secret-bearing Windows work can match
+  only the exact Hyper-V-container profile authorized by its trust decision.
+- [ ] A shipped runner executes one job in a fresh Hyper-V-isolated container
+  with no host share or engine endpoint and destroys its container, writable
+  layer, endpoint, identity, and credentials.
+- [ ] Hostile, crash-at-every-transition, network-bypass, cross-job, secret,
+  and cleanup suites pass on dedicated Windows Hyper-V hosts.
+
 ### WIN-01 — Action-ready Windows toolchain and materializer
 
-**Owner:** P. **Size:** XL. **Dependencies:** RUN-02 contract.
+**Owner:** P. **Size:** XL. **Dependencies:** RUN-02 contract and WIN-ISO-06
+offline Hyper-V-container gate.
 
 Tasks:
 
@@ -62,7 +102,7 @@ Acceptance:
 ### WIN-02 — JavaScript and composite actions on Windows
 
 **Owner:** P with R integration. **Size:** XL. **Dependencies:** WIN-01,
-RUN-01, ACT-01.
+WIN-ISO-08 managed data/credential boundary, RUN-01, ACT-01.
 
 Tasks:
 
@@ -82,7 +122,7 @@ Acceptance:
 ### WIN-03 — Official Windows action acceptance
 
 **Owner:** P with R and X support. **Size:** L. **Dependencies:** WIN-02,
-RES-01, CACHE-03.
+WIN-ISO-11 hosted security gate, RES-01, CACHE-03.
 
 Tasks:
 
@@ -186,28 +226,35 @@ Acceptance:
   filesystem/network separation, CPU/memory/process enforcement, helper-crash
   recovery, and repeated clean execution.
 
-### PLAT-03 — Strong Windows isolation and parallelism
+### PLAT-03 — Windows Hyper-V-container scale and expanded profiles
 
-**Owner:** P with security review. **Size:** XL. **Dependencies:** WIN-03.
+**Owner:** P with security review. **Size:** L. **Dependencies:** WIN-ISO-12.
+
+The only Windows boundary is selected and delivered by WIN-ISO-00 through
+WIN-ISO-12. This package does not add a native, process-isolated, or full-VM
+fallback; it begins only after the Hyper-V-container path is accepted.
 
 Tasks:
 
-- [ ] Choose restricted-token native execution or disposable Hyper-V VMs.
-- [ ] Isolate filesystem, identity, and network.
-- [ ] Retain existing reparse-traversal containment, then attest runner-root
-  DACL ownership/inheritance and hard-link counts at startup and before reuse.
-- [ ] Permit multiple jobs only after path and identity isolation is proven.
-- [ ] Add service installation, recovery, signing, and operator runbooks.
+- [ ] Increase jobs per host only after cross-container identity, storage,
+  network, resource-reservation, crash-recovery, and destructive-cleanup soak
+  passes at the proposed density.
+- [ ] Keep one fresh Hyper-V-isolated container and writable layer per job;
+  parallelism never means mutable container, workspace, identity, cache,
+  endpoint, or credential reuse.
+- [ ] Add only separately named image, authority, and network profiles that
+  retain Hyper-V isolation; prohibit silent process-isolated fallback.
 - [ ] Keep Windows job containers and service containers rejected in the
   capability registry because GitHub documents those features for Linux
   runners; treat any future Windows-container support as an Automata-specific
   extension with a separate isolation gate.
 - [ ] Add private-network/static-egress and proxy/custom-CA profiles only after
-  they preserve Job Object or Hyper-V containment.
-- [ ] Preserve trusted-host labeling until completion.
+  their exact HCN/WFP and upstream policies pass the hostile network matrix.
+- [ ] Publish per-profile capacity, isolation, guest authority, network, image,
+  tool, and unsupported-feature evidence.
 
-Existing Job Object process, CPU, and memory limits are a component foundation;
-they do not satisfy this isolation package or justify hostile workloads.
+Container runtime process, CPU, and memory settings remain component evidence
+until their effective enforcement passes on the exact host/image/engine tuple.
 
 Acceptance:
 
@@ -238,8 +285,8 @@ Acceptance:
 
 Tasks:
 
-- [ ] Run the pinned cache action through the shipped Windows runner and native
-  provider.
+- [ ] Run the pinned cache action through the shipped Windows runner and
+  `windows-hyperv` provider.
 - [ ] Match Windows cache-version calculation, lookup-only,
   fail-on-cache-miss, restore keys, save-always behavior, and branch scopes.
 - [ ] Test NTFS attributes, case-insensitive collisions, Unicode, CRLF-sensitive

@@ -1,4 +1,4 @@
-#![cfg(any(windows, target_os = "macos"))]
+#![cfg(target_os = "macos")]
 #![deny(warnings)]
 
 use std::{
@@ -67,15 +67,9 @@ use std::os::unix::fs::PermissionsExt as _;
 
 const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
     "application/vnd.automata.job-runtime-context.protobuf";
-#[cfg(windows)]
-const PROFILE_ID: &str = "automata.test/windows-process-e2e";
-#[cfg(target_os = "macos")]
 const PROFILE_ID: &str = "automata.dev/macos-15-arm64-vm-v1";
 const S3_BUCKET: &str = "automata-process-e2e";
 const S3_PREFIX: &str = "process-e2e";
-#[cfg(windows)]
-const SENTINEL: &str = "AUTOMATA_WINDOWS_RUNNER_PROCESS_E2E";
-#[cfg(target_os = "macos")]
 const SENTINEL: &str = "AUTOMATA_MACOS_RUNNER_PROCESS_E2E";
 #[cfg(target_os = "macos")]
 const VM_HELPER_ENV: &str = "AUTOMATA_MACOS_VM_HELPER";
@@ -93,8 +87,6 @@ const VM_STORAGE_ROOT_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_ROOT";
 const VM_STORAGE_VOLUME_UUID_ENV: &str = "AUTOMATA_MACOS_VM_STORAGE_VOLUME_UUID";
 #[cfg(target_os = "macos")]
 const DIFFERENTIAL_REFERENCE: &str = "differential.bash=ok\nisolation.cpu=4\nisolation.memory=8589934592\nisolation.process_limit=512\nisolation.no_host_helper=true\nisolation.no_ethernet=true\ndifferential.sh=ok\ndifferential.environment=command-file\ndifferential.output=vm-output\ndifferential.workspace=true\ndifferential.conclusion=success\n";
-#[cfg(windows)]
-const REQUIRE_STANDALONE_PWSH_ENV: &str = "AUTOMATA_RUNNER_WINDOWS_E2E_REQUIRE_STANDALONE_PWSH";
 const TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -177,30 +169,6 @@ async fn shipped_runner_process_executes_a_claimed_isolated_shell_job() {
     tokio::time::timeout(Duration::from_secs(10), handler.wait_for_completed_poll())
         .await
         .expect("runner finalizes the completed job and polls its released slot");
-    #[cfg(windows)]
-    let workspace = root
-        .path()
-        .join("native")
-        .join("workspaces")
-        .join("automata")
-        .join("automata");
-    #[cfg(windows)]
-    let scratch = root
-        .path()
-        .join("native")
-        .join("runner")
-        .join("attempts")
-        .join(handler.attempt_id().to_string());
-    #[cfg(windows)]
-    assert!(
-        !workspace.exists(),
-        "provider left the completed job workspace behind: {workspace:?}"
-    );
-    #[cfg(windows)]
-    assert!(
-        !scratch.exists(),
-        "provider left the per-attempt scratch directory behind: {scratch:?}"
-    );
     #[cfg(target_os = "macos")]
     assert!(
         fs::read_dir(
@@ -221,7 +189,7 @@ async fn shipped_runner_process_executes_a_claimed_isolated_shell_job() {
     assert_eq!(observation.hello_runner_id, Some(runner_id));
     assert_eq!(
         observation.hello_operating_system,
-        Some(native_operating_system())
+        Some(platform_operating_system())
     );
     assert!(
         observation.accepted,
@@ -343,7 +311,7 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
     let requirements = RunnerRequirements::default()
         .with_environment_profile(profile)
         .with_resource_allocation(allocation);
-    let steps = native_steps();
+    let steps = macos_steps();
     let job = JobIr::new(
         JobId::new(),
         RunId::new(),
@@ -362,12 +330,12 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
             "github",
             "automata-ci/automata",
             "0123456789abcdef0123456789abcdef01234567",
-            ".ci/workflows/native-process-e2e.yml",
+            ".ci/workflows/macos-vm-process-e2e.yml",
             "workflow_dispatch",
         ),
         JobExecutionContext::new(
             "CI",
-            "refs/heads/native-process-e2e",
+            "refs/heads/macos-vm-process-e2e",
             "/__w/automata/automata",
             event_reference.clone(),
             runtime_reference.clone(),
@@ -381,23 +349,8 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
     )
 }
 
-#[cfg(windows)]
-fn native_steps() -> Vec<StepIr> {
-    vec![StepIr::new(
-        StepId::new("process-e2e").expect("step ID"),
-        ValueTemplate::literal(native_step_name()).expect("step name"),
-        RuntimeBoolean::literal(false),
-        SemanticStep::run(RunValueTemplates::new(
-            ValueTemplate::literal(native_step_script()).expect("native command"),
-            ShellTemplate::named(
-                ValueTemplate::literal(native_shell_name()).expect("native shell"),
-            ),
-        )),
-    )]
-}
-
 #[cfg(target_os = "macos")]
-fn native_steps() -> Vec<StepIr> {
+fn macos_steps() -> Vec<StepIr> {
     let producer = StepIr::new(
         StepId::new("macos-bash-reference").expect("producer step ID"),
         ValueTemplate::literal("Run Bash differential fixture").expect("producer step name"),
@@ -446,21 +399,6 @@ fn assert_macos_differential_fixture(logs: &str) {
             "Automata VM shell fixture omitted {expected:?}; logs={logs:?}"
         );
     }
-}
-
-#[cfg(windows)]
-const fn native_step_name() -> &'static str {
-    "Run cmd.exe through the shipped runner"
-}
-
-#[cfg(windows)]
-fn native_step_script() -> String {
-    format!("@echo {SENTINEL}\r\n@echo process-level-execution>runner-process-e2e.txt")
-}
-
-#[cfg(windows)]
-const fn native_shell_name() -> &'static str {
-    "cmd"
 }
 
 fn content_reference(key: &str, media_type: &str, bytes: &[u8]) -> JobContentReference {
@@ -741,11 +679,6 @@ impl ProcessFlowHandler {
             .clone()
     }
 
-    #[cfg(windows)]
-    fn attempt_id(&self) -> AttemptId {
-        self.lease.attempt_id()
-    }
-
     fn offer_cursor(&self) -> CommandCursor {
         CommandCursor::through(self.offer.header().sequence())
     }
@@ -772,7 +705,7 @@ impl ProcessFlowHandler {
         state.observation.hello_operating_system =
             Some(hello.runner().platform().operating_system().clone());
         if hello.runner().runner_id() != self.runner_id
-            || hello.runner().platform().operating_system() != &native_operating_system()
+            || hello.runner().platform().operating_system() != &platform_operating_system()
         {
             return Err(internal_application_error());
         }
@@ -920,29 +853,9 @@ impl ProcessFlowHandler {
     }
 }
 
-#[cfg(windows)]
-const fn native_operating_system() -> OperatingSystem {
-    OperatingSystem::Windows
-}
-
-#[cfg(windows)]
-const fn process_resource_capacity() -> ResourceCapacity {
-    ResourceCapacity::new(1_000, 1_073_741_824, 0, 0)
-}
-
-#[cfg(windows)]
-const fn process_control_timeout_millis() -> u32 {
-    10 * 60 * 1_000
-}
-
 #[cfg(target_os = "macos")]
 const fn process_control_timeout_millis() -> u32 {
     30 * 60 * 1_000
-}
-
-#[cfg(windows)]
-const fn process_result_timeout() -> Duration {
-    Duration::from_secs(90)
 }
 
 #[cfg(target_os = "macos")]
@@ -956,13 +869,8 @@ const fn process_resource_capacity() -> ResourceCapacity {
 }
 
 #[cfg(target_os = "macos")]
-const fn native_operating_system() -> OperatingSystem {
+const fn platform_operating_system() -> OperatingSystem {
     OperatingSystem::Macos
-}
-
-#[cfg(windows)]
-const fn process_profile_digest() -> Sha256Digest {
-    Sha256Digest::from_bytes([0x08; 32])
 }
 
 #[cfg(target_os = "macos")]
@@ -1177,153 +1085,6 @@ fn pem(label: &str, der: &[u8]) -> String {
     value
 }
 
-#[allow(clippy::too_many_lines)]
-#[cfg(windows)]
-fn write_runner_config(
-    root: &Path,
-    runner_id: RunnerId,
-    control_address: SocketAddr,
-    s3_address: SocketAddr,
-) -> PathBuf {
-    let journal = root.join("journal");
-    let spool = root.join("spool");
-    let native = root.join("native");
-    let workspaces = native.join("workspaces");
-    let runner = native.join("runner");
-    let temp = root.join("temp");
-    let home = root.join("home");
-    let tool_cache = root.join("tool-cache");
-    for path in [&temp, &home, &tool_cache] {
-        fs::create_dir_all(path).expect("create runner support directory");
-    }
-    let system_root = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"));
-    let cmd = std::env::var_os("ComSpec")
-        .map_or_else(|| system_root.join(r"System32\cmd.exe"), PathBuf::from);
-    let powershell = system_root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-    let standalone_pwsh = PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe");
-    if require_standalone_pwsh() {
-        assert!(
-            standalone_pwsh.is_file(),
-            "{REQUIRE_STANDALONE_PWSH_ENV}=1 requires standalone PowerShell at {}",
-            standalone_pwsh.display()
-        );
-    }
-    let pwsh = if standalone_pwsh.is_file() {
-        standalone_pwsh
-    } else {
-        powershell.clone()
-    };
-    let process_path = [
-        pwsh.parent().expect("pwsh parent"),
-        cmd.parent().expect("cmd parent"),
-        system_root.as_path(),
-    ]
-    .into_iter()
-    .map(|path| path.to_string_lossy())
-    .collect::<Vec<_>>()
-    .join(";");
-    let config = json!({
-        "schema_version": RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION,
-        "runner_id": runner_id.to_string(),
-        "control_endpoint": format!("https://{control_address}/"),
-        "state": {
-            "journal": journal,
-            "spool": spool,
-            "windows_native": native,
-        },
-        "tls": {
-            "server_roots": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SERVER_ROOTS_PEM"},
-            "certificate_chain": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_CERTIFICATE_CHAIN_PEM"},
-            "private_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_PRIVATE_KEY_PEM"},
-        },
-        "spool": {
-            "protection_id": "windows-process-e2e-key-v1",
-            "key_hex": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_SPOOL_KEY_HEX"},
-            "decrypt_only": [],
-        },
-        "inventory": {
-            "labels": ["self-hosted", "windows", "x64"],
-            "groups": ["default"],
-            "max_parallel_jobs": 1,
-            "resources_per_job": {
-                "cpu_millis": 4000,
-                "memory_bytes": 8_589_934_592_u64,
-                "ephemeral_disk_bytes": 0,
-                "pids": 512,
-            },
-            "environment_profiles": [{
-                "id": PROFILE_ID,
-                "manifest_sha256": "08".repeat(32),
-                "workspace": workspaces,
-                "default_environment": {
-                    "SystemRoot": system_root,
-                    "WINDIR": system_root,
-                    "ComSpec": cmd,
-                    "TEMP": temp,
-                    "TMP": temp,
-                    "PATHEXT": ".COM;.EXE;.BAT;.CMD",
-                },
-            }],
-        },
-        "windows_native": {},
-        "executor": {
-            "resources": {
-                "cpu_millis": 4000,
-                "memory_bytes": 8_589_934_592_u64,
-                "ephemeral_disk_bytes": 0,
-                "pids": 512,
-            },
-            "network": "host",
-            "root_filesystem": "host",
-            "privilege": "host",
-            "default_step_timeout_seconds": 60,
-            "maximum_output_bytes": 1_048_576,
-            "runner_root": runner,
-            "home": home,
-            "path": process_path,
-            "temp": temp,
-            "tool_cache": tool_cache,
-            "toolchain": {
-                "bash": null,
-                "sh": null,
-                "python": null,
-                "pwsh": pwsh,
-                "powershell": powershell,
-                "cmd": cmd,
-                "install": null,
-                "tar": null,
-                "node12": null,
-                "node16": null,
-                "node20": null,
-                "node24": null,
-            },
-        },
-        "object_store": {
-            "endpoint": format!("http://{s3_address}/"),
-            "region": "us-east-1",
-            "bucket": S3_BUCKET,
-            "prefix": S3_PREFIX,
-            "loopback_development": true,
-            "operation_timeout_seconds": 5,
-            "access_key_id": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_ACCESS_KEY"},
-            "secret_access_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_SECRET_KEY"},
-        },
-        "github": {
-            "user_agent": "automata-runner-process-e2e/0.1.0",
-            "server_url": "https://github.com/",
-            "api_url": "https://api.github.com/",
-            "graphql_url": "https://api.github.com/graphql",
-        },
-    });
-    let config_path = root.join("runner.windows.process-e2e.json");
-    fs::write(
-        &config_path,
-        serde_json::to_vec_pretty(&config).expect("encode runner config"),
-    )
-    .expect("write runner config");
-    config_path
-}
-
 #[cfg(target_os = "macos")]
 #[allow(clippy::too_many_lines)]
 fn write_runner_config(
@@ -1454,19 +1215,6 @@ fn required_macos_vm_environment(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| panic!("{name} is required"))
 }
 
-#[cfg(windows)]
-fn require_standalone_pwsh() -> bool {
-    match std::env::var_os(REQUIRE_STANDALONE_PWSH_ENV) {
-        None => false,
-        Some(value) if value == "1" => true,
-        Some(value) if value == "0" => false,
-        Some(value) => panic!(
-            "{REQUIRE_STANDALONE_PWSH_ENV} must be 0 or 1, received {}",
-            value.to_string_lossy()
-        ),
-    }
-}
-
 struct TemporaryRoot {
     parent: PathBuf,
     path: PathBuf,
@@ -1474,9 +1222,6 @@ struct TemporaryRoot {
 
 impl TemporaryRoot {
     fn new() -> Self {
-        #[cfg(windows)]
-        let parent = std::env::temp_dir();
-        #[cfg(target_os = "macos")]
         let parent = fs::canonicalize(std::env::temp_dir()).expect("canonical macOS temp root");
         let path = parent.join(format!(
             "automata-runner-process-e2e-{}",

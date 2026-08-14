@@ -158,11 +158,19 @@ shared machinery and the GATE package owns final acceptance.
 | PROV-01–PROV-03, CTR-01–CTR-03, DKR-01–DKR-02, BLD-01, DCK-01 | Service/container/Docker/BuildKit/Kubernetes workflows and cleanup probes | GATE-01, GATE-05, GATE-06 |
 | EVT-01–EVT-08, AUTH-01–AUTH-03, CFG-01–CFG-03, ENV-01–ENV-02, OIDC-01–OIDC-02, SEC-01–SEC-02 | Signed events, trust matrix, credential canaries, approvals, OIDC and replay probes | GATE-03, GATE-04, GATE-05 |
 | RES-01–RES-02, CHECK-01, ART-01–ART-03, CACHE-01–CACHE-03, UI-01 | Exact clients, result/Check assertions, artifact/cache contents and management evidence | GATE-01, GATE-02, GATE-03, GATE-06 |
-| WIN-01–WIN-03, PLAT-01–PLAT-04, FLT-01–FLT-04, OPS-01, LIM-01 | Platform/topology/resource/overload/upgrade fixtures | GATE-02, GATE-05, GATE-06 |
+| WIN-ISO-00–WIN-ISO-12, WIN-01–WIN-03, PLAT-01–PLAT-04, FLT-01–FLT-04, OPS-01, LIM-01 | Windows trust/downgrade, Hyper-V-container lifecycle, guest, network, hostile, fault/recovery, cleanup, plus platform/topology/resource/overload/upgrade fixtures | GATE-02, GATE-03, GATE-05, GATE-06 |
 
 Do not create duplicate IT packages for each row. Add the scenario and its
 assertions to the owning feature PR, then use the shared adapter and graduation
 machinery defined in this workstream.
+
+WIN-ISO evidence must launch the shipped Windows runner, restricted
+container-management broker, selected engine, and Hyper-V-isolated container
+on a dedicated Hyper-V host. Component or injected-runtime evidence cannot
+replace isolation-downgrade, cross-job, engine-endpoint, host-access, secret,
+network-bypass, crash-at-every-transition, orphan-reconciliation, and
+destructive-cleanup observations. The exact matrix and phase ownership are
+defined in the [Windows runner isolation plan](../platforms/windows.md).
 
 ## Parallel delivery for four to six developers
 

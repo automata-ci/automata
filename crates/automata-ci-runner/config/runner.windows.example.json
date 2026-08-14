@@ -1,11 +1,11 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "runner_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
     "journal": "C:\\automata\\state\\journal",
     "spool": "C:\\automata\\state\\spool",
-    "windows_native": "C:\\automata\\native"
+    "windows_hyperv": "C:\\automata\\state\\windows-hyperv"
   },
   "tls": {
     "server_roots": {
@@ -48,9 +48,14 @@
     },
     "environment_profiles": [
       {
-        "id": "automata.dev/windows-2025-x64-native-v1",
+        "id": "automata.dev/windows-2025-x64-hyperv-v1",
         "manifest_sha256": "aee9c4c9fb8ad2a8332ca6cf2b0a2e24bc1a61485ef224adef4831093ab5cd6c",
-        "workspace": "C:\\automata\\native\\workspaces",
+        "image": "registry.example/automata/windows-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "keepalive_program": "C:\\automata\\guest\\automata-ci-sandbox-guest.exe",
+        "keepalive_arguments": [
+          "keepalive"
+        ],
+        "workspace": "C:\\__w",
         "default_environment": {
           "SystemRoot": "C:\\Windows",
           "WINDIR": "C:\\Windows",
@@ -62,7 +67,12 @@
       }
     ]
   },
-  "windows_native": {},
+  "windows_hyperv": {
+    "runtime_executable": "C:\\Program Files\\Docker\\docker.exe",
+    "runtime_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "guest_agent_path": "C:\\automata\\guest\\automata-ci-sandbox-guest.exe",
+    "operation_timeout_seconds": 120
+  },
   "executor": {
     "resources": {
       "cpu_millis": 4000,
@@ -70,12 +80,12 @@
       "ephemeral_disk_bytes": 0,
       "pids": 512
     },
-    "network": "host",
-    "root_filesystem": "host",
-    "privilege": "host",
+    "network": "disabled",
+    "root_filesystem": "writable",
+    "privilege": "unprivileged",
     "default_step_timeout_seconds": 3600,
     "maximum_output_bytes": 16777216,
-    "runner_root": "C:\\automata\\native\\runner",
+    "runner_root": "C:\\automata\\runner",
     "home": "C:\\automata\\home",
     "path": "C:\\Program Files\\PowerShell\\7;C:\\Windows\\System32;C:\\Windows",
     "temp": "C:\\automata\\temp",

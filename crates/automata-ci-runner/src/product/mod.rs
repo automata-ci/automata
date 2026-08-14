@@ -20,7 +20,7 @@ pub use config::{
     MacosVirtualizationProductConfig, MetricsProductConfig, ObjectStoreProductConfig,
     PodmanProductConfig, RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig,
     RunnerProductConfigError, RunnerProviderConfig, SpoolProtectionConfig, StateRoots,
-    ToolchainConfig, WindowsNativeProductConfig,
+    ToolchainConfig, WindowsHyperVProductConfig,
 };
 pub use context::StandardGithubContext;
 pub use files::{SecretSource, SecureInputError};

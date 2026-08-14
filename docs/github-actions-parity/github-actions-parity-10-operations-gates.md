@@ -337,8 +337,8 @@ Acceptance:
 
 ### GATE-02 — Unchanged Windows run-and-actions workflow
 
-**Owner:** X with R and P. **Size:** L. **Dependencies:** WIN-03, CACHE-03,
-ART-01, CAN-02, GATE-01, IT-09.
+**Owner:** X with R, P, and C. **Size:** XL. **Dependencies:** WIN-ISO-11,
+WIN-03, CACHE-03, ART-01, CAN-02, GATE-01, IT-09.
 
 Hosted Windows CI is intentionally absent from the audited main branch because
 Automata does not currently operate a Windows runner. This gate independently
@@ -347,28 +347,38 @@ Linux-only repository-CI `GATE-06`.
 
 Tasks:
 
-- [ ] Restore a hosted Windows CI job that builds both shipped binaries and
-  exercises `automata-runner run` through the native product path.
+- [ ] Restore a controlled Windows Hyper-V release job that builds the shipped
+  control plane, runner, broker, and guest artifacts and exercises
+  `automata-runner run` through the Hyper-V-container product path.
 - [ ] Freeze a Windows workflow using default `pwsh`, explicit PowerShell,
   `cmd`, optional Python, checkout, local composite, one repository JavaScript
   action, cache, artifact upload/download, summaries, outputs, and cancellation.
 - [ ] Compare against GitHub-hosted Windows with normalized paths, case,
   line endings, and environment ordering.
-- [ ] Run through the shipped `automata-runner run` process and native provider,
-  not the executor alone.
-- [ ] Prove Job Object descendant containment, timeout, cancellation, durable
-  cleanup, provider restart reconciliation, and no stale workspace reuse.
-- [ ] Assert standalone PowerShell packaging and reject Store/MSIX-only hosts.
-- [ ] Document trusted-host identity/network/filesystem limitations next to the
-  passing feature matrix.
+- [ ] Run through the shipped runner, restricted broker, Hyper-V-container
+  provider, and bounded guest executable, not the executor or an injected
+  runtime alone.
+- [ ] Prove trust-to-isolation placement, no host share, outer network policy,
+  workload process containment, timeout, cancellation, durable cleanup,
+  runner/broker/engine/host restart reconciliation, and no
+  container/writable-layer/endpoint/generation reuse.
+- [ ] Run the IT-09 hostile and crash-at-every-transition matrix on dedicated
+  Hyper-V hosts with no production credentials.
+- [ ] Assert exact signed image/tool manifests and standalone PowerShell
+  packaging; reject Store/MSIX-only, stale-patch, or security-drifted hosts.
+- [ ] Publish exact Hyper-V-container, image, guest-authority, egress, action,
+  cache, and unsupported service/reboot/nested-container/device limitations
+  next to the feature matrix.
 
 Acceptance:
 
 - [ ] All supported `run:` and `uses:` phases in the fixture match expected
   semantics.
-- [ ] The gate never implies hosted-runner isolation or unsupported services
-  and containers.
-- [ ] CI builds and runs both control-plane and runner binaries on Windows.
+- [ ] The gate claims only the exact Hyper-V-isolated Windows container profile
+  and never implies process isolation, nested containers, devices, interactive
+  desktop, reboot semantics, or native execution.
+- [ ] CI builds and runs the control-plane, runner, broker, and guest product
+  path on controlled Windows Hyper-V hardware.
 
 ### GATE-03 — Credentials, trust, environments, and OIDC
 
@@ -550,8 +560,8 @@ approved divergence must name its early rejection boundary and test.
 - [ ] **Container CLI/daemon compatibility:** keep a narrow BuildKit proxy,
   expose the reviewed per-job Docker/Podman subset, or explicitly reject
   workflows needing a general socket (`BLD-01`, `DCK-01`).
-- [ ] **Windows trust:** retain native trusted-host execution as process
-  containment only, or fund restricted-token/Hyper-V isolation (`PLAT-03`).
+- [x] **Windows trust:** use one fresh Hyper-V-isolated Windows container per
+  job and reject native, process-isolated, or full-VM fallbacks (`PLAT-03`).
 - [ ] **macOS execution:** commit to a provider and signing/test capacity, or
   keep source portability without advertising execution (`PLAT-02`).
 - [ ] **Hosted-image parity:** publish selected immutable profiles or pursue
