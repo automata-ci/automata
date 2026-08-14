@@ -6,7 +6,19 @@ use thiserror::Error;
 use crate::{AttemptId, CORE_SCHEMA_VERSION, LogStreamId, UnixMillis};
 
 /// Defensive maximum for one wire frame; larger writes must be chunked.
-pub const MAX_LOG_FRAME_BYTES: usize = 1024 * 1024;
+pub const MAX_LOG_FRAME_BYTES: usize = 1_048_576;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogLimitRejection {
+    FrameBytes,
+}
+
+const fn log_frame_byte_rejection(observed: usize) -> Option<LogLimitRejection> {
+    if observed > MAX_LOG_FRAME_BYTES {
+        return Some(LogLimitRejection::FrameBytes);
+    }
+    None
+}
 
 /// Zero-based sequence number within one log stream.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -112,7 +124,7 @@ impl LogFrame {
         if self.payload.is_empty() && !self.end_of_stream {
             return Err(LogValidationError::EmptyNonTerminalFrame);
         }
-        if self.payload.len() > MAX_LOG_FRAME_BYTES {
+        if log_frame_byte_rejection(self.payload.len()).is_some() {
             return Err(LogValidationError::FrameTooLarge {
                 size: self.payload.len(),
                 maximum: MAX_LOG_FRAME_BYTES,
@@ -173,6 +185,21 @@ impl LogFrame {
     #[must_use]
     pub fn into_payload(self) -> Vec<u8> {
         self.payload
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{LogLimitRejection, MAX_LOG_FRAME_BYTES, log_frame_byte_rejection};
+
+    #[test]
+    fn log_frame_byte_limit_has_exact_boundaries() {
+        assert_eq!(log_frame_byte_rejection(MAX_LOG_FRAME_BYTES - 1), None);
+        assert_eq!(log_frame_byte_rejection(MAX_LOG_FRAME_BYTES), None);
+        assert_eq!(
+            log_frame_byte_rejection(MAX_LOG_FRAME_BYTES + 1),
+            Some(LogLimitRejection::FrameBytes)
+        );
     }
 }
 

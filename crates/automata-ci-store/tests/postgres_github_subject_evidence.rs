@@ -439,6 +439,121 @@ async fn repository_dispatch_resolution_is_claim_fenced_atomic_and_exactly_repla
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn authenticated_event_readers_reject_forward_envelope_schemas() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = bootstrap(
+            &database,
+            "subject-evidence-forward-event-envelope",
+            0x182,
+            ProviderRepositoryVisibility::Private,
+            100,
+        )
+        .await?;
+        sqlx::query(
+            "ALTER TABLE github_repository_dispatch_pending_evidence \
+             DISABLE TRIGGER github_repository_dispatch_pending_no_update_delete",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE github_repository_dispatch_pending_evidence \
+             DROP CONSTRAINT github_repository_dispatch_pending_shape",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE github_provider_delivery_evidence \
+             DISABLE TRIGGER github_provider_delivery_evidence_no_update_delete",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE github_provider_delivery_evidence \
+             DROP CONSTRAINT github_provider_delivery_evidence_authenticated_event",
+        )
+        .execute(database.pool())
+        .await?;
+
+        let pending_request = repository_dispatch_acceptance(
+            &fixture,
+            "delivery-forward-pending-event-envelope",
+            fixture.activated_at.get(),
+            0x32,
+        );
+        let pending = database
+            .store()
+            .accept_manifest_pinned_github_repository_dispatch(pending_request)
+            .await?;
+        sqlx::query(
+            "UPDATE github_repository_dispatch_pending_evidence \
+             SET authenticated_event_envelope_version = 2 \
+             WHERE provider_delivery_id = $1",
+        )
+        .bind(pending.delivery_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+        assert!(matches!(
+            database
+                .store()
+                .accept_manifest_pinned_github_repository_dispatch(repository_dispatch_acceptance(
+                    &fixture,
+                    "delivery-forward-pending-event-envelope",
+                    fixture.activated_at.get(),
+                    0x32,
+                ),)
+                .await,
+            Err(GithubSubjectEvidenceStoreError::CorruptData)
+        ));
+
+        let resolved_request = repository_dispatch_acceptance(
+            &fixture,
+            "delivery-forward-resolved-event-envelope",
+            fixture.activated_at.get(),
+            0x33,
+        );
+        let accepted = database
+            .store()
+            .accept_manifest_pinned_github_repository_dispatch(resolved_request)
+            .await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x183, 60_000).await?;
+        let resolution = GithubRepositoryDispatchResolution::new(
+            GithubCheckHeadSha::new(HEAD_SHA)?,
+            GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
+        );
+        database
+            .store()
+            .resolve_github_repository_dispatch(ResolveGithubRepositoryDispatch::new(
+                accepted.evidence().clone(),
+                claim,
+                resolution,
+                claim.claimed_at(),
+            )?)
+            .await?;
+        sqlx::query(
+            "UPDATE github_provider_delivery_evidence \
+             SET authenticated_event_envelope_version = 2 \
+             WHERE provider_delivery_id = $1",
+        )
+        .bind(accepted.delivery_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+        assert!(matches!(
+            database
+                .store()
+                .load_manifest_pinned_github_delivery_evidence(
+                    &fixture.tenant,
+                    accepted.delivery_id(),
+                )
+                .await,
+            Err(GithubSubjectEvidenceStoreError::CorruptData)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn rejected_pre_admission_delivery_terminalizes_check_as_failure() -> TestResult {
     run_with_database(|database| async move {
         let fixture = bootstrap(

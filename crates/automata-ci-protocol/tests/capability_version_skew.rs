@@ -8,10 +8,10 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{
     CommandSequence, JobRuntimeAuthorities, JobRuntimeAuthority, LeaseOffer,
-    MessageValidationError, ProtocolLimits, RunnerHello, RunnerSlotOrdinal, RunnerToServer,
-    RuntimeAuthorityCredential, RuntimeAuthorityEndpoint, RuntimeAuthorityName,
-    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerToRunner, ValidatedRunnerToServer,
-    ValidatedServerToRunner,
+    MessageValidationError, ProtocolLimits, RUNTIME_AUTHORITY_SCHEMA_VERSION, RunnerHello,
+    RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint,
+    RuntimeAuthorityError, RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
+    ServerToRunner, ValidatedRunnerToServer, ValidatedServerToRunner,
 };
 
 fn runner() -> RunnerCapabilities {
@@ -214,5 +214,24 @@ fn capability_identifiers_obey_the_negotiated_text_budget() {
             length,
             maximum: 16,
         }) if length == feature.as_str().len(),
+    ));
+}
+
+#[test]
+fn runtime_authority_bundle_rejects_forward_schema() {
+    let message = lease_offer(RunnerRequirements::default());
+    let mut value = serde_json::to_value(message).expect("serialize lease offer");
+    value["payload"]["runtime_authorities"]["schema_version"] = serde_json::json!(
+        RUNTIME_AUTHORITY_SCHEMA_VERSION
+            .checked_add(1)
+            .expect("test schema")
+    );
+    let decoded = serde_json::from_value::<ServerToRunner>(value).expect("decode future bundle");
+
+    assert!(matches!(
+        ValidatedServerToRunner::new(decoded, &ProtocolLimits::default()),
+        Err(MessageValidationError::RuntimeAuthority(
+            RuntimeAuthorityError::UnsupportedSchema
+        ))
     ));
 }

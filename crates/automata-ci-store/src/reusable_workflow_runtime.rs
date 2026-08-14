@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use std::collections::BTreeMap;
 
 use automata_ci_core::{
-    InvocationInputType, OutputSensitivity, PermissionLevel, RunId, Sha256Digest, UnixMillis,
-    WorkflowJobKey, WorkflowOutputKey,
+    InvocationInputType, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, OutputSensitivity, PermissionLevel, RunId,
+    Sha256Digest, UnixMillis, WorkflowJobKey, WorkflowOutputKey,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -469,7 +469,7 @@ impl PublishReusableWorkflowCall {
         if runtime_policy.tenant() != &tenant || runtime_policy.repository_id() != repository_id {
             return Err(ReusableWorkflowRuntimeValueError::RuntimePolicyMismatch);
         }
-        if runtime_context.media_type() != "application/vnd.automata.job-runtime-context.protobuf" {
+        if runtime_context.media_type() != JOB_RUNTIME_CONTEXT_MEDIA_TYPE {
             return Err(ReusableWorkflowRuntimeValueError::InvalidRuntimeContext);
         }
         if published_at.get() < 0 {

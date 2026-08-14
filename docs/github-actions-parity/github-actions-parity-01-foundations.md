@@ -30,36 +30,44 @@ runner capability model, compatibility tests, and `docs/compatibility.md`.
 
 Tasks:
 
-- [ ] Define a machine-readable entry for every workflow, job, step, action,
+- [x] Define a machine-readable entry for every workflow, job, step, action,
   trigger, and runtime feature.
-- [ ] Record decode, compile, projection, admission, scheduler, Linux, Windows,
+- [x] Record decode, compile, projection, admission, scheduler, Linux, Windows,
   Kubernetes, Results, and differential status independently.
-- [ ] Record the evaluation phase and required runtime/provider capabilities.
-- [ ] Record the stable unsupported diagnostic and source span policy.
-- [ ] Inventory every currently accepted decoder field.
-- [ ] Inventory every current late projection or executor rejection.
-- [ ] Move known incompatibilities to publication or admission.
-- [ ] Generate tests that fail when a decoded field has no downstream entry.
-- [ ] Generate tests that fail when a compatibility claim has no acceptance
+- [x] Record the evaluation phase and required runtime/provider capabilities.
+- [x] Record the stable unsupported diagnostic and source span policy.
+- [x] Inventory every currently accepted decoder field, trigger, and action
+  runtime value directly from source.
+- [x] Inventory every current logical projection rejection and classify the
+  executor's bounded admission/error categories.
+- [x] Move known incompatibilities to publication or admission. Job-level
+  concurrency, deployment environments, and direct container actions now fail
+  in compilation with exact source spans; projection guards remain for plans
+  constructed by other frontends.
+- [x] Generate tests that fail when a field is added to any governed current
+  decoder surface without a downstream entry; adding a new decoder surface
+  requires extending the closed inventory in the same change.
+- [x] Generate tests that fail when a compatibility claim has no acceptance
   fixture.
-- [ ] Validate or generate the compatibility table from the registry.
-- [ ] Add a reviewed-delta mechanism for new GitHub syntax, permissions,
+- [x] Validate the compatibility table from the registry.
+- [x] Add a reviewed-delta mechanism for new GitHub syntax, permissions,
   variables, limits, and action runtimes.
 - [ ] Run a scheduled, source-pinned detector against the reviewed GitHub
   Actions reference catalog and open a bounded diff issue when syntax,
   contexts, permissions, events, limits, or default variables change.
-- [ ] Track the pinned `actions/runner` baseline and automatically require
+- [x] Track the pinned `actions/runner` baseline and automatically require
   compatibility review when a newer approved release is selected.
-- [ ] Store reference snapshots with retrieval date, source URL, content
+- [x] Store reference snapshots with retrieval date, source URL, content
   digest, parser version, and a human-approved replacement workflow.
 
 Acceptance:
 
-- [ ] Every accepted field is either product-runnable or rejected before a run
-  is created.
-- [ ] Adding a decoder field without a registry entry fails CI.
-- [ ] “Component complete” cannot be inferred from parsing alone.
-- [ ] Existing unsupported diagnostics remain stable or have an explicit
+- [x] Every accepted field is either mapped to its independently stated product
+  stage or rejected before a run is created.
+- [x] Adding a field to a governed decoder surface without a registry entry
+  fails CI.
+- [x] “Component complete” cannot be inferred from parsing alone.
+- [x] Existing unsupported diagnostics remain stable or have an explicit
   migration note.
 
 Handoff: feature owners add registry entries in their contract pull request;
@@ -149,25 +157,25 @@ Acceptance:
 
 Tasks:
 
-- [ ] Extract shell selection, script extension/fixup, and argv construction
+- [x] Extract shell selection, script extension/fixup, and argv construction
   from `executor.rs` into `shell.rs`.
-- [ ] Extract repository-action archive materialization into
+- [x] Extract repository-action archive materialization into
   `action_content.rs`.
-- [ ] Extract job/service container request construction into
+- [x] Extract job/service container request construction into
   `container_runtime.rs`.
-- [ ] Keep action lifecycle, post registration, orchestration, and operation
+- [x] Keep action lifecycle, post registration, orchestration, and operation
   identity in `executor.rs`.
-- [ ] Preserve output parsing in `output.rs` until the streaming contract
+- [x] Preserve output parsing in `output.rs` until the streaming contract
   lands.
-- [ ] Preserve every operation-ID input exactly.
-- [ ] Add source-level tests preventing extracted modules from bypassing
+- [x] Preserve every operation-ID input exactly.
+- [x] Add source-level tests preventing extracted modules from bypassing
   cancellation, bounds, or secret classification.
 
 Acceptance:
 
-- [ ] No public API or observable behavior changes.
-- [ ] Existing golden executor tests remain byte-for-byte identical.
-- [ ] Lanes R, P, and action-focused contributors can subsequently edit
+- [x] No public API or observable behavior changes.
+- [x] Existing golden executor tests remain byte-for-byte identical.
+- [x] Lanes R, P, and action-focused contributors can subsequently edit
   separate files.
 
 ### FND-04 — Contract, migration, and limit governance
@@ -176,27 +184,44 @@ Acceptance:
 
 Current baseline: runner protocol v1, message schema v1, JobIR schema v1,
 runner-requirements schema v1, and one canonical greenfield
-`0001_initial_schema.sql` migration.
+`0001_initial_schema.sql`. The checked-in
+[foundation governance registry](../governance/foundation-governance-v1.json)
+is an active exact-current inventory; it does not imply upgrade compatibility.
 
 Tasks:
 
-- [ ] Keep schema changes in the canonical greenfield migration and its
-  inventory test until the first released schema creates supported durable
-  upgrade state.
-- [ ] Record owners for JobIR, protobuf, result, event, and store schema
-  versions.
-- [ ] Require compatibility readers for every durable or wire-format change.
-- [ ] Maintain one machine-readable inventory of GitHub and stricter Automata
-  limits, enforcement phase, and reason code.
-- [ ] Require boundary-minus-one, boundary, and boundary-plus-one tests.
-- [ ] Define who updates root manifests, lockfiles, shared CI, and generated
-  fixtures during each wave.
+- [x] Record the canonical greenfield migration inventory and fail CI if a
+  parallel branch adds or reserves a numbered migration while that mode is
+  active.
+- [x] Record owners, exact version/evidence bindings, and named tests for the
+  current JobIR, protobuf, core envelopes, workflow plan, workflow runtime
+  policy/workspace/derivation, protocol, message, and runner requirements;
+  record the canonical store migration policy separately.
+- [x] Complete the registry for every named/versioned internal durable and wire
+  format declaration in the governed Rust and TypeScript roots, including
+  event evidence, provider-owned persistence, and the separately mapped
+  canonical Store migration. Ordinary unversioned public JSON APIs are
+  explicitly outside this inventory.
+- [x] Require source-bound, non-ignored evidence for every prior version when a
+  named/versioned durable or wire format advances beyond v1: either a
+  compatibility-reader acceptance test or an explicit production-guard
+  rejection test; `exact-current-only` cannot advance to v2.
+- [x] Expand the machine-readable inventory to every GitHub and stricter
+  Automata limit, enforcement phase, and reason code.
+- [x] Require every registered limit to bind distinct boundary-minus-one,
+  boundary, and boundary-plus-one fragments inside an attributed Rust test.
+- [x] Define who updates root manifests, lockfiles, shared CI, and generated
+  protobuf fixtures during each wave.
 
 Acceptance:
 
-- [ ] Parallel schema branches coordinate changes to the canonical baseline.
-- [ ] No durable format changes without a version and compatibility test.
-- [ ] Limits have one owner and one enforcing phase.
+- [x] Migration inventory drift fails before parallel branches can claim a
+  nonexistent next sequence.
+- [x] No governed named/versioned internal durable or wire format changes
+  without a version and complete prior-version evidence after v1, using either
+  compatibility-reader acceptance or explicit rejection for each prior
+  version.
+- [x] Limits have one owner and one enforcing phase.
 
 ---
 

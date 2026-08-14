@@ -19,7 +19,43 @@ const DEFAULT_PULL_REQUEST_ACTIONS: &[&str] = &["opened", "synchronize", "reopen
 const MAX_PATTERN_BYTES: usize = 4_096;
 const MAX_CANDIDATE_BYTES: usize = 4_096;
 const MAX_CHANGED_FILES: usize = 3_000;
-const MAX_CHANGED_FILE_BYTES: usize = MAX_CHANGED_FILES * MAX_CANDIDATE_BYTES;
+const MAX_CHANGED_FILE_BYTES: usize = 12_288_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TriggerLimitRejection {
+    PatternBytes,
+    CandidateBytes,
+    ChangedFileCount,
+    ChangedFileBytes,
+}
+
+const fn filter_pattern_byte_rejection(observed: usize) -> Option<TriggerLimitRejection> {
+    if observed > MAX_PATTERN_BYTES {
+        return Some(TriggerLimitRejection::PatternBytes);
+    }
+    None
+}
+
+const fn filter_candidate_byte_rejection(observed: usize) -> Option<TriggerLimitRejection> {
+    if observed > MAX_CANDIDATE_BYTES {
+        return Some(TriggerLimitRejection::CandidateBytes);
+    }
+    None
+}
+
+const fn changed_file_count_rejection(observed: usize) -> Option<TriggerLimitRejection> {
+    if observed > MAX_CHANGED_FILES {
+        return Some(TriggerLimitRejection::ChangedFileCount);
+    }
+    None
+}
+
+const fn changed_file_byte_rejection(observed: usize) -> Option<TriggerLimitRejection> {
+    if observed > MAX_CHANGED_FILE_BYTES {
+        return Some(TriggerLimitRejection::ChangedFileBytes);
+    }
+    None
+}
 
 pub(super) enum TriggerSelection {
     Selected(Option<CompiledWorkflowDispatch>),
@@ -229,9 +265,9 @@ fn merge_group_matches(
         }
     };
     if action.is_empty()
-        || action.len() > MAX_CANDIDATE_BYTES
+        || filter_candidate_byte_rejection(action.len()).is_some()
         || GithubRef::parse(base_ref).is_none()
-        || base_ref.len() > MAX_CANDIDATE_BYTES
+        || filter_candidate_byte_rejection(base_ref.len()).is_some()
     {
         context.semantic(
             "github.compile.invalid_merge_group_metadata",
@@ -286,7 +322,9 @@ fn validate_merge_group_filter(
         );
     }
     for activity in filter.types() {
-        if activity.value().is_empty() || activity.value().len() > MAX_CANDIDATE_BYTES {
+        if activity.value().is_empty()
+            || filter_candidate_byte_rejection(activity.value().len()).is_some()
+        {
             context.semantic(
                 "github.compile.invalid_merge_group_type",
                 "`on.merge_group.types` values must contain at most 4096 bytes",
@@ -1058,7 +1096,7 @@ fn schedule_matches(
             return TriggerSelection::Rejected;
         }
     };
-    if cron.is_empty() || cron.len() > MAX_CANDIDATE_BYTES {
+    if cron.is_empty() || filter_candidate_byte_rejection(cron.len()).is_some() {
         context.semantic(
             "github.compile.invalid_schedule_metadata",
             "schedule metadata requires a non-empty cron expression of at most 4096 bytes",
@@ -1297,7 +1335,7 @@ fn push_matches(
         );
         return TriggerSelection::Rejected;
     };
-    if git_ref.len() > MAX_CANDIDATE_BYTES {
+    if filter_candidate_byte_rejection(git_ref.len()).is_some() {
         context.semantic(
             "github.compile.push_ref_too_long",
             "GitHub push ref exceeds the supported 4096-byte selection limit",
@@ -1385,7 +1423,9 @@ fn pull_request_matches(
         );
         return TriggerSelection::Rejected;
     }
-    if action.len() > MAX_CANDIDATE_BYTES || base_ref.len() > MAX_CANDIDATE_BYTES {
+    if filter_candidate_byte_rejection(action.len()).is_some()
+        || filter_candidate_byte_rejection(base_ref.len()).is_some()
+    {
         context.semantic(
             "github.compile.pull_request_metadata_too_long",
             "pull_request action or base ref exceeds the supported 4096-byte selection limit",
@@ -1479,7 +1519,7 @@ enum PathFilterSelection {
 }
 
 fn valid_changed_files(files: &[String]) -> bool {
-    if files.len() > MAX_CHANGED_FILES {
+    if changed_file_count_rejection(files.len()).is_some() {
         return false;
     }
     let mut bytes = 0_usize;
@@ -1488,9 +1528,9 @@ fn valid_changed_files(files: &[String]) -> bool {
             return false;
         };
         bytes = next_bytes;
-        if bytes > MAX_CHANGED_FILE_BYTES
+        if changed_file_byte_rejection(bytes).is_some()
             || path.is_empty()
-            || path.len() > MAX_CANDIDATE_BYTES
+            || filter_candidate_byte_rejection(path.len()).is_some()
             || path.starts_with('/')
             || path.chars().any(char::is_control)
             || path
@@ -1622,7 +1662,7 @@ impl GithubGlob {
         if source.is_empty() {
             return Err("patterns must not be empty");
         }
-        if source.len() > MAX_PATTERN_BYTES {
+        if filter_pattern_byte_rejection(source.len()).is_some() {
             return Err("patterns must not exceed 4096 bytes");
         }
 
@@ -1693,7 +1733,7 @@ impl GithubGlob {
     }
 
     fn matches(&self, candidate: &str) -> bool {
-        if candidate.len() > MAX_CANDIDATE_BYTES {
+        if filter_candidate_byte_rejection(candidate.len()).is_some() {
             return false;
         }
         let mut states = vec![false; self.pieces.len() + 1];
@@ -1819,7 +1859,12 @@ impl ClassMember {
 
 #[cfg(test)]
 mod tests {
-    use super::GithubGlob;
+    use super::{
+        GithubGlob, MAX_CANDIDATE_BYTES, MAX_CHANGED_FILE_BYTES, MAX_CHANGED_FILES,
+        MAX_PATTERN_BYTES, TriggerLimitRejection, changed_file_byte_rejection,
+        changed_file_count_rejection, filter_candidate_byte_rejection,
+        filter_pattern_byte_rejection,
+    };
 
     fn matches(pattern: &str, candidate: &str) -> bool {
         GithubGlob::parse(pattern)
@@ -1848,5 +1893,51 @@ mod tests {
         assert!(GithubGlob::parse("unterminated[").is_err());
         assert!(GithubGlob::parse("[a-9]").is_err());
         assert!(GithubGlob::parse("[!a]").is_err());
+    }
+
+    #[test]
+    fn filter_pattern_byte_limit_has_exact_boundaries() {
+        assert_eq!(filter_pattern_byte_rejection(MAX_PATTERN_BYTES - 1), None);
+        assert_eq!(filter_pattern_byte_rejection(MAX_PATTERN_BYTES), None);
+        assert_eq!(
+            filter_pattern_byte_rejection(MAX_PATTERN_BYTES + 1),
+            Some(TriggerLimitRejection::PatternBytes)
+        );
+    }
+
+    #[test]
+    fn filter_candidate_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            filter_candidate_byte_rejection(MAX_CANDIDATE_BYTES - 1),
+            None
+        );
+        assert_eq!(filter_candidate_byte_rejection(MAX_CANDIDATE_BYTES), None);
+        assert_eq!(
+            filter_candidate_byte_rejection(MAX_CANDIDATE_BYTES + 1),
+            Some(TriggerLimitRejection::CandidateBytes)
+        );
+    }
+
+    #[test]
+    fn changed_file_count_limit_has_exact_boundaries() {
+        assert_eq!(changed_file_count_rejection(MAX_CHANGED_FILES - 1), None);
+        assert_eq!(changed_file_count_rejection(MAX_CHANGED_FILES), None);
+        assert_eq!(
+            changed_file_count_rejection(MAX_CHANGED_FILES + 1),
+            Some(TriggerLimitRejection::ChangedFileCount)
+        );
+    }
+
+    #[test]
+    fn changed_file_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            changed_file_byte_rejection(MAX_CHANGED_FILE_BYTES - 1),
+            None
+        );
+        assert_eq!(changed_file_byte_rejection(MAX_CHANGED_FILE_BYTES), None);
+        assert_eq!(
+            changed_file_byte_rejection(MAX_CHANGED_FILE_BYTES + 1),
+            Some(TriggerLimitRejection::ChangedFileBytes)
+        );
     }
 }

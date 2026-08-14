@@ -28,11 +28,8 @@ macro_rules! canonical_selector {
                 if value.trim() != value {
                     return Err(SelectorError::SurroundingWhitespace($description));
                 }
-                if value.chars().count() > MAX_SELECTOR_LENGTH {
-                    return Err(SelectorError::TooLong {
-                        kind: $description,
-                        max: MAX_SELECTOR_LENGTH,
-                    });
+                if let Some(rejection) = selector_length_rejection(value.chars().count(), $description) {
+                    return Err(rejection);
                 }
                 if value.chars().any(char::is_control) {
                     return Err(SelectorError::ControlCharacter($description));
@@ -127,4 +124,38 @@ pub enum SelectorError {
     /// The selector contains a terminal or protocol control character.
     #[error("{0} cannot contain control characters")]
     ControlCharacter(&'static str),
+}
+
+const fn selector_length_rejection(characters: usize, kind: &'static str) -> Option<SelectorError> {
+    if characters > MAX_SELECTOR_LENGTH {
+        return Some(SelectorError::TooLong {
+            kind,
+            max: MAX_SELECTOR_LENGTH,
+        });
+    }
+    None
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{MAX_SELECTOR_LENGTH, SelectorError, selector_length_rejection};
+
+    #[test]
+    fn selector_character_limit_has_exact_boundaries() {
+        assert_eq!(
+            selector_length_rejection(MAX_SELECTOR_LENGTH - 1, "runner label"),
+            None
+        );
+        assert_eq!(
+            selector_length_rejection(MAX_SELECTOR_LENGTH, "runner label"),
+            None
+        );
+        assert_eq!(
+            selector_length_rejection(MAX_SELECTOR_LENGTH + 1, "runner label"),
+            Some(SelectorError::TooLong {
+                kind: "runner label",
+                max: MAX_SELECTOR_LENGTH,
+            })
+        );
+    }
 }

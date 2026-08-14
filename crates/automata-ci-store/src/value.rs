@@ -16,6 +16,20 @@ pub const MAX_ROUTING_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_OBJECT_KEY_BYTES: usize = 1024;
 const MAX_LABEL_BYTES: usize = 255;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TerminalResultLimitRejection {
+    EncodedBytes,
+}
+
+pub(crate) const fn terminal_result_bytes_rejection(
+    observed: u64,
+) -> Option<TerminalResultLimitRejection> {
+    if observed > MAX_TERMINAL_RESULT_BYTES {
+        return Some(TerminalResultLimitRejection::EncodedBytes);
+    }
+    None
+}
+
 /// A positive schema number persisted with an immutable document.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DocumentSchema(NonZeroU16);
@@ -322,4 +336,27 @@ pub enum DurabilityValueError {
     InvalidRoutingDocument,
     #[error("routing document must be a JSON object")]
     RoutingDocumentNotObject,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MAX_TERMINAL_RESULT_BYTES, TerminalResultLimitRejection, terminal_result_bytes_rejection,
+    };
+
+    #[test]
+    fn terminal_result_bytes_has_exact_boundaries() {
+        assert_eq!(
+            terminal_result_bytes_rejection(MAX_TERMINAL_RESULT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            terminal_result_bytes_rejection(MAX_TERMINAL_RESULT_BYTES),
+            None
+        );
+        assert_eq!(
+            terminal_result_bytes_rejection(MAX_TERMINAL_RESULT_BYTES + 1),
+            Some(TerminalResultLimitRejection::EncodedBytes)
+        );
+    }
 }

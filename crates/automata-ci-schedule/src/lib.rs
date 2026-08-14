@@ -20,8 +20,36 @@ use thiserror::Error;
 pub const MAX_CRON_EXPRESSION_BYTES: usize = 256;
 /// Maximum bytes in one IANA timezone identifier.
 pub const MAX_IANA_TIMEZONE_BYTES: usize = 255;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduleLimitRejection {
+    ExpressionBytes,
+    TimezoneBytes,
+    IntervalMinutes,
+}
+
+const fn cron_expression_byte_rejection(observed: usize) -> Option<ScheduleLimitRejection> {
+    if observed > MAX_CRON_EXPRESSION_BYTES {
+        return Some(ScheduleLimitRejection::ExpressionBytes);
+    }
+    None
+}
+
+const fn timezone_byte_rejection(observed: usize) -> Option<ScheduleLimitRejection> {
+    if observed > MAX_IANA_TIMEZONE_BYTES {
+        return Some(ScheduleLimitRejection::TimezoneBytes);
+    }
+    None
+}
 /// Minimum supported interval between selected wall-clock minutes.
 pub const MINIMUM_CRON_INTERVAL_MINUTES: u16 = 5;
+
+const fn cron_interval_rejection(observed: u16) -> Option<ScheduleLimitRejection> {
+    if observed < MINIMUM_CRON_INTERVAL_MINUTES {
+        return Some(ScheduleLimitRejection::IntervalMinutes);
+    }
+    None
+}
 
 const MAXIMUM_CALENDAR_SEARCH_DAYS: usize = 3_660;
 
@@ -67,7 +95,7 @@ impl CronExpression {
             months,
             days_of_week,
         };
-        if expression.minimum_daily_interval() < MINIMUM_CRON_INTERVAL_MINUTES {
+        if cron_interval_rejection(expression.minimum_daily_interval()).is_some() {
             return Err(ScheduleError::IntervalTooShort);
         }
         Ok(expression)
@@ -324,7 +352,7 @@ impl FieldKind {
 
 fn validate_expression_text(expression: &str) -> Result<(), ScheduleError> {
     if expression.is_empty()
-        || expression.len() > MAX_CRON_EXPRESSION_BYTES
+        || cron_expression_byte_rejection(expression.len()).is_some()
         || expression.trim() != expression
         || !expression.is_ascii()
         || expression.starts_with('@')
@@ -447,7 +475,7 @@ fn named_value(source: &str, names: &[&str]) -> Option<u16> {
 
 fn parse_timezone(source: &str) -> Result<TimeZone, ScheduleError> {
     if source.is_empty()
-        || source.len() > MAX_IANA_TIMEZONE_BYTES
+        || timezone_byte_rejection(source.len()).is_some()
         || source.trim() != source
         || !source.is_ascii()
         || source.bytes().any(|byte| byte.is_ascii_control())
@@ -467,3 +495,47 @@ const MONTH_NAMES: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 const WEEKDAY_NAMES: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn cron_expression_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            cron_expression_byte_rejection(MAX_CRON_EXPRESSION_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            cron_expression_byte_rejection(MAX_CRON_EXPRESSION_BYTES),
+            None
+        );
+        assert_eq!(
+            cron_expression_byte_rejection(MAX_CRON_EXPRESSION_BYTES + 1),
+            Some(ScheduleLimitRejection::ExpressionBytes)
+        );
+    }
+
+    #[test]
+    fn iana_timezone_byte_limit_has_exact_boundaries() {
+        assert_eq!(timezone_byte_rejection(MAX_IANA_TIMEZONE_BYTES - 1), None);
+        assert_eq!(timezone_byte_rejection(MAX_IANA_TIMEZONE_BYTES), None);
+        assert_eq!(
+            timezone_byte_rejection(MAX_IANA_TIMEZONE_BYTES + 1),
+            Some(ScheduleLimitRejection::TimezoneBytes)
+        );
+    }
+
+    #[test]
+    fn minimum_cron_interval_limit_has_exact_boundaries() {
+        assert_eq!(
+            cron_interval_rejection(MINIMUM_CRON_INTERVAL_MINUTES - 1),
+            Some(ScheduleLimitRejection::IntervalMinutes)
+        );
+        assert_eq!(cron_interval_rejection(MINIMUM_CRON_INTERVAL_MINUTES), None);
+        assert_eq!(
+            cron_interval_rejection(MINIMUM_CRON_INTERVAL_MINUTES + 1),
+            None
+        );
+    }
+}

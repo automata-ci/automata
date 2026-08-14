@@ -36,13 +36,27 @@ use crate::{
     GITHUB_RUNNER_POLICY_MEDIA_TYPE, GithubActivationContext, GithubLogicalActivationEvaluator,
     GithubLogicalJobProjector, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, LogicalJobActivator,
     LogicalJobProjectionError, MAX_GITHUB_RUNNER_POLICY_BYTES, ProjectGithubLogicalJobRequest,
-    ValidatedLogicalPlan, WORKFLOW_EVENT_MEDIA_TYPE, WORKFLOW_PLAN_MEDIA_TYPE,
+    ValidatedLogicalPlan, WORKFLOW_PLAN_MEDIA_TYPE,
 };
 
 const ACTIVATION_INPUT_DIGEST_DOMAIN: &[u8] =
     b"automata.workflow-service.logical-activation-input.v5\0";
 const JOB_ID_DOMAIN: &[u8] = b"automata.workflow-service.logical-job-id.v1\0";
 const MAX_EXACT_GITHUB_INTEGER: u64 = 9_007_199_254_740_992;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubOrchestrationLimitRejection {
+    ExactInteger,
+}
+
+const fn exact_github_integer_rejection(
+    observed: u64,
+) -> Option<GithubOrchestrationLimitRejection> {
+    if observed > MAX_EXACT_GITHUB_INTEGER {
+        return Some(GithubOrchestrationLimitRejection::ExactInteger);
+    }
+    None
+}
 
 /// Exact durable target of one logical-job orchestration attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,7 +173,9 @@ impl PreparedLogicalJobActivation {
             return Err(LogicalOrchestrationValueError::InvalidRuntimePolicy);
         }
         require_media_type(&plan, WORKFLOW_PLAN_MEDIA_TYPE)?;
-        require_media_type(&event, WORKFLOW_EVENT_MEDIA_TYPE)?;
+        if !crate::workflow_event_media_type_is_current(event.media_type()) {
+            return Err(LogicalOrchestrationValueError::InvalidMediaType);
+        }
         require_media_type(&base_context, JOB_RUNTIME_CONTEXT_MEDIA_TYPE)?;
         require_media_type(&prerequisite_context, JOB_RUNTIME_CONTEXT_MEDIA_TYPE)?;
         if runtime_policy.run_id() != target.run_id()
@@ -1333,6 +1349,22 @@ fn is_dependabot_actor(actor: &str) -> bool {
 #[cfg(test)]
 mod source_evidence_tests {
     use super::*;
+
+    #[test]
+    fn exact_github_integer_limit_has_exact_boundaries() {
+        assert_eq!(
+            exact_github_integer_rejection(MAX_EXACT_GITHUB_INTEGER - 1),
+            None
+        );
+        assert_eq!(
+            exact_github_integer_rejection(MAX_EXACT_GITHUB_INTEGER),
+            None
+        );
+        assert_eq!(
+            exact_github_integer_rejection(MAX_EXACT_GITHUB_INTEGER + 1),
+            Some(GithubOrchestrationLimitRejection::ExactInteger)
+        );
+    }
     use automata_ci_core::{
         CompiledValueTemplate, Located, LogicalJobKind, LogicalJobTemplate, LogicalRunStepTemplate,
         LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate, PlanSourceLocation,
@@ -1697,7 +1729,7 @@ mod source_evidence_tests {
 }
 
 fn exact_github_integer(value: u64) -> Result<GithubValue, GithubLogicalJobOrchestrationError> {
-    if value > MAX_EXACT_GITHUB_INTEGER {
+    if exact_github_integer_rejection(value).is_some() {
         return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
     }
     value

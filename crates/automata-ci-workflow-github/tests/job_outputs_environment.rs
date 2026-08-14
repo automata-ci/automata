@@ -215,16 +215,13 @@ fn current_lowering_fails_closed_for_malformed_output_and_environment_shapes() {
 }
 
 #[test]
-fn current_lowering_retains_job_outputs_and_deployment_semantics() {
+fn current_lowering_retains_job_outputs_without_deployment_semantics() {
     let source = r"on: workflow_dispatch
 jobs:
   release:
     runs-on: linux
     outputs:
       artifact: ${{ steps.build.outputs.artifact }}
-    environment:
-      name: production
-      url: https://deployments.example.invalid/current
     steps:
       - id: build
         run: echo build
@@ -245,10 +242,5 @@ jobs:
     let job = &report.plan().expect("current plan").jobs()[0];
     assert_eq!(job.outputs().len(), 1);
     assert_eq!(job.outputs()[0].key().value().as_str(), "artifact");
-    let deployment = job.deployment().expect("deployment selection");
-    assert_eq!(deployment.name().value().source(), "production");
-    assert_eq!(
-        deployment.url().expect("deployment URL").value().source(),
-        "https://deployments.example.invalid/current"
-    );
+    assert!(job.deployment().is_none());
 }

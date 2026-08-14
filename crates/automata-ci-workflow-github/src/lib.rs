@@ -29,6 +29,7 @@ pub use frontend::{
     FrontendReport, GithubFrontendReport, GithubWorkflowFrontend, ParseWorkflowRequest,
     WorkflowFrontend,
 };
+#[allow(deprecated)]
 pub use model::{
     ActionStep, BooleanValue, Concurrency, ConcurrencyQueue, ContainerCredentials,
     ContainerEnvironment, ContainerSequence, Defaults, DetailedConcurrency, DetailedContainer,

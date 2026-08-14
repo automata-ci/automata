@@ -45,6 +45,7 @@ automata-ci-runner-transport.workspace = true
 automata-ci-secret.workspace = true
 automata-ci-store.workspace = true
 automata-ci-ui-renderer.workspace = true
+automata-ci-workflow-github.workspace = true
 automata-ci-workflow-service.workspace = true
 axum.workspace = true
 base64.workspace = true
@@ -86,6 +87,7 @@ automata-ci-postgres-test-support.workspace = true
 automata-ci-scm.workspace = true
 pem-rfc7468.workspace = true
 rcgen.workspace = true
+ring.workspace = true
 sqlx.workspace = true
 tar.workspace = true
 

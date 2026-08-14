@@ -1,6 +1,6 @@
 use automata_ci_core::{
     AttemptId, AttemptNumber, AttemptStateError, FenceError, JobAttemptState, JobId, JobLifecycle,
-    LeaseError, LeaseId, RunnerId, UnixMillis,
+    Lease, LeaseError, LeaseId, RunnerId, UnixMillis,
 };
 
 fn queued_attempt() -> JobAttemptState {
@@ -9,6 +9,46 @@ fn queued_attempt() -> JobAttemptState {
         JobId::new(),
         AttemptNumber::new(1).expect("valid attempt number"),
     )
+}
+
+#[test]
+fn attempt_and_lease_schemas_reject_noncurrent_versions() {
+    let attempt = queued_attempt();
+    let mut encoded_attempt = serde_json::to_value(&attempt).expect("serialize attempt");
+    encoded_attempt["schema_version"] = serde_json::json!(u16::MAX);
+    let decoded_attempt: JobAttemptState =
+        serde_json::from_value(encoded_attempt).expect("decode structurally valid attempt");
+    assert_eq!(
+        decoded_attempt.validate(),
+        Err(AttemptStateError::UnsupportedSchema {
+            supported: 1,
+            received: u16::MAX,
+        })
+    );
+
+    let lease = JobAttemptState::new(
+        AttemptId::new(),
+        JobId::new(),
+        AttemptNumber::new(1).expect("valid attempt number"),
+    )
+    .acquire_lease(
+        LeaseId::new(),
+        RunnerId::new(),
+        UnixMillis::new(1_000),
+        UnixMillis::new(2_000),
+    )
+    .expect("lease");
+    let mut encoded_lease = serde_json::to_value(&lease).expect("serialize lease");
+    encoded_lease["schema_version"] = serde_json::json!(u16::MAX);
+    let decoded_lease: Lease =
+        serde_json::from_value(encoded_lease).expect("decode structurally valid lease");
+    assert_eq!(
+        decoded_lease.validate(),
+        Err(LeaseError::UnsupportedSchema {
+            supported: 1,
+            received: u16::MAX,
+        })
+    );
 }
 
 #[test]

@@ -7,7 +7,7 @@ use automata_ci_core::{
 };
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 use crate::{
     PinnedWorkflowRuntimePolicy, RegisterWorkflowRuntimePolicy, RepositoryId, StoreError,
     TenantScope, WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyPin,
@@ -171,6 +171,7 @@ async fn insert_revision(
     request: &RegisterWorkflowRuntimePolicy,
     registered_at: UnixMillis,
 ) -> Result<(), WorkflowRuntimePolicyStoreError> {
+    let schemas = current_durable_schemas();
     let rows = sqlx::query(
         r"
         INSERT INTO workflow_runtime_policy_revisions (
@@ -178,7 +179,7 @@ async fn insert_revision(
             canonical_policy, permission_policy_canonical, resource_policy_canonical,
             policy_schema, workspace_root, workspace_derivation_version,
             mapping_count, state, registered_at_ms, sealed_at_ms
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,'staging',$11,NULL)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$12,$10,'staging',$11,NULL)
         ",
     )
     .bind(request.pin().tenant().as_str())
@@ -198,6 +199,7 @@ async fn insert_revision(
     .bind(request.policy().workspace_root())
     .bind(count_i32(request.policy().mappings().len())?)
     .bind(registered_at.get())
+    .bind(schemas.workflow_workspace_derivation_i16)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -339,6 +341,7 @@ pub(super) async fn load_revision(
     repository_id: RepositoryId,
     revision: WorkflowRuntimePolicyRevision,
 ) -> Result<WorkflowRuntimePolicy, WorkflowRuntimePolicyStoreError> {
+    let schemas = current_durable_schemas();
     let header = sqlx::query(
         r"
         SELECT policy_digest, canonical_policy, permission_policy_canonical,
@@ -375,7 +378,7 @@ pub(super) async fn load_revision(
     let expected_mappings: i32 = header.try_get("mapping_count").map_err(operation_error)?;
     let state: String = header.try_get("state").map_err(operation_error)?;
     if i16::try_from(canonical_policy.schema()).ok() != Some(schema)
-        || derivation != 1
+        || derivation != schemas.workflow_workspace_derivation_i16
         || state != "sealed"
         || canonical_policy
             .permission_policy()

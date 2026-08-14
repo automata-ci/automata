@@ -1,9 +1,11 @@
 //! Crash-safe runner enrollment request and credential custody.
 
+use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
 use std::{
     fs::File,
     io::{Read as _, Write as _},
-    path::{Path, PathBuf},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -190,6 +192,13 @@ pub(super) struct EnrollmentStage {
 }
 
 impl EnrollmentStage {
+    fn validate_schema(&self) -> Result<()> {
+        if self.schema != STAGE_SCHEMA {
+            bail!("runner enrollment request stage has an unsupported schema");
+        }
+        Ok(())
+    }
+
     fn new(
         config: &RunnerProductConfig,
         origin: &Url,
@@ -226,8 +235,8 @@ impl EnrollmentStage {
         origin: &Url,
         runner_name: &str,
     ) -> Result<()> {
-        if self.schema != STAGE_SCHEMA
-            || self.operation_id.is_nil()
+        self.validate_schema()?;
+        if self.operation_id.is_nil()
             || self.server_origin != origin.as_str()
             || self.runner_name != runner_name
             || self.capabilities != *config.inventory()
@@ -420,19 +429,27 @@ fn validate_destination_set(paths: &[PathBuf]) -> Result<()> {
             bail!("runner enrollment credential and staging paths must be distinct absolute paths");
         }
     }
-    let mut prepared = Vec::with_capacity(paths.len());
-    for path in paths {
-        let destination = prepare_destination(path)?;
-        for earlier in &prepared {
-            if same_destination(earlier, &destination)? {
-                bail!(
-                    "runner enrollment credential and staging paths resolve to the same destination"
-                );
+
+    #[cfg(unix)]
+    {
+        let mut prepared = Vec::with_capacity(paths.len());
+        for path in paths {
+            let destination = prepare_destination(path)?;
+            for earlier in &prepared {
+                if same_destination(earlier, &destination)? {
+                    bail!(
+                        "runner enrollment credential and staging paths resolve to the same destination"
+                    );
+                }
             }
+            prepared.push(destination);
         }
-        prepared.push(destination);
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        bail!("durable runner enrollment is supported only on Unix hosts")
+    }
 }
 
 #[cfg(unix)]
@@ -455,11 +472,6 @@ fn acquire_enrollment_lock(path: &Path) -> Result<rustix::fd::OwnedFd> {
     Ok(lock)
 }
 
-#[cfg(not(unix))]
-fn acquire_enrollment_lock(_path: &Path) -> Result<()> {
-    bail!("durable runner enrollment is supported only on Unix hosts")
-}
-
 #[cfg(unix)]
 struct PreparedDestination {
     parent: rustix::fd::OwnedFd,
@@ -475,11 +487,6 @@ fn same_destination(left: &PreparedDestination, right: &PreparedDestination) -> 
     Ok(left.name == right.name
         && left_parent.st_dev == right_parent.st_dev
         && left_parent.st_ino == right_parent.st_ino)
-}
-
-#[cfg(not(unix))]
-fn same_destination(_left: &(), _right: &()) -> Result<bool> {
-    bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
 #[cfg(unix)]
@@ -544,11 +551,6 @@ fn require_trusted_directory(directory: &rustix::fd::OwnedFd) -> Result<()> {
         bail!("runner enrollment directory is not trusted");
     }
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn prepare_destination(_path: &Path) -> Result<()> {
-    bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
 #[cfg(unix)]
@@ -640,6 +642,7 @@ fn read_bounded_temporary(
     bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
+#[cfg(unix)]
 fn validate_file_metadata(file: &File, private: bool) -> Result<()> {
     let metadata = file
         .metadata()
@@ -647,16 +650,13 @@ fn validate_file_metadata(file: &File, private: bool) -> Result<()> {
     if !metadata.is_file() {
         bail!("runner enrollment state is not a regular file");
     }
-    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt as _;
+    if metadata.nlink() != 1
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || (private && metadata.mode() & 0o077 != 0)
+        || (!private && metadata.mode() & 0o022 != 0)
     {
-        use std::os::unix::fs::MetadataExt as _;
-        if metadata.nlink() != 1
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || (private && metadata.mode() & 0o077 != 0)
-            || (!private && metadata.mode() & 0o022 != 0)
-        {
-            bail!("runner enrollment state has unsafe ownership or permissions");
-        }
+        bail!("runner enrollment state has unsafe ownership or permissions");
     }
     Ok(())
 }
@@ -818,7 +818,10 @@ fn remove_durable(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, File};
+    use std::fs;
+
+    #[cfg(unix)]
+    use std::fs::File;
 
     use automata_ci_core::{
         Architecture, OperatingSystem, RunnerCapabilities, RunnerId, RunnerPlatform,
@@ -832,9 +835,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::remove_durable;
     use super::{
-        CredentialDestinations, EnrollmentStage, STAGE_SCHEMA, acquire_enrollment_lock,
-        persist_exact_file, persist_new, prepare_destination, same_destination, temporary_path,
-        validate_certificate_response, validate_destination_set,
+        CredentialDestinations, EnrollmentStage, STAGE_SCHEMA, persist_exact_file,
+        validate_certificate_response,
+    };
+    #[cfg(unix)]
+    use super::{
+        acquire_enrollment_lock, persist_new, prepare_destination, same_destination,
+        temporary_path, validate_destination_set,
     };
     use crate::enrollment::RedeemResponse;
     #[cfg(target_os = "linux")]
@@ -1053,6 +1060,28 @@ mod tests {
         assert_eq!(decoded.csr_pem, csr_pem);
         assert_eq!(decoded.token.as_str(), "atm_re_staged-secret");
         assert_eq!(decoded.private_key_pem.as_str(), private_key_pem);
+    }
+
+    #[test]
+    fn request_stage_reader_rejects_noncurrent_schema_versions() {
+        let mut document = serde_json::json!({
+            "schema": STAGE_SCHEMA,
+            "operation_id": Uuid::new_v4(),
+            "server_origin": "https://ci.example.test/",
+            "runner_name": "runner-one",
+            "capabilities": RunnerCapabilities::new(
+                RunnerId::new(),
+                RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+            ),
+            "csr_pem": "unused by schema validation",
+            "token": "unused by schema validation",
+            "private_key_pem": "unused by schema validation",
+        });
+        document["schema"] = serde_json::json!(STAGE_SCHEMA + 1);
+        let stage: EnrollmentStage = serde_json::from_value(document).expect("stage shape");
+        stage
+            .validate_schema()
+            .expect_err("forward stage schema must be rejected");
     }
 
     #[test]

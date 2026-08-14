@@ -11,6 +11,9 @@ use automata_ci_auth::{
 };
 use automata_ci_core::{OperationId, RunId, WorkflowId, WorkflowInputKey, canonical_git_ref};
 use automata_ci_store::RepositoryId;
+use automata_ci_workflow_github::{
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS, MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
+};
 use axum::{
     Router,
     body::to_bytes,
@@ -26,10 +29,52 @@ use serde::{
 };
 use uuid::Uuid;
 
-const MAX_REQUEST_BYTES: usize = 128 * 1_024;
+const MAX_REQUEST_BYTES: usize = 131_072;
 const MAX_TARGET_TEXT_BYTES: usize = 1_024;
-const MAX_INPUTS: usize = 25;
-const MAX_INPUT_CHARACTERS: usize = 65_535;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowDispatchApiLimitRejection {
+    RequestBytes,
+    TargetTextBytes,
+    Inputs,
+    InputCharacters,
+}
+
+const fn workflow_dispatch_request_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowDispatchApiLimitRejection> {
+    if observed > MAX_REQUEST_BYTES {
+        return Some(WorkflowDispatchApiLimitRejection::RequestBytes);
+    }
+    None
+}
+
+const fn workflow_dispatch_target_text_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowDispatchApiLimitRejection> {
+    if observed > MAX_TARGET_TEXT_BYTES {
+        return Some(WorkflowDispatchApiLimitRejection::TargetTextBytes);
+    }
+    None
+}
+
+const fn workflow_dispatch_input_count_rejection(
+    observed: usize,
+) -> Option<WorkflowDispatchApiLimitRejection> {
+    if observed > MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS {
+        return Some(WorkflowDispatchApiLimitRejection::Inputs);
+    }
+    None
+}
+
+const fn workflow_dispatch_input_character_rejection(
+    observed: usize,
+) -> Option<WorkflowDispatchApiLimitRejection> {
+    if observed > MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS {
+        return Some(WorkflowDispatchApiLimitRejection::InputCharacters);
+    }
+    None
+}
 
 pub(crate) const WORKFLOW_DISPATCH_PATH: &str =
     "/api/v1/repositories/{repository_id}/workflows/{workflow_id}/dispatches";
@@ -243,7 +288,7 @@ fn validated_inputs(
     inputs: DispatchInputsDocument,
 ) -> Result<BTreeMap<WorkflowInputKey, WorkflowDispatchApiInputValue>, ApiError> {
     let inputs = inputs.0;
-    if inputs.len() > MAX_INPUTS {
+    if workflow_dispatch_input_count_rejection(inputs.len()).is_some() {
         return Err(ApiError::InvalidRequest);
     }
     let mut characters = 0_usize;
@@ -255,8 +300,10 @@ fn validated_inputs(
             characters = characters
                 .checked_add(key.as_str().chars().count())
                 .and_then(|count| count.checked_add(value.character_count()))
-                .filter(|count| *count <= MAX_INPUT_CHARACTERS)
                 .ok_or(ApiError::InvalidRequest)?;
+            if workflow_dispatch_input_character_rejection(characters).is_some() {
+                return Err(ApiError::InvalidRequest);
+            }
             Ok((key, value))
         })
         .collect()
@@ -311,9 +358,12 @@ async fn json_document(request: Request) -> Result<DispatchDocument, ApiError> {
     if !is_json_content_type(request.headers()) {
         return Err(ApiError::UnsupportedMediaType);
     }
-    let body = to_bytes(request.into_body(), MAX_REQUEST_BYTES)
+    let body = to_bytes(request.into_body(), MAX_REQUEST_BYTES + 1)
         .await
         .map_err(|_| ApiError::TooLarge)?;
+    if workflow_dispatch_request_byte_rejection(body.len()).is_some() {
+        return Err(ApiError::TooLarge);
+    }
     serde_json::from_slice(&body).map_err(|_| ApiError::InvalidRequest)
 }
 
@@ -348,7 +398,7 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
 }
 
 fn valid_git_ref(value: &str) -> bool {
-    value.len() <= MAX_TARGET_TEXT_BYTES
+    workflow_dispatch_target_text_byte_rejection(value.len()).is_none()
         && canonical_git_ref(value)
         && ["refs/heads/", "refs/tags/"].into_iter().any(|prefix| {
             value
@@ -411,7 +461,7 @@ impl<'de> Deserialize<'de> for DispatchInputsDocument {
             {
                 let mut inputs = BTreeMap::new();
                 while let Some((key, value)) = map.next_entry()? {
-                    if inputs.len() == MAX_INPUTS {
+                    if workflow_dispatch_input_count_rejection(inputs.len() + 1).is_some() {
                         return Err(M::Error::custom("too many workflow inputs"));
                     }
                     if inputs.insert(key, value).is_some() {
@@ -577,6 +627,76 @@ mod tests {
     const RUN_ID: &str = "44444444-4444-4444-8444-444444444444";
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
     const PATH: &str = "/api/v1/repositories/aaaaaaaa-1111-4111-8111-111111111111/workflows/22222222-2222-4222-8222-222222222222/dispatches";
+
+    #[test]
+    fn workflow_dispatch_request_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_dispatch_request_byte_rejection(MAX_REQUEST_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_request_byte_rejection(MAX_REQUEST_BYTES),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_request_byte_rejection(MAX_REQUEST_BYTES + 1),
+            Some(WorkflowDispatchApiLimitRejection::RequestBytes)
+        );
+    }
+
+    #[test]
+    fn workflow_dispatch_target_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_dispatch_target_text_byte_rejection(MAX_TARGET_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_target_text_byte_rejection(MAX_TARGET_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_target_text_byte_rejection(MAX_TARGET_TEXT_BYTES + 1),
+            Some(WorkflowDispatchApiLimitRejection::TargetTextBytes)
+        );
+    }
+
+    #[test]
+    fn workflow_dispatch_input_count_limit_uses_the_canonical_boundaries() {
+        assert_eq!(
+            workflow_dispatch_input_count_rejection(MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS - 1),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_input_count_rejection(MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_input_count_rejection(MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS + 1),
+            Some(WorkflowDispatchApiLimitRejection::Inputs)
+        );
+    }
+
+    #[test]
+    fn workflow_dispatch_input_character_limit_uses_the_canonical_boundaries() {
+        assert_eq!(
+            workflow_dispatch_input_character_rejection(
+                MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS - 1
+            ),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_input_character_rejection(
+                MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS
+            ),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_input_character_rejection(
+                MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS + 1
+            ),
+            Some(WorkflowDispatchApiLimitRejection::InputCharacters)
+        );
+    }
 
     #[derive(Debug)]
     struct FixedClock;
@@ -758,7 +878,7 @@ mod tests {
                 "{{\"git_ref\":\"refs/heads/release\",\"commit_sha\":\"{SHA}\",\"operation_id\":\"{OPERATION_ID}\",\"inputs\":{{\"same\":true,\"same\":false}}}}"
             ),
         ];
-        let excessive_inputs = (0..=MAX_INPUTS)
+        let excessive_inputs = (0..=MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS)
             .map(|index| (format!("input_{index}"), json!("value")))
             .collect::<serde_json::Map<_, _>>();
         invalid_bodies.push(
@@ -789,7 +909,7 @@ mod tests {
             json!({
                 "git_ref": "refs/heads/release", "commit_sha": SHA,
                 "operation_id": OPERATION_ID,
-                "inputs": {"oversized": "x".repeat(MAX_INPUT_CHARACTERS)}
+                "inputs": {"oversized": "x".repeat(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS)}
             })
             .to_string(),
         );

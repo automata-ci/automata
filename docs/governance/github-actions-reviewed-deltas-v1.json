@@ -1,0 +1,60 @@
+{
+  "reviewed_deltas": [
+    {
+      "categories": [
+        "action_runtimes",
+        "contexts",
+        "default_variables",
+        "events",
+        "limits",
+        "permissions",
+        "syntax",
+        "variables"
+      ],
+      "decision": "approved-baseline",
+      "id": "initial-reference-lock-2026-08-13",
+      "reference_ids": [
+        "github-docs-contexts",
+        "github-docs-events",
+        "github-docs-limits",
+        "github-docs-variables",
+        "github-docs-workflow-syntax",
+        "runner-constants",
+        "runner-node-action-handler",
+        "runner-pipeline-workflow-schema",
+        "runner-workflow-parser-schema"
+      ],
+      "reviewed_at": "2026-08-13",
+      "reviewers": [
+        "foundation-integration-owner",
+        "workflow-language-owner"
+      ],
+      "runner_baseline": {
+        "baseline_commit": "98aabcd429c4e8402406c56ce2d26387fed3b9ce",
+        "baseline_release": "v2.336.0",
+        "javascript_runtime": "node24-24.18.0",
+        "release_url": "https://github.com/actions/runner/releases/tag/v2.336.0",
+        "repository": "actions/runner"
+      },
+      "source_revision": "github/docs@18a2a21176f910cec8cace6a9027158303161929+actions/runner@98aabcd429c4e8402406c56ce2d26387fed3b9ce"
+    },
+    {
+      "categories": [
+        "default_variables"
+      ],
+      "decision": "approved-delta-without-baseline-advance",
+      "id": "runner-artifacts-environment-files-2026-08-07",
+      "reference_ids": [
+        "runner-constants"
+      ],
+      "reviewed_at": "2026-08-07",
+      "reviewers": [
+        "results-owner",
+        "runtime-owner"
+      ],
+      "runner_baseline": null,
+      "source_revision": "actions/runner@35e45850b519df66a669e2c91e0917804a33d0c7"
+    }
+  ],
+  "schema_version": 1
+}

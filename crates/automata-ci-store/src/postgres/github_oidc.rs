@@ -12,7 +12,10 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::{PostgresStore, runtime_authority::github_manifest_origin_is_closed};
+use super::{
+    PostgresStore, durable_schema::current_durable_schemas,
+    runtime_authority::github_manifest_origin_is_closed,
+};
 use crate::github_oidc::github_oidc_claim_evidence_digest;
 use crate::{
     GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
@@ -650,6 +653,7 @@ async fn lock_current_execution(
     let execution = request.execution();
     let lease = execution.lease();
     let session = execution.session();
+    let schemas = current_durable_schemas();
     let row = sqlx::query(
         r#"
         SELECT repository.tenant_id, repository.id AS repository_id,
@@ -780,8 +784,8 @@ async fn lock_current_execution(
           AND attempt.lifecycle IN ('leased', 'preparing', 'running')
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 1
-          AND job.job_ir_schema = 1
+          AND job.admission_epoch = $25
+          AND job.job_ir_schema = $19
           AND job.job_ir_schema = $13
           AND job.job_ir_size_bytes = $14
           AND job.job_ir_digest = $15
@@ -789,8 +793,8 @@ async fn lock_current_execution(
           AND job.requirements @> '{"features":["automata.core/oidc-tokens@v1"]}'::jsonb
           AND run.id = $12
           AND run.workflow_id = $17
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $25
+          AND run.plan_schema = $20
           AND run.status IN ('queued', 'in_progress')
           AND (
               concrete.invocation_id <> marker.root_invocation_id
@@ -834,7 +838,7 @@ async fn lock_current_execution(
               OR origin.repository_visibility = 'private'
               AND origin.private_source_authority_id IS NOT NULL
           )
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $21
           AND marker.state IN ('pending', 'active')
           AND automata_logical_workflow_invocation_published(
               run.id, concrete.invocation_id
@@ -842,7 +846,7 @@ async fn lock_current_execution(
           AND automata_reusable_workflow_oidc_permission_authorized(
               run.id, concrete.invocation_id
           )
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $22
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
@@ -850,18 +854,18 @@ async fn lock_current_execution(
               preparation.activation_input_digest
           AND preparation_claim.state = 'prepared'
           AND publication.condition_matched
-          AND publication.job_ir_version = 1
-          AND publication.runtime_context_schema = 1
+          AND publication.job_ir_version = $23
+          AND publication.runtime_context_schema = $24
           AND manifest.authority_profile = 'standard'
           AND logical_job.authority_profile = 'standard'
           AND preparation_claim.authority_profile = 'standard'
           AND preparation.authority_profile = 'standard'
           AND publication.authority_profile = 'standard'
-          AND instance.job_ir_version = 1
+          AND instance.job_ir_version = $23
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND concrete.runtime_context_schema = 1
+          AND concrete.runtime_context_schema = $24
           AND concrete.requirements = job.requirements
           AND materialization.state = 'materialized'
           AND materialization.authority_profile = 'standard'
@@ -876,7 +880,7 @@ async fn lock_current_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 1
+          AND session.job_ir_schema = $19
           AND session.capability_snapshot @> '{"features":["automata.core/oidc-tokens@v1"]}'::jsonb
           AND session.disconnected_at_ms IS NULL
         FOR SHARE OF attempt, job, run, repository, workflow, snapshot, marker,
@@ -904,6 +908,13 @@ async fn lock_current_execution(
     .bind(execution.job_ir().object_key().as_str())
     .bind(execution.workflow_id().as_uuid())
     .bind(execution.github_repository_name().as_str())
+    .bind(schemas.job_ir_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(oidc_operation_error)?
@@ -1131,6 +1142,7 @@ async fn insert_authority(
     policy: &DerivedAuthorityPolicy,
     fresh_observed_at: i64,
 ) -> Result<bool, GithubOidcStoreError> {
+    let schemas = current_durable_schemas();
     let execution = request.execution();
     let lease = execution.lease();
     let session = execution.session();
@@ -1161,7 +1173,7 @@ async fn insert_authority(
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
-            1, 1, $24, $25, $26, 1, $27, $28, $29, 'id-token:write',
+            $48, $49, $24, $25, $26, $50, $27, $28, $29, 'id-token:write',
             $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40,
             $41, $42, $43, $44, $45, $46, $47
         )
@@ -1240,6 +1252,9 @@ async fn insert_authority(
     .bind(seconds_i64(proposal.expires_at_seconds())?)
     .bind(proposal.request_bearer_sha256().as_bytes().as_slice())
     .bind(fresh_observed_at)
+    .bind(schemas.admission_epoch_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.job_ir_i32)
     .execute(&mut **transaction)
     .await
     .map_err(oidc_operation_error)?;

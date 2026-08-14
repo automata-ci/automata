@@ -3371,6 +3371,76 @@ async fn exact_delivery_operation_is_reserved_and_replayed_without_values() -> T
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn delivery_operation_replay_rejects_a_forward_authority_schema() -> TestResult {
+    run_with_database(|database| async move {
+        let binding = BindingIdentity::fresh();
+        let execution = seed_current_execution(&database, vec![binding]).await?;
+        seed_authority_state(&database, &execution, false, true).await?;
+        let operation_id = Uuid::new_v4();
+        let verifier = digest(0xd5);
+        database
+            .store()
+            .resolve_managed_secret_authority(execution.delivery_request(
+                121_000,
+                operation_id,
+                verifier,
+            )?)
+            .await?;
+
+        sqlx::query(
+            r"
+            ALTER TABLE managed_secret_delivery_operations
+            DISABLE TRIGGER managed_secret_delivery_operations_guard
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            ALTER TABLE managed_secret_delivery_operations
+            DROP CONSTRAINT managed_secret_delivery_operations_authority_schema
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE managed_secret_delivery_operations
+            SET authority_evidence_schema = 2
+            WHERE tenant_id = $1 AND operation_id = $2
+            ",
+        )
+        .bind(&execution.tenant)
+        .bind(operation_id)
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            ALTER TABLE managed_secret_delivery_operations
+            ENABLE TRIGGER managed_secret_delivery_operations_guard
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+
+        assert_eq!(
+            database
+                .store()
+                .resolve_managed_secret_authority(execution.authenticated_delivery_request(
+                    121_100,
+                    operation_id,
+                    verifier,
+                )?)
+                .await,
+            Err(ManagedSecretAuthorityStoreError::CorruptData),
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn authenticated_delivery_requires_the_current_runner_machine() -> TestResult {
     run_with_database(|database| async move {
         let binding = BindingIdentity::fresh();

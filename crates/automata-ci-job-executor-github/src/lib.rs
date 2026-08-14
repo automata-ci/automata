@@ -7,8 +7,10 @@
 //! tool paths, clocks, and operation identities remain explicit object-safe ports.
 
 mod action;
+mod action_content;
 mod adapter;
 mod config;
+mod container_runtime;
 mod content;
 mod environment;
 mod error;
@@ -17,6 +19,7 @@ mod output;
 mod port;
 mod prepared;
 mod secret;
+mod shell;
 
 pub use action::{
     CheckedOutLocalActionPreparer, LocalActionDefinitionPaths, LocalActionPreparationRequest,
@@ -29,9 +32,7 @@ pub use error::{
     ActionPreparationError, ActionPreparationErrorKind, ExecutorAdapterError, PortError,
     PortErrorKind,
 };
-pub use executor::{
-    GithubJobExecutor, GithubJobExecutorPorts, WindowsScriptShell, windows_script_arguments,
-};
+pub use executor::{GithubJobExecutor, GithubJobExecutorPorts};
 pub use port::{
     ActionPreparationPort, ActionPreparationRequest, ContextEnvironmentVariable,
     DeterministicOperationIds, ExecutionClock, ExecutionOperationIds, GithubContextPort,
@@ -49,5 +50,6 @@ pub use prepared::{
 };
 pub use secret::{
     EphemeralJobSecret, EphemeralJobSecrets, EphemeralJobSecretsError,
-    MAX_EPHEMERAL_JOB_SECRET_BYTES, MAX_EPHEMERAL_JOB_SECRETS,
+    MAX_EPHEMERAL_JOB_SECRET_BYTES, MAX_EPHEMERAL_JOB_SECRETS, validate_ephemeral_job_secret_bytes,
 };
+pub use shell::{WindowsScriptShell, windows_script_arguments};

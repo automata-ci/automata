@@ -256,6 +256,8 @@ struct MismatchedPublishedLeaseOffer {
     runtime_authorities: JobRuntimeAuthorities,
     slot: u16,
     created_at: UnixMillis,
+    outer_schema: u16,
+    inner_schema: u16,
     extra_field: bool,
     nested_extra_field: bool,
 }
@@ -272,7 +274,7 @@ impl RunnerLeaseOfferRepository for MismatchedPublishedLeaseOffer {
             "managed_secret_bindings": ManagedSecretBindingOverlay::empty(&self.lease),
             "protocol_version": request.protocol_version().get(),
             "runtime_authorities": self.runtime_authorities,
-            "schema": 1,
+            "schema": self.inner_schema,
             "slot": self.slot,
         });
         if self.extra_field {
@@ -286,8 +288,11 @@ impl RunnerLeaseOfferRepository for MismatchedPublishedLeaseOffer {
             request.request().session(),
             OperationId::new(),
             RunnerOperationKind::new("automata.runner.lease-offer.v1").expect("command kind"),
-            RunnerCommandPayload::new(DocumentSchema::new(1).expect("schema"), payload)
-                .expect("command payload"),
+            RunnerCommandPayload::new(
+                DocumentSchema::new(self.outer_schema).expect("schema"),
+                payload,
+            )
+            .expect("command payload"),
             self.created_at,
         );
         let offer_valid_until = self
@@ -928,7 +933,7 @@ async fn lease_offer_adapter_maps_only_draining_races_to_unavailable() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn recovered_offer_payload_must_match_its_publication_columns() {
+async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_columns() {
     let runner_id = RunnerId::new();
     let fence = RunnerSessionFence::new(
         RunnerSessionId::new(),
@@ -1004,6 +1009,8 @@ async fn recovered_offer_payload_must_match_its_publication_columns() {
             runtime_authorities: runtime_authorities(&expected_job, &lease),
             slot: 3,
             created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 1,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -1013,6 +1020,8 @@ async fn recovered_offer_payload_must_match_its_publication_columns() {
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 1,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -1022,6 +1031,8 @@ async fn recovered_offer_payload_must_match_its_publication_columns() {
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 1,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -1031,6 +1042,8 @@ async fn recovered_offer_payload_must_match_its_publication_columns() {
             runtime_authorities: runtime_authorities(&expected_job, &mismatched_lease),
             slot: 2,
             created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 1,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -1040,6 +1053,8 @@ async fn recovered_offer_payload_must_match_its_publication_columns() {
             runtime_authorities: runtime_authorities(&expected_job, &lease),
             slot: 2,
             created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 1,
             extra_field: true,
             nested_extra_field: false,
         },
@@ -1049,6 +1064,8 @@ async fn recovered_offer_payload_must_match_its_publication_columns() {
             runtime_authorities: runtime_authorities(&expected_job, &lease),
             slot: 2,
             created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 1,
             extra_field: false,
             nested_extra_field: true,
         },
@@ -1063,6 +1080,41 @@ async fn recovered_offer_payload_must_match_its_publication_columns() {
             ),
             slot: 2,
             created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 1,
+            extra_field: false,
+            nested_extra_field: false,
+        },
+        MismatchedPublishedLeaseOffer {
+            job: expected_job.clone(),
+            lease: lease.clone(),
+            runtime_authorities: runtime_authorities(&expected_job, &lease),
+            slot: 2,
+            created_at: UnixMillis::new(20),
+            outer_schema: 2,
+            inner_schema: 1,
+            extra_field: false,
+            nested_extra_field: false,
+        },
+        MismatchedPublishedLeaseOffer {
+            job: expected_job.clone(),
+            lease: lease.clone(),
+            runtime_authorities: runtime_authorities(&expected_job, &lease),
+            slot: 2,
+            created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 0,
+            extra_field: false,
+            nested_extra_field: false,
+        },
+        MismatchedPublishedLeaseOffer {
+            job: expected_job.clone(),
+            lease: lease.clone(),
+            runtime_authorities: runtime_authorities(&expected_job, &lease),
+            slot: 2,
+            created_at: UnixMillis::new(20),
+            outer_schema: 1,
+            inner_schema: 2,
             extra_field: false,
             nested_extra_field: false,
         },

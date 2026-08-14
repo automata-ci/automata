@@ -14,10 +14,11 @@ use crate::{
     ClaimGithubRuntimeAuthorityRevocation, ClaimedGithubRuntimeAuthorityMint,
     ClaimedGithubRuntimeAuthorityRevocation, CommitGithubRuntimeAuthority,
     ConfirmGithubRuntimeAuthorityRevocation, DeferGithubRuntimeAuthorityRevocation,
-    GithubRepositoryId, GithubRepositoryName, GithubRuntimeAuthorityActivationSelectionTail,
-    GithubRuntimeAuthorityClaimFence, GithubRuntimeAuthorityCommitDisposition,
-    GithubRuntimeAuthorityCorruptionKind, GithubRuntimeAuthorityEnvelopeMetadata,
-    GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityInspection, GithubRuntimeAuthorityKey,
+    GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GithubRepositoryId, GithubRepositoryName,
+    GithubRuntimeAuthorityActivationSelectionTail, GithubRuntimeAuthorityClaimFence,
+    GithubRuntimeAuthorityCommitDisposition, GithubRuntimeAuthorityCorruptionKind,
+    GithubRuntimeAuthorityEnvelopeMetadata, GithubRuntimeAuthorityIdentity,
+    GithubRuntimeAuthorityInspection, GithubRuntimeAuthorityKey,
     GithubRuntimeAuthorityMaterializationSelectionTail, GithubRuntimeAuthorityNamespace,
     GithubRuntimeAuthorityPreparationSelectionTail, GithubRuntimeAuthorityReceipt,
     GithubRuntimeAuthorityReconciliationReport, GithubRuntimeAuthorityRepository,
@@ -3376,8 +3377,7 @@ async fn lock_exact_authority_graph(
           AND manifest.runner_policy_object_key = 'github/runner-policy/v1/'
               || pg_catalog.encode(manifest.runner_policy_digest, 'hex') || '.json'
           AND manifest.runner_policy_size_bytes = pg_catalog.octet_length(policy.canonical_policy)
-          AND manifest.runner_policy_media_type =
-              'application/vnd.automata.github-runner-policy+json'
+          AND manifest.runner_policy_media_type = $14
           AND policy.state = 'sealed'
           AND logical_job.runtime_policy_revision = pin.policy_revision
           AND logical_job.runtime_policy_digest = pin.policy_digest
@@ -3421,6 +3421,7 @@ async fn lock_exact_authority_graph(
     .bind(identity.app_key_spki_sha256().as_bytes().as_slice())
     .bind(identity.configuration_fingerprint().as_bytes().as_slice())
     .bind(identity.job_id().as_uuid())
+    .bind(GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)?;

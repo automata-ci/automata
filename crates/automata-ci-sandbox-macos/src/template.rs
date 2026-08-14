@@ -20,6 +20,10 @@ const MAX_ENTITLEMENTS_BYTES: usize = 16 * 1024;
 const MIN_JOB_UID: u32 = 500;
 const VIRTUALIZATION_ENTITLEMENT: &str = "com.apple.security.virtualization";
 
+const fn current_template_schema(schema: u16) -> bool {
+    schema == TEMPLATE_SCHEMA_VERSION
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedTemplate {
     pub(crate) profile_id: EnvironmentProfileId,
@@ -83,7 +87,7 @@ pub(crate) fn load_template(
     let hardware_model = BASE64
         .decode(&raw.hardware_model_base64)
         .map_err(|_| invalid())?;
-    if raw.schema_version != TEMPLATE_SCHEMA_VERSION
+    if !current_template_schema(raw.schema_version)
         || raw.architecture != "arm64"
         || raw.guest_protocol != GUEST_PROTOCOL_VERSION
         || raw.guest_port <= 1_024
@@ -284,7 +288,13 @@ fn invalid() -> io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::supported_macos_version;
+    use super::{TEMPLATE_SCHEMA_VERSION, current_template_schema, supported_macos_version};
+
+    #[test]
+    fn template_manifest_accepts_only_the_current_schema() {
+        assert!(current_template_schema(TEMPLATE_SCHEMA_VERSION));
+        assert!(!current_template_schema(TEMPLATE_SCHEMA_VERSION + 1));
+    }
 
     #[test]
     fn templates_require_macos_15_or_newer() {

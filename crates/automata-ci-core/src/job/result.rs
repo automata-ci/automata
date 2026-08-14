@@ -8,7 +8,10 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use super::{MAX_JOB_OUTPUT_DEFINITIONS, StepId, instance::validate_logical_name};
+use super::{
+    MAX_JOB_OUTPUT_DEFINITIONS, StepId,
+    instance::{job_output_definition_rejection, validate_logical_name},
+};
 use crate::{AttemptId, CORE_SCHEMA_VERSION, OutputSensitivity, UnixMillis};
 
 /// Maximum approximate UTF-16 bytes across the public outputs of one job.
@@ -18,7 +21,7 @@ use crate::{AttemptId, CORE_SCHEMA_VERSION, OutputSensitivity, UnixMillis};
 pub const MAX_JOB_RESULT_OUTPUT_UTF16_BYTES: usize = 1_048_576;
 
 /// Maximum UTF-8 bytes retained across step summaries and annotations in one job result.
-pub const MAX_JOB_RESULT_ATTACHMENT_BYTES: usize = 8 * 1_048_576;
+pub const MAX_JOB_RESULT_ATTACHMENT_BYTES: usize = 8_388_608;
 
 /// Maximum structured annotations retained across one job result.
 pub const MAX_JOB_RESULT_ANNOTATIONS: usize = 4_096;
@@ -29,6 +32,57 @@ pub const MAX_STEP_ANNOTATION_PROPERTIES: usize = 64;
 /// Maximum UTF-8 bytes retained in one summary, annotation message, or property value.
 pub const MAX_STEP_ATTACHMENT_TEXT_BYTES: usize = 1_048_576;
 const MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JobResultLimitRejection {
+    OutputUtf16Bytes,
+    AttachmentBytes,
+    Annotations,
+    AnnotationProperties,
+    StepAttachmentTextBytes,
+    AnnotationPropertyNameBytes,
+}
+
+const fn job_result_output_byte_rejection(observed: usize) -> Option<JobResultLimitRejection> {
+    if observed > MAX_JOB_RESULT_OUTPUT_UTF16_BYTES {
+        return Some(JobResultLimitRejection::OutputUtf16Bytes);
+    }
+    None
+}
+const fn job_result_attachment_byte_rejection(observed: usize) -> Option<JobResultLimitRejection> {
+    if observed > MAX_JOB_RESULT_ATTACHMENT_BYTES {
+        return Some(JobResultLimitRejection::AttachmentBytes);
+    }
+    None
+}
+const fn job_result_annotation_count_rejection(observed: usize) -> Option<JobResultLimitRejection> {
+    if observed > MAX_JOB_RESULT_ANNOTATIONS {
+        return Some(JobResultLimitRejection::Annotations);
+    }
+    None
+}
+const fn step_annotation_property_count_rejection(
+    observed: usize,
+) -> Option<JobResultLimitRejection> {
+    if observed > MAX_STEP_ANNOTATION_PROPERTIES {
+        return Some(JobResultLimitRejection::AnnotationProperties);
+    }
+    None
+}
+const fn step_attachment_text_byte_rejection(observed: usize) -> Option<JobResultLimitRejection> {
+    if observed > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+        return Some(JobResultLimitRejection::StepAttachmentTextBytes);
+    }
+    None
+}
+const fn step_annotation_property_name_byte_rejection(
+    observed: usize,
+) -> Option<JobResultLimitRejection> {
+    if observed > MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES {
+        return Some(JobResultLimitRejection::AnnotationPropertyNameBytes);
+    }
+    None
+}
 
 /// Terminal conclusion produced by a runner.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -387,7 +441,7 @@ impl JobResultOutput {
             }
             (OutputSensitivity::Public, Some(value)) => {
                 let bytes = utf16_bytes(value)?;
-                if bytes > MAX_JOB_RESULT_OUTPUT_UTF16_BYTES {
+                if job_result_output_byte_rejection(bytes).is_some() {
                     return Err(JobResultValidationError::OutputValueTooLarge {
                         maximum: MAX_JOB_RESULT_OUTPUT_UTF16_BYTES,
                     });
@@ -510,7 +564,7 @@ impl JobResult {
             });
         }
 
-        if self.outputs.len() > MAX_JOB_OUTPUT_DEFINITIONS {
+        if job_output_definition_rejection(self.outputs.len()).is_some() {
             return Err(JobResultValidationError::TooManyOutputs {
                 maximum: MAX_JOB_OUTPUT_DEFINITIONS,
             });
@@ -526,7 +580,7 @@ impl JobResult {
                         maximum: MAX_JOB_RESULT_OUTPUT_UTF16_BYTES,
                     },
                 )?;
-                if output_bytes > MAX_JOB_RESULT_OUTPUT_UTF16_BYTES {
+                if job_result_output_byte_rejection(output_bytes).is_some() {
                     return Err(JobResultValidationError::OutputValuesTooLarge {
                         maximum: MAX_JOB_RESULT_OUTPUT_UTF16_BYTES,
                     });
@@ -561,14 +615,15 @@ impl JobResult {
                 .ok_or(JobResultValidationError::TooManyStepAnnotations {
                     maximum: MAX_JOB_RESULT_ANNOTATIONS,
                 })?;
-            if annotation_count > MAX_JOB_RESULT_ANNOTATIONS {
+            if job_result_annotation_count_rejection(annotation_count).is_some() {
                 return Err(JobResultValidationError::TooManyStepAnnotations {
                     maximum: MAX_JOB_RESULT_ANNOTATIONS,
                 });
             }
             for annotation in step.annotations() {
                 charge_attachment_text(&mut attachment_bytes, annotation.message())?;
-                if annotation.properties().len() > MAX_STEP_ANNOTATION_PROPERTIES {
+                if step_annotation_property_count_rejection(annotation.properties().len()).is_some()
+                {
                     return Err(JobResultValidationError::TooManyStepAnnotationProperties {
                         maximum: MAX_STEP_ANNOTATION_PROPERTIES,
                     });
@@ -576,7 +631,8 @@ impl JobResult {
                 let mut property_names = BTreeSet::new();
                 for property in annotation.properties() {
                     if property.name().is_empty()
-                        || property.name().len() > MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES
+                        || step_annotation_property_name_byte_rejection(property.name().len())
+                            .is_some()
                         || property.name().chars().any(char::is_control)
                         || !property_names.insert(property.name().to_ascii_lowercase())
                     {
@@ -592,7 +648,7 @@ impl JobResult {
 }
 
 fn charge_attachment_text(total: &mut usize, value: &str) -> Result<(), JobResultValidationError> {
-    if value.len() > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+    if step_attachment_text_byte_rejection(value.len()).is_some() {
         return Err(JobResultValidationError::StepAttachmentTextTooLarge {
             maximum: MAX_STEP_ATTACHMENT_TEXT_BYTES,
         });
@@ -602,7 +658,7 @@ fn charge_attachment_text(total: &mut usize, value: &str) -> Result<(), JobResul
             maximum: MAX_JOB_RESULT_ATTACHMENT_BYTES,
         },
     )?;
-    if *total > MAX_JOB_RESULT_ATTACHMENT_BYTES {
+    if job_result_attachment_byte_rejection(*total).is_some() {
         return Err(JobResultValidationError::StepAttachmentsTooLarge {
             maximum: MAX_JOB_RESULT_ATTACHMENT_BYTES,
         });
@@ -695,4 +751,104 @@ pub enum JobResultValidationError {
     /// An annotation property name was empty, duplicated, unbounded, or unsafe.
     #[error("step annotation property name is invalid")]
     InvalidStepAnnotationProperty,
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn job_result_output_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            job_result_output_byte_rejection(MAX_JOB_RESULT_OUTPUT_UTF16_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            job_result_output_byte_rejection(MAX_JOB_RESULT_OUTPUT_UTF16_BYTES),
+            None
+        );
+        assert_eq!(
+            job_result_output_byte_rejection(MAX_JOB_RESULT_OUTPUT_UTF16_BYTES + 1),
+            Some(JobResultLimitRejection::OutputUtf16Bytes)
+        );
+    }
+    #[test]
+    fn job_result_attachment_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            job_result_attachment_byte_rejection(MAX_JOB_RESULT_ATTACHMENT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            job_result_attachment_byte_rejection(MAX_JOB_RESULT_ATTACHMENT_BYTES),
+            None
+        );
+        assert_eq!(
+            job_result_attachment_byte_rejection(MAX_JOB_RESULT_ATTACHMENT_BYTES + 1),
+            Some(JobResultLimitRejection::AttachmentBytes)
+        );
+    }
+    #[test]
+    fn job_result_annotation_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            job_result_annotation_count_rejection(MAX_JOB_RESULT_ANNOTATIONS - 1),
+            None
+        );
+        assert_eq!(
+            job_result_annotation_count_rejection(MAX_JOB_RESULT_ANNOTATIONS),
+            None
+        );
+        assert_eq!(
+            job_result_annotation_count_rejection(MAX_JOB_RESULT_ANNOTATIONS + 1),
+            Some(JobResultLimitRejection::Annotations)
+        );
+    }
+    #[test]
+    fn step_annotation_property_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            step_annotation_property_count_rejection(MAX_STEP_ANNOTATION_PROPERTIES - 1),
+            None
+        );
+        assert_eq!(
+            step_annotation_property_count_rejection(MAX_STEP_ANNOTATION_PROPERTIES),
+            None
+        );
+        assert_eq!(
+            step_annotation_property_count_rejection(MAX_STEP_ANNOTATION_PROPERTIES + 1),
+            Some(JobResultLimitRejection::AnnotationProperties)
+        );
+    }
+    #[test]
+    fn step_attachment_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            step_attachment_text_byte_rejection(MAX_STEP_ATTACHMENT_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            step_attachment_text_byte_rejection(MAX_STEP_ATTACHMENT_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            step_attachment_text_byte_rejection(MAX_STEP_ATTACHMENT_TEXT_BYTES + 1),
+            Some(JobResultLimitRejection::StepAttachmentTextBytes)
+        );
+    }
+    #[test]
+    fn step_annotation_property_name_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            step_annotation_property_name_byte_rejection(
+                MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES - 1
+            ),
+            None
+        );
+        assert_eq!(
+            step_annotation_property_name_byte_rejection(MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES),
+            None
+        );
+        assert_eq!(
+            step_annotation_property_name_byte_rejection(
+                MAX_STEP_ANNOTATION_PROPERTY_NAME_BYTES + 1
+            ),
+            Some(JobResultLimitRejection::AnnotationPropertyNameBytes)
+        );
+    }
 }

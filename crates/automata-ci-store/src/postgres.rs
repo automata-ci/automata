@@ -24,6 +24,7 @@ use crate::{
 
 mod admission;
 mod conformance;
+mod durable_schema;
 mod g1;
 mod github_checks;
 mod github_job_runtime_authority;
@@ -223,7 +224,7 @@ impl CurrentAttemptOutputSafety {
             } else {
                 "repository_policy"
             },
-            output_safety_schema: 1,
+            output_safety_schema: crate::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA,
         })
     }
 }
@@ -240,7 +241,7 @@ const fn valid_raw_log_policy(
     disposition: &str,
     schema: i32,
 ) -> bool {
-    schema == 1
+    crate::human_output_publication_safety_schema_is_current(schema)
         && matches!(
             exposure,
             SecretExposureClass::Secretless

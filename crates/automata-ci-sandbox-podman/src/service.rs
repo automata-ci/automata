@@ -779,3 +779,41 @@ const fn parse_protocol(value: &str) -> Option<ServiceTransportProtocol> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_execution::{OperationId, SandboxGeneration};
+
+    use super::*;
+
+    #[test]
+    fn service_manifest_reader_rejects_noncurrent_schemas() {
+        let names = ResourceNames::for_create(
+            OperationId::new(),
+            SandboxGeneration::new(1).expect("generation"),
+        );
+        let mut manifest = json!({
+            "schema": MANIFEST_SCHEMA,
+            "handle": names.handle().opaque(),
+            "fingerprint": "0".repeat(64),
+            "network": names.network(),
+            "aggregate_pids": 1,
+            "proxy_container": names.service_proxy(),
+            "proxy_identifier": null,
+            "proxy_image": null,
+            "proxy_transition": false,
+            "services": [],
+        });
+        let current = serde_json::to_vec(&manifest).expect("current manifest");
+        ServiceManifest::decode(&current, &names).expect("decode current manifest");
+
+        for schema in [0, MANIFEST_SCHEMA.checked_add(1).expect("test schema")] {
+            manifest["schema"] = json!(schema);
+            let bytes = serde_json::to_vec(&manifest).expect("noncurrent manifest");
+            assert!(
+                ServiceManifest::decode(&bytes, &names).is_none(),
+                "accepted manifest schema {schema}"
+            );
+        }
+    }
+}

@@ -32,11 +32,22 @@ use crate::{
 };
 
 /// Canonical content type for a protobuf-encoded current job runtime context.
-pub const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
-    "application/vnd.automata.job-runtime-context.protobuf";
+pub use automata_ci_core::JOB_RUNTIME_CONTEXT_MEDIA_TYPE;
 
-const MAX_JOB_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_JOB_CONTENT_BYTES: usize = 16_777_216;
 const DEFAULT_GITHUB_JOB_TIMEOUT_SECONDS: u32 = 360 * 60;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogicalJobProjectionLimitRejection {
+    JobContentBytes,
+}
+
+const fn job_content_byte_rejection(observed: usize) -> Option<LogicalJobProjectionLimitRejection> {
+    if observed > MAX_JOB_CONTENT_BYTES {
+        return Some(LogicalJobProjectionLimitRejection::JobContentBytes);
+    }
+    None
+}
 
 /// Borrowed immutable inputs for one GitHub logical-job projection.
 pub struct ProjectGithubLogicalJobRequest<'a> {
@@ -956,8 +967,13 @@ fn valid_action_revision(value: &str) -> bool {
 fn encode_runtime_context(
     context: &automata_ci_core::JobRuntimeContext,
 ) -> Result<Vec<u8>, LogicalJobProjectionError> {
-    automata_ci_protocol_protobuf::encode_job_runtime_context(context, &projection_limits())
-        .map_err(LogicalJobProjectionError::RuntimeContextEncoding)
+    let encoded =
+        automata_ci_protocol_protobuf::encode_job_runtime_context(context, &projection_limits())
+            .map_err(LogicalJobProjectionError::RuntimeContextEncoding)?;
+    if job_content_byte_rejection(encoded.len()).is_some() {
+        return Err(LogicalJobProjectionError::RuntimeContextTooLarge);
+    }
+    Ok(encoded)
 }
 
 fn projection_limits() -> ProtocolLimits {
@@ -1092,9 +1108,29 @@ pub enum LogicalJobProjectionError {
     /// Canonical runtime-context protobuf encoding failed.
     #[error("canonical runtime-context encoding failed")]
     RuntimeContextEncoding(#[source] automata_ci_protocol_protobuf::EncodeError),
+    /// Canonical runtime-context bytes exceed the job-content ceiling.
+    #[error("canonical runtime-context exceeds the job-content limit")]
+    RuntimeContextTooLarge,
     /// The projected current `JobIR` violates a domain invariant.
     #[error("projected current JobIR is invalid")]
     InvalidJobIr(#[source] JobValidationError),
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        LogicalJobProjectionLimitRejection, MAX_JOB_CONTENT_BYTES, job_content_byte_rejection,
+    };
+
+    #[test]
+    fn job_content_byte_limit_has_exact_boundaries() {
+        assert_eq!(job_content_byte_rejection(MAX_JOB_CONTENT_BYTES - 1), None);
+        assert_eq!(job_content_byte_rejection(MAX_JOB_CONTENT_BYTES), None);
+        assert_eq!(
+            job_content_byte_rejection(MAX_JOB_CONTENT_BYTES + 1),
+            Some(LogicalJobProjectionLimitRejection::JobContentBytes)
+        );
+    }
 }
 
 #[cfg(test)]

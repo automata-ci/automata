@@ -498,23 +498,24 @@ pub use value::{
 };
 pub use web::{
     DEFAULT_HUMAN_LOG_SEGMENT_PAGE_SIZE, DEFAULT_HUMAN_PAGE_SIZE, HUMAN_JOB_RESULT_MEDIA_TYPE,
-    HUMAN_LOG_SEGMENT_MEDIA_TYPE, HumanArtifactBlock, HumanArtifactDownload, HumanArtifactId,
-    HumanArtifactScope, HumanArtifactSummary, HumanAuthorizationTarget, HumanGitCommitId,
-    HumanGitRef, HumanJob, HumanJobAttempt, HumanJobDetail, HumanJobNavigation, HumanJobScope,
-    HumanLogSegment, HumanLogSegmentCursor, HumanLogSegmentPage, HumanLogSegmentPageDirection,
-    HumanLogSegmentPageSize, HumanLogSegmentQuery, HumanLogStream, HumanOutputPublication,
-    HumanPageSize, HumanRawLogDisposition, HumanReadValueError, HumanRepository,
-    HumanRepositoryCursor, HumanRepositoryListQuery, HumanRepositoryPage, HumanRun,
-    HumanRunConclusion, HumanRunCursor, HumanRunDetail, HumanRunListQuery, HumanRunPage,
-    HumanRunPageDirection, HumanRunPublication, HumanRunScope, HumanRunStatusFilter, HumanRunner,
-    HumanTerminalResult, HumanWorkflow, HumanWorkflowCursor, HumanWorkflowListQuery,
-    HumanWorkflowPage, HumanWorkflowProjectedName, HumanWorkflowReadRepository,
-    MAX_HUMAN_LOG_SEGMENT_PAGE_SIZE, MAX_HUMAN_PAGE_SIZE, RepositoryCoordinate,
+    HUMAN_LOG_SEGMENT_MEDIA_TYPE, HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, HumanArtifactBlock,
+    HumanArtifactDownload, HumanArtifactId, HumanArtifactScope, HumanArtifactSummary,
+    HumanAuthorizationTarget, HumanGitCommitId, HumanGitRef, HumanJob, HumanJobAttempt,
+    HumanJobDetail, HumanJobNavigation, HumanJobScope, HumanLogSegment, HumanLogSegmentCursor,
+    HumanLogSegmentPage, HumanLogSegmentPageDirection, HumanLogSegmentPageSize,
+    HumanLogSegmentQuery, HumanLogStream, HumanOutputPublication, HumanPageSize,
+    HumanRawLogDisposition, HumanReadValueError, HumanRepository, HumanRepositoryCursor,
+    HumanRepositoryListQuery, HumanRepositoryPage, HumanRun, HumanRunConclusion, HumanRunCursor,
+    HumanRunDetail, HumanRunListQuery, HumanRunPage, HumanRunPageDirection, HumanRunPublication,
+    HumanRunScope, HumanRunStatusFilter, HumanRunner, HumanTerminalResult, HumanWorkflow,
+    HumanWorkflowCursor, HumanWorkflowListQuery, HumanWorkflowPage, HumanWorkflowProjectedName,
+    HumanWorkflowReadRepository, MAX_HUMAN_LOG_SEGMENT_PAGE_SIZE, MAX_HUMAN_PAGE_SIZE,
+    RepositoryCoordinate, human_output_publication_safety_schema_is_current,
 };
 pub use workflow_rerun::{
     MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RerunWorkflow, RerunWorkflowByName,
     WorkflowRerunReceipt, WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
-    WorkflowRerunValueError,
+    WorkflowRerunValueError, next_workflow_rerun_attempt,
 };
 pub use workflow_runtime_policy::{
     MAX_WORKFLOW_RUNTIME_POLICY_BYTES, MAX_WORKFLOW_RUNTIME_POLICY_FEATURES,

@@ -9,7 +9,7 @@ use automata_ci_core::{
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 use crate::{
     ActivatedLogicalInstanceDescriptor, AdmissionObject, ClaimLogicalJobResult,
     ClaimNextLogicalJobResult, ClaimedLogicalJobResult, CommitLogicalJobResult,
@@ -1015,6 +1015,7 @@ async fn lock_target(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalJobResultTarget,
 ) -> Result<Option<PgRow>, LogicalJobResultStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         SELECT job.state AS logical_job_state,
@@ -1041,11 +1042,10 @@ async fn lock_target(
         WHERE repository.tenant_id = $1
           AND job.run_id = $2 AND job.invocation_id = $3 AND job.id = $4
           AND job.execution_kind = 'steps'
-          AND invocation.plan_schema = 1
-          AND invocation.plan_media_type =
-              'application/vnd.automata.workflow-plan+json'
-          AND marker.orchestration_schema = 1
-          AND run.admission_epoch = 1 AND run.plan_schema = 1
+          AND invocation.plan_schema = $5
+          AND invocation.plan_media_type = $8
+          AND marker.orchestration_schema = $6
+      AND run.admission_epoch = $9 AND run.plan_schema = $7
           AND job.state IN ('activated', 'completed', 'skipped', 'cancelled', 'failed')
           AND invocation.state IN ('pending', 'active', 'completed', 'cancelled', 'failed')
           AND marker.state IN ('pending', 'active', 'completed', 'cancelled', 'failed')
@@ -1056,6 +1056,11 @@ async fn lock_target(
     .bind(target.run_id().as_uuid())
     .bind(target.invocation_id().as_uuid())
     .bind(target.logical_job_id().as_uuid())
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i32)
+    .bind(LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)

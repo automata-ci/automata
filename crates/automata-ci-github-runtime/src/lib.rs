@@ -26,16 +26,17 @@ pub use limits::{
     WorkflowCommandLimits, WorkflowCommandLimitsBuilder, WorkflowCommandLimitsError,
 };
 pub use model::{
-    ActionInvocationId, Annotation, AnnotationLevel, AnnotationProperty, ArtifactDeclaration,
-    ArtifactDeclarationCommandFile, ArtifactFileDeclaration, ArtifactSubject,
-    ArtifactSubjectCommandFile, ArtifactSubjectKind, CommandFileKind, CommandFilePlatform,
-    CommandNotice, CompletedStepCommands, DebugMessage, EnvironmentCommandFile, GroupTitle,
-    JobCommandState, LegacyStepMutation, MAX_ARTIFACT_DECLARATION_FILE_BYTES,
-    MAX_ARTIFACT_LIST_BYTES, MAX_ARTIFACT_SUBJECTS, MaskRegistration, MatcherCommand, MatcherFile,
-    MatcherOwner, NameValueCommand, OutputCommandFile, OutputLine, ParsedCommandFile,
-    PathCommandFile, PathEntry, PhaseApplication, PhaseApplicationNotice, SecretMask,
-    StateCommandFile, StepId, StepPhase, StepScope, StepSummaryCommandFile, StopCommands,
-    WorkflowCommandEvent, WorkflowCommandPolicy, WorkflowLine,
+    ARTIFACT_LIST_SCHEMA_VERSION, ActionInvocationId, Annotation, AnnotationLevel,
+    AnnotationProperty, ArtifactDeclaration, ArtifactDeclarationCommandFile,
+    ArtifactFileDeclaration, ArtifactSubject, ArtifactSubjectCommandFile, ArtifactSubjectKind,
+    CommandFileKind, CommandFilePlatform, CommandNotice, CompletedStepCommands, DebugMessage,
+    EnvironmentCommandFile, GroupTitle, JobCommandState, LegacyStepMutation,
+    MAX_ARTIFACT_DECLARATION_FILE_BYTES, MAX_ARTIFACT_LIST_BYTES, MAX_ARTIFACT_SUBJECTS,
+    MaskRegistration, MatcherCommand, MatcherFile, MatcherOwner, NameValueCommand,
+    OutputCommandFile, OutputLine, ParsedCommandFile, PathCommandFile, PathEntry, PhaseApplication,
+    PhaseApplicationNotice, SecretMask, StateCommandFile, StepId, StepPhase, StepScope,
+    StepSummaryCommandFile, StopCommands, WorkflowCommandEvent, WorkflowCommandPolicy,
+    WorkflowLine,
 };
 pub use phase::{CompletedStepApplicator, GithubCompletedStepApplicator};
 pub use workflow_command::{GithubWorkflowCommandSession, WorkflowCommandProcessor};

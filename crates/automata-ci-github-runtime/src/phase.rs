@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use crate::model::{ActionState, SensitiveText, StepOutputState};
+use crate::model::{ActionState, SensitiveText, StepOutputState, artifact_list_byte_rejection};
 use crate::{
     CommandFilePlatform, CompletedStepCommands, JobCommandState, MAX_ARTIFACT_LIST_BYTES,
     MAX_ARTIFACT_SUBJECTS, NameValueCommand, PhaseApplication, PhaseApplicationError,
@@ -212,7 +212,7 @@ fn validate_derived_state(
             .map_err(|_| PhaseApplicationError::ArtifactListTooLarge {
                 maximum: MAX_ARTIFACT_LIST_BYTES,
             })?;
-    if artifact_list.len() > MAX_ARTIFACT_LIST_BYTES {
+    if artifact_list_byte_rejection(artifact_list.len()).is_some() {
         return Err(PhaseApplicationError::ArtifactListTooLarge {
             maximum: MAX_ARTIFACT_LIST_BYTES,
         });

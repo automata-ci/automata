@@ -20,6 +20,20 @@ const MAX_REPOSITORY_CACHE_ENTRIES: usize = 4_096;
 const CACHE_ENTRY_CENSUS_LIMIT: i64 = 4_097;
 const MAXIMUM_CACHE_CALLER_CLOCK_SKEW_SECONDS: u64 = 60;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheRepositoryLimitRejection {
+    RepositoryEntries,
+}
+
+const fn repository_cache_entries_rejection(
+    observed: usize,
+) -> Option<CacheRepositoryLimitRejection> {
+    if observed > MAX_REPOSITORY_CACHE_ENTRIES {
+        return Some(CacheRepositoryLimitRejection::RepositoryEntries);
+    }
+    None
+}
+
 /// `PostgreSQL` coordination adapter for current GitHub Actions cache-v2 entries.
 #[derive(Clone, Debug)]
 pub struct PostgresCacheRepository {
@@ -1199,7 +1213,8 @@ async fn enforce_repository_entry_ceiling(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
     repository_id: Uuid,
 ) -> Result<(), CacheRepositoryError> {
-    if repository_entry_count(transaction, repository_id).await? > MAX_REPOSITORY_CACHE_ENTRIES {
+    let observed = repository_entry_count(transaction, repository_id).await?;
+    if repository_cache_entries_rejection(observed).is_some() {
         return Err(error(CacheRepositoryErrorKind::ResourceExhausted));
     }
     Ok(())
@@ -1408,4 +1423,36 @@ fn database_error(error: sqlx::Error) -> CacheRepositoryError {
 
 fn corrupt_error(_error: sqlx::Error) -> CacheRepositoryError {
     CacheRepositoryError::new(CacheRepositoryErrorKind::CorruptData)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CACHE_ENTRY_CENSUS_LIMIT, CacheRepositoryLimitRejection, MAX_REPOSITORY_CACHE_ENTRIES,
+        repository_cache_entries_rejection,
+    };
+
+    #[test]
+    fn repository_cache_entries_have_exact_boundaries() {
+        assert_eq!(
+            repository_cache_entries_rejection(MAX_REPOSITORY_CACHE_ENTRIES - 1),
+            None
+        );
+        assert_eq!(
+            repository_cache_entries_rejection(MAX_REPOSITORY_CACHE_ENTRIES),
+            None
+        );
+        assert_eq!(
+            repository_cache_entries_rejection(MAX_REPOSITORY_CACHE_ENTRIES + 1),
+            Some(CacheRepositoryLimitRejection::RepositoryEntries)
+        );
+    }
+
+    #[test]
+    fn cache_entry_census_limit_is_one_over_the_repository_limit() {
+        assert_eq!(
+            CACHE_ENTRY_CENSUS_LIMIT,
+            MAX_REPOSITORY_CACHE_ENTRIES as i64 + 1
+        );
+    }
 }

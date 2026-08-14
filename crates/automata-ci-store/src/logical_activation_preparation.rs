@@ -27,7 +27,8 @@ use thiserror::Error;
 pub const LOGICAL_ACTIVATION_PREPARATION_PLAN_MEDIA_TYPE: &str =
     "application/vnd.automata.workflow-plan+json";
 /// Exact current provider-event media type accepted by preparation.
-pub const LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE: &str = "application/json";
+pub const LOGICAL_ACTIVATION_PREPARATION_EVENT_MEDIA_TYPE: &str =
+    automata_ci_core::WORKFLOW_EVENT_MEDIA_TYPE;
 /// Maximum duration of one preparation claim.
 pub const MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 

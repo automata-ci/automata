@@ -10,6 +10,28 @@ pub const MAX_JOB_LOGICAL_NAME_BYTES: usize = 256;
 /// Maximum number of terminal output definitions on one concrete job.
 pub const MAX_JOB_OUTPUT_DEFINITIONS: usize = 1_024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum JobInstanceLimitRejection {
+    LogicalNameBytes,
+    OutputDefinitions,
+}
+
+const fn job_logical_name_byte_rejection(observed: usize) -> Option<JobInstanceLimitRejection> {
+    if observed > MAX_JOB_LOGICAL_NAME_BYTES {
+        return Some(JobInstanceLimitRejection::LogicalNameBytes);
+    }
+    None
+}
+
+pub(super) const fn job_output_definition_rejection(
+    observed: usize,
+) -> Option<JobInstanceLimitRejection> {
+    if observed > MAX_JOB_OUTPUT_DEFINITIONS {
+        return Some(JobInstanceLimitRejection::OutputDefinitions);
+    }
+    None
+}
+
 /// Stable identity of one concrete expansion of a logical workflow job.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(try_from = "UncheckedJobInstanceIdentity")]
@@ -202,10 +224,50 @@ pub(super) fn validate_logical_name(
 ) -> Result<(), JobValidationError> {
     if value.is_empty()
         || value.trim() != value
-        || value.len() > MAX_JOB_LOGICAL_NAME_BYTES
+        || job_logical_name_byte_rejection(value.len()).is_some()
         || value.chars().any(char::is_control)
     {
         return Err(JobValidationError::InvalidLogicalName { field });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        JobInstanceLimitRejection, MAX_JOB_LOGICAL_NAME_BYTES, MAX_JOB_OUTPUT_DEFINITIONS,
+        job_logical_name_byte_rejection, job_output_definition_rejection,
+    };
+
+    #[test]
+    fn job_logical_name_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            job_logical_name_byte_rejection(MAX_JOB_LOGICAL_NAME_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            job_logical_name_byte_rejection(MAX_JOB_LOGICAL_NAME_BYTES),
+            None
+        );
+        assert_eq!(
+            job_logical_name_byte_rejection(MAX_JOB_LOGICAL_NAME_BYTES + 1),
+            Some(JobInstanceLimitRejection::LogicalNameBytes)
+        );
+    }
+
+    #[test]
+    fn job_output_definition_limit_has_exact_boundaries() {
+        assert_eq!(
+            job_output_definition_rejection(MAX_JOB_OUTPUT_DEFINITIONS - 1),
+            None
+        );
+        assert_eq!(
+            job_output_definition_rejection(MAX_JOB_OUTPUT_DEFINITIONS),
+            None
+        );
+        assert_eq!(
+            job_output_definition_rejection(MAX_JOB_OUTPUT_DEFINITIONS + 1),
+            Some(JobInstanceLimitRejection::OutputDefinitions)
+        );
+    }
 }

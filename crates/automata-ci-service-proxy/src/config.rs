@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use crate::error::ProxyError;
 
 pub(crate) const MAX_LISTENERS: usize = 128;
+pub(crate) const SERVICE_PROXY_SERVE_COMMAND: &str = "serve-v1";
 const MAX_MAPPING_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,7 +50,7 @@ pub(crate) fn parse_command_line(
         .next()
         .and_then(|value| value.into_string().ok())
         .as_deref()
-        != Some("serve-v1")
+        != Some(SERVICE_PROXY_SERVE_COMMAND)
     {
         return Err(ProxyError::Usage);
     }
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn accepts_only_current_canonical_protocol() {
         let mappings = parse(&[
-            "serve-v1",
+            SERVICE_PROXY_SERVE_COMMAND,
             "tcp|10.20.0.4|5432|0",
             "udp|192.168.2.9|53|5300",
         ])
@@ -153,18 +154,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_noncurrent_command_protocol() {
+        assert_eq!(
+            parse(&["serve-v2", "tcp|10.0.0.2|80|0"]),
+            Err(ProxyError::Usage)
+        );
+    }
+
+    #[test]
     fn rejects_obsolete_or_ambiguous_syntax() {
         for values in [
             vec!["serve", "tcp|10.0.0.2|80|0"],
-            vec!["serve-v2", "tcp|10.0.0.2|80|0"],
-            vec!["serve-v1"],
-            vec!["serve-v1", "TCP|10.0.0.2|80|0"],
-            vec!["serve-v1", "tcp|010.0.0.2|80|0"],
-            vec!["serve-v1", "tcp|10.0.0.2|080|0"],
-            vec!["serve-v1", "tcp|10.0.0.2|80|00"],
-            vec!["serve-v1", "tcp|10.0.0.2|0|0"],
-            vec!["serve-v1", "tcp|10.0.0.2|80|0|extra"],
-            vec!["serve-v1", "tcp:10.0.0.2:80:0"],
+            vec![SERVICE_PROXY_SERVE_COMMAND],
+            vec![SERVICE_PROXY_SERVE_COMMAND, "TCP|10.0.0.2|80|0"],
+            vec![SERVICE_PROXY_SERVE_COMMAND, "tcp|010.0.0.2|80|0"],
+            vec![SERVICE_PROXY_SERVE_COMMAND, "tcp|10.0.0.2|080|0"],
+            vec![SERVICE_PROXY_SERVE_COMMAND, "tcp|10.0.0.2|80|00"],
+            vec![SERVICE_PROXY_SERVE_COMMAND, "tcp|10.0.0.2|0|0"],
+            vec![SERVICE_PROXY_SERVE_COMMAND, "tcp|10.0.0.2|80|0|extra"],
+            vec![SERVICE_PROXY_SERVE_COMMAND, "tcp:10.0.0.2:80:0"],
         ] {
             assert!(parse(&values).is_err(), "accepted {values:?}");
         }
@@ -182,7 +190,7 @@ mod tests {
             "255.255.255.255",
         ] {
             assert!(
-                parse(&["serve-v1", &format!("tcp|{ip}|80|0")]).is_err(),
+                parse(&[SERVICE_PROXY_SERVE_COMMAND, &format!("tcp|{ip}|80|0")]).is_err(),
                 "accepted {ip}"
             );
         }
@@ -190,7 +198,7 @@ mod tests {
 
     #[test]
     fn enforces_listener_bound_before_allocation_grows_unbounded() {
-        let mut values = vec!["serve-v1".to_owned()];
+        let mut values = vec![SERVICE_PROXY_SERVE_COMMAND.to_owned()];
         values.extend((0..=MAX_LISTENERS).map(|_| "tcp|10.0.0.2|80|0".to_owned()));
         let result = parse_command_line(values.into_iter().map(OsString::from));
         assert_eq!(result, Err(ProxyError::Configuration));

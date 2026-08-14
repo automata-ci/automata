@@ -135,6 +135,7 @@ pub enum EnvironmentReviewDecision {
     Reject,
 }
 
+#[cfg(unix)]
 impl EnvironmentReviewDecision {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {

@@ -685,7 +685,7 @@ fn validate_download_manifest(
     limits: ResultsLimits,
 ) -> Result<Vec<BlobDescriptor>, ResultsServiceError> {
     let authority = metadata.authority;
-    if manifest.schema != 1
+    if manifest.validate_schema().is_err()
         || manifest.artifact_id != metadata.artifact_id.get()
         || manifest.upload_id != metadata.upload_id.to_string()
         || manifest.run_id != authority.run_id().to_string()

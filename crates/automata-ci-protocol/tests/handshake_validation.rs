@@ -5,7 +5,7 @@ use automata_ci_core::{
 use automata_ci_protocol::{
     CommandCursor, MessageHeader, MessageValidationError, NegotiatedSession, PROTOCOL_MIN_VERSION,
     ProtocolVersion, RunnerHello, RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerHello,
-    ServerTiming, SessionDisposition,
+    ServerTiming, SessionDisposition, ValidatedRunnerToServer,
 };
 
 fn runner_capabilities() -> RunnerCapabilities {
@@ -31,6 +31,29 @@ fn hello_is_owned_versioned_and_json_round_trippable() {
         serde_json::from_str::<RunnerToServer>(&json).expect("deserialize hello"),
         hello,
     );
+}
+
+#[test]
+fn message_schema_rejects_noncurrent_version() {
+    let hello = RunnerToServer::Hello(RunnerHello::new(
+        OperationId::new(),
+        SUPPORTED_PROTOCOL_RANGE,
+        JobIrVersionRange::current(),
+        runner_capabilities(),
+        UnixMillis::new(123),
+    ));
+    let mut encoded = serde_json::to_value(hello).expect("serialize hello");
+    encoded["payload"]["message_schema_version"] = serde_json::json!(u16::MAX);
+    let decoded: RunnerToServer =
+        serde_json::from_value(encoded).expect("decode structurally valid hello");
+
+    assert!(matches!(
+        ValidatedRunnerToServer::try_from(decoded),
+        Err(MessageValidationError::UnsupportedMessageSchema {
+            supported: 1,
+            received: u16::MAX,
+        })
+    ));
 }
 
 #[test]

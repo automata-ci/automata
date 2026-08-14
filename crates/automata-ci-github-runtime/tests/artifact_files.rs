@@ -1,7 +1,7 @@
 use automata_ci_github_runtime::{
-    ArtifactDeclaration, ArtifactSubject, ArtifactSubjectCommandFile, ArtifactSubjectKind,
-    CommandFileDecoder, CommandFileError, CommandFileKind, CommandFilePlatform,
-    CompletedStepApplicator, CompletedStepCommands, EnvironmentCommandFile,
+    ARTIFACT_LIST_SCHEMA_VERSION, ArtifactDeclaration, ArtifactSubject, ArtifactSubjectCommandFile,
+    ArtifactSubjectKind, CommandFileDecoder, CommandFileError, CommandFileKind, CommandFileLimits,
+    CommandFilePlatform, CompletedStepApplicator, CompletedStepCommands, EnvironmentCommandFile,
     GithubCommandFileDecoder, GithubCompletedStepApplicator, JobCommandState,
     MAX_ARTIFACT_DECLARATION_FILE_BYTES, MAX_ARTIFACT_SUBJECTS, OutputCommandFile,
     ParsedCommandFile, PathCommandFile, PhaseApplicationError, StateCommandFile, StepId, StepPhase,
@@ -142,7 +142,38 @@ fn declaration_file_has_the_fixed_one_mibibyte_ceiling() {
 }
 
 #[test]
+fn declaration_file_reports_a_lower_configured_ceiling() {
+    let configured_maximum = MAX_ARTIFACT_DECLARATION_FILE_BYTES / 2;
+    let defaults = CommandFileLimits::default();
+    let limits = CommandFileLimits::new(
+        configured_maximum,
+        defaults.maximum_summary_bytes(),
+        defaults.maximum_line_bytes(),
+        defaults.maximum_records(),
+        defaults.maximum_name_bytes(),
+        defaults.maximum_value_bytes(),
+    )
+    .expect("valid lower artifact-file limit");
+    let decoder = GithubCommandFileDecoder::new(limits);
+    let source = vec![b'#'; MAX_ARTIFACT_DECLARATION_FILE_BYTES * 2];
+
+    assert_eq!(
+        decoder.decode(
+            CommandFileKind::Artifacts,
+            &source,
+            CommandFilePlatform::Unix,
+        ),
+        Err(CommandFileError::FileTooLarge {
+            kind: CommandFileKind::Artifacts,
+            maximum: configured_maximum,
+            received: source.len(),
+        })
+    );
+}
+
+#[test]
 fn aggregation_is_atomic_sorted_deduplicated_and_conflict_checked() {
+    assert_eq!(ARTIFACT_LIST_SCHEMA_VERSION, 1);
     let applicator = GithubCompletedStepApplicator::default();
     let initial = JobCommandState::new(CommandFilePlatform::Unix);
     let first = completed(vec![
@@ -194,20 +225,44 @@ fn aggregation_is_atomic_sorted_deduplicated_and_conflict_checked() {
 }
 
 #[test]
-fn aggregate_cap_allows_identical_duplicates_but_rejects_distinct_overflow() {
+fn artifact_subject_count_boundaries() {
     let applicator = GithubCompletedStepApplicator::default();
-    let all = (0..MAX_ARTIFACT_SUBJECTS)
-        .map(|index| subject(format!("subject-{index:03}"), 'a', ArtifactSubjectKind::Oci))
-        .collect();
+    let subjects = |count| {
+        (0..count)
+            .map(|index| subject(format!("subject-{index:03}"), 'a', ArtifactSubjectKind::Oci))
+            .collect()
+    };
+
+    let below = applicator
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &scope("below"),
+            &completed(subjects(MAX_ARTIFACT_SUBJECTS - 1)),
+        )
+        .expect("accept one subject below the cap")
+        .into_next_state();
+    assert_eq!(below.artifact_subjects().len(), MAX_ARTIFACT_SUBJECTS - 1);
+
     let state = applicator
         .apply_completed_step(
             &JobCommandState::new(CommandFilePlatform::Unix),
             &scope("fill"),
-            &completed(all),
+            &completed(subjects(MAX_ARTIFACT_SUBJECTS)),
         )
         .expect("fill exact cap")
         .into_next_state();
     assert_eq!(state.artifact_subjects().len(), MAX_ARTIFACT_SUBJECTS);
+
+    assert_eq!(
+        applicator.apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &scope("overflow-direct"),
+            &completed(subjects(MAX_ARTIFACT_SUBJECTS + 1)),
+        ),
+        Err(PhaseApplicationError::TooManyArtifactSubjects {
+            maximum: MAX_ARTIFACT_SUBJECTS,
+        })
+    );
 
     assert!(
         applicator
@@ -219,15 +274,5 @@ fn aggregate_cap_allows_identical_duplicates_but_rejects_distinct_overflow() {
                 ]),
             )
             .is_ok()
-    );
-    assert_eq!(
-        applicator.apply_completed_step(
-            &state,
-            &scope("overflow"),
-            &completed(vec![subject("overflow", 'a', ArtifactSubjectKind::Oci)]),
-        ),
-        Err(PhaseApplicationError::TooManyArtifactSubjects {
-            maximum: MAX_ARTIFACT_SUBJECTS,
-        })
     );
 }

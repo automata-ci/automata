@@ -4,17 +4,19 @@ This document converts the dated
 [GitHub Actions parity backlog](github-actions-parity-backlog.md) into work
 packages for a team of four to six developers. It is based on Automata
 `upstream/main` at commit
-[`8dd4e5a`](https://github.com/automata-ci/automata/commit/8dd4e5a589aa531ed1424a460a0dcef1e918ab4e)
-and the audit completed on 2026-08-12.
+[`1885c2a`](https://github.com/automata-ci/automata/commit/1885c2a2c8b3bc49334272c1a782ca115dd5f999)
+and the refreshed audit completed on 2026-08-13.
 
 The [compatibility page](compatibility.md) remains the source of truth for
 current support. The [implementation plan](implementation-plan.md) owns release
 gates. This page is an execution aid: unchecked tasks are planned work, not
 availability claims.
 
-The refreshed baseline uses runner protocol v1, JobIR schema v1,
-runner-requirements schema v1, and one canonical greenfield store migration. It
-also contains a real Kubernetes product-composition path, three independent
+The refreshed greenfield baseline uses runner protocol v1, message schema v1,
+JobIR schema v1, runner-requirements schema v1, and one canonical
+`0001_initial_schema.sql`. It has no supported database or mixed-version
+upgrade source. It also contains a real Kubernetes product-composition path,
+three independent
 single-slot Linux runner processes, durable workflow reruns and protected
 environment lease authority, and immutable multi-workflow fanout. These are
 component or experimental foundations unless their package records product
@@ -135,11 +137,16 @@ These files and contracts are merge hotspots. Assign one owner at a time.
 
 Additional coordination rules:
 
-- [ ] Keep the unreleased greenfield store as one canonical
+- [x] Check the machine-readable foundation governance registry before changing
+  a registered format, limit, migration, or shared surface.
+- [x] Keep the unreleased greenfield store as one canonical
   `0001_initial_schema.sql`; fold schema changes into that baseline and its
-  inventory test.
+  inventory test, and do not create or reserve `0002` while the registry's
+  bootstrap mode remains active.
 - [ ] Introduce ordered upgrade migrations only after a released schema creates
-  durable state that the project commits to preserve.
+  durable state that the project commits to preserve. Before supporting those
+  upgrades, change the governance mode and define reservation, immutability,
+  forward-reader, rollback, and live-skew rules in one reviewed contract.
 - [ ] Merge provider-neutral core, JobIR, protocol, or protobuf changes before
   provider implementations begin.
 - [ ] Give serialized-format changes one owner for the version bump,
@@ -188,8 +195,11 @@ Six developers can start these packages concurrently with little file overlap:
 | C | `AUTH-01` permission catalog and effective defaults |
 | X | `FND-02` conformance fixture and exact-client catalog |
 
-The rotating integration owner also completes the small `FND-04` governance
-package before Wave 1 branches reserve migrations, formats, or new limits.
+The rotating integration owner lands the `FND-04` bootstrap before Wave 1
+branches change the canonical schema, reserve format versions, or add limits.
+The package remains open until its full format/limit catalog and compatibility
+reader policy land. Migration-number reservation begins only after an explicit
+governance-mode transition enables durable upgrades.
 
 Exit criteria:
 

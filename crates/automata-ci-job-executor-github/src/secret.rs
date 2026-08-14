@@ -10,7 +10,21 @@ use crate::{PortError, PortErrorKind, SecretPort};
 pub const MAX_EPHEMERAL_JOB_SECRETS: usize = 256;
 
 /// Maximum aggregate plaintext bytes retained for one running job.
-pub const MAX_EPHEMERAL_JOB_SECRET_BYTES: usize = 1024 * 1024;
+pub const MAX_EPHEMERAL_JOB_SECRET_BYTES: usize = 1_048_576;
+
+/// Validates the projected aggregate plaintext held by one job.
+///
+/// # Errors
+///
+/// Rejects a value above [`MAX_EPHEMERAL_JOB_SECRET_BYTES`].
+pub const fn validate_ephemeral_job_secret_bytes(
+    observed: usize,
+) -> Result<(), EphemeralJobSecretsError> {
+    if observed > MAX_EPHEMERAL_JOB_SECRET_BYTES {
+        return Err(EphemeralJobSecretsError::AggregatePlaintextTooLarge);
+    }
+    Ok(())
+}
 
 /// One exact-version secret value prepared for a single job execution.
 ///
@@ -99,8 +113,8 @@ impl EphemeralJobSecrets {
             }
             aggregate_plaintext_bytes = aggregate_plaintext_bytes
                 .checked_add(entry.value().expose_secret().len())
-                .filter(|total| *total <= MAX_EPHEMERAL_JOB_SECRET_BYTES)
                 .ok_or(EphemeralJobSecretsError::AggregatePlaintextTooLarge)?;
+            validate_ephemeral_job_secret_bytes(aggregate_plaintext_bytes)?;
             let binding_id = entry.binding_id().to_owned();
             if values.insert(binding_id, entry).is_some() {
                 return Err(EphemeralJobSecretsError::DuplicateBinding);

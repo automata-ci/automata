@@ -35,7 +35,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
+          # Capability diagnostic history is append-only against the PR's
+          # merge base, so the policy job requires repository history.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Show pinned toolchain
@@ -52,10 +54,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Verify crate publication tooling
+      - name: Verify repository tooling
         run: |
           python3 scripts/ci/publish-crates.py --list-publishable >/dev/null
           python3 scripts/ci/tests/publish-crates.test.py
+          python3 scripts/ci/tests/foundation-governance.test.py
+          python3 scripts/ci/verify-foundation-governance.py
+          python3 scripts/ci/tests/github-actions-capabilities.test.py
+          python3 scripts/ci/verify-github-actions-capabilities.py
           ./scripts/dev/create-integration-snapshot.test.sh
 
       - name: Lint workflows and shell scripts

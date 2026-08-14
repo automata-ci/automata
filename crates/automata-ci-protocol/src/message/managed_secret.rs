@@ -522,4 +522,19 @@ mod tests {
         value["digest"] = serde_json::Value::String("00".repeat(32));
         assert!(serde_json::from_value::<ManagedSecretBindingOverlay>(value).is_err());
     }
+
+    #[test]
+    fn serde_rejects_forward_overlay_schema() {
+        let overlay = ManagedSecretBindingOverlay::empty(&lease());
+        let mut value = serde_json::to_value(overlay).expect("serialize overlay");
+        value["schema_version"] = serde_json::json!(
+            super::MANAGED_SECRET_BINDING_OVERLAY_SCHEMA_VERSION
+                .checked_add(1)
+                .expect("test schema")
+        );
+
+        let error = serde_json::from_value::<ManagedSecretBindingOverlay>(value)
+            .expect_err("forward schema must fail closed");
+        assert!(error.to_string().contains("unsupported"));
+    }
 }

@@ -4,7 +4,8 @@ use automata_ci_execution::{ServicePort, ServiceTransportProtocol};
 use serde_json::Value;
 
 pub(crate) const ENTRYPOINT: &str = "/usr/libexec/automata-ci-service-proxy";
-pub(crate) const SERVE_COMMAND: &str = "serve-v1";
+pub(crate) const SERVICE_PROXY_SERVE_COMMAND: &str = "serve-v1";
+pub(crate) const SERVICE_PROXY_STATUS_SCHEMA_VERSION: u64 = 1;
 
 pub(crate) fn mapping_argument(
     address: Ipv4Addr,
@@ -49,7 +50,10 @@ pub(crate) fn parse_status(bytes: &[u8], expected_ports: usize) -> Option<Vec<u1
     let Value::Object(root) = serde_json::from_slice(document).ok()? else {
         return None;
     };
-    if root.len() != 2 || root.get("version")?.as_u64()? != 1 || !root.contains_key("ports") {
+    if root.len() != 2
+        || root.get("version")?.as_u64()? != SERVICE_PROXY_STATUS_SCHEMA_VERSION
+        || !root.contains_key("ports")
+    {
         return None;
     }
     let values = root.get("ports")?.as_array()?;
@@ -64,7 +68,7 @@ pub(crate) fn parse_status(bytes: &[u8], expected_ports: usize) -> Option<Vec<u1
         })
         .collect::<Option<Vec<_>>>()?;
     let canonical = format!(
-        "{{\"version\":1,\"ports\":[{}]}}",
+        "{{\"version\":{SERVICE_PROXY_STATUS_SCHEMA_VERSION},\"ports\":[{}]}}",
         ports
             .iter()
             .map(u16::to_string)
@@ -123,7 +127,7 @@ mod tests {
             b"{\"ports\":[41001,41002],\"version\":1}\n".as_slice(),
             b"{\"ports\":[0,41002],\"version\":1}\n",
             b"{\"ports\":[41001],\"version\":1}\n",
-            b"{\"ports\":[41001,41002],\"version\":2}\n",
+            b"{\"version\":2,\"ports\":[41001,41002]}\n",
             b"{\"extra\":0,\"ports\":[41001,41002],\"version\":1}\n",
             b"{\"ports\":[41001,41002],\"version\":1}\nextra\n",
         ] {

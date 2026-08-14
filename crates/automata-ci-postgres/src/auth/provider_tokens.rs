@@ -757,3 +757,54 @@ impl ProviderTokenVault for PostgresProviderTokenVault {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_auth::human::TenantId;
+
+    use super::*;
+
+    #[test]
+    fn provider_token_payload_rejects_forward_schema() {
+        let provider_id = ProviderId::new("github").expect("provider ID");
+        let provider_subject = ProviderSubject::new("provider-user-42").expect("provider subject");
+        let key = ProviderTokenKey::new(
+            TenantId::new("tenant-a").expect("tenant ID"),
+            provider_id.clone(),
+            provider_subject.clone(),
+        );
+        let scopes = BTreeSet::from(["repo".to_owned()]);
+        let expected = ProviderTokenMetadata::builder(
+            provider_id.clone(),
+            ProviderGrantKind::BrowserAuthorizationCode,
+            "bearer",
+            UnixTimestamp::from_seconds(100),
+        )
+        .provider_subject(Some(provider_subject.clone()))
+        .scopes(scopes.clone())
+        .build()
+        .expect("provider token metadata");
+        let forward_schema = PROVIDER_TOKEN_PAYLOAD_SCHEMA
+            .checked_add(1)
+            .expect("test schema");
+        let payload = EncodedProviderTokenPayload {
+            schema: forward_schema,
+            access_token: "access-token",
+            refresh_token: None,
+            provider_id: &provider_id,
+            provider_subject: Some(&provider_subject),
+            grant_kind: ProviderGrantKind::BrowserAuthorizationCode,
+            token_type: "bearer",
+            scopes: &scopes,
+            issued_at: 100,
+            access_expires_at: None,
+            refresh_expires_at: None,
+        };
+        let encoded = serde_json::to_vec(&payload).expect("forward-schema payload");
+
+        assert!(matches!(
+            decode_payload(&key, &expected, &encoded),
+            Err(ProviderTokenVaultError::IntegrityFailure)
+        ));
+    }
+}

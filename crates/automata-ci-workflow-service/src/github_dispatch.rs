@@ -31,6 +31,20 @@ const EVIDENCE_SCHEMA: u16 = 1;
 const EVIDENCE_KIND: &str = "automata_workflow_dispatch";
 const MAX_EVIDENCE_TEXT_BYTES: usize = 1_024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowDispatchEvidenceLimitRejection {
+    TextBytes,
+}
+
+const fn workflow_dispatch_evidence_text_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowDispatchEvidenceLimitRejection> {
+    if observed > MAX_EVIDENCE_TEXT_BYTES {
+        return Some(WorkflowDispatchEvidenceLimitRejection::TextBytes);
+    }
+    None
+}
+
 /// Exact, authenticated target authorized for a control-plane manual dispatch.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WorkflowDispatchAuthorization {
@@ -684,7 +698,7 @@ fn diagnostic_codes(diagnostics: &[Diagnostic]) -> String {
 
 fn valid_text(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= MAX_EVIDENCE_TEXT_BYTES
+        && workflow_dispatch_evidence_text_byte_rejection(value.len()).is_none()
         && !value.chars().any(char::is_control)
 }
 
@@ -768,4 +782,66 @@ pub enum GithubWorkflowDispatchError {
     /// Immutable publication, transactional authorization, or durable replay failed.
     #[error(transparent)]
     Admission(#[from] WorkflowAdmissionError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_dispatch_evidence_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_dispatch_evidence_text_byte_rejection(MAX_EVIDENCE_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_evidence_text_byte_rejection(MAX_EVIDENCE_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            workflow_dispatch_evidence_text_byte_rejection(MAX_EVIDENCE_TEXT_BYTES + 1),
+            Some(WorkflowDispatchEvidenceLimitRejection::TextBytes)
+        );
+    }
+
+    #[test]
+    fn workflow_dispatch_evidence_rejects_noncurrent_schemas() {
+        let document = EvidenceDocument {
+            schema: EVIDENCE_SCHEMA,
+            kind: EVIDENCE_KIND.to_owned(),
+            authority: EvidenceAuthority {
+                tenant_id: "tenant-1".to_owned(),
+                principal_id: "principal-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                authorization_revision: 1,
+            },
+            repository: EvidenceRepository {
+                repository_id: Uuid::new_v4(),
+                provider: "github".to_owned(),
+                provider_repository_id: "123".to_owned(),
+                owner: "automata-ci".to_owned(),
+                name: "automata".to_owned(),
+            },
+            workflow: EvidenceWorkflow {
+                workflow_id: Uuid::new_v4(),
+                path: ".github/workflows/ci.yml".to_owned(),
+                git_ref: "refs/heads/main".to_owned(),
+                commit_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            },
+            operation_id: Uuid::new_v4(),
+            inputs: BTreeMap::new(),
+        };
+        let current = serde_json::to_vec(&document).expect("current evidence");
+        GithubWorkflowDispatchEvidence::decode(&current).expect("decode current evidence");
+
+        for schema in [0, EVIDENCE_SCHEMA.checked_add(1).expect("test schema")] {
+            let mut noncurrent = document.clone();
+            noncurrent.schema = schema;
+            let bytes = serde_json::to_vec(&noncurrent).expect("noncurrent evidence");
+            assert!(
+                GithubWorkflowDispatchEvidence::decode(&bytes).is_err(),
+                "accepted schema {schema}"
+            );
+        }
+    }
 }

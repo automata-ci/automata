@@ -1,6 +1,8 @@
 use sqlx::Row as _;
 use sqlx::{Postgres, Transaction};
 
+use super::durable_schema::current_durable_schemas;
+
 use crate::{
     AdmitLogicalWorkflowRun, AdmittedReusableInvocation, AdmittedReusableWorkflowExpansion,
     LogicalWorkflowAdmissionStoreError, StoreError,
@@ -12,6 +14,7 @@ pub(super) async fn insert_reusable_workflow_expansion(
     command: &AdmitLogicalWorkflowRun,
     expansion: &AdmittedReusableWorkflowExpansion,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let schemas = current_durable_schemas();
     let catalog_count = count_i32(expansion.catalog().len())?;
     let invocation_count = count_i32(expansion.invocations().len())?;
     let job_count = count_i32(expansion.job_count())?;
@@ -49,7 +52,7 @@ pub(super) async fn insert_reusable_workflow_expansion(
                 invocation_contract_digest, descriptor_digest,
                 logical_job_count, reusable_call_count, created_at_ms
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,2,$13,$14,$15,$16,$17
+                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$18,$13,$14,$15,$16,$17
             )
             ",
         )
@@ -74,6 +77,7 @@ pub(super) async fn insert_reusable_workflow_expansion(
         .bind(i32::from(entry.logical_job_count()))
         .bind(i32::from(entry.reusable_call_count()))
         .bind(command.admitted_at().get())
+        .bind(schemas.workflow_plan_i16)
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;
@@ -310,6 +314,7 @@ async fn insert_invocation_jobs(
     command: &AdmitLogicalWorkflowRun,
     invocation: &AdmittedReusableInvocation,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let schemas = current_durable_schemas();
     for job in invocation.jobs() {
         sqlx::query(
             r"
@@ -319,7 +324,7 @@ async fn insert_invocation_jobs(
                 environment_requirement_kind, environment_template_digest,
                 secret_reference_names, variable_reference_names,
                 credential_requirements_schema
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,1)
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             ",
         )
         .bind(command.run_id().as_uuid())
@@ -342,6 +347,7 @@ async fn insert_invocation_jobs(
         )
         .bind(job.credential_requirements().secret_names())
         .bind(job.credential_requirements().variable_names())
+        .bind(schemas.runner_requirements_i16)
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;

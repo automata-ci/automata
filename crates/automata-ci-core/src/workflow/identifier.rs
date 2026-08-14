@@ -8,6 +8,20 @@ use super::WorkflowPlanError;
 
 const MAX_PLAN_KEY_LENGTH: usize = 256;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowIdentifierLimitRejection {
+    KeyBytes,
+}
+
+const fn workflow_identifier_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowIdentifierLimitRejection> {
+    if observed > MAX_PLAN_KEY_LENGTH {
+        return Some(WorkflowIdentifierLimitRejection::KeyBytes);
+    }
+    None
+}
+
 macro_rules! plan_key {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
         $(#[$meta])*
@@ -24,7 +38,7 @@ macro_rules! plan_key {
                 let value = value.into();
                 if value.is_empty()
                     || value.trim() != value
-                    || value.len() > MAX_PLAN_KEY_LENGTH
+                    || workflow_identifier_byte_rejection(value.len()).is_some()
                     || value.chars().any(char::is_control)
                 {
                     return Err(WorkflowPlanError::InvalidKey {
@@ -89,3 +103,26 @@ plan_key!(/// Stable invocation-secret identity; this identifies a binding, neve
     WorkflowSecretKey, "workflow secret key");
 plan_key!(/// Stable workflow or logical-job output identity.
     WorkflowOutputKey, "workflow output key");
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        MAX_PLAN_KEY_LENGTH, WorkflowIdentifierLimitRejection, workflow_identifier_byte_rejection,
+    };
+
+    #[test]
+    fn workflow_identifier_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_identifier_byte_rejection(MAX_PLAN_KEY_LENGTH - 1),
+            None
+        );
+        assert_eq!(
+            workflow_identifier_byte_rejection(MAX_PLAN_KEY_LENGTH),
+            None
+        );
+        assert_eq!(
+            workflow_identifier_byte_rejection(MAX_PLAN_KEY_LENGTH + 1),
+            Some(WorkflowIdentifierLimitRejection::KeyBytes)
+        );
+    }
+}

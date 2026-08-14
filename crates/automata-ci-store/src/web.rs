@@ -557,6 +557,15 @@ pub struct HumanTerminalResult {
 }
 
 /// Immutable output-safety evidence for a log stream or artifact.
+pub const HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA: i32 = 1;
+
+/// Returns whether an output-safety schema is the exact schema accepted by this build.
+#[must_use]
+pub const fn human_output_publication_safety_schema_is_current(schema: i32) -> bool {
+    schema == HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA
+}
+
+/// Immutable output-safety evidence for a log stream or artifact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HumanOutputPublication {
     /// Closed exposure class observed for this exact output.

@@ -14,8 +14,28 @@ use zeroize::Zeroize as _;
 use crate::{ExecutorAdapterError, error::ExecutorAdapterErrorKind};
 
 const MAX_MASKS: usize = 4_096;
-const MAX_MASK_BYTES: usize = 1_024 * 1_024;
+const MAX_MASK_BYTES: usize = 1_048_576;
 const MASK_REPLACEMENT: &[u8] = b"***";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MaskLimitRejection {
+    Count,
+    AggregateBytes,
+}
+
+const fn mask_count_rejection(projected: usize) -> Option<MaskLimitRejection> {
+    if projected > MAX_MASKS {
+        return Some(MaskLimitRejection::Count);
+    }
+    None
+}
+
+const fn mask_aggregate_bytes_rejection(projected: usize) -> Option<MaskLimitRejection> {
+    if projected > MAX_MASK_BYTES {
+        return Some(MaskLimitRejection::AggregateBytes);
+    }
+    None
+}
 
 pub(crate) struct SecretMasker {
     masks: BTreeSet<Vec<u8>>,
@@ -74,7 +94,14 @@ impl SecretMasker {
             .aggregate_bytes
             .checked_add(value.len())
             .ok_or_else(resource_exhausted)?;
-        if self.masks.len() >= MAX_MASKS || aggregate > MAX_MASK_BYTES {
+        let mask_count = self
+            .masks
+            .len()
+            .checked_add(1)
+            .ok_or_else(resource_exhausted)?;
+        if mask_count_rejection(mask_count).is_some()
+            || mask_aggregate_bytes_rejection(aggregate).is_some()
+        {
             return Err(resource_exhausted());
         }
         self.aggregate_bytes = aggregate;
@@ -506,6 +533,26 @@ mod cancellation_tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn registered_mask_count_limit_has_exact_boundaries() {
+        assert_eq!(mask_count_rejection(MAX_MASKS - 1), None);
+        assert_eq!(mask_count_rejection(MAX_MASKS), None);
+        assert_eq!(
+            mask_count_rejection(MAX_MASKS + 1),
+            Some(MaskLimitRejection::Count)
+        );
+    }
+
+    #[test]
+    fn registered_mask_byte_limit_has_exact_boundaries() {
+        assert_eq!(mask_aggregate_bytes_rejection(MAX_MASK_BYTES - 1), None);
+        assert_eq!(mask_aggregate_bytes_rejection(MAX_MASK_BYTES), None);
+        assert_eq!(
+            mask_aggregate_bytes_rejection(MAX_MASK_BYTES + 1),
+            Some(MaskLimitRejection::AggregateBytes)
+        );
+    }
 
     #[test]
     fn parsing_stops_before_the_next_line_and_mask_after_cancellation() {

@@ -32,8 +32,8 @@ use automata_ci_store::{
     LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, ResolveAuthenticatedWorkflowDispatchSource, TenantScope,
-    WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    ProviderRepositoryVisibility, ResolveAuthenticatedWorkflowDispatchSource, StoreError,
+    TenantScope, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -598,6 +598,84 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
         .fetch_one(database.pool())
         .await?;
         assert!(evidence_required);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn logical_admission_replay_rejects_forward_plan_and_orchestration_schemas() -> TestResult {
+    run_with_database(|database| async move {
+        seed_tenant(&database, "logical-forward-schema").await?;
+        let command = fixture("logical-forward-schema", "delivery-forward-schema", 49, 150);
+        let run_id = command.run_id().as_uuid();
+        let (command, authenticated) =
+            stage_authenticated_admission(&database, &command, 150).await?;
+        database
+            .store()
+            .admit_authenticated_github_delivery(
+                command.clone(),
+                authenticated,
+                command.admitted_at(),
+            )
+            .await?;
+
+        sqlx::query("ALTER TABLE workflow_runs DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            "ALTER TABLE workflow_runs DROP CONSTRAINT workflow_runs_current_event_metadata",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query("UPDATE workflow_runs SET plan_schema = 2 WHERE id = $1")
+            .bind(run_id)
+            .execute(database.pool())
+            .await?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_github_delivery(
+                    command.clone(),
+                    authenticated,
+                    command.admitted_at(),
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::Store(
+                StoreError::CorruptData(_)
+            ))
+        ));
+
+        sqlx::query("UPDATE workflow_runs SET plan_schema = 1 WHERE id = $1")
+            .bind(run_id)
+            .execute(database.pool())
+            .await?;
+        sqlx::query("ALTER TABLE logical_workflow_runs DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            "ALTER TABLE logical_workflow_runs DROP CONSTRAINT logical_workflow_runs_schema_exact",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query("UPDATE logical_workflow_runs SET orchestration_schema = 2 WHERE run_id = $1")
+            .bind(run_id)
+            .execute(database.pool())
+            .await?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_github_delivery(
+                    command.clone(),
+                    authenticated,
+                    command.admitted_at(),
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::Store(
+                StoreError::CorruptData(_)
+            ))
+        ));
         Ok(())
     })
     .await

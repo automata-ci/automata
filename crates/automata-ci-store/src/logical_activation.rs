@@ -31,7 +31,7 @@ pub const MAX_LOGICAL_ACTIVATED_INSTANCES: usize = MAX_MATRIX_EXPANSION;
 pub const LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE: &str = "application/vnd.automata.job-ir.protobuf";
 /// Exact media type accepted for current runtime-context blobs.
 pub const LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
-    "application/vnd.automata.job-runtime-context.protobuf";
+    automata_ci_core::JOB_RUNTIME_CONTEXT_MEDIA_TYPE;
 
 const INSTANCE_ID_DOMAIN: &[u8] = b"automata.store.logical-instance-id.v1\0";
 const PUBLICATION_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-activation-output.v1\0";

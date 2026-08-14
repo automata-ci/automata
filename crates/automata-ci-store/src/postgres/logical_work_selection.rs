@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use super::{
     PostgresStore,
+    durable_schema::current_durable_schemas,
     logical_activation::{
         claim_logical_job_activation_in_transaction, consume_selected_activation_in_transaction,
     },
@@ -640,10 +641,11 @@ async fn require_active_consume_graph_ids(
     run_id: Uuid,
     invocation_id: Uuid,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
+    let schemas = current_durable_schemas();
     let run_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = 1 AND run.plan_schema = 1
+               AND run.admission_epoch = $4 AND run.plan_schema = $3
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1 AND run.id = $2
@@ -652,6 +654,8 @@ async fn require_active_consume_graph_ids(
     )
     .bind(tenant.as_str())
     .bind(run_id)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -661,7 +665,7 @@ async fn require_active_consume_graph_ids(
     let marker_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT marker.state IN ('pending', 'active')
-               AND marker.orchestration_schema = 1
+               AND marker.orchestration_schema = $3
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
                AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
@@ -673,6 +677,7 @@ async fn require_active_consume_graph_ids(
     )
     .bind(run_id)
     .bind(invocation_id)
+    .bind(schemas.logical_orchestration_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -682,7 +687,7 @@ async fn require_active_consume_graph_ids(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 1
+               AND invocation.plan_schema = $3
         FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
@@ -690,6 +695,7 @@ async fn require_active_consume_graph_ids(
     )
     .bind(run_id)
     .bind(invocation_id)
+    .bind(schemas.workflow_plan_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1050,6 +1056,7 @@ async fn discover_activation_candidates(
     cursor: Option<&ActivationDiscoveryCursor>,
     limit: i64,
 ) -> Result<Vec<PgRow>, LogicalWorkSelectionStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         SELECT repository.tenant_id, repository.id AS repository_id,
@@ -1087,13 +1094,13 @@ async fn discover_activation_candidates(
           AND automata_logical_workflow_invocation_published(
               marker.run_id, invocation.id
           )
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $7
           AND invocation.state IN ('pending', 'active')
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $8
           AND marker.admission_graph_sealed_at_ms IS NOT NULL
           AND marker.state IN ('pending', 'active')
           AND run.status IN ('queued', 'in_progress')
-          AND run.admission_epoch = 1 AND run.plan_schema = 1
+          AND run.admission_epoch = $10 AND run.plan_schema = $9
           AND (
               (job.state = 'pending' AND (
                   preparation_claim.logical_job_id IS NULL
@@ -1132,6 +1139,10 @@ async fn discover_activation_candidates(
     .bind(cursor.map(|value| value.source_order))
     .bind(cursor.map(|value| value.logical_job_id))
     .bind(limit)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -1142,6 +1153,7 @@ async fn discover_materialization_candidates(
     cursor: Option<&MaterializationDiscoveryCursor>,
     limit: i64,
 ) -> Result<Vec<PgRow>, LogicalWorkSelectionStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         SELECT repository.tenant_id, repository.id AS repository_id,
@@ -1178,8 +1190,8 @@ async fn discover_materialization_candidates(
         CROSS JOIN LATERAL (
             SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT AS now_ms
         ) AS database_clock
-        WHERE instance.job_ir_version = 1
-          AND instance.runtime_context_schema = 1
+        WHERE instance.job_ir_version = $8
+          AND instance.runtime_context_schema = $9
           AND instance.runtime_policy_revision = pin.policy_revision
           AND instance.runtime_policy_digest = pin.policy_digest
           AND publication.runtime_policy_revision = pin.policy_revision
@@ -1191,13 +1203,13 @@ async fn discover_materialization_candidates(
           AND automata_logical_workflow_invocation_published(
               marker.run_id, invocation.id
           )
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $10
           AND invocation.state IN ('pending', 'active')
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $11
           AND marker.admission_graph_sealed_at_ms IS NOT NULL
           AND marker.state IN ('pending', 'active')
           AND run.status IN ('queued', 'in_progress')
-          AND run.admission_epoch = 1 AND run.plan_schema = 1
+          AND run.admission_epoch = $13 AND run.plan_schema = $12
           AND (claim.instance_id IS NULL
                OR (claim.state = 'materializing'
                    AND claim.expires_at_ms <= database_clock.now_ms))
@@ -1219,6 +1231,12 @@ async fn discover_materialization_candidates(
     .bind(cursor.map(|value| value.matrix_index))
     .bind(cursor.map(|value| value.instance_id))
     .bind(limit)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -1509,6 +1527,7 @@ async fn activation_candidate_is_eligible(
     row: &PgRow,
     now: i64,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query_scalar(
         r"
         SELECT EXISTS (
@@ -1527,13 +1546,13 @@ async fn activation_candidate_is_eligible(
               AND automata_logical_workflow_invocation_published(
                   marker.run_id, invocation.id
               )
-              AND invocation.plan_schema = 1
+              AND invocation.plan_schema = $5
               AND invocation.state IN ('pending', 'active')
-              AND marker.orchestration_schema = 1
+              AND marker.orchestration_schema = $6
               AND marker.admission_graph_sealed_at_ms IS NOT NULL
               AND marker.state IN ('pending', 'active')
               AND run.status IN ('queued', 'in_progress')
-              AND run.admission_epoch = 1 AND run.plan_schema = 1
+              AND run.admission_epoch = $8 AND run.plan_schema = $7
               AND quarantine.logical_job_id IS NULL
               AND (
                   (job.state = 'pending' AND (
@@ -1569,6 +1588,10 @@ async fn activation_candidate_is_eligible(
             .map_err(operation_error)?,
     )
     .bind(now)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_one(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -1579,6 +1602,7 @@ async fn materialization_candidate_is_eligible(
     row: &PgRow,
     now: i64,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query_scalar(
         r"
         SELECT EXISTS (
@@ -1603,7 +1627,7 @@ async fn materialization_candidate_is_eligible(
               ON quarantine.instance_id = instance.id
             WHERE instance.id = $1 AND instance.run_id = $2
               AND instance.invocation_id = $3 AND instance.logical_job_id = $4
-              AND instance.job_ir_version = 1 AND instance.runtime_context_schema = 1
+              AND instance.job_ir_version = $6 AND instance.runtime_context_schema = $7
               AND instance.runtime_policy_revision = pin.policy_revision
               AND instance.runtime_policy_digest = pin.policy_digest
               AND publication.runtime_policy_revision = pin.policy_revision
@@ -1613,13 +1637,13 @@ async fn materialization_candidate_is_eligible(
               AND automata_logical_workflow_invocation_published(
                   marker.run_id, invocation.id
               )
-              AND invocation.plan_schema = 1
+              AND invocation.plan_schema = $8
               AND invocation.state IN ('pending', 'active')
-              AND marker.orchestration_schema = 1
+              AND marker.orchestration_schema = $9
               AND marker.admission_graph_sealed_at_ms IS NOT NULL
               AND marker.state IN ('pending', 'active')
               AND run.status IN ('queued', 'in_progress')
-              AND run.admission_epoch = 1 AND run.plan_schema = 1
+              AND run.admission_epoch = $11 AND run.plan_schema = $10
               AND (claim.instance_id IS NULL
                    OR (claim.state = 'materializing' AND claim.expires_at_ms <= $5))
               AND quarantine.instance_id IS NULL
@@ -1640,6 +1664,12 @@ async fn materialization_candidate_is_eligible(
             .map_err(operation_error)?,
     )
     .bind(now)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.admission_epoch_i32)
     .fetch_one(&mut **transaction)
     .await
     .map_err(operation_error)
@@ -3368,14 +3398,15 @@ async fn require_quarantine_replay_graph(
     run_id: Uuid,
     invocation_id: Uuid,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
+    let schemas = current_durable_schemas();
     let exact: Option<bool> = sqlx::query_scalar(
         r"
-        SELECT run.admission_epoch = 1 AND run.plan_schema = 1
-               AND marker.orchestration_schema = 1
+        SELECT run.admission_epoch = $7 AND run.plan_schema = $4
+               AND marker.orchestration_schema = $5
                AND automata_logical_workflow_invocation_published(
                    marker.run_id, $3
                )
-               AND invocation.plan_schema = 1
+               AND invocation.plan_schema = $6
         FROM workflow_runs AS run
         JOIN repositories AS repository ON repository.id = run.repository_id
         JOIN logical_workflow_runs AS marker ON marker.run_id = run.id
@@ -3388,6 +3419,10 @@ async fn require_quarantine_replay_graph(
     .bind(tenant.as_str())
     .bind(run_id)
     .bind(invocation_id)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;

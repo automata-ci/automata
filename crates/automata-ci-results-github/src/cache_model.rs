@@ -8,6 +8,54 @@ use uuid::Uuid;
 
 use crate::ExecutionAuthority;
 
+const MAX_CACHE_SCOPE_BYTES: usize = 1_024;
+const MAX_CACHE_AUTHORITY_SCOPES: usize = 8;
+const MAX_CACHE_KEY_BYTES: usize = 512;
+const MAX_CACHE_KEY_COMPONENT_BYTES: usize = 512;
+const MAX_CACHE_REPOSITORY_BYTES: usize = 512;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheModelLimitRejection {
+    ScopeBytes,
+    AuthorityScopes,
+    KeyBytes,
+    VersionBytes,
+    RepositoryBytes,
+}
+
+const fn cache_scope_byte_rejection(observed: usize) -> Option<CacheModelLimitRejection> {
+    if observed > MAX_CACHE_SCOPE_BYTES {
+        return Some(CacheModelLimitRejection::ScopeBytes);
+    }
+    None
+}
+const fn cache_authority_scope_count_rejection(
+    observed: usize,
+) -> Option<CacheModelLimitRejection> {
+    if observed > MAX_CACHE_AUTHORITY_SCOPES {
+        return Some(CacheModelLimitRejection::AuthorityScopes);
+    }
+    None
+}
+const fn cache_key_byte_rejection(observed: usize) -> Option<CacheModelLimitRejection> {
+    if observed > MAX_CACHE_KEY_BYTES {
+        return Some(CacheModelLimitRejection::KeyBytes);
+    }
+    None
+}
+const fn cache_version_byte_rejection(observed: usize) -> Option<CacheModelLimitRejection> {
+    if observed > MAX_CACHE_KEY_COMPONENT_BYTES {
+        return Some(CacheModelLimitRejection::VersionBytes);
+    }
+    None
+}
+const fn cache_repository_byte_rejection(observed: usize) -> Option<CacheModelLimitRejection> {
+    if observed > MAX_CACHE_REPOSITORY_BYTES {
+        return Some(CacheModelLimitRejection::RepositoryBytes);
+    }
+    None
+}
+
 /// GitHub cache access-control permission encoded in the runtime JWT `ac` claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -84,7 +132,7 @@ impl CacheAccessScope {
     ) -> Result<Self, CacheModelError> {
         let scope = scope.into();
         if scope.len() < 6
-            || scope.len() > 1_024
+            || cache_scope_byte_rejection(scope.len()).is_some()
             || !scope.starts_with("refs/")
             || scope
                 .bytes()
@@ -178,7 +226,7 @@ impl CacheAuthority {
     ) -> Result<Self, CacheModelError> {
         let repository = repository.into();
         let repository = normalize_repository(&repository)?;
-        if scopes.is_empty() || scopes.len() > 8 {
+        if scopes.is_empty() || cache_authority_scope_count_rejection(scopes.len()).is_some() {
             return Err(CacheModelError::InvalidAuthority);
         }
         let mut ordered = scopes
@@ -235,7 +283,7 @@ impl CacheKey {
     pub fn new(value: impl Into<String>) -> Result<Self, CacheModelError> {
         let value = value.into();
         if value.is_empty()
-            || value.len() > 512
+            || cache_key_byte_rejection(value.len()).is_some()
             || value.contains(',')
             || value.chars().any(char::is_control)
         {
@@ -264,7 +312,7 @@ impl CacheVersion {
     pub fn new(value: impl Into<String>) -> Result<Self, CacheModelError> {
         let value = value.into();
         if value.is_empty()
-            || value.len() > 512
+            || cache_version_byte_rejection(value.len()).is_some()
             || value
                 .bytes()
                 .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
@@ -442,7 +490,7 @@ fn normalize_repository(repository: &str) -> Result<String, CacheModelError> {
     let mut components = repository.split('/');
     let owner = components.next().unwrap_or_default();
     let name = components.next().unwrap_or_default();
-    if repository.len() > 512
+    if cache_repository_byte_rejection(repository.len()).is_some()
         || owner.is_empty()
         || name.is_empty()
         || components.next().is_some()
@@ -704,6 +752,70 @@ mod tests {
                 ("refs/heads/main", "cargo-linux-", false),
                 ("refs/heads/main", "cargo-", false),
             ]
+        );
+    }
+
+    #[test]
+    fn cache_scope_byte_limit_has_exact_boundaries() {
+        assert_eq!(cache_scope_byte_rejection(MAX_CACHE_SCOPE_BYTES - 1), None);
+        assert_eq!(cache_scope_byte_rejection(MAX_CACHE_SCOPE_BYTES), None);
+        assert_eq!(
+            cache_scope_byte_rejection(MAX_CACHE_SCOPE_BYTES + 1),
+            Some(CacheModelLimitRejection::ScopeBytes)
+        );
+    }
+    #[test]
+    fn cache_authority_scope_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            cache_authority_scope_count_rejection(MAX_CACHE_AUTHORITY_SCOPES - 1),
+            None
+        );
+        assert_eq!(
+            cache_authority_scope_count_rejection(MAX_CACHE_AUTHORITY_SCOPES),
+            None
+        );
+        assert_eq!(
+            cache_authority_scope_count_rejection(MAX_CACHE_AUTHORITY_SCOPES + 1),
+            Some(CacheModelLimitRejection::AuthorityScopes)
+        );
+    }
+    #[test]
+    fn cache_key_byte_limit_has_exact_boundaries() {
+        assert_eq!(cache_key_byte_rejection(MAX_CACHE_KEY_BYTES - 1), None);
+        assert_eq!(cache_key_byte_rejection(MAX_CACHE_KEY_BYTES), None);
+        assert_eq!(
+            cache_key_byte_rejection(MAX_CACHE_KEY_BYTES + 1),
+            Some(CacheModelLimitRejection::KeyBytes)
+        );
+    }
+    #[test]
+    fn cache_version_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            cache_version_byte_rejection(MAX_CACHE_KEY_COMPONENT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            cache_version_byte_rejection(MAX_CACHE_KEY_COMPONENT_BYTES),
+            None
+        );
+        assert_eq!(
+            cache_version_byte_rejection(MAX_CACHE_KEY_COMPONENT_BYTES + 1),
+            Some(CacheModelLimitRejection::VersionBytes)
+        );
+    }
+    #[test]
+    fn cache_repository_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            cache_repository_byte_rejection(MAX_CACHE_REPOSITORY_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            cache_repository_byte_rejection(MAX_CACHE_REPOSITORY_BYTES),
+            None
+        );
+        assert_eq!(
+            cache_repository_byte_rejection(MAX_CACHE_REPOSITORY_BYTES + 1),
+            Some(CacheModelLimitRejection::RepositoryBytes)
         );
     }
 }

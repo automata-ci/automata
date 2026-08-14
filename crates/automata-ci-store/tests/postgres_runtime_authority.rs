@@ -1750,6 +1750,53 @@ async fn thirty_two_callers_have_one_mint_winner_and_no_post_mint_takeover() -> 
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
+async fn ready_authority_reader_rejects_a_forward_protected_payload_schema() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = seed_authority(&database).await?;
+        mint_ready_authority(&database, &fixture).await?;
+
+        sqlx::query("ALTER TABLE github_runtime_authority_issuances DISABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+        sqlx::query(
+            r"
+            ALTER TABLE github_runtime_authority_issuances
+            DROP CONSTRAINT github_runtime_authority_protected_metadata_shape
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE github_runtime_authority_issuances
+            SET plaintext_schema = 2
+            WHERE attempt_id = $1 AND fencing_token = 7
+            ",
+        )
+        .bind(fixture.identity.key().attempt_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+        sqlx::query("ALTER TABLE github_runtime_authority_issuances ENABLE TRIGGER USER")
+            .execute(database.pool())
+            .await?;
+
+        assert!(matches!(
+            database
+                .store()
+                .load_ready_github_runtime_authority(LoadGithubRuntimeAuthority::new(
+                    fixture.identity.clone(),
+                    fixture.at(50),
+                )?)
+                .await,
+            Err(GithubRuntimeAuthorityStoreError::CorruptData)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18, AUTOMATA_TEST_DATABASE_URL, and the JobIR schema cutover"]
 async fn fence_race_two_revokers_retry_and_confirmed_erasure_are_exact() -> TestResult {
     run_with_database(|database| async move {
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;

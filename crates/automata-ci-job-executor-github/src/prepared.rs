@@ -6,7 +6,7 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-const MAX_PREPARED_ARCHIVE_BYTES: usize = automata_ci_execution::MAX_COPY_BYTES;
+const MAX_PREPARED_ARCHIVE_BYTES: usize = 16_777_216;
 const MAX_PREPARED_INPUTS: usize = 1_024;
 const MAX_PREPARED_OUTPUTS: usize = 1_024;
 const MAX_COMPOSITE_STEPS: usize = 1_024;
@@ -313,9 +313,10 @@ impl PreparedCompositeAction {
     ///
     /// Rejects empty or excessive step lists and duplicate explicit IDs.
     pub fn new(steps: Vec<PreparedCompositeStep>) -> Result<Self, PreparedActionError> {
-        if steps.is_empty() || steps.len() > MAX_COMPOSITE_STEPS {
+        if steps.is_empty() {
             return Err(PreparedActionError::TooManyCompositeSteps);
         }
+        validate_prepared_composite_step_count(steps.len())?;
         let mut ids = std::collections::BTreeSet::new();
         for step in &steps {
             let metadata = match step {
@@ -574,9 +575,10 @@ impl PreparedAction {
         subpath: impl Into<String>,
         definition: PreparedActionDefinition,
     ) -> Result<Self, PreparedActionError> {
-        if archive.is_empty() || archive.len() > MAX_PREPARED_ARCHIVE_BYTES {
+        if archive.is_empty() {
             return Err(PreparedActionError::ArchiveSize);
         }
+        validate_prepared_archive_bytes(archive.len())?;
         let computed = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
         if computed != archive_digest {
             return Err(PreparedActionError::DigestMismatch);
@@ -689,10 +691,54 @@ pub enum PreparedActionError {
     DuplicateCompositeStepId,
 }
 
-fn validate_input_declarations(values: &[PreparedInput]) -> Result<(), PreparedActionError> {
-    if values.len() > MAX_PREPARED_INPUTS {
-        return Err(PreparedActionError::TooManyInputs);
+const fn validate_prepared_archive_bytes(observed: usize) -> Result<(), PreparedActionError> {
+    if observed > MAX_PREPARED_ARCHIVE_BYTES {
+        return Err(PreparedActionError::ArchiveSize); // stable archive-byte-limit reason
     }
+    Ok(())
+}
+
+const fn validate_prepared_input_count(observed: usize) -> Result<(), PreparedActionError> {
+    if observed > MAX_PREPARED_INPUTS {
+        return Err(PreparedActionError::TooManyInputs); // stable input-count-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_prepared_output_count(observed: usize) -> Result<(), PreparedActionError> {
+    if observed > MAX_PREPARED_OUTPUTS {
+        return Err(PreparedActionError::TooManyOutputs); // stable output-count-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_prepared_composite_step_count(
+    observed: usize,
+) -> Result<(), PreparedActionError> {
+    if observed > MAX_COMPOSITE_STEPS {
+        return Err(PreparedActionError::TooManyCompositeSteps); // stable composite-step-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_prepared_composite_value_count(
+    observed: usize,
+) -> Result<(), PreparedActionError> {
+    if observed > MAX_COMPOSITE_VALUES {
+        return Err(PreparedActionError::InvalidCompositeStep); // stable composite-value-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_prepared_action_path_bytes(observed: usize) -> Result<(), PreparedActionError> {
+    if observed > MAX_ACTION_PATH_BYTES {
+        return Err(PreparedActionError::UnsafePath); // stable action-path-limit reason
+    }
+    Ok(())
+}
+
+fn validate_input_declarations(values: &[PreparedInput]) -> Result<(), PreparedActionError> {
+    validate_prepared_input_count(values.len())?;
     let mut names = std::collections::BTreeSet::new();
     if values
         .iter()
@@ -704,9 +750,7 @@ fn validate_input_declarations(values: &[PreparedInput]) -> Result<(), PreparedA
 }
 
 fn validate_output_declarations(values: &[PreparedOutput]) -> Result<(), PreparedActionError> {
-    if values.len() > MAX_PREPARED_OUTPUTS {
-        return Err(PreparedActionError::TooManyOutputs);
-    }
+    validate_prepared_output_count(values.len())?;
     let mut names = std::collections::BTreeSet::new();
     if values
         .iter()
@@ -718,9 +762,7 @@ fn validate_output_declarations(values: &[PreparedOutput]) -> Result<(), Prepare
 }
 
 fn validate_values(values: &[PreparedKeyValue]) -> Result<(), PreparedActionError> {
-    if values.len() > MAX_COMPOSITE_VALUES {
-        return Err(PreparedActionError::InvalidCompositeStep);
-    }
+    validate_prepared_composite_value_count(values.len())?;
     let mut names = std::collections::BTreeSet::new();
     if values
         .iter()
@@ -732,11 +774,11 @@ fn validate_values(values: &[PreparedKeyValue]) -> Result<(), PreparedActionErro
 }
 
 fn validate_local_action_path(value: String) -> Result<String, PreparedActionError> {
+    validate_prepared_action_path_bytes(value.len())?;
     let relative = value
         .strip_prefix("./")
         .ok_or(PreparedActionError::UnsafePath)?;
     let valid = !relative.is_empty()
-        && value.len() <= MAX_ACTION_PATH_BYTES
         && !value.ends_with('/')
         && !value.contains('\\')
         && !value.chars().any(char::is_control)
@@ -749,8 +791,8 @@ fn validate_local_action_path(value: String) -> Result<String, PreparedActionErr
 }
 
 fn validate_relative_path(value: String) -> Result<String, PreparedActionError> {
+    validate_prepared_action_path_bytes(value.len())?;
     let valid = !value.is_empty()
-        && value.len() <= MAX_ACTION_PATH_BYTES
         && !value.starts_with('/')
         && !value.ends_with('/')
         && !value.contains('\\')
@@ -761,4 +803,69 @@ fn validate_relative_path(value: String) -> Result<String, PreparedActionError> 
     valid
         .then_some(value)
         .ok_or(PreparedActionError::UnsafePath)
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_archive_byte_limit_has_exact_boundaries() {
+        assert!(validate_prepared_archive_bytes(MAX_PREPARED_ARCHIVE_BYTES - 1).is_ok());
+        assert!(validate_prepared_archive_bytes(MAX_PREPARED_ARCHIVE_BYTES).is_ok());
+        assert_eq!(
+            validate_prepared_archive_bytes(MAX_PREPARED_ARCHIVE_BYTES + 1),
+            Err(PreparedActionError::ArchiveSize)
+        );
+    }
+
+    #[test]
+    fn prepared_input_count_limit_has_exact_boundaries() {
+        assert!(validate_prepared_input_count(MAX_PREPARED_INPUTS - 1).is_ok());
+        assert!(validate_prepared_input_count(MAX_PREPARED_INPUTS).is_ok());
+        assert_eq!(
+            validate_prepared_input_count(MAX_PREPARED_INPUTS + 1),
+            Err(PreparedActionError::TooManyInputs)
+        );
+    }
+
+    #[test]
+    fn prepared_output_count_limit_has_exact_boundaries() {
+        assert!(validate_prepared_output_count(MAX_PREPARED_OUTPUTS - 1).is_ok());
+        assert!(validate_prepared_output_count(MAX_PREPARED_OUTPUTS).is_ok());
+        assert_eq!(
+            validate_prepared_output_count(MAX_PREPARED_OUTPUTS + 1),
+            Err(PreparedActionError::TooManyOutputs)
+        );
+    }
+
+    #[test]
+    fn prepared_composite_step_limit_has_exact_boundaries() {
+        assert!(validate_prepared_composite_step_count(MAX_COMPOSITE_STEPS - 1).is_ok());
+        assert!(validate_prepared_composite_step_count(MAX_COMPOSITE_STEPS).is_ok());
+        assert_eq!(
+            validate_prepared_composite_step_count(MAX_COMPOSITE_STEPS + 1),
+            Err(PreparedActionError::TooManyCompositeSteps)
+        );
+    }
+
+    #[test]
+    fn prepared_composite_value_limit_has_exact_boundaries() {
+        assert!(validate_prepared_composite_value_count(MAX_COMPOSITE_VALUES - 1).is_ok());
+        assert!(validate_prepared_composite_value_count(MAX_COMPOSITE_VALUES).is_ok());
+        assert_eq!(
+            validate_prepared_composite_value_count(MAX_COMPOSITE_VALUES + 1),
+            Err(PreparedActionError::InvalidCompositeStep)
+        );
+    }
+
+    #[test]
+    fn prepared_action_path_byte_limit_has_exact_boundaries() {
+        assert!(validate_prepared_action_path_bytes(MAX_ACTION_PATH_BYTES - 1).is_ok());
+        assert!(validate_prepared_action_path_bytes(MAX_ACTION_PATH_BYTES).is_ok());
+        assert_eq!(
+            validate_prepared_action_path_bytes(MAX_ACTION_PATH_BYTES + 1),
+            Err(PreparedActionError::UnsafePath)
+        );
+    }
 }

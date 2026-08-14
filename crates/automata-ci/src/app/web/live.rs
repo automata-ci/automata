@@ -1313,8 +1313,9 @@ fn publication_target(
 }
 
 fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
-    stream.publication.safety_schema == 1
-        && stream.raw_log_disposition == HumanRawLogDisposition::Persist
+    automata_ci_store::human_output_publication_safety_schema_is_current(i32::from(
+        stream.publication.safety_schema,
+    )) && stream.raw_log_disposition == HumanRawLogDisposition::Persist
         && (!matches!(
             stream.publication.secret_exposure,
             SecretExposureClass::ReadableSecret
@@ -1570,7 +1571,7 @@ fn validate_manifest(
         serde_json::from_slice(bytes).map_err(|_| WebDataError::Corrupt)?;
     let canonical = serde_json::to_vec(&manifest).map_err(|_| WebDataError::Corrupt)?;
     if canonical != bytes
-        || manifest.schema != 1
+        || manifest.validate_schema().is_err()
         || manifest.artifact_id != stored.artifact.id.get()
         || manifest.run_id != run_id.to_string()
         || manifest.name != stored.artifact.name
@@ -2776,16 +2777,16 @@ mod tests {
     };
 
     use super::{
-        DecodedJobCursor, DecodedLogCursor, DecodedWorkflowCursor, JOB_CURSOR_BYTES,
-        LOG_CURSOR_BYTES, LiveWebData, NavigationPageDirection,
+        CURSOR_VERSION, DecodedJobCursor, DecodedLogCursor, DecodedWorkflowCursor,
+        JOB_CURSOR_BYTES, LOG_CURSOR_BYTES, LiveWebData, NavigationPageDirection,
         REPOSITORY_SETTINGS_READ_PERMISSION, REPOSITORY_SETTINGS_UPDATE_PERMISSION,
         RUN_CURSOR_BYTES, SECRET_METADATA_READ_PERMISSION, WORKFLOW_CURSOR_BYTES,
         conclusion_status, decode_job_cursor, decode_log_cursor, decode_repository_cursor,
         decode_run_cursor, decode_workflow_cursor, encode_job_cursor, encode_log_cursor,
         encode_repository_cursor, encode_run_cursor, encode_workflow_cursor, lifecycle_status,
-        map_job, map_navigation, map_run, map_workflow, must_escape_log_character,
-        navigation_page_start, normalize_git_ref, projected_repository_next_cursor,
-        render_frame_lines, valid_canonical_uuid,
+        log_stream_safety_is_valid, map_job, map_navigation, map_run, map_workflow,
+        must_escape_log_character, navigation_page_start, normalize_git_ref,
+        projected_repository_next_cursor, render_frame_lines, valid_canonical_uuid,
     };
     use crate::app::repository_secrets::{
         RepositorySecretBrowserMutationOutcome, RepositorySecretWebData, RepositorySecretWebError,
@@ -2928,6 +2929,30 @@ mod tests {
             Some(job_cursor)
         );
         assert!(decode_job_cursor(&encoded, &tenant, repository_id, RunId::new()).is_none());
+    }
+
+    #[test]
+    fn repository_cursor_reader_rejects_noncurrent_versions() {
+        let tenant = tenant();
+        let position = HumanRepositoryCursor {
+            normalized_owner: "automata-ci".to_owned(),
+            normalized_name: "automata".to_owned(),
+            id: RepositoryId::from_uuid(WorkflowId::new().as_uuid()),
+        };
+        let current = encode_repository_cursor(&tenant, &position).expect("current cursor");
+        let mut bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &current)
+                .expect("cursor bytes");
+
+        for version in [0, CURSOR_VERSION.checked_add(1).expect("test version")] {
+            bytes[0] = version;
+            let noncurrent =
+                base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes);
+            assert!(
+                decode_repository_cursor(&noncurrent, &tenant).is_none(),
+                "accepted cursor version {version}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3339,7 +3364,8 @@ mod tests {
             requested_visibility: visibility,
             effective_visibility: visibility,
             safety_reason: reason.to_owned(),
-            safety_schema: 1,
+            safety_schema: u16::try_from(automata_ci_store::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
+                .expect("output publication schema fits u16"),
         }
     }
 
@@ -4129,6 +4155,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn log_stream_reader_rejects_noncurrent_publication_safety_schema() {
+        let run_id = RunId::new();
+        let run = fixture_run(run_id, OutputVisibility::Private);
+        let (_, mut stream) = fixture_job_detail(
+            run,
+            JobId::new(),
+            AttemptId::new(),
+            HumanRawLogDisposition::Persist,
+            fixture_output_publication(
+                OutputVisibility::Private,
+                SecretExposureClass::Secretless,
+                "fixture",
+            ),
+        );
+        assert!(log_stream_safety_is_valid(&stream));
+        for schema in [0, 2] {
+            stream.publication.safety_schema = schema;
+            assert!(!log_stream_safety_is_valid(&stream));
+        }
+    }
+
     #[tokio::test]
     async fn live_job_log_decodes_verified_segments_and_omits_the_end_marker() {
         let (data, context, repository, run_id, job_id) = fake_live_data(true).await;
@@ -4494,7 +4542,9 @@ mod tests {
             BlobKey, BlobPayload, ImmutableBlobStore, MediaType, MemoryBlobStore,
         };
         use automata_ci_core::{AttemptId, JobId, RunId, Sha256Digest};
-        use automata_ci_results_github::{ARTIFACT_MANIFEST_MEDIA_TYPE, ArtifactManifest};
+        use automata_ci_results_github::{
+            ARTIFACT_MANIFEST_MEDIA_TYPE, ARTIFACT_MANIFEST_SCHEMA_VERSION, ArtifactManifest,
+        };
         use automata_ci_store::{
             self as store, HumanArtifactId, HumanAuthorizationTarget, HumanWorkflowReadRepository,
             RepositoryCoordinate, RepositoryId, StoreError, TenantScope,
@@ -4507,7 +4557,7 @@ mod tests {
             data::{
                 RepositoryPath, RequestContext, RunDetailRequest, Viewer, WebData, WebDataError,
             },
-            live::{LiveWebData, MAX_RENDERED_JOBS, block_list_digest},
+            live::{LiveWebData, MAX_RENDERED_JOBS, block_list_digest, validate_manifest},
         };
 
         #[derive(Debug)]
@@ -4677,10 +4727,12 @@ mod tests {
             artifact_id: HumanArtifactId,
             artifact_visibility: OutputVisibility,
             exposure: SecretExposureClass,
+            manifest_schema: u16,
         ) -> (
             store::HumanArtifactSummary,
             store::HumanArtifactDownload,
             Arc<MemoryBlobStore>,
+            ArtifactManifest,
         ) {
             let content_digest = Sha256Digest::from_bytes(Sha256::digest([]).into());
             let artifact = store::HumanArtifactSummary {
@@ -4700,7 +4752,7 @@ mod tests {
                 },
             };
             let manifest = ArtifactManifest {
-                schema: 1,
+                schema: manifest_schema,
                 artifact_id: artifact_id.get(),
                 upload_id: RunId::new().to_string(),
                 run_id: run_id.to_string(),
@@ -4731,7 +4783,7 @@ mod tests {
                 committed_at_seconds: 2_000,
                 blocks: Vec::new(),
             };
-            (artifact, stored, objects)
+            (artifact, stored, objects, manifest)
         }
 
         async fn artifact_fixture(
@@ -4755,8 +4807,14 @@ mod tests {
             run.publication.requested_artifact_visibility = artifact_visibility;
 
             let artifact_id = HumanArtifactId::new(7).expect("artifact ID");
-            let (artifact, stored, objects) =
-                stored_artifact_fixture(run_id, artifact_id, artifact_visibility, exposure).await;
+            let (artifact, stored, objects, _) = stored_artifact_fixture(
+                run_id,
+                artifact_id,
+                artifact_visibility,
+                exposure,
+                ARTIFACT_MANIFEST_SCHEMA_VERSION,
+            )
+            .await;
             let reads = Arc::new(ArtifactReads {
                 repository,
                 expected_run_id: run_id,
@@ -4815,6 +4873,32 @@ mod tests {
             )
             .await
             .map(|artifact| artifact.is_some())
+        }
+
+        #[tokio::test]
+        async fn artifact_download_reader_rejects_noncurrent_manifest_schema() {
+            let run_id = RunId::new();
+            let artifact_id = HumanArtifactId::new(7).expect("artifact ID");
+            for schema in [
+                0,
+                ARTIFACT_MANIFEST_SCHEMA_VERSION
+                    .checked_add(1)
+                    .expect("forward manifest schema"),
+            ] {
+                let (_, stored, _, manifest) = stored_artifact_fixture(
+                    run_id,
+                    artifact_id,
+                    OutputVisibility::Private,
+                    SecretExposureClass::Secretless,
+                    schema,
+                )
+                .await;
+                let bytes = serde_json::to_vec(&manifest).expect("manifest JSON");
+                assert_eq!(
+                    validate_manifest(&stored, run_id, &bytes),
+                    Err(WebDataError::Corrupt)
+                );
+            }
         }
 
         #[tokio::test]

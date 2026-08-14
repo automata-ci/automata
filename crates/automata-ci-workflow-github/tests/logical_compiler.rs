@@ -79,9 +79,6 @@ jobs:
     runs-on: [self-hosted, "${{ matrix.os }}"]
     timeout-minutes: ${{ inputs.timeout }}
     continue-on-error: ${{ matrix.experimental }}
-    environment:
-      name: preview-${{ matrix.os }}
-      url: ${{ steps.deploy.outputs.url }}
     env:
       TARGET: ${{ matrix.os }}
     defaults:

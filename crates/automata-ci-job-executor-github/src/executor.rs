@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     collections::BTreeMap,
     fmt,
     future::Future,
@@ -11,22 +10,20 @@ use std::{
 
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_core::{
-    ActionReference, AttemptId, JobAuthorityProfile, JobConclusion, JobIrEnvelope, JobLifecycle,
-    JobResult, JobResultOutput, JobResultValidationError, JobRuntimeContext,
-    MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES, MAX_STEP_ANNOTATION_PROPERTIES,
-    MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity, RuntimeBoolean,
-    RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep, ShellTemplate,
+    ActionReference, AttemptId, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, JobAuthorityProfile, JobConclusion,
+    JobIrEnvelope, JobLifecycle, JobResult, JobResultOutput, JobResultValidationError,
+    JobRuntimeContext, MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES,
+    MAX_STEP_ANNOTATION_PROPERTIES, MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity,
+    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep,
     StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis,
-    ValueSource, ValueTemplate,
+    ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
     ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionTermination,
-    ImmutableImage, NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle,
-    SandboxLaunch, SandboxProvider, SandboxSpec, SandboxState, ServiceContainerBindings,
-    ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy,
-    ServicePort, ServiceTransportProtocol, TargetPath, TargetPlatform,
+    NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind, RootFilesystemPolicy,
+    SandboxCapability, SandboxGeneration, SandboxHandle, SandboxLaunch, SandboxProvider,
+    SandboxState, ServiceContainerBindings, ServiceContainerSpecs, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
     GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
@@ -62,10 +59,11 @@ use crate::{
     OperationPurpose, PreparedAction, PreparedActionDefinition, PreparedActionExecution,
     PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep, PreparedKeyValue,
     PreparedLocalAction, PreparedValue, SandboxEnvironmentCatalog, SecretCustodyAcknowledger,
-    SecretPort,
+    SecretPort, action_content, container_runtime,
     environment::{EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue},
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
     output::{SecretMasker, emit_system, parse_output_with_cancellation, process_output},
+    shell::{composite_shell, resolve_shell_template, shell_argv},
 };
 use automata_ci_workflow_github::GithubConditionCompiler;
 
@@ -73,10 +71,9 @@ const DIRECTORY_MODE: &str = "0700";
 const MAX_ACTION_NESTING_DEPTH: usize = 10;
 const MAX_COMPOSITE_CHILD_STEPS: usize = 10_000;
 const MAX_ACTION_INVOCATIONS: u32 = 10_000;
-const MAX_COMPOSITE_DERIVED_BYTES: usize = automata_ci_execution::MAX_COPY_BYTES;
+const MAX_COMPOSITE_DERIVED_BYTES: usize = 16_777_216;
+const MAX_EVENT_DEPTH: usize = 128;
 const COMPOSITE_ORDINAL_BASE: u32 = 1 << 24;
-const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
-    "application/vnd.automata.job-runtime-context.protobuf";
 const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
     "command output exceeded the configured capture limit; user output was suppressed";
 const LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\nif [ -f \"$1\" ]; then printf yml; elif [ -f \"$2\" ]; then printf yaml; else exit 44; fi";
@@ -175,55 +172,6 @@ pub struct GithubJobExecutor {
 struct HydratedExecutionRequest<'a> {
     request: &'a ExecutionRequest,
     runtime_context: &'a JobRuntimeContext,
-}
-
-enum ResolvedShell {
-    Default,
-    Named(String),
-    CommandTemplate(String),
-}
-
-impl ResolvedShell {
-    fn script_extension(&self, platform: TargetPlatform) -> &'static str {
-        match self {
-            Self::Named(name) if name.eq_ignore_ascii_case("python") => ".py",
-            Self::Named(name)
-                if name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell") =>
-            {
-                ".ps1"
-            }
-            Self::Named(name) if name.eq_ignore_ascii_case("cmd") => ".cmd",
-            Self::Default if platform == TargetPlatform::Windows => ".ps1",
-            Self::Default | Self::Named(_) | Self::CommandTemplate(_) => ".sh",
-        }
-    }
-
-    fn fix_up_script<'command>(
-        &self,
-        platform: TargetPlatform,
-        command: &'command str,
-    ) -> Cow<'command, str> {
-        let is_powershell = matches!(self, Self::Named(name) if name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("powershell"))
-            || matches!(self, Self::Default if platform == TargetPlatform::Windows);
-        if is_powershell {
-            Cow::Owned(format!(
-                "$ErrorActionPreference = 'stop'\n{command}\nif ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) {{ exit $LASTEXITCODE }}"
-            ))
-        } else if platform == TargetPlatform::Windows
-            && matches!(self, Self::Named(name) if name.eq_ignore_ascii_case("cmd"))
-        {
-            let mut normalized = command
-                .replace("\r\n", "\n")
-                .replace('\r', "\n")
-                .replace('\n', "\r\n");
-            if !normalized.ends_with("\r\n") {
-                normalized.push_str("\r\n");
-            }
-            Cow::Owned(normalized)
-        } else {
-            Cow::Borrowed(command)
-        }
-    }
 }
 
 impl<'a> HydratedExecutionRequest<'a> {
@@ -470,7 +418,7 @@ impl GithubJobExecutor {
         let workspace =
             job_workspace(job, &environment).map_err(|_| AdmissionRejection::InvalidJob)?;
         let event = job.execution().event();
-        if event.media_type() != "application/json"
+        if event.media_type() != WORKFLOW_EVENT_MEDIA_TYPE
             || event.encoded_size() > automata_ci_execution::MAX_COPY_BYTES as u64
         {
             return Err(AdmissionRejection::InvalidJob);
@@ -557,7 +505,7 @@ impl GithubJobExecutor {
         if workspace.platform() == TargetPlatform::Windows && !job.job().services().is_empty() {
             return Err(AdmissionRejection::InvalidJob);
         }
-        validate_service_admission(job, capabilities)?;
+        container_runtime::validate_service_admission(job, capabilities)?;
         Ok(())
     }
 
@@ -855,12 +803,14 @@ impl GithubJobExecutor {
                             &cancellation,
                         )?;
                         let shell = cancellation_dominant(
-                            Self::resolve_shell_template(
-                                &value_builder,
-                                values.shell(),
-                                context.expression(),
-                                &mut masker,
-                            ),
+                            resolve_shell_template(values.shell(), |value| {
+                                Self::resolve_value_template(
+                                    &value_builder,
+                                    value,
+                                    context.expression(),
+                                    &mut masker,
+                                )
+                            }),
                             &cancellation,
                         )?;
                         let working_directory = cancellation_dominant(
@@ -901,8 +851,10 @@ impl GithubJobExecutor {
                             paths.script(index, shell.script_extension(workspace.platform())),
                             &cancellation,
                         )?;
-                        let (program, arguments) =
-                            cancellation_dominant(self.shell_argv(&shell, &script), &cancellation)?;
+                        let (program, arguments) = cancellation_dominant(
+                            shell_argv(self.ports.toolchain.as_ref(), &shell, &script),
+                            &cancellation,
+                        )?;
                         let script_contents =
                             shell.fix_up_script(workspace.platform(), command.expose());
                         cancellation_dominant(
@@ -3159,8 +3111,10 @@ impl GithubJobExecutor {
                         ),
                         cancellation,
                     )?;
-                    let (program, arguments) =
-                        cancellation_dominant(self.shell_argv(&shell, &script), cancellation)?;
+                    let (program, arguments) = cancellation_dominant(
+                        shell_argv(self.ports.toolchain.as_ref(), &shell, &script),
+                        cancellation,
+                    )?;
                     let script_contents = shell.fix_up_script(paths.workspace.platform(), &command);
                     cancellation_dominant(
                         budget.charge_derived(script_contents.len().saturating_sub(command.len())),
@@ -3471,72 +3425,49 @@ impl GithubJobExecutor {
         cancellation: &ExecutionCancellation,
     ) -> Result<ActionPaths, ExecutorAdapterError> {
         let action_paths = paths.action(index, action.subpath())?;
-        let argv = ExecutionArgv::new(
-            required_tool(self.ports.toolchain.install())?,
-            vec![
-                "-d".to_owned(),
-                "-m".to_owned(),
-                DIRECTORY_MODE.to_owned(),
-                "--".to_owned(),
-                action_paths.base.as_str().to_owned(),
-                action_paths.extracted.as_str().to_owned(),
-            ],
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let command = ExecutionCommand::new(
+        let prepare_ordinal = index.checked_add(1).ok_or_else(invalid_job)?;
+        let command = action_content::prepare_directory_command(
             self.ports.operation_ids.operation_id(
                 attempt_id,
                 OperationPurpose::PrepareDirectory,
-                index.checked_add(1).ok_or_else(|| {
-                    ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
-                })?,
+                prepare_ordinal,
             ),
-            argv,
-            paths.workspace.clone(),
-            automata_ci_execution::ExecutionEnvironment::empty(),
+            required_tool(self.ports.toolchain.install())?,
+            &paths.workspace,
+            &action_paths.base,
+            &action_paths.extracted,
             self.config.default_step_timeout(),
             self.config.maximum_output_bytes(),
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        )?;
         let output = endpoint
             .exec(&command, &CancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         require_success(&output)?;
-        self.copy_bytes(
-            endpoint,
-            attempt_id,
-            OperationPurpose::CopyActionArchive,
-            index,
+        let request = action_content::copy_archive_request(
+            self.ports.operation_ids.operation_id(
+                attempt_id,
+                OperationPurpose::CopyActionArchive,
+                index,
+            ),
             &action_paths.archive,
             action.archive(),
-            cancellation,
         )?;
-        let argv = ExecutionArgv::new(
-            required_tool(self.ports.toolchain.tar())?,
-            vec![
-                "-xzf".to_owned(),
-                action_paths.archive.as_str().to_owned(),
-                "--directory".to_owned(),
-                action_paths.extracted.as_str().to_owned(),
-                "--strip-components=1".to_owned(),
-                "--no-same-owner".to_owned(),
-                "--no-same-permissions".to_owned(),
-            ],
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let command = ExecutionCommand::new(
+        endpoint
+            .copy_to(&request, &CancellationBridge(cancellation))
+            .map_err(map_execution_error)?;
+        let command = action_content::extract_archive_command(
             self.ports.operation_ids.operation_id(
                 attempt_id,
                 OperationPurpose::ExtractActionArchive,
                 index,
             ),
-            argv,
-            paths.workspace.clone(),
-            automata_ci_execution::ExecutionEnvironment::empty(),
+            required_tool(self.ports.toolchain.tar())?,
+            &paths.workspace,
+            &action_paths.extracted,
+            &action_paths.archive,
             self.config.default_step_timeout(),
             self.config.maximum_output_bytes(),
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        )?;
         let output = endpoint
             .exec(&command, &CancellationBridge(cancellation))
             .map_err(map_execution_error)?;
@@ -4132,29 +4063,6 @@ impl GithubJobExecutor {
         builder.resolve_source_value(&ValueSource::Template(value.clone()), context, masker)
     }
 
-    fn resolve_shell_template(
-        builder: &EnvironmentBuilder<'_>,
-        shell: &ShellTemplate,
-        context: &dyn GithubEvaluationContext,
-        masker: &mut SecretMasker,
-    ) -> Result<ResolvedShell, ExecutorAdapterError> {
-        match shell {
-            ShellTemplate::Default => Ok(ResolvedShell::Default),
-            ShellTemplate::Named { value } => {
-                Self::resolve_value_template(builder, value, context, masker)
-                    .map(|value| ResolvedShell::Named(value.into_value()))
-            }
-            ShellTemplate::CommandTemplate { value } => {
-                Self::resolve_value_template(builder, value, context, masker)
-                    .map(|value| ResolvedShell::CommandTemplate(value.into_value()))
-            }
-            ShellTemplate::Dynamic { value } => {
-                let value = Self::resolve_value_template(builder, value, context, masker)?;
-                composite_shell(value.expose())
-            }
-        }
-    }
-
     fn evaluate_job_outputs(
         definitions: &[automata_ci_core::JobOutputDefinition],
         builder: &EnvironmentBuilder<'_>,
@@ -4225,28 +4133,22 @@ impl GithubJobExecutor {
                         ExecutorAdapterErrorKind::Unsupported,
                     ));
                 }
-                let image = cancellation_dominant(
-                    ImmutableImage::new(service.image()).map_err(|_| {
-                        ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
-                    }),
-                    cancellation,
-                )?;
+                let image =
+                    cancellation_dominant(container_runtime::service_image(service), cancellation)?;
                 let environment = cancellation_dominant(
                     builder.container_environment(service.environment(), context, masker),
                     cancellation,
                 )?;
-                let ports = cancellation_dominant(service_ports(service), cancellation)?;
-                let health =
-                    cancellation_dominant(service_health_policy(service.options()), cancellation)?;
-                let spec = cancellation_dominant(
-                    ServiceContainerSpec::new(image, environment)
-                        .with_ports(ports)
-                        .map_err(|_| {
-                            ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
-                        }),
+                let ports =
+                    cancellation_dominant(container_runtime::service_ports(service), cancellation)?;
+                let health = cancellation_dominant(
+                    container_runtime::service_health_policy(service.options()),
                     cancellation,
-                )?
-                .with_health(health);
+                )?;
+                let spec = cancellation_dominant(
+                    container_runtime::service_spec(image, environment, ports, health),
+                    cancellation,
+                )?;
                 Ok((name.clone(), spec))
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
@@ -4340,7 +4242,8 @@ impl GithubJobExecutor {
             let operation_id = events
                 .begin_provider_operation(ProviderOperationKind::CreateSandbox)
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            let spec = self.sandbox_spec(
+            let spec = container_runtime::sandbox_spec(
+                &self.config,
                 request,
                 operation_id,
                 generation,
@@ -4378,70 +4281,13 @@ impl GithubJobExecutor {
                 .service_bindings(&handle, &cancellation)
                 .map_err(|error| map_provider_error(&error))?
         };
-        validate_service_bindings(service_specs, &services)?;
+        container_runtime::validate_service_bindings(service_specs, &services)?;
         let endpoint = self
             .ports
             .provider
             .attach(&handle, &cancellation)
             .map_err(|error| map_provider_error(&error))?;
         Ok(ObtainedSandbox { endpoint, services })
-    }
-
-    fn sandbox_spec(
-        &self,
-        request: &ExecutionRequest,
-        operation_id: OperationId,
-        generation: SandboxGeneration,
-        workspace: &TargetPath,
-        scratch: &TargetPath,
-        service_specs: &ServiceContainerSpecs,
-    ) -> Result<SandboxSpec, ExecutorAdapterError> {
-        let resources = self.sandbox_resources(request)?;
-        let mut spec = SandboxSpec::new(
-            operation_id,
-            generation,
-            request.environment().clone(),
-            workspace.clone(),
-            self.config.network(),
-            self.config.root_filesystem(),
-            resources,
-        )
-        .with_privilege(self.config.privilege())
-        .with_services(service_specs.clone())
-        .with_resource_allocation(
-            request
-                .job()
-                .job()
-                .requirements()
-                .resource_allocation()
-                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?,
-        );
-        if matches!(
-            request.environment().launch(),
-            SandboxLaunch::Native | SandboxLaunch::VirtualMachine { .. }
-        ) {
-            spec = spec.with_scratch(scratch.clone());
-        }
-        Ok(spec)
-    }
-
-    fn sandbox_resources(
-        &self,
-        request: &ExecutionRequest,
-    ) -> Result<ResourceLimits, ExecutorAdapterError> {
-        let allocation = request
-            .job()
-            .job()
-            .requirements()
-            .resource_allocation()
-            .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-        let limits = allocation.limits();
-        ResourceLimits::new(
-            limits.memory_bytes(),
-            limits.cpu_millis(),
-            self.config.resources().pids(),
-        )
-        .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
     }
 
     fn prepare_attempt_directories(
@@ -4525,132 +4371,6 @@ impl GithubJobExecutor {
         endpoint
             .copy_to(&request, &CancellationBridge(cancellation))
             .map_err(map_execution_error)
-    }
-
-    #[allow(clippy::too_many_lines)]
-    fn shell_argv(
-        &self,
-        shell: &ResolvedShell,
-        script: &TargetPath,
-    ) -> Result<(TargetPath, Vec<String>), ExecutorAdapterError> {
-        let script_path = script;
-        let script = script.as_str().to_owned();
-        match (self.ports.toolchain.platform(), shell) {
-            (TargetPlatform::Posix, ResolvedShell::Default) => Ok((
-                required_tool(self.ports.toolchain.bash())?,
-                vec!["-e".into(), script],
-            )),
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("bash") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.bash())?,
-                    vec![
-                        "--noprofile".into(),
-                        "--norc".into(),
-                        "-e".into(),
-                        "-o".into(),
-                        "pipefail".into(),
-                        script,
-                    ],
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("sh") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.sh())?,
-                    vec!["-e".into(), script],
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("python") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.python())?,
-                    windows_script_arguments(WindowsScriptShell::Python, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("python") =>
-            {
-                Ok((required_tool(self.ports.toolchain.python())?, vec![script]))
-            }
-            (TargetPlatform::Posix, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("pwsh") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.pwsh())?,
-                    powershell_arguments(&script),
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Default) => Ok((
-                required_tool(self.ports.toolchain.pwsh())?,
-                windows_script_arguments(WindowsScriptShell::PowerShell, script_path)
-                    .ok_or_else(invalid_job)?,
-            )),
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("pwsh") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.pwsh())?,
-                    windows_script_arguments(WindowsScriptShell::PowerShell, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("powershell") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.powershell())?,
-                    windows_script_arguments(WindowsScriptShell::PowerShell, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Windows, ResolvedShell::Named(name))
-                if name.eq_ignore_ascii_case("cmd") =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.cmd())?,
-                    windows_script_arguments(WindowsScriptShell::Cmd, script_path)
-                        .ok_or_else(invalid_job)?,
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::CommandTemplate(template))
-                if template == "bash -e {0}" =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.bash())?,
-                    vec!["-e".into(), script],
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::CommandTemplate(template))
-                if template == "bash --noprofile --norc -eo pipefail {0}" =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.bash())?,
-                    vec![
-                        "--noprofile".into(),
-                        "--norc".into(),
-                        "-eo".into(),
-                        "pipefail".into(),
-                        script,
-                    ],
-                ))
-            }
-            (TargetPlatform::Posix, ResolvedShell::CommandTemplate(template))
-                if template == "sh -e {0}" =>
-            {
-                Ok((
-                    required_tool(self.ports.toolchain.sh())?,
-                    vec!["-e".into(), script],
-                ))
-            }
-            (_, ResolvedShell::Named(_) | ResolvedShell::CommandTemplate(_)) => Err(
-                ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported),
-            ),
-        }
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -5834,10 +5554,7 @@ struct ActionGraphPlanner {
 
 impl ActionGraphPlanner {
     fn enter(&mut self, key: String) -> bool {
-        if self.active.len() >= MAX_ACTION_NESTING_DEPTH
-            || self.occurrences >= MAX_ACTION_INVOCATIONS
-            || self.active.iter().any(|active| active == &key)
-        {
+        if action_budget_rejection(&self.active, self.occurrences, &key).is_some() {
             return false;
         }
         self.occurrences += 1;
@@ -5984,10 +5701,7 @@ impl ActionExecutionBudget {
     }
 
     fn enter(&mut self, key: String) -> bool {
-        if self.active.len() >= MAX_ACTION_NESTING_DEPTH
-            || self.invocations >= MAX_ACTION_INVOCATIONS
-            || self.active.iter().any(|active| active == &key)
-        {
+        if action_budget_rejection(&self.active, self.invocations, &key).is_some() {
             return false;
         }
         self.invocations += 1;
@@ -6000,7 +5714,11 @@ impl ActionExecutionBudget {
     }
 
     fn composite_step(&mut self) -> Result<u32, ExecutorAdapterError> {
-        if self.composite_steps >= MAX_COMPOSITE_CHILD_STEPS {
+        let projected = self
+            .composite_steps
+            .checked_add(1)
+            .ok_or_else(resource_exhausted)?;
+        if composite_child_step_rejection(projected).is_some() {
             return Err(ExecutorAdapterError::new(
                 ExecutorAdapterErrorKind::ResourceExhausted,
             ));
@@ -6029,15 +5747,74 @@ impl ActionExecutionBudget {
     }
 
     fn charge_derived(&mut self, bytes: usize) -> Result<(), ExecutorAdapterError> {
-        self.derived_bytes = self
+        let projected = self
             .derived_bytes
             .checked_add(bytes)
             .ok_or_else(resource_exhausted)?;
-        if self.derived_bytes > MAX_COMPOSITE_DERIVED_BYTES {
+        if composite_derived_bytes_rejection(projected).is_some() {
             return Err(resource_exhausted());
         }
+        self.derived_bytes = projected;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionBudgetRejection {
+    NestingDepth,
+    InvocationCount,
+    CompositeChildSteps,
+    CompositeDerivedBytes,
+    EventDepth,
+    Recursion,
+}
+
+fn action_budget_rejection(
+    active: &[String],
+    invocations: u32,
+    key: &str,
+) -> Option<ActionBudgetRejection> {
+    if active.len() >= MAX_ACTION_NESTING_DEPTH {
+        return Some(ActionBudgetRejection::NestingDepth);
+    }
+    let Some(projected) = invocations.checked_add(1) else {
+        return Some(ActionBudgetRejection::InvocationCount);
+    };
+    if action_invocation_count_rejection(projected).is_some() {
+        return Some(ActionBudgetRejection::InvocationCount);
+    }
+    if active.iter().any(|active| active == key) {
+        return Some(ActionBudgetRejection::Recursion);
+    }
+    None
+}
+
+const fn action_invocation_count_rejection(projected: u32) -> Option<ActionBudgetRejection> {
+    if projected > MAX_ACTION_INVOCATIONS {
+        return Some(ActionBudgetRejection::InvocationCount); // stable invocation-limit reason
+    }
+    None
+}
+
+const fn composite_child_step_rejection(projected: usize) -> Option<ActionBudgetRejection> {
+    if projected > MAX_COMPOSITE_CHILD_STEPS {
+        return Some(ActionBudgetRejection::CompositeChildSteps);
+    }
+    None
+}
+
+const fn composite_derived_bytes_rejection(projected: usize) -> Option<ActionBudgetRejection> {
+    if projected > MAX_COMPOSITE_DERIVED_BYTES {
+        return Some(ActionBudgetRejection::CompositeDerivedBytes);
+    }
+    None
+}
+
+const fn event_depth_rejection(depth: usize) -> Option<ActionBudgetRejection> {
+    if depth > MAX_EVENT_DEPTH {
+        return Some(ActionBudgetRejection::EventDepth);
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -6642,24 +6419,6 @@ fn path_contained_by(path: &TargetPath, root: &TargetPath) -> bool {
     }
 }
 
-fn composite_shell(value: &str) -> Result<ResolvedShell, ExecutorAdapterError> {
-    let value = value.trim();
-    if ["bash", "sh", "python", "pwsh", "powershell", "cmd"]
-        .into_iter()
-        .any(|name| value.eq_ignore_ascii_case(name))
-    {
-        return Ok(ResolvedShell::Named(value.to_ascii_lowercase()));
-    }
-    match value {
-        "bash -e {0}" | "bash --noprofile --norc -eo pipefail {0}" | "sh -e {0}" => {
-            Ok(ResolvedShell::CommandTemplate(value.to_owned()))
-        }
-        _ => Err(ExecutorAdapterError::new(
-            ExecutorAdapterErrorKind::Unsupported,
-        )),
-    }
-}
-
 fn composite_runtime_step_id(call_path: &ActionCallPath) -> String {
     let suffix = call_path
         .0
@@ -6781,220 +6540,6 @@ fn validate_resource_admission(
         return Err(AdmissionRejection::CapabilityChanged);
     }
     Ok(())
-}
-
-fn validate_service_admission(
-    job: &JobIrEnvelope,
-    capabilities: &automata_ci_execution::ProviderCapabilities,
-) -> Result<(), AdmissionRejection> {
-    if job.job().services().is_empty() {
-        return Ok(());
-    }
-    if !capabilities.supports(SandboxCapability::ServiceContainers) {
-        return Err(AdmissionRejection::CapabilityChanged);
-    }
-    let declarations = job
-        .job()
-        .services()
-        .iter()
-        .map(|(name, service)| {
-            if service.credentials().is_some() || !service.volumes().is_empty() {
-                return Err(());
-            }
-            let image = ImmutableImage::new(service.image()).map_err(|_| ())?;
-            let ports = service_ports(service).map_err(|_| ())?;
-            let health = service_health_policy(service.options()).map_err(|_| ())?;
-            let spec = ServiceContainerSpec::new(
-                image,
-                automata_ci_execution::ExecutionEnvironment::empty(),
-            )
-            .with_ports(ports)
-            .map_err(|_| ())?
-            .with_health(health);
-            Ok((name.clone(), spec))
-        })
-        .collect::<Result<std::collections::BTreeMap<_, _>, ()>>();
-    if declarations
-        .ok()
-        .and_then(|values| ServiceContainerSpecs::new(values).ok())
-        .is_none()
-    {
-        return Err(AdmissionRejection::InvalidJob);
-    }
-    Ok(())
-}
-
-fn service_ports(
-    service: &automata_ci_core::ContainerSpec,
-) -> Result<Vec<ServicePort>, ExecutorAdapterError> {
-    service
-        .ports()
-        .iter()
-        .map(|port| {
-            let protocol = match port.protocol() {
-                automata_ci_core::TransportProtocol::Tcp => ServiceTransportProtocol::Tcp,
-                automata_ci_core::TransportProtocol::Udp => ServiceTransportProtocol::Udp,
-            };
-            ServicePort::new(port.container_port(), port.requested_host_port(), protocol)
-                .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
-        })
-        .collect()
-}
-
-fn service_health_policy(options: &[String]) -> Result<ServiceHealthPolicy, ExecutorAdapterError> {
-    if options.is_empty() {
-        return Ok(ServiceHealthPolicy::Image);
-    }
-    let mut command = None;
-    let mut interval = None;
-    let mut timeout = None;
-    let mut start_period = None;
-    let mut retries = None;
-    let mut disabled = false;
-    let mut seen = std::collections::BTreeSet::new();
-    let mut index = 0;
-    while index < options.len() {
-        let token = &options[index];
-        if token == "--no-healthcheck" {
-            if !seen.insert("disabled") {
-                return Err(invalid_service());
-            }
-            disabled = true;
-            index += 1;
-            continue;
-        }
-        let (name, inline) = token
-            .split_once('=')
-            .map_or((token.as_str(), None), |(name, value)| (name, Some(value)));
-        let field = match name {
-            "--health-cmd" => "command",
-            "--health-interval" => "interval",
-            "--health-timeout" => "timeout",
-            "--health-start-period" => "start_period",
-            "--health-retries" => "retries",
-            _ => return Err(invalid_service()),
-        };
-        if !seen.insert(field) {
-            return Err(invalid_service());
-        }
-        let value = if let Some(value) = inline {
-            value
-        } else {
-            index += 1;
-            options
-                .get(index)
-                .map(String::as_str)
-                .ok_or_else(invalid_service)?
-        };
-        if value.is_empty() {
-            return Err(invalid_service());
-        }
-        match field {
-            "command" => command = Some(value.to_owned()),
-            "interval" => interval = Some(parse_container_duration(value)?),
-            "timeout" => timeout = Some(parse_container_duration(value)?),
-            "start_period" => start_period = Some(parse_container_duration(value)?),
-            "retries" => {
-                retries = Some(value.parse::<u32>().map_err(|_| invalid_service())?);
-            }
-            _ => return Err(invalid_service()),
-        }
-        index += 1;
-    }
-    if disabled || command.as_deref() == Some("none") {
-        if seen.len() != 1 {
-            return Err(invalid_service());
-        }
-        return Ok(ServiceHealthPolicy::Disabled);
-    }
-    ServiceHealthOverrides::new(command, interval, timeout, start_period, retries)
-        .map(ServiceHealthPolicy::Override)
-        .map_err(|_| invalid_service())
-}
-
-fn parse_container_duration(value: &str) -> Result<Duration, ExecutorAdapterError> {
-    if value.is_empty() || !value.is_ascii() {
-        return Err(invalid_service());
-    }
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    let mut total = Duration::ZERO;
-    while index < bytes.len() {
-        let number_start = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        if number_start == index {
-            return Err(invalid_service());
-        }
-        let number = value[number_start..index]
-            .parse::<u64>()
-            .map_err(|_| invalid_service())?;
-        let remaining = &value[index..];
-        let (unit, duration) = if remaining.starts_with("ms") {
-            (2, Duration::from_millis(number))
-        } else if remaining.starts_with("us") {
-            (2, Duration::from_micros(number))
-        } else if remaining.starts_with("ns") {
-            (2, Duration::from_nanos(number))
-        } else if remaining.starts_with('h') {
-            (
-                1,
-                Duration::from_secs(number.checked_mul(3_600).ok_or_else(invalid_service)?),
-            )
-        } else if remaining.starts_with('m') {
-            (
-                1,
-                Duration::from_secs(number.checked_mul(60).ok_or_else(invalid_service)?),
-            )
-        } else if remaining.starts_with('s') {
-            (1, Duration::from_secs(number))
-        } else {
-            return Err(invalid_service());
-        };
-        index += unit;
-        total = total.checked_add(duration).ok_or_else(invalid_service)?;
-    }
-    if total.is_zero() {
-        return Err(invalid_service());
-    }
-    Ok(total)
-}
-
-fn validate_service_bindings(
-    specs: &ServiceContainerSpecs,
-    bindings: &ServiceContainerBindings,
-) -> Result<(), ExecutorAdapterError> {
-    if specs.len() != bindings.len() {
-        return Err(ExecutorAdapterError::new(
-            ExecutorAdapterErrorKind::Internal,
-        ));
-    }
-    for (name, spec) in specs.iter() {
-        let binding = bindings
-            .get(name)
-            .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let expected = spec
-            .ports()
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        let actual = binding
-            .ports()
-            .iter()
-            .map(|port| port.service_port())
-            .collect::<std::collections::BTreeSet<_>>();
-        if expected != actual {
-            return Err(ExecutorAdapterError::new(
-                ExecutorAdapterErrorKind::Internal,
-            ));
-        }
-    }
-    Ok(())
-}
-
-const fn invalid_service() -> ExecutorAdapterError {
-    ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
 }
 
 fn tool_path(path: &TargetPath, platform: TargetPlatform) -> bool {
@@ -7123,55 +6668,6 @@ fn windows_artifact_hash_invocation(
     let environment = automata_ci_execution::ExecutionEnvironment::new(values)
         .map_err(|_| resource_exhausted())?;
     Ok((argv, environment))
-}
-
-fn powershell_arguments(script: &str) -> Vec<String> {
-    let script = script.replace('\'', "''");
-    vec!["-command".into(), format!(". '{script}'")]
-}
-
-/// Supported Windows script-interpreter argument contracts.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WindowsScriptShell {
-    /// PowerShell Core or Windows PowerShell dot-sourcing a `.ps1` file.
-    PowerShell,
-    /// `cmd.exe` executing a `.cmd` file with expansion policy fixed explicitly.
-    Cmd,
-    /// Python executing a `.py` file by its exact absolute target path.
-    Python,
-}
-
-/// Builds the exact argument vector used to execute one Windows script file.
-///
-/// Returns `None` for a non-Windows target or when a `cmd.exe` script path
-/// contains quote, percent-expansion, or active command-metacharacter syntax
-/// that the command interpreter could reinterpret before opening the intended
-/// file. `!` remains literal because the argument contract forces `/V:OFF`.
-#[must_use]
-pub fn windows_script_arguments(
-    shell: WindowsScriptShell,
-    script: &TargetPath,
-) -> Option<Vec<String>> {
-    if script.platform() != TargetPlatform::Windows {
-        return None;
-    }
-    let script = script.as_str();
-    match shell {
-        WindowsScriptShell::PowerShell => Some(powershell_arguments(script)),
-        WindowsScriptShell::Cmd
-            if !script.contains(['"', '%', '&', '|', '<', '>', '^', '(', ')']) =>
-        {
-            Some(vec![
-                "/D".into(),
-                "/E:ON".into(),
-                "/V:OFF".into(),
-                "/C".into(),
-                script.to_owned(),
-            ])
-        }
-        WindowsScriptShell::Cmd => None,
-        WindowsScriptShell::Python => Some(vec![script.to_owned()]),
-    }
 }
 
 fn windows_directory_creation_script<'path>(
@@ -7423,8 +6919,7 @@ fn github_value_from_json(
     value: &serde_json::Value,
     depth: usize,
 ) -> Result<GithubValue, ExecutorAdapterError> {
-    const MAX_EVENT_DEPTH: usize = 128;
-    if depth > MAX_EVENT_DEPTH {
+    if event_depth_rejection(depth).is_some() {
         return Err(ExecutorAdapterError::new(
             ExecutorAdapterErrorKind::InvalidJob,
         ));
@@ -7590,7 +7085,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream, TargetPath};
+    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
     use automata_ci_expression_github::GithubValue;
     use automata_ci_github_runtime::{
         CommandFileDecoder, CommandFileKind, CommandFilePlatform, GithubCommandFileDecoder,
@@ -7599,91 +7094,14 @@ mod tests {
     use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionCancellationReason};
 
     use super::{
-        ActionExecutionBudget, CleanupCancellation, ExecutorAdapterErrorKind, GithubStatus,
-        JobConclusion, MAX_ACTION_INVOCATIONS, MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS,
-        MAX_COMPOSITE_DERIVED_BYTES, ResolvedShell, SecretMasker, WindowsScriptShell,
-        composite_shell, encode_action_outputs, github_value_from_json,
-        parse_output_with_cancellation, reconcile_cancelled_operation, reconcile_post_operation,
-        resource_exhausted, windows_script_arguments,
+        ActionBudgetRejection, ActionExecutionBudget, CleanupCancellation,
+        ExecutorAdapterErrorKind, GithubStatus, JobConclusion, MAX_ACTION_INVOCATIONS,
+        MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS, MAX_COMPOSITE_DERIVED_BYTES,
+        MAX_EVENT_DEPTH, SecretMasker, action_invocation_count_rejection,
+        composite_child_step_rejection, composite_derived_bytes_rejection, encode_action_outputs,
+        event_depth_rejection, github_value_from_json, parse_output_with_cancellation,
+        reconcile_cancelled_operation, reconcile_post_operation, resource_exhausted,
     };
-
-    #[test]
-    fn windows_script_arguments_preserve_exact_production_quoting_and_cmd_flags() {
-        let powershell_script =
-            TargetPath::windows(r"C:\runner root\it's probe.ps1").expect("PowerShell script");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::PowerShell, &powershell_script),
-            Some(vec![
-                "-command".to_owned(),
-                ". 'C:\\runner root\\it''s probe.ps1'".to_owned(),
-            ])
-        );
-
-        let cmd_script =
-            TargetPath::windows(r"C:\runner root\probe script.cmd").expect("cmd script");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::Cmd, &cmd_script),
-            Some(vec![
-                "/D".to_owned(),
-                "/E:ON".to_owned(),
-                "/V:OFF".to_owned(),
-                "/C".to_owned(),
-                r"C:\runner root\probe script.cmd".to_owned(),
-            ])
-        );
-        let python_script =
-            TargetPath::windows(r"C:\runner root\probe script.py").expect("Python script");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::Python, &python_script),
-            Some(vec![r"C:\runner root\probe script.py".to_owned()])
-        );
-
-        for metacharacter in ['%', '&', '^', '(', ')'] {
-            let unsafe_script = TargetPath::windows(format!(r"C:\runner{metacharacter}\probe.cmd"))
-                .expect("filesystem-valid Windows path");
-            assert_eq!(
-                windows_script_arguments(WindowsScriptShell::Cmd, &unsafe_script),
-                None,
-                "cmd metacharacter {metacharacter:?} must fail closed"
-            );
-        }
-        for metacharacter in ['"', '|', '<', '>'] {
-            assert!(
-                TargetPath::windows(format!(r"C:\runner{metacharacter}\probe.cmd")).is_err(),
-                "filesystem-invalid Windows metacharacter {metacharacter:?} must fail closed"
-            );
-        }
-        let literal_bang =
-            TargetPath::windows(r"C:\runner!literal\probe.cmd").expect("literal bang path");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::Cmd, &literal_bang),
-            Some(vec![
-                "/D".to_owned(),
-                "/E:ON".to_owned(),
-                "/V:OFF".to_owned(),
-                "/C".to_owned(),
-                r"C:\runner!literal\probe.cmd".to_owned(),
-            ])
-        );
-        let posix = TargetPath::posix("/runner/probe.ps1").expect("POSIX path");
-        assert_eq!(
-            windows_script_arguments(WindowsScriptShell::PowerShell, &posix),
-            None
-        );
-    }
-
-    #[test]
-    fn composite_shell_accepts_only_configured_builtin_names_and_existing_templates() {
-        assert!(matches!(
-            composite_shell("python").expect("Python built-in"),
-            ResolvedShell::Named(name) if name == "python"
-        ));
-        assert!(matches!(
-            composite_shell("pwsh").expect("PowerShell Core built-in"),
-            ResolvedShell::Named(name) if name == "pwsh"
-        ));
-        assert!(composite_shell("perl {0}").is_err());
-    }
 
     #[test]
     fn event_json_conversion_preserves_nested_types() {
@@ -7729,9 +7147,12 @@ mod tests {
     #[test]
     fn composite_runtime_budgets_fail_before_unbounded_work() {
         let mut budget = ActionExecutionBudget::new();
-        for depth in 0..MAX_ACTION_NESTING_DEPTH {
+        for depth in 0..(MAX_ACTION_NESTING_DEPTH - 1) {
             assert!(budget.enter(format!("action-{depth}")));
         }
+        assert_eq!(budget.active.len(), MAX_ACTION_NESTING_DEPTH - 1);
+        assert!(budget.enter("at-depth-limit".to_owned()));
+        assert_eq!(budget.active.len(), MAX_ACTION_NESTING_DEPTH);
         assert!(!budget.enter("one-too-deep".to_owned()));
         for _ in 0..MAX_ACTION_NESTING_DEPTH {
             budget.leave();
@@ -7752,6 +7173,64 @@ mod tests {
             .charge_derived(MAX_COMPOSITE_DERIVED_BYTES)
             .expect("exact derived-text budget");
         assert!(budget.charge_derived(1).is_err());
+    }
+
+    #[test]
+    fn action_invocation_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_invocation_count_rejection(MAX_ACTION_INVOCATIONS - 1),
+            None
+        );
+        assert_eq!(
+            action_invocation_count_rejection(MAX_ACTION_INVOCATIONS),
+            None
+        );
+        assert_eq!(
+            action_invocation_count_rejection(MAX_ACTION_INVOCATIONS + 1),
+            Some(ActionBudgetRejection::InvocationCount)
+        );
+    }
+
+    #[test]
+    fn composite_child_step_limit_has_exact_boundaries() {
+        assert_eq!(
+            composite_child_step_rejection(MAX_COMPOSITE_CHILD_STEPS - 1),
+            None
+        );
+        assert_eq!(
+            composite_child_step_rejection(MAX_COMPOSITE_CHILD_STEPS),
+            None
+        );
+        assert_eq!(
+            composite_child_step_rejection(MAX_COMPOSITE_CHILD_STEPS + 1),
+            Some(ActionBudgetRejection::CompositeChildSteps)
+        );
+    }
+
+    #[test]
+    fn composite_derived_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            composite_derived_bytes_rejection(MAX_COMPOSITE_DERIVED_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            composite_derived_bytes_rejection(MAX_COMPOSITE_DERIVED_BYTES),
+            None
+        );
+        assert_eq!(
+            composite_derived_bytes_rejection(MAX_COMPOSITE_DERIVED_BYTES + 1),
+            Some(ActionBudgetRejection::CompositeDerivedBytes)
+        );
+    }
+
+    #[test]
+    fn event_depth_limit_has_exact_boundaries() {
+        assert_eq!(event_depth_rejection(MAX_EVENT_DEPTH - 1), None);
+        assert_eq!(event_depth_rejection(MAX_EVENT_DEPTH), None);
+        assert_eq!(
+            event_depth_rejection(MAX_EVENT_DEPTH + 1),
+            Some(ActionBudgetRejection::EventDepth)
+        );
     }
 
     #[test]

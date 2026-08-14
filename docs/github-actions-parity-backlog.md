@@ -2,8 +2,8 @@
 
 This document records the implementation gaps found by comparing Automata
 `upstream/main` at commit
-[`8dd4e5a`](https://github.com/automata-ci/automata/commit/8dd4e5a589aa531ed1424a460a0dcef1e918ab4e)
-with the public GitHub Actions documentation on 2026-08-12.
+[`1885c2a`](https://github.com/automata-ci/automata/commit/1885c2a2c8b3bc49334272c1a782ca115dd5f999)
+with the public GitHub Actions documentation, refreshed on 2026-08-13.
 
 The [compatibility page](compatibility.md) remains the source of truth for
 current support claims. The [implementation plan](implementation-plan.md)
@@ -19,11 +19,13 @@ only in focused component tests, work only on Linux, lack production ingress or
 credentials, or deliberately diverge from GitHub.
 
 The 2026-08-12 refresh includes the runtime restoration merged in PR #29:
-runner protocol v1, runner-requirements schema v1, one canonical greenfield
-store schema, three isolated single-slot Linux runner processes, the Kubernetes
-product configuration path, durable rerun and protected-environment authority,
-value-safe managed-secret delivery, and immutable multi-workflow fanout. These
-are component or experimental foundations unless a later item records product
+runner protocol v1, message schema v1, JobIR schema v1, runner-requirements
+schema v1, one canonical greenfield `0001_initial_schema.sql`, three isolated
+single-slot Linux runner processes, the Kubernetes product configuration path,
+durable rerun and protected-environment authority,
+value-safe managed-secret delivery, and immutable multi-workflow fanout. The
+baseline has no supported database or mixed-version upgrade source. These are
+component or experimental foundations unless a later item records product
 acceptance. Hosted Windows CI was removed from `main`; the native Windows path
 therefore remains source-tested but is not a release gate.
 

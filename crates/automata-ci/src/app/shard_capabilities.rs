@@ -117,16 +117,16 @@ mod tests {
                 .expect("bounded body"),
         )
         .expect("JSON response");
-        assert_eq!(document["protocol_version"], 1);
+        assert_eq!(document["protocol_version"], CAPABILITY_DOCUMENT_VERSION);
         assert_eq!(document["shard_id"], "eu-test-1");
         assert_eq!(document["release"]["version"], BuildInfo::current().version);
         assert_eq!(document["release"]["commit"], BuildInfo::current().commit);
         assert_eq!(
             document["protocols"],
             serde_json::json!({
-                "core_http": [1],
-                "management_grpc": [1],
-                "delegated_actor": [1]
+                "core_http": [CORE_HTTP_PROTOCOL_VERSION],
+                "management_grpc": [MANAGEMENT_GRPC_PROTOCOL_VERSION],
+                "delegated_actor": [DELEGATED_ACTOR_PROTOCOL_VERSION]
             })
         );
         assert_eq!(document["public_endpoints"], serde_json::json!({}));

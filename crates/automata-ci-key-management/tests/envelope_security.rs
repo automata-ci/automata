@@ -116,6 +116,26 @@ fn round_trip_uses_fresh_deks_and_nonces_with_redacted_diagnostics() {
 }
 
 #[test]
+fn noncurrent_envelope_schema_is_rejected_before_decryption() {
+    let codec = EnvelopeCodec::new(keyring(("key-a", 0x12), &[], &[]));
+    let context = context("tenant-a", "auth/provider-tokens:v1", "identity-1");
+    let envelope = block_on(codec.seal(&context, plaintext())).expect("seal");
+    let future_schema = ENVELOPE_SCHEMA_V1.checked_add(1).expect("test schema");
+    let altered = rebuild(
+        future_schema,
+        envelope.wrapping_key_id().clone(),
+        envelope.wrapped_data_key().ciphertext().to_vec(),
+        *envelope.nonce(),
+        envelope.ciphertext().to_vec(),
+    );
+
+    assert_eq!(
+        block_on(codec.open(&context, &altered)).unwrap_err(),
+        EnvelopeError::UnsupportedSchema
+    );
+}
+
+#[test]
 fn prepared_seal_is_move_only_fully_redacted_and_provider_free() {
     let provider = Arc::new(CountingContextBlindProvider::new(false));
     let codec = EnvelopeCodec::new(provider.clone());

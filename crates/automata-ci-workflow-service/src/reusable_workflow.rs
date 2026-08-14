@@ -40,7 +40,7 @@ pub const MAX_REUSABLE_WORKFLOW_INVOCATIONS: usize = 256;
 pub const MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS: usize = 4_096;
 
 const MAX_REUSABLE_WORKFLOW_PATH_BYTES: usize = 1_024;
-const MAX_REUSABLE_WORKFLOW_SOURCE_BYTES: usize = 16 * 1_024 * 1_024;
+const MAX_REUSABLE_WORKFLOW_SOURCE_BYTES: usize = 16_777_216;
 const MAX_PERMISSION_NAME_BYTES: usize = 256;
 const MAX_PERMISSION_GRANTS: usize = 256;
 const REUSABLE_INVOCATION_ID_DOMAIN: &[u8] = b"automata.reusable-workflow.invocation.v1\0";
@@ -225,7 +225,7 @@ impl GithubReusableWorkflowCatalog {
         for source in sources {
             let path = canonical_workflow_path(source.path())?;
             if source.source().is_empty()
-                || source.source().len() > MAX_REUSABLE_WORKFLOW_SOURCE_BYTES
+                || validate_reusable_workflow_source_bytes(source.source().len()).is_err()
             {
                 continue;
             }
@@ -250,9 +250,11 @@ impl GithubReusableWorkflowCatalog {
             if entries.contains_key(&path) {
                 continue;
             }
-            if entries.len() + 1 >= MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES {
-                return Err(ReusableWorkflowExpansionError::CatalogLimitExceeded);
-            }
+            let projected = entries
+                .len()
+                .checked_add(1)
+                .ok_or(ReusableWorkflowExpansionError::CatalogLimitExceeded)?;
+            validate_reusable_catalog_entry_count(projected)?;
             let source = available
                 .get(&path)
                 .ok_or_else(|| ReusableWorkflowExpansionError::MissingCatalogPath(path.clone()))?;
@@ -311,17 +313,14 @@ impl GithubReusableWorkflowCatalog {
         validate_coordinate(&repository)?;
         validate_exact_revision(&revision)?;
         let sources = sources.into_iter().collect::<Vec<_>>();
-        if sources.len() > MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES {
-            return Err(ReusableWorkflowExpansionError::CatalogLimitExceeded);
-        }
+        validate_reusable_catalog_entry_count(sources.len())?;
         let mut entries = BTreeMap::new();
         for source in sources {
             let path = canonical_workflow_path(source.path())?;
-            if source.source().is_empty()
-                || source.source().len() > MAX_REUSABLE_WORKFLOW_SOURCE_BYTES
-            {
+            if source.source().is_empty() {
                 return Err(ReusableWorkflowExpansionError::InvalidSourceSize);
             }
+            validate_reusable_workflow_source_bytes(source.source().len())?;
             if entries.contains_key(&path) {
                 return Err(ReusableWorkflowExpansionError::DuplicateCatalogPath(path));
             }
@@ -410,9 +409,11 @@ impl ReusableWorkflowPermissions {
     ) -> Result<Self, ReusableWorkflowExpansionError> {
         let mut normalized = BTreeMap::new();
         for (name, level) in grants {
-            if normalized.len() >= MAX_PERMISSION_GRANTS {
-                return Err(ReusableWorkflowExpansionError::PermissionLimitExceeded);
-            }
+            let projected = normalized
+                .len()
+                .checked_add(1)
+                .ok_or(ReusableWorkflowExpansionError::PermissionLimitExceeded)?;
+            validate_reusable_permission_grant_count(projected)?;
             validate_permission_name(&name)?;
             if normalized.insert(name.clone(), level).is_some() {
                 return Err(ReusableWorkflowExpansionError::DuplicatePermission(name));
@@ -934,6 +935,90 @@ pub enum ReusableWorkflowExpansionError {
     InvalidIdentity,
 }
 
+const fn validate_reusable_catalog_entry_count(
+    observed: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES {
+        return Err(ReusableWorkflowExpansionError::CatalogLimitExceeded); // stable catalog-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_workflow_depth(
+    observed: usize,
+    maximum: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > maximum {
+        return Err(ReusableWorkflowExpansionError::DepthLimitExceeded); // stable depth-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_workflow_invocation_count(
+    observed: usize,
+    maximum: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > maximum {
+        return Err(ReusableWorkflowExpansionError::InvocationLimitExceeded); // stable invocation-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_workflow_job_count(
+    observed: usize,
+    maximum: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > maximum {
+        return Err(ReusableWorkflowExpansionError::JobLimitExceeded); // stable job-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_workflow_source_bytes(
+    observed: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > MAX_REUSABLE_WORKFLOW_SOURCE_BYTES {
+        return Err(ReusableWorkflowExpansionError::InvalidSourceSize); // stable source-byte-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_workflow_path_bytes(
+    observed: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > MAX_REUSABLE_WORKFLOW_PATH_BYTES {
+        return Err(ReusableWorkflowExpansionError::InvalidWorkflowPath); // stable path-byte-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_repository_coordinate_bytes(
+    observed: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > MAX_REUSABLE_WORKFLOW_PATH_BYTES {
+        return Err(ReusableWorkflowExpansionError::InvalidRepositoryCoordinate); // stable coordinate-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_permission_name_bytes(
+    observed: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > MAX_PERMISSION_NAME_BYTES {
+        return Err(ReusableWorkflowExpansionError::InvalidPermissionName); // stable permission-name-limit reason
+    }
+    Ok(())
+}
+
+const fn validate_reusable_permission_grant_count(
+    observed: usize,
+) -> Result<(), ReusableWorkflowExpansionError> {
+    if observed > MAX_PERMISSION_GRANTS {
+        return Err(ReusableWorkflowExpansionError::PermissionLimitExceeded); // stable permission-grant-limit reason
+    }
+    Ok(())
+}
+
 struct ExpansionContext<'a> {
     run_id: RunId,
     catalog: &'a GithubReusableWorkflowCatalog,
@@ -950,11 +1035,10 @@ fn expand_reusable_workflow(
     limits: ReusableWorkflowLimits,
 ) -> Result<ReusableWorkflowExpansion, ReusableWorkflowExpansionError> {
     let root_path = canonical_workflow_path(request.root_path)?;
-    if request.root_source.is_empty()
-        || request.root_source.len() > MAX_REUSABLE_WORKFLOW_SOURCE_BYTES
-    {
+    if request.root_source.is_empty() {
         return Err(ReusableWorkflowExpansionError::InvalidSourceSize);
     }
+    validate_reusable_workflow_source_bytes(request.root_source.len())?;
     validate_plan_origin(
         request.root_plan,
         request.catalog.repository(),
@@ -1061,12 +1145,16 @@ fn expand_invocation(
     request: InvocationRequest<'_>,
     active_paths: &mut Vec<String>,
 ) -> Result<(), ReusableWorkflowExpansionError> {
-    if request.depth > context.limits.maximum_depth() {
-        return Err(ReusableWorkflowExpansionError::DepthLimitExceeded);
-    }
-    if context.invocations.len() >= context.limits.maximum_invocations() {
-        return Err(ReusableWorkflowExpansionError::InvocationLimitExceeded);
-    }
+    validate_reusable_workflow_depth(request.depth, context.limits.maximum_depth())?;
+    let projected_invocations = context
+        .invocations
+        .len()
+        .checked_add(1)
+        .ok_or(ReusableWorkflowExpansionError::InvocationLimitExceeded)?;
+    validate_reusable_workflow_invocation_count(
+        projected_invocations,
+        context.limits.maximum_invocations(),
+    )?;
     if active_paths
         .iter()
         .any(|candidate| candidate == request.workflow_path)
@@ -1180,13 +1268,12 @@ fn expanded_jobs(
     plan: &WorkflowPlan,
     root: bool,
 ) -> Result<Vec<ExpandedReusableJob>, ReusableWorkflowExpansionError> {
-    context.job_count = context
+    let projected_jobs = context
         .job_count
         .checked_add(plan.jobs().len())
         .ok_or(ReusableWorkflowExpansionError::JobLimitExceeded)?;
-    if context.job_count > context.limits.maximum_jobs() {
-        return Err(ReusableWorkflowExpansionError::JobLimitExceeded);
-    }
+    validate_reusable_workflow_job_count(projected_jobs, context.limits.maximum_jobs())?;
+    context.job_count = projected_jobs;
     let mut ids = BTreeMap::new();
     for job in plan.jobs() {
         let id = if root {
@@ -1532,8 +1619,8 @@ fn validate_plan_origin(
 }
 
 fn canonical_workflow_path(value: &str) -> Result<String, ReusableWorkflowExpansionError> {
+    validate_reusable_workflow_path_bytes(value.len())?;
     if value.is_empty()
-        || value.len() > MAX_REUSABLE_WORKFLOW_PATH_BYTES
         || value.starts_with('/')
         || value.ends_with('/')
         || value.contains('\\')
@@ -1570,11 +1657,8 @@ fn resolve_local_reference(reference: &str) -> Result<String, ReusableWorkflowEx
 }
 
 fn validate_coordinate(value: &str) -> Result<(), ReusableWorkflowExpansionError> {
-    if value.is_empty()
-        || value.len() > MAX_REUSABLE_WORKFLOW_PATH_BYTES
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
+    validate_reusable_repository_coordinate_bytes(value.len())?;
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
         return Err(ReusableWorkflowExpansionError::InvalidRepositoryCoordinate);
     }
     Ok(())
@@ -1592,11 +1676,8 @@ fn validate_exact_revision(value: &str) -> Result<(), ReusableWorkflowExpansionE
 }
 
 fn validate_permission_name(name: &str) -> Result<(), ReusableWorkflowExpansionError> {
-    if name.is_empty()
-        || name.len() > MAX_PERMISSION_NAME_BYTES
-        || name.trim() != name
-        || name.chars().any(char::is_control)
-    {
+    validate_reusable_permission_name_bytes(name.len())?;
+    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
         return Err(ReusableWorkflowExpansionError::InvalidPermissionName);
     }
     Ok(())
@@ -1833,5 +1914,142 @@ fn diagnostic_codes(diagnostics: &[Diagnostic]) -> String {
         "unspecified diagnostic".to_owned()
     } else {
         codes.join(",")
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::*;
+
+    #[test]
+    fn reusable_catalog_entry_limit_has_exact_boundaries() {
+        assert!(
+            validate_reusable_catalog_entry_count(MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES - 1)
+                .is_ok()
+        );
+        assert!(
+            validate_reusable_catalog_entry_count(MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES).is_ok()
+        );
+        assert_eq!(
+            validate_reusable_catalog_entry_count(MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES + 1),
+            Err(ReusableWorkflowExpansionError::CatalogLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn reusable_workflow_depth_limit_has_exact_boundaries() {
+        let minus_one = MAX_REUSABLE_WORKFLOW_DEPTH - 1;
+        let at = MAX_REUSABLE_WORKFLOW_DEPTH;
+        let plus_one = MAX_REUSABLE_WORKFLOW_DEPTH + 1;
+        assert!(validate_reusable_workflow_depth(minus_one, MAX_REUSABLE_WORKFLOW_DEPTH).is_ok());
+        assert!(validate_reusable_workflow_depth(at, MAX_REUSABLE_WORKFLOW_DEPTH).is_ok());
+        assert_eq!(
+            validate_reusable_workflow_depth(plus_one, MAX_REUSABLE_WORKFLOW_DEPTH),
+            Err(ReusableWorkflowExpansionError::DepthLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn reusable_workflow_invocation_limit_has_exact_boundaries() {
+        let minus_one = MAX_REUSABLE_WORKFLOW_INVOCATIONS - 1;
+        let at = MAX_REUSABLE_WORKFLOW_INVOCATIONS;
+        let plus_one = MAX_REUSABLE_WORKFLOW_INVOCATIONS + 1;
+        assert!(
+            validate_reusable_workflow_invocation_count(
+                minus_one,
+                MAX_REUSABLE_WORKFLOW_INVOCATIONS
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_reusable_workflow_invocation_count(at, MAX_REUSABLE_WORKFLOW_INVOCATIONS)
+                .is_ok()
+        );
+        assert_eq!(
+            validate_reusable_workflow_invocation_count(
+                plus_one,
+                MAX_REUSABLE_WORKFLOW_INVOCATIONS
+            ),
+            Err(ReusableWorkflowExpansionError::InvocationLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn reusable_workflow_job_limit_has_exact_boundaries() {
+        let minus_one = MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS - 1;
+        let at = MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS;
+        let plus_one = MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS + 1;
+        assert!(
+            validate_reusable_workflow_job_count(minus_one, MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS)
+                .is_ok()
+        );
+        assert!(
+            validate_reusable_workflow_job_count(at, MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS).is_ok()
+        );
+        assert_eq!(
+            validate_reusable_workflow_job_count(plus_one, MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS),
+            Err(ReusableWorkflowExpansionError::JobLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn reusable_workflow_source_byte_limit_has_exact_boundaries() {
+        assert!(
+            validate_reusable_workflow_source_bytes(MAX_REUSABLE_WORKFLOW_SOURCE_BYTES - 1).is_ok()
+        );
+        assert!(
+            validate_reusable_workflow_source_bytes(MAX_REUSABLE_WORKFLOW_SOURCE_BYTES).is_ok()
+        );
+        assert_eq!(
+            validate_reusable_workflow_source_bytes(MAX_REUSABLE_WORKFLOW_SOURCE_BYTES + 1),
+            Err(ReusableWorkflowExpansionError::InvalidSourceSize)
+        );
+    }
+
+    #[test]
+    fn reusable_workflow_path_byte_limit_has_exact_boundaries() {
+        assert!(
+            validate_reusable_workflow_path_bytes(MAX_REUSABLE_WORKFLOW_PATH_BYTES - 1).is_ok()
+        );
+        assert!(validate_reusable_workflow_path_bytes(MAX_REUSABLE_WORKFLOW_PATH_BYTES).is_ok());
+        assert_eq!(
+            validate_reusable_workflow_path_bytes(MAX_REUSABLE_WORKFLOW_PATH_BYTES + 1),
+            Err(ReusableWorkflowExpansionError::InvalidWorkflowPath)
+        );
+    }
+
+    #[test]
+    fn reusable_repository_coordinate_byte_limit_has_exact_boundaries() {
+        assert!(
+            validate_reusable_repository_coordinate_bytes(MAX_REUSABLE_WORKFLOW_PATH_BYTES - 1)
+                .is_ok()
+        );
+        assert!(
+            validate_reusable_repository_coordinate_bytes(MAX_REUSABLE_WORKFLOW_PATH_BYTES).is_ok()
+        );
+        assert_eq!(
+            validate_reusable_repository_coordinate_bytes(MAX_REUSABLE_WORKFLOW_PATH_BYTES + 1),
+            Err(ReusableWorkflowExpansionError::InvalidRepositoryCoordinate)
+        );
+    }
+
+    #[test]
+    fn reusable_permission_name_byte_limit_has_exact_boundaries() {
+        assert!(validate_reusable_permission_name_bytes(MAX_PERMISSION_NAME_BYTES - 1).is_ok());
+        assert!(validate_reusable_permission_name_bytes(MAX_PERMISSION_NAME_BYTES).is_ok());
+        assert_eq!(
+            validate_reusable_permission_name_bytes(MAX_PERMISSION_NAME_BYTES + 1),
+            Err(ReusableWorkflowExpansionError::InvalidPermissionName)
+        );
+    }
+
+    #[test]
+    fn reusable_permission_grant_limit_has_exact_boundaries() {
+        assert!(validate_reusable_permission_grant_count(MAX_PERMISSION_GRANTS - 1).is_ok());
+        assert!(validate_reusable_permission_grant_count(MAX_PERMISSION_GRANTS).is_ok());
+        assert_eq!(
+            validate_reusable_permission_grant_count(MAX_PERMISSION_GRANTS + 1),
+            Err(ReusableWorkflowExpansionError::PermissionLimitExceeded)
+        );
     }
 }

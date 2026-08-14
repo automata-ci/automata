@@ -249,3 +249,60 @@ pub enum LocalKeyringConfigurationError {
     #[error("local wrapping key material was rejected")]
     InvalidKeyMaterial,
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::KeyPurpose;
+    use futures::executor::block_on;
+
+    use super::*;
+
+    #[test]
+    fn local_wrapped_key_rejects_forward_wrap_schema() {
+        let key_id = KeyId::new("local-key-v1").expect("key ID");
+        let keyring = LocalAes256GcmKeyring::new(
+            LocalKeyMaterial::new(
+                key_id,
+                SecretBytes::new(vec![0x51; AES_256_GCM_KEY_BYTES]).expect("key material"),
+            )
+            .expect("local key"),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("keyring");
+        let context = KeyEncryptionContext::new(
+            "tenant-a",
+            KeyPurpose::new("auth/provider-token:v1").expect("purpose"),
+            "record-1",
+        )
+        .expect("context");
+        let forward_schema = WRAP_SCHEMA.checked_add(1).expect("test schema");
+        let nonce_bytes = [0x39; NONCE_BYTES];
+        let mut ciphertext = vec![0x27; AES_256_GCM_KEY_BYTES];
+        keyring
+            .keys
+            .get(&keyring.active_id)
+            .expect("active key")
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce_bytes),
+                Aad::from(context.authenticated_data(
+                    WRAP_AAD_DOMAIN,
+                    forward_schema,
+                    &keyring.active_id,
+                )),
+                &mut ciphertext,
+            )
+            .expect("future-schema wrap");
+        let mut encoded = Vec::with_capacity(WRAPPED_KEY_BYTES);
+        encoded.extend_from_slice(WRAP_HEADER);
+        encoded.extend_from_slice(&nonce_bytes);
+        encoded.extend_from_slice(&ciphertext);
+        let altered = WrappedDataKey::new(keyring.active_id.clone(), encoded)
+            .expect("future-schema wrapped key");
+
+        assert!(matches!(
+            block_on(keyring.unwrap_data_key(&altered, &context)),
+            Err(KeyEncryptionError::AuthenticationFailed)
+        ));
+    }
+}

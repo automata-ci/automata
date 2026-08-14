@@ -231,7 +231,7 @@ impl WorkflowAdmissionService {
         else {
             return Ok(None);
         };
-        if source.source().media_type() != GITHUB_WORKFLOW_MEDIA_TYPE {
+        if !crate::github_workflow_media_type_is_current(source.source().media_type()) {
             return Err(WorkflowAdmissionError::WorkflowDispatchEvidence);
         }
         let descriptor = BlobDescriptor::new(

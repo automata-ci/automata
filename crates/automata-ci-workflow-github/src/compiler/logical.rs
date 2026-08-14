@@ -23,12 +23,11 @@ use automata_ci_core::{
 
 use crate::{
     BooleanValue, CompilationDisposition, CompilationReport, CompileWorkflowRequest, Concurrency,
-    ConcurrencyQueue, Defaults, GithubConditionPhase, JobContainer, JobEnvironment,
-    JobResourceVector, JobResources, JobService, JobStrategy, MatrixConfiguration,
-    MatrixConfigurations, MatrixDimensionValues, MatrixValue, Permissions, ReusableWorkflowCall,
-    ReusableWorkflowSecrets, RunnerSelection, ScalarResolution, ScalarValue, SourceSpan, Spanned,
-    Step, StepExecution, StrategyMatrix, TriggerConfiguration, ValueMap, WorkflowJob,
-    YamlMappingEntry, YamlNode,
+    ConcurrencyQueue, Defaults, GithubConditionPhase, JobContainer, JobResourceVector,
+    JobResources, JobService, JobStrategy, MatrixConfiguration, MatrixConfigurations,
+    MatrixDimensionValues, MatrixValue, Permissions, ReusableWorkflowCall, ReusableWorkflowSecrets,
+    RunnerSelection, ScalarResolution, ScalarValue, SourceSpan, Spanned, Step, StepExecution,
+    StrategyMatrix, TriggerConfiguration, ValueMap, WorkflowJob, YamlMappingEntry, YamlNode,
 };
 
 use super::{
@@ -101,20 +100,7 @@ const STEP_CONTEXTS: &[ExpressionContext] = &[
     ExpressionContext::Runner,
     ExpressionContext::Steps,
 ];
-const STEP_IF_CONTEXTS: &[ExpressionContext] = &[
-    ExpressionContext::Github,
-    ExpressionContext::Inputs,
-    ExpressionContext::Vars,
-    ExpressionContext::Needs,
-    ExpressionContext::Strategy,
-    ExpressionContext::Matrix,
-    ExpressionContext::Env,
-    ExpressionContext::Job,
-    ExpressionContext::Runner,
-    ExpressionContext::Steps,
-];
 const OUTPUT_CONTEXTS: &[ExpressionContext] = STEP_CONTEXTS;
-const DEPLOYMENT_URL_CONTEXTS: &[ExpressionContext] = STEP_IF_CONTEXTS;
 const REUSABLE_INPUT_CONTEXTS: &[ExpressionContext] = JOB_ACTIVATION_CONTEXTS;
 const REUSABLE_SECRET_CONTEXTS: &[ExpressionContext] = &[
     ExpressionContext::Github,
@@ -185,12 +171,6 @@ const OUTPUT_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
     "job output",
     PlanEvaluationPhase::JobFinalization,
     OUTPUT_CONTEXTS,
-    false,
-);
-const DEPLOYMENT_URL_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
-    "deployment environment URL",
-    PlanEvaluationPhase::JobFinalization,
-    DEPLOYMENT_URL_CONTEXTS,
     false,
 );
 const REUSABLE_INPUT_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
@@ -1008,7 +988,12 @@ fn compile_job(
         .permissions()
         .and_then(|permissions| compile_permission_snapshot(permissions, context));
     let concurrency = source_job.concurrency().and_then(|concurrency| {
-        compile_concurrency(concurrency, JOB_ACTIVATION_POLICY, &mut references, context)
+        context.unsupported(
+            "github.compile.job_concurrency_unavailable",
+            "job-level `concurrency` is not runnable and must be rejected before publication",
+            concurrency_span(concurrency).clone(),
+        );
+        None
     });
 
     let reusable = source_job.reusable_workflow_call().is_some();
@@ -1139,9 +1124,16 @@ fn compile_step_job_body(
     let outputs = source_job.outputs().map_or_else(Vec::new, |outputs| {
         compile_outputs(outputs.values(), has_strategy, references, context)
     });
-    let deployment = source_job
-        .deployment_environment()
-        .and_then(|environment| compile_deployment(environment, references, context));
+    let deployment = source_job.deployment_environment().and_then(|environment| {
+        context.unsupported(
+            "github.compile.deployment_environment_unavailable",
+            "deployment environments are not runnable and must be rejected before publication",
+            environment
+                .name()
+                .map_or_else(|| environment.span().clone(), |name| name.span().clone()),
+        );
+        None
+    });
     Some(CompiledJobBody {
         execution: LogicalJobKind::Steps(
             StepJobTemplate::new(runner, steps, span)
@@ -1990,6 +1982,13 @@ fn runner_span(runner: &RunnerSelection) -> &SourceSpan {
     }
 }
 
+fn concurrency_span(concurrency: &Concurrency) -> &SourceSpan {
+    match concurrency {
+        Concurrency::Group(group) => group.span(),
+        Concurrency::Detailed(details) => details.span(),
+    }
+}
+
 fn output_merge_policy(has_strategy: bool) -> LogicalOutputMergePolicy {
     if has_strategy {
         LogicalOutputMergePolicy::LastSuccessfulCompletion
@@ -2154,6 +2153,14 @@ fn compile_step_execution(
                 context.unsupported(
                     "github.compile.dynamic_action_reference",
                     "action `uses` references cannot contain expressions",
+                    action.reference().span().clone(),
+                );
+                return None;
+            }
+            if action.reference().value().starts_with("docker://") {
+                context.unsupported(
+                    "github.compile.container_action_unavailable",
+                    "direct container actions are not runnable and must be rejected before publication",
                     action.reference().span().clone(),
                 );
                 return None;
@@ -2350,31 +2357,6 @@ fn compile_outputs(
             ))
         })
         .collect()
-}
-
-fn compile_deployment(
-    environment: &JobEnvironment,
-    references: &mut BTreeMap<ParsedNeedReference, SourceSpan>,
-    context: &mut CompileContext<'_>,
-) -> Option<DeploymentSelection> {
-    context.reject_extensions(environment.extensions());
-    let Some(name) = environment.name() else {
-        context.semantic(
-            "github.compile.job_environment_name_required",
-            "deployment environment requires a `name`",
-            environment.span().clone(),
-        );
-        return None;
-    };
-    let name = compile_located_template(name, JOB_ACTIVATION_POLICY, references, context)?;
-    let url = environment
-        .url()
-        .and_then(|url| compile_located_template(url, DEPLOYMENT_URL_POLICY, references, context));
-    Some(DeploymentSelection::new(
-        name,
-        url,
-        context.span(environment.span())?,
-    ))
 }
 
 fn compile_strategy(

@@ -1237,6 +1237,24 @@ mod tests {
                 ),
                 Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
             );
+
+            let mut workspace_schema = current.clone();
+            workspace_schema["workspace"]["schema"] = serde_json::json!(unsupported);
+            assert_eq!(
+                WorkflowRuntimePolicy::decode_configuration(
+                    &serde_json::to_vec(&workspace_schema).expect("policy JSON")
+                ),
+                Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
+            );
+
+            let mut derivation = current.clone();
+            derivation["workspace"]["derivation"] = serde_json::json!(unsupported);
+            assert_eq!(
+                WorkflowRuntimePolicy::decode_configuration(
+                    &serde_json::to_vec(&derivation).expect("policy JSON")
+                ),
+                Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
+            );
         }
     }
 

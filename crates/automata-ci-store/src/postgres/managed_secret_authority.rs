@@ -19,7 +19,7 @@ use crate::{
     SecretWorkloadGrantId, SessionEpoch, TenantScope,
 };
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 
 const EVIDENCE_DOMAIN: &[u8] = b"automata/store/managed-secret-authority:v1\0";
 
@@ -220,6 +220,7 @@ async fn resolve_managed_secret_execution_scope(
 ) -> Result<ManagedSecretExecutionScope, ManagedSecretAuthorityStoreError> {
     let lease = request.lease();
     let session = request.session();
+    let schemas = current_durable_schemas();
     let row = sqlx::query(
         r"
         SELECT repository.tenant_id, repository.id AS repository_id
@@ -261,29 +262,29 @@ async fn resolve_managed_secret_execution_scope(
           AND attempt.lease_expires_at_ms > $14
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 1
-          AND job.job_ir_schema = 1
+          AND job.admission_epoch = $21
+          AND job.job_ir_schema = $15
           AND run.id = $12
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $21
+          AND run.plan_schema = $16
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $17
           AND marker.state IN ('pending', 'active')
           AND automata_logical_workflow_invocation_published(
               run.id, invocation.id
           )
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $18
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
-          AND instance.job_ir_version = 1
+          AND instance.job_ir_version = $19
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.runtime_context_schema = 1
+          AND instance.runtime_context_schema = $20
           AND instance.runtime_context_digest = $13
-          AND concrete.runtime_context_schema = 1
+          AND concrete.runtime_context_schema = $20
           AND concrete.runtime_context_digest = $13
           AND concrete.runtime_context_digest = instance.runtime_context_digest
           AND concrete.requirements = job.requirements
@@ -297,7 +298,7 @@ async fn resolve_managed_secret_execution_scope(
           AND runner_session.id = $8
           AND runner_session.session_epoch = $9
           AND runner_session.runner_generation = $10
-          AND runner_session.job_ir_schema = 1
+          AND runner_session.job_ir_schema = $15
           AND runner_session.disconnected_at_ms IS NULL
         ",
     )
@@ -315,6 +316,13 @@ async fn resolve_managed_secret_execution_scope(
     .bind(request.run_id().as_uuid())
     .bind(request.runtime_context_digest().as_bytes().as_slice())
     .bind(request.observed_at().get())
+    .bind(schemas.job_ir_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(pool)
     .await
     .map_err(operation_error)?
@@ -394,9 +402,10 @@ async fn lock_delivery_operation(
     let delivery = request
         .delivery()
         .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
-    sqlx::query(
+    let row = sqlx::query(
         r"
-        SELECT credential_sha256, state, usable_until_ms, acknowledged_at_ms,
+        SELECT authority_evidence_schema, credential_sha256, state,
+               usable_until_ms, acknowledged_at_ms,
                (repository_id = $3 AND run_id = $4 AND job_id = $5
                 AND attempt_id = $6 AND lease_id = $7 AND fencing_token = $8
                 AND runner_id = $9 AND runner_session_id = $10
@@ -430,7 +439,9 @@ async fn lock_delivery_operation(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
-    .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)
+    .ok_or(ManagedSecretAuthorityStoreError::Unauthorized)?;
+    validate_authority_evidence_schema(&row)?;
+    Ok(row)
 }
 
 async fn expire_delivery_operation(
@@ -624,6 +635,7 @@ async fn lock_current_execution(
 ) -> Result<ExecutionRow, ManagedSecretAuthorityStoreError> {
     let lease = request.lease();
     let session = request.session();
+    let schemas = current_durable_schemas();
     let row = sqlx::query(
         r"
         SELECT attempt.attempt_number, attempt.secret_exposure_class,
@@ -667,32 +679,32 @@ async fn lock_current_execution(
           AND attempt.lease_expires_at_ms > $16
           AND job.id = $2
           AND job.run_id = $12
-          AND job.admission_epoch = 1
-          AND job.job_ir_schema = 1
+          AND job.admission_epoch = $23
+          AND job.job_ir_schema = $17
           AND run.id = $12
           AND run.repository_id = $13
-          AND run.admission_epoch = 1
-          AND run.plan_schema = 1
+          AND run.admission_epoch = $23
+          AND run.plan_schema = $18
           AND run.status IN ('queued', 'in_progress')
           AND run.plan_digest = invocation.plan_digest
           AND repository.id = $13
           AND repository.tenant_id = $14
-          AND marker.orchestration_schema = 1
+          AND marker.orchestration_schema = $19
           AND marker.state IN ('pending', 'active')
           AND automata_logical_workflow_invocation_published(
               run.id, invocation.id
           )
-          AND invocation.plan_schema = 1
+          AND invocation.plan_schema = $20
           AND invocation.state IN ('pending', 'active')
           AND logical_job.execution_kind = 'steps'
           AND logical_job.state = 'activated'
-          AND instance.job_ir_version = 1
+          AND instance.job_ir_version = $21
           AND instance.job_ir_digest = job.job_ir_digest
           AND instance.job_ir_object_key = job.job_ir_object_key
           AND instance.job_ir_size_bytes = job.job_ir_size_bytes
-          AND instance.runtime_context_schema = 1
+          AND instance.runtime_context_schema = $22
           AND instance.runtime_context_digest = $15
-          AND concrete.runtime_context_schema = 1
+          AND concrete.runtime_context_schema = $22
           AND concrete.runtime_context_digest = $15
           AND concrete.runtime_context_digest = instance.runtime_context_digest
           AND concrete.requirements = job.requirements
@@ -706,7 +718,7 @@ async fn lock_current_execution(
           AND session.id = $8
           AND session.session_epoch = $9
           AND session.runner_generation = $10
-          AND session.job_ir_schema = 1
+          AND session.job_ir_schema = $17
           AND session.disconnected_at_ms IS NULL
         FOR UPDATE OF attempt, job
         FOR SHARE OF run, repository, marker, concrete, instance,
@@ -729,6 +741,13 @@ async fn lock_current_execution(
     .bind(request.tenant().as_str())
     .bind(request.runtime_context_digest().as_bytes().as_slice())
     .bind(request.observed_at().get())
+    .bind(schemas.job_ir_i32)
+    .bind(schemas.workflow_plan_i32)
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.job_ir_i16)
+    .bind(schemas.runtime_context_i16)
+    .bind(schemas.admission_epoch_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?
@@ -1778,15 +1797,16 @@ async fn reserve_delivery_operation(
             attempt_id, lease_id, fencing_token, runner_id,
             runner_session_id, runner_session_epoch, runner_generation,
             runner_slot, runtime_context_digest, binding_set_digest,
-            authority_evidence_digest, credential_key_id, credential_sha256,
+            authority_evidence_schema, authority_evidence_digest,
+            credential_key_id, credential_sha256,
             state, created_at_ms, usable_until_ms, acknowledged_at_ms
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9,
             $10, $11, $12,
             $13, $14, $15,
-            $16, $17, $18,
-            'pending', $19, $20, NULL
+            $16, $17, $18, $19,
+            'pending', $20, $21, NULL
         )
         ON CONFLICT DO NOTHING
         ",
@@ -1809,6 +1829,10 @@ async fn reserve_delivery_operation(
     )
     .bind(request.runtime_context_digest().as_bytes().as_slice())
     .bind(binding_set_digest.as_bytes().as_slice())
+    .bind(
+        i16::try_from(MANAGED_SECRET_AUTHORITY_SCHEMA)
+            .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?,
+    )
     .bind(authority_evidence_digest.as_bytes().as_slice())
     .bind(delivery.credential_key_id())
     .bind(delivery.credential_sha256().as_bytes().as_slice())
@@ -1821,7 +1845,8 @@ async fn reserve_delivery_operation(
     let row = if request.machine().is_none() {
         sqlx::query(
             r"
-            SELECT operation_id, credential_key_id, credential_sha256
+            SELECT operation_id, authority_evidence_schema,
+                   credential_key_id, credential_sha256
             FROM managed_secret_delivery_operations
             WHERE tenant_id = $1 AND repository_id = $2
               AND run_id = $3 AND job_id = $4 AND attempt_id = $5
@@ -1865,7 +1890,8 @@ async fn reserve_delivery_operation(
     } else {
         sqlx::query(
             r"
-        SELECT operation_id, credential_key_id, credential_sha256, (
+        SELECT operation_id, authority_evidence_schema,
+               credential_key_id, credential_sha256, (
             repository_id = $3 AND run_id = $4 AND job_id = $5
             AND attempt_id = $6 AND lease_id = $7 AND fencing_token = $8
             AND runner_id = $9 AND runner_session_id = $10
@@ -1910,6 +1936,7 @@ async fn reserve_delivery_operation(
     let Some(row) = row else {
         return Err(ManagedSecretAuthorityStoreError::Unauthorized);
     };
+    validate_authority_evidence_schema(&row)?;
     let reserved_operation_id =
         ManagedSecretDeliveryOperationId::from_uuid(field(&row, "operation_id")?)
             .map_err(|_| ManagedSecretAuthorityStoreError::CorruptData)?;
@@ -1934,6 +1961,17 @@ async fn reserve_delivery_operation(
         })
     } else {
         Err(ManagedSecretAuthorityStoreError::Unauthorized)
+    }
+}
+
+fn validate_authority_evidence_schema(
+    row: &sqlx::postgres::PgRow,
+) -> Result<(), ManagedSecretAuthorityStoreError> {
+    let schema: i16 = field(row, "authority_evidence_schema")?;
+    if u16::try_from(schema).ok() == Some(MANAGED_SECRET_AUTHORITY_SCHEMA) {
+        Ok(())
+    } else {
+        Err(ManagedSecretAuthorityStoreError::CorruptData)
     }
 }
 

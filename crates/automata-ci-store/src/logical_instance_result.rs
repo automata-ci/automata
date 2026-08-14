@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use crate::{
     LogicalActivationObject, LogicalWorkflowInstanceId, LogicalWorkflowInvocationId,
-    LogicalWorkflowJobId, MAX_TERMINAL_RESULT_BYTES, ObjectKey, StoreError, TenantScope,
+    LogicalWorkflowJobId, ObjectKey, StoreError, TenantScope,
+    value::terminal_result_bytes_rejection,
 };
 
 /// Exact media type of the current runner terminal-result object.
@@ -320,7 +321,7 @@ impl LogicalTerminalResultObject {
         if schema != CORE_SCHEMA_VERSION {
             return Err(LogicalInstanceResultValueError::InvalidResultObject);
         }
-        if encoded_size == 0 || encoded_size > MAX_TERMINAL_RESULT_BYTES {
+        if encoded_size == 0 || terminal_result_bytes_rejection(encoded_size).is_some() {
             return Err(LogicalInstanceResultValueError::InvalidResultObject);
         }
         Ok(Self {

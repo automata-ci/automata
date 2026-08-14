@@ -20,12 +20,14 @@ use super::{
     PostgresStore,
     secret_management::{AuthorizedHumanRepositoryAction, authorize_human_repository_action},
 };
+use crate::workflow_rerun::workflow_rerun_age_rejection;
 use crate::{
     GithubCheckRerunAction, GithubCheckRerunRepository, GithubCheckRerunRequest,
-    GithubCheckRerunStoreError, GithubCheckRerunTarget, MAX_WORKFLOW_RERUN_AGE_MILLIS,
+    GithubCheckRerunStoreError, GithubCheckRerunTarget,
     MAX_WORKFLOW_RERUN_ATTEMPTS, RepositoryId, RerunWorkflow, RerunWorkflowByName, StoreError,
     WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowConcurrency, WorkflowRerunReceipt,
     WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
+    next_workflow_rerun_attempt,
 };
 
 const RERUN_PERMISSION: &str = "runs:rerun";
@@ -619,7 +621,8 @@ async fn admit_authorized_rerun(
     }
     let database_now = database_now_ms(&mut transaction).await?;
     if source.root_created_at_ms > database_now
-        || database_now.saturating_sub(source.root_created_at_ms) > MAX_WORKFLOW_RERUN_AGE_MILLIS
+        || workflow_rerun_age_rejection(database_now.saturating_sub(source.root_created_at_ms))
+            .is_some()
     {
         return Err(WorkflowRerunStoreError::SourceExpired);
     }
@@ -1487,12 +1490,7 @@ async fn next_attempt(
         .map_err(operation_error)?
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| StoreError::corrupt_data("workflow rerun attempt is invalid"))?;
-    if maximum >= MAX_WORKFLOW_RERUN_ATTEMPTS {
-        return Err(WorkflowRerunStoreError::AttemptLimitReached);
-    }
-    maximum
-        .checked_add(1)
-        .ok_or(WorkflowRerunStoreError::AttemptLimitReached)
+    next_workflow_rerun_attempt(maximum).ok_or(WorkflowRerunStoreError::AttemptLimitReached)
 }
 
 async fn load_triggering_actor(

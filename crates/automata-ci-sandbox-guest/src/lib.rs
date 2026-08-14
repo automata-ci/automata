@@ -3,10 +3,11 @@
 //! Versioned, framed transport used to keep command arguments and environment
 //! values out of Kubernetes Pod specifications and exec request URLs.
 
+use std::{collections::BTreeMap, fmt, io, path::Path};
+
+#[cfg(unix)]
 use std::{
-    collections::{BTreeMap, VecDeque},
-    fmt, io,
-    path::Path,
+    collections::VecDeque,
     process::Stdio,
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
@@ -22,37 +23,49 @@ use std::os::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 #[cfg(unix)]
 use tokio::{
-    io::AsyncWriteExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
-    task::JoinSet,
-};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
     process::Command,
     sync::{mpsc, watch},
+    task::JoinSet,
 };
 
 /// Current guest protocol version.
 pub const GUEST_PROTOCOL_VERSION: u16 = 2;
 /// Maximum encoded request or response frame.
 pub const MAX_GUEST_FRAME_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(unix)]
 const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+#[cfg(unix)]
 const MAX_OUTPUT_DATA_RECORDS: usize = 65_534;
+#[cfg(unix)]
 const MAX_OPERATION_ID_BYTES: usize = 128;
+#[cfg(unix)]
 const MAX_TARGET_PATH_BYTES: usize = 4_096;
+#[cfg(unix)]
 const MAX_EXECUTION_ARGUMENTS: usize = 4_096;
+#[cfg(unix)]
 const MAX_EXECUTION_ARGV_BYTES: usize = 1024 * 1024;
+#[cfg(unix)]
 const MAX_ENVIRONMENT_VARIABLES: usize = 1_024;
+#[cfg(unix)]
 const MAX_ENVIRONMENT_NAME_BYTES: usize = 128;
+#[cfg(unix)]
 const MAX_ENVIRONMENT_VALUE_BYTES: usize = 1024 * 1024;
+#[cfg(unix)]
 const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(unix)]
 const MAX_COMMAND_TIMEOUT_MILLIS: u64 = 24 * 60 * 60 * 1_000;
+#[cfg(unix)]
 const MAX_EXECUTION_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(unix)]
 const MAX_REPLAY_ENTRIES: usize = 256;
+#[cfg(unix)]
 const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
 
 /// One operation sent through anonymous stdin to the sandbox guest.
@@ -185,6 +198,7 @@ impl fmt::Debug for GuestRequest {
     }
 }
 
+#[cfg(unix)]
 impl GuestRequest {
     fn protocol(&self) -> u16 {
         match self {
@@ -522,12 +536,18 @@ async fn serve_internal(
 ///
 /// Returns an unsupported transport error on non-Unix platforms.
 #[cfg(not(unix))]
+#[allow(clippy::unused_async)]
 pub async fn serve(_socket: &Path) -> Result<(), GuestProtocolError> {
     Err(unsupported_unix_transport().into())
 }
 
 /// Rejects identity-bearing guest service on non-Unix platforms.
+///
+/// # Errors
+///
+/// Always returns an unsupported transport error.
 #[cfg(not(unix))]
+#[allow(clippy::unused_async)]
 pub async fn serve_vm(_socket: &Path, _identity: GuestIdentity) -> Result<(), GuestProtocolError> {
     Err(unsupported_unix_transport().into())
 }
@@ -556,6 +576,7 @@ pub async fn forward_stdio(socket: &Path) -> Result<(), GuestProtocolError> {
 ///
 /// Returns an unsupported transport error on non-Unix platforms.
 #[cfg(not(unix))]
+#[allow(clippy::unused_async)]
 pub async fn forward_stdio(_socket: &Path) -> Result<(), GuestProtocolError> {
     Err(unsupported_unix_transport().into())
 }
@@ -699,6 +720,7 @@ async fn serve_connection(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn wait_for_disconnect<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(), GuestProtocolError> {
@@ -710,6 +732,7 @@ async fn wait_for_disconnect<R: AsyncRead + Unpin>(
     }
 }
 
+#[cfg(unix)]
 #[derive(Default)]
 struct ReplayCache {
     entries: BTreeMap<String, ReplayEntry>,
@@ -718,17 +741,20 @@ struct ReplayCache {
     bytes: usize,
 }
 
+#[cfg(unix)]
 struct InFlightReplay {
     fingerprint: [u8; 32],
     completion: watch::Sender<bool>,
 }
 
+#[cfg(unix)]
 struct ReplayEntry {
     fingerprint: [u8; 32],
     response: GuestResponse,
     bytes: usize,
 }
 
+#[cfg(unix)]
 impl ReplayCache {
     fn get(&self, operation_id: &str, fingerprint: &[u8; 32]) -> Option<GuestResponse> {
         self.entries.get(operation_id).map(|entry| {
@@ -768,6 +794,7 @@ impl ReplayCache {
     }
 }
 
+#[cfg(unix)]
 struct ReplayReservation {
     replay: Arc<Mutex<ReplayCache>>,
     operation_id: String,
@@ -775,6 +802,7 @@ struct ReplayReservation {
     completion: Option<watch::Sender<bool>>,
 }
 
+#[cfg(unix)]
 impl ReplayReservation {
     fn commit(mut self, response: GuestResponse) {
         {
@@ -788,6 +816,7 @@ impl ReplayReservation {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ReplayReservation {
     fn drop(&mut self) {
         let Some(completion) = self.completion.take() else {
@@ -800,18 +829,21 @@ impl Drop for ReplayReservation {
     }
 }
 
+#[cfg(unix)]
 fn lock_replay(replay: &Mutex<ReplayCache>) -> MutexGuard<'_, ReplayCache> {
     replay
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+#[cfg(unix)]
 enum ReplayDecision {
     Return(GuestResponse),
     Wait(watch::Receiver<bool>),
     Execute(ReplayReservation),
 }
 
+#[cfg(unix)]
 fn replay_decision(
     replay: &Arc<Mutex<ReplayCache>>,
     operation_id: &str,
@@ -845,6 +877,7 @@ fn replay_decision(
     })
 }
 
+#[cfg(unix)]
 async fn replay_request(
     request: GuestRequest,
     replay: Arc<Mutex<ReplayCache>>,
@@ -872,6 +905,7 @@ async fn replay_request(
     }
 }
 
+#[cfg(unix)]
 async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, GuestProtocolError> {
     let mut header = [0_u8; 4];
     reader.read_exact(&mut header).await?;
@@ -887,6 +921,7 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, Gue
     Ok(frame)
 }
 
+#[cfg(unix)]
 async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) -> GuestResponse {
     match request {
         GuestRequest::Hello { nonce, .. } => {
@@ -951,6 +986,7 @@ async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) 
     }
 }
 
+#[cfg(unix)]
 fn valid_attestation_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_OPERATION_ID_BYTES
@@ -971,11 +1007,7 @@ fn configure_process_limit(process_limit: u32) -> io::Result<()> {
     .map_err(Into::into)
 }
 
-#[cfg(not(unix))]
-fn configure_process_limit(_process_limit: u32) -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
-}
-
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     program: String,
@@ -1079,6 +1111,7 @@ async fn execute(
     }
 }
 
+#[cfg(unix)]
 async fn collect_process_output(
     child: &mut tokio::process::Child,
     receiver: &mut mpsc::Receiver<(GuestOutputStream, Vec<u8>)>,
@@ -1132,9 +1165,6 @@ fn configure_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
-#[cfg(not(unix))]
-fn configure_process_group(_command: &mut Command) {}
-
 #[cfg(unix)]
 fn terminate_process_group(process_group: u32) {
     let Ok(process_group) = i32::try_from(process_group) else {
@@ -1146,9 +1176,7 @@ fn terminate_process_group(process_group: u32) {
     let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
 }
 
-#[cfg(not(unix))]
-fn terminate_process_group(_process_group: u32) {}
-
+#[cfg(unix)]
 async fn read_output<R: AsyncRead + Unpin>(
     mut reader: R,
     stream: GuestOutputStream,
@@ -1168,6 +1196,7 @@ async fn read_output<R: AsyncRead + Unpin>(
     }
 }
 
+#[cfg(unix)]
 async fn write_file(path: &str, content_base64: &str) -> GuestResponse {
     let Ok(content) = BASE64.decode(content_base64) else {
         return rejected(GuestRejection::InvalidRequest);
@@ -1183,6 +1212,7 @@ async fn write_file(path: &str, content_base64: &str) -> GuestResponse {
     }
 }
 
+#[cfg(unix)]
 async fn read_file(path: &str, byte_limit: usize) -> GuestResponse {
     if !valid_absolute_path(path) || byte_limit == 0 || byte_limit > MAX_GUEST_FRAME_BYTES / 2 {
         return rejected(GuestRejection::InvalidRequest);
@@ -1211,6 +1241,7 @@ async fn read_file(path: &str, byte_limit: usize) -> GuestResponse {
     }
 }
 
+#[cfg(unix)]
 fn rejected(kind: GuestRejection) -> GuestResponse {
     GuestResponse::Rejected {
         protocol: GUEST_PROTOCOL_VERSION,
@@ -1218,6 +1249,7 @@ fn rejected(kind: GuestRejection) -> GuestResponse {
     }
 }
 
+#[cfg(unix)]
 fn valid_absolute_path(value: &str) -> bool {
     value.starts_with('/')
         && value.len() <= MAX_TARGET_PATH_BYTES
@@ -1229,6 +1261,7 @@ fn valid_absolute_path(value: &str) -> bool {
         && !value.contains('\0')
 }
 
+#[cfg(unix)]
 fn valid_operation_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_OPERATION_ID_BYTES
@@ -1237,6 +1270,7 @@ fn valid_operation_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
+#[cfg(unix)]
 fn valid_execution_request(
     program: &str,
     arguments: &[String],
@@ -1311,6 +1345,7 @@ mod tests {
         assert!(decode_frame::<GuestResponse>(&frame).is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn hello_returns_only_the_baked_identity_and_fresh_nonce() {
         let identity = GuestIdentity {
@@ -1345,6 +1380,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn process_configuration_requires_the_exact_baked_vm_identity() {
         let identity = GuestIdentity {
@@ -1372,6 +1408,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn replay_is_exact_and_changed_material_fails_closed() {
         let path =
@@ -1414,6 +1451,7 @@ mod tests {
         tokio::fs::remove_file(path).await.expect("remove fixture");
     }
 
+    #[cfg(unix)]
     #[test]
     fn execution_request_budgets_match_the_public_endpoint_contract() {
         assert!(valid_operation_id(OPERATION_ONE));
@@ -1444,6 +1482,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_retains_output_observed_before_process_termination() {
         let response = execute(
@@ -1474,6 +1513,7 @@ mod tests {
         assert_eq!(output, b"retained");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bounded_read_rejects_content_past_the_requested_limit() {
         let path = std::env::temp_dir().join(format!(
@@ -1501,6 +1541,7 @@ mod tests {
         drop(listener);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_exited_process_leader_cannot_leave_background_work_running() {
         let marker =

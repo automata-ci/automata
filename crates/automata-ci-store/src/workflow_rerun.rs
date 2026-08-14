@@ -16,8 +16,45 @@ use crate::{LogicalWorkflowJobId, RepositoryId, StoreError};
 /// Maximum physical attempts after the original run and its 50 allowed reruns.
 pub const MAX_WORKFLOW_RERUN_ATTEMPTS: u32 = 51;
 /// Database-time retention horizon for starting a rerun of a terminal run.
-pub const MAX_WORKFLOW_RERUN_AGE_MILLIS: i64 = 30 * 24 * 60 * 60 * 1_000;
+pub const MAX_WORKFLOW_RERUN_AGE_MILLIS: i64 = 2_592_000_000;
 const MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES: usize = 100;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkflowRerunLimitRejection {
+    AgeMillis,
+    RepositorySegmentBytes,
+}
+
+pub(crate) const fn workflow_rerun_age_rejection(
+    observed: i64,
+) -> Option<WorkflowRerunLimitRejection> {
+    if observed > MAX_WORKFLOW_RERUN_AGE_MILLIS {
+        return Some(WorkflowRerunLimitRejection::AgeMillis);
+    }
+    None
+}
+
+const fn workflow_rerun_repository_segment_byte_rejection(
+    observed: usize,
+) -> Option<WorkflowRerunLimitRejection> {
+    if observed > MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES {
+        return Some(WorkflowRerunLimitRejection::RepositorySegmentBytes);
+    }
+    None
+}
+
+/// Returns the next physical attempt while the 50-rerun budget remains.
+///
+/// Attempt one is the original execution, so attempt 51 is the final allowed
+/// physical execution and represents rerun 50.
+#[must_use]
+pub const fn next_workflow_rerun_attempt(current_attempt: u32) -> Option<u32> {
+    if current_attempt >= MAX_WORKFLOW_RERUN_ATTEMPTS {
+        None
+    } else {
+        current_attempt.checked_add(1)
+    }
+}
 
 /// Closed selection mode for a durable workflow rerun.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,7 +274,7 @@ impl RerunWorkflowByName {
 fn valid_repository_segment(value: &str) -> bool {
     !value.is_empty()
         && !matches!(value, "." | "..")
-        && value.len() <= MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES
+        && workflow_rerun_repository_segment_byte_rejection(value.len()).is_none()
         && !value.contains('/')
         && value
             .chars()
@@ -515,6 +552,63 @@ mod tests {
         assert_eq!(
             WorkflowRerunReceipt::new(source, rerun, 1, 1, 0, false),
             Err(WorkflowRerunValueError::InvalidReceipt)
+        );
+    }
+
+    #[test]
+    fn fifty_rerun_limit_is_exact_at_minus_one_at_and_plus_one() {
+        assert_eq!(
+            next_workflow_rerun_attempt(MAX_WORKFLOW_RERUN_ATTEMPTS - 1),
+            Some(MAX_WORKFLOW_RERUN_ATTEMPTS),
+            "attempt 50 must admit the final (50th) rerun",
+        );
+        assert_eq!(
+            next_workflow_rerun_attempt(MAX_WORKFLOW_RERUN_ATTEMPTS),
+            None,
+            "attempt 51 has consumed the 50-rerun budget",
+        );
+        assert_eq!(
+            next_workflow_rerun_attempt(MAX_WORKFLOW_RERUN_ATTEMPTS + 1),
+            None,
+            "a malformed future attempt cannot reopen the budget",
+        );
+    }
+
+    #[test]
+    fn workflow_rerun_age_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_rerun_age_rejection(MAX_WORKFLOW_RERUN_AGE_MILLIS - 1),
+            None
+        );
+        assert_eq!(
+            workflow_rerun_age_rejection(MAX_WORKFLOW_RERUN_AGE_MILLIS),
+            None
+        );
+        assert_eq!(
+            workflow_rerun_age_rejection(MAX_WORKFLOW_RERUN_AGE_MILLIS + 1),
+            Some(WorkflowRerunLimitRejection::AgeMillis)
+        );
+    }
+
+    #[test]
+    fn workflow_rerun_repository_segment_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            workflow_rerun_repository_segment_byte_rejection(
+                MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES - 1
+            ),
+            None
+        );
+        assert_eq!(
+            workflow_rerun_repository_segment_byte_rejection(
+                MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES + 0
+            ),
+            None
+        );
+        assert_eq!(
+            workflow_rerun_repository_segment_byte_rejection(
+                MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES + 1
+            ),
+            Some(WorkflowRerunLimitRejection::RepositorySegmentBytes)
         );
     }
 }

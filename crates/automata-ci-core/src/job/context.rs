@@ -10,14 +10,57 @@ use crate::workflow::OutputSensitivity;
 
 /// Schema emitted for independently persisted [`JobRuntimeContext`] blobs.
 pub const JOB_RUNTIME_CONTEXT_SCHEMA_VERSION: u16 = 1;
+/// Canonical media type for a protobuf-encoded job runtime context.
+pub const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
+    "application/vnd.automata.job-runtime-context.protobuf";
 /// Maximum nesting depth of a canonical runtime-context value.
 pub const MAX_CONTEXT_VALUE_DEPTH: usize = 32;
 /// Maximum aggregate value nodes in one canonical value or runtime context.
 pub const MAX_CONTEXT_VALUE_NODES: usize = 65_536;
 /// Maximum aggregate UTF-8 bytes in one canonical value or runtime context.
-pub const MAX_CONTEXT_VALUE_TEXT_BYTES: usize = 1_024 * 1_024;
+pub const MAX_CONTEXT_VALUE_TEXT_BYTES: usize = 1_048_576;
 /// Maximum UTF-8 bytes in one runtime-context key or opaque binding identifier.
 pub const MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES: usize = 1_024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeContextLimitRejection {
+    ValueDepth,
+    ValueNodes,
+    ValueTextBytes,
+    IdentifierBytes,
+}
+
+const fn context_value_depth_rejection(observed: usize) -> Option<RuntimeContextLimitRejection> {
+    if observed > MAX_CONTEXT_VALUE_DEPTH {
+        return Some(RuntimeContextLimitRejection::ValueDepth);
+    }
+    None
+}
+
+const fn context_value_node_rejection(observed: usize) -> Option<RuntimeContextLimitRejection> {
+    if observed > MAX_CONTEXT_VALUE_NODES {
+        return Some(RuntimeContextLimitRejection::ValueNodes);
+    }
+    None
+}
+
+const fn context_value_text_byte_rejection(
+    observed: usize,
+) -> Option<RuntimeContextLimitRejection> {
+    if observed > MAX_CONTEXT_VALUE_TEXT_BYTES {
+        return Some(RuntimeContextLimitRejection::ValueTextBytes);
+    }
+    None
+}
+
+const fn runtime_context_identifier_byte_rejection(
+    observed: usize,
+) -> Option<RuntimeContextLimitRejection> {
+    if observed > MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES {
+        return Some(RuntimeContextLimitRejection::IdentifierBytes);
+    }
+    None
+}
 
 /// A type-preserving value exposed to an expression runtime.
 ///
@@ -228,7 +271,7 @@ impl ContextValue {
     fn charge(&self, budget: &mut ContextBudget) -> Result<(), RuntimeContextError> {
         let mut pending = vec![(self, 1_usize)];
         while let Some((value, depth)) = pending.pop() {
-            if depth > MAX_CONTEXT_VALUE_DEPTH {
+            if context_value_depth_rejection(depth).is_some() {
                 return Err(RuntimeContextError::ValueTooDeep {
                     maximum: MAX_CONTEXT_VALUE_DEPTH,
                 });
@@ -279,7 +322,7 @@ impl ContextBudget {
             .ok_or(RuntimeContextError::TooManyValueNodes {
                 maximum: MAX_CONTEXT_VALUE_NODES,
             })?;
-        if projected > MAX_CONTEXT_VALUE_NODES {
+        if context_value_node_rejection(projected).is_some() {
             return Err(RuntimeContextError::TooManyValueNodes {
                 maximum: MAX_CONTEXT_VALUE_NODES,
             });
@@ -294,7 +337,7 @@ impl ContextBudget {
             .ok_or(RuntimeContextError::TooManyValueNodes {
                 maximum: MAX_CONTEXT_VALUE_NODES,
             })?;
-        if self.nodes > MAX_CONTEXT_VALUE_NODES {
+        if context_value_node_rejection(self.nodes).is_some() {
             return Err(RuntimeContextError::TooManyValueNodes {
                 maximum: MAX_CONTEXT_VALUE_NODES,
             });
@@ -309,7 +352,7 @@ impl ContextBudget {
                 .ok_or(RuntimeContextError::TooMuchValueText {
                     maximum: MAX_CONTEXT_VALUE_TEXT_BYTES,
                 })?;
-        if self.text_bytes > MAX_CONTEXT_VALUE_TEXT_BYTES {
+        if context_value_text_byte_rejection(self.text_bytes).is_some() {
             return Err(RuntimeContextError::TooMuchValueText {
                 maximum: MAX_CONTEXT_VALUE_TEXT_BYTES,
             });
@@ -955,7 +998,7 @@ where
 fn validate_runtime_key(value: &str, field: &'static str) -> Result<(), RuntimeContextError> {
     if value.is_empty()
         || value.trim() != value
-        || value.len() > MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES
+        || runtime_context_identifier_byte_rejection(value.len()).is_some()
         || value.chars().any(char::is_control)
     {
         return Err(RuntimeContextError::InvalidIdentifier { field });
@@ -965,6 +1008,74 @@ fn validate_runtime_key(value: &str, field: &'static str) -> Result<(), RuntimeC
 
 fn validate_opaque_identifier(value: &str, field: &'static str) -> Result<(), RuntimeContextError> {
     validate_runtime_key(value, field)
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        MAX_CONTEXT_VALUE_DEPTH, MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES,
+        MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES, RuntimeContextLimitRejection,
+        context_value_depth_rejection, context_value_node_rejection,
+        context_value_text_byte_rejection, runtime_context_identifier_byte_rejection,
+    };
+
+    #[test]
+    fn context_value_depth_limit_has_exact_boundaries() {
+        assert_eq!(
+            context_value_depth_rejection(MAX_CONTEXT_VALUE_DEPTH - 1),
+            None
+        );
+        assert_eq!(context_value_depth_rejection(MAX_CONTEXT_VALUE_DEPTH), None);
+        assert_eq!(
+            context_value_depth_rejection(MAX_CONTEXT_VALUE_DEPTH + 1),
+            Some(RuntimeContextLimitRejection::ValueDepth)
+        );
+    }
+
+    #[test]
+    fn context_value_node_limit_has_exact_boundaries() {
+        assert_eq!(
+            context_value_node_rejection(MAX_CONTEXT_VALUE_NODES - 1),
+            None
+        );
+        assert_eq!(context_value_node_rejection(MAX_CONTEXT_VALUE_NODES), None);
+        assert_eq!(
+            context_value_node_rejection(MAX_CONTEXT_VALUE_NODES + 1),
+            Some(RuntimeContextLimitRejection::ValueNodes)
+        );
+    }
+
+    #[test]
+    fn context_value_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            context_value_text_byte_rejection(MAX_CONTEXT_VALUE_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            context_value_text_byte_rejection(MAX_CONTEXT_VALUE_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            context_value_text_byte_rejection(MAX_CONTEXT_VALUE_TEXT_BYTES + 1),
+            Some(RuntimeContextLimitRejection::ValueTextBytes)
+        );
+    }
+
+    #[test]
+    fn runtime_context_identifier_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            runtime_context_identifier_byte_rejection(MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            runtime_context_identifier_byte_rejection(MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES),
+            None
+        );
+        assert_eq!(
+            runtime_context_identifier_byte_rejection(MAX_RUNTIME_CONTEXT_IDENTIFIER_BYTES + 1),
+            Some(RuntimeContextLimitRejection::IdentifierBytes)
+        );
+    }
 }
 
 /// Invalid canonical value or runtime-context blob.

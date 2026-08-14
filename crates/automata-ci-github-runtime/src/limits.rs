@@ -13,6 +13,106 @@ const HARD_MAX_MASKS: usize = 1_000_000;
 const HARD_MAX_STATE_ENTRIES: usize = 1_000_000;
 const HARD_MAX_STATE_BYTES: usize = 512 * 1_024 * 1_024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GithubRuntimeHardLimitRejection {
+    FileBytes,
+    SummaryBytes,
+    LineBytes,
+    Records,
+    NameBytes,
+    ValueBytes,
+    StreamBytes,
+    StreamLines,
+    Properties,
+    Masks,
+    StateEntries,
+    StateBytes,
+}
+
+const fn hard_max_file_bytes_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_FILE_BYTES {
+        return Some(GithubRuntimeHardLimitRejection::FileBytes);
+    }
+    None
+}
+
+const fn hard_max_summary_bytes_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_SUMMARY_BYTES {
+        return Some(GithubRuntimeHardLimitRejection::SummaryBytes);
+    }
+    None
+}
+
+const fn hard_max_line_bytes_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_LINE_BYTES {
+        return Some(GithubRuntimeHardLimitRejection::LineBytes);
+    }
+    None
+}
+
+const fn hard_max_records_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_RECORDS {
+        return Some(GithubRuntimeHardLimitRejection::Records);
+    }
+    None
+}
+
+const fn hard_max_name_bytes_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_NAME_BYTES {
+        return Some(GithubRuntimeHardLimitRejection::NameBytes);
+    }
+    None
+}
+
+const fn hard_max_value_bytes_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_VALUE_BYTES {
+        return Some(GithubRuntimeHardLimitRejection::ValueBytes);
+    }
+    None
+}
+
+const fn hard_max_stream_bytes_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_STREAM_BYTES {
+        return Some(GithubRuntimeHardLimitRejection::StreamBytes);
+    }
+    None
+}
+
+const fn hard_max_stream_lines_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_STREAM_LINES {
+        return Some(GithubRuntimeHardLimitRejection::StreamLines);
+    }
+    None
+}
+
+const fn hard_max_properties_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_PROPERTIES {
+        return Some(GithubRuntimeHardLimitRejection::Properties);
+    }
+    None
+}
+
+const fn hard_max_masks_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_MASKS {
+        return Some(GithubRuntimeHardLimitRejection::Masks);
+    }
+    None
+}
+
+const fn hard_max_state_entries_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_STATE_ENTRIES {
+        return Some(GithubRuntimeHardLimitRejection::StateEntries);
+    }
+    None
+}
+
+const fn hard_max_state_bytes_rejection(value: usize) -> Option<GithubRuntimeHardLimitRejection> {
+    if value > HARD_MAX_STATE_BYTES {
+        return Some(GithubRuntimeHardLimitRejection::StateBytes);
+    }
+    None
+}
+
 /// Independent ceilings for a single GitHub command file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommandFileLimits {
@@ -41,17 +141,17 @@ impl CommandFileLimits {
         maximum_value_bytes: usize,
     ) -> Result<Self, CommandFileLimitsError> {
         if maximum_file_bytes == 0
-            || maximum_file_bytes > HARD_MAX_FILE_BYTES
             || maximum_summary_bytes == 0
-            || maximum_summary_bytes > HARD_MAX_SUMMARY_BYTES
             || maximum_line_bytes == 0
-            || maximum_line_bytes > HARD_MAX_LINE_BYTES
             || maximum_records == 0
-            || maximum_records > HARD_MAX_RECORDS
             || maximum_name_bytes == 0
-            || maximum_name_bytes > HARD_MAX_NAME_BYTES
             || maximum_value_bytes == 0
-            || maximum_value_bytes > HARD_MAX_VALUE_BYTES
+            || hard_max_file_bytes_rejection(maximum_file_bytes).is_some()
+            || hard_max_summary_bytes_rejection(maximum_summary_bytes).is_some()
+            || hard_max_line_bytes_rejection(maximum_line_bytes).is_some()
+            || hard_max_records_rejection(maximum_records).is_some()
+            || hard_max_name_bytes_rejection(maximum_name_bytes).is_some()
+            || hard_max_value_bytes_rejection(maximum_value_bytes).is_some()
         {
             return Err(CommandFileLimitsError);
         }
@@ -203,21 +303,21 @@ impl WorkflowCommandLimitsBuilder {
     /// Returns an error when a limit is zero or exceeds its hard ceiling.
     pub const fn build(self) -> Result<WorkflowCommandLimits, WorkflowCommandLimitsError> {
         if self.stream_bytes == 0
-            || self.stream_bytes > HARD_MAX_STREAM_BYTES
             || self.line_bytes == 0
-            || self.line_bytes > HARD_MAX_LINE_BYTES
             || self.stream_lines == 0
-            || self.stream_lines > HARD_MAX_STREAM_LINES
             || self.commands == 0
-            || self.commands > HARD_MAX_RECORDS
             || self.properties == 0
-            || self.properties > HARD_MAX_PROPERTIES
             || self.name_bytes == 0
-            || self.name_bytes > HARD_MAX_NAME_BYTES
             || self.data_bytes == 0
-            || self.data_bytes > HARD_MAX_VALUE_BYTES
             || self.masks == 0
-            || self.masks > HARD_MAX_MASKS
+            || hard_max_stream_bytes_rejection(self.stream_bytes).is_some()
+            || hard_max_line_bytes_rejection(self.line_bytes).is_some()
+            || hard_max_stream_lines_rejection(self.stream_lines).is_some()
+            || hard_max_records_rejection(self.commands).is_some()
+            || hard_max_properties_rejection(self.properties).is_some()
+            || hard_max_name_bytes_rejection(self.name_bytes).is_some()
+            || hard_max_value_bytes_rejection(self.data_bytes).is_some()
+            || hard_max_masks_rejection(self.masks).is_some()
         {
             return Err(WorkflowCommandLimitsError);
         }
@@ -341,15 +441,15 @@ impl PhaseApplicationLimits {
         maximum_aggregate_bytes: usize,
     ) -> Result<Self, PhaseApplicationLimitsError> {
         if maximum_environment_entries == 0
-            || maximum_environment_entries > HARD_MAX_STATE_ENTRIES
             || maximum_path_entries == 0
-            || maximum_path_entries > HARD_MAX_STATE_ENTRIES
             || maximum_steps == 0
-            || maximum_steps > HARD_MAX_STATE_ENTRIES
             || maximum_action_states == 0
-            || maximum_action_states > HARD_MAX_STATE_ENTRIES
             || maximum_aggregate_bytes == 0
-            || maximum_aggregate_bytes > HARD_MAX_STATE_BYTES
+            || hard_max_state_entries_rejection(maximum_environment_entries).is_some()
+            || hard_max_state_entries_rejection(maximum_path_entries).is_some()
+            || hard_max_state_entries_rejection(maximum_steps).is_some()
+            || hard_max_state_entries_rejection(maximum_action_states).is_some()
+            || hard_max_state_bytes_rejection(maximum_aggregate_bytes).is_some()
         {
             return Err(PhaseApplicationLimitsError);
         }
@@ -409,3 +509,162 @@ impl Default for PhaseApplicationLimits {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("GitHub phase-application limit is zero or exceeds a hard safety ceiling")]
 pub struct PhaseApplicationLimitsError;
+
+#[cfg(test)]
+mod hard_limit_contract_tests {
+    use super::{
+        GithubRuntimeHardLimitRejection, HARD_MAX_FILE_BYTES, HARD_MAX_LINE_BYTES, HARD_MAX_MASKS,
+        HARD_MAX_NAME_BYTES, HARD_MAX_PROPERTIES, HARD_MAX_RECORDS, HARD_MAX_STATE_BYTES,
+        HARD_MAX_STATE_ENTRIES, HARD_MAX_STREAM_BYTES, HARD_MAX_STREAM_LINES,
+        HARD_MAX_SUMMARY_BYTES, HARD_MAX_VALUE_BYTES, hard_max_file_bytes_rejection,
+        hard_max_line_bytes_rejection, hard_max_masks_rejection, hard_max_name_bytes_rejection,
+        hard_max_properties_rejection, hard_max_records_rejection, hard_max_state_bytes_rejection,
+        hard_max_state_entries_rejection, hard_max_stream_bytes_rejection,
+        hard_max_stream_lines_rejection, hard_max_summary_bytes_rejection,
+        hard_max_value_bytes_rejection,
+    };
+
+    #[test]
+    fn hard_max_file_bytes_has_exact_boundaries() {
+        assert_eq!(hard_max_file_bytes_rejection(HARD_MAX_FILE_BYTES - 1), None);
+        assert_eq!(hard_max_file_bytes_rejection(HARD_MAX_FILE_BYTES), None);
+        assert_eq!(
+            hard_max_file_bytes_rejection(HARD_MAX_FILE_BYTES + 1),
+            Some(GithubRuntimeHardLimitRejection::FileBytes)
+        );
+    }
+
+    #[test]
+    fn hard_max_summary_bytes_has_exact_boundaries() {
+        assert_eq!(
+            hard_max_summary_bytes_rejection(HARD_MAX_SUMMARY_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            hard_max_summary_bytes_rejection(HARD_MAX_SUMMARY_BYTES),
+            None
+        );
+        assert_eq!(
+            hard_max_summary_bytes_rejection(HARD_MAX_SUMMARY_BYTES + 1),
+            Some(GithubRuntimeHardLimitRejection::SummaryBytes)
+        );
+    }
+
+    #[test]
+    fn hard_max_line_bytes_has_exact_boundaries() {
+        assert_eq!(hard_max_line_bytes_rejection(HARD_MAX_LINE_BYTES - 1), None);
+        assert_eq!(hard_max_line_bytes_rejection(HARD_MAX_LINE_BYTES), None);
+        assert_eq!(
+            hard_max_line_bytes_rejection(HARD_MAX_LINE_BYTES + 1),
+            Some(GithubRuntimeHardLimitRejection::LineBytes)
+        );
+    }
+
+    #[test]
+    fn hard_max_records_has_exact_boundaries() {
+        assert_eq!(hard_max_records_rejection(HARD_MAX_RECORDS - 1), None);
+        assert_eq!(hard_max_records_rejection(HARD_MAX_RECORDS), None);
+        assert_eq!(
+            hard_max_records_rejection(HARD_MAX_RECORDS + 1),
+            Some(GithubRuntimeHardLimitRejection::Records)
+        );
+    }
+
+    #[test]
+    fn hard_max_name_bytes_has_exact_boundaries() {
+        assert_eq!(hard_max_name_bytes_rejection(HARD_MAX_NAME_BYTES - 1), None);
+        assert_eq!(hard_max_name_bytes_rejection(HARD_MAX_NAME_BYTES), None);
+        assert_eq!(
+            hard_max_name_bytes_rejection(HARD_MAX_NAME_BYTES + 1),
+            Some(GithubRuntimeHardLimitRejection::NameBytes)
+        );
+    }
+
+    #[test]
+    fn hard_max_value_bytes_has_exact_boundaries() {
+        assert_eq!(
+            hard_max_value_bytes_rejection(HARD_MAX_VALUE_BYTES - 1),
+            None
+        );
+        assert_eq!(hard_max_value_bytes_rejection(HARD_MAX_VALUE_BYTES), None);
+        assert_eq!(
+            hard_max_value_bytes_rejection(HARD_MAX_VALUE_BYTES + 1),
+            Some(GithubRuntimeHardLimitRejection::ValueBytes)
+        );
+    }
+
+    #[test]
+    fn hard_max_stream_bytes_has_exact_boundaries() {
+        assert_eq!(
+            hard_max_stream_bytes_rejection(HARD_MAX_STREAM_BYTES - 1),
+            None
+        );
+        assert_eq!(hard_max_stream_bytes_rejection(HARD_MAX_STREAM_BYTES), None);
+        assert_eq!(
+            hard_max_stream_bytes_rejection(HARD_MAX_STREAM_BYTES + 1),
+            Some(GithubRuntimeHardLimitRejection::StreamBytes)
+        );
+    }
+
+    #[test]
+    fn hard_max_stream_lines_has_exact_boundaries() {
+        assert_eq!(
+            hard_max_stream_lines_rejection(HARD_MAX_STREAM_LINES - 1),
+            None
+        );
+        assert_eq!(hard_max_stream_lines_rejection(HARD_MAX_STREAM_LINES), None);
+        assert_eq!(
+            hard_max_stream_lines_rejection(HARD_MAX_STREAM_LINES + 1),
+            Some(GithubRuntimeHardLimitRejection::StreamLines)
+        );
+    }
+
+    #[test]
+    fn hard_max_properties_has_exact_boundaries() {
+        assert_eq!(hard_max_properties_rejection(HARD_MAX_PROPERTIES - 1), None);
+        assert_eq!(hard_max_properties_rejection(HARD_MAX_PROPERTIES), None);
+        assert_eq!(
+            hard_max_properties_rejection(HARD_MAX_PROPERTIES + 1),
+            Some(GithubRuntimeHardLimitRejection::Properties)
+        );
+    }
+
+    #[test]
+    fn hard_max_masks_has_exact_boundaries() {
+        assert_eq!(hard_max_masks_rejection(HARD_MAX_MASKS - 1), None);
+        assert_eq!(hard_max_masks_rejection(HARD_MAX_MASKS), None);
+        assert_eq!(
+            hard_max_masks_rejection(HARD_MAX_MASKS + 1),
+            Some(GithubRuntimeHardLimitRejection::Masks)
+        );
+    }
+
+    #[test]
+    fn hard_max_state_entries_has_exact_boundaries() {
+        assert_eq!(
+            hard_max_state_entries_rejection(HARD_MAX_STATE_ENTRIES - 1),
+            None
+        );
+        assert_eq!(
+            hard_max_state_entries_rejection(HARD_MAX_STATE_ENTRIES),
+            None
+        );
+        assert_eq!(
+            hard_max_state_entries_rejection(HARD_MAX_STATE_ENTRIES + 1),
+            Some(GithubRuntimeHardLimitRejection::StateEntries)
+        );
+    }
+
+    #[test]
+    fn hard_max_state_bytes_has_exact_boundaries() {
+        assert_eq!(
+            hard_max_state_bytes_rejection(HARD_MAX_STATE_BYTES - 1),
+            None
+        );
+        assert_eq!(hard_max_state_bytes_rejection(HARD_MAX_STATE_BYTES), None);
+        assert_eq!(
+            hard_max_state_bytes_rejection(HARD_MAX_STATE_BYTES + 1),
+            Some(GithubRuntimeHardLimitRejection::StateBytes)
+        );
+    }
+}

@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::{
     CurrentAttemptOutputSafety, PostgresStore,
+    durable_schema::current_durable_schemas,
     github_checks::{GithubJobCheckInsertError, insert_github_job_check_subject},
 };
 use crate::{
@@ -800,6 +801,7 @@ async fn lock_run(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalInstanceMaterializationTarget,
 ) -> Result<Option<LockedRunState>, LogicalMaterializationStoreError> {
+    let schemas = current_durable_schemas();
     let row = sqlx::query(
         r"
         SELECT run.status
@@ -825,7 +827,7 @@ async fn lock_run(
     let marker_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT marker.state IN ('pending', 'active')
-               AND marker.orchestration_schema = 1
+               AND marker.orchestration_schema = $3
                AND marker.admission_graph_sealed_at_ms IS NOT NULL
                AND automata_logical_workflow_invocation_published(
                    marker.run_id, $2
@@ -837,6 +839,7 @@ async fn lock_run(
     )
     .bind(target.run_id().as_uuid())
     .bind(target.invocation_id().as_uuid())
+    .bind(schemas.logical_orchestration_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -846,7 +849,7 @@ async fn lock_run(
     let invocation_active: Option<bool> = sqlx::query_scalar(
         r"
         SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = 1
+               AND invocation.plan_schema = $3
         FROM logical_workflow_invocations AS invocation
         WHERE invocation.run_id = $1 AND invocation.id = $2
         FOR SHARE OF invocation
@@ -854,6 +857,7 @@ async fn lock_run(
     )
     .bind(target.run_id().as_uuid())
     .bind(target.invocation_id().as_uuid())
+    .bind(schemas.workflow_plan_i16)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -980,12 +984,21 @@ async fn lock_instance(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalInstanceMaterializationTarget,
 ) -> Result<Option<PgRow>, LogicalMaterializationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(instance_query())
         .bind(target.tenant().as_str())
         .bind(target.run_id().as_uuid())
         .bind(target.invocation_id().as_uuid())
         .bind(target.logical_job_id().as_uuid())
         .bind(target.instance_id().as_uuid())
+        .bind(schemas.job_ir_i16)
+        .bind(schemas.runtime_context_i16)
+        .bind(schemas.workflow_plan_i16)
+        .bind(schemas.logical_orchestration_i16)
+        .bind(schemas.workflow_plan_i32)
+        .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
+        .bind(LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -1005,12 +1018,23 @@ async fn lock_terminal_materialized_instance(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalInstanceMaterializationTarget,
 ) -> Result<Option<PgRow>, LogicalMaterializationStoreError> {
+    let schemas = current_durable_schemas();
     let row = sqlx::query(TERMINAL_MATERIALIZED_INSTANCE_QUERY)
         .bind(target.tenant().as_str())
         .bind(target.run_id().as_uuid())
         .bind(target.invocation_id().as_uuid())
         .bind(target.logical_job_id().as_uuid())
         .bind(target.instance_id().as_uuid())
+        .bind(schemas.job_ir_i16)
+        .bind(schemas.runtime_context_i16)
+        .bind(schemas.workflow_plan_i16)
+        .bind(schemas.logical_orchestration_i16)
+        .bind(schemas.workflow_plan_i32)
+        .bind(schemas.job_ir_i32)
+        .bind(schemas.core_i32)
+        .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
+        .bind(LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)?;
@@ -1158,17 +1182,15 @@ fn instance_query() -> &'static str {
       AND instance.invocation_id = $3
       AND instance.logical_job_id = $4
       AND instance.id = $5
-      AND instance.job_ir_version = 1
-      AND instance.job_ir_media_type =
-          'application/vnd.automata.job-ir.protobuf'
-      AND instance.runtime_context_schema = 1
-      AND instance.runtime_context_media_type =
-          'application/vnd.automata.job-runtime-context.protobuf'
+      AND instance.job_ir_version = $6
+      AND instance.job_ir_media_type = $11
+      AND instance.runtime_context_schema = $7
+      AND instance.runtime_context_media_type = $12
       AND publication.condition_matched
       AND publication.instance_count > 0
       AND logical_job.execution_kind = 'steps'
-      AND invocation.plan_schema = 1
-      AND marker.orchestration_schema = 1
+      AND invocation.plan_schema = $8
+      AND marker.orchestration_schema = $9
       AND (
           (
               logical_job.state = 'activated'
@@ -1191,8 +1213,8 @@ fn instance_query() -> &'static str {
               )
           )
       )
-      AND run.admission_epoch = 1
-      AND run.plan_schema = 1
+      AND run.admission_epoch = $13
+      AND run.plan_schema = $10
     FOR UPDATE OF instance
     "
 }
@@ -1305,20 +1327,18 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND instance.invocation_id = $3
       AND instance.logical_job_id = $4
       AND instance.id = $5
-      AND instance.job_ir_version = 1
-      AND instance.job_ir_media_type =
-          'application/vnd.automata.job-ir.protobuf'
-      AND instance.runtime_context_schema = 1
-      AND instance.runtime_context_media_type =
-          'application/vnd.automata.job-runtime-context.protobuf'
+      AND instance.job_ir_version = $6
+      AND instance.job_ir_media_type = $13
+      AND instance.runtime_context_schema = $7
+      AND instance.runtime_context_media_type = $14
       AND publication.condition_matched
       AND publication.instance_count > 0
       AND logical_job.execution_kind = 'steps'
-      AND invocation.plan_schema = 1
+      AND invocation.plan_schema = $8
       AND marker.root_invocation_id = invocation.id
-      AND marker.orchestration_schema = 1
-      AND run.admission_epoch = 1
-      AND run.plan_schema = 1
+      AND marker.orchestration_schema = $9
+      AND run.admission_epoch = $15
+      AND run.plan_schema = $10
       AND claim.state = 'materialized'
       AND concrete.descriptor_digest = claim.descriptor_digest
       AND concrete.job_id = claim.expected_job_id
@@ -1329,14 +1349,14 @@ const TERMINAL_MATERIALIZED_INSTANCE_QUERY: &str = r"
       AND concrete.claim_expires_at_ms = claim.expires_at_ms
       AND concrete.committed_at_ms = claim.updated_at_ms
       AND job.run_id = concrete.run_id
-      AND job.admission_epoch = 1
-      AND job.job_ir_schema = 1
+      AND job.admission_epoch = $15
+      AND job.job_ir_schema = $11
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
       AND job.job_ir_size_bytes = instance.job_ir_size_bytes
       AND attempt.job_id = job.id
       AND attempt.attempt_number = 1
-      AND terminal.result_schema = 1
+      AND terminal.result_schema = $12
       AND terminal.logical_workflow_logical_job_id = logical_job.id
       AND terminal.logical_workflow_terminal_ordinal > 0
       AND terminal.completed_at_ms >= 0
@@ -1715,6 +1735,7 @@ async fn load_terminal_job_base_rows(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalInstanceMaterializationTarget,
 ) -> Result<BTreeMap<Uuid, PgRow>, LogicalMaterializationStoreError> {
+    let schemas = current_durable_schemas();
     let rows = sqlx::query(
         r"
         SELECT job.id AS logical_job_id, job.logical_key, job.source_order,
@@ -1740,17 +1761,21 @@ async fn load_terminal_job_base_rows(
         WHERE repository.tenant_id = $1
           AND job.run_id = $2 AND job.invocation_id = $3
           AND marker.root_invocation_id = job.invocation_id
-          AND marker.orchestration_schema = 1
-          AND invocation.plan_schema = 1
-          AND invocation.plan_media_type =
-              'application/vnd.automata.workflow-plan+json'
-          AND run.admission_epoch = 1 AND run.plan_schema = 1
+          AND marker.orchestration_schema = $4
+          AND invocation.plan_schema = $5
+          AND invocation.plan_media_type = $7
+          AND run.admission_epoch = $8 AND run.plan_schema = $6
         ORDER BY job.source_order, job.id
         ",
     )
     .bind(target.tenant().as_str())
     .bind(target.run_id().as_uuid())
     .bind(target.invocation_id().as_uuid())
+    .bind(schemas.logical_orchestration_i16)
+    .bind(schemas.workflow_plan_i16)
+    .bind(schemas.workflow_plan_i32)
+    .bind(LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE)
+    .bind(schemas.admission_epoch_i32)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -3598,13 +3623,14 @@ async fn insert_job(
     request: &CommitLogicalInstanceMaterialization,
     descriptor: &LogicalInstanceMaterializationDescriptor,
 ) -> Result<(), LogicalMaterializationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         INSERT INTO jobs (
             id, run_id, job_key, display_name, job_ir_digest,
             job_ir_object_key, requirements, created_at_ms,
             admission_epoch, job_ir_schema, job_ir_size_bytes
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,1,1,$9)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$10,$11,$9)
         ",
     )
     .bind(request.claim().expected_job_id().as_uuid())
@@ -3620,6 +3646,8 @@ async fn insert_job(
             StoreError::corrupt_data("logical JobIR size does not fit PostgreSQL BIGINT")
         })?,
     )
+    .bind(schemas.admission_epoch_i32)
+    .bind(schemas.job_ir_i32)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -3664,6 +3692,7 @@ async fn insert_materialization_receipt(
     request: &CommitLogicalInstanceMaterialization,
     descriptor: &LogicalInstanceMaterializationDescriptor,
 ) -> Result<(), LogicalMaterializationStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         INSERT INTO logical_workflow_concrete_jobs (
@@ -3679,7 +3708,7 @@ async fn insert_materialization_receipt(
             runtime_policy_revision, runtime_policy_digest
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,1,$22,$23,$24,$25,$26,$27,$28
+            $18,$19,$20,$21,$29,$22,$23,$24,$25,$26,$27,$28
         )
         ",
     )
@@ -3726,6 +3755,7 @@ async fn insert_materialization_receipt(
             .as_bytes()
             .as_slice(),
     )
+    .bind(schemas.runtime_context_i16)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;

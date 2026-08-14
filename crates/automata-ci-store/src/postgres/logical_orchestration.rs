@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use automata_ci_core::{
-    OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, UnixMillis, WorkflowId,
+    JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
+    UnixMillis, WorkflowId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
@@ -9,6 +10,7 @@ use uuid::Uuid;
 use super::{
     PostgresStore,
     admission::{RunPublicationSnapshot, lock_repository_publication_snapshot},
+    durable_schema::current_durable_schemas,
     github_schedule::{
         record_github_scheduled_run_evidence_in_transaction,
         validate_github_scheduled_run_evidence_in_transaction,
@@ -997,7 +999,7 @@ async fn replay_receipt(
                 && base_context_size.and_then(|size| u64::try_from(size).ok())
                     == Some(context.encoded_size())
                 && base_context_media_type.as_deref() == Some(context.media_type())
-                && base_context_schema == Some(1)
+                && base_context_schema == i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).ok()
         }
         None => {
             base_context_digest.is_none()
@@ -1144,12 +1146,13 @@ async fn resolve_snapshot(
     command: &AdmitLogicalWorkflowRun,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let source = command.source();
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         INSERT INTO workflow_snapshots (
             id, workflow_id, source_digest, source_object_key, frontend_schema,
             created_at_ms, admission_epoch, source_size_bytes, source_media_type
-        ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8)
+        ) VALUES ($1,$2,$3,$4,$9,$5,$6,$7,$8)
         ON CONFLICT (workflow_id, source_digest) DO NOTHING
         ",
     )
@@ -1161,6 +1164,7 @@ async fn resolve_snapshot(
     .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
     .bind(size_i64(source)?)
     .bind(source.media_type())
+    .bind(schemas.workflow_plan_i16)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1188,7 +1192,7 @@ async fn resolve_snapshot(
         && row
             .try_get::<i16, _>("frontend_schema")
             .map_err(operation_error)?
-            == 1
+            == schemas.workflow_plan_i16
         && row
             .try_get::<i32, _>("admission_epoch")
             .map_err(operation_error)?
@@ -1241,6 +1245,7 @@ async fn insert_run(
     run_number: u64,
     publication: &RunPublicationSnapshot,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let schemas = current_durable_schemas();
     let event = command.event();
     let plan = command.plan();
     let run_number = i64::try_from(run_number)
@@ -1265,7 +1270,7 @@ async fn insert_run(
             $1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',$10,
             $11,$12,$13,$14,$15,$15,$16,$17,$18,
             $19,$20,$21,$22,$23,$24,$25,$26,$27,
-            $28,$29,$29,$30,$31,'repository_policy',1,$32
+            $28,$29,$29,$30,$31,'repository_policy',$33,$32
         )
         ON CONFLICT (id) DO NOTHING
         RETURNING id
@@ -1315,6 +1320,7 @@ async fn insert_run(
     .bind(publication.logs())
     .bind(publication.artifacts())
     .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
+    .bind(schemas.publication_safety_i32)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1355,9 +1361,9 @@ async fn insert_logical_run_and_invocation(
     .bind(base_context.map(|context| context.object_key().as_str()))
     .bind(base_context.map(size_i64).transpose()?)
     .bind(base_context.map(AdmissionObject::media_type))
-    .bind(base_context.map(|_| {
-        i16::try_from(automata_ci_core::JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).unwrap_or(i16::MAX)
-    }))
+    .bind(
+        base_context.map(|_| i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION).unwrap_or(i16::MAX)),
+    )
     .bind(i16::try_from(RUNNER_REQUIREMENTS_SCHEMA_VERSION).unwrap_or(i16::MAX))
     .execute(&mut **transaction)
     .await
@@ -1395,6 +1401,7 @@ async fn insert_logical_jobs(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let schemas = current_durable_schemas();
     let pin = sqlx::query(
         r"
         SELECT policy_revision, policy_digest
@@ -1424,7 +1431,7 @@ async fn insert_logical_jobs(
                 credential_requirements_schema
             ) VALUES (
                 $1,$2,$3,$4,$5,$6,'pending',0,$7,$7,$8,$9,
-                $10,$11,$12,$13,1
+                $10,$11,$12,$13,$14
             )
             ",
         )
@@ -1446,6 +1453,7 @@ async fn insert_logical_jobs(
         )
         .bind(job.credential_requirements().secret_names())
         .bind(job.credential_requirements().variable_names())
+        .bind(schemas.runner_requirements_i16)
         .execute(&mut **transaction)
         .await
         .map_err(operation_error)?;

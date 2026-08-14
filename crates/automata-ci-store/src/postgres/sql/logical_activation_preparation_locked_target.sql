@@ -110,14 +110,13 @@ WHERE repository.tenant_id = $1
   AND automata_logical_workflow_invocation_published(
       marker.run_id, invocation.id
   )
-  AND invocation.plan_schema = 1
-  AND invocation.plan_media_type =
-      'application/vnd.automata.workflow-plan+json'
+  AND invocation.plan_schema = $6
+  AND invocation.plan_media_type = $7
   AND invocation.state IN ('pending', 'active')
-  AND marker.orchestration_schema = 1
-  AND marker.base_context_schema = 1
+  AND marker.orchestration_schema = $8
+  AND marker.base_context_schema = $9
   AND marker.state IN ('pending', 'active')
-  AND run.admission_epoch = 1 AND run.plan_schema = 1
-  AND run.event_media_type = 'application/json'
+  AND run.admission_epoch = $10 AND run.plan_schema = $11
+  AND run.event_media_type = $12
   AND (job.state = 'pending' OR claim.state = 'prepared')
 FOR UPDATE OF job

@@ -3,7 +3,10 @@ use crate::{
     SourceSpan, Spanned, TriggerSet, WorkflowJob, YamlDocument,
 };
 
-/// Current and only supported GitHub source-plan schema version.
+/// Compatibility marker retained for downstream callers of the pre-greenfield
+/// source-plan API. [`GithubWorkflowSourcePlan`] is an in-process model and does
+/// not serialize or negotiate this value.
+#[deprecated(note = "GithubWorkflowSourcePlan is an unversioned in-process model")]
 pub const SOURCE_PLAN_SCHEMA_VERSION: u16 = 1;
 
 /// Complete GitHub workflow model decoded from one exact YAML document.

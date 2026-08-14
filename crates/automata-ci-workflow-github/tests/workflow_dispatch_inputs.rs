@@ -223,12 +223,6 @@ fn verified_payload_wrapper_enforces_canonical_resource_bounds() {
     assert!(!debug.contains("private-value"));
     assert!(debug.contains("input_count"));
 
-    let too_many =
-        (0..=MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS).map(|index| (format!("input_{index}"), "value"));
-    assert_eq!(
-        GithubWorkflowDispatchInputs::try_new(too_many),
-        Err(GithubWorkflowDispatchInputsError::TooManyInputs)
-    );
     assert_eq!(
         GithubWorkflowDispatchInputs::try_new([("duplicate", "first"), ("duplicate", "second")]),
         Err(GithubWorkflowDispatchInputsError::DuplicateInputKey)
@@ -237,11 +231,73 @@ fn verified_payload_wrapper_enforces_canonical_resource_bounds() {
         GithubWorkflowDispatchInputs::try_new([(" invalid ", "value")]),
         Err(GithubWorkflowDispatchInputsError::InvalidInputKey)
     );
+}
+
+#[test]
+fn workflow_dispatch_definition_count_boundaries() {
+    let source = |count| {
+        let definitions = (0..count)
+            .map(|index| format!("      input_{index}:\n        type: string"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("on:\n  workflow_dispatch:\n    inputs:\n{definitions}\n{JOB}")
+    };
+
+    for count in [
+        MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS - 1,
+        MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
+    ] {
+        let report = compile(&source(count), Some(payload([])));
+        assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    }
+    assert_rejected_with(
+        &compile(
+            &source(MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS + 1),
+            Some(payload([])),
+        ),
+        "github.compile.too_many_workflow_dispatch_inputs",
+    );
+}
+
+#[test]
+fn workflow_dispatch_input_count_boundaries() {
+    let inputs = |count| {
+        (0..count)
+            .map(|index| (format!("input_{index}"), "value"))
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        GithubWorkflowDispatchInputs::try_new(inputs(MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS - 1))
+            .is_ok()
+    );
+    assert!(
+        GithubWorkflowDispatchInputs::try_new(inputs(MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS)).is_ok()
+    );
     assert_eq!(
-        GithubWorkflowDispatchInputs::try_new([(
-            "value",
-            "x".repeat(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS)
-        )]),
+        GithubWorkflowDispatchInputs::try_new(inputs(MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS + 1)),
+        Err(GithubWorkflowDispatchInputsError::TooManyInputs)
+    );
+}
+
+#[test]
+fn workflow_dispatch_character_boundaries() {
+    let input = |total_characters| [("v", "x".repeat(total_characters - 1))];
+
+    assert!(
+        GithubWorkflowDispatchInputs::try_new(input(
+            MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS - 1
+        ))
+        .is_ok()
+    );
+    assert!(
+        GithubWorkflowDispatchInputs::try_new(input(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS))
+            .is_ok()
+    );
+    assert_eq!(
+        GithubWorkflowDispatchInputs::try_new(input(
+            MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS + 1
+        )),
         Err(GithubWorkflowDispatchInputsError::PayloadTooLarge)
     );
 }

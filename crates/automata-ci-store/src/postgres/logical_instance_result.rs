@@ -6,7 +6,7 @@ use automata_ci_core::{
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 use crate::{
     ClaimLogicalInstanceResult, ClaimNextLogicalInstanceResult, ClaimedLogicalInstanceResult,
     CommitLogicalInstanceResult, LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE,
@@ -1073,9 +1073,18 @@ async fn lock_target(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalInstanceResultTarget,
 ) -> Result<Option<PgRow>, LogicalInstanceResultStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(target_query())
         .bind(target.tenant().as_str())
         .bind(target.attempt_id().as_uuid())
+        .bind(schemas.job_ir_i32)
+        .bind(schemas.job_ir_i16)
+        .bind(schemas.core_i32)
+        .bind(schemas.workflow_plan_i16)
+        .bind(schemas.logical_orchestration_i16)
+        .bind(schemas.workflow_plan_i32)
+        .bind(LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE)
+        .bind(schemas.admission_epoch_i32)
         .fetch_optional(&mut **transaction)
         .await
         .map_err(operation_error)
@@ -1263,17 +1272,16 @@ fn target_query() -> &'static str {
       AND terminal.attempt_id = $2
       AND materialization.state = 'materialized'
       AND job.run_id = concrete.run_id
-      AND job.admission_epoch = 1
-      AND job.job_ir_schema = 1
+      AND job.admission_epoch = $10
+      AND job.job_ir_schema = $3
       AND job.job_ir_digest = instance.job_ir_digest
       AND job.job_ir_object_key = instance.job_ir_object_key
       AND job.job_ir_size_bytes = instance.job_ir_size_bytes
-      AND instance.job_ir_version = 1
-      AND instance.job_ir_media_type =
-          'application/vnd.automata.job-ir.protobuf'
+      AND instance.job_ir_version = $4
+      AND instance.job_ir_media_type = $9
       AND (
           (terminal.terminal_authority = 'runner'
-           AND terminal.result_schema = 1)
+           AND terminal.result_schema = $5)
           OR terminal.terminal_authority = 'server_cancellation'
       )
       AND terminal.logical_workflow_logical_job_id = concrete.logical_job_id
@@ -1288,10 +1296,10 @@ fn target_query() -> &'static str {
           OR (terminal.conclusion = 'skipped' AND attempt.lifecycle = 'skipped')
       )
       AND logical_job.execution_kind = 'steps'
-      AND invocation.plan_schema = 1
-      AND marker.orchestration_schema = 1
-      AND run.admission_epoch = 1
-      AND run.plan_schema = 1
+      AND invocation.plan_schema = $6
+      AND marker.orchestration_schema = $7
+      AND run.admission_epoch = $10
+      AND run.plan_schema = $8
       AND logical_job.state IN ('activated', 'completed', 'skipped', 'cancelled', 'failed')
       AND invocation.state IN ('pending', 'active', 'completed', 'cancelled', 'failed')
       AND marker.state IN ('pending', 'active', 'completed', 'cancelled', 'failed')

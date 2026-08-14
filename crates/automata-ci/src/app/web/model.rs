@@ -20,6 +20,8 @@ use automata_ci_store::{
 use automata_ci_ui_renderer::{ClientAssetManifest, MAX_RENDER_REQUEST_UTF8_BYTES};
 use serde::Serialize;
 use thiserror::Error;
+
+const RENDER_REQUEST_SCHEMA_VERSION: u8 = 1;
 use time::OffsetDateTime;
 use url::Url;
 
@@ -2468,7 +2470,7 @@ fn serialize_request<P: Serialize>(
     page: P,
 ) -> Result<String, ModelError> {
     let json = serde_json::to_string(&RenderRequest {
-        schema_version: 1,
+        schema_version: RENDER_REQUEST_SCHEMA_VERSION,
         host: RenderHost {
             locale: "en",
             assets: RenderAssets {
@@ -3224,6 +3226,9 @@ mod tests {
         let page = document["page"]
             .as_object()
             .expect("setup page must be an object");
+
+        assert_eq!(RENDER_REQUEST_SCHEMA_VERSION, 1);
+        assert_eq!(document["schemaVersion"], RENDER_REQUEST_SCHEMA_VERSION);
 
         assert_eq!(page.keys().collect::<Vec<_>>(), ["form", "kind", "shell"]);
         assert_eq!(page["kind"], "setup");

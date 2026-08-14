@@ -8,7 +8,29 @@ use super::{ExpressionProgram, ExpressionProgramError};
 /// Maximum number of literal/evaluation segments in one value template.
 pub const MAX_VALUE_TEMPLATE_SEGMENTS: usize = 1_024;
 /// Maximum aggregate UTF-8 source bytes retained by one value template.
-pub const MAX_VALUE_TEMPLATE_TEXT_BYTES: usize = 16 * 1_024 * 1_024;
+pub const MAX_VALUE_TEMPLATE_TEXT_BYTES: usize = 16_777_216;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValueTemplateLimitRejection {
+    Segments,
+    TextBytes,
+}
+
+const fn value_template_segment_rejection(observed: usize) -> Option<ValueTemplateLimitRejection> {
+    if observed > MAX_VALUE_TEMPLATE_SEGMENTS {
+        return Some(ValueTemplateLimitRejection::Segments);
+    }
+    None
+}
+
+const fn value_template_text_byte_rejection(
+    observed: usize,
+) -> Option<ValueTemplateLimitRejection> {
+    if observed > MAX_VALUE_TEMPLATE_TEXT_BYTES {
+        return Some(ValueTemplateLimitRejection::TextBytes);
+    }
+    None
+}
 
 /// One already-parsed segment of an execution-time value template.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -129,7 +151,7 @@ impl ValueTemplate {
         if self.segments.is_empty() {
             return Err(ValueTemplateError::Empty);
         }
-        if self.segments.len() > MAX_VALUE_TEMPLATE_SEGMENTS {
+        if value_template_segment_rejection(self.segments.len()).is_some() {
             return Err(ValueTemplateError::TooManySegments {
                 maximum: MAX_VALUE_TEMPLATE_SEGMENTS,
             });
@@ -165,13 +187,53 @@ impl ValueTemplate {
                     previous_was_literal = false;
                 }
             }
-            if text_bytes > MAX_VALUE_TEMPLATE_TEXT_BYTES {
+            if value_template_text_byte_rejection(text_bytes).is_some() {
                 return Err(ValueTemplateError::TextTooLong {
                     maximum: MAX_VALUE_TEMPLATE_TEXT_BYTES,
                 });
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        MAX_VALUE_TEMPLATE_SEGMENTS, MAX_VALUE_TEMPLATE_TEXT_BYTES, ValueTemplateLimitRejection,
+        value_template_segment_rejection, value_template_text_byte_rejection,
+    };
+
+    #[test]
+    fn value_template_segment_limit_has_exact_boundaries() {
+        assert_eq!(
+            value_template_segment_rejection(MAX_VALUE_TEMPLATE_SEGMENTS - 1),
+            None
+        );
+        assert_eq!(
+            value_template_segment_rejection(MAX_VALUE_TEMPLATE_SEGMENTS),
+            None
+        );
+        assert_eq!(
+            value_template_segment_rejection(MAX_VALUE_TEMPLATE_SEGMENTS + 1),
+            Some(ValueTemplateLimitRejection::Segments)
+        );
+    }
+
+    #[test]
+    fn value_template_text_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            value_template_text_byte_rejection(MAX_VALUE_TEMPLATE_TEXT_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            value_template_text_byte_rejection(MAX_VALUE_TEMPLATE_TEXT_BYTES),
+            None
+        );
+        assert_eq!(
+            value_template_text_byte_rejection(MAX_VALUE_TEMPLATE_TEXT_BYTES + 1),
+            Some(ValueTemplateLimitRejection::TextBytes)
+        );
     }
 }
 

@@ -115,6 +115,45 @@ pub use workflow_rerun::WorkflowRerunService;
 /// Immutable media type used for exact GitHub workflow source.
 pub const GITHUB_WORKFLOW_MEDIA_TYPE: &str = "application/vnd.github-actions.workflow+yaml";
 /// Immutable media type used for the exact provider event body.
-pub const WORKFLOW_EVENT_MEDIA_TYPE: &str = "application/json";
+pub use automata_ci_core::WORKFLOW_EVENT_MEDIA_TYPE;
 /// Immutable media type used for canonical workflow-plan JSON.
 pub const WORKFLOW_PLAN_MEDIA_TYPE: &str = "application/vnd.automata.workflow-plan+json";
+
+pub(crate) fn github_workflow_media_type_is_current(value: &str) -> bool {
+    value == GITHUB_WORKFLOW_MEDIA_TYPE
+}
+
+pub(crate) fn workflow_event_media_type_is_current(value: &str) -> bool {
+    value == WORKFLOW_EVENT_MEDIA_TYPE
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::{
+        GITHUB_WORKFLOW_MEDIA_TYPE, WORKFLOW_EVENT_MEDIA_TYPE,
+        github_workflow_media_type_is_current, workflow_event_media_type_is_current,
+    };
+
+    #[test]
+    fn github_workflow_source_reader_rejects_noncurrent_media_types() {
+        assert!(github_workflow_media_type_is_current(
+            GITHUB_WORKFLOW_MEDIA_TYPE
+        ));
+        for media_type in [
+            "application/vnd.github-actions.workflow.v2+yaml",
+            "application/yaml",
+        ] {
+            assert!(!github_workflow_media_type_is_current(media_type));
+        }
+    }
+
+    #[test]
+    fn workflow_event_reader_rejects_noncurrent_media_types() {
+        assert!(workflow_event_media_type_is_current(
+            WORKFLOW_EVENT_MEDIA_TYPE
+        ));
+        for media_type in ["application/vnd.automata.event.v2+json", "text/plain"] {
+            assert!(!workflow_event_media_type_is_current(media_type));
+        }
+    }
+}

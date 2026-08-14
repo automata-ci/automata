@@ -4,7 +4,7 @@ use automata_ci_schedule::CronExpression;
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::PostgresStore;
+use super::{PostgresStore, durable_schema::current_durable_schemas};
 use crate::{
     AdmitLogicalWorkflowRun, ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery,
     ClaimedGithubScheduleFire, CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
@@ -833,6 +833,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
     claim: GithubScheduleFireClaim,
     admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let schemas = current_durable_schemas();
     let source = lock_scheduled_check_source(transaction, claim)
         .await
         .map_err(schedule_admission_error)?;
@@ -869,7 +870,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
                AND evidence.event_name = 'schedule'
                AND evidence.event_digest = $11
                AND evidence.git_ref = $12
-               AND evidence.workflow_plan_schema = 1
+               AND evidence.workflow_plan_schema = $18
                AND evidence.plan_digest = $13
                AND evidence.logical_admission_digest = $14
                AND evidence.admitted_at_ms = $15
@@ -904,6 +905,7 @@ pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
     .bind(admitted_at.get())
     .bind(source.registry_id)
     .bind(source.github_repository_owner_id)
+    .bind(schemas.workflow_plan_i16)
     .fetch_one(&mut **transaction)
     .await
     .map_err(logical_operation_error)?;
@@ -1002,6 +1004,7 @@ async fn insert_scheduled_run_evidence(
     subject_id: Uuid,
     source: &ScheduledCheckSource,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let schemas = current_durable_schemas();
     sqlx::query(
         r"
         INSERT INTO github_schedule_workflow_run_subject_evidence (
@@ -1015,7 +1018,7 @@ async fn insert_scheduled_run_evidence(
             plan_digest, logical_admission_digest, admitted_at_ms
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            'schedule',$18,$19,1,$20,$21,$22
+            'schedule',$18,$19,$23,$20,$21,$22
         )
         ",
     )
@@ -1043,6 +1046,7 @@ async fn insert_scheduled_run_evidence(
     .bind(command.plan().digest().as_bytes().as_slice())
     .bind(command.request_digest().as_bytes().as_slice())
     .bind(command.admitted_at().get())
+    .bind(schemas.workflow_plan_i32)
     .execute(&mut **transaction)
     .await
     .map_err(logical_operation_error)?;

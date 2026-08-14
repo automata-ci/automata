@@ -709,6 +709,65 @@ async fn current_refresh_handoff_revocation_and_retirement_are_fenced() -> TestR
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn handoff_replay_rejects_a_forward_protected_plaintext_schema() -> TestResult {
+    run_with_database(|database| async move {
+        let scenario = prepare_lifecycle_scenario(&database).await?;
+        sqlx::query(
+            r"
+            ALTER TABLE github_server_service_authority_issuances
+            DISABLE TRIGGER github_server_service_issuances_update_guard
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            ALTER TABLE github_server_service_authority_issuances
+            DROP CONSTRAINT github_server_service_issuances_protected_shape
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            UPDATE github_server_service_authority_issuances
+            SET plaintext_schema = 2
+            WHERE authority_id = $1 AND generation = 1
+            ",
+        )
+        .bind(scenario.authority.authority_id().as_uuid())
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            r"
+            ALTER TABLE github_server_service_authority_issuances
+            ENABLE TRIGGER github_server_service_issuances_update_guard
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+
+        set_database_test_clock(&database, 2_201_100).await?;
+        assert!(matches!(
+            database
+                .store()
+                .acquire_github_server_service_handoff(AcquireGithubServerServiceHandoff::new(
+                    authority_selector(&scenario.authority),
+                    scenario.handoff_id,
+                    scenario.consumer,
+                    UnixMillis::new(2_201_100),
+                    UnixMillis::new(2_500_000),
+                )?,)
+                .await,
+            Err(GithubServerServiceStoreError::CorruptData)
+        ));
+        Ok(())
+    })
+    .await
+}
+
 async fn prepare_lifecycle_scenario(database: &TestDatabase) -> TestResult<LifecycleScenario> {
     let fixture = seed_fixture(database, "lifecycle", 10).await?;
     let ensure_claim = claim_check(database, &fixture, 2_000, 50_000).await?;

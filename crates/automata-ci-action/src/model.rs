@@ -11,12 +11,59 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 const MAX_SUBPATH_BYTES: usize = 1_024;
-const MAX_COMPRESSED_BYTES: u64 = 16 * 1_024 * 1_024;
+const MAX_COMPRESSED_BYTES: u64 = 16_777_216;
 const MAX_ENTRY_COUNT: usize = 10_000;
-const MAX_EXPANDED_BYTES: u64 = 256 * 1_024 * 1_024;
-const MAX_DEFINITION_BYTES: u64 = 1_024 * 1_024;
-const MAX_ENTRY_PATH_BYTES: usize = 4 * 1_024;
-const MAX_PATH_INDEX_BYTES: usize = 16 * 1_024 * 1_024;
+const MAX_EXPANDED_BYTES: u64 = 268_435_456;
+const MAX_DEFINITION_BYTES: u64 = 1_048_576;
+const MAX_ENTRY_PATH_BYTES: usize = 4_096;
+const MAX_PATH_INDEX_BYTES: usize = 16_777_216;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionModelLimitRejection {
+    SubpathBytes,
+    CompressedBytes,
+    EntryCount,
+    ExpandedBytes,
+    DefinitionBytes,
+    EntryPathBytes,
+    PathIndexBytes,
+}
+
+const fn action_subpath_byte_rejection(observed: usize) -> Option<ActionModelLimitRejection> {
+    if observed > MAX_SUBPATH_BYTES {
+        return Some(ActionModelLimitRejection::SubpathBytes);
+    }
+    None
+}
+
+const fn action_bundle_limit_rejection(
+    compressed_bytes: u64,
+    entries: usize,
+    expanded_bytes: u64,
+    definition_bytes: u64,
+    entry_path_bytes: usize,
+    path_index_bytes: usize,
+) -> Option<ActionModelLimitRejection> {
+    if compressed_bytes > MAX_COMPRESSED_BYTES {
+        return Some(ActionModelLimitRejection::CompressedBytes);
+    }
+    if entries > MAX_ENTRY_COUNT {
+        return Some(ActionModelLimitRejection::EntryCount);
+    }
+    if expanded_bytes > MAX_EXPANDED_BYTES {
+        return Some(ActionModelLimitRejection::ExpandedBytes);
+    }
+    if definition_bytes > MAX_DEFINITION_BYTES {
+        return Some(ActionModelLimitRejection::DefinitionBytes);
+    }
+    if entry_path_bytes > MAX_ENTRY_PATH_BYTES {
+        return Some(ActionModelLimitRejection::EntryPathBytes);
+    }
+    if path_index_bytes > MAX_PATH_INDEX_BYTES {
+        return Some(ActionModelLimitRejection::PathIndexBytes);
+    }
+    None
+}
 
 /// Canonical repository-relative directory containing an action definition.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -37,7 +84,7 @@ impl ActionSubpath {
     /// backslash-containing, trailing-slash, and oversized paths.
     pub fn new(value: impl Into<String>) -> Result<Self, ActionSubpathError> {
         let value = value.into();
-        if value.is_empty() || value.len() > MAX_SUBPATH_BYTES {
+        if value.is_empty() || action_subpath_byte_rejection(value.len()).is_some() {
             return Err(ActionSubpathError::InvalidLength);
         }
         if value.starts_with('/')
@@ -105,18 +152,21 @@ impl ActionBundleLimits {
         maximum_entry_path_bytes: usize,
         maximum_path_index_bytes: usize,
     ) -> Result<Self, ActionBundleLimitsError> {
-        if compressed.maximum_bytes() > MAX_COMPRESSED_BYTES
-            || maximum_entries == 0
-            || maximum_entries > MAX_ENTRY_COUNT
+        if maximum_entries == 0
             || maximum_expanded_bytes == 0
-            || maximum_expanded_bytes > MAX_EXPANDED_BYTES
             || maximum_definition_bytes == 0
-            || maximum_definition_bytes > MAX_DEFINITION_BYTES
             || maximum_definition_bytes > maximum_expanded_bytes
             || maximum_entry_path_bytes == 0
-            || maximum_entry_path_bytes > MAX_ENTRY_PATH_BYTES
             || maximum_path_index_bytes == 0
-            || maximum_path_index_bytes > MAX_PATH_INDEX_BYTES
+            || action_bundle_limit_rejection(
+                compressed.maximum_bytes(),
+                maximum_entries,
+                maximum_expanded_bytes,
+                maximum_definition_bytes,
+                maximum_entry_path_bytes,
+                maximum_path_index_bytes,
+            )
+            .is_some()
         {
             return Err(ActionBundleLimitsError);
         }
@@ -181,6 +231,121 @@ impl Default for ActionBundleLimits {
             maximum_entry_path_bytes: MAX_ENTRY_PATH_BYTES,
             maximum_path_index_bytes: MAX_PATH_INDEX_BYTES,
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_contract_tests {
+    use super::{
+        ActionModelLimitRejection, MAX_COMPRESSED_BYTES, MAX_DEFINITION_BYTES, MAX_ENTRY_COUNT,
+        MAX_ENTRY_PATH_BYTES, MAX_EXPANDED_BYTES, MAX_PATH_INDEX_BYTES, MAX_SUBPATH_BYTES,
+        action_bundle_limit_rejection, action_subpath_byte_rejection,
+    };
+
+    #[test]
+    fn action_subpath_byte_limit_has_exact_boundaries() {
+        assert_eq!(action_subpath_byte_rejection(MAX_SUBPATH_BYTES - 1), None);
+        assert_eq!(action_subpath_byte_rejection(MAX_SUBPATH_BYTES), None);
+        assert_eq!(
+            action_subpath_byte_rejection(MAX_SUBPATH_BYTES + 1),
+            Some(ActionModelLimitRejection::SubpathBytes)
+        );
+    }
+
+    #[test]
+    fn action_bundle_compressed_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_bundle_limit_rejection(MAX_COMPRESSED_BYTES - 1, 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(MAX_COMPRESSED_BYTES, 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(MAX_COMPRESSED_BYTES + 1, 1, 1, 1, 1, 1),
+            Some(ActionModelLimitRejection::CompressedBytes)
+        );
+    }
+
+    #[test]
+    fn action_bundle_entry_count_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_bundle_limit_rejection(1, MAX_ENTRY_COUNT - 1, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, MAX_ENTRY_COUNT, 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, MAX_ENTRY_COUNT + 1, 1, 1, 1, 1),
+            Some(ActionModelLimitRejection::EntryCount)
+        );
+    }
+
+    #[test]
+    fn action_bundle_expanded_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, MAX_EXPANDED_BYTES - 1, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, MAX_EXPANDED_BYTES, 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, MAX_EXPANDED_BYTES + 1, 1, 1, 1),
+            Some(ActionModelLimitRejection::ExpandedBytes)
+        );
+    }
+
+    #[test]
+    fn action_bundle_definition_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, MAX_EXPANDED_BYTES, MAX_DEFINITION_BYTES - 1, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, MAX_EXPANDED_BYTES, MAX_DEFINITION_BYTES, 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, MAX_EXPANDED_BYTES, MAX_DEFINITION_BYTES + 1, 1, 1),
+            Some(ActionModelLimitRejection::DefinitionBytes)
+        );
+    }
+
+    #[test]
+    fn action_bundle_entry_path_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, 1, 1, MAX_ENTRY_PATH_BYTES - 1, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, 1, 1, MAX_ENTRY_PATH_BYTES, 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, 1, 1, MAX_ENTRY_PATH_BYTES + 1, 1),
+            Some(ActionModelLimitRejection::EntryPathBytes)
+        );
+    }
+
+    #[test]
+    fn action_bundle_path_index_byte_limit_has_exact_boundaries() {
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, 1, 1, 1, MAX_PATH_INDEX_BYTES - 1),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, 1, 1, 1, MAX_PATH_INDEX_BYTES),
+            None
+        );
+        assert_eq!(
+            action_bundle_limit_rejection(1, 1, 1, 1, 1, MAX_PATH_INDEX_BYTES + 1),
+            Some(ActionModelLimitRejection::PathIndexBytes)
+        );
     }
 }
 
