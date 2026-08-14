@@ -66,7 +66,7 @@ pub trait LeasePollObserver: fmt::Debug + Send + Sync {
 
 /// Allocation-free observer used when metrics are not composed.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NoopLeasePollObserver;
+pub(crate) struct NoopLeasePollObserver;
 
 impl LeasePollObserver for NoopLeasePollObserver {}
 

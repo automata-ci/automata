@@ -3,11 +3,11 @@ mod support;
 use std::sync::Arc;
 
 use automata_ci_auth::machine::MachineIdentityVerifier;
-use automata_ci_core::RunnerId;
-use automata_ci_runner_auth::{RunnerMachineAuthLimits, RunnerMachineDirectoryError};
-use automata_ci_runner_control::{
+use automata_ci_control::runner_control::{
     ControlPortError, DesiredRunnerState, RunnerRegistrationAuthorizer,
 };
+use automata_ci_core::RunnerId;
+use automata_ci_runner_auth::{RunnerMachineAuthLimits, RunnerMachineDirectoryError};
 use support::{EXPIRES_AT, FakeDirectory, MutableClock, NOW, authenticator, evidence, record};
 
 #[tokio::test]

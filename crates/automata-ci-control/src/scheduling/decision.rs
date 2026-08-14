@@ -2,7 +2,7 @@
 
 use automata_ci_core::{AttemptId, JobId, RequirementMismatch, RunnerId};
 
-use crate::{RunnerSlot, SessionGuard};
+use super::{RunnerSlot, SessionGuard};
 
 /// Pure result of evaluating one scheduling snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]

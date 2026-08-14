@@ -2,8 +2,8 @@ use std::fmt;
 
 use async_trait::async_trait;
 use automata_ci_auth::{machine::ExternalRunnerIdentity, time::UnixTimestamp};
+use automata_ci_control::runner_control::DesiredRunnerState;
 use automata_ci_core::{RunnerId, Sha256Digest};
-use automata_ci_runner_control::DesiredRunnerState;
 use automata_ci_store::RunnerGeneration;
 use thiserror::Error;
 

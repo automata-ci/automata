@@ -1,4 +1,4 @@
-use automata_ci_control_plane::{
+use crate::scheduling::{
     EffectiveRunnerError, RoutingRequirementsError, RunnerCapabilityIntersectionError,
     RunnerEvidenceError, SchedulingInputError,
 };

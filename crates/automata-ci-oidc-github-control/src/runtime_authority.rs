@@ -1,6 +1,9 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
+use automata_ci_control::runner_control::{
+    ControlPortError, OptionalRuntimeAuthorityIssuer, RuntimeAuthorityIssueRequest,
+};
 use automata_ci_core::{PermissionLevel, Sha256Digest, UnixMillis};
 use automata_ci_oidc_github::{
     GITHUB_OIDC_RUNTIME_AUTHORITY_NAMESPACE, OidcAuthorityId, OidcIssuer, OidcKeyId,
@@ -9,9 +12,6 @@ use automata_ci_oidc_github::{
 use automata_ci_protocol::{
     JobRuntimeAuthorities, JobRuntimeAuthority, RuntimeAuthorityCredential,
     RuntimeAuthorityEndpoint, RuntimeAuthorityName,
-};
-use automata_ci_runner_control::{
-    ControlPortError, OptionalRuntimeAuthorityIssuer, RuntimeAuthorityIssueRequest,
 };
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;

@@ -2,15 +2,15 @@
 
 use std::{fmt::Debug, str::FromStr};
 
-use automata_ci_control_plane::{
+use automata_ci_control::scheduling::{
     AuthorizedRunnerRouting, EffectiveRunner, RoutingRequirements, RunnableCandidate,
     RunnerEvidence, RunnerSlot, SessionGuard,
 };
 use automata_ci_core::{
     Architecture, AttemptId, ContainerCapabilities, ContainerFeature, JobId, OperatingSystem,
-    OperationId, ResourceCapacity, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId,
-    RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, SandboxCapabilities,
-    SandboxFeature, UnixMillis,
+    ResourceCapacity, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId, RunnerLabel,
+    RunnerPlatform, RunnerRequirements, RunnerSessionId, SandboxCapabilities, SandboxFeature,
+    UnixMillis,
 };
 
 pub fn typed_id<T>(tail: u64) -> T
@@ -37,10 +37,6 @@ pub fn attempt_id(tail: u64) -> AttemptId {
 
 pub fn job_id(tail: u64) -> JobId {
     typed_id(30_000 + tail)
-}
-
-pub fn operation_id(tail: u64) -> OperationId {
-    typed_id(40_000 + tail)
 }
 
 pub fn label(value: &str) -> RunnerLabel {

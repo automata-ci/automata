@@ -3,11 +3,11 @@ mod support;
 use std::sync::Arc;
 
 use automata_ci_auth::machine::{MachineAuthenticationError, MachineIdentityVerifier};
+use automata_ci_control::runner_control::DesiredRunnerState;
 use automata_ci_core::RunnerId;
 use automata_ci_runner_auth::{
     RunnerMachineAuthLimits, RunnerMachineDirectoryError, RunnerMachineRecord,
 };
-use automata_ci_runner_control::DesiredRunnerState;
 use support::{
     EXPIRES_AT, FakeDirectory, MutableClock, NOW, authenticator, digest, evidence, record,
 };

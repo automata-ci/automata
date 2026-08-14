@@ -90,7 +90,7 @@ pub enum RunnerSlotError {
 
 /// Capabilities observed from one authenticated runner session.
 ///
-/// Evidence is intentionally not accepted by [`crate::SchedulerPolicy`]. It
+/// Evidence is intentionally not accepted by [`crate::scheduling::SchedulerPolicy`]. It
 /// must first be reduced and authorized into [`EffectiveRunner`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunnerEvidence {

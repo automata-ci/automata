@@ -1,16 +1,16 @@
 use std::{fmt, sync::Arc};
 
+use crate::lease::{
+    AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,
+    LeasePollObserver, LeasePollOutcome, LeasePollRepository, LeasePollService,
+    NoopLeasePollObserver, RunnableAttemptGate,
+};
+use crate::scheduling::SchedulerPolicy;
 use async_trait::async_trait;
 use automata_ci_auth::machine::{AuthenticatedMachine, ExternalRunnerIdentity};
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
-use automata_ci_control::{
-    AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,
-    LeasePollObserver, LeasePollOutcome, LeasePollRepository, LeasePollService,
-    NoopLeasePollObserver, RunnableAttemptGate,
-};
-use automata_ci_control_plane::SchedulerPolicy;
 use automata_ci_core::{
     JobIrEnvelope, JobIrVersion, Lease, OperationId, RunnerId, RunnerSessionId, Sha256Digest,
     UnixMillis,

@@ -201,6 +201,6 @@ pub trait RunnerControlObserver: fmt::Debug + Send + Sync {
 
 /// Observer used when server semantic metrics are not composed.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NoopRunnerControlObserver;
+pub(super) struct NoopRunnerControlObserver;
 
 impl RunnerControlObserver for NoopRunnerControlObserver {}

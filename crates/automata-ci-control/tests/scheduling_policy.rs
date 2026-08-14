@@ -1,13 +1,13 @@
-mod support;
-
-use automata_ci_control_plane::{
+use automata_ci_control::scheduling::{
     CandidateCapacity, CandidateDeclineReason, DeterministicScheduler, PlacementDecision,
     PlacementDecline, PlacementFactoryError, RunnableCandidate, SchedulerPolicy, SchedulingInput,
     SchedulingInputError, classify_candidate_capacity,
 };
 use automata_ci_core::{RequirementMismatch, UnixMillis};
 
-use support::{attempt_id, candidate, effective_runner, job_id, routing};
+use super::scheduling_support::{
+    attempt_id, candidate, effective_runner, job_id, label, routing, runner_id,
+};
 
 #[test]
 fn default_policy_is_fifo_and_independent_of_input_order() {
@@ -33,7 +33,7 @@ fn default_policy_is_fifo_and_independent_of_input_order() {
         panic!("a matching placement was expected");
     };
     assert_eq!(placement.attempt_id(), older.attempt_id());
-    assert_eq!(placement.session().runner_id(), support::runner_id(1));
+    assert_eq!(placement.session().runner_id(), runner_id(1));
     assert_eq!(placement.slot().ordinal(), 1);
     assert_eq!(
         placement.slot().runner_id(),
@@ -55,7 +55,7 @@ fn matching_runner_without_capacity_has_a_typed_busy_decline() {
     assert_eq!(declines[0].attempt_id(), candidates[0].attempt_id());
     assert_eq!(
         declines[0].reason(),
-        &CandidateDeclineReason::CompatibleRunnersBusy(vec![support::runner_id(1)])
+        &CandidateDeclineReason::CompatibleRunnersBusy(vec![runner_id(1)])
     );
 }
 
@@ -94,10 +94,10 @@ fn incompatibility_preserves_complete_core_matching_diagnostics() {
         panic!("a capability decline was expected");
     };
     assert_eq!(runner_declines.len(), 1);
-    assert_eq!(runner_declines[0].runner_id(), support::runner_id(1));
+    assert_eq!(runner_declines[0].runner_id(), runner_id(1));
     assert_eq!(
         runner_declines[0].mismatches(),
-        &[RequirementMismatch::MissingLabel(support::label("gpu"))]
+        &[RequirementMismatch::MissingLabel(label("gpu"))]
     );
 }
 
@@ -136,7 +136,7 @@ fn scheduling_snapshot_rejects_ambiguous_attempt_and_runner_records() {
     assert_eq!(
         SchedulingInput::new(&[], &[runner.clone(), runner])
             .expect_err("duplicate runner must fail"),
-        SchedulingInputError::DuplicateRunner(support::runner_id(1))
+        SchedulingInputError::DuplicateRunner(runner_id(1))
     );
 }
 

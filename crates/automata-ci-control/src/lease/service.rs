@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use automata_ci_control_plane::{
+use crate::scheduling::{
     AuthorizedRunnerRouting, EffectiveRunner, Placement, PlacementDecision, RoutingRequirements,
     RunnableCandidate, RunnerEvidence, RunnerSlot, SchedulerPolicy, SchedulingInput, SessionGuard,
     intersect_runner_capabilities,
@@ -19,7 +19,7 @@ use automata_ci_store::{
     TryClaimReceipt,
 };
 
-use crate::{
+use super::{
     CapabilityDocument, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,
     LeasePollFailure, LeasePollInvariant, LeasePollObservation, LeasePollObserver,
     LeasePollRepository, RequestCorrelationError, RunnableAttemptGate,
@@ -492,15 +492,15 @@ const fn observe_outcome(outcome: &LeasePollOutcome) -> LeasePollObservation {
     }
 }
 
-const fn observe_rejection(reason: ClaimRejection) -> crate::LeaseClaimRejection {
+const fn observe_rejection(reason: ClaimRejection) -> super::LeaseClaimRejection {
     match reason {
-        ClaimRejection::AttemptNotFound => crate::LeaseClaimRejection::AttemptNotFound,
-        ClaimRejection::AttemptNotQueued(_) => crate::LeaseClaimRejection::AttemptNotQueued,
-        ClaimRejection::NoLongerRunnable => crate::LeaseClaimRejection::NoLongerRunnable,
-        ClaimRejection::NotRoutable => crate::LeaseClaimRejection::NotRoutable,
-        ClaimRejection::SlotOutOfRange => crate::LeaseClaimRejection::SlotOutOfRange,
-        ClaimRejection::SlotOccupied { .. } => crate::LeaseClaimRejection::SlotOccupied,
-        ClaimRejection::ScanSuperseded => crate::LeaseClaimRejection::ScanSuperseded,
+        ClaimRejection::AttemptNotFound => super::LeaseClaimRejection::AttemptNotFound,
+        ClaimRejection::AttemptNotQueued(_) => super::LeaseClaimRejection::AttemptNotQueued,
+        ClaimRejection::NoLongerRunnable => super::LeaseClaimRejection::NoLongerRunnable,
+        ClaimRejection::NotRoutable => super::LeaseClaimRejection::NotRoutable,
+        ClaimRejection::SlotOutOfRange => super::LeaseClaimRejection::SlotOutOfRange,
+        ClaimRejection::SlotOccupied { .. } => super::LeaseClaimRejection::SlotOccupied,
+        ClaimRejection::ScanSuperseded => super::LeaseClaimRejection::ScanSuperseded,
     }
 }
 

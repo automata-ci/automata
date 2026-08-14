@@ -1,10 +1,7 @@
-mod support;
+use std::collections::BTreeSet;
 
-use std::{collections::BTreeSet, str::FromStr};
-
-use automata_ci_control_plane::{
-    AuthorizedRunnerRouting, EffectiveRunner, EffectiveRunnerError, IdempotencyGuard,
-    OperationRequestDigest, OperationRequestDigestError, RoutingRequirements,
+use automata_ci_control::scheduling::{
+    AuthorizedRunnerRouting, EffectiveRunner, EffectiveRunnerError, RoutingRequirements,
     RunnerCapabilityIntersectionError, RunnerEvidence, RunnerEvidenceError, RunnerSlot,
     RunnerSlotError, SessionGuard, intersect_runner_capabilities,
 };
@@ -16,7 +13,7 @@ use automata_ci_core::{
 };
 use serde_json::json;
 
-use support::{group, label, observed_capabilities, operation_id, runner_id, session_id};
+use super::scheduling_support::{group, label, observed_capabilities, runner_id, session_id};
 
 #[test]
 fn session_and_slot_wire_shapes_preserve_distinct_stable_identities() {
@@ -216,32 +213,6 @@ fn routing_requirement_json_rejects_unknown_schema_before_admission() {
     encoded["schema_version"] = json!(u16::MAX);
     assert!(serde_json::from_value::<RunnerRequirements>(encoded).is_err());
     assert!(RoutingRequirements::new(RunnerRequirements::default()).is_ok());
-}
-
-#[test]
-fn request_digests_are_canonical_and_round_trip_with_idempotency_identity() {
-    let digest = OperationRequestDigest::sha256("abc");
-    assert_eq!(
-        digest.to_string(),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-    assert_eq!(
-        OperationRequestDigest::from_str(&digest.to_string()).expect("digest must parse"),
-        digest
-    );
-    assert_eq!(
-        OperationRequestDigest::from_str(
-            "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"
-        ),
-        Err(OperationRequestDigestError::InvalidHexCharacter { index: 0 })
-    );
-
-    let guard = IdempotencyGuard::new(operation_id(1), digest);
-    let encoded = serde_json::to_string(&guard).expect("guard must serialize");
-    assert_eq!(
-        serde_json::from_str::<IdempotencyGuard>(&encoded).expect("guard must deserialize"),
-        guard
-    );
 }
 
 #[test]

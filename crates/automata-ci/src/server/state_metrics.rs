@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use automata_ci_control_plane::{
+use automata_ci_control::scheduling::{
     AuthorizedRunnerRouting, CandidateCapacity, EffectiveRunner, RoutingRequirements,
     RunnableCandidate, RunnerEvidence, RunnerSlot, SessionGuard, classify_candidate_capacity,
     intersect_runner_capabilities,

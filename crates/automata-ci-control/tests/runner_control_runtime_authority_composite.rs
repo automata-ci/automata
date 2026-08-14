@@ -1,6 +1,10 @@
 use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
+use automata_ci_control::runner_control::{
+    CompositeRuntimeAuthorityIssuer, ControlPortError, OptionalRuntimeAuthorityIssuer,
+    RuntimeAuthorityIssueRequest, RuntimeAuthorityIssueRequestError, RuntimeAuthorityIssuer,
+};
 use automata_ci_core::{
     AttemptId, FencingToken, JobContentReference, JobExecutionContext, JobId, JobInstanceIdentity,
     JobIr, JobIrEnvelope, JobSource, Lease, LeaseId, RunId, RunValueTemplates, RunnerId,
@@ -12,10 +16,6 @@ use automata_ci_protocol::{
     RuntimeAuthorityCredential, RuntimeAuthorityEndpoint, RuntimeAuthorityName,
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
-use automata_ci_runner_control::{
-    CompositeRuntimeAuthorityIssuer, ControlPortError, OptionalRuntimeAuthorityIssuer,
-    RuntimeAuthorityIssueRequest, RuntimeAuthorityIssueRequestError, RuntimeAuthorityIssuer,
-};
 use automata_ci_store::{
     JobIrMetadata, ObjectKey, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
 };
