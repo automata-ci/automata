@@ -1044,7 +1044,17 @@ async fn installation_setup(
             return internal_server_error();
         }
     };
-    render(state, request_json, csp_nonce).await
+    let mut response = render(state, request_json, csp_nonce).await;
+    // A form POST uses the document's referrer policy when serializing its
+    // Origin header. `no-referrer` therefore produces `Origin: null`, which
+    // cannot satisfy the setup route's exact same-origin admission check.
+    // Keep every cross-origin request opaque while preserving this page's
+    // same-origin setup submission.
+    response.headers_mut().insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    response
 }
 
 async fn root_redirect(RawQuery(raw_query): RawQuery) -> Response<Body> {
@@ -3319,7 +3329,7 @@ mod tests {
         let response = get(&app, "/setup").await;
         let page = renderer.page();
 
-        assert_page_headers(&response, &page);
+        assert_page_headers_with_referrer(&response, &page, "same-origin");
         assert_eq!(page["page"]["kind"], "setup");
         assert_eq!(page["page"]["form"]["action"], "/setup/auth/github");
         assert_eq!(page["page"]["form"]["returnPath"], "/");
@@ -3422,12 +3432,23 @@ mod tests {
     }
 
     fn assert_page_headers(response: &Response<Body>, page: &Value) {
+        assert_page_headers_with_referrer(response, page, "no-referrer");
+    }
+
+    fn assert_page_headers_with_referrer(
+        response: &Response<Body>,
+        page: &Value,
+        expected_referrer_policy: &str,
+    ) {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[CONTENT_TYPE], "text/html; charset=utf-8");
         assert_eq!(response.headers()[CACHE_CONTROL], PAGE_CACHE_CONTROL);
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         assert_eq!(response.headers()["x-frame-options"], "DENY");
-        assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(
+            response.headers()["referrer-policy"],
+            expected_referrer_policy
+        );
         let nonce = page["host"]["cspNonce"]
             .as_str()
             .expect("page model must contain its CSP nonce");
