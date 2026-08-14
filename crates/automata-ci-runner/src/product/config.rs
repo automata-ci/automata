@@ -1917,10 +1917,13 @@ impl RawWindowsHyperVProductConfig {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
         if validate_absolute_path(&self.runtime_executable).is_err()
-            || self
-                .runtime_executable
-                .to_str()
-                .is_none_or(|path| !valid_literal_windows_path(path, true))
+            || self.runtime_executable.to_str().is_none_or(|path| {
+                !valid_literal_windows_path(path, true)
+                    || path
+                        .rsplit('\\')
+                        .next()
+                        .is_none_or(|name| !name.eq_ignore_ascii_case("docker.exe"))
+            })
         {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
@@ -2443,6 +2446,16 @@ fn target_is_root(path: &TargetPath) -> bool {
     }
 }
 
+fn exact_windows_executable(path: &TargetPath, basename: &str) -> bool {
+    path.platform() == TargetPlatform::Windows
+        && valid_literal_windows_path(path.as_str(), true)
+        && path
+            .as_str()
+            .rsplit('\\')
+            .next()
+            .is_some_and(|value| value.eq_ignore_ascii_case(basename))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawToolchainConfig {
@@ -2498,6 +2511,22 @@ impl RawToolchainConfig {
                     && config.pwsh.is_some()
                     && config.powershell.is_some()
                     && config.cmd.is_some()
+                    && config
+                        .pwsh
+                        .as_ref()
+                        .is_some_and(|path| exact_windows_executable(path, "pwsh.exe"))
+                    && config
+                        .powershell
+                        .as_ref()
+                        .is_some_and(|path| exact_windows_executable(path, "powershell.exe"))
+                    && config
+                        .cmd
+                        .as_ref()
+                        .is_some_and(|path| exact_windows_executable(path, "cmd.exe"))
+                    && config
+                        .python
+                        .as_ref()
+                        .is_none_or(|path| exact_windows_executable(path, "python.exe"))
                     && [
                         config.python.as_ref(),
                         config.pwsh.as_ref(),

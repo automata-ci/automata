@@ -25,10 +25,6 @@ const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const SHELL_PROBE_OUTPUT_BYTES: usize = 4 * 1024;
 const WINDOWS_SHELL_PROBE_COUNT: usize = 3;
 const MAX_SHELL_PROBE_COUNT: usize = WINDOWS_SHELL_PROBE_COUNT + 1;
-const POWERSHELL_PROBE_SCRIPT: &[u8] = b"$ErrorActionPreference = 'Stop'\r\nexit 0\r\n";
-const CMD_PROBE_SCRIPT: &[u8] = b"@echo off\r\nexit /B 0\r\n";
-const PYTHON_PROBE_SCRIPT: &[u8] = b"raise SystemExit(0)\r\n";
-const POSIX_PROBE_SCRIPT: &[u8] = b"set -eu\nexit 0\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ProfileAdmissionPolicy {
@@ -77,12 +73,35 @@ impl ShellProbe {
         }
     }
 
-    const fn script_content(&self) -> &'static [u8] {
+    fn marker(&self, operation_id: OperationId) -> String {
+        let kind = match self.kind {
+            ShellKind::Bash => "bash",
+            ShellKind::Sh => "sh",
+            ShellKind::Pwsh => "pwsh",
+            ShellKind::WindowsPowerShell => "powershell",
+            ShellKind::Cmd => "cmd",
+            ShellKind::Python => "python",
+        };
+        format!("automata-profile-{kind}-{operation_id}")
+    }
+
+    fn script_content(&self, operation_id: OperationId) -> Vec<u8> {
+        let marker = self.marker(operation_id);
         match self.kind {
-            ShellKind::Bash | ShellKind::Sh => POSIX_PROBE_SCRIPT,
-            ShellKind::Pwsh | ShellKind::WindowsPowerShell => POWERSHELL_PROBE_SCRIPT,
-            ShellKind::Cmd => CMD_PROBE_SCRIPT,
-            ShellKind::Python => PYTHON_PROBE_SCRIPT,
+            ShellKind::Bash | ShellKind::Sh => {
+                format!("set -eu\nprintf '%s' '{marker}'\n").into_bytes()
+            }
+            ShellKind::Pwsh | ShellKind::WindowsPowerShell => {
+                format!("$ErrorActionPreference = 'Stop'\r\n[Console]::Out.Write('{marker}')\r\n")
+                    .into_bytes()
+            }
+            ShellKind::Cmd => {
+                format!("@echo off\r\n<nul set /p \"={marker}\"\r\nexit /B 0\r\n").into_bytes()
+            }
+            ShellKind::Python => {
+                format!("import sys\r\nsys.stdout.write(\"{marker}\")\r\nraise SystemExit(0)\r\n")
+                    .into_bytes()
+            }
         }
     }
 
@@ -632,16 +651,17 @@ impl ProfileAdmissionContext<'_> {
             ));
         }
 
-        for ((probe, script), operation_id) in shell_probes
+        for (((probe, script), operation_id), execution_operation_id) in shell_probes
             .probes
             .iter()
             .zip(script_paths)
             .zip(operation_ids.copy)
+            .zip(operation_ids.exec)
         {
             let Ok(request) = CopyToRequest::new(
                 operation_id,
                 script.clone(),
-                probe.script_content().to_vec(),
+                probe.script_content(execution_operation_id),
             ) else {
                 let (cleanup, cleanup_error) = cleanup_handle(
                     self.provider,
@@ -679,6 +699,7 @@ impl ProfileAdmissionContext<'_> {
             .zip(script_paths)
             .zip(operation_ids.exec)
         {
+            let expected_stdout = probe.marker(operation_id);
             let Ok(argv) = probe.argv(script) else {
                 let (cleanup, cleanup_error) = cleanup_handle(
                     self.provider,
@@ -732,7 +753,11 @@ impl ProfileAdmissionContext<'_> {
                     ));
                 }
             };
-            if output.termination() != ExecutionTermination::Exited(0) || output.was_truncated() {
+            if output.termination() != ExecutionTermination::Exited(0)
+                || output.was_truncated()
+                || output.stdout() != expected_stdout.as_bytes()
+                || !output.stderr().is_empty()
+            {
                 let (cleanup, cleanup_error) = cleanup_handle(
                     self.provider,
                     record.handle(),
@@ -1054,6 +1079,8 @@ mod tests {
         InspectAndDestroyFailure,
         ExecTermination(ExecutionTermination),
         ExecTruncated,
+        ExecWrongOutput,
+        ExecStderr,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1282,6 +1309,29 @@ mod tests {
         behavior: FakeBehavior,
     }
 
+    fn fake_shell_kind(program: &TargetPath) -> Option<ShellKind> {
+        let basename = program.as_str().rsplit(['/', '\\']).next()?;
+        if basename.eq_ignore_ascii_case("bash") {
+            Some(ShellKind::Bash)
+        } else if basename.eq_ignore_ascii_case("sh") {
+            Some(ShellKind::Sh)
+        } else if basename.eq_ignore_ascii_case("pwsh") || basename.eq_ignore_ascii_case("pwsh.exe")
+        {
+            Some(ShellKind::Pwsh)
+        } else if basename.eq_ignore_ascii_case("powershell.exe") {
+            Some(ShellKind::WindowsPowerShell)
+        } else if basename.eq_ignore_ascii_case("cmd.exe") {
+            Some(ShellKind::Cmd)
+        } else if basename.eq_ignore_ascii_case("python")
+            || basename.eq_ignore_ascii_case("python3")
+            || basename.eq_ignore_ascii_case("python.exe")
+        {
+            Some(ShellKind::Python)
+        } else {
+            None
+        }
+    }
+
     impl ExecutionEndpoint for FakeEndpoint {
         fn handle(&self) -> &SandboxHandle {
             &self.handle
@@ -1312,12 +1362,41 @@ mod tests {
             } else {
                 ExecutionTermination::Exited(0)
             };
+            let kind = fake_shell_kind(request.argv().program()).ok_or_else(|| {
+                ExecutionError::new(ExecutionErrorKind::InvalidEnvironment, ExecutionStage::Exec)
+            })?;
+            let stdout = if self.behavior == FakeBehavior::ExecWrongOutput {
+                b"wrong-shell-probe-output".to_vec()
+            } else {
+                ShellProbe::new(kind, request.argv().program().clone())
+                    .marker(request.operation_id())
+                    .into_bytes()
+            };
+            let stdout = ExecutionOutputRecord::data(ExecutionOutputStream::Stdout, stdout)
+                .map_err(|_| {
+                    ExecutionError::new(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec)
+                })?;
+            let mut records = vec![
+                stdout,
+                ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stdout),
+            ];
+            if self.behavior == FakeBehavior::ExecStderr {
+                records.push(
+                    ExecutionOutputRecord::data(
+                        ExecutionOutputStream::Stderr,
+                        b"unexpected-shell-probe-stderr".to_vec(),
+                    )
+                    .map_err(|_| {
+                        ExecutionError::new(ExecutionErrorKind::LocalStorage, ExecutionStage::Exec)
+                    })?,
+                );
+            }
+            records.push(ExecutionOutputRecord::end_of_stream(
+                ExecutionOutputStream::Stderr,
+            ));
             ExecutionOutput::new(
                 termination,
-                vec![
-                    ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stdout),
-                    ExecutionOutputRecord::end_of_stream(ExecutionOutputStream::Stderr),
-                ],
+                records,
                 self.behavior == FakeBehavior::ExecTruncated,
             )
             .map_err(|_| {
@@ -1676,16 +1755,16 @@ mod tests {
         };
         assert_eq!(inspected, attached);
         let expected_scripts = [
-            ("profile admission pwsh.ps1", POWERSHELL_PROBE_SCRIPT),
-            ("profile admission powershell.ps1", POWERSHELL_PROBE_SCRIPT),
-            ("profile admission cmd.cmd", CMD_PROBE_SCRIPT),
-            ("profile admission python.py", PYTHON_PROBE_SCRIPT),
+            "profile admission pwsh.ps1",
+            "profile admission powershell.ps1",
+            "profile admission cmd.cmd",
+            "profile admission python.py",
         ];
         let mut operation_ids = BTreeSet::from([spec.operation_id()]);
         let copied_scripts = calls[3..7]
             .iter()
             .zip(expected_scripts)
-            .map(|(call, (name, content))| {
+            .map(|(call, name)| {
                 let Call::CopyTo(request) = call else {
                     panic!("every shell probe script must be copied before execution")
                 };
@@ -1693,20 +1772,34 @@ mod tests {
                     request.target(),
                     &target_child(spec.workspace(), name).expect("expected script target")
                 );
-                assert_eq!(request.content(), content);
                 assert!(operation_ids.insert(request.operation_id()));
                 request.target().clone()
             })
             .collect::<Vec<_>>();
         let expected_programs = [&pwsh, &powershell, &cmd, &python];
-        for ((call, expected_program), script) in calls[7..11]
+        let expected_kinds = [
+            ShellKind::Pwsh,
+            ShellKind::WindowsPowerShell,
+            ShellKind::Cmd,
+            ShellKind::Python,
+        ];
+        for (index, ((call, expected_program), script)) in calls[7..11]
             .iter()
             .zip(expected_programs)
             .zip(&copied_scripts)
+            .enumerate()
         {
             let Call::Exec(command) = call else {
                 panic!("container shell probe must execute")
             };
+            let Call::CopyTo(copy) = &calls[3 + index] else {
+                unreachable!()
+            };
+            assert_eq!(
+                copy.content(),
+                ShellProbe::new(expected_kinds[index], (*expected_program).clone())
+                    .script_content(command.operation_id())
+            );
             assert_eq!(command.argv().program(), expected_program);
             assert_eq!(command.working_directory(), spec.workspace());
             assert_eq!(command.environment(), &expected_environment);
@@ -1800,10 +1893,12 @@ mod tests {
     }
 
     #[test]
-    fn shell_admission_rejects_nonzero_or_truncated_probe() {
+    fn shell_admission_requires_exact_clean_success_evidence() {
         for behavior in [
             FakeBehavior::ExecTermination(ExecutionTermination::Exited(7)),
             FakeBehavior::ExecTruncated,
+            FakeBehavior::ExecWrongOutput,
+            FakeBehavior::ExecStderr,
         ] {
             let signals = ProbeCancellation::default();
             let provider = FakeProvider::new(behavior, signals.clone());

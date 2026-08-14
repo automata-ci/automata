@@ -191,6 +191,10 @@ fn windows_container_image_runtime_and_guest_agent_are_pinned() {
 
     for (field, invalid) in [
         ("runtime_executable", serde_json::json!(r"docker.exe")),
+        (
+            "runtime_executable",
+            serde_json::json!(r"C:\Program Files\Docker\container.exe"),
+        ),
         ("runtime_sha256", serde_json::json!("not-a-digest")),
         ("guest_agent_path", serde_json::json!(r"C:\guest\agent.cmd")),
         (
@@ -243,6 +247,22 @@ fn windows_container_toolchain_and_paths_are_in_image_and_literal() {
         parse(&legacy_node).expect_err("only Node 24 is supported"),
         RunnerProductConfigError::InvalidExecutor
     );
+
+    for (field, invalid) in [
+        ("pwsh", r"C:\automata\tools\noop.exe"),
+        ("powershell", r"C:\automata\tools\pwsh.exe"),
+        ("cmd", r"C:\automata\tools\command.exe"),
+        ("python", r"C:\automata\tools\noop.exe"),
+    ] {
+        let mut wrong_interpreter = baseline();
+        wrong_interpreter["executor"]["toolchain"][field] = serde_json::json!(invalid);
+        assert_eq!(
+            parse(&wrong_interpreter)
+                .expect_err("configured shell paths require the exact executable basename"),
+            RunnerProductConfigError::InvalidExecutor,
+            "invalid {field} executable"
+        );
+    }
 
     let mut packaged_shell = baseline();
     packaged_shell["executor"]["toolchain"]["pwsh"] =
