@@ -1672,7 +1672,13 @@ async fn poll_setup_device(
     drop(document);
     match state.service.poll_device(credential).await {
         Ok(outcome) => setup_device_poll_response(&state, outcome, state.clock.now()),
-        Err(error) => setup_error_response(error, state.clock.now()),
+        Err(error) => {
+            tracing::warn!(
+                error = ?error,
+                "installation setup device authorization poll failed"
+            );
+            setup_error_response(error, state.clock.now())
+        }
     }
 }
 
