@@ -20,7 +20,7 @@ use automata_ci_store::{
     AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
-    WorkflowAdmissionIdempotency,
+    WorkflowAdmissionIdempotency, WorkflowAdmissionValueError,
 };
 use automata_ci_workflow_github::{
     CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler, GithubWorkflowFrontend,
@@ -89,6 +89,7 @@ async fn admission_resolves_max_queue_concurrency_from_safe_context() {
         .admit(concurrency_request(
             "logical-max-queue",
             "queue-${{ github.ref }}-${{ vars.channel }}",
+            "github.ref != 'refs/heads/main'",
         ))
         .await
         .expect("max-queue admission");
@@ -97,8 +98,29 @@ async fn admission_resolves_max_queue_concurrency_from_safe_context() {
     let concurrency = command.concurrency().expect("workflow concurrency");
     assert_eq!(concurrency.display_key(), "queue-refs/heads/main-stable");
     assert_eq!(concurrency.normalized_key(), "queue-refs/heads/main-stable");
-    assert!(concurrency.cancel_in_progress());
+    assert!(!concurrency.cancel_in_progress());
     assert_eq!(concurrency.queue_policy(), QueuePolicy::Max);
+}
+
+#[tokio::test]
+async fn admission_rejects_expression_resolved_max_queue_conflict_before_store_commit() {
+    let repository = Arc::new(ControllableRepository::default());
+    let error = service(repository.clone())
+        .admit(concurrency_request(
+            "logical-max-queue-conflict",
+            "queue-${{ github.ref }}",
+            "github.ref == 'refs/heads/main'",
+        ))
+        .await
+        .expect_err("resolved queue: max conflict must fail before persistence");
+
+    assert!(matches!(
+        error,
+        WorkflowAdmissionError::AdmissionValue(
+            WorkflowAdmissionValueError::InvalidConcurrencyPolicy
+        )
+    ));
+    assert!(repository.command.lock().expect("command lock").is_none());
 }
 
 #[tokio::test]
@@ -108,6 +130,7 @@ async fn admission_rejects_late_bound_concurrency_before_store_commit() {
         .admit(concurrency_request(
             "logical-late-concurrency",
             "queue-${{ github.run_number }}",
+            "github.ref != 'refs/heads/main'",
         ))
         .await
         .expect_err("late-bound run identity must fail closed");
@@ -343,13 +366,17 @@ fn service(repository: Arc<ControllableRepository>) -> WorkflowAdmissionService 
     )
 }
 
-fn concurrency_request(tenant: &str, group: &str) -> WorkflowAdmissionRequest {
+fn concurrency_request(
+    tenant: &str,
+    group: &str,
+    cancel_condition: &str,
+) -> WorkflowAdmissionRequest {
     let source = format!(
         r"name: Queue contract
 on: push
 concurrency:
   group: {group}
-  cancel-in-progress: ${{{{ github.ref == 'refs/heads/main' }}}}
+  cancel-in-progress: ${{{{ {cancel_condition} }}}}
   queue: max
 jobs:
   verify:

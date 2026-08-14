@@ -49,9 +49,9 @@ GitHub-versus-Automata differential path exists. The detailed parallel work is
 tracked in the
 [cross-repository integration-test plan](github-actions-parity/github-actions-parity-11-integration-tests.md).
 
-One immediate documentation correction is required: `concurrency.queue: max`
-is now documented by GitHub, including a 100-entry queue and FIFO behavior. It
-must no longer be described as an Automata-only extension. See
+`concurrency.queue: max` is documented by GitHub, including a 100-entry queue
+and FIFO behavior, and is implemented as a compatibility feature rather than
+an Automata-only extension. See
 [GitHub workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
 
 ## Legend
@@ -547,17 +547,17 @@ GitHub documents `queue: single`, `queue: max`, a maximum of 100 waiting items,
 case-insensitive groups, and FIFO-by-wait-start behavior. See
 [concurrency syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
 
-- [ ] Reclassify `queue: max` as current GitHub syntax, not an Automata-only
+- [x] Reclassify `queue: max` as current GitHub syntax, not an Automata-only
   extension.
-- [ ] Match the 100-item queue.
-- [ ] Reject `queue: max` with `cancel-in-progress: true`.
-- [ ] Match FIFO based on when a job or run begins waiting.
+- [x] Match the 100-item queue.
+- [x] Reject `queue: max` with `cancel-in-progress: true`.
+- [x] Match FIFO based on when a job or run begins waiting.
 - [ ] Implement job-level concurrency.
 - [ ] Evaluate job-level groups with the correct contexts.
-- [ ] Support expression-valued `cancel-in-progress`.
-- [ ] Match case-insensitive group names.
-- [ ] Keep groups repository-scoped.
-- [ ] Match replacement of the existing pending run under `queue: single`.
+- [x] Support expression-valued `cancel-in-progress`.
+- [x] Match case-insensitive group names.
+- [x] Keep groups repository-scoped.
+- [x] Match replacement of the existing pending run under `queue: single`.
 - [ ] Propagate cancellation to queued jobs.
 - [ ] Propagate cancellation to active leases.
 - [ ] Propagate cancellation to complete process trees.
@@ -1233,7 +1233,7 @@ GitHub's reference includes a 500 KB workflow file, 35-day workflow limit,
 - [ ] Enforce or document the 30-day approval limit.
 - [ ] Enforce the 256-job matrix limit.
 - [x] Enforce the 50-rerun limit.
-- [ ] Enforce the 100-entry `queue: max` limit.
+- [x] Enforce the 100-entry `queue: max` limit.
 - [ ] Implement the 24-hour self-hosted queue timeout.
 - [ ] Decide whether to match the five-day self-hosted job maximum.
 - [ ] Decide whether GitHub-hosted six-hour semantics apply to mapped hosted
@@ -1322,7 +1322,7 @@ stating that a behavior is unsupported.
   will reproduce.
 - [ ] Document that Automata's per-job `resources` syntax is not portable
   GitHub syntax.
-- [ ] Remove the stale claim that `queue: max` is Automata-only.
+- [x] Remove the stale claim that `queue: max` is Automata-only.
 - [ ] Keep Automata-owned run, artifact, and cache records clearly distinct
   from native GitHub Actions records.
 

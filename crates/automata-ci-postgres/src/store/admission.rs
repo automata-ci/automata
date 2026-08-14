@@ -27,7 +27,7 @@ const CONCURRENCY_CANCELLATION_REASON: &str = "superseded by a newer workflow ru
 const CANCELLATION_INTENT_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-intent.v1";
 const CANCELLATION_COMMAND_ID_DOMAIN: &[u8] = b"automata.concurrency.cancel-command.v1";
 const PUBLICATION_SAFETY_REASON: &str = "repository_policy";
-pub(super) const MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP: i64 = 4_096;
+pub(super) const MAX_PENDING_RUNS_PER_CONCURRENCY_GROUP: i64 = 100;
 
 pub(super) const fn queue_policy_name(policy: automata_ci_core::QueuePolicy) -> &'static str {
     match policy {

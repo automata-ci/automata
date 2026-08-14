@@ -1327,7 +1327,7 @@ fn resolve_workflow_concurrency(
         }
     };
     WorkflowConcurrency::new(group, cancel_in_progress)
-        .map(|concurrency| concurrency.with_queue_policy(template.queue()))
+        .and_then(|concurrency| concurrency.with_queue_policy(template.queue()))
         .map(Some)
         .map_err(WorkflowAdmissionError::AdmissionValue)
 }

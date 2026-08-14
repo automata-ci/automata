@@ -24,8 +24,9 @@ use automata_ci_store::{
     GithubCheckRerunAction, GithubCheckRerunRepository, GithubCheckRerunRequest,
     GithubCheckRerunStoreError, GithubCheckRerunTarget, MAX_WORKFLOW_RERUN_ATTEMPTS, RepositoryId,
     RerunWorkflow, RerunWorkflowByName, StoreError, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
-    WorkflowConcurrency, WorkflowRerunReceipt, WorkflowRerunRepository, WorkflowRerunSelection,
-    WorkflowRerunStoreError, next_workflow_rerun_attempt,
+    WorkflowAdmissionStoreError, WorkflowConcurrency, WorkflowRerunReceipt,
+    WorkflowRerunRepository, WorkflowRerunSelection, WorkflowRerunStoreError,
+    next_workflow_rerun_attempt,
 };
 
 const RERUN_PERMISSION: &str = "runs:rerun";
@@ -502,7 +503,7 @@ async fn rerun_workflow_transaction(
     .ok_or(WorkflowRerunStoreError::AuthorityRejected)?;
     require_exact_actor(&request, &actor)?;
 
-    admit_authorized_rerun(transaction, request, actor).await
+    admit_authorized_rerun(store, transaction, request, actor).await
 }
 
 async fn rerun_workflow_by_name_transaction(
@@ -542,7 +543,7 @@ async fn rerun_workflow_by_name_transaction(
     .map_err(corrupt_value)?;
     require_exact_actor(&request, &actor)?;
 
-    admit_authorized_rerun(transaction, request, actor).await
+    admit_authorized_rerun(store, transaction, request, actor).await
 }
 
 async fn resolve_named_repository(
@@ -591,6 +592,7 @@ async fn lock_named_repository(
 }
 
 async fn admit_authorized_rerun(
+    store: &PostgresStore,
     mut transaction: Transaction<'_, Postgres>,
     request: RerunWorkflow,
     actor: AuthorizedHumanRepositoryAction,
@@ -635,10 +637,6 @@ async fn admit_authorized_rerun(
     let jobs = load_source_jobs(&mut transaction, &source).await?;
     let dependencies = load_source_dependencies(&mut transaction, &source).await?;
     let selected = select_jobs(&request, &jobs, &dependencies)?;
-    if source.concurrency.is_some() {
-        return Err(WorkflowRerunStoreError::UnsupportedSelection);
-    }
-
     let run_id = derived_uuid(RERUN_RUN_ID_DOMAIN, &request_digest, &[]);
     let invocation_id = derived_uuid(RERUN_INVOCATION_ID_DOMAIN, &request_digest, &[]);
     let job_ids = jobs
@@ -669,6 +667,18 @@ async fn admit_authorized_rerun(
         invocation_id,
     };
     persist_rerun(&mut transaction, &write).await?;
+    if let Some(concurrency) = write.source.concurrency.as_ref() {
+        super::admission::assign_concurrency_slot(
+            &mut transaction,
+            store.runner_payload_encryption.as_ref(),
+            request.repository_id(),
+            RunId::from_uuid(write.run_id),
+            automata_ci_core::UnixMillis::new(write.admitted_at_ms),
+            concurrency,
+        )
+        .await
+        .map_err(map_concurrency_admission_error)?;
+    }
     transaction.commit().await.map_err(operation_error)?;
 
     WorkflowRerunReceipt::new(
@@ -680,6 +690,20 @@ async fn admit_authorized_rerun(
         false,
     )
     .map_err(corrupt_value)
+}
+
+fn map_concurrency_admission_error(error: WorkflowAdmissionStoreError) -> WorkflowRerunStoreError {
+    match error {
+        WorkflowAdmissionStoreError::Store(error) => WorkflowRerunStoreError::Store(error),
+        WorkflowAdmissionStoreError::ConcurrencyQueueFull => {
+            WorkflowRerunStoreError::ConcurrencyQueueFull
+        }
+        WorkflowAdmissionStoreError::IdempotencyConflict
+        | WorkflowAdmissionStoreError::IdentityConflict(_)
+        | WorkflowAdmissionStoreError::RunNumberExhausted => WorkflowRerunStoreError::Store(
+            StoreError::corrupt_data("workflow rerun concurrency returned an unrelated error"),
+        ),
+    }
 }
 
 async fn persist_rerun(
@@ -1370,7 +1394,8 @@ fn decode_concurrency(row: &PgRow) -> Result<Option<WorkflowConcurrency>, Workfl
     };
     let concurrency = WorkflowConcurrency::new(display, cancel)
         .map_err(corrupt_value)?
-        .with_queue_policy(queue_policy);
+        .with_queue_policy(queue_policy)
+        .map_err(corrupt_value)?;
     if concurrency.normalized_key() != normalized {
         return Err(
             StoreError::corrupt_data("workflow rerun concurrency key is inconsistent").into(),
@@ -2567,10 +2592,19 @@ mod tests {
     use automata_ci_core::JOB_RUNTIME_CONTEXT_SCHEMA_VERSION;
 
     use automata_ci_store::{
-        WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowRerunStoreError,
+        WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionStoreError,
+        WorkflowRerunStoreError,
     };
 
-    use super::validate_current_source_contract;
+    use super::{map_concurrency_admission_error, validate_current_source_contract};
+
+    #[test]
+    fn rerun_concurrency_preserves_the_queue_full_contract() {
+        assert!(matches!(
+            map_concurrency_admission_error(WorkflowAdmissionStoreError::ConcurrencyQueueFull),
+            WorkflowRerunStoreError::ConcurrencyQueueFull
+        ));
+    }
 
     #[test]
     fn post_terminal_source_contract_accepts_current_schema_and_rejects_skew() {
