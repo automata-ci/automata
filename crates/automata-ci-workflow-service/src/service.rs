@@ -258,7 +258,7 @@ impl WorkflowAdmissionService {
     ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
         let started = Instant::now();
         let jobs = request.plan().jobs().len();
-        let result = self.admit_inner(request, authority).await;
+        let result = Box::pin(self.admit_inner(request, authority)).await;
         let outcome = match &result {
             Ok(value) if value.receipt().is_replay() => WorkflowAdmissionObservation::Replay,
             Ok(_) => WorkflowAdmissionObservation::New { jobs },

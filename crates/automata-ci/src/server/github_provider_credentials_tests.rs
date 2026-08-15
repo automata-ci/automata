@@ -39,8 +39,8 @@ use automata_ci_store::{
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
     RegisterWorkflowRuntimePolicy, ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest,
-    TenantScope, WorkflowPermissionPolicy, WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping,
-    WorkflowRuntimePolicyRevision, github_provider_repository_id,
+    TenantScope, WorkflowPermissionPolicy, WorkflowRunnerFeaturePolicy, WorkflowRuntimePolicy,
+    WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -596,6 +596,7 @@ fn test_runtime_policy() -> WorkflowRuntimePolicy {
         ),
         OperatingSystem::Linux,
         Architecture::X86_64,
+        WorkflowRunnerFeaturePolicy::new([]).expect("empty runner feature policy"),
         [],
     )
     .expect("runtime mapping");

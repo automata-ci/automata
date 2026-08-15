@@ -251,13 +251,7 @@ fn project_github_logical_job(
     let LogicalJobKind::Steps(step_job) = request.job.execution() else {
         unreachable!("unsupported reusable jobs were rejected above");
     };
-    let trust_snapshot = request
-        .trust_snapshot
-        .ok_or(LogicalJobProjectionError::MissingTrustSnapshot)?;
-    if trust_snapshot.is_construction_placeholder() {
-        return Err(LogicalJobProjectionError::MissingTrustSnapshot);
-    }
-    validate_trust_runtime_authority(trust_snapshot, request.instance)?;
+    let trust_snapshot = required_trust_snapshot(request.trust_snapshot, request.instance)?;
     let runner = request
         .instance
         .runner()
@@ -350,6 +344,18 @@ fn project_github_logical_job(
         runtime_context,
         runtime_context_bytes: Bytes::from(runtime_context_bytes),
     })
+}
+
+fn required_trust_snapshot<'a>(
+    snapshot: Option<&'a TrustSnapshot>,
+    instance: &ActivatedJobInstance,
+) -> Result<&'a TrustSnapshot, LogicalJobProjectionError> {
+    let snapshot = snapshot.ok_or(LogicalJobProjectionError::MissingTrustSnapshot)?;
+    if snapshot.is_construction_placeholder() {
+        return Err(LogicalJobProjectionError::MissingTrustSnapshot);
+    }
+    validate_trust_runtime_authority(snapshot, instance)?;
+    Ok(snapshot)
 }
 
 fn validate_trust_runtime_authority(

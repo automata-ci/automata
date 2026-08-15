@@ -1298,6 +1298,38 @@ norlX3KEHNe7cTke5cP4OA==";
         slot: StableRunnerSlot,
     }
 
+    fn authenticated_snapshot(event_name: &str, git_ref: &str) -> TrustSnapshot {
+        let event = match event_name {
+            "pull_request" => TrustEventKind::PullRequest,
+            _ => TrustEventKind::Push,
+        };
+        let repository =
+            TrustRepositoryEvidence::new("42", "7").expect("stable repository evidence");
+        let actor = || {
+            TrustActorEvidence::new("actor-1", TrustActorKind::User, TrustAutomationKind::None)
+                .expect("stable actor evidence")
+        };
+        let evidence = TrustEvidence::new(TrustOriginKind::ProviderWebhook, event)
+            .with_original_actor(actor())
+            .with_repositories(repository.clone(), repository)
+            .with_refs(git_ref, git_ref, git_ref)
+            .with_revisions(
+                "0123456789abcdef0123456789abcdef01234567",
+                "0123456789abcdef0123456789abcdef01234567",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .with_fork(false)
+            .with_token_recursion(TrustTokenRecursion::Suppressed);
+        let evidence = if event == TrustEventKind::PullRequest {
+            evidence.with_source_actor(actor())
+        } else {
+            evidence
+        };
+        TrustPolicy::current()
+            .evaluate(evidence)
+            .expect("authenticated test trust snapshot")
+    }
+
     impl RuntimeFixture {
         fn new(provider: &str, permission: JobPermissionRequest, event_name: &str) -> Self {
             Self::new_with_git_ref(provider, permission, event_name, "refs/heads/main")
@@ -1329,7 +1361,7 @@ norlX3KEHNe7cTke5cP4OA==";
                 )],
             )
             .with_permission_request(permission)
-            .with_trust_snapshot(trusted_push_snapshot())
+            .with_trust_snapshot(authenticated_snapshot(event_name, git_ref))
             .with_authority_profile(JobAuthorityProfile::Standard)
             .with_timeout_seconds(120);
             let execution = JobExecutionContext::new(
