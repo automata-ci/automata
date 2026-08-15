@@ -3,6 +3,9 @@ use crate::{
     PermissionLevel, Permissions, PreservedField, RunDefaults, ScalarResolution, ScalarValue,
     Spanned, ValueMap, ValueMapEntry, YamlNode,
 };
+use automata_ci_github_permissions::{
+    GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION, github_workflow_permission,
+};
 
 use super::{DecodeContext, field_name};
 
@@ -125,11 +128,24 @@ pub(super) fn permissions(
         let Some(entry_path) = context.child_path(path, &name.decoded, &entry.key.span) else {
             break;
         };
+        let Some(permission) = github_workflow_permission(&name.decoded) else {
+            context.semantic(
+                "github.unknown_permission",
+                format!(
+                    "`{entry_path}` is not present in GitHub workflow permission catalog revision {GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION}"
+                ),
+                entry.key.span.clone(),
+            );
+            continue;
+        };
         let Some(level) = context.scalar(&entry.value, &entry_path) else {
             continue;
         };
-        let level = match (name.decoded.as_str(), level.decoded.as_str()) {
-            ("id-token", "read") => {
+        let level = match level.decoded.as_str() {
+            "read" if permission.allows_read() => PermissionLevel::Read,
+            "write" if permission.allows_write() => PermissionLevel::Write,
+            "none" => PermissionLevel::None,
+            "read" if name.decoded == "id-token" => {
                 context.semantic(
                     "github.invalid_id_token_permission_level",
                     format!("`{entry_path}` must be `write` or `none`"),
@@ -137,9 +153,14 @@ pub(super) fn permissions(
                 );
                 continue;
             }
-            (_, "read") => PermissionLevel::Read,
-            (_, "write") => PermissionLevel::Write,
-            (_, "none") => PermissionLevel::None,
+            "write" if name.decoded == "vulnerability-alerts" => {
+                context.semantic(
+                    "github.invalid_permission_level",
+                    format!("`{entry_path}` must be `read` or `none`"),
+                    entry.value.span.clone(),
+                );
+                continue;
+            }
             _ => {
                 context.semantic(
                     "github.invalid_permission_level",

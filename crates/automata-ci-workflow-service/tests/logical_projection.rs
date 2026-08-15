@@ -10,6 +10,7 @@ use automata_ci_core::{
     ValueTemplateSegment, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
+use automata_ci_github_permissions::GITHUB_WORKFLOW_PERMISSIONS;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::WorkflowPermissionPolicy;
 use automata_ci_workflow_github::{
@@ -46,14 +47,10 @@ fn resource_policy() -> JobResourcePolicy {
 }
 
 fn permission_policy() -> WorkflowPermissionPolicy {
-    WorkflowPermissionPolicy::new(
-        BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-        BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-        BTreeMap::from([
-            ("contents".to_owned(), PermissionLevel::Write),
-            ("id-token".to_owned(), PermissionLevel::Write),
-        ]),
-    )
+    WorkflowPermissionPolicy::from_provider_default(BTreeMap::from([(
+        "contents".to_owned(),
+        PermissionLevel::Read,
+    )]))
     .expect("permission policy")
 }
 
@@ -889,10 +886,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-        &JobPermissionRequest::mapping([JobPermissionGrant::new(
-            "contents",
-            PermissionLevel::Read,
-        )]),
+        &catalog_read_all_request(),
     );
 
     assert_projected_permissions(
@@ -903,10 +897,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-        &JobPermissionRequest::mapping([
-            JobPermissionGrant::new("contents", PermissionLevel::Write),
-            JobPermissionGrant::new("id-token", PermissionLevel::Write),
-        ]),
+        &catalog_write_all_request(),
     );
 
     let overridden = assert_projected_permissions(
@@ -965,6 +956,31 @@ fn assert_projected_permissions(source: &str, expected: &JobPermissionRequest) -
         "projected permission request"
     );
     envelope
+}
+
+fn catalog_read_all_request() -> JobPermissionRequest {
+    JobPermissionRequest::mapping(
+        GITHUB_WORKFLOW_PERMISSIONS
+            .iter()
+            .copied()
+            .filter(|permission| permission.allows_read())
+            .map(|permission| JobPermissionGrant::new(permission.name(), PermissionLevel::Read)),
+    )
+}
+
+fn catalog_write_all_request() -> JobPermissionRequest {
+    JobPermissionRequest::mapping(GITHUB_WORKFLOW_PERMISSIONS.iter().copied().filter_map(
+        |permission| {
+            let level = if permission.allows_write() {
+                PermissionLevel::Write
+            } else if permission.allows_read() {
+                PermissionLevel::Read
+            } else {
+                return None;
+            };
+            Some(JobPermissionGrant::new(permission.name(), level))
+        },
+    ))
 }
 
 #[test]

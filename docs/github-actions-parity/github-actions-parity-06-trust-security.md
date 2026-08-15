@@ -86,26 +86,26 @@ explicitly unchecked above.
 
 Tasks:
 
-- [ ] Create a versioned GitHub permission catalog with current names and
+- [x] Create a versioned GitHub permission catalog with current names and
   allowed levels.
-- [ ] Reject unknown names and invalid levels at publication.
-- [ ] Preserve explicit empty mapping as deny-all.
+- [x] Reject unknown names and invalid levels at publication.
+- [x] Preserve explicit empty mapping as deny-all.
 - [ ] Resolve omitted enterprise, organization, and repository defaults.
-- [ ] Apply workflow then job permissions.
-- [ ] Expand read-all/write-all from the pinned catalog.
-- [ ] Keep `id-token` out of read-all and reject `id-token: read`.
-- [ ] Apply reusable-workflow ceilings.
+- [x] Apply workflow then job permissions.
+- [x] Expand read-all/write-all from the pinned catalog.
+- [x] Keep `id-token` out of read-all and reject `id-token: read`.
+- [x] Apply reusable-workflow ceilings.
 - [ ] Pin catalog/default-policy revision and digest to the run.
-- [ ] Put only exact resolved permissions into executable JobIR.
+- [x] Put only exact resolved permissions into executable JobIR.
 - [ ] Add `artifact-metadata` with its documented levels and enforce it on
   provenance/attestation reads and writes independently from artifact content
   authority.
 
 Acceptance:
 
-- [ ] `{}`, omitted, read-all, write-all, mappings, and reusable ceilings have
+- [x] `{}`, omitted, read-all, write-all, mappings, and reusable ceilings have
   golden results.
-- [ ] Unknown future permission names fail early.
+- [x] Unknown future permission names fail early.
 - [ ] No runtime adapter guesses defaults.
 
 ### AUTH-02 — Authenticated event trust and authority reduction
