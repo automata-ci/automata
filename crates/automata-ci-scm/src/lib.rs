@@ -18,7 +18,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-/// Least-privilege workload credential issuance contracts.
+/// Provider-neutral workload credential request, result, and failure contracts.
 pub mod credential;
 
 mod model;

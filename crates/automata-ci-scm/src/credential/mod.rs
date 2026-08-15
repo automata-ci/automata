@@ -1,16 +1,19 @@
-//! Provider-neutral, least-privilege workload credential contracts.
+//! Provider-neutral workload credential requests, results, and failures.
 //!
-//! The broker boundary deliberately separates short-lived repository credentials
-//! from human login credentials and provider root keys. A broker implementation
-//! receives a validated workload, repository, permission set, and validity floor;
-//! its result remains bound to that exact request.
+//! These contracts deliberately separate short-lived repository credentials from
+//! human login credentials and provider root keys. A request binds a validated
+//! workload, repository, permission set, and validity floor; an issued result
+//! remains bound to that exact request.
+//!
+//! Provider integrations should define lifecycle-adequate ports once their mint
+//! ambiguity and secret-custody semantics are known rather than reuse a
+//! speculative generic broker.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod error;
 mod model;
-mod port;
 
 pub use error::{CredentialError, CredentialErrorKind};
 pub use model::{
@@ -18,4 +21,3 @@ pub use model::{
     PermissionName, PermissionSet, ProviderResourceId, RepositoryCredentialRequest,
     RepositoryScope, WorkloadIdentity,
 };
-pub use port::RepositoryCredentialBroker;
