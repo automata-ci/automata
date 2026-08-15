@@ -99,11 +99,13 @@ async fn exact_source_rejects_malformed_or_mismatched_commit_evidence_without_fa
         let endpoint = fixture.endpoint();
         let repository = RepositoryId::new("automata-ci/automata").unwrap();
         let revision = ExactRevision::new(SHA).unwrap();
+        let token = token();
 
         let error = endpoint
-            .fetch_repository_source(RepositorySourceRequest::public(
+            .fetch_repository_source(RepositorySourceRequest::authenticated(
                 &repository,
                 &revision,
+                &token,
                 ArchiveLimits::default(),
             ))
             .await
@@ -131,10 +133,12 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
     let endpoint = untrusted.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
     let revision = ExactRevision::new(SHA).unwrap();
+    let token = token();
     let error = endpoint
-        .fetch_repository_source(RepositorySourceRequest::public(
+        .fetch_repository_source(RepositorySourceRequest::authenticated(
             &repository,
             &revision,
+            &token,
             ArchiveLimits::default(),
         ))
         .await
@@ -158,9 +162,10 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
     ));
     let endpoint = invalid_media.endpoint();
     let error = endpoint
-        .fetch_repository_source(RepositorySourceRequest::public(
+        .fetch_repository_source(RepositorySourceRequest::authenticated(
             &repository,
             &revision,
+            &token,
             ArchiveLimits::default(),
         ))
         .await
@@ -189,11 +194,13 @@ async fn exact_source_enforces_the_incremental_archive_byte_ceiling() {
     let endpoint = fixture.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
     let revision = ExactRevision::new(SHA).unwrap();
+    let token = token();
 
     let error = endpoint
-        .fetch_repository_source(RepositorySourceRequest::public(
+        .fetch_repository_source(RepositorySourceRequest::authenticated(
             &repository,
             &revision,
+            &token,
             ArchiveLimits::new(16).unwrap(),
         ))
         .await
@@ -236,6 +243,38 @@ async fn public_exact_revision_uses_the_immutable_archive_origin_without_api_req
     assert_eq!(
         requests[0].uri,
         format!("/actions/checkout/legacy.tar.gz/{SHA}")
+    );
+    assert!(!requests[0].headers.contains_key("authorization"));
+}
+
+#[tokio::test]
+async fn public_exact_source_uses_the_immutable_archive_origin_without_api_requests() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(ResponseSpec::binary(
+        StatusCode::OK,
+        "application/x-gzip",
+        vec![0x1f, 0x8b, 0x08, 0x00, 1, 2, 3, 4],
+    ));
+    let endpoint = fixture.endpoint();
+    let repository = RepositoryId::new("automata-ci/automata").unwrap();
+    let revision = ExactRevision::new(SHA).unwrap();
+
+    let source = endpoint
+        .fetch_repository_source(RepositorySourceRequest::public(
+            &repository,
+            &revision,
+            ArchiveLimits::new(1024).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(source.revision(), &revision);
+    assert_eq!(source.size(), 8);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].uri,
+        format!("/automata-ci/automata/legacy.tar.gz/{SHA}")
     );
     assert!(!requests[0].headers.contains_key("authorization"));
 }

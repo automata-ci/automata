@@ -255,6 +255,20 @@ impl RepositorySourcePort for GithubHttpEndpoint {
         &self,
         request: RepositorySourceRequest<'_>,
     ) -> Result<RepositorySource, ScmError> {
+        if request.credential().is_none() {
+            let location =
+                self.exact_public_archive_location(request.repository(), request.revision())?;
+            let bytes = self
+                .download_archive(location, request.limits().maximum_bytes())
+                .await?;
+            return Ok(RepositorySource::from_bytes(
+                self.scm_provider_id.clone(),
+                request.repository().clone(),
+                request.revision().clone(),
+                ArchiveFormat::TarGzip,
+                bytes,
+            ));
+        }
         self.prove_exact_revision(&request).await?;
         let location = self.exact_archive_redirect(&request).await?;
         let bytes = self
