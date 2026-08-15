@@ -40,8 +40,10 @@ with `@actions/cache` 5.0.5. It verifies every declared Node entry and embedded
 lockfile integrity. Ignored offline tests import explicitly supplied local
 client modules and never download packages. The production-composition test
 connects those clients to the real HTTP adapters, PostgreSQL repositories, and
-S3 blob implementation and retains an identifier-free transcript, but remains
-an opt-in acceptance test until its PostgreSQL/S3 environment is available.
+S3 blob implementation and retains an identifier-free transcript. The ordinary
+CI workflow supplies its isolated PostgreSQL, RustFS, Node, and exact-module
+environment; direct local invocation remains opt-in because it requires those
+same services and immutable inputs.
 Runner protocol v1 carries a required, per-attempt Results authority bundle;
 there is no runner- or fleet-wide Results credential.
 
@@ -71,8 +73,8 @@ Acceptance:
 
 - [ ] Exact action wrappers run against the real Results HTTP adapter,
   PostgreSQL repository, and production blob store.
-- [ ] The suite is deterministic and network independent.
-- [ ] Unsupported operations fail with stable protocol responses rather than
+- [x] The suite is deterministic and network independent.
+- [x] Unsupported operations fail with stable protocol responses rather than
   connection resets or generic internal errors.
 
 ### RES-02 — Complete job, step, log, and result contract
