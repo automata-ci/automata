@@ -14,9 +14,15 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+automata-ci-core.workspace = true
+bollard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true

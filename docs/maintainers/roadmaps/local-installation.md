@@ -2,12 +2,13 @@
 
 - Roadmap status: Active
 - Available slice: read-only `automata local doctor` from a reviewed source checkout
-- Current implementation checkpoint: 2A, host-state retirement and reuse contract
+- Current implementation checkpoint: 2B.1, pinned Docker context and immutable identity anchor
 - Date: 2026-08-15
 
 This roadmap owns the work required to make Automata easy to evaluate on one
-machine, optionally connect that installation to one GitHub repository, and then
-grow the tested deployment choices. Capability claims remain in
+machine, run repository-scoped work through a repository-agnostic local
+installation, optionally connect that installation to GitHub, and then grow the
+tested deployment choices. Capability claims remain in
 [Compatibility](../../compatibility.md); this page records product decisions,
 reuse boundaries, merge checkpoints, and the evidence required to change those
 claims.
@@ -153,6 +154,15 @@ Every command that addresses an installation accepts the same
 `--installation NAME` selector. Host-only `doctor` and source-only `check` do
 not invent or select an installation. Any native cache location is an internal
 platform choice, not installation identity or a public lifecycle selector.
+An installation is a repository-agnostic deployment and runner-capacity domain:
+the same selected installation may admit snapshots from different repositories,
+and repository identity never enters its selector key, engine labels, Compose
+project, or desired specification. Repository identity is derived and retained
+with `LocalSnapshot` admission instead. Repositories sharing one installation
+form one trusted set and share its runner capacity; separate installation names
+are useful for distinct trust sets or destructive test environments, but names
+on the same administrator-controlled daemon are not a hostile-code isolation
+boundary.
 JSON reserves stdout for one stable document and never prompts.
 Non-interactive execution never reads values from implicit environment
 variables or command arguments. Secret setters use hidden TTY input when no
@@ -171,7 +181,8 @@ onboarding path:
 
 | Existing path | Reusable capability | Remaining local gap |
 | --- | --- | --- |
-| `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retires checkpoint 1's proposed native state-root input because installation identity will be engine-owned |
+| `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
+| `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
 | `deploy/dev/compose.yaml` | Pinned PostgreSQL and object-storage development dependencies with health checks | It does not compose the product control plane and runner |
 | Control-plane deployment guide and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
@@ -277,10 +288,12 @@ any of them.
 A deterministic external named Docker volume is created once as the
 installation anchor. Its exact Automata-managed label allowlist contains the
 managed marker, identity schema, installation UUID, installation selector key,
-canonical repository binding, deterministic Compose project, and the anchor
-resource-kind discriminator. The selector key is an identifier, not
-cryptographic key material. Changing an identity field requires confirmed reset
-or an explicit migration; it is never an in-place update.
+deterministic Compose project, and the anchor resource-kind discriminator. The
+selector key is derived only from the canonical installation selector under an
+exact versioned byte preimage; it is an identifier, not cryptographic key
+material. No repository, checkout, worktree, or source identity participates in
+that preimage. Changing an identity field requires confirmed reset or an
+explicit migration; it is never an in-place update.
 
 Create and adoption require `Driver=local`, `Scope=local`, empty driver options,
 no host-bind option, and no container attachment. The supervisor always
@@ -317,10 +330,9 @@ complete document or the next complete document, never a partial desired spec.
 Every persistent service volume carries only immutable Automata
 contract/identity/role labels: managed marker, contract and resource kind,
 installation UUID, selector key, project, and exact role. The identity anchor
-has the additional immutable schema and repository-binding labels described
-above. Persistent volume labels never carry a plan digest, so a plan update
-cannot make durable PostgreSQL, object, runner, or desired-spec data look
-foreign.
+has the additional immutable identity-schema label described above. Persistent
+volume labels never carry a plan digest, so a plan update cannot make durable
+PostgreSQL, object, runner, or desired-spec data look foreign.
 
 #### Replaceable topology and `down`
 
@@ -378,6 +390,10 @@ time alone never authorizes lock deletion.
 #### Exact reset
 
 Reset runs under that lock and uses this ordered transaction:
+
+Before confirmation, the command lists the installation-wide repositories,
+history, repository-scoped secrets, and GitHub connections that will be lost;
+reset is never presented as a checkout-local operation.
 
 1. discover the union of deterministic names, exact Compose-project resources,
    all resources with the installation's managed labels, volume/network
@@ -441,8 +457,13 @@ The new source boundary builds a deterministic, bounded archive from Git's
 tracked and non-ignored worktree inventory. It rejects unsafe file types,
 escaping symlinks, submodule ambiguity, case collisions, and concurrent
 mutation. The archive digest—not a possibly dirty HEAD—is the execution source
-identity. HEAD, dirty state, repository identity, selected workflow, inputs,
-and architecture decisions remain explicit provenance.
+identity. The source adapter also derives the canonical repository identity
+used by local admission. Before assigning that provenance contract version 1,
+its exact versioned byte preimage must define Git worktrees, symlinks,
+non-Unicode paths, case behavior, checkout moves, and clones on Linux, macOS,
+and Windows. HEAD, dirty state, repository identity, selected workflow, inputs,
+and architecture decisions remain explicit run provenance; none becomes local
+installation identity.
 
 `LocalSnapshot` is a distinct admission authority accepted only in the local
 deployment context. It parameterizes source location and archive policy around
@@ -610,9 +631,9 @@ engines fail actionably; and preflight creates no file, credential, or engine
 resource.
 
 Status: available. Host, Docker, Compose, and architecture behavior remains
-useful and is retained. Checkpoint 2A removes public state-root resolution and
-its readiness gate because installation identity will be engine-owned and any
-optional native cache will be internal and discardable.
+useful and is retained. Checkpoint 2A removed public state-root resolution and
+its readiness gate because checkpoint 2B.1 makes installation identity
+engine-owned and any optional native cache remains internal and discardable.
 
 ### 2A. Retire host lifecycle state and freeze the reuse boundary
 
@@ -620,56 +641,106 @@ Remove checkpoint 1's unused public state-root option and JSON field before any
 mutating local command depends on them. Record the reuse-first architecture and
 delete the draft host installation manifest, mirrored resource inventory,
 local-specific operation ID, broad lifecycle state machine, and duplicated
-platform filesystem framework. Do not publish an engine label schema or
-repository-binding algorithm until a real adapter consumes and
-integration-tests it. Do not extract the runner journal into a premature
-generic state library: journal, spool, CLI receipt, provider, and installation
-identity have different custody and recovery contracts.
+platform filesystem framework. Do not publish an engine label schema until a
+real engine adapter consumes and integration-tests it. Do not publish a
+repository-identity algorithm until the `LocalSnapshot` admission adapter
+consumes and integration-tests it. Do not extract the runner journal into a
+premature generic state library: journal, spool, CLI receipt, provider, and
+installation identity have different custody and recovery contracts.
 
 This checkpoint changes only the read-only preflight and the accepted design
 direction. It does not create, inspect, adopt, or delete engine resources and
 does not claim that `local up` is available.
 
-Gate: `local doctor` rejects the removed `--state-dir` option, JSON schema 2 has
-no state path or state-path issue codes, preflight creates no host or engine
-state, all reader-facing docs agree, and the focused native and package-scoped
-cross-target checks pass. The diff contains no unconsumed engine identity API,
-host lifecycle journal, or new platform filesystem substrate.
+Gate for the checkpoint 2A diff: `local doctor` rejects the removed
+`--state-dir` option, JSON schema 2 has no state path or state-path issue codes,
+preflight creates no host or engine state, all reader-facing docs agree, and the
+focused native and package-scoped cross-target checks pass. The diff contains
+no unconsumed engine identity API, host lifecycle journal, or new platform
+filesystem substrate.
 
 ### 2B. Engine identity and desired-spec adapter
 
-Add the first Docker Engine adapter together with the contracts it consumes.
-Define deterministic Compose project identity; a strictly inspected external
-identity anchor; exact role-specific managed-label allowlists; and the atomic,
-digest-bound desired-spec document in an engine config volume. Persistent
-volumes carry immutable identity-only labels while replaceable resources carry
-the rendered plan digest. Compose and fresh engine inspection are resource
-truth; no host manifest mirrors them.
+Land the first Docker Engine adapter and the engine-owned identity and desired
+intent contracts in two independently reviewable, strictly ordered slices.
+Installation identity is a repository-agnostic deployment/capacity boundary;
+repository and snapshot identity remain owned by later `LocalSnapshot`
+admission. Compose and fresh engine inspection are resource truth throughout,
+and no host manifest mirrors them.
 
-Before assigning contract version 1 or creating a volume, define the exact
-versioned byte preimage for repository identity, including Git worktrees,
-symlinks, non-Unicode paths, case behavior, checkout moves, and clones on Linux,
-macOS, and Windows. The adapter, not an arbitrary digest wrapper, constructs
-that binding. Likewise, parsing a resource requires the exact expected role
-from the checked-in rendered plan; a merely well-formed unknown role is not
-owned.
+#### 2B.1. Pinned Docker context and immutable identity anchor
 
-Gate: create and adoption always post-inspect local driver/scope, empty options,
-no bind, exact managed-label allowlist, and no attachments; foreign name/key,
-repository, role, project, or truncated-name collisions fail without mutation;
-the helper atomically commits and verifies a bounded value-free desired
-document; `N`, profile, and render inputs reconstruct the same digest after an
-adapter restart with no realized topology; and fake-daemon plus ignored
-live-Docker tests exercise the public adapter rather than value objects in
-isolation.
+Snapshot the selected Docker context before daemon probes, retain its exact
+validated local Unix-socket or Windows-named-pipe endpoint, pin subsequent
+daemon probes with that exact `--host` value, and connect the direct Engine API
+adapter only to that endpoint. Reverify the expected engine identity before
+mutation. Define the
+exact versioned byte preimage from the canonical installation selector to the
+full selector key, deterministic Compose project, and deterministic anchor
+name. Create only the external immutable identity-anchor volume in this slice;
+do not create, label, mount, or otherwise anticipate the desired-spec volume or
+any realized topology.
+
+The anchor's exact managed-label allowlist contains only its managed marker,
+identity schema, installation UUID, full selector key, Compose project, and
+anchor resource kind. The selector preimage contains no repository, checkout,
+worktree, or source input. The adapter exposes only the high-level inspection
+and create-or-adopt operations consumed here; generic volume mutation, pull,
+remove, reset, and lifecycle APIs do not land speculatively.
+
+Gate: create and adoption always re-inspect the deterministic anchor name after
+`volume create` and require local driver/scope, empty options, no bind, the
+exact anchor managed-label allowlist, and no container attachment. Foreign
+name, full-key, project, resource-kind, or truncated-name collisions fail
+without a second mutation. Changing the active context cannot redirect an
+already pinned adapter; a changed engine identity at the retained endpoint
+fails closed.
+Stateful fake-daemon and ignored live-Docker tests exercise the public adapter,
+including a create response that cannot be trusted, rather than testing value
+objects in isolation. The slice creates no desired-spec volume, helper
+container, Compose topology, host manifest, or repository binding.
+Doctor JSON schema 3 reports the bounded selected context name without exposing
+the retained endpoint URI, and CLI process tests prove daemon probes receive the
+exact validated `--host` value.
+
+#### 2B.2. Desired-spec config volume and atomic helper
+
+Extend the adapter with the separate persistent desired-spec config volume and
+the exact `desired-spec` persistent-volume role. Its immutable labels bind only
+the installation UUID, full selector key, Compose project, persistent-volume
+contract/resource kind, and exact role; they contain neither repository
+identity nor a mutable plan digest. Create and adoption use the same fresh
+post-inspection, local driver/scope, empty-option, no-bind, exact-label, and
+attachment checks as the anchor before any helper is started.
+
+Define the bounded, canonical, credential-value-free desired-spec document. It
+contains only the installation binding, requested `max_parallel_jobs`, exact
+local profile and architecture decision, closed image/render inputs, renderer
+version, and canonical plan digest needed to reconstruct the same stack after
+`down`. Reuse the existing digest-pinned sandbox guest as the one-shot helper;
+strengthen its bounded file write to use a same-directory exclusive temporary
+file, file synchronization, atomic rename, and directory synchronization. The
+adapter post-inspects each exact helper container ID before start, performs a
+fresh helper readback after commit, and accepts the document only when canonical
+decode, installation binding, and recomputed digest agree. It never pulls the
+helper implicitly.
+
+Gate: foreign config-volume name, key, project, role, label, driver, option, or
+attachment evidence fails before helper mutation; interruption leaves either
+the prior complete desired document or the next complete document; and `N`,
+profile, architecture decision, and closed render inputs reconstruct the same
+digest after an adapter restart with no realized topology. Stateful fake-daemon
+and ignored live-Docker tests cover the public read/commit adapter, exact helper
+post-inspection, bounded protocol, fresh readback, and zero topology. This slice
+completes checkpoint 2B but still exposes no user lifecycle command.
 
 ### 2C. Convergent Compose lifecycle and exact reset
 
-Add checked-in value-free rendering, persistent identity-only volume labels,
-digest-labeled replaceable topology, the inert ID-held engine lock, union
-discovery, `up`, `status`, `down`, and exact reset. The command layer remains
-private until these operations are convergent and their destructive boundary is
-proven.
+Build on the completed 2B.2 adapter. Add checked-in value-free rendering,
+persistent identity-only volume labels, digest-labeled replaceable topology,
+the inert ID-held engine lock, union discovery, `up`, `status`, `down`, and exact
+reset. The command layer remains private until these operations are convergent
+and their destructive boundary is proven.
 
 Gate: persistent volumes never carry a mutable plan digest; every replaceable
 resource carries the current digest; unknown managed keys, unexpected roles,
@@ -701,14 +772,18 @@ Add bounded Git worktree snapshotting and a provider-distinct local source
 authority. Parameterize source location/archive loading around the existing
 GitHub Actions frontend and compiler. Feed compiled requests into the existing
 workflow service, admission transaction, scheduler, cancellation, logs, and
-history. Add `automata local check` as a read-only view of that path.
+history. Define and retain the exact canonical repository identity as admitted
+source provenance here, not as an engine installation binding. Add
+`automata local check` as a read-only view of that path.
 
 Gate: clean and dirty worktrees produce deterministic digests; ignored files,
 `.git`, sockets, devices, escaping symlinks, submodule ambiguity, concurrent
 mutation, oversized archives, and case collisions fail closed; direct
 `.github/workflows` and `.ci/workflows` files and admitted same-tree reusable
-workflows use the existing compiler; no source operation mutates Git; and no
-local subject can enter signed-GitHub admission or create a GitHub Check.
+workflows use the existing compiler; the versioned repository-identity preimage
+has cross-platform worktree, symlink, non-Unicode, case, move, and clone
+fixtures; no source operation mutates Git; and no local subject can enter
+signed-GitHub admission or create a GitHub Check.
 
 ### 3C. Arch secretless vertical slice
 

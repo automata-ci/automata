@@ -274,10 +274,23 @@ cargo run --locked -p automata-ci -- local doctor
 cargo run --locked -p automata-ci -- local doctor --json
 ```
 
-The command does not create host state or any container resources.
-`local up` and the worker composition remain planned; follow the
+The command does not create host state or any container resources. It reports
+the selected Docker context and pins all daemon probes to that context's exact
+validated local endpoint. The library's anchor adapter is exercised by fake
+Engine tests, but no product command invokes its mutation API yet. `local up`
+and the worker composition remain planned; follow the
 [local installation and deployment roadmap](maintainers/roadmaps/local-installation.md) for
 their merge and host-qualification gates.
+
+The opt-in live adapter contract creates one randomly named identity volume,
+adopts the same UUID through the public adapter, then re-inspects and removes
+only that exact unattached fixture:
+
+```console
+AUTOMATA_TEST_LOCAL_DOCKER=1 cargo test --locked -p automata-ci-local \
+  'engine::tests::live_docker_public_adapter_creates_and_re_adopts_one_exact_anchor' \
+  -- --ignored --exact
+```
 
 ## Local PostgreSQL and RustFS
 
