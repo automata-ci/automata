@@ -68,6 +68,6 @@ pub use source::{
 };
 pub use syntax::ParseLimits as WorkflowParseLimits;
 pub use syntax::{
-    AnchorId, ScalarResolution, ScalarStyle, YamlAlias, YamlDocument, YamlMappingEntry, YamlNode,
-    YamlNodeKind, YamlScalar, YamlTag,
+    AnchorId, ScalarResolution, ScalarStyle, YamlAlias, YamlAliasExpansion, YamlDocument,
+    YamlMappingEntry, YamlNode, YamlNodeKind, YamlScalar, YamlTag,
 };

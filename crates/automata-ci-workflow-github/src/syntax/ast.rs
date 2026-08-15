@@ -102,6 +102,35 @@ pub struct YamlAlias {
     pub(crate) target: AnchorId,
 }
 
+/// Provenance recorded when one alias occurrence is expanded into a derived YAML node.
+///
+/// The expanded node's primary [`YamlNode::span`] is always the alias-use span. The
+/// definition span retained here points back to the source node copied for that use.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct YamlAliasExpansion {
+    pub(crate) target: AnchorId,
+    pub(crate) alias_use_span: SourceSpan,
+    pub(crate) definition_span: SourceSpan,
+}
+
+impl YamlAliasExpansion {
+    /// Returns the parser identity of the anchor selected at this alias occurrence.
+    pub const fn target(&self) -> AnchorId {
+        self.target
+    }
+
+    /// Returns the exact span of the alias token that caused this copy.
+    pub const fn alias_use_span(&self) -> &SourceSpan {
+        &self.alias_use_span
+    }
+
+    /// Returns the source span of the node copied from the selected definition.
+    pub const fn definition_span(&self) -> &SourceSpan {
+        &self.definition_span
+    }
+}
+
 impl YamlAlias {
     /// Returns the document-local anchor targeted by this alias.
     pub const fn target(&self) -> AnchorId {
@@ -157,6 +186,7 @@ pub struct YamlNode {
     pub(crate) span: SourceSpan,
     pub(crate) anchor: Option<AnchorId>,
     pub(crate) tag: Option<YamlTag>,
+    pub(crate) alias_expansions: Vec<YamlAliasExpansion>,
 }
 
 impl YamlNode {
@@ -202,6 +232,14 @@ impl YamlNode {
     /// Returns the explicit YAML tag applied to this node, if any.
     pub fn tag(&self) -> Option<&YamlTag> {
         self.tag.as_ref()
+    }
+
+    /// Returns the alias-expansion chain that produced this derived node.
+    ///
+    /// Entries are ordered from the innermost alias copy to the outermost one.
+    /// Nodes in the original retained document have an empty chain.
+    pub fn alias_expansions(&self) -> &[YamlAliasExpansion] {
+        &self.alias_expansions
     }
 }
 

@@ -135,13 +135,7 @@ fn compiler_distinguishes_unconfigured_events_from_lossy_yaml_rejection() {
     }));
 
     let aliases = compile(include_str!("fixtures/aliases.yml"), "push");
-    assert!(aliases.plan().is_none());
-    assert_eq!(aliases.disposition(), CompilationDisposition::Rejected);
-    assert!(aliases.diagnostics().iter().any(|diagnostic| {
-        diagnostic.kind() == DiagnosticKind::Unsupported
-            && matches!(
-                diagnostic.code(),
-                "github.compile.yaml_anchor" | "github.compile.yaml_alias"
-            )
-    }));
+    assert!(aliases.is_accepted(), "{:#?}", aliases.diagnostics());
+    assert_eq!(aliases.disposition(), CompilationDisposition::Accepted);
+    assert!(aliases.plan().is_some());
 }

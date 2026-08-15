@@ -1,0 +1,7 @@
+on: push
+env: &cycle
+  SELF: *cycle
+jobs:
+  build:
+    runs-on: linux
+    steps: [{run: echo build}]

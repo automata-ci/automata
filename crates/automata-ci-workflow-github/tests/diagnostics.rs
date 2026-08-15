@@ -54,22 +54,10 @@ fn unknown_fields_are_preserved_and_rejected_as_unsupported() {
 }
 
 #[test]
-fn anchors_and_aliases_are_preserved_but_never_expanded_silently() {
+fn anchors_and_aliases_retain_original_evidence_and_decode_from_an_expanded_tree() {
     let source = include_str!("fixtures/aliases.yml");
     let report = support::parse(source);
-    assert!(report.plan().is_some());
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == "github.yaml_anchor_not_expanded")
-    );
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == "github.yaml_alias_not_expanded")
-    );
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
 
     let plan = report.plan().expect("plan");
     let jobs = plan.document().root().as_mapping().expect("root")[3]
@@ -81,6 +69,16 @@ fn anchors_and_aliases_are_preserved_but_never_expanded_silently() {
         job_fields
             .iter()
             .any(|entry| matches!(entry.value().kind(), YamlNodeKind::Alias(_)))
+    );
+    let expanded_jobs = plan.expanded_document().root().as_mapping().expect("root")[3]
+        .value()
+        .as_mapping()
+        .expect("jobs");
+    let expanded_fields = expanded_jobs[0].value().as_mapping().expect("job");
+    assert!(
+        expanded_fields
+            .iter()
+            .all(|entry| { !matches!(entry.value().kind(), YamlNodeKind::Alias(_)) })
     );
 }
 

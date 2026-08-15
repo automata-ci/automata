@@ -1,0 +1,26 @@
+name: &workflow_name Alias equivalence
+on: workflow_dispatch
+env: &shared_env
+  MODE: strict
+  RETRIES: 2
+jobs:
+  template: &whole_job
+    name: *workflow_name
+    runs-on: &runner_labels [self-hosted, linux]
+    env: *shared_env
+    services: &shared_services
+      database:
+        image: registry.example/database@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        env:
+          DATABASE_NAME: aliases
+        ports: [5432:5432]
+    steps: &shared_steps
+      - name: Verify
+        run: echo verify
+  repeated: *whole_job
+  direct:
+    name: *workflow_name
+    runs-on: *runner_labels
+    env: *shared_env
+    services: *shared_services
+    steps: *shared_steps

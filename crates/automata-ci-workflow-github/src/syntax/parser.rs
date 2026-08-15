@@ -15,8 +15,9 @@ use crate::{
 
 /// Independent bounds applied while parsing loss-aware YAML syntax.
 ///
-/// These limits bound retained input, nesting, node allocation, and aliases
-/// before GitHub workflow semantic decoding begins.
+/// These limits bound retained input, nesting, node allocation, alias uses,
+/// and the derived tree produced by alias expansion before GitHub workflow
+/// semantic decoding begins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_field_names)]
 #[non_exhaustive]
@@ -25,6 +26,10 @@ pub struct ParseLimits {
     max_depth: usize,
     max_nodes: usize,
     max_aliases: usize,
+    max_alias_expansion_depth: usize,
+    max_expanded_nodes: usize,
+    max_expanded_scalar_bytes: usize,
+    max_alias_expansion_work: usize,
 }
 
 impl Default for ParseLimits {
@@ -34,12 +39,19 @@ impl Default for ParseLimits {
             max_depth: 64,
             max_nodes: 100_000,
             max_aliases: 1_024,
+            max_alias_expansion_depth: 64,
+            max_expanded_nodes: 100_000,
+            max_expanded_scalar_bytes: 8 * 1024 * 1024,
+            max_alias_expansion_work: 1_000_000,
         }
     }
 }
 
 impl ParseLimits {
-    /// Creates a parsing policy with explicit independent ceilings.
+    /// Creates a parsing policy with explicit source-tree ceilings.
+    ///
+    /// Alias-expansion ceilings retain their secure defaults and can be
+    /// replaced independently with the `with_max_*` builders.
     #[must_use]
     pub const fn new(
         max_source_bytes: usize,
@@ -52,6 +64,10 @@ impl ParseLimits {
             max_depth,
             max_nodes,
             max_aliases,
+            max_alias_expansion_depth: 64,
+            max_expanded_nodes: 100_000,
+            max_expanded_scalar_bytes: 8 * 1024 * 1024,
+            max_alias_expansion_work: 1_000_000,
         }
     }
 
@@ -73,6 +89,26 @@ impl ParseLimits {
     /// Returns the maximum number of alias nodes observed.
     pub const fn max_aliases(self) -> usize {
         self.max_aliases
+    }
+
+    /// Returns the maximum number of nested alias substitutions.
+    pub const fn max_alias_expansion_depth(self) -> usize {
+        self.max_alias_expansion_depth
+    }
+
+    /// Returns the maximum number of nodes in the expanded YAML document.
+    pub const fn max_expanded_nodes(self) -> usize {
+        self.max_expanded_nodes
+    }
+
+    /// Returns the maximum decoded scalar bytes in the expanded YAML document.
+    pub const fn max_expanded_scalar_bytes(self) -> usize {
+        self.max_expanded_scalar_bytes
+    }
+
+    /// Returns the maximum aggregate work charged during alias expansion.
+    pub const fn max_alias_expansion_work(self) -> usize {
+        self.max_alias_expansion_work
     }
 
     #[must_use]
@@ -100,6 +136,34 @@ impl ParseLimits {
     /// Replaces the maximum observed alias count.
     pub const fn with_max_aliases(mut self, maximum: usize) -> Self {
         self.max_aliases = maximum;
+        self
+    }
+
+    #[must_use]
+    /// Replaces the maximum number of nested alias substitutions.
+    pub const fn with_max_alias_expansion_depth(mut self, maximum: usize) -> Self {
+        self.max_alias_expansion_depth = maximum;
+        self
+    }
+
+    #[must_use]
+    /// Replaces the maximum node count in the expanded YAML document.
+    pub const fn with_max_expanded_nodes(mut self, maximum: usize) -> Self {
+        self.max_expanded_nodes = maximum;
+        self
+    }
+
+    #[must_use]
+    /// Replaces the maximum decoded scalar bytes in the expanded YAML document.
+    pub const fn with_max_expanded_scalar_bytes(mut self, maximum: usize) -> Self {
+        self.max_expanded_scalar_bytes = maximum;
+        self
+    }
+
+    #[must_use]
+    /// Replaces the maximum aggregate work charged during alias expansion.
+    pub const fn with_max_alias_expansion_work(mut self, maximum: usize) -> Self {
+        self.max_alias_expansion_work = maximum;
         self
     }
 }
@@ -132,12 +196,18 @@ pub(crate) fn parse_yaml(source: &SourceFile, limits: ParseLimits) -> SyntaxRepo
     let mut receiver = AstReceiver::new(source, limits);
     let result = Parser::new_from_str(source.text()).load(&mut receiver, true);
     if let Err(error) = result {
-        receiver.diagnostics.push(Diagnostic::error(
-            DiagnosticKind::Syntax,
-            "yaml.invalid_syntax",
-            error.info(),
-            empty_marker_span(source, &receiver.coordinates, *error.marker()),
-        ));
+        let marker = *error.marker();
+        let marker_offset = receiver.coordinates.byte_offset(marker.index());
+        receiver.diagnostics.push(
+            unresolved_alias_diagnostic(source, marker_offset).unwrap_or_else(|| {
+                Diagnostic::error(
+                    DiagnosticKind::Syntax,
+                    "yaml.invalid_syntax",
+                    error.info(),
+                    empty_marker_span(source, &receiver.coordinates, marker),
+                )
+            }),
+        );
         receiver.fatal = true;
     }
     receiver.finish()
@@ -247,7 +317,7 @@ impl<'source> AstReceiver<'source> {
         let source_span = convert_span(self.source, &self.coordinates, span);
         let anchor = anchor_id(anchor);
         let tag = tag.map(|tag| convert_tag(&tag));
-        self.report_metadata(anchor, tag.as_ref(), source_span.clone());
+        self.report_metadata(tag.as_ref(), source_span.clone());
 
         let frame = if mapping {
             CollectionFrame::Mapping(Box::new(MappingFrame {
@@ -285,12 +355,14 @@ impl<'source> AstReceiver<'source> {
                 kind: YamlNodeKind::Sequence(frame.items),
                 anchor: frame.anchor,
                 tag: frame.tag,
+                alias_expansions: Vec::new(),
             },
             CollectionFrame::Mapping(frame) if mapping && frame.pending_key.is_none() => YamlNode {
                 span: join_spans(&frame.start, &end),
                 kind: YamlNodeKind::Mapping(frame.entries),
                 anchor: frame.anchor,
                 tag: frame.tag,
+                alias_expansions: Vec::new(),
             },
             CollectionFrame::Mapping(mut frame) if frame.pending_key.is_some() => {
                 let key = frame.pending_key.take().expect("pending key was checked");
@@ -326,7 +398,7 @@ impl<'source> AstReceiver<'source> {
         let source_span = convert_span(self.source, &self.coordinates, span);
         let anchor = anchor_id(anchor);
         let tag = tag.map(|tag| convert_tag(&tag));
-        self.report_metadata(anchor, tag.as_ref(), source_span.clone());
+        self.report_metadata(tag.as_ref(), source_span.clone());
         let resolution = resolve_scalar(&decoded, style);
         self.attach(YamlNode {
             kind: YamlNodeKind::Scalar(YamlScalar {
@@ -337,6 +409,7 @@ impl<'source> AstReceiver<'source> {
             span: source_span,
             anchor,
             tag,
+            alias_expansions: Vec::new(),
         });
     }
 
@@ -357,12 +430,6 @@ impl<'source> AstReceiver<'source> {
             );
             return;
         }
-        self.diagnostics.push(Diagnostic::error(
-            DiagnosticKind::Unsupported,
-            "github.yaml_alias_not_expanded",
-            "YAML aliases are preserved but alias expansion is not implemented by this frontend version",
-            source_span.clone(),
-        ));
         self.attach(YamlNode {
             kind: YamlNodeKind::Alias(YamlAlias {
                 target: AnchorId(target),
@@ -370,6 +437,7 @@ impl<'source> AstReceiver<'source> {
             span: source_span,
             anchor: None,
             tag: None,
+            alias_expansions: Vec::new(),
         });
     }
 
@@ -421,20 +489,7 @@ impl<'source> AstReceiver<'source> {
         }
     }
 
-    fn report_metadata(
-        &mut self,
-        anchor: Option<AnchorId>,
-        tag: Option<&YamlTag>,
-        span: SourceSpan,
-    ) {
-        if anchor.is_some() {
-            self.diagnostics.push(Diagnostic::error(
-                DiagnosticKind::Unsupported,
-                "github.yaml_anchor_not_expanded",
-                "YAML anchors are preserved but anchor expansion is not implemented by this frontend version",
-                span.clone(),
-            ));
-        }
+    fn report_metadata(&mut self, tag: Option<&YamlTag>, span: SourceSpan) {
         if tag.is_some() {
             self.diagnostics.push(Diagnostic::error(
                 DiagnosticKind::Unsupported,
@@ -677,4 +732,305 @@ fn join_spans(start: &SourceSpan, end: &SourceSpan) -> SourceSpan {
         start.end
     };
     SourceSpan::new(start.source_id.clone(), start.start, end_location)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceTokenKind {
+    Anchor,
+    Alias,
+}
+
+#[derive(Debug)]
+struct SurfaceToken<'source> {
+    kind: SurfaceTokenKind,
+    name: &'source str,
+    document: usize,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceMode {
+    Plain,
+    SingleQuoted,
+    DoubleQuoted,
+}
+
+/// Saphyr deliberately does not expose anchor names through its event API and
+/// rejects an unresolved alias before emitting an alias event. This bounded
+/// source pass keeps candidate recognition linear in the retained source size
+/// and never matches dependency error strings, so those failures still carry
+/// stable alias/definition provenance.
+fn unresolved_alias_diagnostic(source: &SourceFile, marker_offset: usize) -> Option<Diagnostic> {
+    let (unresolved, forward_definition) = scan_unresolved_alias(source.text(), marker_offset)?;
+    let alias_span = source_offsets_span(source, unresolved.start, unresolved.end);
+
+    Some(if let Some(definition) = &forward_definition {
+        Diagnostic::error(
+            DiagnosticKind::Semantic,
+            "github.yaml_forward_alias",
+            format!(
+                "YAML alias `*{}` appears before its anchor definition",
+                unresolved.name
+            ),
+            alias_span,
+        )
+        .with_related(
+            "anchor is defined later in this document",
+            source_offsets_span(source, definition.start, definition.end),
+        )
+    } else {
+        Diagnostic::error(
+            DiagnosticKind::Semantic,
+            "github.yaml_undefined_alias",
+            format!(
+                "YAML alias `*{}` has no preceding anchor definition",
+                unresolved.name
+            ),
+            alias_span,
+        )
+    })
+}
+
+// Quote, comment, document, and block-scalar state deliberately stays in one
+// bounded pass so token-classification transitions can be audited together.
+#[allow(clippy::too_many_lines)]
+fn scan_unresolved_alias(
+    source: &str,
+    marker_offset: usize,
+) -> Option<(SurfaceToken<'_>, Option<SurfaceToken<'_>>)> {
+    let mut unresolved = None;
+    let mut forward_definition = None;
+    let mut document = 0_usize;
+    let mut mode = SurfaceMode::Plain;
+    let mut block_indent = None;
+    let mut line_offset = 0_usize;
+
+    for line_with_ending in source.split_inclusive('\n') {
+        let line = line_with_ending
+            .strip_suffix('\n')
+            .unwrap_or(line_with_ending);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let indent = line
+            .chars()
+            .take_while(|character| *character == ' ')
+            .count();
+        let trimmed = line.trim_start_matches(' ');
+
+        if mode == SurfaceMode::Plain {
+            if let Some(parent_indent) = block_indent {
+                if trimmed.is_empty() || indent > parent_indent {
+                    line_offset = line_offset.saturating_add(line_with_ending.len());
+                    continue;
+                }
+                block_indent = None;
+            }
+
+            if indent == 0 && is_document_marker(trimmed) {
+                document = document.saturating_add(1);
+            }
+        }
+
+        let mut relative = 0_usize;
+        let mut previous = None;
+        while relative < line.len() {
+            let rest = &line[relative..];
+            let character = rest.chars().next().expect("offset is a character boundary");
+            let width = character.len_utf8();
+            match mode {
+                SurfaceMode::SingleQuoted => {
+                    if character == '\'' {
+                        let next = rest[width..].chars().next();
+                        if next == Some('\'') {
+                            relative = relative.saturating_add(width * 2);
+                            previous = Some('\'');
+                            continue;
+                        }
+                        mode = SurfaceMode::Plain;
+                    }
+                }
+                SurfaceMode::DoubleQuoted => {
+                    if character == '\\' {
+                        relative = relative.saturating_add(width);
+                        if relative < line.len() {
+                            let escaped_width = line[relative..]
+                                .chars()
+                                .next()
+                                .expect("offset is a character boundary")
+                                .len_utf8();
+                            relative = relative.saturating_add(escaped_width);
+                        }
+                        previous = Some(character);
+                        continue;
+                    }
+                    if character == '"' {
+                        mode = SurfaceMode::Plain;
+                    }
+                }
+                SurfaceMode::Plain => {
+                    let comment_boundary = previous.is_none_or(is_yaml_blank);
+                    if character == '#' && comment_boundary {
+                        break;
+                    }
+                    let node_position = matches!(character, '\'' | '"' | '|' | '>' | '&' | '*')
+                        && is_surface_node_position(&line[..relative]);
+                    if character == '\'' && node_position {
+                        mode = SurfaceMode::SingleQuoted;
+                    } else if character == '"' && node_position {
+                        mode = SurfaceMode::DoubleQuoted;
+                    } else if matches!(character, '|' | '>')
+                        && node_position
+                        && is_block_scalar_header(rest)
+                    {
+                        block_indent = Some(indent);
+                        break;
+                    } else if matches!(character, '&' | '*') && node_position {
+                        let name_start = relative.saturating_add(width);
+                        let mut name_end = name_start;
+                        for (offset, candidate) in line[name_start..].char_indices() {
+                            if !is_anchor_name_character(candidate) {
+                                break;
+                            }
+                            name_end = name_start
+                                .saturating_add(offset)
+                                .saturating_add(candidate.len_utf8());
+                        }
+                        if name_end > name_start {
+                            let token = SurfaceToken {
+                                kind: if character == '&' {
+                                    SurfaceTokenKind::Anchor
+                                } else {
+                                    SurfaceTokenKind::Alias
+                                },
+                                name: &line[name_start..name_end],
+                                document,
+                                start: line_offset.saturating_add(relative),
+                                end: line_offset.saturating_add(name_end),
+                            };
+                            if token.kind == SurfaceTokenKind::Alias && token.start == marker_offset
+                            {
+                                unresolved = Some(token);
+                            } else if forward_definition.is_none()
+                                && unresolved.as_ref().is_some_and(|alias| {
+                                    token.kind == SurfaceTokenKind::Anchor
+                                        && token.document == alias.document
+                                        && token.start > alias.start
+                                        && token.name == alias.name
+                                })
+                            {
+                                forward_definition = Some(token);
+                            }
+                            relative = name_end;
+                            previous = line[..relative].chars().next_back();
+                            continue;
+                        }
+                    }
+                }
+            }
+            relative = relative.saturating_add(width);
+            previous = Some(character);
+        }
+
+        line_offset = line_offset.saturating_add(line_with_ending.len());
+    }
+
+    unresolved.map(|alias| (alias, forward_definition))
+}
+
+fn is_surface_node_position(mut prefix: &str) -> bool {
+    let mut property_count = 0_usize;
+    loop {
+        let trimmed = prefix.trim_end_matches(is_yaml_blank);
+        if trimmed.is_empty() {
+            return true;
+        }
+        if trimmed
+            .chars()
+            .next_back()
+            .is_some_and(|character| matches!(character, '-' | '?' | ':' | ',' | '[' | '{'))
+        {
+            return true;
+        }
+        if trimmed.len() == prefix.len() {
+            return false;
+        }
+
+        let property_start = trimmed.rfind(is_yaml_blank).map_or(0, |index| index + 1);
+        let property = &trimmed[property_start..];
+        let is_property = property.starts_with('!')
+            || property
+                .strip_prefix('&')
+                .is_some_and(|name| !name.is_empty() && name.chars().all(is_anchor_name_character));
+        if !is_property {
+            return false;
+        }
+        property_count = property_count.saturating_add(1);
+        if property_count > 2 {
+            return false;
+        }
+        prefix = &trimmed[..property_start];
+    }
+}
+
+fn is_yaml_blank(character: char) -> bool {
+    matches!(character, ' ' | '\t')
+}
+
+fn is_anchor_name_character(character: char) -> bool {
+    !matches!(
+        character,
+        '\0' | '\n' | '\r' | ' ' | '\t' | '\u{feff}' | ',' | '[' | ']' | '{' | '}'
+    )
+}
+
+fn is_document_marker(line: &str) -> bool {
+    ["---", "..."].iter().any(|marker| {
+        line.strip_prefix(marker).is_some_and(|suffix| {
+            suffix.is_empty() || suffix.chars().next().is_some_and(is_yaml_blank)
+        })
+    })
+}
+
+fn is_block_scalar_header(rest: &str) -> bool {
+    let mut suffix = &rest[1..];
+    let mut saw_chomping = false;
+    let mut saw_indent = false;
+    while let Some(character) = suffix.chars().next() {
+        if matches!(character, '+' | '-') && !saw_chomping {
+            saw_chomping = true;
+        } else if matches!(character, '1'..='9') && !saw_indent {
+            saw_indent = true;
+        } else {
+            break;
+        }
+        suffix = &suffix[character.len_utf8()..];
+    }
+    suffix.is_empty()
+        || suffix.starts_with('#')
+        || suffix.chars().next().is_some_and(char::is_whitespace)
+}
+
+fn source_offsets_span(source: &SourceFile, start: usize, end: usize) -> SourceSpan {
+    SourceSpan::new(
+        source.provenance().id().clone(),
+        source_location_at(source.text(), start),
+        source_location_at(source.text(), end),
+    )
+}
+
+fn source_location_at(source: &str, byte_offset: usize) -> SourceLocation {
+    let mut line = 1_usize;
+    let mut column = 1_usize;
+    for (offset, character) in source.char_indices() {
+        if offset >= byte_offset {
+            break;
+        }
+        if character == '\n' {
+            line = line.saturating_add(1);
+            column = 1;
+        } else {
+            column = column.saturating_add(1);
+        }
+    }
+    SourceLocation::new(byte_offset.min(source.len()), line, column)
 }

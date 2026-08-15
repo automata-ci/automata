@@ -219,7 +219,7 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
         source: request.source_plan,
         diagnostics: Vec::new(),
     };
-    scan_lossy_yaml(request.source_plan.document().root(), &mut context);
+    scan_lossy_yaml(request.source_plan, &mut context);
 
     let workflow = request.source_plan.workflow();
     context.reject_extensions(workflow.extensions());
