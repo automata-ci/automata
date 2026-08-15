@@ -153,6 +153,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0037_runtime_authority_deliveries.sql",
         "bf752f9a883c773e4f1ea10f9290f2b41a0ab44db50f7b7d68874014f88c0343fc223ac9948ed11c64b7748deb3a26a0",
     ),
+    (
+        "0038_restore_github_manifest_digest_part.sql",
+        "02fda663c53f99897dfc8671541df9120fd5e9d196f0536c6e1d5dad5515935d8afd8ff196f7f8947f5c3d8be8ef97fa",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
