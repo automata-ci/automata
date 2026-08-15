@@ -532,150 +532,6 @@ impl GithubCheckDesiredProjection {
     }
 }
 
-/// Immutable registration request for one pre-admission subject.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RegisterGithubCheckSubject {
-    identity: GithubCheckSubjectIdentity,
-    created_at: UnixMillis,
-}
-
-impl RegisterGithubCheckSubject {
-    /// Constructs a queued subject registration.
-    ///
-    /// # Errors
-    ///
-    /// Rejects timestamps before the Unix epoch.
-    pub fn new(
-        identity: GithubCheckSubjectIdentity,
-        created_at: UnixMillis,
-    ) -> Result<Self, GithubCheckValueError> {
-        validate_timestamp(created_at, "GitHub Check creation time")?;
-        Ok(Self {
-            identity,
-            created_at,
-        })
-    }
-
-    /// Returns the exact immutable identity.
-    #[must_use]
-    pub const fn identity(&self) -> &GithubCheckSubjectIdentity {
-        &self.identity
-    }
-    /// Returns the durable creation time.
-    #[must_use]
-    pub const fn created_at(&self) -> UnixMillis {
-        self.created_at
-    }
-}
-
-/// Tenant-scoped subject target used by all later mutations.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GithubCheckSubjectTarget {
-    tenant: TenantScope,
-    subject_id: GithubCheckSubjectId,
-}
-
-impl GithubCheckSubjectTarget {
-    /// Constructs an exact tenant-scoped target.
-    #[must_use]
-    pub const fn new(tenant: TenantScope, subject_id: GithubCheckSubjectId) -> Self {
-        Self { tenant, subject_id }
-    }
-
-    /// Returns the authenticated tenant scope.
-    #[must_use]
-    pub const fn tenant(&self) -> &TenantScope {
-        &self.tenant
-    }
-    /// Returns the durable subject identity.
-    #[must_use]
-    pub const fn subject_id(&self) -> GithubCheckSubjectId {
-        self.subject_id
-    }
-}
-
-/// Marks a queued desired projection in progress.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StartGithubCheckProjection {
-    target: GithubCheckSubjectTarget,
-    started_at: UnixMillis,
-}
-
-impl StartGithubCheckProjection {
-    /// Constructs a server-owned in-progress transition.
-    ///
-    /// # Errors
-    ///
-    /// Rejects timestamps before the Unix epoch.
-    pub fn new(
-        target: GithubCheckSubjectTarget,
-        started_at: UnixMillis,
-    ) -> Result<Self, GithubCheckValueError> {
-        validate_timestamp(started_at, "GitHub Check start time")?;
-        Ok(Self { target, started_at })
-    }
-
-    /// Returns the exact subject target.
-    #[must_use]
-    pub const fn target(&self) -> &GithubCheckSubjectTarget {
-        &self.target
-    }
-    /// Returns the desired-transition time.
-    #[must_use]
-    pub const fn started_at(&self) -> UnixMillis {
-        self.started_at
-    }
-}
-
-/// Terminalizes a subject through the server-only terminalization port.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TerminalizeGithubCheck {
-    target: GithubCheckSubjectTarget,
-    cause: GithubCheckTerminalCause,
-    terminal_at: UnixMillis,
-}
-
-impl TerminalizeGithubCheck {
-    /// Constructs a terminal transition with a cause-derived conclusion.
-    ///
-    /// # Errors
-    ///
-    /// Rejects timestamps before the Unix epoch.
-    pub fn new(
-        target: GithubCheckSubjectTarget,
-        cause: GithubCheckTerminalCause,
-        terminal_at: UnixMillis,
-    ) -> Result<Self, GithubCheckValueError> {
-        validate_timestamp(terminal_at, "GitHub Check terminal time")?;
-        Ok(Self {
-            target,
-            cause,
-            terminal_at,
-        })
-    }
-
-    /// Returns the exact subject target.
-    #[must_use]
-    pub const fn target(&self) -> &GithubCheckSubjectTarget {
-        &self.target
-    }
-    /// Returns the closed terminal cause.
-    #[must_use]
-    pub const fn cause(&self) -> GithubCheckTerminalCause {
-        self.cause
-    }
-    /// Returns the cause-derived conclusion.
-    #[must_use]
-    pub const fn conclusion(&self) -> GithubCheckConclusion {
-        self.cause.conclusion()
-    }
-    /// Returns the terminal transition time.
-    #[must_use]
-    pub const fn terminal_at(&self) -> UnixMillis {
-        self.terminal_at
-    }
-}
-
 /// Durable current subject state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubCheckSubjectReceipt {
@@ -2224,18 +2080,6 @@ pub enum GithubCheckStoreError {
     /// Backend operation failed without exposing sensitive details.
     #[error(transparent)]
     Operation(#[from] RepositoryOperationError),
-    /// The requested subject does not exist in the authenticated scope.
-    #[error("the GitHub Check subject is unavailable")]
-    NotFound,
-    /// Registration replay changed immutable evidence.
-    #[error("the GitHub Check subject replay conflicts with durable identity")]
-    ReplayConflict,
-    /// A run link or desired transition conflicts with durable state.
-    #[error("the GitHub Check subject transition conflicts with durable state")]
-    TransitionConflict,
-    /// Provider delivery, repository, or run authority did not match exactly.
-    #[error("the GitHub Check subject authority is not exact")]
-    AuthorityRejected,
     /// An outbox claim is stale, expired, or has the wrong action.
     #[error("the GitHub Check projection claim is stale or rejected")]
     ClaimRejected,
@@ -2262,32 +2106,6 @@ impl GithubCheckStoreError {
     pub fn operation(source: impl std::error::Error + Send + Sync + 'static) -> Self {
         RepositoryOperationError::from_source(source).into()
     }
-}
-
-/// Durable pre-admission Check-subject lifecycle, excluding terminalization.
-#[async_trait]
-pub trait GithubCheckSubjectRepository: Send + Sync {
-    /// Registers a queued subject or returns the exact existing replay receipt.
-    async fn register_github_check_subject(
-        &self,
-        request: RegisterGithubCheckSubject,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
-
-    /// Advances a queued subject to in-progress desired state.
-    async fn start_github_check_projection(
-        &self,
-        request: StartGithubCheckProjection,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
-}
-
-/// Least-authority server-owned port for explicit Check terminalization.
-#[async_trait]
-pub trait GithubCheckTerminalizationRepository: Send + Sync {
-    /// Terminalizes queued or in-progress desired state with a closed cause mapping.
-    async fn terminalize_github_check(
-        &self,
-        request: TerminalizeGithubCheck,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError>;
 }
 
 /// Fenced durable outbox for GitHub Checks provider workers.
