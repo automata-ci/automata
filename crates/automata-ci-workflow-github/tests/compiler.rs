@@ -3,7 +3,7 @@ use crate::support;
 use automata_ci_core::{WorkflowEventProvenance, WorkflowPlan, WorkflowPlanVersion};
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, DiagnosticKind, GithubEventMetadata,
-    GithubWorkflowCompiler, WorkflowCompiler, WorkflowNotSelectedReason,
+    GithubWorkflowCompiler, WorkflowNotSelectedReason,
 };
 
 fn event(name: &str) -> WorkflowEventProvenance {
@@ -30,7 +30,7 @@ fn compile(source: &str, event_name: &str) -> automata_ci_workflow_github::Compi
 }
 
 #[test]
-fn inherent_and_trait_paths_emit_only_the_current_logical_plan() {
+fn inherent_compiler_emits_only_the_current_logical_plan() {
     let source = r"on: workflow_dispatch
 jobs:
   verify:
@@ -41,27 +41,19 @@ jobs:
     let parsed = support::parse(source);
     assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
     let source_plan = parsed.plan().expect("source plan");
-    let compiler = GithubWorkflowCompiler::new();
-    let inherent = compiler.compile(CompileWorkflowRequest::new(
+    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
         source_plan,
         event("workflow_dispatch"),
     ));
-    let through_trait = <GithubWorkflowCompiler as WorkflowCompiler>::compile(
-        &compiler,
-        source_plan,
-        event("workflow_dispatch"),
-    );
 
-    for report in [inherent, through_trait] {
-        assert!(report.is_accepted(), "{:#?}", report.diagnostics());
-        let plan = report.plan().expect("current plan");
-        assert_eq!(plan.version(), WorkflowPlanVersion::v1());
-        assert_eq!(plan.jobs().len(), 1);
-        plan.validate().expect("valid current plan");
-        let encoded = serde_json::to_string(plan).expect("serialize plan");
-        let decoded: WorkflowPlan = serde_json::from_str(&encoded).expect("deserialize plan");
-        assert_eq!(decoded, *plan);
-    }
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let plan = report.plan().expect("current plan");
+    assert_eq!(plan.version(), WorkflowPlanVersion::v1());
+    assert_eq!(plan.jobs().len(), 1);
+    plan.validate().expect("valid current plan");
+    let encoded = serde_json::to_string(plan).expect("serialize plan");
+    let decoded: WorkflowPlan = serde_json::from_str(&encoded).expect("deserialize plan");
+    assert_eq!(decoded, *plan);
 }
 
 #[test]

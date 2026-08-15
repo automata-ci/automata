@@ -72,7 +72,7 @@ workflow YAML + event
         |
   source plan
         |
- WorkflowCompiler
+ GithubWorkflowCompiler
         |
  immutable logical WorkflowPlan
         |

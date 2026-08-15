@@ -6,8 +6,6 @@ mod lowering;
 mod safety;
 mod trigger;
 
-use std::fmt::Debug;
-
 use automata_ci_core::{
     ContextValue, Located, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan,
     WorkflowEventProvenance, WorkflowPlan, WorkflowSourceProvenance,
@@ -212,23 +210,6 @@ impl CompilationReport {
     }
 }
 
-/// Provider frontend compiler boundary.
-pub trait WorkflowCompiler: Debug + Send + Sync {
-    /// Dialect-owned, source-preserving plan accepted by this compiler.
-    type SourcePlan: Clone + Debug + Send + Sync + 'static;
-
-    /// Compiles a previously parsed source plan for one exact event provenance.
-    ///
-    /// This compatibility boundary lacks provider-specific event metadata;
-    /// GitHub initial admission should prefer [`GithubWorkflowCompiler::compile`]
-    /// with a [`CompileWorkflowRequest`].
-    fn compile(
-        &self,
-        source_plan: &Self::SourcePlan,
-        event: WorkflowEventProvenance,
-    ) -> CompilationReport;
-}
-
 /// GitHub Actions workflow compiler. It performs no action fetching or execution.
 #[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
@@ -248,18 +229,6 @@ impl GithubWorkflowCompiler {
     #[must_use]
     pub fn compile(&self, request: CompileWorkflowRequest<'_>) -> CompilationReport {
         logical::compile(request)
-    }
-}
-
-impl WorkflowCompiler for GithubWorkflowCompiler {
-    type SourcePlan = GithubWorkflowSourcePlan;
-
-    fn compile(
-        &self,
-        source_plan: &Self::SourcePlan,
-        event: WorkflowEventProvenance,
-    ) -> CompilationReport {
-        self.compile(CompileWorkflowRequest::new(source_plan, event))
     }
 }
 
