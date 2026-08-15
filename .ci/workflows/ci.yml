@@ -97,6 +97,7 @@ jobs:
           ./scripts/dev/git-http-server.test.sh
           ./scripts/ci/tests/benchmark-postgres-tests.test.sh
           python3 scripts/ci/tests/psql-test-database.test.py
+          ./scripts/ci/tests/profile-image-contract.test.sh
           ./scripts/ci/tests/container-context.test.sh
           ./scripts/ci/tests/install.test.sh
           python3 scripts/ci/tests/integration-test-targets.test.py

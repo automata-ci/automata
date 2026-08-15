@@ -44,7 +44,7 @@
             "selector": "ubuntu-24.04",
             "environment_profile": {
               "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
-              "manifest_sha256": "d34437d037410cd10564d232df12591a40e132735fbe415420f605faf3f5d648"
+              "manifest_sha256": "f7a6f8e592a484f59330bf2cedd839adc75488618ee58efcc3c3d4957d186e21"
             },
             "operating_system": "linux",
             "architecture": "x86_64",
@@ -152,7 +152,7 @@
             "selector": "ubuntu-24.04",
             "environment_profile": {
               "id": "automata.dev/github-hosted-ubuntu-24-04-x64-v1",
-              "manifest_sha256": "d34437d037410cd10564d232df12591a40e132735fbe415420f605faf3f5d648"
+              "manifest_sha256": "f7a6f8e592a484f59330bf2cedd839adc75488618ee58efcc3c3d4957d186e21"
             },
             "operating_system": "linux",
             "architecture": "x86_64",

@@ -23,8 +23,9 @@ const ADMISSION_GENERATION: u64 = 1;
 const OPERATION_DOMAIN: [u8; 16] = *b"automata-profile";
 const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const SHELL_PROBE_OUTPUT_BYTES: usize = 4 * 1024;
+#[cfg(test)]
 const WINDOWS_SHELL_PROBE_COUNT: usize = 3;
-const MAX_SHELL_PROBE_COUNT: usize = WINDOWS_SHELL_PROBE_COUNT + 1;
+const MAX_SHELL_PROBE_COUNT: usize = 11;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ProfileAdmissionPolicy {
@@ -55,6 +56,13 @@ enum ShellKind {
     WindowsPowerShell,
     Cmd,
     Python,
+    Install,
+    Tar,
+    Sha256sum,
+    Node12,
+    Node16,
+    Node20,
+    Node24,
 }
 
 impl ShellProbe {
@@ -62,15 +70,22 @@ impl ShellProbe {
         Self { kind, program }
     }
 
-    const fn script_name(&self) -> &'static str {
-        match self.kind {
+    const fn script_name(&self) -> Option<&'static str> {
+        Some(match self.kind {
             ShellKind::Bash => "profile admission bash.sh",
             ShellKind::Sh => "profile admission sh.sh",
             ShellKind::Pwsh => "profile admission pwsh.ps1",
             ShellKind::WindowsPowerShell => "profile admission powershell.ps1",
             ShellKind::Cmd => "profile admission cmd.cmd",
             ShellKind::Python => "profile admission python.py",
-        }
+            ShellKind::Install
+            | ShellKind::Tar
+            | ShellKind::Sha256sum
+            | ShellKind::Node12
+            | ShellKind::Node16
+            | ShellKind::Node20
+            | ShellKind::Node24 => return None,
+        })
     }
 
     fn marker(&self, operation_id: OperationId) -> String {
@@ -81,13 +96,20 @@ impl ShellProbe {
             ShellKind::WindowsPowerShell => "powershell",
             ShellKind::Cmd => "cmd",
             ShellKind::Python => "python",
+            ShellKind::Install => "install",
+            ShellKind::Tar => "tar",
+            ShellKind::Sha256sum => "sha256sum",
+            ShellKind::Node12 => "node12",
+            ShellKind::Node16 => "node16",
+            ShellKind::Node20 => "node20",
+            ShellKind::Node24 => "node24",
         };
         format!("automata-profile-{kind}-{operation_id}")
     }
 
-    fn script_content(&self, operation_id: OperationId) -> Vec<u8> {
+    fn script_content(&self, operation_id: OperationId) -> Option<Vec<u8>> {
         let marker = self.marker(operation_id);
-        match self.kind {
+        Some(match self.kind {
             ShellKind::Bash | ShellKind::Sh => {
                 format!("set -eu\nprintf '%s' '{marker}'\n").into_bytes()
             }
@@ -102,39 +124,91 @@ impl ShellProbe {
                 format!("import sys\r\nsys.stdout.write(\"{marker}\")\r\nraise SystemExit(0)\r\n")
                     .into_bytes()
             }
-        }
+            ShellKind::Install
+            | ShellKind::Tar
+            | ShellKind::Sha256sum
+            | ShellKind::Node12
+            | ShellKind::Node16
+            | ShellKind::Node20
+            | ShellKind::Node24 => return None,
+        })
     }
 
-    fn argv(&self, script: &TargetPath) -> Result<ExecutionArgv, ProfileAdmissionError> {
-        let arguments = match (self.kind, script.platform()) {
-            (ShellKind::Bash, TargetPlatform::Posix) => vec![
+    fn argv(
+        &self,
+        script: Option<&TargetPath>,
+        operation_id: OperationId,
+    ) -> Result<ExecutionArgv, ProfileAdmissionError> {
+        let script_platform = script.map(TargetPath::platform);
+        let arguments = match (self.kind, script_platform) {
+            (ShellKind::Bash, Some(TargetPlatform::Posix)) => vec![
                 "--noprofile".to_owned(),
                 "--norc".to_owned(),
                 "-e".to_owned(),
-                script.as_str().to_owned(),
+                script.expect("matched script").as_str().to_owned(),
             ],
-            (ShellKind::Sh, TargetPlatform::Posix) => {
-                vec!["-e".to_owned(), script.as_str().to_owned()]
+            (ShellKind::Sh, Some(TargetPlatform::Posix)) => {
+                vec![
+                    "-e".to_owned(),
+                    script.expect("matched script").as_str().to_owned(),
+                ]
             }
-            (ShellKind::Pwsh, TargetPlatform::Posix) => vec![
+            (ShellKind::Pwsh, Some(TargetPlatform::Posix)) => vec![
                 "-command".to_owned(),
-                format!(". '{}'", script.as_str().replace('\'', "''")),
+                format!(
+                    ". '{}'",
+                    script.expect("matched script").as_str().replace('\'', "''")
+                ),
             ],
-            (ShellKind::Python, TargetPlatform::Posix) => {
-                vec![script.as_str().to_owned()]
+            (ShellKind::Python, Some(TargetPlatform::Posix | TargetPlatform::Windows)) => {
+                vec![script.expect("matched script").as_str().to_owned()]
             }
-            (ShellKind::Pwsh | ShellKind::WindowsPowerShell, TargetPlatform::Windows) => {
-                windows_script_arguments(WindowsScriptShell::PowerShell, script)
+            (ShellKind::Pwsh | ShellKind::WindowsPowerShell, Some(TargetPlatform::Windows)) => {
+                windows_script_arguments(
+                    WindowsScriptShell::PowerShell,
+                    script.expect("matched script"),
+                )
+                .ok_or_else(invalid_catalog)?
+            }
+            (ShellKind::Cmd, Some(TargetPlatform::Windows)) => {
+                windows_script_arguments(WindowsScriptShell::Cmd, script.expect("matched script"))
                     .ok_or_else(invalid_catalog)?
             }
-            (ShellKind::Cmd, TargetPlatform::Windows) => {
-                windows_script_arguments(WindowsScriptShell::Cmd, script)
-                    .ok_or_else(invalid_catalog)?
+            (ShellKind::Install | ShellKind::Tar | ShellKind::Sha256sum, None) => {
+                vec!["--version".to_owned()]
             }
-            (ShellKind::Python, TargetPlatform::Windows) => vec![script.as_str().to_owned()],
+            (
+                ShellKind::Node12 | ShellKind::Node16 | ShellKind::Node20 | ShellKind::Node24,
+                None,
+            ) => {
+                let major = match self.kind {
+                    ShellKind::Node12 => 12,
+                    ShellKind::Node16 => 16,
+                    ShellKind::Node20 => 20,
+                    ShellKind::Node24 => 24,
+                    _ => unreachable!(),
+                };
+                let marker = self.marker(operation_id);
+                vec![
+                    "--input-type=commonjs".to_owned(),
+                    "--eval".to_owned(),
+                    format!(
+                        "if (process.versions.node.split('.')[0] !== '{major}') process.exit(64); process.stdout.write('{marker}')"
+                    ),
+                ]
+            }
             _ => return Err(invalid_catalog()),
         };
         ExecutionArgv::new(self.program.clone(), arguments).map_err(|_| invalid_catalog())
+    }
+
+    fn expected_stdout_matches(&self, operation_id: OperationId, stdout: &[u8]) -> bool {
+        match self.kind {
+            ShellKind::Install => stdout.starts_with(b"install (GNU coreutils) "),
+            ShellKind::Tar => stdout.starts_with(b"tar (GNU tar) "),
+            ShellKind::Sha256sum => stdout.starts_with(b"sha256sum (GNU coreutils) "),
+            _ => stdout == self.marker(operation_id).as_bytes(),
+        }
     }
 }
 
@@ -154,6 +228,59 @@ impl ProfileAdmissionPolicy {
             resource_allocation,
             shell_probes: None,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn with_linux_tools(
+        mut self,
+        bash: TargetPath,
+        sh: TargetPath,
+        python: Option<TargetPath>,
+        pwsh: Option<TargetPath>,
+        install: TargetPath,
+        tar: TargetPath,
+        sha256sum: TargetPath,
+        node12: Option<TargetPath>,
+        node16: Option<TargetPath>,
+        node20: Option<TargetPath>,
+        node24: Option<TargetPath>,
+    ) -> Result<Self, ProfileAdmissionError> {
+        let mut probes = vec![
+            ShellProbe::new(ShellKind::Bash, bash),
+            ShellProbe::new(ShellKind::Sh, sh),
+        ];
+        if let Some(python) = python {
+            probes.push(ShellProbe::new(ShellKind::Python, python));
+        }
+        if let Some(pwsh) = pwsh {
+            probes.push(ShellProbe::new(ShellKind::Pwsh, pwsh));
+        }
+        probes.extend([
+            ShellProbe::new(ShellKind::Install, install),
+            ShellProbe::new(ShellKind::Tar, tar),
+            ShellProbe::new(ShellKind::Sha256sum, sha256sum),
+        ]);
+        for (kind, program) in [
+            (ShellKind::Node12, node12),
+            (ShellKind::Node16, node16),
+            (ShellKind::Node20, node20),
+            (ShellKind::Node24, node24),
+        ] {
+            if let Some(program) = program {
+                probes.push(ShellProbe::new(kind, program));
+            }
+        }
+        if self.shell_probes.is_some()
+            || probes.len() > MAX_SHELL_PROBE_COUNT
+            || probes.iter().any(|probe| !valid_linux_probe(probe))
+        {
+            return Err(invalid_catalog());
+        }
+        self.shell_probes = Some(ShellProbePolicy {
+            scratch_root: None,
+            probes,
+        });
+        Ok(self)
     }
 
     pub(super) fn with_windows_hyperv_shells(
@@ -224,6 +351,35 @@ impl ProfileAdmissionPolicy {
             probes: shell_probes,
         });
         Ok(self)
+    }
+}
+
+fn valid_linux_probe(probe: &ShellProbe) -> bool {
+    if probe.program.platform() != TargetPlatform::Posix || !probe.program.as_str().starts_with('/')
+    {
+        return false;
+    }
+    let Some(basename) = probe.program.as_str().rsplit('/').next() else {
+        return false;
+    };
+    match probe.kind {
+        ShellKind::Bash => basename == "bash",
+        ShellKind::Sh => basename == "sh",
+        ShellKind::Pwsh => basename == "pwsh",
+        ShellKind::Python => {
+            basename == "python"
+                || basename == "python3"
+                || basename.strip_prefix("python3.").is_some_and(|version| {
+                    !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        }
+        ShellKind::Install => basename == "install",
+        ShellKind::Tar => basename == "tar",
+        ShellKind::Sha256sum => basename == "sha256sum",
+        ShellKind::Node12 | ShellKind::Node16 | ShellKind::Node20 | ShellKind::Node24 => {
+            basename == "node"
+        }
+        ShellKind::WindowsPowerShell | ShellKind::Cmd => false,
     }
 }
 
@@ -432,7 +588,12 @@ impl ProfileAdmissionContext<'_> {
                 policy
                     .probes
                     .iter()
-                    .map(|probe| target_child(script_root, probe.script_name()))
+                    .map(|probe| {
+                        probe
+                            .script_name()
+                            .map(|name| target_child(script_root, name))
+                            .transpose()
+                    })
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?;
@@ -462,7 +623,7 @@ impl ProfileAdmissionContext<'_> {
                 &workspace,
                 shell_probes,
                 script_paths,
-                operation_ids,
+                &operation_ids,
             )?;
         }
         self.destroy(&record, operation_ids.destroy)
@@ -604,8 +765,8 @@ impl ProfileAdmissionContext<'_> {
         record: &automata_ci_execution::SandboxRecord,
         workspace: &TargetPath,
         shell_probes: &ShellProbePolicy,
-        script_paths: &[TargetPath],
-        operation_ids: AdmissionOperationIds,
+        script_paths: &[Option<TargetPath>],
+        operation_ids: &AdmissionOperationIds,
     ) -> Result<(), ProfileAdmissionError> {
         let endpoint = match self
             .provider
@@ -658,11 +819,27 @@ impl ProfileAdmissionContext<'_> {
             .zip(operation_ids.copy)
             .zip(operation_ids.exec)
         {
-            let Ok(request) = CopyToRequest::new(
-                operation_id,
-                script.clone(),
+            let (Some(script), Some(content)) = (
+                script.as_ref(),
                 probe.script_content(execution_operation_id),
             ) else {
+                if script.is_some() || probe.script_name().is_some() {
+                    let (cleanup, cleanup_error) = cleanup_handle(
+                        self.provider,
+                        record.handle(),
+                        self.generation,
+                        operation_ids.destroy,
+                        &self.cleanup_cancellation,
+                    );
+                    return Err(ProfileAdmissionError::evidence(
+                        ProfileAdmissionErrorKind::InvalidCopyEvidence,
+                        cleanup,
+                        cleanup_error,
+                    ));
+                }
+                continue;
+            };
+            let Ok(request) = CopyToRequest::new(operation_id, script.clone(), content) else {
                 let (cleanup, cleanup_error) = cleanup_handle(
                     self.provider,
                     record.handle(),
@@ -699,8 +876,7 @@ impl ProfileAdmissionContext<'_> {
             .zip(script_paths)
             .zip(operation_ids.exec)
         {
-            let expected_stdout = probe.marker(operation_id);
-            let Ok(argv) = probe.argv(script) else {
+            let Ok(argv) = probe.argv(script.as_ref(), operation_id) else {
                 let (cleanup, cleanup_error) = cleanup_handle(
                     self.provider,
                     record.handle(),
@@ -755,7 +931,7 @@ impl ProfileAdmissionContext<'_> {
             };
             if output.termination() != ExecutionTermination::Exited(0)
                 || output.was_truncated()
-                || output.stdout() != expected_stdout.as_bytes()
+                || !probe.expected_stdout_matches(operation_id, output.stdout())
                 || !output.stderr().is_empty()
             {
                 let (cleanup, cleanup_error) = cleanup_handle(
@@ -841,6 +1017,7 @@ fn validate_provider_policy(
     policy: &ProfileAdmissionPolicy,
 ) -> Result<(), ProfileAdmissionError> {
     if policy.shell_probes.is_some() {
+        let capabilities = provider.capabilities();
         let common_capabilities = [
             SandboxCapability::WholeJob,
             SandboxCapability::Attach,
@@ -853,16 +1030,30 @@ fn validate_provider_policy(
         ];
         let common_valid = common_capabilities
             .into_iter()
-            .all(|capability| provider.capabilities().supports(capability));
-        let boundary_valid = policy.network == NetworkPolicy::Disabled
-            && policy.root_filesystem == RootFilesystemPolicy::Writable
-            && policy.privilege == SandboxPrivilegePolicy::Unprivileged
-            && provider
-                .capabilities()
-                .supports(SandboxCapability::WritableRootFilesystem)
-            && provider
-                .capabilities()
-                .supports(SandboxCapability::NetworkDisabled);
+            .all(|capability| capabilities.supports(capability));
+        let network_valid = match policy.network {
+            NetworkPolicy::Disabled => capabilities.supports(SandboxCapability::NetworkDisabled),
+            NetworkPolicy::PrivateEgress => capabilities.supports(SandboxCapability::PrivateEgress),
+            NetworkPolicy::Host => false,
+        };
+        let root_valid = match policy.root_filesystem {
+            RootFilesystemPolicy::ReadOnly => {
+                capabilities.supports(SandboxCapability::ReadOnlyRootFilesystem)
+            }
+            RootFilesystemPolicy::Writable => {
+                capabilities.supports(SandboxCapability::WritableRootFilesystem)
+            }
+            RootFilesystemPolicy::Host => false,
+        };
+        let privilege_valid = match policy.privilege {
+            SandboxPrivilegePolicy::Unprivileged => true,
+            SandboxPrivilegePolicy::Administrator => {
+                capabilities.supports(SandboxCapability::Administrator)
+                    && capabilities.supports(SandboxCapability::UserNamespace)
+            }
+            SandboxPrivilegePolicy::Host => false,
+        };
+        let boundary_valid = network_valid && root_valid && privilege_valid;
         if !common_valid || !boundary_valid {
             return Err(ProfileAdmissionError::evidence(
                 ProfileAdmissionErrorKind::InvalidProviderEvidence,
@@ -973,34 +1164,23 @@ impl AdmissionOperationIds {
         Self {
             create: operation_id(profile, probe_attempt, 0x43),
             destroy: operation_id(profile, probe_attempt, 0x44),
-            copy: [
-                operation_id(profile, probe_attempt, 0x60),
-                operation_id(profile, probe_attempt, 0x61),
-                operation_id(profile, probe_attempt, 0x62),
-                operation_id(profile, probe_attempt, 0x63),
-            ],
-            exec: [
-                operation_id(profile, probe_attempt, 0x50),
-                operation_id(profile, probe_attempt, 0x51),
-                operation_id(profile, probe_attempt, 0x52),
-                operation_id(profile, probe_attempt, 0x53),
-            ],
+            copy: std::array::from_fn(|index| {
+                let index = u8::try_from(index).expect("profile probe count fits in u8");
+                operation_id(profile, probe_attempt, 0x60 + index)
+            }),
+            exec: std::array::from_fn(|index| {
+                let index = u8::try_from(index).expect("profile probe count fits in u8");
+                operation_id(profile, probe_attempt, 0x50 + index)
+            }),
         }
     }
 
-    const fn values(self) -> [OperationId; 2 + MAX_SHELL_PROBE_COUNT * 2] {
-        [
-            self.create,
-            self.destroy,
-            self.copy[0],
-            self.copy[1],
-            self.copy[2],
-            self.copy[3],
-            self.exec[0],
-            self.exec[1],
-            self.exec[2],
-            self.exec[3],
-        ]
+    fn values(self) -> Vec<OperationId> {
+        let mut values = Vec::with_capacity(2 + MAX_SHELL_PROBE_COUNT * 2);
+        values.extend([self.create, self.destroy]);
+        values.extend(self.copy);
+        values.extend(self.exec);
+        values
     }
 }
 
@@ -1123,7 +1303,11 @@ mod tests {
                     SandboxCapability::HostFilesystem,
                     SandboxCapability::HostIdentity,
                     SandboxCapability::NetworkDisabled,
+                    SandboxCapability::PrivateEgress,
+                    SandboxCapability::ReadOnlyRootFilesystem,
                     SandboxCapability::WritableRootFilesystem,
+                    SandboxCapability::Administrator,
+                    SandboxCapability::UserNamespace,
                     SandboxCapability::ResourceLimits,
                     SandboxCapability::ProcessLimits,
                 ])
@@ -1309,7 +1493,8 @@ mod tests {
         behavior: FakeBehavior,
     }
 
-    fn fake_shell_kind(program: &TargetPath) -> Option<ShellKind> {
+    fn fake_shell_kind(request: &ExecutionCommand) -> Option<ShellKind> {
+        let program = request.argv().program();
         let basename = program.as_str().rsplit(['/', '\\']).next()?;
         if basename.eq_ignore_ascii_case("bash") {
             Some(ShellKind::Bash)
@@ -1327,6 +1512,22 @@ mod tests {
             || basename.eq_ignore_ascii_case("python.exe")
         {
             Some(ShellKind::Python)
+        } else if basename == "install" {
+            Some(ShellKind::Install)
+        } else if basename == "tar" {
+            Some(ShellKind::Tar)
+        } else if basename == "sha256sum" {
+            Some(ShellKind::Sha256sum)
+        } else if basename == "node" {
+            let evaluation = request.argv().arguments().last()?;
+            [
+                ("!== '12'", ShellKind::Node12),
+                ("!== '16'", ShellKind::Node16),
+                ("!== '20'", ShellKind::Node20),
+                ("!== '24'", ShellKind::Node24),
+            ]
+            .into_iter()
+            .find_map(|(needle, kind)| evaluation.contains(needle).then_some(kind))
         } else {
             None
         }
@@ -1362,15 +1563,20 @@ mod tests {
             } else {
                 ExecutionTermination::Exited(0)
             };
-            let kind = fake_shell_kind(request.argv().program()).ok_or_else(|| {
+            let kind = fake_shell_kind(request).ok_or_else(|| {
                 ExecutionError::new(ExecutionErrorKind::InvalidEnvironment, ExecutionStage::Exec)
             })?;
             let stdout = if self.behavior == FakeBehavior::ExecWrongOutput {
                 b"wrong-shell-probe-output".to_vec()
             } else {
-                ShellProbe::new(kind, request.argv().program().clone())
-                    .marker(request.operation_id())
-                    .into_bytes()
+                match kind {
+                    ShellKind::Install => b"install (GNU coreutils) 9.4\n".to_vec(),
+                    ShellKind::Tar => b"tar (GNU tar) 1.35\n".to_vec(),
+                    ShellKind::Sha256sum => b"sha256sum (GNU coreutils) 9.4\n".to_vec(),
+                    _ => ShellProbe::new(kind, request.argv().program().clone())
+                        .marker(request.operation_id())
+                        .into_bytes(),
+                }
             };
             let stdout = ExecutionOutputRecord::data(ExecutionOutputStream::Stdout, stdout)
                 .map_err(|_| {
@@ -1571,6 +1777,177 @@ mod tests {
         (BTreeMap::from([(attestation, environment)]), policy)
     }
 
+    fn linux_tool_policy() -> ProfileAdmissionPolicy {
+        let resources = ResourceLimits::new(512 * 1024 * 1024, 2_000, 128).expect("resources");
+        ProfileAdmissionPolicy::new(
+            NetworkPolicy::PrivateEgress,
+            RootFilesystemPolicy::Writable,
+            SandboxPrivilegePolicy::Administrator,
+            resources,
+            resource_allocation(resources),
+        )
+        .with_linux_tools(
+            TargetPath::posix("/usr/bin/bash").expect("bash path"),
+            TargetPath::posix("/usr/bin/sh").expect("sh path"),
+            Some(TargetPath::posix("/usr/bin/python3").expect("python path")),
+            None,
+            TargetPath::posix("/usr/bin/install").expect("install path"),
+            TargetPath::posix("/usr/bin/tar").expect("tar path"),
+            TargetPath::posix("/usr/bin/sha256sum").expect("sha256sum path"),
+            None,
+            None,
+            None,
+            Some(TargetPath::posix("/opt/externals/node24/bin/node").expect("node path")),
+        )
+        .expect("Linux tool admission policy")
+    }
+
+    #[test]
+    fn linux_profile_admission_proves_every_configured_tool_in_the_exact_sandbox() {
+        let signals = ProbeCancellation::default();
+        let provider = FakeProvider::new(FakeBehavior::Happy, signals.clone());
+        let (attestation, environment) = environment("linux-toolchain", profile_digest(0x35), 0x46);
+        let expected_environment = environment.default_environment().clone();
+        let profiles = BTreeMap::from([(attestation, environment)]);
+
+        assert_eq!(
+            admit_environment_profiles(&provider, &profiles, linux_tool_policy(), &signals),
+            Ok(ProfileAdmissionOutcome::Admitted)
+        );
+        let calls = provider.calls();
+        let Call::Create(spec) = &calls[0] else {
+            panic!("Linux tool admission must begin with create")
+        };
+        assert_eq!(spec.network(), NetworkPolicy::PrivateEgress);
+        assert_eq!(spec.root_filesystem(), RootFilesystemPolicy::Writable);
+        assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Administrator);
+        assert!(spec.scratch().is_none());
+        assert!(
+            spec.workspace()
+                .as_str()
+                .starts_with("/work/linux-toolchain/profile-admission-")
+        );
+        assert!(matches!(calls[1], Call::Inspect(_)));
+        assert!(matches!(calls[2], Call::Attach(_)));
+
+        let copied = calls[3..6]
+            .iter()
+            .map(|call| match call {
+                Call::CopyTo(request) => request.target().as_str(),
+                _ => panic!("only script probes copy input"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            copied,
+            [
+                format!("{}/profile admission bash.sh", spec.workspace().as_str()),
+                format!("{}/profile admission sh.sh", spec.workspace().as_str()),
+                format!("{}/profile admission python.py", spec.workspace().as_str()),
+            ]
+        );
+
+        let expected_programs = [
+            "/usr/bin/bash",
+            "/usr/bin/sh",
+            "/usr/bin/python3",
+            "/usr/bin/install",
+            "/usr/bin/tar",
+            "/usr/bin/sha256sum",
+            "/opt/externals/node24/bin/node",
+        ];
+        let executions = &calls[6..13];
+        for (call, expected_program) in executions.iter().zip(expected_programs) {
+            let Call::Exec(command) = call else {
+                panic!("every configured Linux tool must execute")
+            };
+            assert_eq!(command.argv().program().as_str(), expected_program);
+            assert_eq!(command.working_directory(), spec.workspace());
+            assert_eq!(command.environment(), &expected_environment);
+            assert_eq!(command.timeout(), SHELL_PROBE_TIMEOUT);
+            assert_eq!(command.output_limit(), SHELL_PROBE_OUTPUT_BYTES);
+        }
+        for call in &executions[3..6] {
+            let Call::Exec(command) = call else {
+                unreachable!()
+            };
+            assert_eq!(command.argv().arguments(), &["--version".to_owned()]);
+        }
+        let Call::Exec(node) = &executions[6] else {
+            unreachable!()
+        };
+        assert_eq!(node.argv().arguments()[0], "--input-type=commonjs");
+        assert!(node.argv().arguments()[2].contains("!== '24'"));
+        assert!(matches!(calls[13], Call::Destroy(_, false)));
+        assert_eq!(provider.resource_count(), 0);
+    }
+
+    #[test]
+    fn linux_profile_tool_policy_rejects_aliased_paths_before_provider_mutation() {
+        let resources = ResourceLimits::new(512 * 1024 * 1024, 2_000, 128).expect("resources");
+        let invalid = ProfileAdmissionPolicy::new(
+            NetworkPolicy::PrivateEgress,
+            RootFilesystemPolicy::Writable,
+            SandboxPrivilegePolicy::Administrator,
+            resources,
+            resource_allocation(resources),
+        )
+        .with_linux_tools(
+            TargetPath::posix("/usr/bin/true").expect("literal path"),
+            TargetPath::posix("/usr/bin/sh").expect("sh path"),
+            None,
+            None,
+            TargetPath::posix("/usr/bin/install").expect("install path"),
+            TargetPath::posix("/usr/bin/tar").expect("tar path"),
+            TargetPath::posix("/usr/bin/sha256sum").expect("sha256sum path"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect_err("a generic successful program cannot stand in for Bash");
+        assert_eq!(invalid.kind(), ProfileAdmissionErrorKind::InvalidCatalog);
+        assert_eq!(
+            invalid.cleanup_status(),
+            ProfileAdmissionCleanupStatus::NotRequired
+        );
+    }
+
+    #[test]
+    fn linux_profile_tool_admission_requires_confined_administrator_evidence() {
+        for missing in [
+            SandboxCapability::PrivateEgress,
+            SandboxCapability::Administrator,
+            SandboxCapability::UserNamespace,
+        ] {
+            let signals = ProbeCancellation::default();
+            let mut provider = FakeProvider::new(FakeBehavior::Happy, signals.clone());
+            provider.capabilities = ProviderCapabilities::new(
+                provider
+                    .capabilities
+                    .values()
+                    .iter()
+                    .copied()
+                    .filter(|capability| *capability != missing),
+            )
+            .expect("capabilities with one Linux boundary omitted");
+            let (profile, sandbox) = environment("linux-tools", profile_digest(0x57), 0x68);
+            let profiles = BTreeMap::from([(profile, sandbox)]);
+
+            let error =
+                admit_environment_profiles(&provider, &profiles, linux_tool_policy(), &signals)
+                    .expect_err("Linux profile tools require the complete sandbox boundary");
+            assert_eq!(
+                error.kind(),
+                ProfileAdmissionErrorKind::InvalidProviderEvidence
+            );
+            assert_eq!(
+                error.cleanup_status(),
+                ProfileAdmissionCleanupStatus::NotRequired
+            );
+            assert!(provider.calls().is_empty(), "missing {missing:?}");
+        }
+    }
+
     #[test]
     fn windows_python_probe_is_present_only_when_the_tool_is_configured() {
         let resources = ResourceLimits::new(256 * 1024 * 1024, 1_000, 16).expect("resources");
@@ -1603,7 +1980,7 @@ mod tests {
             .as_ref()
             .expect("shell probe policy")
             .probes;
-        assert_eq!(probes.len(), MAX_SHELL_PROBE_COUNT);
+        assert_eq!(probes.len(), WINDOWS_SHELL_PROBE_COUNT + 1);
         assert_eq!(
             probes.last().map(|probe| probe.kind),
             Some(ShellKind::Python)
@@ -1799,6 +2176,7 @@ mod tests {
                 copy.content(),
                 ShellProbe::new(expected_kinds[index], (*expected_program).clone())
                     .script_content(command.operation_id())
+                    .expect("shell probe payload")
             );
             assert_eq!(command.argv().program(), expected_program);
             assert_eq!(command.working_directory(), spec.workspace());

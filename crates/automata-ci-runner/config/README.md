@@ -84,8 +84,9 @@ A Kubernetes selection has this provider-specific shape:
 limit. A dedicated non-empty node selector is mandatory. Nonzero ephemeral
 storage or GPU inventory is admitted only with its corresponding verified
 enforcement field or resource mapping. The runner creates the authenticated
-client, exercises every configured environment through create/inspect/destroy,
-and registers only after that lifecycle succeeds. These assertions do not
+client, exercises every configured environment through create, inspect,
+attach, configured-tool execution, and destroy, and registers only after that
+evidence succeeds. These assertions do not
 replace cluster-side CNI, node-local traffic, admission-policy, RuntimeClass,
 or kubelet verification.
 
@@ -502,8 +503,13 @@ Failure exits without advertising the runner. After the network gate, startup
 also creates, inspects, and destroys one sandbox for every configured
 environment profile through the exact provider policy. It requires matching
 provider/profile/generation/running evidence and complete cleanup before it
-constructs the advertised inventory. This verifies that the configured
-digest-pinned image launches through that provider path; it is not
+constructs the advertised inventory. Linux admission attaches to that same
+sandbox and proves the configured Bash, `sh`, optional Python/PowerShell,
+install, tar, SHA-256, and Node-major executables. Host network, host
+filesystem, and host identity are never valid tool-probe boundaries; an
+administrator profile additionally requires administrator and user-namespace
+provider evidence. This verifies that the configured digest-pinned image
+launches and exposes the configured runtime through that provider path; it is not
 supply-chain attestation or the complete hosted-image conformance suite.
 
 The runner schema rejects static repository, workflow, and Results token

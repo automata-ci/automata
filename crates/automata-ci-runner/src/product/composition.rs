@@ -710,7 +710,36 @@ fn admit_configured_environment_profiles(
                 toolchain.pwsh().cloned(),
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
-        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => policy,
+        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => policy
+            .with_linux_tools(
+                toolchain
+                    .bash()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain
+                    .sh()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain.python().cloned(),
+                toolchain.pwsh().cloned(),
+                toolchain
+                    .install()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain
+                    .tar()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain
+                    .sha256sum()
+                    .ok_or(RunnerProductError::ProviderConfiguration)?
+                    .clone(),
+                toolchain.node12().cloned(),
+                toolchain.node16().cloned(),
+                toolchain.node20().cloned(),
+                toolchain.node24().cloned(),
+            )
+            .map_err(|_| RunnerProductError::ProviderConfiguration)?,
     };
     let result = admit_environment_profiles(provider, config.environments(), policy, cancellation);
     match result {

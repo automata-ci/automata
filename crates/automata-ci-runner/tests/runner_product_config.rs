@@ -18,7 +18,7 @@ use automata_ci_runner::product::{RunnerProductError, load_spool_keyring};
 const RUNNER_ID: &str = "6e561f8b-9098-418d-b573-d82f5c73006e";
 const MAX_DECRYPT_ONLY_CONTENT_KEYS: usize = 8;
 const PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
-const PROFILE_DIGEST: &str = "d34437d037410cd10564d232df12591a40e132735fbe415420f605faf3f5d648";
+const PROFILE_DIGEST: &str = "f7a6f8e592a484f59330bf2cedd839adc75488618ee58efcc3c3d4957d186e21";
 const IMAGE: &str = "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194";
 const SERVICE_PROXY_IMAGE: &str = "registry.example.test/automata/service-proxy@sha256:4d7a838e047d65bbf708d4fc315db9b3b91ae73c0d50459b519089c0713ff34b";
 const BUILDKIT_RUNTIME_IMAGE: &str = "registry.example.test/buildkit/runtime@sha256:7777777777777777777777777777777777777777777777777777777777777777";

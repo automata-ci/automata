@@ -98,8 +98,8 @@ jobs:
           manifest = json.loads(manifest_bytes)
           lock = json.loads((directory / "profile-lock.json").read_bytes())
 
-          if manifest.get("schema_version") != 1 or lock.get("schema_version") != 1:
-              fail("only profile manifest and lock schema version 1 are supported")
+          if manifest.get("schema_version") != 2 or lock.get("schema_version") != 2:
+              fail("only profile manifest and lock schema version 2 are supported")
           profile_id = manifest.get("profile_id")
           if not isinstance(profile_id, str) or profile_id != lock.get("profile_id"):
               fail("manifest and lock profile identifiers differ")
@@ -206,8 +206,8 @@ jobs:
           def fail(message: str) -> None:
               raise SystemExit(f"candidate profile validation failed: {message}")
 
-          if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
-              fail("only profile manifest schema version 1 is supported")
+          if not isinstance(manifest, dict) or manifest.get("schema_version") != 2:
+              fail("only profile manifest schema version 2 is supported")
           profile_id = manifest.get("profile_id")
           if profile_id != "automata.dev/github-hosted-ubuntu-24-04-x64-v1":
               fail("profile identifier is not the reviewed compatibility contract")
@@ -272,6 +272,55 @@ jobs:
                   fail(f"WASI SDK field {field!r} is missing")
           if re.fullmatch(r"[0-9a-f]{64}", wasi_sdk.get("archive_sha256", "")) is None:
               fail("WASI SDK archive checksum is invalid")
+
+          inventory = manifest.get("software_inventory")
+          if not isinstance(inventory, dict) or inventory.get("schema") != (
+              "automata.dev/linux-software-inventory-v1"
+          ):
+              fail("software inventory contract is missing")
+          if inventory.get("dpkg_query") != "/usr/bin/dpkg-query":
+              fail("software inventory package query differs from the reviewed path")
+          packages = inventory.get("dpkg_packages")
+          if not isinstance(packages, dict) or not 1 <= len(packages) <= 128:
+              fail("software inventory package map is missing or unbounded")
+          if list(packages) != sorted(packages):
+              fail("software inventory package map is not canonically ordered")
+          for package, version in packages.items():
+              if re.fullmatch(r"[a-z0-9][a-z0-9+.-]{0,127}", package) is None:
+                  fail(f"invalid software inventory package: {package!r}")
+              if not isinstance(version, str) or re.fullmatch(
+                  r"[!-~]{1,128}", version
+              ) is None:
+                  fail(f"invalid software inventory version: {package!r}")
+          tools = inventory.get("tools")
+          required_tools = {
+              "bash", "cargo", "clang", "g++", "gcc", "git", "install", "make",
+              "node24", "python3", "rustc", "sh", "sha256sum", "sudo", "tar",
+              "unzip", "xz", "zip",
+          }
+          if not isinstance(tools, dict) or set(tools) != required_tools:
+              fail("software inventory tool set differs from the reviewed profile")
+          if list(tools) != sorted(tools):
+              fail("software inventory tool map is not canonically ordered")
+          for tool, contract in tools.items():
+              if not isinstance(contract, dict):
+                  fail(f"invalid software inventory tool contract: {tool!r}")
+              if re.fullmatch(
+                  r"/[A-Za-z0-9._+/-]{1,255}", contract.get("path", "")
+              ) is None:
+                  fail(f"invalid software inventory tool path: {tool!r}")
+              source = contract.get("source")
+              version = contract.get("version")
+              if source is not None and source not in packages:
+                  fail(f"software inventory source is not pinned: {tool!r}")
+              if source is None and (not isinstance(version, str) or not version):
+                  fail(f"standalone software inventory version is missing: {tool!r}")
+          if re.fullmatch(
+              r"[0-9a-f]{64}", tools["node24"].get("archive_sha256", "")
+          ) is None:
+              fail("software inventory Node checksum is invalid")
+          if inventory.get("unavailable_tools") != ["pwsh", "zstd"]:
+              fail("software inventory unavailable-tool set differs")
 
           container_engine = manifest.get("job_container_engine")
           if not isinstance(container_engine, dict):

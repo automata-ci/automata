@@ -151,6 +151,13 @@ Current component foundation:
   and optional GPU requests and limits through scheduler matching, executor
   admission, and `SandboxSpec`; the Kubernetes adapter renders exact resource
   quantities and mapped devices.
+- [x] Profile-manifest schema v2 records an exact package/tool inventory and
+  the local verifier rejects package, executable-path, standalone-version, or
+  unavailable-tool drift against a digest-qualified image.
+- [x] Linux runner startup probes every configured shell, Node major, Python,
+  PowerShell, install, tar, and SHA utility inside a fresh exact-image sandbox
+  before advertising inventory; host boundaries are rejected and sandbox
+  administrator probes require user-namespace evidence.
 
 Remaining tasks:
 
