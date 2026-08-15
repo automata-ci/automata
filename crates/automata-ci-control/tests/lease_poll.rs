@@ -2,11 +2,12 @@ use std::{sync::Mutex, time::Duration};
 
 use async_trait::async_trait;
 use automata_ci_control::lease::{
-    AuthenticatedRunnerSession, ClaimedAttempt, LeaseClock, LeaseIdGenerator, LeasePollConfig,
-    LeasePollObservation, LeasePollObserver, LeasePollOutcome, LeasePollRepository,
-    LeasePollService, LeaseRequestKey, LeaseTimeToLive, NoWorkLeaseRequest, RunnableAttempt,
-    RunnableAttemptGate, RunnableAttemptGateDisposition, RunnableScanLimit, RunnableScanPage,
-    RunnableScanRequest, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
+    AuthenticatedPlacementTrust, AuthenticatedRunnerSession, ClaimedAttempt, LeaseClock,
+    LeaseIdGenerator, LeasePollConfig, LeasePollObservation, LeasePollObserver, LeasePollOutcome,
+    LeasePollRepository, LeasePollService, LeaseRequestKey, LeaseTimeToLive, NoWorkLeaseRequest,
+    RunnableAttempt, RunnableAttemptError, RunnableAttemptGate, RunnableAttemptGateDisposition,
+    RunnableScanLimit, RunnableScanPage, RunnableScanRequest, TryClaimAttempt, TryClaimOutcome,
+    TryClaimReceipt, WindowsHyperVPlacementGrant,
     repository::{RunnableAttemptRepository, RunnerClaimRepository},
     routing::{
         RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSlotAvailability,
@@ -15,11 +16,13 @@ use automata_ci_control::lease::{
 };
 use automata_ci_control::scheduling::DeterministicScheduler;
 use automata_ci_core::{
-    Architecture, AttemptId, ContainerCapabilities, ContainerFeature, FencingToken, JobId,
-    JobIrVersion, Lease, LeaseId, OperatingSystem, OperationId, ResourceCapacity, RunId,
-    RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform,
-    RunnerRequirements, RunnerSessionId, SandboxCapabilities, SandboxFeature, Sha256Digest,
-    UnixMillis,
+    Architecture, AttemptId, ContainerCapabilities, ContainerFeature, EnvironmentProfile,
+    EnvironmentProfileId, FencingToken, JobAuthorityProfile, JobId, JobIrVersion, Lease, LeaseId,
+    OperatingSystem, OperationId, ResourceCapacity, RunId, RunnerCapabilities, RunnerFeature,
+    RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId,
+    SandboxCapabilities, SandboxFeature, Sha256Digest, TrustActorEvidence, TrustActorKind,
+    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
+    TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis,
 };
 use automata_ci_protocol::{LeaseRequest, MessageHeader, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal};
 use automata_ci_store::{
@@ -106,6 +109,7 @@ struct FakeRepository {
     availability: RunnerSlotAvailability,
     candidates: Vec<RunnableAttempt>,
     metadata: JobIrMetadata,
+    windows_grants: Mutex<Vec<Option<WindowsHyperVPlacementGrant>>>,
 }
 
 impl FakeRepository {
@@ -134,6 +138,10 @@ impl RunnerClaimRepository for FakeRepository {
 
     async fn try_claim(&self, request: TryClaimAttempt) -> Result<TryClaimReceipt, StoreError> {
         self.called("claim");
+        self.windows_grants
+            .lock()
+            .expect("Windows grant observations")
+            .push(request.windows_placement_grant().cloned());
         let lease = Lease::new(
             request.lease_id(),
             request.attempt_id(),
@@ -336,6 +344,7 @@ fn fixture(availability: RunnerSlotAvailability, with_candidates: bool) -> Fixtu
             availability,
             candidates,
             metadata,
+            windows_grants: Mutex::new(Vec::new()),
         },
         authenticated: AuthenticatedRunnerSession::new(
             fence,
@@ -387,13 +396,143 @@ fn runnable<const N: usize>(
         UnixMillis::new(queued_at),
         requirements,
         metadata,
+        None,
     )
     .expect("runnable")
+}
+
+fn trusted_snapshot(actor: &str) -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(
+                    TrustActorEvidence::new(actor, TrustActorKind::User, TrustAutomationKind::None)
+                        .expect("actor evidence"),
+                )
+                .with_repositories(
+                    TrustRepositoryEvidence::new("42", "7").expect("source repository"),
+                    TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+                )
+                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                .with_revisions("source-sha", "target-sha", "execution-sha")
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("trusted snapshot")
+}
+
+fn windows_fixture(with_trust: bool) -> Fixture {
+    let mut fixture = fixture(RunnerSlotAvailability::Available, false);
+    let fence = fixture.authenticated.fence();
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.test/windows-2025").expect("profile ID"),
+        Sha256Digest::from_bytes([0x25; 32]),
+    );
+    let capabilities = RunnerCapabilities::new(
+        fence.runner_id(),
+        RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
+    )
+    .with_max_parallel_jobs(1)
+    .expect("single Windows slot")
+    .with_sandbox(SandboxCapabilities::new(
+        automata_ci_core::IsolationLevel::VirtualMachine,
+        [
+            SandboxFeature::CLEAN_WORKSPACE,
+            SandboxFeature::NETWORK_ISOLATION,
+            SandboxFeature::WINDOWS_HYPERV_CONTAINER,
+        ],
+    ))
+    .with_environment_profiles([profile.clone()])
+    .with_features([RunnerFeature::SHELL_STEPS]);
+    fixture.repository.routing = RunnerRoutingSnapshot::try_new(
+        fence,
+        Some((
+            RunnerGroupId::from_uuid(fence.runner_id().as_uuid()),
+            "trusted-group".into(),
+        )),
+        [RoutingLabel::new("trusted").expect("routing label")],
+        capability_document(&capabilities),
+        capability_document(&capabilities),
+        RunnerSlotCount::new(1).expect("slot count"),
+        JobIrVersion::current(),
+    )
+    .expect("Windows routing snapshot");
+    let run_id = RunId::new();
+    let attempt_id = AttemptId::new();
+    let job_id = JobId::new();
+    let metadata = JobIrMetadata::new(
+        job_id,
+        run_id,
+        JobIrVersion::current(),
+        256,
+        Sha256Digest::from_bytes([0x44; 32]),
+        ObjectKey::new(format!("jobs/{job_id}")).expect("object key"),
+    )
+    .expect("metadata");
+    let requirements = RunnerRequirements::default()
+        .with_labels([RunnerLabel::new("trusted").expect("label")])
+        .with_eligible_groups([RunnerGroup::new("trusted-group").expect("group")])
+        .with_windows_hyperv_container()
+        .with_architecture(Architecture::X86_64)
+        .with_environment_profile(profile);
+    let placement_trust = with_trust.then(|| {
+        AuthenticatedPlacementTrust::try_new(
+            &trusted_snapshot("actor-1"),
+            JobAuthorityProfile::Standard,
+            &requirements,
+        )
+        .expect("placement trust")
+    });
+    let candidate = RunnableAttempt::try_new(
+        attempt_id,
+        job_id,
+        run_id,
+        UnixMillis::new(40),
+        requirements,
+        metadata.clone(),
+        placement_trust,
+    )
+    .expect("Windows candidate");
+    fixture.expected_attempt = attempt_id;
+    fixture.repository.metadata = metadata;
+    fixture.repository.candidates = vec![candidate];
+    fixture
 }
 
 fn capability_document(capabilities: &RunnerCapabilities) -> RoutingDocument {
     RoutingDocument::new(serde_json::to_string(capabilities).expect("capability JSON"))
         .expect("routing document")
+}
+
+fn windows_claim_request(
+    fixture: &Fixture,
+    candidate: &RunnableAttempt,
+    operation_id: OperationId,
+) -> TryClaimAttempt {
+    let page = RunnableScanPage::try_new(
+        fixture.authenticated.fence(),
+        StableRunnerSlot::new(1).expect("slot"),
+        Sha256Digest::from_bytes([0x52; 32]),
+        0,
+        Some(candidate.queue_key()),
+        vec![candidate.clone()],
+    )
+    .expect("page");
+    let request_key = LeaseRequestKey::first(
+        fixture.authenticated.fence(),
+        operation_id,
+        StableRunnerSlot::new(1).expect("slot"),
+    );
+    TryClaimAttempt::for_candidate(
+        request_key,
+        candidate,
+        fixture.lease_id,
+        UnixMillis::new(1_000),
+        UnixMillis::new(1_500),
+        page.claim_advance(candidate.attempt_id())
+            .expect("claim cursor"),
+    )
+    .expect("Windows claim")
 }
 
 fn service(fixture: &Fixture) -> LeasePollService<'_> {
@@ -464,6 +603,63 @@ async fn temporarily_no_eligible_runner_for_admitted_features_remains_no_work() 
 }
 
 #[tokio::test]
+async fn windows_claim_carries_one_use_trust_profile_and_generation_binding() {
+    let fixture = windows_fixture(true);
+
+    let outcome = service(&fixture)
+        .poll(fixture.authenticated, &fixture.request)
+        .await
+        .expect("authenticated Windows placement succeeds");
+
+    let LeasePollOutcome::Claimed(claimed) = outcome else {
+        panic!("authenticated exact-profile Windows work must be claimed");
+    };
+    let grants = fixture
+        .repository
+        .windows_grants
+        .lock()
+        .expect("Windows grant observations");
+    let grant = grants[0].as_ref().expect("Windows placement grant");
+    assert_eq!(grant.attempt_id(), claimed.lease().attempt_id());
+    assert_eq!(
+        grant.operation_id(),
+        fixture.request.header().operation_id()
+    );
+    assert_eq!(grant.session(), fixture.authenticated.fence());
+    assert_eq!(grant.lease_id(), fixture.lease_id);
+    assert_eq!(grant.expires_at(), UnixMillis::new(1_500));
+    assert_eq!(
+        grant.environment_profile().id().as_str(),
+        "automata.test/windows-2025"
+    );
+    assert_ne!(grant.binding_digest(), Sha256Digest::from_bytes([0; 32]));
+}
+
+#[tokio::test]
+async fn windows_candidate_without_authenticated_trust_is_no_work_before_claim() {
+    let fixture = windows_fixture(false);
+
+    let outcome = service(&fixture)
+        .poll(fixture.authenticated, &fixture.request)
+        .await
+        .expect("missing Windows trust is a fail-closed no-work result");
+
+    assert_eq!(outcome, LeasePollOutcome::NoWork { replayed: false });
+    assert_eq!(
+        fixture.repository.calls(),
+        ["lookup", "routing", "availability", "scan", "no_work"]
+    );
+    assert!(
+        fixture
+            .repository
+            .windows_grants
+            .lock()
+            .expect("Windows grant observations")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn unavailable_service_container_requirement_never_creates_a_lease() {
     let mut fixture = fixture(RunnerSlotAvailability::Available, true);
     fixture.repository.candidates = vec![runnable(
@@ -485,6 +681,86 @@ async fn unavailable_service_container_requirement_never_creates_a_lease() {
         fixture.repository.calls(),
         ["lookup", "routing", "availability", "scan", "no_work"]
     );
+}
+
+#[test]
+fn windows_grant_changes_across_operations_and_trust_snapshots() {
+    let fixture = windows_fixture(true);
+    let candidate = &fixture.repository.candidates[0];
+    let first = windows_claim_request(&fixture, candidate, OperationId::new());
+    let second = windows_claim_request(&fixture, candidate, OperationId::new());
+    assert_ne!(
+        first
+            .windows_placement_grant()
+            .expect("first Windows grant")
+            .binding_digest(),
+        second
+            .windows_placement_grant()
+            .expect("second Windows grant")
+            .binding_digest()
+    );
+
+    let changed_trust = AuthenticatedPlacementTrust::try_new(
+        &trusted_snapshot("actor-2"),
+        JobAuthorityProfile::Standard,
+        candidate.requirements(),
+    )
+    .expect("changed placement trust");
+    let changed_candidate = RunnableAttempt::try_new(
+        candidate.attempt_id(),
+        candidate.job_id(),
+        candidate.run_id(),
+        candidate.queued_at(),
+        candidate.requirements().clone(),
+        candidate.job_ir().clone(),
+        Some(changed_trust),
+    )
+    .expect("changed candidate");
+    let changed = windows_claim_request(&fixture, &changed_candidate, first.operation_id());
+    assert_ne!(
+        first
+            .windows_placement_grant()
+            .expect("first Windows grant")
+            .binding_digest(),
+        changed
+            .windows_placement_grant()
+            .expect("changed Windows grant")
+            .binding_digest()
+    );
+    #[cfg(feature = "adapter-spi")]
+    {
+        assert!(
+            automata_ci_control::adapter_spi::try_claim_attempt_matches_runnable(&first, candidate)
+        );
+        assert!(
+            !automata_ci_control::adapter_spi::try_claim_attempt_matches_runnable(
+                &first,
+                &changed_candidate,
+            )
+        );
+    }
+}
+
+#[test]
+fn windows_candidate_rejects_stale_materialization_requirements() {
+    let fixture = windows_fixture(true);
+    let candidate = &fixture.repository.candidates[0];
+
+    let error = RunnableAttempt::try_new(
+        candidate.attempt_id(),
+        candidate.job_id(),
+        candidate.run_id(),
+        candidate.queued_at(),
+        candidate
+            .requirements()
+            .clone()
+            .with_labels([RunnerLabel::new("changed-routing").expect("changed label")]),
+        candidate.job_ir().clone(),
+        candidate.placement_trust().cloned(),
+    )
+    .expect_err("stale materialization requirements must be rejected");
+
+    assert_eq!(error, RunnableAttemptError::PlacementRequirementsMismatch);
 }
 
 #[tokio::test]

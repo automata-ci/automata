@@ -38,15 +38,15 @@ pub use operation::{
     BeginLeaseRequest, BegunLeaseRequest, ClaimCommandError, ClaimRejection, ClaimedAttempt,
     CompleteLeaseRequest, LeaseOfferCompletionError, LeaseRequestCompletion, LeaseRequestKey,
     LeaseRequestKeyError, NoWorkLeaseRequest, RevokedLeaseOfferFallback, TryClaimAttempt,
-    TryClaimOutcome, TryClaimReceipt,
+    TryClaimOutcome, TryClaimReceipt, WindowsHyperVPlacementGrant, WindowsPlacementGrantError,
 };
 pub use port::{
     LeaseClock, LeaseIdGenerator, LeasePollRepository, RandomLeaseIdGenerator, RunnableAttemptGate,
     RunnableAttemptGateDisposition, SystemLeaseClock,
 };
 pub use runnable::{
-    RunnableAttempt, RunnableAttemptError, RunnableCursorAdvance, RunnableQueueKey,
-    RunnableScanError, RunnableScanLimit, RunnableScanPage, RunnableScanRequest,
+    AuthenticatedPlacementTrust, RunnableAttempt, RunnableAttemptError, RunnableCursorAdvance,
+    RunnableQueueKey, RunnableScanError, RunnableScanLimit, RunnableScanPage, RunnableScanRequest,
 };
 pub use service::{
     AuthenticatedRunnerSession, ClaimedLeasePoll, LeasePollOutcome, LeasePollService,
