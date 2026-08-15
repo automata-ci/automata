@@ -4421,22 +4421,38 @@ impl GithubJobExecutor {
         }
         let artifact_hash_timeout = execution.timeout.min(ARTIFACT_HASH_TIMEOUT);
         let command_paths = paths.command_files(execution.phase)?;
-        let initialized = self.initialize_command_files(
-            endpoint,
-            attempt_id,
-            execution.phase,
-            &command_paths,
-            commands,
-            cancellation,
-        );
+        let initialized = self
+            .initialize_command_files(
+                endpoint,
+                attempt_id,
+                execution.phase,
+                &command_paths,
+                commands,
+                cancellation,
+            )
+            .map_err(|error| {
+                observe_phase_failure(
+                    error,
+                    attempt_id,
+                    execution.phase,
+                    "initialize_command_files",
+                )
+            });
         let Some(()) = reconcile_cancelled_operation(initialized, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
         };
         let environment = add_command_file_environment(&execution.environment, &command_paths)?;
-        let command = self.build_phase_command(attempt_id, &execution, environment)?;
+        let command = self
+            .build_phase_command(attempt_id, &execution, environment)
+            .map_err(|error| {
+                observe_phase_failure(error, attempt_id, execution.phase, "build_phase_command")
+            })?;
         let output = endpoint
             .exec(&command, &CancellationBridge(cancellation))
-            .map_err(map_execution_error);
+            .map_err(map_execution_error)
+            .map_err(|error| {
+                observe_phase_failure(error, attempt_id, execution.phase, "execute_phase")
+            });
         let Some(output) = reconcile_cancelled_operation(output, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
         };
@@ -4455,17 +4471,26 @@ impl GithubJobExecutor {
             ));
         }
         let collected = (|| {
-            let completed = self.collect_completed_phase(
-                endpoint,
-                attempt_id,
-                execution.phase,
-                &command_paths,
-                commands.platform(),
-                &output,
-                masker,
-                events,
-                cancellation,
-            )?;
+            let completed = self
+                .collect_completed_phase(
+                    endpoint,
+                    attempt_id,
+                    execution.phase,
+                    &command_paths,
+                    commands.platform(),
+                    &output,
+                    masker,
+                    events,
+                    cancellation,
+                )
+                .map_err(|error| {
+                    observe_phase_failure(
+                        error,
+                        attempt_id,
+                        execution.phase,
+                        "collect_completed_phase",
+                    )
+                })?;
             if cancellation.is_cancelled() {
                 return Err(cancelled());
             }
@@ -4486,7 +4511,15 @@ impl GithubJobExecutor {
             let applied = self
                 .completed_steps
                 .apply_completed_step(commands, &scope, &completed_commands)
-                .map_err(|error| map_phase_application_error(&error))?;
+                .map_err(|error| map_phase_application_error(&error))
+                .map_err(|error| {
+                    observe_phase_failure(
+                        error,
+                        attempt_id,
+                        execution.phase,
+                        "apply_completed_step",
+                    )
+                })?;
             if cancellation.is_cancelled() {
                 return Err(cancelled());
             }
@@ -4553,8 +4586,11 @@ impl GithubJobExecutor {
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &dyn ExecutorCancellation,
     ) -> Result<CollectedPhase, ExecutorAdapterError> {
-        let completed =
-            self.read_command_files(endpoint, attempt_id, phase, paths, platform, cancellation)?;
+        let completed = self
+            .read_command_files(endpoint, attempt_id, phase, paths, platform, cancellation)
+            .map_err(|error| {
+                observe_phase_failure(error, attempt_id, phase, "read_command_files")
+            })?;
         if cancellation.is_cancelled() {
             return Err(ExecutorAdapterError::new(
                 ExecutorAdapterErrorKind::Cancelled,
@@ -4566,7 +4602,8 @@ impl GithubJobExecutor {
             self.workflow_command_policy,
             masker,
             &|| cancellation.is_cancelled(),
-        )?;
+        )
+        .map_err(|error| observe_phase_failure(error, attempt_id, phase, "parse_output"))?;
         if cancellation.is_cancelled() {
             return Err(ExecutorAdapterError::new(
                 ExecutorAdapterErrorKind::Cancelled,
@@ -4587,7 +4624,8 @@ impl GithubJobExecutor {
                 ExecutorAdapterErrorKind::Cancelled,
             ));
         }
-        processed?;
+        processed
+            .map_err(|error| observe_phase_failure(error, attempt_id, phase, "process_output"))?;
         Ok(CollectedPhase {
             commands: completed.commands.with_legacy_mutations(&legacy),
             artifacts: completed.artifacts,
@@ -4702,7 +4740,16 @@ impl GithubJobExecutor {
             parsed.push(
                 self.command_files
                     .decode(*kind, &bytes, platform)
-                    .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?,
+                    .map_err(|error| {
+                        tracing::warn!(
+                            attempt_id = %attempt_id,
+                            phase,
+                            command_file_kind = ?kind,
+                            decode_error = ?error,
+                            "GitHub command file was rejected"
+                        );
+                        ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob)
+                    })?,
             );
         }
         let [environment, output, path, state, summary] = parsed
@@ -6757,6 +6804,22 @@ fn artifact_file_name(path: &str) -> Result<String, ExecutorAdapterError> {
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .ok_or_else(invalid_job)
+}
+
+fn observe_phase_failure(
+    error: ExecutorAdapterError,
+    attempt_id: AttemptId,
+    phase: u32,
+    failure_stage: &'static str,
+) -> ExecutorAdapterError {
+    tracing::warn!(
+        attempt_id = %attempt_id,
+        phase,
+        failure_stage,
+        error_kind = ?error.kind(),
+        "GitHub job phase failed"
+    );
+    error
 }
 
 const fn map_phase_application_error(error: &PhaseApplicationError) -> ExecutorAdapterError {
