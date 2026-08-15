@@ -32,6 +32,31 @@ automata_set_target_tmpdir \
 readonly context output_directory
 [[ -d "$context" && ! -L "$context" ]] || die "prepared context is missing"
 [[ ! -e "$output_directory" ]] || die "output directory already exists"
+
+builder="${AUTOMATA_SERVICE_PROXY_OCI_BUILDER:-podman}"
+case "$builder" in
+  podman | buildah-chroot) ;;
+  *) die "AUTOMATA_SERVICE_PROXY_OCI_BUILDER must be podman or buildah-chroot" ;;
+esac
+process_probe="${AUTOMATA_SERVICE_PROXY_PROCESS_PROBE:-required}"
+case "$process_probe" in
+  required | metadata-only) ;;
+  *) die "AUTOMATA_SERVICE_PROXY_PROCESS_PROBE must be required or metadata-only" ;;
+esac
+if [[ "$builder" == podman ]]; then
+  runtime="${AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME:-podman}"
+  [[ "$runtime" == podman ]] || die "Podman candidate builds require the Podman runtime"
+  command -v podman >/dev/null 2>&1 || die "Podman is unavailable"
+else
+  runtime="${AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME:-buildah}"
+  [[ "$runtime" == buildah ]] || \
+    die "buildah-chroot candidate builds require the Buildah image runtime"
+  command -v buildah >/dev/null 2>&1 || die "Buildah is unavailable"
+  [[ "$process_probe" == metadata-only ]] || \
+    die "buildah-chroot candidate builds require metadata-only process verification"
+fi
+readonly builder process_probe runtime
+
 install -d -m 0700 -- "$output_directory"
 
 # Rootless OverlayFS records its private origin/impure bookkeeping as PAX
@@ -56,7 +81,10 @@ readonly storage_directory storage_config storage_graphroot storage_runroot
 tag="localhost/automata-ci/service-proxy:candidate-${BASHPID}"
 readonly tag
 cleanup() {
-  podman image rm --force "$tag" >/dev/null 2>&1 || true
+  case "$builder" in
+    podman) podman image rm --force "$tag" >/dev/null 2>&1 || true ;;
+    buildah-chroot) buildah rmi --force "$tag" >/dev/null 2>&1 || true ;;
+  esac
   if [[ "$storage_directory" == "$TMPDIR"/podman-vfs.* \
     && -d "$storage_directory" \
     && ! -L "$storage_directory" ]]; then
@@ -64,10 +92,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-
-runtime="${AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME:-podman}"
-[[ "$runtime" == podman ]] || die "candidate builds require the Podman OCI builder"
-command -v podman >/dev/null 2>&1 || die "Podman is unavailable"
 
 mapfile -t source_values < <(python3 - "$context/source-provenance.json" <<'PY'
 import hashlib
@@ -97,29 +121,54 @@ sbom_sha256="${source_values[5]}"
 source_sha256="${source_values[6]}"
 readonly version revision created source_date_epoch binary_sha256 sbom_sha256 source_sha256
 
-env -u SOURCE_DATE_EPOCH podman build \
-  --build-arg "AUTOMATA_CREATED=${created}" \
-  --build-arg "AUTOMATA_REVISION=${revision}" \
-  --build-arg "AUTOMATA_SERVICE_PROXY_BINARY_SHA256=${binary_sha256}" \
-  --build-arg "AUTOMATA_SERVICE_PROXY_SBOM_SHA256=${sbom_sha256}" \
-  --build-arg "AUTOMATA_SERVICE_PROXY_SOURCE_SHA256=${source_sha256}" \
-  --build-arg "AUTOMATA_VERSION=${version}" \
-  --file "$context/Containerfile" \
-  --format oci \
-  --identity-label=false \
-  --network none \
-  --pull=never \
-  --timestamp "$source_date_epoch" \
-  --tag "$tag" \
-  "$context"
-
-AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME=podman \
-  "${script_directory}/verify-service-proxy-image.sh" \
-  "$tag" "$version" "$revision" "$created"
+build_arguments=(
+  --build-arg "AUTOMATA_CREATED=${created}"
+  --build-arg "AUTOMATA_REVISION=${revision}"
+  --build-arg "AUTOMATA_SERVICE_PROXY_BINARY_SHA256=${binary_sha256}"
+  --build-arg "AUTOMATA_SERVICE_PROXY_SBOM_SHA256=${sbom_sha256}"
+  --build-arg "AUTOMATA_SERVICE_PROXY_SOURCE_SHA256=${source_sha256}"
+  --build-arg "AUTOMATA_VERSION=${version}"
+  --file "$context/Containerfile"
+  --format oci
+  --identity-label=false
+  --pull=never
+  --timestamp "$source_date_epoch"
+  --tag "$tag"
+)
+readonly -a build_arguments
+if [[ "$builder" == podman ]]; then
+  env -u SOURCE_DATE_EPOCH podman build \
+    "${build_arguments[@]}" \
+    --network none \
+    "$context"
+  AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME="$runtime" \
+    AUTOMATA_SERVICE_PROXY_PROCESS_PROBE="$process_probe" \
+    "${script_directory}/verify-service-proxy-image.sh" \
+    "$tag" "$version" "$revision" "$created"
+else
+  # Chroot isolation in the nested Automata job cannot create another network
+  # namespace. Host networking is inert because this exact reviewed scratch
+  # Containerfile contains metadata and local COPY instructions, but no RUN.
+  python3 "${script_directory}/validate-service-proxy-buildah-containerfile.py" \
+    "$context/Containerfile"
+  env -u SOURCE_DATE_EPOCH buildah bud \
+    "${build_arguments[@]}" \
+    --isolation chroot \
+    --network host \
+    "$context"
+  AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME="$runtime" \
+    AUTOMATA_SERVICE_PROXY_PROCESS_PROBE="$process_probe" \
+    "${script_directory}/verify-service-proxy-image.sh" \
+    "$tag" "$version" "$revision" "$created"
+fi
 
 oci_archive="$output_directory/automata-service-proxy.oci.tar"
 candidate="$output_directory/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
-podman save --format oci-archive --output "$oci_archive" "$tag"
+if [[ "$builder" == podman ]]; then
+  podman save --format oci-archive --output "$oci_archive" "$tag"
+else
+  buildah push "$tag" "oci-archive:${oci_archive}"
+fi
 candidate_arguments=(
   --context "$context"
   --oci-archive "$oci_archive"
