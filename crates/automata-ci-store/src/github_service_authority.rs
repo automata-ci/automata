@@ -1044,152 +1044,6 @@ impl ClaimedGithubServerServiceMint {
     }
 }
 
-/// Starts a new initial or refresh generation under one descriptor.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimGithubServerServiceMint {
-    selector: GithubServerServiceAuthoritySelector,
-    generation: GithubServerServiceGeneration,
-    worker: GithubServerServiceWorkerId,
-    requested_at: UnixMillis,
-    request_deadline: UnixMillis,
-    claim_expires_at: UnixMillis,
-}
-
-impl ClaimGithubServerServiceMint {
-    /// Constructs a bounded new-generation claim.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid provider-request or claim intervals.
-    pub fn new(
-        selector: GithubServerServiceAuthoritySelector,
-        generation: GithubServerServiceGeneration,
-        worker: GithubServerServiceWorkerId,
-        requested_at: UnixMillis,
-        request_deadline: UnixMillis,
-        claim_expires_at: UnixMillis,
-    ) -> Result<Self, GithubServerServiceValueError> {
-        validate_claim_interval(
-            requested_at,
-            claim_expires_at,
-            MAX_GITHUB_SERVICE_MINT_CLAIM_MILLIS,
-        )?;
-        validate_request_interval(requested_at, request_deadline)?;
-        if claim_expires_at > request_deadline {
-            return Err(GithubServerServiceValueError::InvalidTimeInterval);
-        }
-        Ok(Self {
-            selector,
-            generation,
-            worker,
-            requested_at,
-            request_deadline,
-            claim_expires_at,
-        })
-    }
-    /// Returns the exact immutable descriptor selector.
-    #[must_use]
-    pub const fn selector(&self) -> &GithubServerServiceAuthoritySelector {
-        &self.selector
-    }
-    /// Returns descriptor ID.
-    #[must_use]
-    pub const fn authority_id(&self) -> GithubServerServiceAuthorityId {
-        self.selector.authority_id()
-    }
-    /// Returns the caller-pinned next generation for exact lost-response replay.
-    #[must_use]
-    pub const fn generation(&self) -> GithubServerServiceGeneration {
-        self.generation
-    }
-    /// Returns claiming worker.
-    #[must_use]
-    pub const fn worker(&self) -> GithubServerServiceWorkerId {
-        self.worker
-    }
-    /// Returns trusted request time.
-    #[must_use]
-    pub const fn requested_at(&self) -> UnixMillis {
-        self.requested_at
-    }
-    /// Returns fixed provider deadline.
-    #[must_use]
-    pub const fn request_deadline(&self) -> UnixMillis {
-        self.request_deadline
-    }
-    /// Returns exclusive claim expiry.
-    #[must_use]
-    pub const fn claim_expires_at(&self) -> UnixMillis {
-        self.claim_expires_at
-    }
-}
-
-/// Reclaims a definitively unissued retry generation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReclaimGithubServerServiceMint {
-    selector: GithubServerServiceAuthoritySelector,
-    key: GithubServerServiceIssuanceKey,
-    worker: GithubServerServiceWorkerId,
-    observed_at: UnixMillis,
-    claim_expires_at: UnixMillis,
-}
-
-impl ReclaimGithubServerServiceMint {
-    /// Constructs a bounded retry claim.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid claim interval.
-    pub fn new(
-        selector: GithubServerServiceAuthoritySelector,
-        key: GithubServerServiceIssuanceKey,
-        worker: GithubServerServiceWorkerId,
-        observed_at: UnixMillis,
-        claim_expires_at: UnixMillis,
-    ) -> Result<Self, GithubServerServiceValueError> {
-        validate_claim_interval(
-            observed_at,
-            claim_expires_at,
-            MAX_GITHUB_SERVICE_MINT_CLAIM_MILLIS,
-        )?;
-        if selector.authority_id() != key.authority_id() {
-            return Err(GithubServerServiceValueError::InvalidClaim);
-        }
-        Ok(Self {
-            selector,
-            key,
-            worker,
-            observed_at,
-            claim_expires_at,
-        })
-    }
-    /// Returns the exact immutable descriptor selector.
-    #[must_use]
-    pub const fn selector(&self) -> &GithubServerServiceAuthoritySelector {
-        &self.selector
-    }
-    /// Returns issuance key.
-    #[must_use]
-    pub const fn key(&self) -> GithubServerServiceIssuanceKey {
-        self.key
-    }
-    /// Returns claiming worker.
-    #[must_use]
-    pub const fn worker(&self) -> GithubServerServiceWorkerId {
-        self.worker
-    }
-    /// Returns trusted observation.
-    #[must_use]
-    pub const fn observed_at(&self) -> UnixMillis {
-        self.observed_at
-    }
-    /// Returns exclusive claim expiry.
-    #[must_use]
-    pub const fn claim_expires_at(&self) -> UnixMillis {
-        self.claim_expires_at
-    }
-}
-
 /// Irreversible durable mint-start boundary recorded before provider I/O.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BeginGithubServerServiceMint {
@@ -1317,57 +1171,6 @@ pub enum BeginGithubServerServiceMintOutcome {
     Started(GithubServerServiceMintStart),
     /// The cutoff already existed; provider I/O must never be repeated.
     AlreadyStarted(GithubServerServiceMintStart),
-}
-
-/// Reconciles a mint whose durable claim or provider deadline expired.
-///
-/// A pre-provider [`GithubServerServiceIssuanceState::Claimed`] or definitively
-/// unissued [`GithubServerServiceIssuanceState::MintRetryPending`] generation
-/// is rejected. A post-cutoff [`GithubServerServiceIssuanceState::Minting`]
-/// generation becomes indeterminate and can never be reminted.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReconcileExpiredGithubServerServiceMint {
-    selector: GithubServerServiceAuthoritySelector,
-    key: GithubServerServiceIssuanceKey,
-    observed_at: UnixMillis,
-}
-
-impl ReconcileExpiredGithubServerServiceMint {
-    /// Constructs a trusted stale-mint reconciliation request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a pre-epoch observation.
-    pub fn new(
-        selector: GithubServerServiceAuthoritySelector,
-        key: GithubServerServiceIssuanceKey,
-        observed_at: UnixMillis,
-    ) -> Result<Self, GithubServerServiceValueError> {
-        validate_timestamp(observed_at)?;
-        if selector.authority_id() != key.authority_id() {
-            return Err(GithubServerServiceValueError::InvalidClaim);
-        }
-        Ok(Self {
-            selector,
-            key,
-            observed_at,
-        })
-    }
-    /// Returns the exact immutable descriptor selector.
-    #[must_use]
-    pub const fn selector(&self) -> &GithubServerServiceAuthoritySelector {
-        &self.selector
-    }
-    /// Returns the exact issuance key.
-    #[must_use]
-    pub const fn key(&self) -> GithubServerServiceIssuanceKey {
-        self.key
-    }
-    /// Returns the trusted reconciliation observation.
-    #[must_use]
-    pub const fn observed_at(&self) -> UnixMillis {
-        self.observed_at
-    }
 }
 
 /// Canonical provider or cryptographic failure class with no credential data.
@@ -2227,72 +2030,6 @@ impl RetireGithubServerServiceAuthority {
     }
 }
 
-/// Claims one eligible generation for provider revocation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClaimGithubServerServiceRevocation {
-    selector: GithubServerServiceAuthoritySelector,
-    key: GithubServerServiceIssuanceKey,
-    worker: GithubServerServiceWorkerId,
-    observed_at: UnixMillis,
-    claim_expires_at: UnixMillis,
-}
-
-impl ClaimGithubServerServiceRevocation {
-    /// Constructs a bounded revocation claim.
-    ///
-    /// # Errors
-    ///
-    /// Rejects an invalid claim interval.
-    pub fn new(
-        selector: GithubServerServiceAuthoritySelector,
-        key: GithubServerServiceIssuanceKey,
-        worker: GithubServerServiceWorkerId,
-        observed_at: UnixMillis,
-        claim_expires_at: UnixMillis,
-    ) -> Result<Self, GithubServerServiceValueError> {
-        validate_claim_interval(
-            observed_at,
-            claim_expires_at,
-            MAX_GITHUB_SERVICE_REVOKE_CLAIM_MILLIS,
-        )?;
-        if selector.authority_id() != key.authority_id() {
-            return Err(GithubServerServiceValueError::InvalidClaim);
-        }
-        Ok(Self {
-            selector,
-            key,
-            worker,
-            observed_at,
-            claim_expires_at,
-        })
-    }
-    /// Returns the exact immutable descriptor selector.
-    #[must_use]
-    pub const fn selector(&self) -> &GithubServerServiceAuthoritySelector {
-        &self.selector
-    }
-    /// Returns issuance key.
-    #[must_use]
-    pub const fn key(&self) -> GithubServerServiceIssuanceKey {
-        self.key
-    }
-    /// Returns claiming worker.
-    #[must_use]
-    pub const fn worker(&self) -> GithubServerServiceWorkerId {
-        self.worker
-    }
-    /// Returns trusted observation.
-    #[must_use]
-    pub const fn observed_at(&self) -> UnixMillis {
-        self.observed_at
-    }
-    /// Returns exclusive claim expiry.
-    #[must_use]
-    pub const fn claim_expires_at(&self) -> UnixMillis {
-        self.claim_expires_at
-    }
-}
-
 /// Provider-revocation claim with protected credential custody.
 pub struct ClaimedGithubServerServiceRevocation {
     claim: GithubServerServiceClaim,
@@ -2482,52 +2219,6 @@ impl FinishGithubServerServiceRevocation {
     }
 }
 
-/// Safely erases indeterminate or quarantined custody after its fixed horizon.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EraseExpiredGithubServerServiceIssuance {
-    selector: GithubServerServiceAuthoritySelector,
-    key: GithubServerServiceIssuanceKey,
-    observed_at: UnixMillis,
-}
-
-impl EraseExpiredGithubServerServiceIssuance {
-    /// Constructs an expiry-based erasure request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a pre-epoch observation.
-    pub fn new(
-        selector: GithubServerServiceAuthoritySelector,
-        key: GithubServerServiceIssuanceKey,
-        observed_at: UnixMillis,
-    ) -> Result<Self, GithubServerServiceValueError> {
-        validate_timestamp(observed_at)?;
-        if selector.authority_id() != key.authority_id() {
-            return Err(GithubServerServiceValueError::InvalidClaim);
-        }
-        Ok(Self {
-            selector,
-            key,
-            observed_at,
-        })
-    }
-    /// Returns the exact immutable descriptor selector.
-    #[must_use]
-    pub const fn selector(&self) -> &GithubServerServiceAuthoritySelector {
-        &self.selector
-    }
-    /// Returns issuance key.
-    #[must_use]
-    pub const fn key(&self) -> GithubServerServiceIssuanceKey {
-        self.key
-    }
-    /// Returns trusted erasure observation.
-    #[must_use]
-    pub const fn observed_at(&self) -> UnixMillis {
-        self.observed_at
-    }
-}
-
 /// Closes a corrupt current credential while retaining protected custody.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuarantineGithubServerServiceCredential {
@@ -2648,7 +2339,7 @@ impl ClaimNextGithubServerServiceMaintenance {
 /// One atomic, restart-safe maintenance result.
 #[derive(Debug)]
 pub enum GithubServerServiceMaintenanceOutcome {
-    /// A due definitive no-token retry was atomically reclaimed for minting.
+    /// A due initial, refresh, or definitive no-token retry was claimed for minting.
     Mint(Box<ClaimedGithubServerServiceMint>),
     /// A due protected credential was atomically claimed for revocation.
     Revocation(Box<ClaimedGithubServerServiceRevocation>),
@@ -2682,15 +2373,9 @@ pub enum GithubServerServiceStoreError {
     /// A current credential cannot satisfy the exact handoff request.
     #[error("GitHub server-service credential handoff was rejected")]
     HandoffRejected,
-    /// One current plus one refresh generation is already retained.
-    #[error("GitHub server-service authority already has an active refresh")]
-    RefreshAlreadyActive,
     /// A positive durable generation or claim fence is exhausted.
     #[error("GitHub server-service authority generation or fence is exhausted")]
     FenceExhausted,
-    /// Closed provider attempt bound is exhausted.
-    #[error("GitHub server-service authority retry bound is exhausted")]
-    RetryLimitReached,
     /// A live exact handoff still requires the credential.
     #[error("GitHub server-service credential is still borrowed")]
     HandoffStillLive,
@@ -2789,16 +2474,6 @@ pub trait GithubServerServiceAuthorityRepository: Send + Sync {
         tenant: &TenantScope,
         authority_id: GithubServerServiceAuthorityId,
     ) -> Result<GithubServerServiceAuthorityDescriptor, GithubServerServiceStoreError>;
-    /// Creates and claims the sole initial/refresh generation.
-    async fn claim_github_server_service_mint(
-        &self,
-        request: ClaimGithubServerServiceMint,
-    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError>;
-    /// Reclaims a definitively unissued retry generation.
-    async fn reclaim_github_server_service_mint(
-        &self,
-        request: ReclaimGithubServerServiceMint,
-    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError>;
     /// Persists the irreversible provider-call cutoff.
     async fn begin_github_server_service_mint(
         &self,
@@ -2808,11 +2483,6 @@ pub trait GithubServerServiceAuthorityRepository: Send + Sync {
     async fn finish_github_server_service_mint(
         &self,
         request: &FinishGithubServerServiceMint,
-    ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError>;
-    /// Closes an expired pre-I/O mint or quarantines an expired post-I/O mint.
-    async fn reconcile_expired_github_server_service_mint(
-        &self,
-        request: ReconcileExpiredGithubServerServiceMint,
     ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError>;
     /// Acquires protected current custody for one exact value-free consumer claim.
     async fn acquire_github_server_service_handoff(
@@ -2834,20 +2504,10 @@ pub trait GithubServerServiceAuthorityRepository: Send + Sync {
         &self,
         request: RetireGithubServerServiceAuthority,
     ) -> Result<GithubServerServiceAuthorityDescriptor, GithubServerServiceStoreError>;
-    /// Claims an eligible retained credential for provider revocation.
-    async fn claim_github_server_service_revocation(
-        &self,
-        request: ClaimGithubServerServiceRevocation,
-    ) -> Result<ClaimedGithubServerServiceRevocation, GithubServerServiceStoreError>;
     /// Commits one closed provider revocation result.
     async fn finish_github_server_service_revocation(
         &self,
         request: FinishGithubServerServiceRevocation,
-    ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError>;
-    /// Erases indeterminate or quarantined custody only after the fixed horizon.
-    async fn erase_expired_github_server_service_issuance(
-        &self,
-        request: EraseExpiredGithubServerServiceIssuance,
     ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError>;
     /// Atomically discovers and claims/reduces one due tenant maintenance record.
     async fn claim_next_github_server_service_maintenance(

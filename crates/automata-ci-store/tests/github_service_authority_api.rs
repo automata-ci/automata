@@ -1,22 +1,23 @@
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_store::{
-    AcquireGithubServerServiceHandoff, ClaimGithubServerServiceMint, FinishGithubServerServiceMint,
-    GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityDescriptor,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
-    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
-    GithubServerServiceAuthorityState, GithubServerServiceClaim, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
-    GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
-    GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
+    AcquireGithubServerServiceHandoff, ClaimNextGithubServerServiceMaintenance,
+    FinishGithubServerServiceMint, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityDescriptor, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
+    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
+    GithubServerServiceClaim, GithubServerServiceClaimFence, GithubServerServiceConsumerClaim,
+    GithubServerServiceConsumerId, GithubServerServiceCredentialHandoff,
+    GithubServerServiceEnvelopeMetadata, GithubServerServiceGeneration,
+    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
     GithubServerServiceIssuanceReceipt, GithubServerServiceIssuanceState,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     GithubServerServiceValueError, GithubServerServiceWorkerId,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_GITHUB_SERVICE_HANDOFF_MILLIS,
     MAX_GITHUB_SERVICE_PLAINTEXT_BYTES, MIN_GITHUB_SERVICE_READY_USE_MILLIS,
     ProtectedGithubServerServiceCredential, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, ReconcileExpiredGithubServerServiceMint, RepositoryId, TenantScope,
+    ProviderRepositoryId, RepositoryId, TenantScope,
 };
 use uuid::Uuid;
 
@@ -132,35 +133,55 @@ fn failure_breaker_descriptor_requires_exact_saturated_rearm_shape() {
 }
 
 #[test]
-fn new_generation_claim_is_bounded_and_caller_pinned() {
-    let identity = identity(
-        GithubServerServiceScope::ChecksWrite,
-        GithubServerServiceJwtIssuer::AppClientId,
-    );
-    let selector = GithubServerServiceAuthoritySelector::from_identity(&identity);
-    let authority = identity.authority_id();
-    let generation = GithubServerServiceGeneration::new(4).expect("generation");
-    let request = ClaimGithubServerServiceMint::new(
-        selector.clone(),
-        generation,
-        worker(),
+fn next_maintenance_claim_is_tenant_scoped_and_bounded() {
+    let tenant = TenantScope::from_authenticated_tenant_id("tenant").expect("tenant");
+    let claim_worker = worker();
+    let request = ClaimNextGithubServerServiceMaintenance::new(
+        tenant.clone(),
+        claim_worker,
         UnixMillis::new(1_000),
-        UnixMillis::new(1_120),
         UnixMillis::new(1_100),
     )
-    .expect("bounded claim");
-    assert_eq!(request.authority_id(), authority);
-    assert_eq!(request.generation(), generation);
+    .expect("bounded maintenance claim");
+    assert_eq!(request.tenant(), &tenant);
+    assert_eq!(request.worker(), claim_worker);
+    assert_eq!(request.observed_at(), UnixMillis::new(1_000));
+    assert_eq!(request.claim_expires_at(), UnixMillis::new(1_100));
     assert!(matches!(
-        ClaimGithubServerServiceMint::new(
-            selector,
-            generation,
+        ClaimNextGithubServerServiceMaintenance::new(
+            tenant.clone(),
             worker(),
             UnixMillis::new(1_000),
             UnixMillis::new(121_001),
-            UnixMillis::new(1_100),
         ),
         Err(GithubServerServiceValueError::InvalidTimeInterval)
+    ));
+    assert!(matches!(
+        ClaimNextGithubServerServiceMaintenance::new(
+            tenant.clone(),
+            worker(),
+            UnixMillis::new(1_000),
+            UnixMillis::new(1_000),
+        ),
+        Err(GithubServerServiceValueError::InvalidTimeInterval)
+    ));
+    assert!(matches!(
+        ClaimNextGithubServerServiceMaintenance::new(
+            tenant.clone(),
+            worker(),
+            UnixMillis::new(1_000),
+            UnixMillis::new(999),
+        ),
+        Err(GithubServerServiceValueError::InvalidTimeInterval)
+    ));
+    assert!(matches!(
+        ClaimNextGithubServerServiceMaintenance::new(
+            tenant,
+            worker(),
+            UnixMillis::new(-1),
+            UnixMillis::new(1_000),
+        ),
+        Err(GithubServerServiceValueError::NegativeTimestamp)
     ));
 }
 
@@ -448,27 +469,6 @@ fn handoff_limits_are_action_specific_and_revoke_only_custody_is_never_deliverab
             protected(identity, generation, 32),
         ),
         Err(GithubServerServiceValueError::InvalidHandoff)
-    ));
-}
-
-#[test]
-fn expired_mint_reconciliation_is_bound_to_one_exact_generation() {
-    let key = GithubServerServiceIssuanceKey::new(
-        authority_id(),
-        GithubServerServiceGeneration::new(7).expect("generation"),
-    );
-    let selector = GithubServerServiceAuthoritySelector::from_identity(&identity(
-        GithubServerServiceScope::ChecksWrite,
-        GithubServerServiceJwtIssuer::AppClientId,
-    ));
-    let request =
-        ReconcileExpiredGithubServerServiceMint::new(selector.clone(), key, UnixMillis::new(4_000))
-            .expect("reconciliation request");
-    assert_eq!(request.key(), key);
-    assert_eq!(request.observed_at(), UnixMillis::new(4_000));
-    assert!(matches!(
-        ReconcileExpiredGithubServerServiceMint::new(selector, key, UnixMillis::new(-1)),
-        Err(GithubServerServiceValueError::NegativeTimestamp)
     ));
 }
 

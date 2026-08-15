@@ -6,30 +6,26 @@ use uuid::Uuid;
 
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
-    BeginGithubServerServiceMintOutcome, ClaimGithubServerServiceMint,
-    ClaimGithubServerServiceRevocation, ClaimNextGithubServerServiceMaintenance,
+    BeginGithubServerServiceMintOutcome, ClaimNextGithubServerServiceMaintenance,
     ClaimedGithubServerServiceMint, ClaimedGithubServerServiceRevocation,
-    EnsureGithubServerServiceAuthority, EraseExpiredGithubServerServiceIssuance,
-    FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
-    GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS, GithubRepositoryName, GithubServerServiceAction,
-    GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityDescriptor, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
-    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
-    GithubServerServiceClaim, GithubServerServiceClaimFence, GithubServerServiceConsumerClaim,
-    GithubServerServiceConsumerId, GithubServerServiceCredentialHandoff,
-    GithubServerServiceEnvelopeMetadata, GithubServerServiceGeneration,
-    GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
+    EnsureGithubServerServiceAuthority, FinishGithubServerServiceMint,
+    FinishGithubServerServiceRevocation, GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS,
+    GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityDescriptor,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GithubServerServiceAuthorityRepository, GithubServerServiceAuthoritySelector,
+    GithubServerServiceAuthorityState, GithubServerServiceClaim, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId,
+    GithubServerServiceCredentialHandoff, GithubServerServiceEnvelopeMetadata,
+    GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
     GithubServerServiceIssuanceReceipt, GithubServerServiceIssuanceState,
     GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
     GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceStoreError,
     GithubServerServiceWorkerId, MAX_GITHUB_SERVICE_CONSECUTIVE_GENERATION_FAILURES,
-    MAX_GITHUB_SERVICE_HANDOFF_MILLIS, MAX_GITHUB_SERVICE_MINT_ATTEMPTS,
-    MAX_GITHUB_SERVICE_REQUEST_MILLIS, MAX_GITHUB_SERVICE_REVOKE_ATTEMPTS,
+    MAX_GITHUB_SERVICE_MINT_ATTEMPTS, MAX_GITHUB_SERVICE_REVOKE_ATTEMPTS,
     MIN_GITHUB_SERVICE_READY_USE_MILLIS, ProtectedGithubServerServiceCredential,
     ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId,
-    QuarantineGithubServerServiceCredential, ReclaimGithubServerServiceMint,
-    ReconcileExpiredGithubServerServiceMint, ReleaseGithubServerServiceHandoff, RepositoryId,
+    QuarantineGithubServerServiceCredential, ReleaseGithubServerServiceHandoff, RepositoryId,
     RetireGithubServerServiceAuthority, Sha256Digest, TenantScope,
 };
 
@@ -202,247 +198,6 @@ impl GithubServerServiceAuthorityRepository for PostgresStore {
         load_authority_from_pool(&self.pool, tenant, authority_id).await
     }
 
-    async fn claim_github_server_service_mint(
-        &self,
-        request: ClaimGithubServerServiceMint,
-    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError> {
-        let claim_duration =
-            requested_duration(request.requested_at(), request.claim_expires_at())?;
-        let request_duration =
-            requested_duration(request.requested_at(), request.request_deadline())?;
-        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
-        pin_read_committed(&mut transaction).await?;
-        let authority_row = select_authority_for_update(&mut transaction, request.selector())
-            .await?
-            .ok_or(GithubServerServiceStoreError::NotFound)?;
-        let mut descriptor = decode_authority(&authority_row)?;
-        let key = GithubServerServiceIssuanceKey::new(request.authority_id(), request.generation());
-
-        if let Some(existing) = select_issuance_for_update(&mut transaction, key).await? {
-            let database_now = database_now_ms(&mut transaction).await?;
-            let exact = exact_mint_claim_replay(
-                &existing,
-                request.worker(),
-                claim_duration,
-                request_duration,
-            )? && live_mint_claim_at(&existing, database_now)?;
-            if !exact {
-                return Err(GithubServerServiceStoreError::RefreshAlreadyActive);
-            }
-            let claimed = decode_claimed_mint(descriptor.identity().clone(), &existing)?;
-            transaction.commit().await.map_err(operation_error)?;
-            return Ok(claimed);
-        }
-        if descriptor.state() != GithubServerServiceAuthorityState::Active {
-            return Err(GithubServerServiceStoreError::ClaimRejected);
-        }
-        if descriptor.refresh_generation().is_some() {
-            return Err(GithubServerServiceStoreError::RefreshAlreadyActive);
-        }
-        let mut database_now = database_now_ms(&mut transaction).await?;
-        validate_caller_clock(request.requested_at(), database_now)?;
-        if descriptor.consecutive_generation_failures()
-            >= MAX_GITHUB_SERVICE_CONSECUTIVE_GENERATION_FAILURES
-        {
-            if !rearm_github_server_service_failure_budget(
-                &mut transaction,
-                &descriptor,
-                UnixMillis::new(database_now),
-            )
-            .await?
-            {
-                return Err(GithubServerServiceStoreError::RetryLimitReached);
-            }
-            let rearmed = select_authority_for_update(&mut transaction, request.selector())
-                .await?
-                .ok_or(GithubServerServiceStoreError::CorruptData)?;
-            descriptor = decode_authority(&rearmed)?;
-            database_now = database_now_ms(&mut transaction).await?;
-            validate_caller_clock(request.requested_at(), database_now)?;
-        }
-        if descriptor
-            .next_mint_not_before()
-            .is_some_and(|not_before| not_before.get() > database_now)
-        {
-            return Err(GithubServerServiceStoreError::ClaimRejected);
-        }
-        if descriptor.next_generation() != request.generation() {
-            return Err(GithubServerServiceStoreError::FenceExhausted);
-        }
-        if let Some(current_generation) = descriptor.current_generation() {
-            let current_key =
-                GithubServerServiceIssuanceKey::new(request.authority_id(), current_generation);
-            let current = select_issuance_for_update(&mut transaction, current_key)
-                .await?
-                .ok_or(GithubServerServiceStoreError::CorruptData)?;
-            database_now = database_now_ms(&mut transaction).await?;
-            validate_caller_clock(request.requested_at(), database_now)?;
-            let refresh_due_by = MAX_GITHUB_SERVICE_HANDOFF_MILLIS
-                .checked_add(MAX_GITHUB_SERVICE_REQUEST_MILLIS)
-                .and_then(|lead| database_now.checked_add(lead))
-                .ok_or(GithubServerServiceStoreError::CorruptData)?;
-            if issuance_state(&current)? != GithubServerServiceIssuanceState::Ready
-                || optional_i64(&current, "provider_expires_at_ms")?
-                    .and_then(|expires| expires.checked_sub(60_000))
-                    .is_none_or(|usable_until| usable_until > refresh_due_by)
-            {
-                return Err(GithubServerServiceStoreError::ClaimRejected);
-            }
-        }
-        let claim_expires_at = issue_deadline(database_now, claim_duration)?;
-        let request_deadline = issue_deadline(database_now, request_duration)?;
-        if claim_expires_at > request_deadline {
-            return Err(GithubServerServiceStoreError::ClaimRejected);
-        }
-        let next_generation = request
-            .generation()
-            .get()
-            .checked_add(1)
-            .filter(|value| i64::try_from(*value).is_ok())
-            .ok_or(GithubServerServiceStoreError::FenceExhausted)?;
-        let conservative_expiry = request_deadline
-            .checked_add(3_780_000)
-            .ok_or(GithubServerServiceStoreError::CorruptData)?;
-        sqlx::query(
-            r"
-            INSERT INTO github_server_service_authority_issuances (
-                tenant_id, authority_id, generation, state,
-                mint_attempt_count, mint_claim_fence, mint_claim_owner_id,
-                mint_claimed_at_ms, mint_claim_expires_at_ms,
-                requested_at_ms, request_deadline_at_ms,
-                conservative_expiry_at_ms, safe_erase_after_ms,
-                created_at_ms, state_updated_at_ms
-            ) VALUES (
-                $1, $2, $3, 'claimed', 1, 1, $4, $5, $6,
-                $5, $7, $8, $8, $5, $5
-            )
-            ",
-        )
-        .bind(descriptor.identity().tenant().as_str())
-        .bind(request.authority_id().as_uuid())
-        .bind(pg_bigint(request.generation().get()))
-        .bind(request.worker().as_uuid())
-        .bind(database_now)
-        .bind(claim_expires_at)
-        .bind(request_deadline)
-        .bind(conservative_expiry)
-        .execute(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        let updated = sqlx::query(
-            r"
-            UPDATE github_server_service_authorities
-            SET refresh_issuance_generation = $2,
-                next_issuance_generation = $4,
-                state_updated_at_ms = $3
-            WHERE id = $1
-              AND state = 'active'
-              AND refresh_issuance_generation IS NULL
-              AND state_updated_at_ms <= $3
-            ",
-        )
-        .bind(request.authority_id().as_uuid())
-        .bind(pg_bigint(request.generation().get()))
-        .bind(database_now)
-        .bind(i64_from_u64(next_generation)?)
-        .execute(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        if updated.rows_affected() != 1 {
-            return Err(GithubServerServiceStoreError::ClaimRejected);
-        }
-        let issuance = select_issuance_for_update(&mut transaction, key)
-            .await?
-            .ok_or(GithubServerServiceStoreError::CorruptData)?;
-        let claimed = decode_claimed_mint(descriptor.identity().clone(), &issuance)?;
-        transaction.commit().await.map_err(operation_error)?;
-        Ok(claimed)
-    }
-
-    async fn reclaim_github_server_service_mint(
-        &self,
-        request: ReclaimGithubServerServiceMint,
-    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError> {
-        let claim_duration = requested_duration(request.observed_at(), request.claim_expires_at())?;
-        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
-        pin_read_committed(&mut transaction).await?;
-        let authority_row = select_authority_for_update(&mut transaction, request.selector())
-            .await?
-            .ok_or(GithubServerServiceStoreError::NotFound)?;
-        let descriptor = decode_authority(&authority_row)?;
-        let existing = select_issuance_for_update(&mut transaction, request.key())
-            .await?
-            .ok_or(GithubServerServiceStoreError::NotFound)?;
-        let state = issuance_state(&existing)?;
-        let database_now = database_now_ms(&mut transaction).await?;
-        if state == GithubServerServiceIssuanceState::Claimed
-            && optional_uuid(&existing, "mint_claim_owner_id")? == Some(request.worker().as_uuid())
-            && optional_claim_duration(&existing, "mint_claimed_at_ms", "mint_claim_expires_at_ms")?
-                == Some(claim_duration)
-            && live_mint_claim_at(&existing, database_now)?
-        {
-            let claimed = decode_claimed_mint(descriptor.identity().clone(), &existing)?;
-            transaction.commit().await.map_err(operation_error)?;
-            return Ok(claimed);
-        }
-        validate_caller_clock(request.observed_at(), database_now)?;
-        let request_deadline = i64_column(&existing, "request_deadline_at_ms")?;
-        let claim_expires_at = issue_deadline(database_now, claim_duration)?;
-        if descriptor.state() != GithubServerServiceAuthorityState::Active
-            || descriptor.refresh_generation() != Some(request.key().generation())
-            || state != GithubServerServiceIssuanceState::MintRetryPending
-            || optional_i64(&existing, "next_mint_at_ms")?.is_none_or(|next| next > database_now)
-            || claim_expires_at > request_deadline
-        {
-            return Err(GithubServerServiceStoreError::ClaimRejected);
-        }
-        let attempts = u16_column(&existing, "mint_attempt_count")?;
-        let fence = positive_u64(&existing, "mint_claim_fence")?;
-        if attempts >= MAX_GITHUB_SERVICE_MINT_ATTEMPTS {
-            return Err(GithubServerServiceStoreError::RetryLimitReached);
-        }
-        let next_fence = fence
-            .checked_add(1)
-            .filter(|value| i64::try_from(*value).is_ok())
-            .ok_or(GithubServerServiceStoreError::FenceExhausted)?;
-        let row = sqlx::query(AssertSqlSafe(format!(
-            r"
-            UPDATE github_server_service_authority_issuances
-            SET state = 'claimed',
-                mint_attempt_count = mint_attempt_count + 1,
-                mint_claim_fence = $3,
-                mint_claim_owner_id = $4,
-                mint_claimed_at_ms = $5,
-                mint_claim_expires_at_ms = $6,
-                mint_started_at_ms = NULL,
-                mint_started_owner_id = NULL,
-                mint_started_claim_fence = NULL,
-                mint_started_claimed_at_ms = NULL,
-                mint_started_claim_expires_at_ms = NULL,
-                next_mint_at_ms = NULL,
-                mint_failure_kind = NULL,
-                state_updated_at_ms = $5
-            WHERE authority_id = $1 AND generation = $2
-              AND state = 'mint_retry'
-              AND next_mint_at_ms <= $5
-            RETURNING {ISSUANCE_COLUMNS}
-            "
-        )))
-        .bind(request.key().authority_id().as_uuid())
-        .bind(pg_bigint(request.key().generation().get()))
-        .bind(i64_from_u64(next_fence)?)
-        .bind(request.worker().as_uuid())
-        .bind(database_now)
-        .bind(claim_expires_at)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(operation_error)?
-        .ok_or(GithubServerServiceStoreError::ClaimRejected)?;
-        let claimed = decode_claimed_mint(descriptor.identity().clone(), &row)?;
-        transaction.commit().await.map_err(operation_error)?;
-        Ok(claimed)
-    }
-
     async fn begin_github_server_service_mint(
         &self,
         request: BeginGithubServerServiceMint,
@@ -588,13 +343,6 @@ impl GithubServerServiceAuthorityRepository for PostgresStore {
         }
     }
 
-    async fn reconcile_expired_github_server_service_mint(
-        &self,
-        request: ReconcileExpiredGithubServerServiceMint,
-    ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
-        reconcile_expired_mint(self, request).await
-    }
-
     async fn acquire_github_server_service_handoff(
         &self,
         request: AcquireGithubServerServiceHandoff,
@@ -623,25 +371,11 @@ impl GithubServerServiceAuthorityRepository for PostgresStore {
         retire_authority(self, request).await
     }
 
-    async fn claim_github_server_service_revocation(
-        &self,
-        request: ClaimGithubServerServiceRevocation,
-    ) -> Result<ClaimedGithubServerServiceRevocation, GithubServerServiceStoreError> {
-        claim_revocation(self, request).await
-    }
-
     async fn finish_github_server_service_revocation(
         &self,
         request: FinishGithubServerServiceRevocation,
     ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
         finish_revocation(self, request).await
-    }
-
-    async fn erase_expired_github_server_service_issuance(
-        &self,
-        request: EraseExpiredGithubServerServiceIssuance,
-    ) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
-        erase_expired(self, request).await
     }
 
     async fn claim_next_github_server_service_maintenance(
@@ -650,158 +384,6 @@ impl GithubServerServiceAuthorityRepository for PostgresStore {
     ) -> Result<Option<GithubServerServiceMaintenanceOutcome>, GithubServerServiceStoreError> {
         claim_next_maintenance(self, request).await
     }
-}
-
-#[allow(clippy::too_many_lines)]
-async fn reconcile_expired_mint(
-    store: &PostgresStore,
-    request: ReconcileExpiredGithubServerServiceMint,
-) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
-    const PRE_IO_FAILURE: &str = "mint_request_expired_before_provider_call";
-    const POST_IO_FAILURE: &str = "mint_outcome_unobserved_after_claim_expiry";
-
-    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
-    pin_read_committed(&mut transaction).await?;
-    let authority_row = select_authority_for_update(&mut transaction, request.selector())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
-    let descriptor = decode_authority(&authority_row)?;
-    let existing = select_issuance_for_update(&mut transaction, request.key())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
-    let state = issuance_state(&existing)?;
-
-    let replay = match state {
-        GithubServerServiceIssuanceState::Rejected => {
-            optional_string(&existing, "mint_failure_kind")?.is_some()
-                && optional_string(&existing, "terminal_reason")?.as_deref()
-                    == Some("request_expired")
-        }
-        GithubServerServiceIssuanceState::Indeterminate => {
-            optional_string(&existing, "mint_failure_kind")?.as_deref() == Some(POST_IO_FAILURE)
-                && optional_string(&existing, "terminal_reason")?.is_none()
-        }
-        _ => false,
-    };
-    if replay {
-        if descriptor
-            .refresh_generation()
-            .is_some_and(|generation| generation == request.key().generation())
-        {
-            return Err(GithubServerServiceStoreError::CorruptData);
-        }
-        let receipt = decode_issuance_receipt(&existing)?;
-        transaction.commit().await.map_err(operation_error)?;
-        return Ok(receipt);
-    }
-
-    if descriptor.state() != GithubServerServiceAuthorityState::Active
-        || descriptor.refresh_generation() != Some(request.key().generation())
-    {
-        return Err(GithubServerServiceStoreError::ClaimRejected);
-    }
-    let database_now = database_now_ms(&mut transaction).await?;
-    validate_caller_clock(request.observed_at(), database_now)?;
-    let request_deadline = i64_column(&existing, "request_deadline_at_ms")?;
-    let (target_state, failure, terminal_reason, expired) = match state {
-        GithubServerServiceIssuanceState::Claimed => (
-            "rejected",
-            PRE_IO_FAILURE.to_owned(),
-            Some("request_expired"),
-            optional_i64(&existing, "mint_claim_expires_at_ms")?
-                .is_some_and(|claim_expiry| database_now >= claim_expiry)
-                || database_now >= request_deadline,
-        ),
-        GithubServerServiceIssuanceState::Minting => (
-            "indeterminate",
-            POST_IO_FAILURE.to_owned(),
-            None,
-            optional_i64(&existing, "mint_claim_expires_at_ms")?
-                .is_some_and(|claim_expiry| database_now >= claim_expiry)
-                || database_now >= request_deadline,
-        ),
-        GithubServerServiceIssuanceState::MintRetryPending => (
-            "rejected",
-            optional_string(&existing, "mint_failure_kind")?
-                .ok_or(GithubServerServiceStoreError::CorruptData)?,
-            Some("request_expired"),
-            database_now >= request_deadline,
-        ),
-        _ => return Err(GithubServerServiceStoreError::ClaimRejected),
-    };
-    if !expired || database_now < i64_column(&existing, "state_updated_at_ms")? {
-        return Err(GithubServerServiceStoreError::ClaimRejected);
-    }
-
-    let row = sqlx::query(AssertSqlSafe(format!(
-        r"
-        UPDATE github_server_service_authority_issuances
-        SET state = $4,
-            mint_claim_owner_id = NULL,
-            mint_claimed_at_ms = NULL,
-            mint_claim_expires_at_ms = NULL,
-            next_mint_at_ms = NULL,
-            generation_failure_gate_at_ms = CASE
-                WHEN $4 = 'rejected' THEN $7 + 60000
-                ELSE safe_erase_after_ms
-            END,
-            mint_failure_kind = $5,
-            terminal_reason = $6,
-            state_updated_at_ms = $7
-        WHERE authority_id = $1 AND generation = $2
-          AND state = $3
-        RETURNING {ISSUANCE_COLUMNS}
-        "
-    )))
-    .bind(request.key().authority_id().as_uuid())
-    .bind(pg_bigint(request.key().generation().get()))
-    .bind(github_server_service_issuance_state_name(state))
-    .bind(target_state)
-    .bind(&failure)
-    .bind(terminal_reason)
-    .bind(database_now)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(operation_error)?
-    .ok_or(GithubServerServiceStoreError::ClaimRejected)?;
-    let updated = sqlx::query(
-        r"
-        UPDATE github_server_service_authorities
-        SET refresh_issuance_generation = NULL,
-            consecutive_generation_failures = LEAST(
-                consecutive_generation_failures + 1, 32
-            ),
-            failure_budget_rearm_at_ms = CASE
-                WHEN consecutive_generation_failures = 31 THEN $5
-                ELSE failure_budget_rearm_at_ms
-            END,
-            mint_gate_generation = CASE
-                WHEN next_mint_not_before_ms IS NULL
-                    OR $4 > next_mint_not_before_ms THEN $2
-                ELSE mint_gate_generation
-            END,
-            next_mint_not_before_ms = GREATEST(
-                COALESCE(next_mint_not_before_ms, $4), $4
-            ),
-            state_updated_at_ms = $3
-        WHERE id = $1 AND refresh_issuance_generation = $2
-          AND state = 'active' AND state_updated_at_ms <= $3
-        ",
-    )
-    .bind(request.key().authority_id().as_uuid())
-    .bind(pg_bigint(request.key().generation().get()))
-    .bind(database_now)
-    .bind(generation_failure_not_before(&row)?)
-    .bind(failure_budget_rearm_at(UnixMillis::new(database_now))?)
-    .execute(&mut *transaction)
-    .await
-    .map_err(operation_error)?;
-    if updated.rows_affected() != 1 {
-        return Err(GithubServerServiceStoreError::ClaimRejected);
-    }
-    let receipt = decode_issuance_receipt(&row)?;
-    transaction.commit().await.map_err(operation_error)?;
-    Ok(receipt)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2715,123 +2297,6 @@ async fn retire_authority(
     Ok(result)
 }
 
-#[allow(clippy::too_many_lines)]
-async fn claim_revocation(
-    store: &PostgresStore,
-    request: ClaimGithubServerServiceRevocation,
-) -> Result<ClaimedGithubServerServiceRevocation, GithubServerServiceStoreError> {
-    let claim_duration = requested_duration(request.observed_at(), request.claim_expires_at())?;
-    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
-    pin_read_committed(&mut transaction).await?;
-    let authority_row = select_authority_for_update(&mut transaction, request.selector())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
-    let descriptor = decode_authority(&authority_row)?;
-    let existing = select_issuance_for_update(&mut transaction, request.key())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
-    let state = issuance_state(&existing)?;
-    let database_now = database_now_ms(&mut transaction).await?;
-    if state == GithubServerServiceIssuanceState::RevokeClaimed
-        && optional_uuid(&existing, "revoke_claim_owner_id")? == Some(request.worker().as_uuid())
-        && optional_claim_duration(
-            &existing,
-            "revoke_claimed_at_ms",
-            "revoke_claim_expires_at_ms",
-        )? == Some(claim_duration)
-        && optional_i64(&existing, "revoke_claimed_at_ms")?
-            .is_some_and(|claimed_at| claimed_at <= database_now)
-        && optional_i64(&existing, "revoke_claim_expires_at_ms")?
-            .is_some_and(|expires_at| database_now < expires_at)
-        && i64_column(&existing, "safe_erase_after_ms")? > database_now
-    {
-        let Some(claimed) = decode_claimed_revocation_or_quarantine(
-            &mut transaction,
-            descriptor.identity().clone(),
-            &existing,
-            UnixMillis::new(database_now),
-        )
-        .await?
-        else {
-            transaction.commit().await.map_err(operation_error)?;
-            return Err(GithubServerServiceStoreError::CorruptData);
-        };
-        transaction.commit().await.map_err(operation_error)?;
-        return Ok(claimed);
-    }
-    validate_caller_clock(request.observed_at(), database_now)?;
-    let eligible = state == GithubServerServiceIssuanceState::RevokePending
-        || state == GithubServerServiceIssuanceState::RevokeRetryPending
-            && optional_i64(&existing, "next_revoke_at_ms")?
-                .is_some_and(|next| next <= database_now)
-        || state == GithubServerServiceIssuanceState::RevokeClaimed
-            && optional_i64(&existing, "revoke_claim_expires_at_ms")?
-                .is_some_and(|expiry| expiry <= database_now);
-    let claim_expires_at = issue_deadline(database_now, claim_duration)?;
-    if !eligible || i64_column(&existing, "safe_erase_after_ms")? <= claim_expires_at {
-        return Err(GithubServerServiceStoreError::ClaimRejected);
-    }
-    let attempts = u16_column(&existing, "revoke_attempt_count")?;
-    let fence = nonnegative_u64(&existing, "revoke_claim_fence")?;
-    if attempts >= MAX_GITHUB_SERVICE_REVOKE_ATTEMPTS {
-        return Err(GithubServerServiceStoreError::RetryLimitReached);
-    }
-    if has_live_handoff(
-        &mut transaction,
-        request.key(),
-        UnixMillis::new(database_now),
-    )
-    .await?
-    {
-        return Err(GithubServerServiceStoreError::HandoffStillLive);
-    }
-    let next_fence = fence
-        .checked_add(1)
-        .filter(|value| i64::try_from(*value).is_ok())
-        .ok_or(GithubServerServiceStoreError::FenceExhausted)?;
-    let row = sqlx::query(AssertSqlSafe(format!(
-        r"
-        UPDATE github_server_service_authority_issuances
-        SET state = 'revoke_claimed',
-            revoke_attempt_count = revoke_attempt_count + 1,
-            revoke_claim_fence = $3, revoke_claim_owner_id = $4,
-            revoke_claimed_at_ms = $5, revoke_claim_expires_at_ms = $6,
-            revoke_result_owner_id = NULL,
-            revoke_result_claim_fence = NULL,
-            revoke_result_claimed_at_ms = NULL,
-            revoke_result_claim_expires_at_ms = NULL,
-            next_revoke_at_ms = NULL, revoke_failure_kind = NULL,
-            state_updated_at_ms = $5
-        WHERE authority_id = $1 AND generation = $2
-          AND state IN ('revoke_pending', 'revoke_retry', 'revoke_claimed')
-        RETURNING {ISSUANCE_COLUMNS}
-        "
-    )))
-    .bind(request.key().authority_id().as_uuid())
-    .bind(pg_bigint(request.key().generation().get()))
-    .bind(i64_from_u64(next_fence)?)
-    .bind(request.worker().as_uuid())
-    .bind(database_now)
-    .bind(claim_expires_at)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(operation_error)?
-    .ok_or(GithubServerServiceStoreError::ClaimRejected)?;
-    let Some(claimed) = decode_claimed_revocation_or_quarantine(
-        &mut transaction,
-        descriptor.identity().clone(),
-        &row,
-        UnixMillis::new(database_now),
-    )
-    .await?
-    else {
-        transaction.commit().await.map_err(operation_error)?;
-        return Err(GithubServerServiceStoreError::CorruptData);
-    };
-    transaction.commit().await.map_err(operation_error)?;
-    Ok(claimed)
-}
-
 async fn has_live_handoff(
     connection: &mut PgConnection,
     key: GithubServerServiceIssuanceKey,
@@ -3101,107 +2566,6 @@ async fn rearm_github_server_service_failure_budget(
     .await
     .map_err(operation_error)?;
     Ok(changed.rows_affected() == 1)
-}
-
-async fn erase_expired(
-    store: &PostgresStore,
-    request: EraseExpiredGithubServerServiceIssuance,
-) -> Result<GithubServerServiceIssuanceReceipt, GithubServerServiceStoreError> {
-    let mut transaction = store.pool.begin().await.map_err(operation_error)?;
-    pin_read_committed(&mut transaction).await?;
-    let authority_row = select_authority_for_update(&mut transaction, request.selector())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
-    let descriptor = decode_authority(&authority_row)?;
-    let existing = select_issuance_for_update(&mut transaction, request.key())
-        .await?
-        .ok_or(GithubServerServiceStoreError::NotFound)?;
-    if issuance_state(&existing)? == GithubServerServiceIssuanceState::Revoked {
-        let receipt = decode_issuance_receipt(&existing)?;
-        transaction.commit().await.map_err(operation_error)?;
-        return Ok(receipt);
-    }
-    let database_now = database_now_ms(&mut transaction).await?;
-    validate_caller_clock(request.observed_at(), database_now)?;
-    let state = issuance_state(&existing)?;
-    if !matches!(
-        state,
-        GithubServerServiceIssuanceState::Ready
-            | GithubServerServiceIssuanceState::Indeterminate
-            | GithubServerServiceIssuanceState::Quarantined
-            | GithubServerServiceIssuanceState::RevokePending
-            | GithubServerServiceIssuanceState::RevokeClaimed
-            | GithubServerServiceIssuanceState::RevokeRetryPending
-    ) || i64_column(&existing, "safe_erase_after_ms")? > database_now
-    {
-        return Err(GithubServerServiceStoreError::ClaimRejected);
-    }
-    let terminal_reason = if optional_i64(&existing, "provider_expires_at_ms")?.is_some() {
-        "provider_expired"
-    } else {
-        "conservative_expiry"
-    };
-    let row = sqlx::query(AssertSqlSafe(format!(
-        r"
-        UPDATE github_server_service_authority_issuances
-        SET state = 'revoked', mint_claim_owner_id = NULL,
-            mint_claimed_at_ms = NULL, mint_claim_expires_at_ms = NULL,
-            next_mint_at_ms = NULL, revoke_claim_owner_id = NULL,
-            revoke_claimed_at_ms = NULL, revoke_claim_expires_at_ms = NULL,
-            next_revoke_at_ms = NULL, revoke_failure_kind = NULL,
-            plaintext_schema = NULL, plaintext_size_bytes = NULL,
-            plaintext_digest = NULL, aad_digest = NULL,
-            envelope_schema = NULL, wrapping_key_id = NULL,
-            wrapped_data_key = NULL, nonce = NULL, ciphertext = NULL,
-            terminal_reason = $3, state_updated_at_ms = $4
-        WHERE authority_id = $1 AND generation = $2
-          AND state IN ('ready', 'indeterminate', 'quarantined', 'revoke_pending',
-                        'revoke_claimed', 'revoke_retry')
-          AND safe_erase_after_ms <= $4
-        RETURNING {ISSUANCE_COLUMNS}
-        "
-    )))
-    .bind(request.key().authority_id().as_uuid())
-    .bind(pg_bigint(request.key().generation().get()))
-    .bind(terminal_reason)
-    .bind(database_now)
-    .fetch_optional(&mut *transaction)
-    .await
-    .map_err(operation_error)?
-    .ok_or(GithubServerServiceStoreError::ClaimRejected)?;
-    if state == GithubServerServiceIssuanceState::Ready {
-        if descriptor.current_generation() != Some(request.key().generation()) {
-            return Err(GithubServerServiceStoreError::CorruptData);
-        }
-        let cleared = sqlx::query(
-            r"
-            UPDATE github_server_service_authorities
-            SET current_issuance_generation = NULL, state_updated_at_ms = $3
-            WHERE tenant_id = $1 AND id = $2 AND state = 'active'
-              AND current_issuance_generation = $4
-              AND state_updated_at_ms <= $3
-            ",
-        )
-        .bind(request.selector().tenant().as_str())
-        .bind(request.key().authority_id().as_uuid())
-        .bind(database_now)
-        .bind(pg_bigint(request.key().generation().get()))
-        .execute(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        if cleared.rows_affected() != 1 {
-            return Err(GithubServerServiceStoreError::ClaimRejected);
-        }
-    }
-    maybe_finish_retirement(
-        &mut transaction,
-        request.key().authority_id(),
-        UnixMillis::new(database_now),
-    )
-    .await?;
-    let receipt = decode_issuance_receipt(&row)?;
-    transaction.commit().await.map_err(operation_error)?;
-    Ok(receipt)
 }
 
 async fn maybe_finish_retirement(
@@ -3587,55 +2951,6 @@ fn decode_consumer_claim(
         action,
         revision,
     ))
-}
-
-fn exact_mint_claim_replay(
-    row: &PgRow,
-    worker: GithubServerServiceWorkerId,
-    claim_duration: i64,
-    request_duration: i64,
-) -> Result<bool, GithubServerServiceStoreError> {
-    Ok(
-        issuance_state(row)? == GithubServerServiceIssuanceState::Claimed
-            && u16_column(row, "mint_attempt_count")? == 1
-            && positive_u64(row, "mint_claim_fence")? == 1
-            && optional_uuid(row, "mint_claim_owner_id")? == Some(worker.as_uuid())
-            && optional_i64(row, "mint_claimed_at_ms")?
-                == Some(i64_column(row, "requested_at_ms")?)
-            && i64_column(row, "state_updated_at_ms")? == i64_column(row, "requested_at_ms")?
-            && optional_claim_duration(row, "mint_claimed_at_ms", "mint_claim_expires_at_ms")?
-                == Some(claim_duration)
-            && i64_column(row, "request_deadline_at_ms")?
-                .checked_sub(i64_column(row, "requested_at_ms")?)
-                == Some(request_duration),
-    )
-}
-
-fn live_mint_claim_at(
-    row: &PgRow,
-    database_now: i64,
-) -> Result<bool, GithubServerServiceStoreError> {
-    Ok(optional_i64(row, "mint_claimed_at_ms")?
-        .is_some_and(|claimed_at| claimed_at <= database_now)
-        && optional_i64(row, "mint_claim_expires_at_ms")?
-            .is_some_and(|expires_at| database_now < expires_at)
-        && database_now < i64_column(row, "request_deadline_at_ms")?)
-}
-
-fn optional_claim_duration(
-    row: &PgRow,
-    claimed_at_column: &str,
-    expires_at_column: &str,
-) -> Result<Option<i64>, GithubServerServiceStoreError> {
-    let Some(claimed_at) = optional_i64(row, claimed_at_column)? else {
-        return Ok(None);
-    };
-    let Some(expires_at) = optional_i64(row, expires_at_column)? else {
-        return Ok(None);
-    };
-    Ok(expires_at
-        .checked_sub(claimed_at)
-        .filter(|duration| *duration > 0))
 }
 
 fn require_exact_begin_evidence(

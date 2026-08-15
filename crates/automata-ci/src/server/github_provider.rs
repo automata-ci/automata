@@ -805,9 +805,7 @@ fn map_authority_store_error(
         GithubServerServiceStoreError::CorruptData
         | GithubServerServiceStoreError::NotFound
         | GithubServerServiceStoreError::HandoffRejected
-        | GithubServerServiceStoreError::RefreshAlreadyActive
         | GithubServerServiceStoreError::FenceExhausted
-        | GithubServerServiceStoreError::RetryLimitReached
         | GithubServerServiceStoreError::HandoffStillLive => {
             GithubProviderBootstrapError::InconsistentState
         }
