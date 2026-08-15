@@ -296,6 +296,23 @@ and the worker composition remain planned; follow the
 [local installation and deployment roadmap](maintainers/roadmaps/local-installation.md) for
 their merge and host-qualification gates.
 
+The internal local-source foundation seals tracked and non-ignored live bytes
+through pinned, no-follow ancestor handles and feeds every exact digest-bound
+archive through source-policy-specific workflow discovery. Git mode normalizes
+tracked symlinks across native Unix links and Windows placeholders; Windows
+reparse points and junctions fail closed. Sparse and assume-unchanged index
+flags cannot hide live bytes, ignored paths are classified in bounded batches,
+and portable path identity uses a bounded Unicode-normalized full-case-folded
+component trie. Its adversarial fixture suite is available with:
+
+```console
+cargo test --locked -p automata-ci-local snapshot::tests
+```
+
+There is deliberately no `automata local check` command yet. Exact local event
+semantics, same-tree reusable-workflow compilation, and admission must land
+together before that public validation surface is truthful.
+
 The opt-in live adapter contract creates one randomly named identity volume,
 adopts the same UUID through the public adapter, then re-inspects and removes
 only that exact unattached fixture:

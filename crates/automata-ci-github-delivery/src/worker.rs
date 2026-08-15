@@ -48,7 +48,7 @@ use automata_ci_store::{
 use automata_ci_workflow_github::{
     RepositoryWorkflowDiscoveryError, RepositoryWorkflowDiscoveryFailure,
     RepositoryWorkflowDiscoveryLimits, RepositoryWorkflowDiscoveryOutcome,
-    discover_repository_workflows,
+    RepositoryWorkflowDiscoveryPolicy, discover_repository_workflows,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -1424,6 +1424,7 @@ impl GithubDeliveryWorker {
         let workflows = discover_repository_workflows(
             source.bytes(),
             manifest_discovery_limits(evidence.manifest())?,
+            RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
         )
         .map_err(|error| ProcessingFailure::reject(discovery_failure_kind(error)))?;
         self.all_direct_workflow_outcomes(
@@ -2512,8 +2513,16 @@ const fn discovery_failure_kind(error: RepositoryWorkflowDiscoveryError) -> &'st
             "github.repository_archive.resource_limit"
         }
         RepositoryWorkflowDiscoveryError::UnsafePath => "github.repository_archive.unsafe_path",
+        RepositoryWorkflowDiscoveryError::UnsafeLink => "github.repository_archive.unsafe_link",
         RepositoryWorkflowDiscoveryError::DuplicatePath => {
             "github.repository_archive.duplicate_path"
+        }
+        RepositoryWorkflowDiscoveryError::PathAlias => "github.repository_archive.path_alias",
+        RepositoryWorkflowDiscoveryError::PathTypeConflict => {
+            "github.repository_archive.path_type_conflict"
+        }
+        RepositoryWorkflowDiscoveryError::NamespaceAlias => {
+            "github.repository_archive.workflow_namespace_alias"
         }
         RepositoryWorkflowDiscoveryError::UnsupportedArchiveEntry => {
             "github.repository_archive.unsupported_entry"
@@ -2656,10 +2665,26 @@ mod lease_tests {
     use super::*;
 
     #[test]
-    fn github_actions_workflow_authority_has_a_specific_archive_failure() {
+    fn archive_authority_and_graph_failures_have_specific_failure_kinds() {
         assert_eq!(
             discovery_failure_kind(RepositoryWorkflowDiscoveryError::UnsupportedWorkflowLocation),
             "github.repository_archive.unsupported_workflow_location"
+        );
+        assert_eq!(
+            discovery_failure_kind(RepositoryWorkflowDiscoveryError::UnsafeLink),
+            "github.repository_archive.unsafe_link"
+        );
+        assert_eq!(
+            discovery_failure_kind(RepositoryWorkflowDiscoveryError::PathAlias),
+            "github.repository_archive.path_alias"
+        );
+        assert_eq!(
+            discovery_failure_kind(RepositoryWorkflowDiscoveryError::PathTypeConflict),
+            "github.repository_archive.path_type_conflict"
+        );
+        assert_eq!(
+            discovery_failure_kind(RepositoryWorkflowDiscoveryError::NamespaceAlias),
+            "github.repository_archive.workflow_namespace_alias"
         );
     }
 

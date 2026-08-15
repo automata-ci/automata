@@ -42,6 +42,15 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   adapter, Compose topology, or public local lifecycle command. Guest-bearing
   Kubernetes, Windows, and macOS artifacts must be rebuilt in lockstep because
   protocol versions 1 through 3 are deliberately rejected.
+- Internal `LocalSnapshot` foundation for tracked and non-ignored live-worktree
+  source. It hashes the exact deterministic archive consumed by the existing
+  bounded workflow discovery, pins filesystem ancestors without following
+  links, normalizes tracked symlinks from Git mode, rejects Windows reparse
+  points, sparse or assume-unchanged index state, and bounded
+  Unicode-normalized portable path-graph aliases, supports exactly one explicit
+  `.github/workflows` or `.ci/workflows` namespace, and exposes no partial
+  product command, admission, execution, GitHub authentication, or Check Run
+  path.
 
 ### Known limitations
 

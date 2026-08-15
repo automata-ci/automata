@@ -26,8 +26,9 @@ use automata_ci_store::{
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, GithubChangedFiles, GithubEventMetadata,
     GithubWorkflowCompiler, GithubWorkflowFrontend, GithubWorkflowSourcePlan, ParseWorkflowRequest,
-    RepositoryWorkflowDiscoveryLimits, SourceId, SourceOrigin, SourceProvenance,
-    WorkflowFrontend as _, WorkflowNotSelectedReason, discover_repository_workflows,
+    RepositoryWorkflowDiscoveryLimits, RepositoryWorkflowDiscoveryPolicy, SourceId, SourceOrigin,
+    SourceProvenance, WorkflowFrontend as _, WorkflowNotSelectedReason,
+    discover_repository_workflows,
 };
 use automata_ci_workflow_service::{
     AdmissionRepositoryCoordinates, RepositoryWorkflowSource, WorkflowAdmissionError,
@@ -1306,19 +1307,23 @@ fn repository_workflow_sources(
         limits.workflow_max_bytes(),
     )
     .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-    discover_repository_workflows(source.bytes(), discovery_limits)
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)
-        .map(|workflows| {
-            workflows
-                .into_iter()
-                .filter_map(|workflow| {
-                    let (path, source) = workflow.into_parts();
-                    source
-                        .ok()
-                        .map(|source| RepositoryWorkflowSource::new(path, Bytes::from(source)))
-                })
-                .collect()
-        })
+    discover_repository_workflows(
+        source.bytes(),
+        discovery_limits,
+        RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
+    )
+    .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)
+    .map(|workflows| {
+        workflows
+            .into_iter()
+            .filter_map(|workflow| {
+                let (path, source) = workflow.into_parts();
+                source
+                    .ok()
+                    .map(|source| RepositoryWorkflowSource::new(path, Bytes::from(source)))
+            })
+            .collect()
+    })
 }
 
 fn valid_authenticated_event_request(request: &GithubDeliveryWorkflowRequest<'_>) -> bool {
