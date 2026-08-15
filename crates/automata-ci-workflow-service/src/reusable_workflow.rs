@@ -33,7 +33,9 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::credential_requirements::{BuiltInCredentialRequirement, discover_job_credentials};
+use crate::credential_requirements::{
+    BuiltInCredentialRequirement, built_in_secret_requirement, discover_job_credentials,
+};
 
 /// Maximum repository workflow files accepted by one reusable catalog.
 pub const MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES: usize = 50;
@@ -1837,10 +1839,8 @@ impl CredentialTraversalPolicy for SymbolicCredentialPolicy {
         if let Some(contract) = node.plan.logical().invocation() {
             for secret in contract.secrets().iter().filter(|secret| secret.required()) {
                 let name = secret.key().value().as_str();
-                if name.eq_ignore_ascii_case("GITHUB_TOKEN") {
-                    required
-                        .built_in
-                        .insert(BuiltInCredentialRequirement::GithubToken);
+                if let Some(requirement) = built_in_secret_requirement(name) {
+                    required.built_in.insert(requirement);
                 } else {
                     required.external.insert(name.to_ascii_uppercase());
                 }
@@ -1923,8 +1923,8 @@ fn symbolic_secret_edge(
                 let source = binding.source().value().as_str();
                 bindings.insert(
                     target.to_ascii_uppercase(),
-                    if source.eq_ignore_ascii_case("GITHUB_TOKEN") {
-                        SymbolicSecretSource::BuiltIn(BuiltInCredentialRequirement::GithubToken)
+                    if let Some(requirement) = built_in_secret_requirement(source) {
+                        SymbolicSecretSource::BuiltIn(requirement)
                     } else {
                         SymbolicSecretSource::External(source.to_ascii_uppercase())
                     },

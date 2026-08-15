@@ -21,8 +21,9 @@ use tokio::{io::AsyncWriteExt as _, process::Command as ProcessCommand, time::ti
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CaptureFailure, CommandFailure, MAX_COMMAND_STREAM_BYTES, read_bounded, spawn_contained,
-    terminate_process_tree, terminate_remaining_process_tree,
+    CaptureFailure, CommandFailure, MAX_COMMAND_STREAM_BYTES, read_bounded,
+    snapshot_limits::local_snapshot_limits, spawn_contained, terminate_process_tree,
+    terminate_remaining_process_tree,
 };
 
 const SNAPSHOT_ROOT: &str = "worktree";
@@ -31,35 +32,17 @@ const MAX_GIT_COORDINATE_FIELD_BYTES: usize = 16 * 1_024;
 const MAX_GIT_COORDINATES_BYTES: usize = 4 * (MAX_GIT_COORDINATE_FIELD_BYTES + 2);
 const MAX_GIT_LOCATOR_BYTES: usize = MAX_GIT_COORDINATE_FIELD_BYTES;
 const MAX_GIT_HEAD_BYTES: usize = 128;
-// Capture retains bounded Git inventories and one expanded file inventory while
-// constructing one compressed archive. These local-only ceilings keep the peak
-// materially below the shared delivery-scale bounds; the public result retains
-// none of those buffers.
-const LOCAL_MAX_COMPRESSED_BYTES: u64 = 32 * 1024 * 1024;
-const LOCAL_MAX_DECOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
-const LOCAL_MAX_ENTRIES: usize = 20_000;
-const LOCAL_MAX_EXPANDED_BYTES: u64 = 32 * 1024 * 1024;
-const LOCAL_MAX_ENTRY_PATH_BYTES: usize = 4_096;
-const LOCAL_MAX_WORKFLOWS: usize = 128;
-const LOCAL_MAX_WORKFLOW_BYTES: u64 = 1024 * 1024;
-
-#[cfg(unix)]
 const TRUSTED_GIT_EXECUTABLE: &str = "/usr/bin/git";
-#[cfg(unix)]
 const GIT_NULL_DEVICE: &str = "/dev/null";
-#[cfg(windows)]
-const GIT_NULL_DEVICE: &str = "NUL";
 
 #[derive(Debug)]
 struct GitExecutable {
     path: PathBuf,
-    #[cfg(unix)]
     identity: ExecutableIdentity,
     #[cfg(test)]
     fixture: bool,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ExecutableIdentity {
     device: u64,
@@ -74,7 +57,6 @@ struct ExecutableIdentity {
 }
 
 impl GitExecutable {
-    #[cfg(unix)]
     fn resolve() -> Result<Self, LocalSnapshotError> {
         let path = PathBuf::from(TRUSTED_GIT_EXECUTABLE);
         let metadata = trusted_executable_metadata(&path)?;
@@ -86,18 +68,10 @@ impl GitExecutable {
         })
     }
 
-    #[cfg(not(any(unix, windows)))]
-    fn resolve() -> Result<Self, LocalSnapshotError> {
-        Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedPlatform,
-        ))
-    }
-
     fn path(&self) -> &Path {
         &self.path
     }
 
-    #[cfg(unix)]
     fn verify(&self) -> Result<(), LocalSnapshotError> {
         #[cfg(test)]
         if self.fixture {
@@ -112,44 +86,26 @@ impl GitExecutable {
         Ok(())
     }
 
-    #[cfg(not(unix))]
-    fn verify(&self) -> Result<(), LocalSnapshotError> {
-        Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedPlatform,
-        ))
-    }
-
     #[cfg(test)]
     fn fixture(path: &Path) -> Self {
-        #[cfg(unix)]
-        {
-            Self {
-                path: path.to_owned(),
-                identity: ExecutableIdentity {
-                    device: 0,
-                    inode: 0,
-                    length: 0,
-                    modified_seconds: 0,
-                    modified_nanoseconds: 0,
-                    changed_seconds: 0,
-                    changed_nanoseconds: 0,
-                    mode: 0,
-                    owner: 0,
-                },
-                fixture: true,
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            Self {
-                path: path.to_owned(),
-                fixture: true,
-            }
+        Self {
+            path: path.to_owned(),
+            identity: ExecutableIdentity {
+                device: 0,
+                inode: 0,
+                length: 0,
+                modified_seconds: 0,
+                modified_nanoseconds: 0,
+                changed_seconds: 0,
+                changed_nanoseconds: 0,
+                mode: 0,
+                owner: 0,
+            },
+            fixture: true,
         }
     }
 }
 
-#[cfg(unix)]
 impl ExecutableIdentity {
     fn new(metadata: &fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt as _;
@@ -199,29 +155,17 @@ fn check_cancelled(cancellation: &CancellationToken) -> Result<(), LocalSnapshot
     }
 }
 
-pub(crate) fn local_snapshot_limits() -> RepositoryWorkflowDiscoveryLimits {
-    RepositoryWorkflowDiscoveryLimits::new(
-        LOCAL_MAX_COMPRESSED_BYTES,
-        LOCAL_MAX_DECOMPRESSED_BYTES,
-        LOCAL_MAX_ENTRIES,
-        LOCAL_MAX_EXPANDED_BYTES,
-        LOCAL_MAX_ENTRY_PATH_BYTES,
-        LOCAL_MAX_WORKFLOWS,
-        LOCAL_MAX_WORKFLOW_BYTES,
-    )
-    .expect("fixed local snapshot limits must satisfy shared hard bounds")
-}
-
 fn validate_local_snapshot_limits(
     limits: RepositoryWorkflowDiscoveryLimits,
 ) -> Result<(), LocalSnapshotError> {
-    if limits.maximum_compressed_bytes() > LOCAL_MAX_COMPRESSED_BYTES
-        || limits.maximum_decompressed_bytes() > LOCAL_MAX_DECOMPRESSED_BYTES
-        || limits.maximum_entries() > LOCAL_MAX_ENTRIES
-        || limits.maximum_expanded_bytes() > LOCAL_MAX_EXPANDED_BYTES
-        || limits.maximum_entry_path_bytes() > LOCAL_MAX_ENTRY_PATH_BYTES
-        || limits.maximum_workflows() > LOCAL_MAX_WORKFLOWS
-        || limits.maximum_workflow_bytes() > LOCAL_MAX_WORKFLOW_BYTES
+    let maximum = local_snapshot_limits();
+    if limits.maximum_compressed_bytes() > maximum.maximum_compressed_bytes()
+        || limits.maximum_decompressed_bytes() > maximum.maximum_decompressed_bytes()
+        || limits.maximum_entries() > maximum.maximum_entries()
+        || limits.maximum_expanded_bytes() > maximum.maximum_expanded_bytes()
+        || limits.maximum_entry_path_bytes() > maximum.maximum_entry_path_bytes()
+        || limits.maximum_workflows() > maximum.maximum_workflows()
+        || limits.maximum_workflow_bytes() > maximum.maximum_workflow_bytes()
     {
         return Err(LocalSnapshotError::new(
             LocalSnapshotErrorCode::ResourceLimit,
@@ -358,18 +302,8 @@ pub(crate) async fn capture_snapshot(
     request: LocalSnapshotRequest,
     cancellation: &CancellationToken,
 ) -> Result<LocalSnapshot, LocalSnapshotError> {
-    #[cfg(windows)]
-    {
-        let _ = (request, cancellation);
-        return Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedPlatform,
-        ));
-    }
-    #[cfg(not(windows))]
-    {
-        let git = GitExecutable::resolve()?;
-        capture_snapshot_with_executable(request, &git, cancellation).await
-    }
+    let git = GitExecutable::resolve()?;
+    capture_snapshot_with_executable(request, &git, cancellation).await
 }
 
 async fn capture_snapshot_with_executable(
@@ -1430,7 +1364,6 @@ impl GitLocator {
             .handle
             .symlink_metadata(".git")
             .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::NotGitWorktree))?;
-        require_no_windows_reparse(&metadata)?;
         if metadata.is_dir() {
             let directory = open_git_locator_directory(
                 worktree,
@@ -1474,7 +1407,6 @@ impl GitLocator {
                     .handle
                     .symlink_metadata(".git")
                     .map_err(|_| LocalSnapshotError::new(failure))?;
-                require_no_windows_reparse(&metadata)?;
                 if !metadata.is_dir() {
                     return Err(LocalSnapshotError::new(failure));
                 }
@@ -1527,7 +1459,6 @@ fn capture_git_file(
         .handle
         .symlink_metadata(".git")
         .map_err(|_| LocalSnapshotError::new(failure))?;
-    require_no_windows_reparse(&before)?;
     if !before.is_file() {
         return Err(LocalSnapshotError::new(failure));
     }
@@ -1542,7 +1473,6 @@ fn capture_git_file(
     let opened = file
         .metadata()
         .map_err(|_| LocalSnapshotError::new(failure))?;
-    require_no_windows_reparse(&opened)?;
     if !opened.is_file() || MetadataStamp::new(&opened) != stamp {
         return Err(LocalSnapshotError::new(failure));
     }
@@ -1565,8 +1495,6 @@ fn capture_git_file(
         .handle
         .symlink_metadata(".git")
         .map_err(|_| LocalSnapshotError::new(failure))?;
-    require_no_windows_reparse(&opened_after)?;
-    require_no_windows_reparse(&ambient_after)?;
     if !opened_after.is_file()
         || !ambient_after.is_file()
         || MetadataStamp::new(&opened_after) != stamp
@@ -1648,7 +1576,6 @@ fn require_directory(
     metadata: &Metadata,
     code: LocalSnapshotErrorCode,
 ) -> Result<(), LocalSnapshotError> {
-    require_no_windows_reparse(metadata)?;
     if !metadata.is_dir() {
         return Err(LocalSnapshotError::new(code));
     }
@@ -1659,7 +1586,6 @@ fn require_ambient_directory(
     metadata: &fs::Metadata,
     code: LocalSnapshotErrorCode,
 ) -> Result<(), LocalSnapshotError> {
-    require_no_ambient_windows_reparse(metadata)?;
     if !metadata.is_dir() {
         return Err(LocalSnapshotError::new(code));
     }
@@ -1740,7 +1666,6 @@ fn scan_worktree_filesystem(
                 .handle
                 .symlink_metadata(&name)
                 .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
-            require_no_windows_reparse(&metadata)?;
             validate_scanned_path(&path, &metadata, path_validator)?;
             let file_type = metadata.file_type();
             let stamp = MetadataStamp::new(&metadata);
@@ -1899,7 +1824,6 @@ fn capture_entries(
                 ));
             }
         };
-        require_no_windows_reparse(&before)?;
         let before_stamp = MetadataStamp::new(&before);
         let payload = match tracked {
             Some(TrackedMode::Symlink) if before.file_type().is_symlink() => {
@@ -1952,7 +1876,6 @@ fn capture_entries(
         let after = parent
             .symlink_metadata(name)
             .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
-        require_no_windows_reparse(&after)?;
         if MetadataStamp::new(&after) != before_stamp {
             return Err(LocalSnapshotError::new(
                 LocalSnapshotErrorCode::ConcurrentMutation,
@@ -2196,16 +2119,19 @@ fn build_archive(
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?;
     let writer = BoundedWriter::new(encoder, maximum_decompressed_bytes);
     let mut archive = TarBuilder::new(writer);
-    append_root(&mut archive).map_err(|error| archive_error(&error))?;
+    append_root(&mut archive).map_err(|error| archive_error(&error, cancellation))?;
     for entry in entries {
         check_cancelled(cancellation)?;
-        append_entry(&mut archive, entry, cancellation).map_err(|error| archive_error(&error))?;
+        append_entry(&mut archive, entry, cancellation)
+            .map_err(|error| archive_error(&error, cancellation))?;
     }
     let writer = archive
         .into_inner()
-        .map_err(|error| archive_error(&error))?;
+        .map_err(|error| archive_error(&error, cancellation))?;
     let encoder = writer.into_inner();
-    let writer = encoder.finish().map_err(|error| archive_error(&error))?;
+    let writer = encoder
+        .finish()
+        .map_err(|error| archive_error(&error, cancellation))?;
     check_cancelled(cancellation)?;
     Ok(writer.into_inner())
 }
@@ -2263,7 +2189,7 @@ impl<'a, R> CancellableReader<'a, R> {
 impl<R: io::Read> io::Read for CancellableReader<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if self.cancellation.is_cancelled() {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(io::Error::other("cancelled"));
         }
         self.inner.read(buffer)
     }
@@ -2280,8 +2206,10 @@ fn deterministic_header(entry_type: EntryType, size: u64, mode: u32) -> Header {
     header
 }
 
-fn archive_error(error: &io::Error) -> LocalSnapshotError {
-    LocalSnapshotError::new(if error.kind() == io::ErrorKind::FileTooLarge {
+fn archive_error(error: &io::Error, cancellation: &CancellationToken) -> LocalSnapshotError {
+    LocalSnapshotError::new(if cancellation.is_cancelled() {
+        LocalSnapshotErrorCode::Cancelled
+    } else if error.kind() == io::ErrorKind::FileTooLarge {
         LocalSnapshotErrorCode::ResourceLimit
     } else {
         LocalSnapshotErrorCode::ArchiveEncoding
@@ -2373,7 +2301,6 @@ fn open_regular_nofollow(parent: &Dir, name: &str) -> Result<File, LocalSnapshot
     let metadata = file
         .metadata()
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
-    require_no_windows_reparse(&metadata)?;
     if !metadata.is_file() {
         return Err(LocalSnapshotError::new(
             LocalSnapshotErrorCode::ConcurrentMutation,
@@ -2382,21 +2309,12 @@ fn open_regular_nofollow(parent: &Dir, name: &str) -> Result<File, LocalSnapshot
     Ok(file)
 }
 
-#[cfg(unix)]
 fn configure_regular_open(options: &mut OpenOptions) {
     use cap_std::fs::OpenOptionsExt as _;
 
     let flags = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits())
         .expect("Unix nonblocking flag must fit c_int");
     options.custom_flags(flags);
-}
-
-#[cfg(windows)]
-fn configure_regular_open(options: &mut OpenOptions) {
-    use cap_std::fs::OpenOptionsExt as _;
-
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    options.share_mode(FILE_SHARE_READ);
 }
 
 fn executable(metadata: &Metadata, tracked: Option<TrackedMode>) -> bool {
@@ -2406,64 +2324,10 @@ fn executable(metadata: &Metadata, tracked: Option<TrackedMode>) -> bool {
     )
 }
 
-#[cfg(unix)]
 fn untracked_executable(metadata: &Metadata) -> bool {
     use cap_std::fs::MetadataExt as _;
 
     metadata.mode() & 0o111 != 0
-}
-
-#[cfg(windows)]
-const fn untracked_executable(_metadata: &Metadata) -> bool {
-    false
-}
-
-fn require_no_windows_reparse(metadata: &Metadata) -> Result<(), LocalSnapshotError> {
-    if metadata_is_windows_reparse(metadata) {
-        return Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedEntry,
-        ));
-    }
-    Ok(())
-}
-
-fn require_no_ambient_windows_reparse(metadata: &fs::Metadata) -> Result<(), LocalSnapshotError> {
-    if ambient_metadata_is_windows_reparse(metadata) {
-        return Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedEntry,
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-const fn metadata_is_windows_reparse(_metadata: &Metadata) -> bool {
-    false
-}
-
-#[cfg(windows)]
-fn metadata_is_windows_reparse(metadata: &Metadata) -> bool {
-    use cap_std::fs::MetadataExt as _;
-
-    windows_reparse_attributes(metadata.file_attributes())
-}
-
-#[cfg(unix)]
-const fn ambient_metadata_is_windows_reparse(_metadata: &fs::Metadata) -> bool {
-    false
-}
-
-#[cfg(windows)]
-fn ambient_metadata_is_windows_reparse(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-
-    windows_reparse_attributes(metadata.file_attributes())
-}
-
-#[cfg(any(test, windows))]
-const fn windows_reparse_attributes(attributes: u32) -> bool {
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2483,7 +2347,6 @@ impl DirectoryIdentity {
     }
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MetadataStamp {
     device: u64,
@@ -2496,7 +2359,6 @@ struct MetadataStamp {
     changed_nanoseconds: i64,
 }
 
-#[cfg(unix)]
 impl MetadataStamp {
     fn new(metadata: &Metadata) -> Self {
         use cap_std::fs::MetadataExt as _;
@@ -2514,40 +2376,10 @@ impl MetadataStamp {
     }
 }
 
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MetadataStamp {
-    device: u64,
-    inode: u64,
-    attributes: u32,
-    created: u64,
-    modified: u64,
-    length: u64,
-}
-
-#[cfg(windows)]
-impl MetadataStamp {
-    fn new(metadata: &Metadata) -> Self {
-        use cap_fs_ext::MetadataExt as _;
-        use cap_std::fs::MetadataExt as _;
-
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            attributes: metadata.file_attributes(),
-            created: metadata.creation_time(),
-            modified: metadata.last_write_time(),
-            length: metadata.file_size(),
-        }
-    }
-}
-
 /// Stable fail-closed class for local snapshot construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LocalSnapshotErrorCode {
     /// This checkpoint has not qualified exact mutation evidence on the host platform.
-    #[cfg(not(unix))]
-    UnsupportedPlatform,
     /// Cooperative shutdown interrupted snapshot construction.
     Cancelled,
     /// The Git executable was unavailable.
@@ -2595,10 +2427,6 @@ impl LocalSnapshotErrorCode {
     #[must_use]
     pub(crate) const fn message(self) -> &'static str {
         match self {
-            #[cfg(not(unix))]
-            Self::UnsupportedPlatform => {
-                "exact local snapshot mutation evidence is not qualified on this platform"
-            }
             Self::Cancelled => "local snapshot construction was cancelled",
             Self::GitUnavailable => "install Git at the trusted system executable path",
             Self::GitExecutableChanged => {
@@ -2691,6 +2519,21 @@ mod tests {
 
     const WORKFLOW: &str =
         "on: push\njobs:\n  check:\n    runs-on: linux\n    steps:\n      - run: true\n";
+
+    #[test]
+    fn archive_cancellation_is_terminal_not_retryable_io() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut reader =
+            super::CancellableReader::new(std::io::Cursor::new(b"payload"), &cancellation);
+        let error = std::io::copy(&mut reader, &mut std::io::sink())
+            .expect_err("cancellation must terminate the copy");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            super::archive_error(&error, &cancellation).code(),
+            LocalSnapshotErrorCode::Cancelled
+        );
+    }
 
     fn assert_archive_policy_rejects(snapshot: &super::LocalSnapshot) {
         let error = analyze_local_github_archive(
@@ -3351,15 +3194,6 @@ mod tests {
         let files = archive_files(snapshot.archive_bytes());
         assert!(!files.contains_key("nested/deleted"));
         assert_eq!(files.get("retained").unwrap(), b"retain me\n");
-    }
-
-    #[test]
-    fn windows_reparse_attribute_is_fail_closed() {
-        use super::windows_reparse_attributes;
-
-        assert!(!windows_reparse_attributes(0));
-        assert!(windows_reparse_attributes(0x0000_0400));
-        assert!(windows_reparse_attributes(0xffff_ffff));
     }
 
     #[cfg(unix)]

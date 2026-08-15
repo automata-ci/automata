@@ -20,7 +20,12 @@ use tokio::{
 mod check;
 mod engine;
 mod installation;
+#[cfg(unix)]
 mod snapshot;
+#[cfg(not(unix))]
+#[path = "snapshot_unsupported.rs"]
+mod snapshot;
+mod snapshot_limits;
 
 pub use check::{
     LocalCheckDiagnostic, LocalCheckIssue, LocalCheckIssueCode, LocalCheckReport,

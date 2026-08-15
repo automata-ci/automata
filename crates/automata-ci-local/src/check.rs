@@ -11,9 +11,9 @@ use automata_ci_workflow_service::{
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::snapshot::{
-    LocalSnapshot, LocalSnapshotErrorCode, LocalSnapshotRequest, capture_snapshot,
-    local_snapshot_limits,
+use crate::{
+    snapshot::{LocalSnapshot, LocalSnapshotErrorCode, LocalSnapshotRequest, capture_snapshot},
+    snapshot_limits::local_snapshot_limits,
 };
 
 const LOCAL_CHECK_SCHEMA: u32 = 1;

@@ -1456,7 +1456,7 @@ impl<R: io::Read> io::Read for BoundedReader<'_, R> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         if (self.cancellation)() {
             self.limit_state.mark_cancelled();
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            return Err(io::Error::other("cancelled"));
         }
         if bytes.is_empty() {
             return Ok(0);
@@ -1572,13 +1572,35 @@ impl Error for RepositoryWorkflowDiscoveryError {}
 #[cfg(test)]
 mod limit_contract_tests {
     use super::{
-        ArchiveNodeKind, ArchivePathGraph, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES,
-        MAX_ENTRY_COUNT, MAX_ENTRY_PATH_BYTES, MAX_EXPANDED_BYTES, MAX_GLOBAL_PAX_BYTES,
-        MAX_REPOSITORY_WORKFLOW_PATH_BYTES, MAX_WORKFLOW_BYTES, MAX_WORKFLOW_COUNT,
-        RepositoryArchiveLimitRejection, RepositoryWorkflowDiscoveryError,
-        archive_policy_limit_rejection, global_pax_byte_rejection,
-        repository_workflow_path_byte_rejection,
+        ArchiveNodeKind, ArchivePathGraph, BoundedReader, MAX_COMPRESSED_BYTES,
+        MAX_DECOMPRESSED_BYTES, MAX_ENTRY_COUNT, MAX_ENTRY_PATH_BYTES, MAX_EXPANDED_BYTES,
+        MAX_GLOBAL_PAX_BYTES, MAX_REPOSITORY_WORKFLOW_PATH_BYTES, MAX_WORKFLOW_BYTES,
+        MAX_WORKFLOW_COUNT, ReadLimitState, RepositoryArchiveLimitRejection,
+        RepositoryWorkflowDiscoveryError, archive_policy_limit_rejection,
+        global_pax_byte_rejection, read_error, repository_workflow_path_byte_rejection,
     };
+
+    #[test]
+    fn cancellation_stops_standard_readers_instead_of_requesting_a_retry() {
+        use std::io::Read as _;
+
+        let state = ReadLimitState::default();
+        let cancelled = || true;
+        let mut reader = BoundedReader::new(
+            std::io::Cursor::new(b"payload"),
+            64,
+            state.clone(),
+            &cancelled,
+        );
+        let error = reader
+            .read_to_end(&mut Vec::new())
+            .expect_err("cancellation must terminate the read");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            read_error(&state),
+            RepositoryWorkflowDiscoveryError::Cancelled
+        );
+    }
 
     #[test]
     fn derived_component_storage_has_an_exact_cumulative_byte_boundary() {

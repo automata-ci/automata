@@ -45,12 +45,11 @@ impl DiscoveredJobCredentials {
     pub fn built_in(&self) -> &[BuiltInCredentialRequirement] {
         &self.built_in
     }
+}
 
-    /// Consumes this analysis into its externally resolved requirements.
-    #[must_use]
-    pub fn into_external(self) -> JobCredentialRequirements {
-        self.external
-    }
+pub(crate) fn built_in_secret_requirement(name: &str) -> Option<BuiltInCredentialRequirement> {
+    name.eq_ignore_ascii_case("GITHUB_TOKEN")
+        .then_some(BuiltInCredentialRequirement::GithubToken)
 }
 
 /// Discovers exact static `secrets.<name>`, `vars.<name>`, and provider
@@ -83,8 +82,8 @@ pub fn discover_job_credentials(
     {
         for binding in bindings {
             let source = binding.source().value().as_str();
-            if source.eq_ignore_ascii_case("GITHUB_TOKEN") {
-                built_in.insert(BuiltInCredentialRequirement::GithubToken);
+            if let Some(requirement) = built_in_secret_requirement(source) {
+                built_in.insert(requirement);
             } else {
                 secrets.insert(source.to_owned());
             }
@@ -109,19 +108,19 @@ pub(crate) fn discover_external_job_credentials(
     workflow: &LogicalWorkflowPlan,
     job: &LogicalJobTemplate,
 ) -> Result<JobCredentialRequirements, CredentialDiscoveryError> {
-    discover_job_credentials(workflow, job).map(DiscoveredJobCredentials::into_external)
+    discover_job_credentials(workflow, job).map(|credentials| credentials.external)
 }
 
 fn classify_builtin_secrets(
     secrets: &mut BTreeSet<String>,
     built_in: &mut BTreeSet<BuiltInCredentialRequirement>,
 ) {
-    let has_github_token = secrets
-        .iter()
-        .any(|name| name.eq_ignore_ascii_case("GITHUB_TOKEN"));
-    if has_github_token {
-        secrets.retain(|name| !name.eq_ignore_ascii_case("GITHUB_TOKEN"));
-        built_in.insert(BuiltInCredentialRequirement::GithubToken);
+    for name in std::mem::take(secrets) {
+        if let Some(requirement) = built_in_secret_requirement(&name) {
+            built_in.insert(requirement);
+        } else {
+            secrets.insert(name);
+        }
     }
 }
 
