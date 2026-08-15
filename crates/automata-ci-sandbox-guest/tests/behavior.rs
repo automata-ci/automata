@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     io,
+    os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
@@ -20,12 +21,13 @@ use std::os::{
 };
 
 use automata_ci_sandbox_guest::{
-    GUEST_PROTOCOL_VERSION, GuestOutputStream, GuestProtocolError, GuestRejection, GuestRequest,
-    GuestResponse, GuestTermination, MAX_GUEST_FRAME_BYTES, decode_frame, encode_frame, probe,
-    serve,
+    GUEST_PROTOCOL_VERSION, GuestAtomicCommitOutcome, GuestFileExpectation, GuestOptionalFile,
+    GuestOutputStream, GuestProtocolError, GuestRejection, GuestRequest, GuestResponse,
+    GuestTermination, MAX_GUEST_FRAME_BYTES, decode_frame, encode_frame, probe, serve,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Serialize, ser::Error as _};
+use sha2::{Digest as _, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
     net::UnixStream,
@@ -37,6 +39,10 @@ use tokio::{
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_OPERATION: &str = "00000000-0000-4000-8000-000000000001";
 const GUEST_BINARY: &str = env!("CARGO_BIN_EXE_automata-ci-sandbox-guest");
+const LIVE_DOCKER_ENABLE: &str = "AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER";
+const LIVE_DOCKER_HOST: &str = "AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER_HOST";
+const LIVE_DOCKER_IMAGE: &str = "AUTOMATA_SANDBOX_GUEST_LIVE_IMAGE";
+const LIVE_DOCKER_VOLUME_LABEL: &str = "io.automata.test.sandbox-guest-volume";
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 struct TempDir {
@@ -136,6 +142,247 @@ async fn exchange(socket: &Path, request: &GuestRequest) -> GuestResponse {
     })
     .await
     .expect("guest exchange completes")
+}
+
+async fn stdio_once(request: &GuestRequest) -> GuestResponse {
+    let mut child = Command::new(GUEST_BINARY)
+        .arg("stdio-once")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start one-shot guest");
+    child
+        .stdin
+        .take()
+        .expect("one-shot guest stdin")
+        .write_all(&encode_frame(request).expect("encode one-shot request"))
+        .await
+        .expect("write one-shot request");
+    let output = timeout(TEST_TIMEOUT, child.wait_with_output())
+        .await
+        .expect("one-shot guest completes")
+        .expect("wait for one-shot guest");
+    assert!(
+        output.status.success(),
+        "one-shot guest failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    decode_frame(&output.stdout).expect("one-shot guest writes one exact response frame")
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut encoded, byte| {
+            write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+            encoded
+        })
+}
+
+fn directory_entries(path: &Path) -> Vec<String> {
+    let mut entries = std::fs::read_dir(path)
+        .expect("read test directory")
+        .map(|entry| {
+            entry
+                .expect("read test directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    entries
+}
+
+fn docker_command(host: &str) -> std::process::Command {
+    let mut command = std::process::Command::new("docker");
+    command.args(["--host", host]);
+    command
+}
+
+fn assert_registry_digest_image(image: &str) {
+    let Some((repository, digest)) = image.rsplit_once("@sha256:") else {
+        panic!("{LIVE_DOCKER_IMAGE} must be a registry-qualified sha256 digest reference");
+    };
+    let registry = repository.split('/').next().unwrap_or_default();
+    assert!(
+        repository.contains('/')
+            && (registry == "localhost" || registry.contains('.') || registry.contains(':')),
+        "{LIVE_DOCKER_IMAGE} must be registry-qualified"
+    );
+    assert!(
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{LIVE_DOCKER_IMAGE} must contain one lowercase sha256 digest"
+    );
+}
+
+struct DockerLiveResources {
+    host: String,
+    volume: String,
+    nonce: String,
+    armed: bool,
+}
+
+impl DockerLiveResources {
+    fn is_owned_volume(&self) -> bool {
+        let output = match docker_command(&self.host)
+            .args(["volume", "inspect", &self.volume])
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            Ok(_) | Err(_) => return false,
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+            return false;
+        };
+        let Some(volume) = value
+            .as_array()
+            .and_then(|volumes| (volumes.len() == 1).then(|| volumes.first()).flatten())
+        else {
+            return false;
+        };
+        let labels = volume.get("Labels").and_then(serde_json::Value::as_object);
+        volume.get("Name").and_then(serde_json::Value::as_str) == Some(self.volume.as_str())
+            && volume.get("Driver").and_then(serde_json::Value::as_str) == Some("local")
+            && volume.get("Scope").and_then(serde_json::Value::as_str) == Some("local")
+            && volume.get("Options").is_some_and(|options| {
+                options.is_null() || options.as_object().is_some_and(serde_json::Map::is_empty)
+            })
+            && labels.is_some_and(|labels| {
+                labels
+                    .get(LIVE_DOCKER_VOLUME_LABEL)
+                    .and_then(serde_json::Value::as_str)
+                    == Some(self.nonce.as_str())
+                    && labels.iter().all(|(key, value)| {
+                        key == LIVE_DOCKER_VOLUME_LABEL
+                            || (key == "com.docker.volume.anonymous" && value.as_str() == Some(""))
+                    })
+            })
+    }
+
+    fn has_attachments(&self) -> bool {
+        let filter = format!("volume={}", self.volume);
+        match docker_command(&self.host)
+            .args([
+                "container",
+                "ls",
+                "--all",
+                "--filter",
+                &filter,
+                "--format",
+                "{{.ID}}",
+            ])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                !output.stdout.iter().all(u8::is_ascii_whitespace)
+            }
+            Ok(_) | Err(_) => true,
+        }
+    }
+
+    fn remove(&mut self) {
+        assert!(
+            self.is_owned_volume(),
+            "refusing to remove an unowned test volume"
+        );
+        assert!(
+            !self.has_attachments(),
+            "refusing to remove an attached test volume"
+        );
+        let output = docker_command(&self.host)
+            .args(["volume", "rm", &self.volume])
+            .output()
+            .expect("remove live-test volume");
+        assert!(
+            output.status.success(),
+            "remove live-test volume: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let inspect = docker_command(&self.host)
+            .args(["volume", "inspect", &self.volume])
+            .output()
+            .expect("verify live-test volume removal");
+        assert!(
+            !inspect.status.success(),
+            "live-test volume was not removed"
+        );
+        self.armed = false;
+    }
+}
+
+impl Drop for DockerLiveResources {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.is_owned_volume() && !self.has_attachments() {
+            let _ = docker_command(&self.host)
+                .args(["volume", "rm", &self.volume])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+fn docker_stdio_once(
+    resources: &DockerLiveResources,
+    image: &str,
+    request: &GuestRequest,
+) -> GuestResponse {
+    let mount = format!(
+        "type=volume,src={},dst=/var/lib/automata-local",
+        resources.volume
+    );
+    let mut child = docker_command(&resources.host)
+        .args([
+            "run",
+            "--rm",
+            "--interactive",
+            "--pull",
+            "never",
+            "--user",
+            "65532:65532",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges=true",
+            "--mount",
+            &mount,
+            image,
+            "stdio-once",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start digest-pinned sandbox-guest container");
+    let mut stdin = child.stdin.take().expect("sandbox-guest container stdin");
+    std::io::Write::write_all(
+        &mut stdin,
+        &encode_frame(request).expect("encode Docker live request"),
+    )
+    .expect("write Docker live request");
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .expect("wait for sandbox-guest container");
+    assert!(
+        output.status.success(),
+        "sandbox-guest container failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    decode_frame(&output.stdout).expect("container writes one exact guest response frame")
 }
 
 async fn connect_guest(socket: &Path) -> io::Result<UnixStream> {
@@ -354,6 +601,21 @@ fn debug_views_redact_request_response_and_output_payloads() {
             path: "/secret/read-path".into(),
             byte_limit: 64,
         },
+        GuestRequest::AtomicCommitFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: "atomic-operation".into(),
+            path: "/secret/atomic-path".into(),
+            content_base64: BASE64.encode(b"secret-atomic-content"),
+            expected: GuestFileExpectation::Sha256 {
+                digest: sha256(b"secret-previous-content"),
+            },
+        },
+        GuestRequest::ReadOptionalFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: "optional-read-operation".into(),
+            path: "/secret/optional-read-path".into(),
+            byte_limit: 64,
+        },
     ];
     let mut rendered = String::new();
     for request in requests {
@@ -367,6 +629,9 @@ fn debug_views_redact_request_response_and_output_payloads() {
         "secret/write-path",
         "secret-file-content",
         "secret/read-path",
+        "secret/atomic-path",
+        "secret-atomic-content",
+        "secret/optional-read-path",
     ] {
         assert!(!rendered.contains(secret));
     }
@@ -391,6 +656,14 @@ fn debug_views_redact_request_response_and_output_payloads() {
         content_base64: BASE64.encode(b"secret-read-content"),
     };
     assert!(!format!("{read_response:?}").contains("secret-read-content"));
+
+    let optional_read_response = GuestResponse::ReadOptionalFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        file: GuestOptionalFile::Present {
+            content_base64: BASE64.encode(b"secret-optional-read-content"),
+        },
+    };
+    assert!(!format!("{optional_read_response:?}").contains("secret-optional-read-content"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -420,6 +693,19 @@ async fn guest_protocol_v2_is_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guest_protocol_v3_is_rejected() {
+    let server = GuestServer::start("guest-protocol-v3-rejection").await;
+    let unsupported = GuestRequest::Probe {
+        protocol: 3,
+        operation_id: FIRST_OPERATION.into(),
+    };
+    assert_rejected(
+        exchange(&server.socket, &unsupported).await,
+        GuestRejection::UnsupportedProtocol,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn listener_lifecycle_protocol_and_malformed_connections_fail_closed() {
     let temp = TempDir::new("listener-lifecycle");
     let socket = temp.path().join("guest.sock");
@@ -429,7 +715,7 @@ async fn listener_lifecycle_protocol_and_malformed_connections_fail_closed() {
     assert!(probe(&socket));
 
     let expected_rejection = GuestRejection::UnsupportedProtocol;
-    for unsupported_protocol in [1, 2, GUEST_PROTOCOL_VERSION + 1] {
+    for unsupported_protocol in [1, 2, 3, GUEST_PROTOCOL_VERSION + 1] {
         let unsupported = GuestRequest::ReadFile {
             protocol: unsupported_protocol,
             operation_id: FIRST_OPERATION.into(),
@@ -899,6 +1185,346 @@ async fn write_and_read_file_validate_paths_base64_and_exact_byte_limits() {
         exchange(&server.socket, &request).await,
         GuestRejection::InvalidRequest,
     );
+}
+
+#[tokio::test]
+async fn stdio_once_optional_read_distinguishes_missing_from_other_io_failures() {
+    let temp = TempDir::new("stdio-once-optional-read");
+    let missing = GuestRequest::ReadOptionalFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(72),
+        path: temp.path().join("missing").to_string_lossy().into_owned(),
+        byte_limit: 64,
+    };
+    assert_eq!(
+        stdio_once(&missing).await,
+        GuestResponse::ReadOptionalFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            file: GuestOptionalFile::Missing {},
+        }
+    );
+
+    let present_path = temp.path().join("present");
+    tokio::fs::write(&present_path, b"present bytes")
+        .await
+        .unwrap();
+    let present = GuestRequest::ReadOptionalFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(73),
+        path: present_path.to_string_lossy().into_owned(),
+        byte_limit: 64,
+    };
+    assert_eq!(
+        stdio_once(&present).await,
+        GuestResponse::ReadOptionalFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            file: GuestOptionalFile::Present {
+                content_base64: BASE64.encode(b"present bytes"),
+            },
+        }
+    );
+
+    let directory = GuestRequest::ReadOptionalFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(74),
+        path: temp.path().to_string_lossy().into_owned(),
+        byte_limit: 64,
+    };
+    assert_rejected(
+        stdio_once(&directory).await,
+        GuestRejection::OperationFailed,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stdio_once_atomic_commit_replaces_whole_bytes_and_cas_is_idempotent() {
+    let temp = TempDir::new("stdio-once-atomic-commit");
+    let path = temp.path().join("desired-spec.json");
+    let old = vec![b'a'; 2 * 1024 * 1024];
+    let new = vec![b'b'; 2 * 1024 * 1024];
+    tokio::fs::write(&path, &old).await.unwrap();
+    let inode_before = tokio::fs::metadata(&path).await.unwrap().ino();
+
+    let request = GuestRequest::AtomicCommitFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(75),
+        path: path.to_string_lossy().into_owned(),
+        content_base64: BASE64.encode(&new),
+        expected: GuestFileExpectation::Sha256 {
+            digest: sha256(&old),
+        },
+    };
+    let watched_path = path.clone();
+    let watched_old = old.clone();
+    let watched_new = new.clone();
+    let watcher = tokio::spawn(async move {
+        loop {
+            let observed = tokio::fs::read(&watched_path)
+                .await
+                .expect("read file while it is replaced");
+            assert!(
+                observed == watched_old || observed == watched_new,
+                "atomic replacement exposed partial file bytes"
+            );
+            if observed == watched_new {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    assert_eq!(
+        stdio_once(&request).await,
+        GuestResponse::AtomicCommitFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            outcome: GuestAtomicCommitOutcome::Committed,
+        }
+    );
+    timeout(TEST_TIMEOUT, watcher)
+        .await
+        .expect("concurrent reader observes committed bytes")
+        .expect("concurrent reader completes");
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), new);
+    let committed_metadata = tokio::fs::metadata(&path).await.unwrap();
+    assert_ne!(
+        committed_metadata.ino(),
+        inode_before,
+        "commit must replace rather than truncate the destination"
+    );
+
+    let entries_after_commit = directory_entries(temp.path());
+    assert_eq!(
+        stdio_once(&request).await,
+        GuestResponse::AtomicCommitFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            outcome: GuestAtomicCommitOutcome::AlreadyCurrent,
+        }
+    );
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), new);
+    assert_eq!(
+        tokio::fs::metadata(&path).await.unwrap().ino(),
+        committed_metadata.ino(),
+        "an identical ambiguous-outcome retry must not replace current bytes"
+    );
+    assert_eq!(directory_entries(temp.path()), entries_after_commit);
+
+    let conflict = GuestRequest::AtomicCommitFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(76),
+        path: path.to_string_lossy().into_owned(),
+        content_base64: BASE64.encode(b"conflicting bytes"),
+        expected: GuestFileExpectation::Absent,
+    };
+    assert_eq!(
+        stdio_once(&conflict).await,
+        GuestResponse::AtomicCommitFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            outcome: GuestAtomicCommitOutcome::Conflict,
+        }
+    );
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), new);
+    assert_eq!(
+        tokio::fs::metadata(&path).await.unwrap().ino(),
+        committed_metadata.ino(),
+        "a compare-and-swap conflict must not mutate the destination"
+    );
+    assert_eq!(directory_entries(temp.path()), entries_after_commit);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atomic_stdio_once_requires_clean_eof_before_mutating() {
+    let temp = TempDir::new("atomic-stdio-eof");
+    let path = temp.path().join("committed-after-eof");
+    let request = GuestRequest::AtomicCommitFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(77),
+        path: path.to_string_lossy().into_owned(),
+        content_base64: BASE64.encode(b"committed bytes"),
+        expected: GuestFileExpectation::Absent,
+    };
+    let mut child = Command::new(GUEST_BINARY)
+        .arg("stdio-once")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start one-shot atomic guest");
+    let mut stdin = child.stdin.take().expect("one-shot atomic stdin");
+    stdin
+        .write_all(&encode_frame(&request).unwrap())
+        .await
+        .unwrap();
+    sleep(Duration::from_millis(200)).await;
+    assert!(
+        !path.exists(),
+        "atomic request mutated before standard-input EOF"
+    );
+    assert!(
+        child
+            .try_wait()
+            .expect("poll one-shot atomic guest")
+            .is_none(),
+        "atomic request did not wait for standard-input EOF"
+    );
+    drop(stdin);
+    let output = timeout(TEST_TIMEOUT, child.wait_with_output())
+        .await
+        .expect("atomic request completes after EOF")
+        .expect("wait for one-shot atomic guest");
+    assert!(output.status.success());
+    assert_eq!(
+        decode_frame::<GuestResponse>(&output.stdout).unwrap(),
+        GuestResponse::AtomicCommitFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            outcome: GuestAtomicCommitOutcome::Committed,
+        }
+    );
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"committed bytes");
+
+    let trailing_path = temp.path().join("must-not-be-created");
+    let trailing_request = GuestRequest::AtomicCommitFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(78),
+        path: trailing_path.to_string_lossy().into_owned(),
+        content_base64: BASE64.encode(b"unreachable bytes"),
+        expected: GuestFileExpectation::Absent,
+    };
+    let mut child = Command::new(GUEST_BINARY)
+        .arg("stdio-once")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start one-shot trailing-input guest");
+    let mut stdin = child.stdin.take().expect("one-shot trailing-input stdin");
+    stdin
+        .write_all(&encode_frame(&trailing_request).unwrap())
+        .await
+        .unwrap();
+    stdin.write_all(b"unexpected trailing byte").await.unwrap();
+    drop(stdin);
+    let output = timeout(TEST_TIMEOUT, child.wait_with_output())
+        .await
+        .expect("trailing-input guest exits")
+        .expect("wait for trailing-input guest");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        !trailing_path.exists(),
+        "atomic request with trailing input must not mutate"
+    );
+}
+
+#[test]
+#[ignore = "requires an explicit Docker daemon and a preloaded digest-pinned guest image"]
+#[allow(clippy::too_many_lines)]
+fn opt_in_docker_fresh_named_volume_is_writable_by_nonroot_guest() {
+    assert_eq!(
+        std::env::var(LIVE_DOCKER_ENABLE).as_deref(),
+        Ok("1"),
+        "ignored Docker test requires {LIVE_DOCKER_ENABLE}=1"
+    );
+    let host = std::env::var(LIVE_DOCKER_HOST)
+        .expect("ignored Docker test requires an explicit Docker daemon endpoint");
+    assert!(
+        !host.trim().is_empty(),
+        "{LIVE_DOCKER_HOST} must not be empty"
+    );
+    let image = std::env::var(LIVE_DOCKER_IMAGE)
+        .expect("ignored Docker test requires a preloaded sandbox-guest image digest");
+    assert_registry_digest_image(&image);
+
+    let inspect = docker_command(&host)
+        .args(["image", "inspect", &image])
+        .output()
+        .expect("inspect preloaded sandbox-guest image");
+    assert!(
+        inspect.status.success(),
+        "{LIVE_DOCKER_IMAGE} must already exist at the selected daemon: {}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+
+    let mut nonce_bytes = [0_u8; 16];
+    getrandom::fill(&mut nonce_bytes).expect("obtain a live-test ownership nonce");
+    let nonce = nonce_bytes
+        .iter()
+        .fold(String::with_capacity(32), |mut encoded, byte| {
+            write!(&mut encoded, "{byte:02x}").expect("writing to a string cannot fail");
+            encoded
+        });
+    let label = format!("{LIVE_DOCKER_VOLUME_LABEL}={nonce}");
+    let created = docker_command(&host)
+        .args(["volume", "create", "--driver", "local", "--label", &label])
+        .output()
+        .expect("create fresh named Docker volume");
+    assert!(
+        created.status.success(),
+        "create fresh named Docker volume: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let volume = String::from_utf8(created.stdout)
+        .expect("Docker volume name is UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        !volume.is_empty()
+            && volume.len() <= 255
+            && volume
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte)),
+        "Docker returned an invalid volume name"
+    );
+    let mut resources = DockerLiveResources {
+        host,
+        volume,
+        nonce,
+        armed: false,
+    };
+    assert!(
+        resources.is_owned_volume(),
+        "created volume did not retain the exact test ownership contract"
+    );
+    resources.armed = true;
+    assert!(
+        !resources.has_attachments(),
+        "new test volume unexpectedly has a container attachment"
+    );
+
+    let content = b"nonroot named-volume write";
+    let commit = GuestRequest::AtomicCommitFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(79),
+        path: "/var/lib/automata-local/desired-spec.json".into(),
+        content_base64: BASE64.encode(content),
+        expected: GuestFileExpectation::Absent,
+    };
+    assert_eq!(
+        docker_stdio_once(&resources, &image, &commit),
+        GuestResponse::AtomicCommitFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            outcome: GuestAtomicCommitOutcome::Committed,
+        }
+    );
+
+    let read = GuestRequest::ReadOptionalFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(80),
+        path: "/var/lib/automata-local/desired-spec.json".into(),
+        byte_limit: 1_024,
+    };
+    assert_eq!(
+        docker_stdio_once(&resources, &image, &read),
+        GuestResponse::ReadOptionalFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            file: GuestOptionalFile::Present {
+                content_base64: BASE64.encode(content),
+            },
+        }
+    );
+
+    resources.remove();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

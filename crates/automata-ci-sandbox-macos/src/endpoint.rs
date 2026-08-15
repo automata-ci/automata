@@ -463,7 +463,9 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
         | GuestResponse::Configured { .. }
         | GuestResponse::Exec { .. }
         | GuestResponse::WriteFile { .. }
-        | GuestResponse::ReadFile { .. } => ExecutionErrorKind::BackendRejected,
+        | GuestResponse::AtomicCommitFile { .. }
+        | GuestResponse::ReadFile { .. }
+        | GuestResponse::ReadOptionalFile { .. } => ExecutionErrorKind::BackendRejected,
     };
     error(kind, stage)
 }

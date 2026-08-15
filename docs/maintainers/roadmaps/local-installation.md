@@ -2,7 +2,9 @@
 
 - Roadmap status: Active
 - Available slice: read-only `automata local doctor` from a reviewed source checkout
-- Current implementation checkpoint: 2B.1, pinned Docker context and immutable identity anchor
+- Current implementation checkpoint: 2B.2a, shared sandbox-guest protocol v4 file primitives
+- Last completed engine-adapter checkpoint: 2B.1, pinned Docker context and
+  immutable identity anchor
 - Date: 2026-08-15
 
 This roadmap owns the work required to make Automata easy to evaluate on one
@@ -183,6 +185,7 @@ onboarding path:
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
 | `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
+| `automata-ci-sandbox-guest` | Protocol 4 bounded optional read and Unix durable compare-and-swap atomic commit, plus a non-root helper-image data mountpoint | No local adapter yet mounts a desired-spec volume or invokes these primitives |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
 | Workflow service | Credential requirement discovery, admission, and orchestration boundaries | It needs local provenance as an additional source authority |
@@ -309,22 +312,31 @@ Compose labels used for independent project discovery are validated separately.
 
 #### Persistent desired specification
 
-A separate engine-managed config volume persists one schema-versioned,
-credential-value-free desired-spec document. It contains only the installation
-binding, requested `max_parallel_jobs`, exact local profile and architecture
-decision, image/render inputs, renderer version, and canonical plan digest
-needed to reconstruct the same stack after `down`. It contains no credential
-value, container or network ID, live phase, daemon version, or resource
-inventory.
+A separate engine-managed config volume will persist one schema-versioned,
+credential-value-free desired-spec document. The exact version-one field set is
+deliberately not frozen before renderer version one has a closed input contract.
+Installation binding, requested capacity, local profile and architecture
+selection, immutable image identities, and rendering decisions are examples of
+the concerns that contract is expected to settle, not a final schema. The
+frozen document must contain every input needed to reconstruct the same stack
+after `down`, reject unknown or unbounded extension data, and contain no
+repository identity, credential value, container or network ID, live phase,
+daemon version, or resource inventory.
 
-The digest is computed from the canonical document with its digest field
-excluded, then read back and recomputed before rendering. A digest-pinned helper
-container with only the config volume mounted performs bounded decode, temporary
-write, file and directory synchronization, and atomic rename. The supervisor
-checks the helper by container ID, reads the committed document back through a
-fresh helper, and accepts the update only when its recomputed digest and
-installation binding agree. An interruption therefore leaves either the prior
-complete document or the next complete document, never a partial desired spec.
+The frozen schema will define its canonical encoding and plan digest together.
+The shared sandbox guest protocol supplies bounded optional reads and a durable,
+compare-and-swap atomic file commit. The supervisor will run only an already
+present, digest-pinned helper image, inspect each exact helper container ID, and
+mount only the config volume at the image's `65532:65532`-owned data mountpoint. A
+desired-spec update will hold the engine lock, compare the expected prior
+state, commit, then read through a fresh helper and verify canonical decode,
+installation binding, and recomputed digest. An interruption therefore leaves
+either the prior complete document or the next complete document, never a
+partial desired spec; an ambiguous or stale comparison never becomes an
+unconditional overwrite. Matching readback after an ambiguous commit is not
+durability proof by itself: the supervisor issues a fresh compare-and-swap
+commit and requires its synchronization-closing `AlreadyCurrent` or
+`Committed` acknowledgement before reporting success.
 
 Every persistent service volume carries only immutable Automata
 contract/identity/role labels: managed marker, contract and resource kind,
@@ -356,10 +368,12 @@ host manifest.
 
 #### Engine-scoped mutation lock
 
-Every initialize, desired-spec update, up, down, reset, and ordinary
-reconciliation mutation holds one deterministic engine lock container. The
-lock uses an exact inert
-configuration: digest-pinned helper image and fixed lock-holder command,
+Every desired-spec update, up, down, reset, and ordinary reconciliation
+mutation after the immutable installation anchor exists holds one deterministic
+engine lock container. Deterministic, post-inspected create-or-adopt of the
+anchor and empty desired-spec volume remain separately race-safe primitives.
+The lock uses an exact inert configuration: digest-pinned helper image and
+fixed lock-holder command,
 non-root user, read-only root, `network=none`, all capabilities dropped,
 no-new-privileges, `restart=no`, auto-remove disabled, and no mount, device,
 port, secret, credential, or user-supplied environment. Before starting it, the
@@ -661,7 +675,11 @@ filesystem substrate.
 ### 2B. Engine identity and desired-spec adapter
 
 Land the first Docker Engine adapter and the engine-owned identity and desired
-intent contracts in two independently reviewable, strictly ordered slices.
+intent contracts in independently reviewable, strictly ordered slices. The
+shared guest primitive lands before a desired-spec schema; the schema lands only
+after renderer version one's complete input set is known; read-only volume I/O
+lands before locked mutation.
+
 Installation identity is a repository-agnostic deployment/capacity boundary;
 repository and snapshot identity remain owned by later `LocalSnapshot`
 admission. Compose and fresh engine inspection are resource truth throughout,
@@ -702,42 +720,132 @@ Doctor JSON schema 3 reports the bounded selected context name without exposing
 the retained endpoint URI, and CLI process tests prove daemon probes receive the
 exact validated `--host` value.
 
-#### 2B.2. Desired-spec config volume and atomic helper
+#### 2B.2a. Shared sandbox-guest protocol v4 durable file primitives
 
-Extend the adapter with the separate persistent desired-spec config volume and
-the exact `desired-spec` persistent-volume role. Its immutable labels bind only
-the installation UUID, full selector key, Compose project, persistent-volume
-contract/resource kind, and exact role; they contain neither repository
-identity nor a mutable plan digest. Create and adoption use the same fresh
-post-inspection, local driver/scope, empty-option, no-bind, exact-label, and
-attachment checks as the anchor before any helper is started.
+Advance the existing shared sandbox guest and every in-tree consumer, template,
+and fixture to protocol version 4. Add `ReadOptionalFile`, whose closed response
+distinguishes bounded present bytes from `NotFound`; every other I/O failure is
+a rejection, never a string-parsed absence signal. Add `AtomicCommitFile` with
+an expected state of either `Absent` or an exact SHA-256 of the prior file bytes
+and a closed `Committed`, `AlreadyCurrent`, or `Conflict` outcome. The same
+desired bytes are idempotently `AlreadyCurrent`; a mismatched expectation is a
+non-mutating `Conflict`.
 
-Define the bounded, canonical, credential-value-free desired-spec document. It
-contains only the installation binding, requested `max_parallel_jobs`, exact
-local profile and architecture decision, closed image/render inputs, renderer
-version, and canonical plan digest needed to reconstruct the same stack after
-`down`. Reuse the existing digest-pinned sandbox guest as the one-shot helper;
-strengthen its bounded file write to use a same-directory exclusive temporary
-file, file synchronization, atomic rename, and directory synchronization. The
-adapter post-inspects each exact helper container ID before start, performs a
-fresh helper readback after commit, and accepts the document only when canonical
-decode, installation binding, and recomputed digest agree. It never pulls the
-helper implicitly.
+On Unix, atomic commit requires an existing parent, bounds and validates the
+target, creates an exclusive temporary file in that same directory, writes and
+synchronizes the complete file, renames it atomically, and synchronizes the
+parent directory. A caught failure before rename cleans only that operation's
+exact temporary file. The one-shot helper consumes EOF before dispatching an
+atomic commit so trailing input cannot arrive after mutation begins. Native
+Windows guests reject this operation with `OperationFailed`; the local
+config-volume helper always runs in a Linux container on all three initial host
+platforms.
+Existing ordinary sandbox file-transfer operations keep their established
+semantics.
+
+Seed `/var/lib/automata-local` in the scratch helper image with mode `0700` and
+UID/GID `65532`, retain final `USER 65532:65532`, and do not declare a Dockerfile
+`VOLUME`. This lets Docker initialize a fresh named volume for the non-root
+helper without a root fallback or an anonymous volume. Engine users must supply
+an already present, registry-qualified digest reference and use pull-never
+semantics; this slice adds no pull path.
+
+Gate: protocol 4 rejects every prior wire version. Guest wire tests cover
+request/response framing, replay, redaction, bounds, paths, expectations, typed
+missing, idempotence, conflict, pre-rename cleanup, post-rename ambiguity, and
+committed bytes. Windows-targeted tests require the closed unsupported atomic
+response; downstream Rust exhaustive-match checks and a Swift-source coupling
+test prevent an in-tree consumer from silently retaining an older protocol.
+An opt-in live Linux-container test uses an explicit Docker endpoint and an
+already loaded digest-pinned helper with pull disabled, non-root UID/GID,
+read-only root filesystem, `network=none`, all capabilities dropped,
+no-new-privileges, and only a fresh named local volume mounted at the dedicated
+data path. It performs atomic commit and optional read through unnamed
+auto-removed helpers, then revalidates the volume's cryptographic ownership
+label and empty attachment set before non-force removal. This
+shared-prerequisite slice creates no installation volume, freezes no
+desired-spec schema, extends no local Engine adapter, and exposes no lifecycle
+command; checkpoint 2B.2 is not complete.
+
+#### 2B.2b. Renderer-v1 inputs and canonical desired-spec schema
+
+First enumerate and test renderer version one's closed, value-free input
+contract without invoking Compose or mutating the Engine. Only after every
+render-affecting input is explicit may this slice freeze the exact bounded
+desired-spec schema, canonical byte encoding, digest rule, validation, and
+version/migration policy. The concerns described in the architecture section
+are review prompts rather than a field list; the implemented renderer contract
+is the authority for the final schema.
+
+The document binds to the repository-agnostic installation identity and never
+contains repository or snapshot identity, credential values, live resource
+IDs, observed daemon state, or arbitrary extension maps. No ambient current
+directory, environment variable, clock, active context, or live topology may
+change rendering outside the canonical document and immutable checked-in
+renderer.
+
+Gate: exact-schema and golden-vector tests prove that canonical bytes and the
+plan digest are stable across host OSes, unknown or non-canonical input fails,
+every renderer-v1 input participates according to the frozen rule, and equal
+documents render byte-identical value-free Compose configuration. This slice
+creates no Engine resource and exposes no lifecycle command.
+
+#### 2B.2c. Desired-spec volume and read adapter
+
+Extend the pinned Engine adapter with the separate persistent desired-spec
+config volume and the exact `desired-spec` persistent-volume role. Its immutable
+labels bind only the installation UUID, full selector key, Compose project,
+persistent-volume contract/resource kind, and exact role; they contain neither
+repository identity nor a mutable plan digest. Create and adoption use fresh
+post-inspection and require the local driver/scope, empty options, no bind, the
+exact managed-label allowlist, and no attachment before any helper starts.
+
+Add only bounded desired-spec inspection in this slice. A fresh, exactly
+inspected helper container uses the already present digest-pinned image with
+pull disabled, its hardened non-root configuration, and the config volume as
+its sole read-only mount. `ReadOptionalFile` maps an empty new volume to a typed
+uninitialized result and present bytes to canonical schema validation; helper
+failure, malformed bytes, wrong installation binding, or indeterminate
+attachment state fails closed. The adapter removes and reinspects the exact
+helper by container ID.
 
 Gate: foreign config-volume name, key, project, role, label, driver, option, or
-attachment evidence fails before helper mutation; interruption leaves either
-the prior complete desired document or the next complete document; and `N`,
-profile, architecture decision, and closed render inputs reconstruct the same
-digest after an adapter restart with no realized topology. Stateful fake-daemon
-and ignored live-Docker tests cover the public read/commit adapter, exact helper
-post-inspection, bounded protocol, fresh readback, and zero topology. This slice
-completes checkpoint 2B but still exposes no user lifecycle command.
+attachment evidence fails before a helper starts. Stateful fake-daemon and
+ignored live-Docker tests cover create/adopt, typed missing and present reads,
+exact helper configuration and post-inspection, cleanup, restart, and zero
+realized topology. There is no desired-spec write API and no user lifecycle
+command in this slice.
 
-### 2C. Convergent Compose lifecycle and exact reset
+#### 2B.3. Engine lock and compare-and-swap desired-spec commit
 
-Build on the completed 2B.2 adapter. Add checked-in value-free rendering,
-persistent identity-only volume labels, digest-labeled replaceable topology,
-the inert ID-held engine lock, union discovery, `up`, `status`, `down`, and exact
+Implement the deterministic exact-ID engine lock before exposing desired-spec
+mutation. Under that lock, a commit freshly reads the current optional document,
+requires the caller's expected absent state or exact prior canonical-byte
+SHA-256, invokes protocol 4 `AtomicCommitFile`, and then reads through a new
+helper. Success requires the expected closed commit outcome plus canonical
+decode, installation binding, and recomputed plan digest. A stale expectation
+is a typed conflict with no mutation; an ambiguous daemon or helper result is
+inspected through a fresh read and then resolved by a fresh
+synchronization-closing commit. Inspection alone never proves durability; an
+unprovable outcome retains interrupted lock evidence for explicit recovery.
+
+Every later Compose mutation consumes this locked high-level operation. The
+adapter still exposes no generic container, volume-write, pull, or remove API;
+the helper is already present by immutable digest, runs non-root with only the
+exact config mount, and is checked and removed by exact container ID.
+
+Gate: concurrent managers cannot lose an update; absent-first-create,
+same-document retry, stale-prior conflict, interruption before and after rename,
+fresh readback, wrong binding/digest, busy-live lock, stopped recovery-required
+lock, and positively authorized exact-ID recovery are covered by stateful fake
+daemon and opt-in live-Docker tests. No plan digest enters persistent-volume
+labels, no realized topology exists, and no user lifecycle command is exposed.
+
+### 2C. Compose realization, convergent lifecycle, and exact reset
+
+Build on the completed 2B.3 locked adapter. Realize the checked-in renderer-v1
+configuration as persistent identity-only volumes and digest-labeled
+replaceable topology, then add union discovery, `up`, `status`, `down`, and exact
 reset. The command layer remains private until these operations are convergent
 and their destructive boundary is proven.
 

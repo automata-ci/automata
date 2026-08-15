@@ -9,6 +9,11 @@ use std::{collections::BTreeMap, fmt, io, path::Path};
 #[cfg(unix)]
 use std::{
     collections::VecDeque,
+    ffi::OsString,
+    fs::File,
+    io::{Read as _, Write as _},
+    os::unix::ffi::OsStrExt as _,
+    path::Component,
     sync::{Arc, Mutex, MutexGuard},
 };
 #[cfg(any(unix, windows))]
@@ -23,6 +28,15 @@ use std::os::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+#[cfg(unix)]
+use rustix::{
+    fd::OwnedFd,
+    fs::{
+        self as unix_fs, AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fstat, open,
+        openat, renameat, unlinkat,
+    },
+    io::Errno,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use sha2::{Digest as _, Sha256};
@@ -42,11 +56,11 @@ use tokio::{
 
 /// Current guest protocol version.
 ///
-/// Version 3 adds the one-shot standard-I/O probe and the optional
-/// per-execution process-limit field used by Hyper-V-isolated Windows
-/// containers. Earlier versions are rejected instead of being interpreted as
-/// the current wire contract.
-pub const GUEST_PROTOCOL_VERSION: u16 = 3;
+/// Version 4 adds optimistic, durable file replacement and an optional-file
+/// read whose missing result is distinct from other filesystem failures.
+/// Earlier versions are rejected instead of being interpreted as the current
+/// wire contract.
+pub const GUEST_PROTOCOL_VERSION: u16 = 4;
 /// Maximum encoded request or response frame.
 pub const MAX_GUEST_FRAME_BYTES: usize = 32 * 1024 * 1024;
 #[cfg(any(unix, windows))]
@@ -79,6 +93,74 @@ const MAX_PROCESS_LIMIT: u32 = 1_000_000;
 const MAX_REPLAY_ENTRIES: usize = 256;
 #[cfg(unix)]
 const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(unix)]
+const MAX_ATOMIC_STAGE_CREATE_ATTEMPTS: usize = 8;
+#[cfg(unix)]
+const ATOMIC_STAGE_RANDOM_BYTES: usize = 16;
+
+/// Expected state used to fence one atomic file replacement.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuestFileExpectation {
+    /// The target must not exist.
+    Absent,
+    /// The target must contain bytes with this exact lowercase SHA-256 digest.
+    Sha256 {
+        /// Exactly 64 lowercase hexadecimal characters.
+        digest: String,
+    },
+}
+
+impl fmt::Debug for GuestFileExpectation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent => formatter.write_str("GuestFileExpectation::Absent"),
+            Self::Sha256 { .. } => formatter
+                .debug_struct("GuestFileExpectation::Sha256")
+                .field("digest", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+/// Result of one optimistic atomic file replacement.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestAtomicCommitOutcome {
+    /// The requested bytes replaced the expected prior state durably.
+    Committed,
+    /// The target already contained the requested bytes and the exact file and
+    /// parent directory were synchronized before acknowledgement.
+    AlreadyCurrent,
+    /// The target did not match the caller's expected prior state.
+    Conflict,
+}
+
+/// Explicit state returned by an optional-file read.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuestOptionalFile {
+    /// The target was absent.
+    Missing {},
+    /// The target was present with bounded, base64-encoded content.
+    Present {
+        /// Base64-encoded file content.
+        content_base64: String,
+    },
+}
+
+impl fmt::Debug for GuestOptionalFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing {} => formatter.write_str("GuestOptionalFile::Missing"),
+            Self::Present { content_base64 } => formatter
+                .debug_struct("GuestOptionalFile::Present")
+                .field("encoded_bytes", &content_base64.len())
+                .field("content", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
 
 /// One operation sent through anonymous stdin to the sandbox guest.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -145,8 +227,39 @@ pub enum GuestRequest {
         /// Base64-encoded file content.
         content_base64: String,
     },
+    /// Durably replaces one bounded file if its prior state matches.
+    ///
+    /// A transport failure or rejected operation after dispatch can be
+    /// ambiguous if replacement completed but the parent-directory sync or
+    /// response failed. Matching optional-file readback is not durability
+    /// proof: callers must issue a fresh atomic commit for the same bytes and
+    /// require its synchronization-closing `Committed` or `AlreadyCurrent`
+    /// outcome.
+    AtomicCommitFile {
+        /// Protocol version selected by the caller.
+        protocol: u16,
+        /// Idempotent operation identifier.
+        operation_id: String,
+        /// Absolute destination path whose parent already exists.
+        path: String,
+        /// Base64-encoded file content.
+        content_base64: String,
+        /// Expected prior target state used for optimistic fencing.
+        expected: GuestFileExpectation,
+    },
     /// Read one bounded file inside the sandbox.
     ReadFile {
+        /// Protocol version selected by the caller.
+        protocol: u16,
+        /// Idempotent operation identifier.
+        operation_id: String,
+        /// Absolute source path.
+        path: String,
+        /// Maximum returned bytes.
+        byte_limit: usize,
+    },
+    /// Reads one bounded file while representing absence explicitly.
+    ReadOptionalFile {
         /// Protocol version selected by the caller.
         protocol: u16,
         /// Idempotent operation identifier.
@@ -217,6 +330,19 @@ impl fmt::Debug for GuestRequest {
                 .field("encoded_bytes", &content_base64.len())
                 .field("payload", &"[REDACTED]")
                 .finish(),
+            Self::AtomicCommitFile {
+                protocol,
+                operation_id,
+                content_base64,
+                ..
+            } => formatter
+                .debug_struct("GuestRequest::AtomicCommitFile")
+                .field("protocol", protocol)
+                .field("operation_id", operation_id)
+                .field("encoded_bytes", &content_base64.len())
+                .field("expected", &"[REDACTED]")
+                .field("payload", &"[REDACTED]")
+                .finish(),
             Self::ReadFile {
                 protocol,
                 operation_id,
@@ -224,6 +350,18 @@ impl fmt::Debug for GuestRequest {
                 ..
             } => formatter
                 .debug_struct("GuestRequest::ReadFile")
+                .field("protocol", protocol)
+                .field("operation_id", operation_id)
+                .field("byte_limit", byte_limit)
+                .field("path", &"[REDACTED]")
+                .finish(),
+            Self::ReadOptionalFile {
+                protocol,
+                operation_id,
+                byte_limit,
+                ..
+            } => formatter
+                .debug_struct("GuestRequest::ReadOptionalFile")
                 .field("protocol", protocol)
                 .field("operation_id", operation_id)
                 .field("byte_limit", byte_limit)
@@ -242,7 +380,9 @@ impl GuestRequest {
             | Self::Configure { protocol, .. }
             | Self::Exec { protocol, .. }
             | Self::WriteFile { protocol, .. }
-            | Self::ReadFile { protocol, .. } => *protocol,
+            | Self::AtomicCommitFile { protocol, .. }
+            | Self::ReadFile { protocol, .. }
+            | Self::ReadOptionalFile { protocol, .. } => *protocol,
         }
     }
 
@@ -253,7 +393,9 @@ impl GuestRequest {
             | Self::Configure { operation_id, .. }
             | Self::Exec { operation_id, .. }
             | Self::WriteFile { operation_id, .. }
-            | Self::ReadFile { operation_id, .. } => operation_id,
+            | Self::AtomicCommitFile { operation_id, .. }
+            | Self::ReadFile { operation_id, .. }
+            | Self::ReadOptionalFile { operation_id, .. } => operation_id,
         }
     }
 }
@@ -377,12 +519,26 @@ pub enum GuestResponse {
         /// Guest protocol version.
         protocol: u16,
     },
+    /// An optimistic atomic file replacement completed.
+    AtomicCommitFile {
+        /// Guest protocol version.
+        protocol: u16,
+        /// Whether bytes were committed, already current, or fenced out.
+        outcome: GuestAtomicCommitOutcome,
+    },
     /// A file read completed.
     ReadFile {
         /// Guest protocol version.
         protocol: u16,
         /// Base64-encoded content.
         content_base64: String,
+    },
+    /// An optional-file read completed.
+    ReadOptionalFile {
+        /// Guest protocol version.
+        protocol: u16,
+        /// Explicit present-or-missing file state.
+        file: GuestOptionalFile,
     },
     /// The request was rejected without returning sensitive diagnostics.
     Rejected {
@@ -431,6 +587,11 @@ impl fmt::Debug for GuestResponse {
                 .debug_struct("GuestResponse::WriteFile")
                 .field("protocol", protocol)
                 .finish(),
+            Self::AtomicCommitFile { protocol, outcome } => formatter
+                .debug_struct("GuestResponse::AtomicCommitFile")
+                .field("protocol", protocol)
+                .field("outcome", outcome)
+                .finish(),
             Self::ReadFile {
                 protocol,
                 content_base64,
@@ -439,6 +600,11 @@ impl fmt::Debug for GuestResponse {
                 .field("protocol", protocol)
                 .field("encoded_bytes", &content_base64.len())
                 .field("content", &"[REDACTED]")
+                .finish(),
+            Self::ReadOptionalFile { protocol, file } => formatter
+                .debug_struct("GuestResponse::ReadOptionalFile")
+                .field("protocol", protocol)
+                .field("file", file)
                 .finish(),
             Self::Rejected { protocol, kind } => formatter
                 .debug_struct("GuestResponse::Rejected")
@@ -642,6 +808,9 @@ pub async fn serve_stdio_once() -> Result<(), GuestProtocolError> {
     let mut input = tokio::io::stdin();
     let frame = read_frame(&mut input).await?;
     let request: GuestRequest = decode_frame(&frame)?;
+    if matches!(request, GuestRequest::AtomicCommitFile { .. }) {
+        require_eof(&mut input).await?;
+    }
     let response = match immediate_rejection(&request) {
         Some(response) => response,
         None => handle_request(request, None).await,
@@ -815,6 +984,16 @@ fn immediate_rejection(request: &GuestRequest) -> Option<GuestResponse> {
 async fn wait_for_disconnect<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(), GuestProtocolError> {
+    let mut unexpected = [0_u8; 1];
+    match reader.read(&mut unexpected).await {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(GuestProtocolError::InvalidFrame),
+        Err(error) => Err(GuestProtocolError::Io(error)),
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn require_eof<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(), GuestProtocolError> {
     let mut unexpected = [0_u8; 1];
     match reader.read(&mut unexpected).await {
         Ok(0) => Ok(()),
@@ -1076,9 +1255,19 @@ async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) 
             content_base64,
             ..
         } => write_file(&path, &content_base64).await,
+        GuestRequest::AtomicCommitFile {
+            operation_id,
+            path,
+            content_base64,
+            expected,
+            ..
+        } => atomic_commit_file(operation_id, path, content_base64, expected).await,
         GuestRequest::ReadFile {
             path, byte_limit, ..
         } => read_file(&path, byte_limit).await,
+        GuestRequest::ReadOptionalFile {
+            path, byte_limit, ..
+        } => read_optional_file(&path, byte_limit).await,
     }
 }
 
@@ -1364,17 +1553,447 @@ async fn write_file(path: &str, content_base64: &str) -> GuestResponse {
     }
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum ParsedFileExpectation {
+    Absent,
+    Sha256([u8; 32]),
+}
+
+#[cfg(any(unix, windows))]
+#[cfg_attr(windows, allow(clippy::unused_async))]
+async fn atomic_commit_file(
+    operation_id: String,
+    path: String,
+    content_base64: String,
+    expected: GuestFileExpectation,
+) -> GuestResponse {
+    let Ok(content) = BASE64.decode(content_base64) else {
+        return rejected(GuestRejection::InvalidRequest);
+    };
+    if !valid_operation_id(&operation_id)
+        || !valid_explicit_file_path(&path)
+        || content.len() > MAX_GUEST_FRAME_BYTES / 2
+    {
+        return rejected(GuestRejection::InvalidRequest);
+    }
+    #[cfg(unix)]
+    {
+        let expected = match expected {
+            GuestFileExpectation::Absent => ParsedFileExpectation::Absent,
+            GuestFileExpectation::Sha256 { digest } => {
+                let Some(digest) = parse_lowercase_sha256(&digest) else {
+                    return rejected(GuestRejection::InvalidRequest);
+                };
+                ParsedFileExpectation::Sha256(digest)
+            }
+        };
+        match tokio::task::spawn_blocking(move || {
+            atomic_commit_file_unix(&operation_id, &path, &content, expected)
+        })
+        .await
+        {
+            Ok(Ok(outcome)) => GuestResponse::AtomicCommitFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                outcome,
+            },
+            Ok(Err(())) | Err(_) => rejected(GuestRejection::OperationFailed),
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        if let GuestFileExpectation::Sha256 { digest } = &expected
+            && parse_lowercase_sha256(digest).is_none()
+        {
+            return rejected(GuestRejection::InvalidRequest);
+        }
+        let _ = (operation_id, path, content, expected);
+        rejected(GuestRejection::OperationFailed)
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn parse_lowercase_sha256(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = lowercase_hex_nibble(pair[0])?;
+        let low = lowercase_hex_nibble(pair[1])?;
+        digest[index] = (high << 4) | low;
+    }
+    Some(digest)
+}
+
+#[cfg(any(unix, windows))]
+const fn lowercase_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(unix)]
+fn atomic_commit_file_unix(
+    operation_id: &str,
+    path: &str,
+    content: &[u8],
+    expected: ParsedFileExpectation,
+) -> Result<GuestAtomicCommitOutcome, ()> {
+    atomic_commit_file_unix_with_directory_sync(operation_id, path, content, expected, |parent| {
+        unix_fs::fsync(parent).map_err(|_| ())
+    })
+}
+
+#[cfg(unix)]
+fn atomic_commit_file_unix_with_directory_sync<SyncDirectory>(
+    operation_id: &str,
+    path: &str,
+    content: &[u8],
+    expected: ParsedFileExpectation,
+    sync_directory: SyncDirectory,
+) -> Result<GuestAtomicCommitOutcome, ()>
+where
+    SyncDirectory: FnOnce(&OwnedFd) -> Result<(), ()>,
+{
+    atomic_commit_file_unix_with_hooks(
+        operation_id,
+        path,
+        content,
+        expected,
+        |_, _| Ok(()),
+        sync_directory,
+    )
+}
+
+#[cfg(unix)]
+fn atomic_commit_file_unix_with_hooks<BeforeRename, SyncDirectory>(
+    operation_id: &str,
+    path: &str,
+    content: &[u8],
+    expected: ParsedFileExpectation,
+    before_rename: BeforeRename,
+    sync_directory: SyncDirectory,
+) -> Result<GuestAtomicCommitOutcome, ()>
+where
+    BeforeRename: FnOnce(&OwnedFd, &str) -> Result<(), ()>,
+    SyncDirectory: FnOnce(&OwnedFd) -> Result<(), ()>,
+{
+    let (parent, target_name) = open_secure_parent(path).map_err(|_| ())?;
+    flock(&parent, FlockOperation::LockExclusive).map_err(|_| ())?;
+
+    let current = read_secure_regular_target(&parent, &target_name, MAX_GUEST_FRAME_BYTES / 2)
+        .map_err(|_| ())?;
+    if current.as_ref().map(|current| current.content.as_slice()) == Some(content) {
+        current
+            .as_ref()
+            .expect("present content retains its exact descriptor")
+            .descriptor
+            .sync_all()
+            .map_err(|_| ())?;
+        sync_directory(&parent)?;
+        return Ok(GuestAtomicCommitOutcome::AlreadyCurrent);
+    }
+    let expectation_matches = match (
+        expected,
+        current.as_ref().map(|current| current.content.as_slice()),
+    ) {
+        (ParsedFileExpectation::Absent, None) => true,
+        (ParsedFileExpectation::Sha256(expected), Some(current)) => {
+            <[u8; 32]>::from(Sha256::digest(current)) == expected
+        }
+        (ParsedFileExpectation::Absent | ParsedFileExpectation::Sha256(_), _) => false,
+    };
+    if !expectation_matches {
+        return Ok(GuestAtomicCommitOutcome::Conflict);
+    }
+
+    let temporary_prefix = atomic_temporary_prefix(operation_id, path);
+    let (mut temporary, temporary_name) =
+        create_atomic_temporary(&parent, &target_name, &temporary_prefix)?;
+    if temporary
+        .write_all(content)
+        .and_then(|()| temporary.sync_all())
+        .is_err()
+    {
+        drop(temporary);
+        cleanup_atomic_temporary(&parent, &temporary_name);
+        return Err(());
+    }
+    drop(temporary);
+    if before_rename(&parent, &temporary_name).is_err() {
+        cleanup_atomic_temporary(&parent, &temporary_name);
+        return Err(());
+    }
+    if renameat(&parent, temporary_name.as_str(), &parent, &target_name).is_err() {
+        cleanup_atomic_temporary(&parent, &temporary_name);
+        return Err(());
+    }
+    sync_directory(&parent)?;
+    Ok(GuestAtomicCommitOutcome::Committed)
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+enum SecureFileError {
+    NotFound,
+    InvalidRequest,
+    OperationFailed,
+}
+
+#[cfg(unix)]
+struct SecureRegularFileRead {
+    descriptor: File,
+    content: Vec<u8>,
+}
+
+#[cfg(unix)]
+fn open_secure_parent(path: &str) -> Result<(OwnedFd, OsString), SecureFileError> {
+    let target = Path::new(path);
+    let parent_path = target.parent().ok_or(SecureFileError::InvalidRequest)?;
+    let target_name = target
+        .file_name()
+        .ok_or(SecureFileError::InvalidRequest)?
+        .to_os_string();
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let mut parent =
+        open("/", directory_flags, Mode::empty()).map_err(|_| SecureFileError::OperationFailed)?;
+    for component in parent_path.components().skip(1) {
+        let Component::Normal(name) = component else {
+            return Err(SecureFileError::InvalidRequest);
+        };
+        parent = match openat(&parent, name, directory_flags, Mode::empty()) {
+            Ok(parent) => parent,
+            Err(Errno::NOENT) => return Err(SecureFileError::NotFound),
+            Err(_) => return Err(SecureFileError::OperationFailed),
+        };
+    }
+    Ok((parent, target_name))
+}
+
+#[cfg(unix)]
+fn read_secure_regular_target(
+    parent: &OwnedFd,
+    target_name: &OsString,
+    byte_limit: usize,
+) -> Result<Option<SecureRegularFileRead>, SecureFileError> {
+    let descriptor = match openat(
+        parent,
+        target_name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(SecureFileError::OperationFailed),
+    };
+    let metadata = fstat(&descriptor).map_err(|_| SecureFileError::OperationFailed)?;
+    if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile {
+        return Err(SecureFileError::OperationFailed);
+    }
+    if u64::try_from(metadata.st_size).map_err(|_| SecureFileError::OperationFailed)?
+        > u64::try_from(byte_limit).map_err(|_| SecureFileError::InvalidRequest)?
+    {
+        return Err(SecureFileError::InvalidRequest);
+    }
+    let read_limit =
+        u64::try_from(byte_limit.saturating_add(1)).map_err(|_| SecureFileError::InvalidRequest)?;
+    let mut content = Vec::with_capacity(
+        usize::try_from(metadata.st_size)
+            .unwrap_or(OUTPUT_CHUNK_BYTES)
+            .min(OUTPUT_CHUNK_BYTES),
+    );
+    let mut descriptor = File::from(descriptor);
+    (&mut descriptor)
+        .take(read_limit)
+        .read_to_end(&mut content)
+        .map_err(|_| SecureFileError::OperationFailed)?;
+    if content.len() > byte_limit {
+        return Err(SecureFileError::InvalidRequest);
+    }
+    Ok(Some(SecureRegularFileRead {
+        descriptor,
+        content,
+    }))
+}
+
+#[cfg(unix)]
+fn atomic_temporary_prefix(operation_id: &str, path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut hasher = Sha256::new();
+    hasher.update(operation_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(path.as_bytes());
+    let digest = hasher.finalize();
+    let mut name = String::with_capacity(28 + digest.len() * 2);
+    name.push_str(".automata-ci-atomic-stage-");
+    for byte in digest {
+        name.push(char::from(HEX[usize::from(byte >> 4)]));
+        name.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    name.push('-');
+    name
+}
+
+#[cfg(unix)]
+fn create_atomic_temporary(
+    parent: &OwnedFd,
+    target_name: &OsString,
+    temporary_prefix: &str,
+) -> Result<(File, String), ()> {
+    create_atomic_temporary_with_random(parent, target_name, temporary_prefix, |random| {
+        getrandom::fill(random).map_err(|_| ())
+    })
+}
+
+#[cfg(unix)]
+fn create_atomic_temporary_with_random<FillRandom>(
+    parent: &OwnedFd,
+    target_name: &OsString,
+    temporary_prefix: &str,
+    mut fill_random: FillRandom,
+) -> Result<(File, String), ()>
+where
+    FillRandom: FnMut(&mut [u8; ATOMIC_STAGE_RANDOM_BYTES]) -> Result<(), ()>,
+{
+    for _ in 0..MAX_ATOMIC_STAGE_CREATE_ATTEMPTS {
+        let mut random = [0_u8; ATOMIC_STAGE_RANDOM_BYTES];
+        fill_random(&mut random)?;
+        let temporary_name = atomic_temporary_name(temporary_prefix, &random);
+        if target_name.as_bytes() == temporary_name.as_bytes() {
+            continue;
+        }
+        match openat(
+            parent,
+            temporary_name.as_str(),
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::CLOEXEC
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK,
+            Mode::from_raw_mode(0o600),
+        ) {
+            Ok(temporary) => return Ok((File::from(temporary), temporary_name)),
+            Err(Errno::EXIST) => {}
+            Err(_) => return Err(()),
+        }
+    }
+    Err(())
+}
+
+#[cfg(unix)]
+fn atomic_temporary_name(prefix: &str, random: &[u8; ATOMIC_STAGE_RANDOM_BYTES]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut name = String::with_capacity(prefix.len() + random.len() * 2);
+    name.push_str(prefix);
+    for byte in random {
+        name.push(char::from(HEX[usize::from(byte >> 4)]));
+        name.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    name
+}
+
+#[cfg(unix)]
+fn cleanup_atomic_temporary(parent: &OwnedFd, temporary_name: &str) {
+    if unlinkat(parent, temporary_name, AtFlags::empty()).is_ok() {
+        let _ = unix_fs::fsync(parent);
+    }
+}
+
 #[cfg(any(unix, windows))]
 async fn read_file(path: &str, byte_limit: usize) -> GuestResponse {
     if !valid_absolute_path(path) || byte_limit == 0 || byte_limit > MAX_GUEST_FRAME_BYTES / 2 {
         return rejected(GuestRejection::InvalidRequest);
     }
-    let Ok(file) = tokio::fs::File::open(path).await else {
-        return rejected(GuestRejection::OperationFailed);
+    let content = match read_bounded_file(path, byte_limit).await {
+        Ok(Some(content)) => content,
+        Ok(None) | Err(GuestRejection::OperationFailed) => {
+            return rejected(GuestRejection::OperationFailed);
+        }
+        Err(kind) => return rejected(kind),
+    };
+    GuestResponse::ReadFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        content_base64: BASE64.encode(content),
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn read_optional_file(path: &str, byte_limit: usize) -> GuestResponse {
+    if !valid_explicit_file_path(path) || byte_limit == 0 || byte_limit > MAX_GUEST_FRAME_BYTES / 2
+    {
+        return rejected(GuestRejection::InvalidRequest);
+    }
+
+    #[cfg(unix)]
+    {
+        let path = path.to_owned();
+        match tokio::task::spawn_blocking(move || read_optional_file_unix(&path, byte_limit)).await
+        {
+            Ok(Ok(content)) => GuestResponse::ReadOptionalFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                file: content.map_or(GuestOptionalFile::Missing {}, |content| {
+                    GuestOptionalFile::Present {
+                        content_base64: BASE64.encode(content),
+                    }
+                }),
+            },
+            Ok(Err(SecureFileError::InvalidRequest)) => rejected(GuestRejection::InvalidRequest),
+            Ok(Err(SecureFileError::NotFound | SecureFileError::OperationFailed)) | Err(_) => {
+                rejected(GuestRejection::OperationFailed)
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        match read_bounded_file(path, byte_limit).await {
+            Ok(content) => GuestResponse::ReadOptionalFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                file: content.map_or(GuestOptionalFile::Missing {}, |content| {
+                    GuestOptionalFile::Present {
+                        content_base64: BASE64.encode(content),
+                    }
+                }),
+            },
+            Err(kind) => rejected(kind),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_optional_file_unix(
+    path: &str,
+    byte_limit: usize,
+) -> Result<Option<Vec<u8>>, SecureFileError> {
+    let (parent, target_name) = match open_secure_parent(path) {
+        Ok(target) => target,
+        Err(SecureFileError::NotFound) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    read_secure_regular_target(&parent, &target_name, byte_limit)
+        .map(|content| content.map(|content| content.content))
+}
+
+#[cfg(any(unix, windows))]
+async fn read_bounded_file(
+    path: &str,
+    byte_limit: usize,
+) -> Result<Option<Vec<u8>>, GuestRejection> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(GuestRejection::OperationFailed),
     };
     let mut content = Vec::with_capacity(byte_limit.min(OUTPUT_CHUNK_BYTES));
     let Ok(read_limit) = u64::try_from(byte_limit.saturating_add(1)) else {
-        return rejected(GuestRejection::InvalidRequest);
+        return Err(GuestRejection::InvalidRequest);
     };
     if file
         .take(read_limit)
@@ -1382,15 +2001,12 @@ async fn read_file(path: &str, byte_limit: usize) -> GuestResponse {
         .await
         .is_err()
     {
-        return rejected(GuestRejection::OperationFailed);
+        return Err(GuestRejection::OperationFailed);
     }
     if content.len() > byte_limit {
-        return rejected(GuestRejection::InvalidRequest);
+        return Err(GuestRejection::InvalidRequest);
     }
-    GuestResponse::ReadFile {
-        protocol: GUEST_PROTOCOL_VERSION,
-        content_base64: BASE64.encode(content),
-    }
+    Ok(Some(content))
 }
 
 #[cfg(any(unix, windows))]
@@ -1413,6 +2029,11 @@ fn valid_absolute_path(value: &str) -> bool {
         && !value.contains('\0')
 }
 
+#[cfg(unix)]
+fn valid_explicit_file_path(value: &str) -> bool {
+    valid_absolute_path(value) && !value.ends_with('/')
+}
+
 #[cfg(windows)]
 fn valid_absolute_path(value: &str) -> bool {
     let bytes = value.as_bytes();
@@ -1431,6 +2052,11 @@ fn valid_absolute_path(value: &str) -> bool {
                     .bytes()
                     .any(|byte| matches!(byte, b':' | b'*' | b'?' | b'"' | b'<' | b'>' | b'|'))
         })
+}
+
+#[cfg(windows)]
+fn valid_explicit_file_path(value: &str) -> bool {
+    valid_absolute_path(value) && !value.ends_with('\\')
 }
 
 #[cfg(any(unix, windows))]
@@ -1499,9 +2125,9 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[test]
-    fn protocol_v3_rejects_every_prior_wire_version() {
-        assert_eq!(GUEST_PROTOCOL_VERSION, 3);
-        for protocol in [1, 2] {
+    fn protocol_v4_rejects_every_prior_wire_version() {
+        assert_eq!(GUEST_PROTOCOL_VERSION, 4);
+        for protocol in [1, 2, 3] {
             let request = GuestRequest::Probe {
                 protocol,
                 operation_id: OPERATION_ONE.into(),
@@ -1540,6 +2166,483 @@ mod tests {
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_commit_is_fenced_and_an_identical_retry_is_idempotent() {
+        let root = fresh_test_directory("atomic-fenced").await;
+        let target = root
+            .join("desired-spec.json")
+            .to_string_lossy()
+            .into_owned();
+
+        let first = atomic_commit_file(
+            OPERATION_ONE.into(),
+            target.clone(),
+            BASE64.encode(b"first"),
+            GuestFileExpectation::Absent,
+        )
+        .await;
+        assert_eq!(
+            first,
+            GuestResponse::AtomicCommitFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                outcome: GuestAtomicCommitOutcome::Committed,
+            }
+        );
+        let retry = atomic_commit_file(
+            OPERATION_ONE.into(),
+            target.clone(),
+            BASE64.encode(b"first"),
+            GuestFileExpectation::Absent,
+        )
+        .await;
+        assert_eq!(
+            retry,
+            GuestResponse::AtomicCommitFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                outcome: GuestAtomicCommitOutcome::AlreadyCurrent,
+            }
+        );
+
+        let conflict = atomic_commit_file(
+            "00000000-0000-4000-8000-000000000002".into(),
+            target.clone(),
+            BASE64.encode(b"conflicting"),
+            GuestFileExpectation::Absent,
+        )
+        .await;
+        assert_eq!(
+            conflict,
+            GuestResponse::AtomicCommitFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                outcome: GuestAtomicCommitOutcome::Conflict,
+            }
+        );
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read target"),
+            b"first"
+        );
+
+        let replacement = atomic_commit_file(
+            "00000000-0000-4000-8000-000000000003".into(),
+            target.clone(),
+            BASE64.encode(b"replacement"),
+            GuestFileExpectation::Sha256 {
+                digest: sha256_hex(b"first"),
+            },
+        )
+        .await;
+        assert_eq!(
+            replacement,
+            GuestResponse::AtomicCommitFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                outcome: GuestAtomicCommitOutcome::Committed,
+            }
+        );
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read target"),
+            b"replacement"
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_atomic_commits_serialize_the_expected_state_check() {
+        let root = fresh_test_directory("atomic-concurrent").await;
+        let target = root
+            .join("desired-spec.json")
+            .to_string_lossy()
+            .into_owned();
+        let first = atomic_commit_file(
+            OPERATION_ONE.into(),
+            target.clone(),
+            BASE64.encode(b"first"),
+            GuestFileExpectation::Absent,
+        );
+        let second = atomic_commit_file(
+            "00000000-0000-4000-8000-000000000002".into(),
+            target,
+            BASE64.encode(b"second"),
+            GuestFileExpectation::Absent,
+        );
+        let (first, second) = tokio::join!(first, second);
+        let outcomes = [first, second].map(|response| match response {
+            GuestResponse::AtomicCommitFile { outcome, .. } => outcome,
+            response => panic!("unexpected response: {response:?}"),
+        });
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == GuestAtomicCommitOutcome::Committed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == GuestAtomicCommitOutcome::Conflict)
+                .count(),
+            1
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_commit_rejects_invalid_state_and_ignores_foreign_crash_stages() {
+        let root = fresh_test_directory("atomic-invalid").await;
+        let target = root
+            .join("desired-spec.json")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            atomic_commit_file(
+                OPERATION_ONE.into(),
+                target.clone(),
+                BASE64.encode(b"first"),
+                GuestFileExpectation::Sha256 {
+                    digest: "A".repeat(64),
+                },
+            )
+            .await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+        assert!(!Path::new(&target).exists());
+
+        let prefix = atomic_temporary_prefix(OPERATION_ONE, &target);
+        let stage = root.join(atomic_temporary_name(
+            &prefix,
+            &[7; ATOMIC_STAGE_RANDOM_BYTES],
+        ));
+        tokio::fs::write(&stage, b"foreign")
+            .await
+            .expect("write foreign stage");
+        assert_eq!(
+            atomic_commit_file(
+                OPERATION_ONE.into(),
+                target.clone(),
+                BASE64.encode(b"first"),
+                GuestFileExpectation::Absent,
+            )
+            .await,
+            GuestResponse::AtomicCommitFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                outcome: GuestAtomicCommitOutcome::Committed,
+            }
+        );
+        assert_eq!(
+            tokio::fs::read(&stage).await.expect("read foreign stage"),
+            b"foreign"
+        );
+
+        let (parent, target_name) = open_secure_parent(&target).expect("open target parent");
+        let mut calls = 0_u8;
+        let (created, created_name) =
+            create_atomic_temporary_with_random(&parent, &target_name, &prefix, |random| {
+                calls += 1;
+                random.fill(if calls == 1 { 7 } else { 8 });
+                Ok(())
+            })
+            .expect("retry random collision");
+        drop(created);
+        assert_eq!(calls, 2);
+        assert_ne!(root.join(&created_name), stage);
+        assert_eq!(
+            tokio::fs::read(&stage).await.expect("read foreign stage"),
+            b"foreign"
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn post_rename_sync_failure_requires_fresh_readback() {
+        let root = fresh_test_directory("atomic-ambiguous").await;
+        let target = root
+            .join("desired-spec.json")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            atomic_commit_file_unix_with_directory_sync(
+                OPERATION_ONE,
+                &target,
+                b"committed-before-sync-failure",
+                ParsedFileExpectation::Absent,
+                |_| Err(()),
+            ),
+            Err(())
+        );
+        assert_eq!(
+            read_optional_file(&target, 64).await,
+            GuestResponse::ReadOptionalFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                file: GuestOptionalFile::Present {
+                    content_base64: BASE64.encode(b"committed-before-sync-failure"),
+                },
+            }
+        );
+        assert_eq!(
+            atomic_commit_file_unix_with_directory_sync(
+                OPERATION_ONE,
+                &target,
+                b"committed-before-sync-failure",
+                ParsedFileExpectation::Absent,
+                |_| Err(()),
+            ),
+            Err(())
+        );
+        assert_eq!(
+            atomic_commit_file(
+                OPERATION_ONE.into(),
+                target,
+                BASE64.encode(b"committed-before-sync-failure"),
+                GuestFileExpectation::Absent,
+            )
+            .await,
+            GuestResponse::AtomicCommitFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                outcome: GuestAtomicCommitOutcome::AlreadyCurrent,
+            }
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pre_rename_failure_cleans_only_its_new_random_stage() {
+        let root = fresh_test_directory("atomic-pre-rename-failure").await;
+        let target = root
+            .join("desired-spec.json")
+            .to_string_lossy()
+            .into_owned();
+        tokio::fs::write(&target, b"retained")
+            .await
+            .expect("write target fixture");
+
+        let operation_id = "00000000-0000-4000-8000-000000000004";
+        let prefix = atomic_temporary_prefix(operation_id, &target);
+        let foreign_name = atomic_temporary_name(&prefix, &[7; ATOMIC_STAGE_RANDOM_BYTES]);
+        let foreign_stage = root.join(&foreign_name);
+        tokio::fs::write(&foreign_stage, b"foreign")
+            .await
+            .expect("write foreign stage");
+
+        let created_name = std::cell::RefCell::new(None);
+        assert_eq!(
+            atomic_commit_file_unix_with_hooks(
+                operation_id,
+                &target,
+                b"replacement",
+                ParsedFileExpectation::Sha256(
+                    parse_lowercase_sha256(&sha256_hex(b"retained")).expect("fixture digest"),
+                ),
+                |_, name| {
+                    assert_eq!(
+                        std::fs::read(root.join(name)).expect("read exact new stage"),
+                        b"replacement"
+                    );
+                    created_name.replace(Some(name.to_owned()));
+                    Err(())
+                },
+                |_| panic!("directory sync must not run before rename"),
+            ),
+            Err(())
+        );
+
+        let created_name = created_name.into_inner().expect("capture exact new stage");
+        assert_ne!(created_name, foreign_name);
+        assert!(!root.join(created_name).exists());
+        assert_eq!(
+            tokio::fs::read(&foreign_stage)
+                .await
+                .expect("read foreign stage"),
+            b"foreign"
+        );
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read target"),
+            b"retained"
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_commit_requires_a_preexisting_real_parent_and_regular_target() {
+        let root = fresh_test_directory("atomic-paths").await;
+        let missing_target = root
+            .join("missing")
+            .join("desired-spec.json")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            atomic_commit_file(
+                OPERATION_ONE.into(),
+                missing_target,
+                BASE64.encode(b"first"),
+                GuestFileExpectation::Absent,
+            )
+            .await,
+            rejected(GuestRejection::OperationFailed)
+        );
+        assert!(!root.join("missing").exists());
+
+        let directory_target = root.join("directory-target");
+        tokio::fs::create_dir(&directory_target)
+            .await
+            .expect("create directory target");
+        assert_eq!(
+            atomic_commit_file(
+                "00000000-0000-4000-8000-000000000002".into(),
+                directory_target.to_string_lossy().into_owned(),
+                BASE64.encode(b"first"),
+                GuestFileExpectation::Absent,
+            )
+            .await,
+            rejected(GuestRejection::OperationFailed)
+        );
+        assert!(directory_target.is_dir());
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn optional_read_distinguishes_only_a_missing_file() {
+        let root = fresh_test_directory("optional-read").await;
+        let missing = root.join("missing").to_string_lossy().into_owned();
+        assert_eq!(
+            read_optional_file(&missing, 16).await,
+            GuestResponse::ReadOptionalFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                file: GuestOptionalFile::Missing {},
+            }
+        );
+        let missing_parent = root
+            .join("missing-parent")
+            .join("missing")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            read_optional_file(&missing_parent, 16).await,
+            GuestResponse::ReadOptionalFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                file: GuestOptionalFile::Missing {},
+            }
+        );
+
+        let present = root.join("present");
+        tokio::fs::write(&present, b"present")
+            .await
+            .expect("write fixture");
+        assert_eq!(
+            read_optional_file(&present.to_string_lossy(), 16).await,
+            GuestResponse::ReadOptionalFile {
+                protocol: GUEST_PROTOCOL_VERSION,
+                file: GuestOptionalFile::Present {
+                    content_base64: BASE64.encode(b"present"),
+                },
+            }
+        );
+        let symlink = root.join("symlink");
+        std::os::unix::fs::symlink(&present, &symlink).expect("create target symlink");
+        assert_eq!(
+            read_optional_file(&symlink.to_string_lossy(), 16).await,
+            rejected(GuestRejection::OperationFailed)
+        );
+
+        let real_parent = root.join("real-parent");
+        tokio::fs::create_dir(&real_parent)
+            .await
+            .expect("create real parent");
+        tokio::fs::write(real_parent.join("present"), b"present")
+            .await
+            .expect("write nested fixture");
+        let parent_symlink = root.join("parent-symlink");
+        std::os::unix::fs::symlink(&real_parent, &parent_symlink).expect("create parent symlink");
+        assert_eq!(
+            read_optional_file(&parent_symlink.join("present").to_string_lossy(), 16,).await,
+            rejected(GuestRejection::OperationFailed)
+        );
+        assert_eq!(
+            read_optional_file(&root.to_string_lossy(), 16).await,
+            rejected(GuestRejection::OperationFailed)
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_commit_and_optional_read_reject_trailing_slash_aliases() {
+        let root = fresh_test_directory("file-trailing-slash").await;
+        let target = root.join("desired-spec.json");
+        tokio::fs::write(&target, b"retained")
+            .await
+            .expect("write target fixture");
+        let alias = format!("{}/", target.to_string_lossy());
+
+        assert_eq!(
+            atomic_commit_file(
+                OPERATION_ONE.into(),
+                alias.clone(),
+                BASE64.encode(b"replacement"),
+                GuestFileExpectation::Sha256 {
+                    digest: sha256_hex(b"retained"),
+                },
+            )
+            .await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+        assert_eq!(
+            read_optional_file(&alias, 16).await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read target"),
+            b"retained"
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    async fn fresh_test_directory(label: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("automata-guest-{label}-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir(&root)
+            .await
+            .expect("create test directory");
+        root
+    }
+
+    #[cfg(unix)]
+    fn sha256_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+
+        let digest = Sha256::digest(bytes);
+        let mut encoded = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        encoded
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_execution_requires_an_explicit_bounded_process_limit() {
@@ -1559,6 +2662,109 @@ mod tests {
         assert!(!valid(None));
         assert!(!valid(Some(0)));
         assert!(!valid(Some(MAX_PROCESS_LIMIT + 1)));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_atomic_commit_rejects_valid_expectations_without_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "automata-guest-windows-atomic-valid-{}",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir(&root)
+            .await
+            .expect("create test directory");
+
+        let missing = root.join("missing.json").to_string_lossy().into_owned();
+        assert_eq!(
+            atomic_commit_file(
+                OPERATION_ONE.into(),
+                missing.clone(),
+                BASE64.encode(b"new"),
+                GuestFileExpectation::Absent,
+            )
+            .await,
+            rejected(GuestRejection::OperationFailed)
+        );
+        assert!(!Path::new(&missing).exists());
+
+        let target = root.join("present.json");
+        tokio::fs::write(&target, b"retained")
+            .await
+            .expect("write target fixture");
+        assert_eq!(
+            atomic_commit_file(
+                "00000000-0000-4000-8000-000000000002".into(),
+                target.to_string_lossy().into_owned(),
+                BASE64.encode(b"replacement"),
+                GuestFileExpectation::Sha256 {
+                    digest: "0".repeat(64),
+                },
+            )
+            .await,
+            rejected(GuestRejection::OperationFailed)
+        );
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read target"),
+            b"retained"
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_atomic_commit_rejects_invalid_digest_and_trailing_aliases_without_mutation() {
+        let root = std::env::temp_dir().join(format!(
+            "automata-guest-windows-atomic-invalid-{}",
+            std::process::id()
+        ));
+        let _ = tokio::fs::remove_dir_all(&root).await;
+        tokio::fs::create_dir(&root)
+            .await
+            .expect("create test directory");
+        let target = root.join("present.json");
+        tokio::fs::write(&target, b"retained")
+            .await
+            .expect("write target fixture");
+
+        assert_eq!(
+            atomic_commit_file(
+                OPERATION_ONE.into(),
+                target.to_string_lossy().into_owned(),
+                BASE64.encode(b"replacement"),
+                GuestFileExpectation::Sha256 {
+                    digest: "A".repeat(64),
+                },
+            )
+            .await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+
+        let alias = format!("{}\\", target.to_string_lossy());
+        assert_eq!(
+            atomic_commit_file(
+                "00000000-0000-4000-8000-000000000002".into(),
+                alias.clone(),
+                BASE64.encode(b"replacement"),
+                GuestFileExpectation::Absent,
+            )
+            .await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+        assert_eq!(
+            read_optional_file(&alias, 16).await,
+            rejected(GuestRejection::InvalidRequest)
+        );
+        assert_eq!(
+            tokio::fs::read(&target).await.expect("read target"),
+            b"retained"
+        );
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove fixture");
     }
 
     #[test]
@@ -1582,6 +2788,88 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(!debug.contains("secret-argument"));
         assert!(!debug.contains("secret-value"));
+
+        let atomic = GuestRequest::AtomicCommitFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: OPERATION_ONE.into(),
+            path: "/secret/path".into(),
+            content_base64: BASE64.encode(b"secret-content"),
+            expected: GuestFileExpectation::Sha256 {
+                digest: "a".repeat(64),
+            },
+        };
+        assert_eq!(
+            decode_frame::<GuestRequest>(&encode_frame(&atomic).expect("frame")).expect("decode"),
+            atomic
+        );
+        let debug = format!("{atomic:?}");
+        assert!(!debug.contains("/secret/path"));
+        assert!(!debug.contains("secret-content"));
+        assert!(!debug.contains(&"a".repeat(64)));
+        assert!(
+            !format!(
+                "{:?}",
+                GuestFileExpectation::Sha256 {
+                    digest: "b".repeat(64)
+                }
+            )
+            .contains(&"b".repeat(64))
+        );
+    }
+
+    #[test]
+    fn optional_file_response_requires_an_explicit_closed_state() {
+        let present = GuestResponse::ReadOptionalFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            file: GuestOptionalFile::Present {
+                content_base64: BASE64.encode(b"secret-optional-content"),
+            },
+        };
+        assert_eq!(
+            decode_frame::<GuestResponse>(&encode_frame(&present).expect("encode present"))
+                .expect("decode present"),
+            present
+        );
+        let debug = format!("{present:?}");
+        assert!(!debug.contains("secret-optional-content"));
+        assert!(!debug.contains(&BASE64.encode(b"secret-optional-content")));
+
+        let missing = GuestResponse::ReadOptionalFile {
+            protocol: GUEST_PROTOCOL_VERSION,
+            file: GuestOptionalFile::Missing {},
+        };
+        assert_eq!(
+            decode_frame::<GuestResponse>(&encode_frame(&missing).expect("encode missing"))
+                .expect("decode missing"),
+            missing
+        );
+
+        for malformed in [
+            serde_json::json!({
+                "result": "read_optional_file",
+                "protocol": GUEST_PROTOCOL_VERSION,
+            }),
+            serde_json::json!({
+                "result": "read_optional_file",
+                "protocol": GUEST_PROTOCOL_VERSION,
+                "file": { "state": "present" },
+            }),
+            serde_json::json!({
+                "result": "read_optional_file",
+                "protocol": GUEST_PROTOCOL_VERSION,
+                "file": {
+                    "state": "missing",
+                    "content_base64": BASE64.encode(b"forbidden"),
+                },
+            }),
+        ] {
+            assert!(
+                decode_frame::<GuestResponse>(
+                    &encode_frame(&malformed).expect("encode malformed fixture")
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

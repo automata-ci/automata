@@ -35,6 +35,13 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   stable JSON schema 3 and human output report its bounded name. The internal
   adapter can strictly inspect or create-and-adopt a repository-agnostic
   installation identity anchor without exposing a product mutation command.
+- Shared sandbox-guest protocol 4 primitives for bounded optional-file reads
+  and Unix durable compare-and-swap atomic file commits. The scratch helper image
+  seeds a non-root-writable data mountpoint for future engine-managed local
+  configuration; this does not yet add a desired-spec schema, config-volume
+  adapter, Compose topology, or public local lifecycle command. Guest-bearing
+  Kubernetes, Windows, and macOS artifacts must be rebuilt in lockstep because
+  protocol versions 1 through 3 are deliberately rejected.
 
 ### Known limitations
 

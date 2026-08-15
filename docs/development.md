@@ -306,6 +306,24 @@ AUTOMATA_TEST_LOCAL_DOCKER=1 cargo test --locked -p automata-ci-local \
   -- --ignored --exact
 ```
 
+Protocol v4's opt-in helper-image contract test requires an explicit local
+Docker endpoint and an already loaded registry digest. It creates a fresh
+ownership-labeled local volume, proves non-root atomic commit and readback
+through the Linux helper envelope, and removes only the revalidated unattached
+fixture:
+
+```console
+AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER=1 \
+AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER_HOST=unix:///var/run/docker.sock \
+AUTOMATA_SANDBOX_GUEST_LIVE_IMAGE='registry.example/automata/sandbox-guest@sha256:<64-lowercase-hex>' \
+cargo test --locked -p automata-ci-sandbox-guest --test behavior \
+  opt_in_docker_fresh_named_volume_is_writable_by_nonroot_guest \
+  -- --ignored --exact --nocapture
+```
+
+The [sandbox-guest guide](../crates/automata-ci-sandbox-guest/README.md#helper-image-contract)
+owns the root-context build, registry-digest, and pull-never prerequisites.
+
 ## External integration-test services
 
 Database and object-storage integration lanes use services managed outside the

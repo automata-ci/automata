@@ -404,7 +404,9 @@ const fn response_protocol(response: &GuestResponse) -> u16 {
         | GuestResponse::Configured { protocol }
         | GuestResponse::Exec { protocol, .. }
         | GuestResponse::WriteFile { protocol }
+        | GuestResponse::AtomicCommitFile { protocol, .. }
         | GuestResponse::ReadFile { protocol, .. }
+        | GuestResponse::ReadOptionalFile { protocol, .. }
         | GuestResponse::Rejected { protocol, .. } => *protocol,
     }
 }

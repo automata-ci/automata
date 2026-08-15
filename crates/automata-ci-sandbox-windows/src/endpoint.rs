@@ -762,7 +762,9 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
         | GuestResponse::Configured { .. }
         | GuestResponse::Exec { .. }
         | GuestResponse::WriteFile { .. }
+        | GuestResponse::AtomicCommitFile { .. }
         | GuestResponse::ReadFile { .. }
+        | GuestResponse::ReadOptionalFile { .. }
         | GuestResponse::Rejected { .. } => ExecutionErrorKind::BackendRejected,
     };
     error::execution(kind, stage)
