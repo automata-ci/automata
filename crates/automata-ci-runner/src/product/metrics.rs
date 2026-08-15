@@ -356,6 +356,8 @@ enum ControlRequestKind {
     Handshake,
     LeaseRequest,
     LeaseResponse,
+    RuntimeAuthorityRequest,
+    RuntimeAuthorityAck,
     Heartbeat,
     JobState,
     JobResult,
@@ -364,10 +366,12 @@ enum ControlRequestKind {
 }
 
 impl ControlRequestKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 10] = [
         Self::Handshake,
         Self::LeaseRequest,
         Self::LeaseResponse,
+        Self::RuntimeAuthorityRequest,
+        Self::RuntimeAuthorityAck,
         Self::Heartbeat,
         Self::JobState,
         Self::JobResult,
@@ -380,6 +384,8 @@ impl ControlRequestKind {
             RunnerToServer::Hello(_) => Self::Handshake,
             RunnerToServer::LeaseRequest(_) => Self::LeaseRequest,
             RunnerToServer::LeaseResponse(_) => Self::LeaseResponse,
+            RunnerToServer::RuntimeAuthorityRequest(_) => Self::RuntimeAuthorityRequest,
+            RunnerToServer::RuntimeAuthorityAck(_) => Self::RuntimeAuthorityAck,
             RunnerToServer::Heartbeat(_) => Self::Heartbeat,
             RunnerToServer::JobState(_) => Self::JobState,
             RunnerToServer::JobResult(_) => Self::JobResult,
@@ -395,6 +401,8 @@ impl EncodeLabelValue for ControlRequestKind {
             Self::Handshake => "handshake",
             Self::LeaseRequest => "lease_request",
             Self::LeaseResponse => "lease_response",
+            Self::RuntimeAuthorityRequest => "runtime_authority_request",
+            Self::RuntimeAuthorityAck => "runtime_authority_ack",
             Self::Heartbeat => "heartbeat",
             Self::JobState => "job_state",
             Self::JobResult => "job_result",
@@ -1034,10 +1042,12 @@ impl SemanticMetrics {
 
     #[allow(clippy::too_many_lines)]
     fn preinitialize(&self) {
-        const EXCHANGES: [&str; 8] = [
+        const EXCHANGES: [&str; 10] = [
             "handshake",
             "lease_poll",
             "lease_response",
+            "runtime_authority_request",
+            "runtime_authority_ack",
             "heartbeat",
             "job_state",
             "job_result",
@@ -1387,6 +1397,8 @@ const fn exchange_label(value: RuntimeExchangeKind) -> &'static str {
         RuntimeExchangeKind::Handshake => "handshake",
         RuntimeExchangeKind::LeasePoll => "lease_poll",
         RuntimeExchangeKind::LeaseResponse => "lease_response",
+        RuntimeExchangeKind::RuntimeAuthorityRequest => "runtime_authority_request",
+        RuntimeExchangeKind::RuntimeAuthorityAck => "runtime_authority_ack",
         RuntimeExchangeKind::Heartbeat => "heartbeat",
         RuntimeExchangeKind::JobState => "job_state",
         RuntimeExchangeKind::JobResult => "job_result",
@@ -1400,6 +1412,8 @@ const fn control_kind_from_exchange(value: RuntimeExchangeKind) -> ControlReques
         RuntimeExchangeKind::Handshake => ControlRequestKind::Handshake,
         RuntimeExchangeKind::LeasePoll => ControlRequestKind::LeaseRequest,
         RuntimeExchangeKind::LeaseResponse => ControlRequestKind::LeaseResponse,
+        RuntimeExchangeKind::RuntimeAuthorityRequest => ControlRequestKind::RuntimeAuthorityRequest,
+        RuntimeExchangeKind::RuntimeAuthorityAck => ControlRequestKind::RuntimeAuthorityAck,
         RuntimeExchangeKind::Heartbeat => ControlRequestKind::Heartbeat,
         RuntimeExchangeKind::JobState => ControlRequestKind::JobState,
         RuntimeExchangeKind::JobResult => ControlRequestKind::JobResult,
