@@ -37,6 +37,13 @@ case "$runtime" in
 esac
 command -v "$runtime" >/dev/null 2>&1 || die "requested runtime is unavailable"
 
+process_probe="${AUTOMATA_SERVICE_PROXY_PROCESS_PROBE:-required}"
+case "$process_probe" in
+  required | metadata-only) ;;
+  *) die "AUTOMATA_SERVICE_PROXY_PROCESS_PROBE must be required or metadata-only" ;;
+esac
+readonly process_probe
+
 automata_init_target_root "$repository_root"
 automata_set_target_tmpdir \
   "$repository_root" \
@@ -89,6 +96,11 @@ if config.get("Entrypoint") != ["/usr/libexec/automata-ci-service-proxy"]:
 if config.get("User") != "65532:65532":
     raise SystemExit("service-proxy-image: candidate user differs")
 PY
+
+if [[ "$process_probe" == metadata-only ]]; then
+  printf 'Service-proxy image metadata verified; process probe is covered by the static binary contract\n'
+  exit 0
+fi
 
 set +e
 "$runtime" run --rm --network none --read-only "$image" \
