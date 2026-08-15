@@ -298,7 +298,12 @@ function resolveNpmDependency(packages, uiDirectory, parentPath, dependencyName)
   return null;
 }
 
-export function collectNpmComponents({ lock, uiDirectory, artifact }) {
+export function collectNpmComponents({
+  lock,
+  uiDirectory,
+  artifact,
+  embeddedRuntimeRoots,
+}) {
   if (lock.lockfileVersion !== 3 || typeof lock.packages !== "object") {
     fail("npm package-lock.json must use lockfileVersion 3");
   }
@@ -307,7 +312,32 @@ export function collectNpmComponents({ lock, uiDirectory, artifact }) {
     fail("npm lockfile has no root package entry");
   }
 
-  const queue = Object.keys(root.dependencies ?? {}).map((name) => ({
+  const explicitEmbeddedRuntime = embeddedRuntimeRoots !== undefined;
+  const rootNames = explicitEmbeddedRuntime
+    ? embeddedRuntimeRoots
+    : Object.keys(root.dependencies ?? {});
+  if (
+    !Array.isArray(rootNames) ||
+    rootNames.length === 0 ||
+    rootNames.some((name) => typeof name !== "string" || name.length === 0) ||
+    new Set(rootNames).size !== rootNames.length
+  ) {
+    fail("npm embedded runtime roots must be a non-empty unique string array");
+  }
+  if (explicitEmbeddedRuntime) {
+    const declared = new Set([
+      ...Object.keys(root.dependencies ?? {}),
+      ...Object.keys(root.devDependencies ?? {}),
+      ...Object.keys(root.optionalDependencies ?? {}),
+      ...Object.keys(root.peerDependencies ?? {}),
+    ]);
+    for (const name of rootNames) {
+      if (!declared.has(name)) {
+        fail(`npm embedded runtime root is not declared by the package: ${name}`);
+      }
+    }
+  }
+  const queue = rootNames.map((name) => ({
     name,
     optional: false,
     parentPath: "",
@@ -334,7 +364,7 @@ export function collectNpmComponents({ lock, uiDirectory, artifact }) {
     visited.add(packagePath);
 
     const entry = lock.packages[packagePath];
-    if (entry.dev === true) {
+    if (entry.dev === true && !explicitEmbeddedRuntime) {
       fail(`npm production dependency ${packagePath} is marked dev-only`);
     }
     const directory = path.join(uiDirectory, packagePath);

@@ -92,6 +92,13 @@
         ],
         "licenseTextFrom": "cargo:defmt@1.1.1",
         "reason": "The parser crate is published from the defmt workspace without the repository license files."
+      },
+      {
+        "components": [
+          "cargo:tonic-prost@0.14.6"
+        ],
+        "licenseTextFrom": "cargo:tonic@0.14.6",
+        "reason": "The Prost integration crate is published from the tonic workspace without the repository license files."
       }
     ],
     "reviewedFallbacks": [
@@ -166,6 +173,11 @@
   "npm": {
     "allowedLicenseExpressions": [
       "MIT"
+    ],
+    "embeddedRuntimeRoots": [
+      "@phosphor-icons/web",
+      "react",
+      "react-dom"
     ],
     "allowedProductionPackages": [
       {

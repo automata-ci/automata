@@ -1243,7 +1243,7 @@ fn authenticated_event_source_revision(
             Some(push.after_commit_sha())
         }
         automata_ci_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
-            Some(pull_request.merge_revision().as_str())
+            Some(pull_request.head_revision().as_str())
         }
         automata_ci_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
             Some(merge_group.head_revision().as_str())

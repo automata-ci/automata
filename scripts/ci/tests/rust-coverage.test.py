@@ -265,23 +265,20 @@ def main() -> None:
             "sha256-framed-git-head-and-nonignored-worktree-content-v1"
         )
 
-        read_only_manifest_directory = scratch / "read-only-manifest"
-        read_only_manifest_directory.mkdir()
-        read_only_manifest_directory.chmod(0o555)
-        try:
-            failed_write = check(
-                policy_path,
-                summary_path,
-                lcov_path,
-                read_only_manifest_directory / "manifest.json",
-                "ordinary",
-            )
-        finally:
-            read_only_manifest_directory.chmod(0o755)
+        manifest_parent_file = scratch / "manifest-parent-file"
+        manifest_parent_file.write_text("not a directory\n", encoding="utf-8")
+        failed_manifest_path = manifest_parent_file / "manifest.json"
+        failed_write = check(
+            policy_path,
+            summary_path,
+            lcov_path,
+            failed_manifest_path,
+            "ordinary",
+        )
         assert failed_write.returncode == 2
         assert "error:" in failed_write.stderr
         assert "Traceback" not in failed_write.stderr
-        assert not (read_only_manifest_directory / "manifest.json").exists()
+        assert not failed_manifest_path.exists()
 
         mismatched_lcov = lcov_path.read_text(encoding="utf-8").replace(
             "LH:90", "LH:89", 1

@@ -133,6 +133,17 @@ function main() {
   if (policy.schema !== 1) {
     fail("unsupported third-party license policy schema");
   }
+  const embeddedRuntimeRoots = policy.npm?.embeddedRuntimeRoots;
+  if (
+    !Array.isArray(embeddedRuntimeRoots) ||
+    embeddedRuntimeRoots.length === 0 ||
+    embeddedRuntimeRoots.some(
+      (name) => typeof name !== "string" || name.length === 0,
+    ) ||
+    new Set(embeddedRuntimeRoots).size !== embeddedRuntimeRoots.length
+  ) {
+    fail("npm policy must define unique embedded runtime roots");
+  }
 
   const commonMetadataArguments = [
     "--locked",
@@ -191,6 +202,7 @@ function main() {
       lock: JSON.parse(readFileSync(npmLockPath, "utf8")),
       uiDirectory: path.join(repositoryRoot, "ui"),
       artifact: "embedded-ui-runtime",
+      embeddedRuntimeRoots,
     }),
   ];
 
