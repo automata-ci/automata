@@ -7,12 +7,11 @@ use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
-    BootstrapGithubProviderRepository, ClaimGithubServerServiceRevocation,
-    ClaimNextGithubServerServiceMaintenance, EnsureGithubServerServiceAuthority,
-    FinalizeGithubWorkflowPermissionObservation, FinishGithubServerServiceMint,
-    FinishGithubServerServiceRevocation, GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
-    GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins,
+    BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
+    EnsureGithubServerServiceAuthority, FinalizeGithubWorkflowPermissionObservation,
+    FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
+    GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS, GithubCheckName, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceAuthoritySelector,
@@ -532,16 +531,22 @@ async fn ambiguous_handoff_reconciliation_survives_authority_retirement() -> Tes
             attempt.generation,
         );
         set_database_test_clock(&database, BASE_TIME + 1_030).await?;
-        let revocation = database
+        let maintenance = database
             .store()
-            .claim_github_server_service_revocation(ClaimGithubServerServiceRevocation::new(
-                selector(&fixture.authority),
-                issuance_key,
-                GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-                UnixMillis::new(BASE_TIME + 1_030),
-                UnixMillis::new(BASE_TIME + 2_030),
-            )?)
-            .await?;
+            .claim_next_github_server_service_maintenance(
+                ClaimNextGithubServerServiceMaintenance::for_authority(
+                    selector(&fixture.authority),
+                    GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
+                    UnixMillis::new(BASE_TIME + 1_030),
+                    UnixMillis::new(BASE_TIME + 2_030),
+                )?,
+            )
+            .await?
+            .expect("the exact retiring authority must have revocation maintenance");
+        let GithubServerServiceMaintenanceOutcome::Revocation(revocation) = maintenance else {
+            panic!("the exact retiring authority must produce a revocation claim");
+        };
+        assert_eq!(revocation.claim().key(), issuance_key);
         set_database_test_clock(&database, BASE_TIME + 1_040).await?;
         database
             .store()
