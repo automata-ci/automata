@@ -36,6 +36,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use super::api_support::{is_json_content_type, json_response};
+
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_QUERY_BYTES: usize = 1_024;
 const DEFAULT_PAGE_SIZE: u16 = 50;
@@ -700,36 +702,6 @@ async fn json_document<T: DeserializeOwned>(request: Request) -> Result<T, ApiEr
     serde_json::from_slice(&body).map_err(|_| ApiError::InvalidRequest)
 }
 
-fn is_json_content_type(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
-    let Some(value) = values.next() else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
-    }
-    value.to_str().is_ok_and(|value| {
-        let mut parts = value.split(';');
-        if !parts
-            .next()
-            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
-        {
-            return false;
-        }
-        let Some(parameter) = parts.next() else {
-            return true;
-        };
-        parts.next().is_none()
-            && parameter
-                .trim()
-                .split_once('=')
-                .is_some_and(|(name, value)| {
-                    name.trim().eq_ignore_ascii_case("charset")
-                        && value.trim().eq_ignore_ascii_case("utf-8")
-                })
-    })
-}
-
 fn one_path_id(path: Result<Path<String>, PathRejection>) -> Result<String, ApiError> {
     path.map(|Path(value)| value)
         .map_err(|_| ApiError::InvalidRequest)
@@ -892,29 +864,6 @@ impl IntoResponse for ApiError {
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         }
         response
-    }
-}
-
-fn json_response<T: Serialize>(status: StatusCode, document: &T) -> Response {
-    match serde_json::to_vec(document) {
-        Ok(body) => (
-            status,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            body,
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            br#"{"error":"internal_error"}"#.as_slice(),
-        )
-            .into_response(),
     }
 }
 

@@ -18,7 +18,7 @@ use axum::{
     Router,
     body::to_bytes,
     extract::{Path, Request, State, rejection::PathRejection},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
     routing::post,
@@ -28,6 +28,8 @@ use serde::{
     de::{Error as _, MapAccess, Visitor},
 };
 use uuid::Uuid;
+
+use super::api_support::{ApiError, canonical_uuid, is_json_content_type, json_response};
 
 const MAX_REQUEST_BYTES: usize = 131_072;
 const MAX_TARGET_TEXT_BYTES: usize = 1_024;
@@ -321,14 +323,6 @@ fn exact_target(
     ))
 }
 
-fn canonical_uuid(value: &str) -> Result<Uuid, ApiError> {
-    let parsed = Uuid::parse_str(value).map_err(|_| ApiError::InvalidRequest)?;
-    if parsed.is_nil() || parsed.hyphenated().to_string() != value {
-        return Err(ApiError::InvalidRequest);
-    }
-    Ok(parsed)
-}
-
 fn actor_from_request(
     state: &WorkflowDispatchApiState,
     request: &Request,
@@ -365,36 +359,6 @@ async fn json_document(request: Request) -> Result<DispatchDocument, ApiError> {
         return Err(ApiError::TooLarge);
     }
     serde_json::from_slice(&body).map_err(|_| ApiError::InvalidRequest)
-}
-
-fn is_json_content_type(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all(header::CONTENT_TYPE).iter();
-    let Some(value) = values.next() else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
-    }
-    value.to_str().is_ok_and(|value| {
-        let mut parts = value.split(';');
-        if !parts
-            .next()
-            .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
-        {
-            return false;
-        }
-        let Some(parameter) = parts.next() else {
-            return true;
-        };
-        parts.next().is_none()
-            && parameter
-                .trim()
-                .split_once('=')
-                .is_some_and(|(name, value)| {
-                    name.trim().eq_ignore_ascii_case("charset")
-                        && value.trim().eq_ignore_ascii_case("utf-8")
-                })
-    })
 }
 
 fn valid_git_ref(value: &str) -> bool {
@@ -499,24 +463,6 @@ struct DispatchResponseDocument {
     replay: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorDocument {
-    error: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ApiError {
-    Unauthorized,
-    Forbidden,
-    NotFound,
-    InvalidRequest,
-    UnsupportedMediaType,
-    TooLarge,
-    Conflict,
-    Unavailable,
-    Internal,
-}
-
 impl From<WorkflowDispatchApiBackendError> for ApiError {
     fn from(value: WorkflowDispatchApiBackendError) -> Self {
         match value {
@@ -527,77 +473,6 @@ impl From<WorkflowDispatchApiBackendError> for ApiError {
             WorkflowDispatchApiBackendError::Unavailable => Self::Unavailable,
             WorkflowDispatchApiBackendError::Invariant => Self::Internal,
         }
-    }
-}
-
-impl ApiError {
-    const fn status(self) -> StatusCode {
-        match self {
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::NotFound => StatusCode::NOT_FOUND,
-            Self::InvalidRequest => StatusCode::BAD_REQUEST,
-            Self::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::Conflict => StatusCode::CONFLICT,
-            Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-
-    const fn code(self) -> &'static str {
-        match self {
-            Self::Unauthorized => "unauthorized",
-            Self::Forbidden => "forbidden",
-            Self::NotFound => "not_found",
-            Self::InvalidRequest => "invalid_request",
-            Self::UnsupportedMediaType => "unsupported_media_type",
-            Self::TooLarge => "request_too_large",
-            Self::Conflict => "conflict",
-            Self::Unavailable => "dependency_unavailable",
-            Self::Internal => "internal_error",
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let mut response = json_response(self.status(), &ErrorDocument { error: self.code() });
-        if self == Self::Unauthorized {
-            response.headers_mut().insert(
-                header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Bearer realm=\"automata\""),
-            );
-        }
-        if self == Self::Unavailable {
-            response
-                .headers_mut()
-                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
-        }
-        response
-    }
-}
-
-fn json_response<T: Serialize>(status: StatusCode, document: &T) -> Response {
-    match serde_json::to_vec(document) {
-        Ok(body) => (
-            status,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            body,
-        )
-            .into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            [
-                (header::CONTENT_TYPE, "application/json"),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            br#"{"error":"internal_error"}"#.as_slice(),
-        )
-            .into_response(),
     }
 }
 
