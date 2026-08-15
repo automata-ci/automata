@@ -985,9 +985,21 @@ fn compile_job(
         )?;
         locate_analyzed(analyzed, value.span(), &mut references, context)
     });
-    let strategy = source_job
-        .strategy()
-        .and_then(|strategy| compile_strategy(strategy, &mut references, context));
+    let reusable = source_job.reusable_workflow_call().is_some();
+    let strategy = source_job.strategy().and_then(|strategy| {
+        if reusable {
+            context.unsupported(
+                "github.compile.reusable_workflow_matrix_unavailable",
+                "matrix strategies on reusable-workflow calls require durable per-cell call coordination and must be rejected before publication",
+                strategy
+                    .matrix()
+                    .map_or_else(|| strategy.span().clone(), |matrix| matrix.span().clone()),
+            );
+            None
+        } else {
+            compile_strategy(strategy, &mut references, context)
+        }
+    });
     let has_strategy = strategy.is_some();
     let permissions = source_job
         .permissions()
@@ -1001,7 +1013,6 @@ fn compile_job(
         None
     });
 
-    let reusable = source_job.reusable_workflow_call().is_some();
     let body = compile_job_body(job, has_strategy, span.clone(), &mut references, context)?;
 
     let output_keys = body

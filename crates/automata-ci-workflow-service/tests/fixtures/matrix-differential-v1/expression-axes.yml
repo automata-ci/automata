@@ -1,0 +1,38 @@
+name: Matrix differential expression axes
+on:
+  workflow_dispatch:
+    inputs:
+      runtimes:
+        type: string
+        default: '["stable","next"]'
+      platforms:
+        type: string
+        default: '["linux","windows"]'
+      experimental:
+        type: string
+        default: '[false]'
+      excludes:
+        type: string
+        default: '[{"runtime":"next","platform":"windows"}]'
+      includes:
+        type: string
+        default: '[{"channel":"general"},{"runtime":"stable","channel":"stable"},{"runtime":"edge","platform":"linux","experimental":true,"channel":"edge"}]'
+jobs:
+  build:
+    name: Matrix ${{ matrix.runtime }}-${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      matrix:
+        runtime: ${{ fromJSON(inputs.runtimes) }}
+        platform: ${{ fromJSON(inputs.platforms) }}
+        experimental: ${{ fromJSON(inputs.experimental) }}
+        exclude: ${{ fromJSON(inputs.excludes) }}
+        include: ${{ fromJSON(inputs.includes) }}
+    env:
+      MATRIX_RUNTIME: ${{ matrix.runtime }}
+      MATRIX_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Emit canonical observation
+        if: ${{ matrix.platform == 'linux' }}
+        run: printf '%s\n' '${{ toJSON(matrix) }}'

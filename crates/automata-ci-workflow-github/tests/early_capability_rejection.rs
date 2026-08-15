@@ -57,6 +57,15 @@ fn deployment_environment_is_rejected_during_compilation_with_its_value_span() {
 }
 
 #[test]
+fn reusable_workflow_matrix_is_rejected_during_compilation_with_its_value_span() {
+    assert_rejected_before_plan(
+        "on: workflow_dispatch\njobs:\n  call:\n    strategy:\n      matrix: ${{ fromJSON(github.event.matrix) }}\n    uses: ./.ci/workflows/reusable.yml\n",
+        "github.compile.reusable_workflow_matrix_unavailable",
+        "${{ fromJSON(github.event.matrix) }}",
+    );
+}
+
+#[test]
 fn job_container_is_rejected_during_compilation_with_its_value_span() {
     assert_rejected_before_plan(
         "on: workflow_dispatch\njobs:\n  test:\n    runs-on: linux\n    container: ubuntu:24.04\n    steps: [{run: echo test}]\n",

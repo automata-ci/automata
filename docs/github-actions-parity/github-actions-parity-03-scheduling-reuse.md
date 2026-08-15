@@ -28,23 +28,51 @@ definition of done.
 
 **Owner:** S. **Size:** L. **Dependencies:** WF-03.
 
+Component closure landed against the production GitHub expression adapter and
+an exact external candidate-fixture set. GitHub performs matrix expansion in
+its service rather than the public `actions/runner` repository, so the checked
+items below are hermetic contract evidence. The fixture manifest deliberately
+records no live GitHub observation; the cross-repository acceptance gate must
+attach that immutable evidence before claiming end-to-end differential parity.
+
 Tasks:
 
-- [ ] Verify static axes, expression axes, whole-matrix `fromJSON`, include
+- [x] Verify static axes, expression axes, whole-matrix `fromJSON`, include
   merging, include-only matrices, exclude matching, duplicates, and empty
-  axes.
-- [ ] Verify deterministic ordering, identities, numbering, and matrix context.
-- [ ] Enforce the 256-instance limit before partial publication.
-- [ ] Verify matrix values in names, conditions, environment, concurrency,
-  `continue-on-error`, and reusable calls.
-- [ ] Resolve nested array/object expression behavior through differential
-  fixtures before broadening support.
+  axes through the real evaluator. Static and dynamic empty axes fail closed.
+- [x] Verify deterministic ordering, identities, zero-based numbering, totals,
+  duplicate-row identity, value digests, and matrix context.
+- [x] Enforce the 256-instance limit before partial publication. A 256-cell
+  Cartesian product succeeds; a product reduced to 257 cells fails without an
+  activation result; PostgreSQL publishes the maximum set in one transaction.
+- [x] Verify matrix values in activation-time names and `continue-on-error`,
+  and retain matrix-bound step conditions and job environment templates for
+  execution. Deployment environments, job-level concurrency, and matrix
+  reusable-workflow calls remain later-package surfaces and have stable,
+  source-located pre-publication rejection tests.
+- [x] Keep expressions nested inside matrix array/object values fail closed.
+  Exact candidate fixture bytes exist, but support is not broadened because a
+  live GitHub observation for that behavior is not yet immutable evidence.
 
 Acceptance:
 
-- [ ] Repeated activation produces identical identities and ordering.
-- [ ] Equivalent static and dynamic matrices produce equivalent contexts.
-- [ ] Limit failure is atomic.
+- [x] Repeated activation produces identical identities and ordering.
+- [x] Equivalent static, expression-axis, and whole-expression matrices
+  produce equivalent contexts and value digests under the real evaluator.
+- [x] Limit failure is atomic at the activator boundary, and a fault injected
+  after 128 of 256 PostgreSQL descriptor inserts rolls back the publication,
+  every instance, and the job transition before exact retry/replay.
+
+Evidence:
+
+- `crates/automata-ci-workflow-service/tests/fixtures/matrix-differential-v1`
+  is the exact candidate source/expectation set and documents its evidence
+  class.
+- `matrix_differential` compiles those bytes and exercises the production
+  evaluator; `logical_activation` contains the real-PostgreSQL atomicity and
+  replay test (and remains explicitly skipped without the database fixture).
+- A live GitHub run and captured observation are still acceptance-gate inputs,
+  not implied by this component closure.
 
 ### MAT-02 — Durable `strategy.max-parallel`
 
