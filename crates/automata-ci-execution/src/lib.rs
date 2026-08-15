@@ -2,11 +2,11 @@
 #![deny(missing_docs)]
 //! Provider-neutral contracts for whole-job sandboxes and command execution.
 //!
-//! A [`SandboxProvider`] owns job-level isolation. [`ExecutionEndpoint`] is the
-//! only interface used to execute inside an attached sandbox. The optional
-//! [`ContainerEngine`] port is deliberately separate: Firecracker, Kubernetes,
-//! native-process, and future platform providers need not pretend to be
-//! container engines.
+//! A [`SandboxProvider`] owns job-level isolation and any service containers
+//! attached to it. [`ExecutionEndpoint`] is the only interface used to execute
+//! inside an attached sandbox. Service discovery crosses the boundary through
+//! [`ServiceContainerBindings`] and opaque [`ContainerHandle`] values rather
+//! than backend-specific container operations.
 //!
 //! # Trust boundary
 //!
@@ -28,7 +28,6 @@
 //! must keep those values out of logs and durable diagnostics.
 
 mod capability;
-mod container;
 mod endpoint;
 mod error;
 mod sandbox;
@@ -37,10 +36,6 @@ mod value;
 
 pub use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, OperationId, Sha256Digest};
 pub use capability::{ProviderCapabilities, SandboxCapability};
-pub use container::{
-    ContainerCreateRequest, ContainerEngine, ContainerEngineCapabilities, ContainerHandle,
-    ContainerInspection, ContainerRecord, ContainerState,
-};
 pub use endpoint::{
     Cancellation, CopyFromRequest, CopyToRequest, EnvironmentName, EnvironmentValue,
     EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionEnvironment,
@@ -56,9 +51,9 @@ pub use sandbox::{
     SandboxSpec, SandboxState,
 };
 pub use service::{
-    ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs,
-    ServiceHealthOverrides, ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding,
-    ServiceTransportProtocol,
+    ContainerHandle, ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec,
+    ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServiceNetwork,
+    ServicePort, ServicePortBinding, ServiceTransportProtocol,
 };
 pub use value::{
     ImmutableImage, NetworkPolicy, ProviderId, ResourceLimits, RootFilesystemPolicy,
@@ -66,7 +61,7 @@ pub use value::{
     TargetPath, TargetPlatform,
 };
 
-/// Maximum encoded length, in bytes, of an opaque provider or engine handle.
+/// Maximum encoded length, in bytes, of an opaque provider or container handle.
 pub const MAX_SANDBOX_HANDLE_BYTES: usize = 192;
 /// Maximum encoded length, in bytes, of an immutable image reference.
 pub const MAX_IMAGE_REFERENCE_BYTES: usize = 512;

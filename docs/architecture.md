@@ -24,17 +24,18 @@ GitHub events          Browser / CLI
  automata-runner on Linux, Windows, or macOS
                  |
           configured SandboxProvider
-          |              |                |
- rootless Podman   Windows Hyper-V container   macOS VM
+          |              |              |                |
+ rootless Podman   Kubernetes Pod   Windows Hyper-V container   macOS VM
 ```
 
 The workspace builds many libraries but distributes two product commands:
 
 - `automata` starts the complete control plane and provides administration
   commands. It has no per-role server selector yet.
-- `automata-runner` supervises rootless Linux, Hyper-V-isolated Windows
-  container, or disposable macOS VM execution, host admission, lease renewal,
-  logging, cancellation, and cleanup.
+- `automata-runner` supervises rootless Podman or Kubernetes Pod execution on
+  Linux, Hyper-V-isolated Windows container execution, or disposable macOS VM
+  execution, along with host admission, lease renewal, logging, cancellation,
+  and cleanup.
 
 The browser preview is a smaller mode of `automata`; it does not start the
 durable services or runner listener. Production dependencies never fall back
@@ -93,11 +94,12 @@ supplies defaults and bounds before scheduling.
 The remaining internal boundaries have narrower jobs:
 
 - `SchedulerPolicy` matches routing, typed requirements, and eligible capacity.
-- `FleetController` reconciles runner supply outside scheduling transactions.
 - `SandboxProvider` owns a job sandbox from creation through idempotent
-  destruction.
-- `ContainerEngine` runs job containers, services, and sequential container
-  actions inside that sandbox.
+  destruction. A provider that advertises service-container support also owns
+  those resources and returns their complete healthy discovery view through
+  `service_bindings`.
+- `ExecutionEndpoint` is the only command, copy, signal, and wait interface
+  inside an attached sandbox.
 - Storage, source-control, secret, authentication, and credential-broker ports
   keep backend data out of JobIR.
 
