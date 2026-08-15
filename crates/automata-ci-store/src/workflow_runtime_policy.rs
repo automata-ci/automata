@@ -1202,8 +1202,8 @@ mod tests {
       }],
       "permissions":{
         "provider_default":{"contents":"read"},
-        "read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},
-        "write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}
+        "read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},
+        "write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}
       },
       "resources":{
         "maximum_limits":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":17179869184,"cpu_millis":8000},
@@ -1215,7 +1215,7 @@ mod tests {
       },
       "schema":1
     }"#;
-    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
+    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 
     #[test]
     fn resource_policy_is_canonical_pinned_evidence() {
@@ -1304,11 +1304,11 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "50cb377906b638e42c7faf825f87f77753c4635331a08a0164a0aefc9fa786d0"
+            "77998494a655c8905d4378272c2376c35e6e5361d73a798d7841aa5af9854e00"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "1f2eb82b9ee12a4fd364bcb4ec803b8f19b627210a1a4b23b9607657f49be5f9"
+            "c8e2a58f8b6281d8201ca232634acf7d18b6a5d7e37a34949135d361c4e0451d"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
