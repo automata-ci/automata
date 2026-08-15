@@ -1,9 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use crate::authorization::RoleName;
 
 const MAX_GITHUB_DISPLAY_NAME_LENGTH: usize = 255;
 
@@ -286,118 +284,8 @@ impl GithubMembershipSnapshot {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-/// A stable GitHub membership source that may grant configured Automata roles.
-pub enum GithubRoleSource {
-    /// Membership in one GitHub organization.
-    Organization {
-        /// The stable organization identifier.
-        organization_id: GithubOrganizationId,
-    },
-    /// Membership in one team within a GitHub organization.
-    Team {
-        /// The stable identifier of the containing organization.
-        organization_id: GithubOrganizationId,
-        /// The stable team identifier.
-        team_id: GithubTeamId,
-    },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// An explicit mapping from a stable GitHub membership source to Automata roles.
-pub struct GithubRoleMapping {
-    source: GithubRoleSource,
-    roles: BTreeSet<RoleName>,
-}
-
-impl GithubRoleMapping {
-    /// Creates one explicit membership-to-role mapping.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no role is assigned.
-    pub fn new(
-        source: GithubRoleSource,
-        roles: BTreeSet<RoleName>,
-    ) -> Result<Self, GithubRoleMappingError> {
-        if roles.is_empty() {
-            return Err(GithubRoleMappingError::EmptyRoles);
-        }
-        Ok(Self { source, roles })
-    }
-
-    /// Returns the stable GitHub membership source.
-    pub const fn source(&self) -> &GithubRoleSource {
-        &self.source
-    }
-
-    /// Returns the explicitly granted Automata roles.
-    pub const fn roles(&self) -> &BTreeSet<RoleName> {
-        &self.roles
-    }
-
-    /// Splits the mapping into its source and granted roles.
-    pub fn into_parts(self) -> (GithubRoleSource, BTreeSet<RoleName>) {
-        (self.source, self.roles)
-    }
-}
-
-/// Resolves only configured organization/team mappings. Membership in GitHub, org
-/// ownership, and a role's spelling never grant an implicit Automata role.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct GithubRoleMapper {
-    mappings: BTreeMap<GithubRoleSource, BTreeSet<RoleName>>,
-}
-
-impl GithubRoleMapper {
-    /// Indexes validated explicit role mappings.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when any supplied mapping has no role.
-    pub fn new(
-        mappings: impl IntoIterator<Item = GithubRoleMapping>,
-    ) -> Result<Self, GithubRoleMappingError> {
-        let mut indexed = BTreeMap::<GithubRoleSource, BTreeSet<RoleName>>::new();
-        for mapping in mappings {
-            if mapping.roles.is_empty() {
-                return Err(GithubRoleMappingError::EmptyRoles);
-            }
-            indexed
-                .entry(mapping.source)
-                .or_default()
-                .extend(mapping.roles);
-        }
-        Ok(Self { mappings: indexed })
-    }
-
-    /// Resolves the union of explicitly configured roles for a membership snapshot.
-    pub fn roles_for(&self, memberships: &GithubMembershipSnapshot) -> BTreeSet<RoleName> {
-        let organization_roles = memberships
-            .organizations
-            .keys()
-            .filter_map(|organization_id| {
-                self.mappings.get(&GithubRoleSource::Organization {
-                    organization_id: *organization_id,
-                })
-            });
-        let team_roles = memberships.teams.values().filter_map(|team| {
-            self.mappings.get(&GithubRoleSource::Team {
-                organization_id: team.organization_id,
-                team_id: team.id,
-            })
-        });
-        organization_roles
-            .chain(team_roles)
-            .flatten()
-            .cloned()
-            .collect()
-    }
-}
-
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-/// A validation failure in GitHub membership metadata or role mapping.
+/// A validation failure in GitHub membership metadata.
 pub enum GithubRoleMappingError {
     /// A GitHub numeric identity is not positive.
     #[error("{label} must be a positive integer")]
@@ -411,9 +299,6 @@ pub enum GithubRoleMappingError {
         /// The kind of display name that failed validation.
         label: &'static str,
     },
-    /// A role mapping grants no Automata roles.
-    #[error("a GitHub role mapping must grant at least one explicit role")]
-    EmptyRoles,
     /// A snapshot contains the same organization ID more than once.
     #[error("a membership snapshot contains a duplicate organization ID")]
     DuplicateOrganizationId,

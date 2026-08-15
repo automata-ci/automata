@@ -1,4 +1,4 @@
-//! GitHub App human authentication protocol and explicit RBAC mapping.
+//! GitHub App human authentication protocol and membership snapshots.
 
 mod flow;
 mod login_service;
@@ -39,9 +39,8 @@ pub use port::{
 };
 pub use role_mapping::{
     GithubMembershipSnapshot, GithubOrganizationId, GithubOrganizationLogin,
-    GithubOrganizationMembership, GithubOrganizationMembershipRole, GithubRoleMapper,
-    GithubRoleMapping, GithubRoleMappingError, GithubRoleSource, GithubTeam, GithubTeamId,
-    GithubTeamSlug,
+    GithubOrganizationMembership, GithubOrganizationMembershipRole, GithubRoleMappingError,
+    GithubTeam, GithubTeamId, GithubTeamSlug,
 };
 pub use transaction_state::{
     GithubDeviceTransactionMetadata, GithubTransactionStateCodec, GithubTransactionStateError,

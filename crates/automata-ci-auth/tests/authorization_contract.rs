@@ -4,18 +4,13 @@ use automata_ci_auth::{
     authorization::{Permission, RbacPolicy, RoleName},
     github::{
         GithubMembershipSnapshot, GithubOrganizationId, GithubOrganizationLogin,
-        GithubOrganizationMembership, GithubOrganizationMembershipRole, GithubRoleMapper,
-        GithubRoleMapping, GithubRoleMappingError, GithubRoleSource, GithubTeam, GithubTeamId,
-        GithubTeamSlug,
+        GithubOrganizationMembership, GithubOrganizationMembershipRole, GithubRoleMappingError,
+        GithubTeam, GithubTeamId, GithubTeamSlug,
     },
 };
 
 fn role(value: &str) -> RoleName {
     RoleName::new(value).expect("valid role")
-}
-
-fn roles(values: &[&str]) -> BTreeSet<RoleName> {
-    values.iter().map(|value| role(value)).collect()
 }
 
 fn organization(
@@ -40,7 +35,7 @@ fn team(id: i64, organization_id: i64, organization_login: &str, slug: &str) -> 
 }
 
 #[test]
-fn github_membership_grants_only_explicitly_mapped_roles() {
+fn github_membership_snapshot_uses_stable_id_lookups_and_normalized_metadata() {
     let organization_id = GithubOrganizationId::new(44).expect("organization ID");
     let team_id = GithubTeamId::new(91).expect("team ID");
     let memberships = GithubMembershipSnapshot::new(
@@ -57,118 +52,22 @@ fn github_membership_grants_only_explicitly_mapped_roles() {
         )],
     )
     .expect("membership snapshot");
-    let mapper = GithubRoleMapper::new([
-        GithubRoleMapping::new(
-            GithubRoleSource::Team {
-                organization_id,
-                team_id,
-            },
-            roles(&["run-operator"]),
-        )
-        .expect("team mapping"),
-        GithubRoleMapping::new(
-            GithubRoleSource::Organization {
-                organization_id: GithubOrganizationId::new(45).expect("organization ID"),
-            },
-            roles(&["administrator"]),
-        )
-        .expect("unrelated mapping"),
-    ])
-    .expect("role mapper");
 
-    assert_eq!(mapper.roles_for(&memberships), roles(&["run-operator"]));
-    assert_eq!(
-        memberships
-            .organization(organization_id)
-            .expect("organization")
-            .login()
-            .as_str(),
-        "automata-org"
-    );
-}
-
-#[test]
-fn an_unmapped_owner_or_team_has_no_implicit_role() {
-    let memberships = GithubMembershipSnapshot::new(
-        [organization(
-            44,
-            "automata",
-            GithubOrganizationMembershipRole::Admin,
-        )],
-        [],
-    )
-    .expect("membership snapshot");
-    let mapper = GithubRoleMapper::default();
-    assert!(mapper.roles_for(&memberships).is_empty());
+    let organization = memberships
+        .organization(organization_id)
+        .expect("organization");
+    assert_eq!(organization.login().as_str(), "automata-org");
+    assert_eq!(organization.role(), GithubOrganizationMembershipRole::Admin);
+    let team = memberships.team(team_id).expect("team");
+    assert_eq!(team.organization_id(), organization_id);
+    assert_eq!(team.organization_login().as_str(), "automata-org");
+    assert_eq!(team.slug().as_str(), "ci-operators");
 }
 
 #[test]
 fn team_snapshot_requires_the_containing_organization() {
     let result = GithubMembershipSnapshot::new([], [team(91, 44, "automata", "operators")]);
     assert_eq!(result, Err(GithubRoleMappingError::TeamWithoutOrganization));
-}
-
-#[test]
-fn mutable_github_names_never_participate_in_role_authority() {
-    let organization_id = GithubOrganizationId::new(44).expect("organization ID");
-    let team_id = GithubTeamId::new(91).expect("team ID");
-    let mapper = GithubRoleMapper::new([
-        GithubRoleMapping::new(
-            GithubRoleSource::Organization { organization_id },
-            roles(&["organization-reader"]),
-        )
-        .expect("organization mapping"),
-        GithubRoleMapping::new(
-            GithubRoleSource::Team {
-                organization_id,
-                team_id,
-            },
-            roles(&["run-operator"]),
-        )
-        .expect("team mapping"),
-    ])
-    .expect("role mapper");
-
-    let after_renames = GithubMembershipSnapshot::new(
-        [organization(
-            44,
-            "new-organization-login",
-            GithubOrganizationMembershipRole::Member,
-        )],
-        [team(91, 44, "new-organization-login", "renamed-team")],
-    )
-    .expect("renamed membership snapshot");
-
-    assert_eq!(
-        mapper.roles_for(&after_renames),
-        roles(&["organization-reader", "run-operator"])
-    );
-}
-
-#[test]
-fn identical_names_with_different_ids_never_match_a_mapping() {
-    let mapped_organization_id = GithubOrganizationId::new(44).expect("organization ID");
-    let mapped_team_id = GithubTeamId::new(91).expect("team ID");
-    let mapper = GithubRoleMapper::new([GithubRoleMapping::new(
-        GithubRoleSource::Team {
-            organization_id: mapped_organization_id,
-            team_id: mapped_team_id,
-        },
-        roles(&["run-operator"]),
-    )
-    .expect("team mapping")])
-    .expect("role mapper");
-    let impersonating_names = GithubMembershipSnapshot::new(
-        [organization(
-            45,
-            "automata",
-            GithubOrganizationMembershipRole::Admin,
-        )],
-        [team(92, 45, "automata", "operators")],
-    )
-    .expect("membership snapshot");
-
-    assert!(mapper.roles_for(&impersonating_names).is_empty());
 }
 
 #[test]
@@ -241,13 +140,11 @@ fn membership_snapshots_reject_duplicate_and_conflicting_relationships() {
 }
 
 #[test]
-fn github_numeric_ids_must_be_positive_in_constructors_and_settings_json() {
+fn github_numeric_ids_must_be_positive_in_constructors_and_json() {
     assert!(GithubOrganizationId::new(0).is_err());
     assert!(GithubTeamId::new(-1).is_err());
-    assert!(
-        serde_json::from_str::<GithubRoleSource>(r#"{"kind":"organization","organization_id":0}"#)
-            .is_err()
-    );
+    assert!(serde_json::from_str::<GithubOrganizationId>("0").is_err());
+    assert!(serde_json::from_str::<GithubTeamId>("-1").is_err());
 }
 
 #[test]
