@@ -16,7 +16,7 @@ use automata_ci_auth_postgres::{
     PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
 };
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
-use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfigError};
+use automata_ci_blob_s3::S3BlobStoreConfigError;
 use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, RandomLeaseIdGenerator, RunnableScanLimit, SystemLeaseClock,
     repository::RunnerLeaseRequestRepository,
@@ -1895,7 +1895,7 @@ impl ReadinessProbe for ImmutableBlobReadinessProbe {
 fn build_blob_store(
     config: &ServerConfig,
 ) -> Result<Arc<dyn ImmutableBlobStore>, ServerCompositionError> {
-    let connected = crate::object_store::connect(
+    let store = crate::object_store::connect(
         &config.s3,
         config.s3_prefix.clone(),
         config.s3_at_rest_encryption.clone(),
@@ -1908,10 +1908,7 @@ fn build_blob_store(
             ServerCompositionError::S3(error)
         }
     })?;
-    Ok(Arc::new(S3BlobStore::new(
-        connected.client,
-        &connected.config,
-    )))
+    Ok(Arc::new(store))
 }
 
 fn load_server_tls(config: &ServerConfig) -> Result<ServerTlsConfig, ServerCompositionError> {

@@ -3,8 +3,10 @@
 use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 
 use automata_ci_runner::product::{
-    RunnerProductError, SecretSource, SecureInputError, load_s3_credentials, load_spool_key,
+    ObjectStoreTlsTrust, RunnerProductError, SecretSource, SecureInputError, load_s3_credentials,
+    load_s3_tls_trust, load_spool_key,
 };
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use uuid::Uuid;
 
 struct SecretFile {
@@ -137,6 +139,51 @@ fn s3_credentials_accept_one_file_line_ending_and_reject_extra_or_oversized_inpu
             .is_err()
         );
     }
+}
+
+#[test]
+fn s3_private_ca_loading_is_bounded_exact_and_sanitized() {
+    let key = KeyPair::generate().expect("private CA key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("private CA params");
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let pem = params
+        .self_signed(&key)
+        .expect("self-signed private CA")
+        .pem();
+    let certificate = SecretFile::new(pem.as_bytes());
+    let policy = ObjectStoreTlsTrust::PrivateCa {
+        certificate_source: certificate.source().clone(),
+    };
+    let trust = load_s3_tls_trust(&policy).expect("one exact private CA");
+    let debug = format!("{trust:?}");
+    assert_eq!(debug, "S3TlsTrust::PrivateCa([certificate redacted])");
+    assert!(!debug.contains(&pem));
+
+    let malformed = SecretFile::new(b"private CA content must never escape");
+    let policy = ObjectStoreTlsTrust::PrivateCa {
+        certificate_source: malformed.source().clone(),
+    };
+    assert!(matches!(
+        load_s3_tls_trust(&policy),
+        Err(RunnerProductError::ObjectStore(
+            automata_ci_blob_s3::S3BlobStoreConfigError::InvalidPrivateCa
+        ))
+    ));
+
+    let oversized = SecretFile::new(&vec![
+        b'x';
+        automata_ci_blob_s3::MAX_S3_PRIVATE_CA_PEM_BYTES + 1
+    ]);
+    let policy = ObjectStoreTlsTrust::PrivateCa {
+        certificate_source: oversized.source().clone(),
+    };
+    assert!(matches!(
+        load_s3_tls_trust(&policy),
+        Err(RunnerProductError::SecureInput(
+            SecureInputError::InvalidSize
+        ))
+    ));
 }
 
 #[test]

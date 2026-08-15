@@ -53,6 +53,15 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   path.
 - Sandbox specifications now require one closed runner-custody variant across
   every provider; job custody includes a mandatory non-zero durable slot.
+- Exact private-CA HTTPS trust for S3-compatible storage and a hidden,
+  current-only `automata internal object-store ensure-bucket` image command.
+  Server, initializer, and runner use closed bounded credential/trust
+  configuration and the production AWS SDK client path; runner product schema
+  4 requires the same explicit trust choice. Config and SDK clients are one
+  inseparable store, canonical private-CA bytes and signing usage fail closed,
+  connected-store diagnostics expose no bound state, validated transport is
+  one closed security mode, and bucket creation is region-correct, idempotent,
+  conflict-reverified, and bounded by one total deadline.
 
 ### Known limitations
 

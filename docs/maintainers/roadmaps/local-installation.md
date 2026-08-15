@@ -852,6 +852,21 @@ replaceable topology, then add union discovery, `up`, `status`, `down`, and exac
 reset. The command layer remains private until these operations are convergent
 and their destructive boundary is proven.
 
+The renderer consumes the current hidden image boundary
+`automata internal object-store ensure-bucket`; it does not invent a shell
+client, test helper, compatibility alias, or placeholder service-init command.
+The initializer and server share the production S3 connection parser and the
+sole validated-config-to-store AWS SDK construction boundary. Runner product
+schema 4 independently requires the same closed
+trust choice for every runner-side S3 client. Local HTTPS rendering selects
+exact private-CA trust and mounted bounded `SecretSource` file references for
+the CA and credentials on all three surfaces; the private root is never merged
+with Web PKI roots. Initialization may create the exact bucket only after
+`HeadBucket` reports not found, and creation conflicts require a successful
+final `HeadBucket` under the same total deadline.
+Every non-`us-east-1` bucket creation carries the exact validated region as its
+S3 `LocationConstraint`; `us-east-1` alone omits it.
+
 Gate: persistent volumes never carry a mutable plan digest; every replaceable
 resource carries the current digest; unknown managed keys, unexpected roles,
 and mixed digests fail closed. Concurrent mutation tests prove graceful

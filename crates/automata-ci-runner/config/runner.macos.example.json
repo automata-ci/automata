@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "runner_id": "75934d27-b027-45df-94c4-97e5a91f4011",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
@@ -102,6 +102,7 @@
     "bucket": "automata-runner",
     "prefix": "automata/v1",
     "loopback_development": false,
+    "tls_trust": { "mode": "web_pki" },
     "operation_timeout_seconds": 30,
     "access_key_id": {
       "kind": "macos_keychain",

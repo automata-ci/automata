@@ -17,9 +17,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use automata_ci_auth::{github::GithubClientId, installation::InstallationTenant};
-use automata_ci_blob_s3::{
-    MAX_S3_PRIVATE_CA_PEM_BYTES, S3AtRestEncryption, S3BlobStoreConfig, S3TlsTrust,
-};
+use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, S3TlsTrust};
 use automata_ci_control::maintenance::{
     LeaseFailureLimit, MaintenanceBatchSize, StaleSessionTimeoutMillis,
 };
@@ -342,17 +340,26 @@ pub struct ServerConfig {
 /// Shared validated S3 connection, trust, deadline, and credential sources.
 #[derive(Clone, Debug)]
 pub(crate) struct S3ConnectionConfig {
-    pub(crate) endpoint: Url,
-    pub(crate) region: String,
-    pub(crate) bucket: String,
-    pub(crate) force_path_style: bool,
-    pub(crate) tls_trust: S3TlsTrustMode,
-    private_ca: Option<SecretSource>,
-    pub(crate) allow_loopback_http: bool,
-    pub(crate) operation_timeout: Duration,
+    endpoint: Url,
+    region: String,
+    bucket: String,
+    force_path_style: bool,
+    transport: S3Transport,
+    operation_timeout: Duration,
     access_key: SecretSource,
     secret_key: SecretSource,
     session_token: Option<SecretSource>,
+}
+
+/// Exact transport and server-authentication policy for one validated S3 endpoint.
+#[derive(Clone, Debug)]
+pub(crate) enum S3Transport {
+    /// HTTPS authenticated by the platform Web PKI roots.
+    WebPki,
+    /// HTTPS authenticated by exactly one bounded deployment-provided CA.
+    PrivateCa { certificate_source: SecretSource },
+    /// Plaintext restricted to an exact literal-loopback HTTP endpoint.
+    LoopbackPlaintext,
 }
 
 impl S3ConnectionConfig {
@@ -370,36 +377,30 @@ impl S3ConnectionConfig {
         {
             return Err(ServerConfigError::InvalidSecretSource);
         }
-        let private_ca = match (args.s3_tls_trust, args.s3_private_ca_source.as_ref()) {
-            (S3TlsTrustMode::WebPki, None) => None,
-            (S3TlsTrustMode::PrivateCa, Some(source)) => Some(source.clone()),
+        let tls_transport = match (args.s3_tls_trust, args.s3_private_ca_source.as_ref()) {
+            (S3TlsTrustMode::WebPki, None) => S3Transport::WebPki,
+            (S3TlsTrustMode::PrivateCa, Some(source)) => S3Transport::PrivateCa {
+                certificate_source: source.clone(),
+            },
             (S3TlsTrustMode::WebPki, Some(_)) | (S3TlsTrustMode::PrivateCa, None) => {
                 return Err(ServerConfigError::InvalidS3TlsTrust);
             }
         };
         let endpoint =
             Url::parse(&args.s3_endpoint).map_err(|_| ServerConfigError::InvalidS3Endpoint)?;
-        match endpoint.scheme() {
-            "https" if args.s3_allow_loopback_http => {
-                return Err(ServerConfigError::InvalidS3Transport);
-            }
-            "https" => {}
-            "http"
-                if args.s3_allow_loopback_http && args.s3_tls_trust == S3TlsTrustMode::WebPki => {}
-            "http" => return Err(ServerConfigError::InvalidS3Transport),
+        let transport = match (
+            endpoint.scheme(),
+            args.s3_allow_loopback_http,
+            tls_transport,
+        ) {
+            ("https", false, transport) => transport,
+            ("http", true, S3Transport::WebPki) => S3Transport::LoopbackPlaintext,
+            ("https" | "http", _, _) => return Err(ServerConfigError::InvalidS3Transport),
             _ => return Err(ServerConfigError::InvalidS3Endpoint),
-        }
+        };
         let operation_timeout = positive_seconds(args.s3_operation_timeout_seconds)?;
-        let validation = if args.s3_allow_loopback_http {
-            S3BlobStoreConfig::loopback_development(
-                endpoint.clone(),
-                args.s3_region.clone(),
-                args.s3_bucket.clone(),
-                None,
-                operation_timeout,
-            )
-        } else {
-            S3BlobStoreConfig::new(
+        let validation = match &transport {
+            S3Transport::WebPki | S3Transport::PrivateCa { .. } => S3BlobStoreConfig::new(
                 endpoint.clone(),
                 args.s3_region.clone(),
                 args.s3_bucket.clone(),
@@ -407,17 +408,23 @@ impl S3ConnectionConfig {
                 args.s3_force_path_style,
                 S3TlsTrust::web_pki(),
                 operation_timeout,
-            )
+            ),
+            S3Transport::LoopbackPlaintext => S3BlobStoreConfig::loopback_development(
+                endpoint.clone(),
+                args.s3_region.clone(),
+                args.s3_bucket.clone(),
+                None,
+                operation_timeout,
+            ),
         };
         validation.map_err(|_| ServerConfigError::InvalidS3Configuration)?;
         Ok(Self {
             endpoint,
             region: args.s3_region.clone(),
             bucket: args.s3_bucket.clone(),
-            force_path_style: args.s3_force_path_style || args.s3_allow_loopback_http,
-            tls_trust: args.s3_tls_trust,
-            private_ca,
-            allow_loopback_http: args.s3_allow_loopback_http,
+            force_path_style: args.s3_force_path_style
+                || matches!(&transport, S3Transport::LoopbackPlaintext),
+            transport,
             operation_timeout,
             access_key: args.s3_access_key_source.clone(),
             secret_key: args.s3_secret_key_source.clone(),
@@ -425,19 +432,28 @@ impl S3ConnectionConfig {
         })
     }
 
-    pub(crate) fn load_tls_trust(&self) -> Result<S3TlsTrust, SecretLoadError> {
-        match (self.tls_trust, self.private_ca.as_ref()) {
-            (S3TlsTrustMode::PrivateCa, Some(source)) => source
-                .load_bytes(MAX_S3_PRIVATE_CA_PEM_BYTES)
-                .map(|pem| pem.to_vec())
-                .and_then(|pem| {
-                    S3TlsTrust::private_ca(pem).map_err(|_| SecretLoadError::InvalidCertificate)
-                }),
-            (S3TlsTrustMode::WebPki, None) => Ok(S3TlsTrust::web_pki()),
-            (S3TlsTrustMode::WebPki, Some(_)) | (S3TlsTrustMode::PrivateCa, None) => {
-                Err(SecretLoadError::InvalidCertificate)
-            }
-        }
+    pub(crate) const fn transport(&self) -> &S3Transport {
+        &self.transport
+    }
+
+    pub(crate) const fn endpoint(&self) -> &Url {
+        &self.endpoint
+    }
+
+    pub(crate) fn region(&self) -> &str {
+        &self.region
+    }
+
+    pub(crate) fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    pub(crate) const fn force_path_style(&self) -> bool {
+        self.force_path_style
+    }
+
+    pub(crate) const fn operation_timeout(&self) -> Duration {
+        self.operation_timeout
     }
 
     pub(crate) fn load_access_key(&self) -> Result<Zeroizing<String>, SecretLoadError> {

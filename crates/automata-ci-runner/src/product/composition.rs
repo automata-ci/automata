@@ -5,7 +5,9 @@ use automata_ci_action_github::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
 use automata_ci_blob::ImmutableBlobStore;
-use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, S3TlsTrust, StaticS3Credentials};
+use automata_ci_blob_s3::{
+    MAX_S3_PRIVATE_CA_PEM_BYTES, S3BlobStoreConfig, S3TlsTrust, StaticS3Credentials,
+};
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
 use automata_ci_job_executor_github::{
@@ -61,8 +63,8 @@ use super::managed_secret_delivery::ManagedSecretJobExecutor;
 #[cfg(not(target_os = "linux"))]
 use super::state::RuntimeMountSnapshot;
 use super::{
-    ClientTlsMaterialError, ProductStateRootError, RunnerProductConfig, RunnerProductConfigError,
-    RunnerProviderConfig, SecretSource, StandardGithubContext,
+    ClientTlsMaterialError, ObjectStoreTlsTrust, ProductStateRootError, RunnerProductConfig,
+    RunnerProductConfigError, RunnerProviderConfig, SecretSource, StandardGithubContext,
     config::required_podman_state_root,
     metrics::RunnerMetrics,
     profile_admission::{
@@ -1124,7 +1126,7 @@ fn build_object_store(
             object_store.bucket(),
             object_store.prefix().map(str::to_owned),
             object_store.force_path_style(),
-            S3TlsTrust::web_pki(),
+            load_s3_tls_trust(object_store.tls_trust())?,
             object_store.operation_timeout(),
         )
     }?;
@@ -1133,8 +1135,24 @@ fn build_object_store(
         object_store.secret_access_key(),
         object_store.session_token(),
     )?;
-    let client = store_config.client(credentials)?;
-    Ok(Arc::new(S3BlobStore::new(client, &store_config)))
+    Ok(Arc::new(store_config.connect(credentials)?))
+}
+
+/// Loads the exact configured S3 HTTPS trust policy from its bounded source.
+///
+/// # Errors
+///
+/// Returns a sanitized product error when a private CA source is unavailable,
+/// excessive, malformed, or not exactly one X.509 CA certificate.
+pub fn load_s3_tls_trust(policy: &ObjectStoreTlsTrust) -> Result<S3TlsTrust, RunnerProductError> {
+    match policy {
+        ObjectStoreTlsTrust::WebPki => Ok(S3TlsTrust::web_pki()),
+        ObjectStoreTlsTrust::PrivateCa { certificate_source } => {
+            let mut certificate_pem = certificate_source.read(MAX_S3_PRIVATE_CA_PEM_BYTES)?;
+            S3TlsTrust::private_ca(std::mem::take(&mut *certificate_pem))
+                .map_err(RunnerProductError::ObjectStore)
+        }
+    }
 }
 
 fn build_toolchain(

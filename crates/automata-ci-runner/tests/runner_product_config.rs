@@ -5,7 +5,8 @@ use automata_ci_core::{
     RunnerRequirements, SandboxFeature, Sha256Digest,
 };
 use automata_ci_runner::product::{
-    RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
+    ObjectStoreTlsTrust, RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig,
+    RunnerProductConfigError,
 };
 #[cfg(unix)]
 use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
@@ -115,6 +116,7 @@ fn valid_configuration() -> String {
     "bucket": "automata-dev",
     "prefix": "automata/v1",
     "loopback_development": true,
+    "tls_trust": {{"mode": "web_pki"}},
     "operation_timeout_seconds": 30,
     "access_key_id": {{"kind": "environment", "name": "AUTOMATA_S3_ACCESS_KEY_ID"}},
     "secret_access_key": {{"kind": "environment", "name": "AUTOMATA_S3_SECRET_ACCESS_KEY"}}
@@ -213,6 +215,10 @@ fn validated_config_preserves_exact_runner_and_profile_inventory() {
             .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
     );
     assert!(config.object_store().force_path_style());
+    assert!(matches!(
+        config.object_store().tls_trust(),
+        ObjectStoreTlsTrust::WebPki
+    ));
     assert!(
         config
             .podman()
@@ -279,6 +285,77 @@ fn validated_config_preserves_exact_runner_and_profile_inventory() {
         PROFILE_DIGEST
             .parse::<Sha256Digest>()
             .expect("digest fixture")
+    );
+}
+
+#[test]
+fn object_store_tls_trust_is_mandatory_current_and_transport_exact() {
+    let original: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+
+    let mut missing = original.clone();
+    missing["object_store"]
+        .as_object_mut()
+        .expect("object-store object")
+        .remove("tls_trust");
+    assert_eq!(
+        parse_value(&missing).expect_err("TLS trust must be explicit"),
+        RunnerProductConfigError::InvalidDocument
+    );
+
+    let mut obsolete = original.clone();
+    obsolete["schema_version"] = serde_json::json!(3);
+    assert_eq!(
+        parse_value(&obsolete).expect_err("schema 3 must not be interpreted as current"),
+        RunnerProductConfigError::UnsupportedSchema
+    );
+
+    for invalid in [
+        serde_json::json!({}),
+        serde_json::json!({"mode": "private_ca"}),
+        serde_json::json!({
+            "mode": "web_pki",
+            "certificate_source": {"kind": "file", "path": "/run/secrets/s3-ca.pem"}
+        }),
+        serde_json::json!({"mode": "private-ca", "certificate_source": {"kind": "file", "path": "/run/secrets/s3-ca.pem"}}),
+        serde_json::json!({"mode": "private_ca", "certificate_source": "inline CA"}),
+    ] {
+        let mut changed = original.clone();
+        changed["object_store"]["tls_trust"] = invalid;
+        assert_eq!(
+            parse_value(&changed).expect_err("noncurrent trust shape must fail closed"),
+            RunnerProductConfigError::InvalidDocument
+        );
+    }
+
+    let private_ca = serde_json::json!({
+        "mode": "private_ca",
+        "certificate_source": {"kind": "file", "path": "/run/secrets/s3-ca.pem"}
+    });
+    let mut private_https = original.clone();
+    private_https["object_store"]["endpoint"] =
+        serde_json::json!("https://objects.internal.example/");
+    private_https["object_store"]["loopback_development"] = serde_json::json!(false);
+    private_https["object_store"]["tls_trust"] = private_ca.clone();
+    let parsed = parse_value(&private_https).expect("exact private CA over HTTPS");
+    assert!(matches!(
+        parsed.object_store().tls_trust(),
+        ObjectStoreTlsTrust::PrivateCa { .. }
+    ));
+
+    let mut private_http = original.clone();
+    private_http["object_store"]["tls_trust"] = private_ca;
+    assert_eq!(
+        parse_value(&private_http).expect_err("private CA cannot configure plaintext"),
+        RunnerProductConfigError::InvalidObjectStore
+    );
+
+    let mut inert_loopback = private_https;
+    inert_loopback["object_store"]["tls_trust"] = serde_json::json!({"mode": "web_pki"});
+    inert_loopback["object_store"]["loopback_development"] = serde_json::json!(true);
+    assert_eq!(
+        parse_value(&inert_loopback).expect_err("loopback plaintext mode cannot be inert on HTTPS"),
+        RunnerProductConfigError::InvalidObjectStore
     );
 }
 

@@ -3,9 +3,7 @@ use std::{env, time::Duration};
 use automata_ci_blob::{
     BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType, PutBlobOutcome,
 };
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials, ensure_bucket,
-};
+use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use bytes::Bytes;
 use url::Url;
 
@@ -31,13 +29,13 @@ async fn rustfs_conditional_put_and_verified_read_contract() {
         )
         .expect("test S3 KMS key identity"),
     );
-    let client = config
-        .client(StaticS3Credentials::new(access_key, secret_key, None).expect("test credentials"))
-        .expect("test S3 SDK client");
-    ensure_bucket(&client, &config)
+    let store = config
+        .connect(StaticS3Credentials::new(access_key, secret_key, None).expect("test credentials"))
+        .expect("test S3 store");
+    store
+        .ensure_bucket()
         .await
         .expect("test bucket must be ready");
-    let store = S3BlobStore::new(client, &config);
     let payload = BlobPayload::from_bytes(
         BlobKey::new("stable-object").expect("key"),
         MediaType::new("application/octet-stream").expect("media type"),

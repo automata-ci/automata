@@ -33,7 +33,7 @@ use super::files::{
 use super::spool_crypto::MAX_DECRYPT_ONLY_CONTENT_KEYS;
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 3;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 4;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -800,10 +800,23 @@ pub struct ObjectStoreProductConfig {
     prefix: Option<String>,
     force_path_style: bool,
     loopback_development: bool,
+    tls_trust: ObjectStoreTlsTrust,
     operation_timeout: Duration,
     access_key_id: SecretSource,
     secret_access_key: SecretSource,
     session_token: Option<SecretSource>,
+}
+
+/// Closed HTTPS trust policy for the runner's S3-compatible object store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObjectStoreTlsTrust {
+    /// Authenticate the endpoint through the platform Web PKI root store.
+    WebPki,
+    /// Authenticate the endpoint through exactly one bounded private CA source.
+    PrivateCa {
+        /// Source containing one PEM-encoded X.509 CA certificate.
+        certificate_source: SecretSource,
+    },
 }
 
 impl ObjectStoreProductConfig {
@@ -843,6 +856,12 @@ impl ObjectStoreProductConfig {
     #[must_use]
     pub const fn loopback_development(&self) -> bool {
         self.loopback_development
+    }
+
+    /// Returns the exact object-store HTTPS trust policy.
+    #[must_use]
+    pub const fn tls_trust(&self) -> &ObjectStoreTlsTrust {
+        &self.tls_trust
     }
 
     /// Returns the deadline applied to each object-store operation.
@@ -2594,10 +2613,32 @@ struct RawObjectStoreProductConfig {
     force_path_style: bool,
     #[serde(default)]
     loopback_development: bool,
+    tls_trust: RawObjectStoreTlsTrust,
     operation_timeout_seconds: u64,
     access_key_id: SecretSource,
     secret_access_key: SecretSource,
     session_token: Option<SecretSource>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum RawObjectStoreTlsTrust {
+    WebPki {},
+    PrivateCa { certificate_source: SecretSource },
+}
+
+impl RawObjectStoreTlsTrust {
+    fn validate(self) -> Result<ObjectStoreTlsTrust, RunnerProductConfigError> {
+        match self {
+            Self::WebPki {} => Ok(ObjectStoreTlsTrust::WebPki),
+            Self::PrivateCa { certificate_source } => {
+                certificate_source
+                    .validate()
+                    .map_err(RunnerProductConfigError::SecureInput)?;
+                Ok(ObjectStoreTlsTrust::PrivateCa { certificate_source })
+            }
+        }
+    }
 }
 
 impl RawObjectStoreProductConfig {
@@ -2616,18 +2657,20 @@ impl RawObjectStoreProductConfig {
         }
         let endpoint =
             Url::parse(&self.endpoint).map_err(|_| RunnerProductConfigError::InvalidObjectStore)?;
+        let tls_trust = self.tls_trust.validate()?;
         let operation_timeout = Duration::from_secs(self.operation_timeout_seconds);
         let effective_force_path_style = self.force_path_style || self.loopback_development;
-        if self.loopback_development {
-            automata_ci_blob_s3::S3BlobStoreConfig::loopback_development(
-                endpoint.clone(),
-                self.region.clone(),
-                self.bucket.clone(),
-                self.prefix.clone(),
-                operation_timeout,
-            )
-        } else {
-            automata_ci_blob_s3::S3BlobStoreConfig::new(
+        match (endpoint.scheme(), self.loopback_development, &tls_trust) {
+            ("http", true, ObjectStoreTlsTrust::WebPki) => {
+                automata_ci_blob_s3::S3BlobStoreConfig::loopback_development(
+                    endpoint.clone(),
+                    self.region.clone(),
+                    self.bucket.clone(),
+                    self.prefix.clone(),
+                    operation_timeout,
+                )
+            }
+            ("https", false, _) => automata_ci_blob_s3::S3BlobStoreConfig::new(
                 endpoint.clone(),
                 self.region.clone(),
                 self.bucket.clone(),
@@ -2635,7 +2678,8 @@ impl RawObjectStoreProductConfig {
                 self.force_path_style,
                 automata_ci_blob_s3::S3TlsTrust::web_pki(),
                 operation_timeout,
-            )
+            ),
+            _ => return Err(RunnerProductConfigError::InvalidObjectStore),
         }
         .map_err(|_| RunnerProductConfigError::InvalidObjectStore)?;
         Ok(ObjectStoreProductConfig {
@@ -2645,6 +2689,7 @@ impl RawObjectStoreProductConfig {
             prefix: self.prefix,
             force_path_style: effective_force_path_style,
             loopback_development: self.loopback_development,
+            tls_trust,
             operation_timeout,
             access_key_id: self.access_key_id,
             secret_access_key: self.secret_access_key,

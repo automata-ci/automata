@@ -2,10 +2,13 @@ use std::{fmt, net::IpAddr, time::Duration};
 
 use aws_sdk_s3::{Client, config::Region};
 use aws_smithy_http_client::tls::{TlsContext, TrustStore};
+use rustls::{RootCertStore, pki_types::CertificateDer};
 use thiserror::Error;
 use url::{Host, Url};
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
+
+use crate::adapter::S3BlobStore;
 
 const MAX_BUCKET_BYTES: usize = 63;
 const MAX_PREFIX_BYTES: usize = 1_024;
@@ -41,9 +44,12 @@ impl S3TlsTrust {
     ///
     /// # Errors
     ///
-    /// Rejects oversized input, malformed or non-certificate PEM, trailing or
-    /// concatenated PEM documents, malformed X.509, and certificates that are
-    /// not marked as certificate authorities.
+    /// Rejects oversized input, malformed or non-certificate PEM, malformed
+    /// X.509, and certificates that are not marked as certificate authorities.
+    /// The source bytes must be the canonical RFC 7468 encoding: no preamble,
+    /// exactly 64 Base64 characters per non-final line, LF line endings, one
+    /// terminal LF, and no trailing data or second document. When `KeyUsage` is
+    /// present, it must authorize certificate signing.
     pub fn private_ca(certificate_pem: impl Into<Vec<u8>>) -> Result<Self, S3BlobStoreConfigError> {
         let certificate_pem = certificate_pem.into();
         if certificate_pem.is_empty() || certificate_pem.len() > MAX_S3_PRIVATE_CA_PEM_BYTES {
@@ -54,11 +60,29 @@ impl S3TlsTrust {
         if label != "CERTIFICATE" {
             return Err(S3BlobStoreConfigError::InvalidPrivateCa);
         }
-        let (remaining, certificate) = parse_x509_certificate(&certificate_der)
-            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
-        if !remaining.is_empty() || !certificate.tbs_certificate.is_ca() {
+        let canonical_pem = pem_rfc7468::encode_string(
+            "CERTIFICATE",
+            pem_rfc7468::LineEnding::LF,
+            &certificate_der,
+        )
+        .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        if canonical_pem.as_bytes() != certificate_pem {
             return Err(S3BlobStoreConfigError::InvalidPrivateCa);
         }
+        let (remaining, certificate) = parse_x509_certificate(&certificate_der)
+            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        let key_usage = certificate
+            .key_usage()
+            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        if !remaining.is_empty()
+            || !certificate.tbs_certificate.is_ca()
+            || key_usage.is_some_and(|usage| !usage.value.key_cert_sign())
+        {
+            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
+        }
+        RootCertStore::empty()
+            .add(CertificateDer::from(certificate_der))
+            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
         Ok(Self {
             mode: S3TlsTrustPolicy::PrivateCa { certificate_pem },
         })
@@ -88,12 +112,6 @@ impl fmt::Debug for S3TlsTrust {
             S3TlsTrustPolicy::WebPki => "S3TlsTrust::WebPki",
             S3TlsTrustPolicy::PrivateCa { .. } => "S3TlsTrust::PrivateCa([certificate redacted])",
         })
-    }
-}
-
-impl Default for S3TlsTrust {
-    fn default() -> Self {
-        Self::web_pki()
     }
 }
 
@@ -369,15 +387,16 @@ impl S3BlobStoreConfig {
         })
     }
 
-    /// Constructs a statically authenticated S3 SDK client.
+    /// Connects this validated policy to one statically authenticated S3 store.
     ///
-    /// The adapter also accepts an externally constructed [`Client`] so a
-    /// deployment may use any SDK credential provider without changing this
-    /// domain configuration.
-    pub fn client(
-        &self,
+    /// # Errors
+    ///
+    /// Returns a sanitized error if the validated exact TLS trust policy cannot
+    /// be converted into the SDK HTTP client's TLS context.
+    pub fn connect(
+        self,
         credentials: StaticS3Credentials,
-    ) -> Result<Client, S3BlobStoreConfigError> {
+    ) -> Result<S3BlobStore, S3BlobStoreConfigError> {
         let http_client = aws_smithy_http_client::Builder::new()
             .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
                 aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
@@ -392,7 +411,14 @@ impl S3BlobStoreConfig {
             .credentials_provider(credentials.into_sdk())
             .force_path_style(self.force_path_style)
             .build();
-        Ok(Client::from_conf(config))
+        Ok(S3BlobStore::from_validated(
+            Client::from_conf(config),
+            &self,
+        ))
+    }
+
+    pub(crate) fn region(&self) -> &str {
+        &self.region
     }
 
     /// Returns the bucket name without credentials.
@@ -411,12 +437,6 @@ impl S3BlobStoreConfig {
     #[must_use]
     pub const fn operation_timeout(&self) -> Duration {
         self.operation_timeout
-    }
-
-    /// Returns the exact HTTPS endpoint trust policy.
-    #[must_use]
-    pub const fn tls_trust(&self) -> &S3TlsTrust {
-        &self.tls_trust
     }
 
     /// Selects a mandatory server-side encryption policy.

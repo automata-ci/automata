@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use automata_ci_blob_s3::{
-    EnsureBucketError, EnsureBucketOutcome, S3BlobStoreConfig, S3TlsTrust, StaticS3Credentials,
-    ensure_bucket,
+    EnsureBucketError, EnsureBucketOutcome, S3BlobStore, S3BlobStoreConfig, S3TlsTrust,
+    StaticS3Credentials,
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -31,7 +31,7 @@ async fn aws_sdk_uses_only_the_selected_exact_private_ca() {
     );
 
     assert_eq!(
-        ensure_bucket(&sdk_client(&trusted_config), &trusted_config).await,
+        connected_store(trusted_config).ensure_bucket().await,
         Ok(EnsureBucketOutcome::AlreadyExists)
     );
 
@@ -42,14 +42,14 @@ async fn aws_sdk_uses_only_the_selected_exact_private_ca() {
         S3TlsTrust::private_ca(wrong.pem()).expect("wrong private CA"),
     );
     assert!(matches!(
-        ensure_bucket(&sdk_client(&wrong_config), &wrong_config).await,
+        connected_store(wrong_config).ensure_bucket().await,
         Err(EnsureBucketError::InitialInspection | EnsureBucketError::Deadline)
     ));
 
     let web_pki_fixture = TlsS3Fixture::spawn(&trusted).await;
     let web_pki_config = https_config(web_pki_fixture.endpoint.clone(), S3TlsTrust::web_pki());
     assert!(matches!(
-        ensure_bucket(&sdk_client(&web_pki_config), &web_pki_config).await,
+        connected_store(web_pki_config).ensure_bucket().await,
         Err(EnsureBucketError::InitialInspection | EnsureBucketError::Deadline)
     ));
 }
@@ -67,13 +67,13 @@ fn https_config(endpoint: Url, trust: S3TlsTrust) -> S3BlobStoreConfig {
     .expect("TLS S3 fixture configuration")
 }
 
-fn sdk_client(config: &S3BlobStoreConfig) -> aws_sdk_s3::Client {
+fn connected_store(config: S3BlobStoreConfig) -> S3BlobStore {
     config
-        .client(
+        .connect(
             StaticS3Credentials::new("test-access", "test-secret", None)
                 .expect("TLS fixture credentials"),
         )
-        .expect("TLS fixture SDK client")
+        .expect("TLS fixture S3 store")
 }
 
 struct TestAuthority {

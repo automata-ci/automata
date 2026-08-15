@@ -6,8 +6,9 @@ use std::{
 };
 
 use automata_ci_blob_s3::{
-    EnsureBucketError, EnsureBucketOutcome, S3BlobStoreConfig, StaticS3Credentials, ensure_bucket,
+    EnsureBucketError, EnsureBucketOutcome, S3BlobStoreConfig, StaticS3Credentials,
 };
+use aws_sdk_s3::types::BucketLocationConstraint;
 use tokio::{
     net::{TcpListener, TcpStream},
     task::{JoinHandle, JoinSet},
@@ -45,6 +46,39 @@ async fn absent_bucket_is_created_then_reinspected() {
             "HEAD /automata-tests/"
         ]
     );
+    assert!(fixture.create_body().is_empty());
+}
+
+#[tokio::test]
+async fn every_non_us_east_1_region_is_the_exact_create_location_constraint() {
+    let regions = BucketLocationConstraint::values()
+        .iter()
+        .copied()
+        .chain(["future-region-1"]);
+    for region in regions {
+        let fixture = S3Fixture::spawn([
+            Response::Status("404 Not Found"),
+            Response::Status("200 OK"),
+            Response::Status("200 OK"),
+        ])
+        .await;
+
+        assert_eq!(
+            fixture
+                .ensure_in_region(region, Duration::from_secs(1))
+                .await,
+            Ok(EnsureBucketOutcome::Created),
+            "region {region}"
+        );
+        assert_eq!(
+            fixture.create_body(),
+            format!(
+                "<CreateBucketConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LocationConstraint>{region}</LocationConstraint></CreateBucketConfiguration>"
+            )
+            .as_bytes(),
+            "region {region}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -115,7 +149,7 @@ enum Response {
 
 struct S3Fixture {
     endpoint: Url,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
     task: JoinHandle<()>,
 }
 
@@ -168,9 +202,17 @@ impl S3Fixture {
         &self,
         operation_timeout: Duration,
     ) -> Result<EnsureBucketOutcome, EnsureBucketError> {
+        self.ensure_in_region("us-east-1", operation_timeout).await
+    }
+
+    async fn ensure_in_region(
+        &self,
+        region: &str,
+        operation_timeout: Duration,
+    ) -> Result<EnsureBucketOutcome, EnsureBucketError> {
         let config = S3BlobStoreConfig::loopback_development(
             self.endpoint.clone(),
-            "us-east-1",
+            region,
             "automata-tests",
             None,
             operation_timeout,
@@ -178,14 +220,31 @@ impl S3Fixture {
         .expect("bucket fixture config");
         let credentials = StaticS3Credentials::new("test-access", "test-secret", None)
             .expect("bucket fixture credentials");
-        let client = config
-            .client(credentials)
-            .expect("bucket fixture SDK client");
-        ensure_bucket(&client, &config).await
+        config
+            .connect(credentials)
+            .expect("bucket fixture S3 store")
+            .ensure_bucket()
+            .await
     }
 
     fn requests(&self) -> Vec<String> {
-        self.requests.lock().expect("bucket request lock").clone()
+        self.requests
+            .lock()
+            .expect("bucket request lock")
+            .iter()
+            .map(|request| request.target.clone())
+            .collect()
+    }
+
+    fn create_body(&self) -> Vec<u8> {
+        self.requests
+            .lock()
+            .expect("bucket request lock")
+            .iter()
+            .find(|request| request.target.starts_with("PUT "))
+            .expect("create request")
+            .body
+            .clone()
     }
 }
 
@@ -197,19 +256,11 @@ impl Drop for S3Fixture {
 
 async fn serve(
     stream: TcpStream,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<RecordedRequest>>>,
     response: Response,
 ) -> io::Result<()> {
-    let request = read_request_head(&stream).await?;
-    let first_line = request
-        .split("\r\n")
-        .next()
-        .and_then(|line| line.strip_suffix(" HTTP/1.1"))
-        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-    requests
-        .lock()
-        .expect("bucket request lock")
-        .push(first_line.to_owned());
+    let request = read_request(&stream).await?;
+    requests.lock().expect("bucket request lock").push(request);
     match response {
         Response::Status(status) => {
             stream.writable().await?;
@@ -223,10 +274,19 @@ async fn serve(
     }
 }
 
-async fn read_request_head(stream: &TcpStream) -> io::Result<String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedRequest {
+    target: String,
+    body: Vec<u8>,
+}
+
+async fn read_request(stream: &TcpStream) -> io::Result<RecordedRequest> {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4 * 1_024];
-    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+    let header_end = loop {
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
         stream.readable().await?;
         match stream.try_read(&mut buffer) {
             Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
@@ -239,6 +299,42 @@ async fn read_request_head(stream: &TcpStream) -> io::Result<String> {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error),
         }
+    };
+    let head = std::str::from_utf8(&request[..header_end])
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let target = head
+        .split("\r\n")
+        .next()
+        .and_then(|line| line.strip_suffix(" HTTP/1.1"))
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?
+        .to_owned();
+    let content_length = head
+        .split("\r\n")
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| value.trim().parse::<usize>())
+        .transpose()
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?
+        .unwrap_or(0);
+    let complete_length = header_end
+        .checked_add(content_length)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    while request.len() < complete_length {
+        stream.readable().await?;
+        match stream.try_read(&mut buffer) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(received) => {
+                request.extend_from_slice(&buffer[..received]);
+                if request.len() > 64 * 1_024 {
+                    return Err(io::Error::from(io::ErrorKind::InvalidData));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
     }
-    String::from_utf8(request).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))
+    Ok(RecordedRequest {
+        target,
+        body: request[header_end..complete_length].to_vec(),
+    })
 }

@@ -3,9 +3,7 @@ mod support;
 use std::{env, sync::Arc, time::Duration};
 
 use automata_ci_blob::ImmutableBlobStore as _;
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_control::adapter_spi::{
     AcquireLease, InternalAttemptRepository as _, QueuedAttempt,
 };
@@ -60,10 +58,8 @@ async fn finalized_manifest_and_blocks_are_verified_in_rustfs() -> TestResult {
         .with_at_rest_encryption(S3AtRestEncryption::aws_kms(env::var(
             "AUTOMATA_TEST_S3_KMS_KEY_ID",
         )?)?);
-        let objects = Arc::new(S3BlobStore::new(
-            config.client(StaticS3Credentials::new(access_key, secret_key, None)?)?,
-            &config,
-        ));
+        let objects =
+            Arc::new(config.connect(StaticS3Credentials::new(access_key, secret_key, None)?)?);
         let upload_id = UploadId::from_uuid(Uuid::new_v4());
         let repository = Arc::new(PostgresArtifactRepository::new(database.pool().clone()));
         let service = ArtifactService::new(
