@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_core::{LogicalJobKind, ReusableSecretForwarding, WorkflowEventProvenance};
 use automata_ci_workflow_github::{

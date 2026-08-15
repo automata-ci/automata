@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use automata_ci_core::{
     Architecture, AttemptId, IsolationLevel, JobConclusion, JobIrVersion, JobLifecycle, JobResult,

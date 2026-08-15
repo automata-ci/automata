@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_store::{MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES};
 use automata_ci_workflow_service::{WorkflowAdmissionRequest, WorkflowAdmissionRequestError};

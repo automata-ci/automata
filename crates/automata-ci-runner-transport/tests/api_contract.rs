@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_core::{JobIrVersion, OperationId, RunnerSessionId};
 use automata_ci_protocol::{

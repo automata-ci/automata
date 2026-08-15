@@ -2,6 +2,7 @@
 name = "automata-ci-sandbox-podman"
 description = "Rootless local Podman whole-job sandbox adapter for Automata"
 publish.workspace = true
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +11,14 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+
+[[test]]
+name = "sandbox_podman"
+path = "tests/sandbox_podman.rs"
+
+[[test]]
+name = "live_rootless"
+path = "tests/live_rootless.rs"
 
 [lints]
 workspace = true

@@ -1,4 +1,4 @@
-mod support;
+use super::support;
 
 use automata_ci_core::{
     JobLifecycle, LeaseGuard, LogSequence, LogStreamId, OperationId, RunnerSessionId, UnixMillis,

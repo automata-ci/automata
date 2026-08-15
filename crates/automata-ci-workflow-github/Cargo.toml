@@ -1,5 +1,6 @@
 [package]
 name = "automata-ci-workflow-github"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +11,10 @@ homepage.workspace = true
 readme = "README.md"
 description = "Loss-aware GitHub Actions workflow frontend for Automata"
 publish.workspace = true
+
+[[test]]
+name = "workflow_github"
+path = "tests/workflow_github.rs"
 
 [dependencies]
 automata-ci-core.workspace = true

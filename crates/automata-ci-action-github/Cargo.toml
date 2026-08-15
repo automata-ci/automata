@@ -10,6 +10,7 @@ homepage.workspace = true
 readme = "README.md"
 description = "Bounded GitHub Actions metadata decoder for Automata"
 publish.workspace = true
+autotests = false
 
 [dependencies]
 automata-ci-action.workspace = true
@@ -29,3 +30,11 @@ url.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "action_github"
+path = "tests/action_github.rs"
+
+[[test]]
+name = "live_checkout_pipeline"
+path = "tests/live_checkout_pipeline.rs"

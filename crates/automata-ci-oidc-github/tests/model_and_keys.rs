@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_oidc_github::{
     AuthorizedOidcIssuance, MAXIMUM_ID_TOKEN_LIFETIME_SECONDS, MAXIMUM_OIDC_KEYS_PER_KEYRING,

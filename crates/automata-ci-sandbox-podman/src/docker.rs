@@ -3235,7 +3235,7 @@ const fn decode_hex(byte: u8) -> Option<u8> {
 }
 
 #[cfg(test)]
-#[path = "../tests/support/docker_policy.rs"]
+#[path = "docker_policy_tests.rs"]
 mod tests;
 
 #[cfg(test)]
