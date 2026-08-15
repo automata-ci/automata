@@ -845,6 +845,15 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
             ConsumeLoginTransactionOutcome::Consumed(_)
         ));
 
+        sqlx::query(
+            r"
+            INSERT INTO tenants (id, display_name, created_at_ms, updated_at_ms)
+            VALUES ('bootstrap-tenant', 'bootstrap-tenant', 1, 1)
+            ",
+        )
+        .execute(database.pool())
+        .await?;
+
         let completion_seconds = clock
             .now()
             .await?
@@ -917,6 +926,11 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
         };
         assert_eq!(principal_id, completed.principal_id().clone());
         assert_eq!(revision, completed.revision());
+        let tenant_display_name: String =
+            sqlx::query_scalar("SELECT display_name FROM tenants WHERE id='bootstrap-tenant'")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(tenant_display_name, "Bootstrap Tenant");
 
         let provider_key = ProviderTokenKey::new(
             TenantId::new("bootstrap-tenant").expect("tenant"),
