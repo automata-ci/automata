@@ -425,6 +425,15 @@ impl<'a> RepositoryActionRequest<'a> {
         self.limits
     }
 
+    /// Reports whether this request carries no repository credential.
+    ///
+    /// Only credential-free requests may use the public immutable-action
+    /// cache. Authenticated requests must always re-authorize through SCM.
+    #[must_use]
+    pub const fn is_public(&self) -> bool {
+        self.credential.is_none()
+    }
+
     pub(crate) const fn snapshot_request(&self) -> SnapshotRequest<'_> {
         if let Some(credential) = self.credential {
             SnapshotRequest::authenticated(
@@ -691,6 +700,8 @@ pub enum ActionResolveErrorKind {
     Archive,
     /// Immutable blob verification or publication failed.
     BlobStore,
+    /// The local immutable-reference index failed or contradicted provenance.
+    ReferenceCache,
     /// A provider result or locally constructed identity violated an invariant.
     Internal,
 }

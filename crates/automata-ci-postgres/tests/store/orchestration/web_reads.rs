@@ -1117,11 +1117,36 @@ async fn workflow_authorization_and_rows_share_one_repeatable_read_snapshot() ->
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
-async fn duplicate_latest_attempt_log_streams_fail_as_corrupt_data() -> TestResult {
+async fn a_stale_prior_lease_log_stream_does_not_poison_the_terminal_job() -> TestResult {
     run_with_database(|database| async move {
         let seed = seed_control_plane(database.pool(), 1).await?;
         let fixture = seed_public_completed_run(&database, &seed).await?;
         insert_duplicate_stream(&database, &seed, fixture).await?;
+        let scope = HumanJobScope::new(
+            TenantScope::from_authenticated_tenant_id(&seed.tenant_id)?,
+            RepositoryId::from_uuid(seed.repository_id),
+            fixture.run_id,
+            fixture.job_id,
+        );
+        let detail = database
+            .store()
+            .get_job(&scope)
+            .await?
+            .expect("terminal job remains readable");
+        assert_eq!(detail.job.id, fixture.job_id);
+        assert!(detail.log_stream.is_some());
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn duplicate_authoritative_log_streams_still_fail_closed() -> TestResult {
+    run_with_database(|database| async move {
+        let seed = seed_control_plane(database.pool(), 1).await?;
+        let fixture = seed_public_completed_run(&database, &seed).await?;
+        insert_duplicate_authoritative_stream(&database, fixture).await?;
         let scope = HumanJobScope::new(
             TenantScope::from_authenticated_tenant_id(&seed.tenant_id)?,
             RepositoryId::from_uuid(seed.repository_id),
@@ -1570,6 +1595,44 @@ async fn insert_duplicate_stream(
     .bind(i64::try_from(fence.session_epoch().get())?)
     .bind(i64::try_from(fence.runner_generation().get())?)
     .bind(Uuid::new_v4())
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+async fn insert_duplicate_authoritative_stream(
+    database: &TestDatabase,
+    fixture: PublicFixture,
+) -> TestResult {
+    let attempt_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM job_attempts WHERE job_id = $1 ORDER BY attempt_number DESC LIMIT 1",
+    )
+    .bind(fixture.job_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        INSERT INTO attempt_log_streams (
+            id, attempt_id, runner_session_id, operation_id, runner_id,
+            runner_session_epoch, runner_generation, runner_slot,
+            lease_id, fencing_token, log_schema, opened_at_ms,
+            secret_exposure_class, raw_log_disposition,
+            requested_visibility, effective_visibility,
+            output_safety_reason, output_safety_schema
+        )
+        SELECT $1, terminal.attempt_id, terminal.runner_session_id, $2,
+               terminal.runner_id, terminal.runner_session_epoch,
+               terminal.runner_generation, terminal.runner_slot,
+               terminal.lease_id, terminal.fencing_token, 1, 22,
+               'secretless', 'persist', 'public', 'public',
+               'repository_policy', 1
+        FROM attempt_terminal_results AS terminal
+        WHERE terminal.attempt_id = $3
+        ",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind(attempt_id)
     .execute(database.pool())
     .await?;
     Ok(())

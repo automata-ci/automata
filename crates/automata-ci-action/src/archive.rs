@@ -54,7 +54,7 @@ pub fn inspect_archive(
 /// # Errors
 ///
 /// Returns the same fail-closed errors as [`inspect_archive`].
-fn inspect_archive_bytes(
+pub(crate) fn inspect_archive_bytes(
     bytes: &Bytes,
     subpath: &ActionSubpath,
     limits: ActionBundleLimits,

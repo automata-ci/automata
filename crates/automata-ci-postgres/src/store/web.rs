@@ -795,7 +795,8 @@ async fn load_jobs(
         LEFT JOIN LATERAL (
             SELECT attempt.id, attempt.attempt_number, attempt.lifecycle,
                    attempt.queued_at_ms, attempt.changed_at_ms,
-                   attempt.started_at_ms, attempt.runner_id
+                   attempt.started_at_ms, attempt.runner_id,
+                   attempt.lease_id, attempt.fencing_token
             FROM job_attempts AS attempt
             WHERE attempt.job_id = job.id
             ORDER BY attempt.attempt_number DESC, attempt.id DESC
@@ -808,6 +809,8 @@ async fn load_jobs(
          AND runner.id = coalesce(terminal.runner_id, latest.runner_id)
         LEFT JOIN attempt_log_streams AS stream
           ON stream.attempt_id = latest.id
+         AND stream.lease_id = coalesce(terminal.lease_id, latest.lease_id)
+         AND stream.fencing_token = coalesce(terminal.fencing_token, latest.fencing_token)
         WHERE repository.tenant_id = $1
           AND repository.id = $2
           AND run.id = $3
@@ -1211,14 +1214,18 @@ async fn load_log_stream(
         JOIN jobs AS job
           ON job.run_id = run.id
         JOIN LATERAL (
-            SELECT attempt.id
+            SELECT attempt.id, attempt.lease_id, attempt.fencing_token
             FROM job_attempts AS attempt
             WHERE attempt.job_id = job.id
             ORDER BY attempt.attempt_number DESC, attempt.id DESC
             LIMIT 1
         ) AS latest ON TRUE
+        LEFT JOIN attempt_terminal_results AS terminal
+          ON terminal.attempt_id = latest.id
         JOIN attempt_log_streams AS stream
           ON stream.attempt_id = latest.id
+         AND stream.lease_id = coalesce(terminal.lease_id, latest.lease_id)
+         AND stream.fencing_token = coalesce(terminal.fencing_token, latest.fencing_token)
         LEFT JOIN LATERAL (
             SELECT count(*) AS segment_count,
                    min(ordered.first_sequence) AS first_sequence,

@@ -842,19 +842,14 @@ struct PullRequestObjectPayload {
     base: PullRequestBranchPayload,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(untagged)]
 enum PullRequestMergeCommitShaPayload {
     Revision(String),
     Null(()),
     #[serde(skip)]
+    #[default]
     Missing,
-}
-
-impl Default for PullRequestMergeCommitShaPayload {
-    fn default() -> Self {
-        Self::Missing
-    }
 }
 
 #[derive(Deserialize)]
@@ -1096,10 +1091,7 @@ pub(crate) fn normalize_pull_request(
         PullRequestMergeCommitShaPayload::Null(()) if !payload.pull_request.merged => {
             head_revision.clone()
         }
-        PullRequestMergeCommitShaPayload::Null(()) => {
-            return Err(GithubWebhookError::InvalidPayload);
-        }
-        PullRequestMergeCommitShaPayload::Missing => {
+        PullRequestMergeCommitShaPayload::Null(()) | PullRequestMergeCommitShaPayload::Missing => {
             return Err(GithubWebhookError::InvalidPayload);
         }
     };

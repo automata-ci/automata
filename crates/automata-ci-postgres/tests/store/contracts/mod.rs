@@ -2,6 +2,6 @@
 
 mod github_oidc;
 mod migration_layout;
-mod schema_catalog;
 mod schema_bindings;
+mod schema_catalog;
 mod secret_management;
