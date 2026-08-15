@@ -23,7 +23,10 @@ duplicate its locking, transaction, checksum, and migration-ledger behavior.
 The files numbered `0001` through `0026` are the frozen greenfield baseline,
 split into bounded stages for routines, relations, catalog data, keys, indexes,
 triggers, and foreign keys. Do not edit, renumber, squash, or delete an applied
-migration. SQLx deliberately rejects checksum changes.
+migration. SQLx deliberately rejects checksum changes. An ordinary Rust contract
+pins every applied filename and raw SQLx SHA-384 checksum. Each schema change
+must append the next sequential version and its identity to that inventory
+without changing an earlier entry.
 
 Every schema change after the baseline must be a focused, forward-only migration
 with the next unused version. With `sqlx-cli` installed, create one from the
@@ -39,6 +42,12 @@ Keep migrations below 2,000 lines. Prefer one behavioral change per file, and
 include any supporting index required by a new trigger query in the same
 migration. The live schema catalog test rejects exact duplicate indexes and
 non-covering indexes that merely extend an already-unique key.
+
+Once a migration is applied, an older binary is not a rollback artifact: its
+embedded inventory cannot validate the newer ledger. Roll behavior back with a
+new binary built from the current migration lineage, or restore the database
+and matching binary together from a pre-migration backup. Never rewrite SQLx's
+migration ledger or configure it to ignore missing versions.
 
 PostgreSQL receives no plaintext login state, provider token, or managed secret
 value. Session bearer values are represented by keyed digests, and runner
