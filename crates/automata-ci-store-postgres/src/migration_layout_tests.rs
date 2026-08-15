@@ -117,6 +117,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0028_allow_queued_cancellation_after_lease_retry.sql",
         "4841124d150802cd51308c78f1f9607e9ca04c4b077e08eb89936ed5aa7ab527fc1add96b34bb95b0825286191a17d0e",
     ),
+    (
+        "0029_align_artifact_protocol_version.sql",
+        "00d51644b2bed927c55fbd7bfa6ba84efe66526d59adb0accd3ab2b4b27d11fec73a62e6d4ae7af159a0b2c522e2eea2",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
