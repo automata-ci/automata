@@ -1085,6 +1085,7 @@ dependencies = [
  "automata-ci-oidc-github",
  "automata-ci-schedule",
  "automata-ci-store",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "sqlx",

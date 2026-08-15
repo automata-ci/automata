@@ -36,11 +36,13 @@ use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, JobConclusion, JobLifecycle, Lease, LeaseGuard,
     LeaseId, LogSequence, LogStreamId, OperationId, Sha256Digest, UnixMillis,
 };
+use automata_ci_postgres::store::PostgresLogCommitListener;
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CloseRunnerSession, CommandCursor, CommandSequence, DocumentSchema,
-    EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, ObjectKey, OpenRunnerSession,
-    RunnerCommandPayload, RunnerGeneration, RunnerOperationKind, RunnerOperationRequest,
-    RunnerOperationResponse, RunnerProtocolVersion, StableRunnerSlot, StoreError,
+    EnqueueRunnerCommand, HumanLogCommitHint, HumanLogCommitNotificationSource as _, JobIrMetadata,
+    LeaseOfferCommandIdentity, ObjectKey, OpenRunnerSession, RunnerCommandPayload,
+    RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
+    RunnerProtocolVersion, StableRunnerSlot, StoreError,
 };
 
 use crate::support::{
@@ -1635,6 +1637,7 @@ async fn lease_response_and_reported_lifecycle_are_atomic_fenced_and_replayed() 
 #[allow(clippy::too_many_lines)]
 async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipts() -> TestResult {
     run_with_database(|database| async move {
+        let mut notifications = PostgresLogCommitListener::connect(database.pool()).await?;
         let (seed, lease, metadata, slot, request_operation_id, request_digest) =
             active_lease(&database).await?;
         let fence = seed.session_fences[0];
@@ -1716,6 +1719,10 @@ async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipt
             .await?;
         assert!(!first.was_replayed());
         assert!(replay.was_replayed());
+        assert_eq!(
+            notifications.receive().await?,
+            HumanLogCommitHint::new(stream_id, LogSequence::new(0), false)
+        );
 
         let admitted_request = first_segment.admission().request();
         let wrong_attempt_admission = RunnerLogAdmission::new(
@@ -1891,6 +1898,10 @@ async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipt
         );
         remove_receipt_failpoint(&database, "runner_rpc_receipts").await?;
         database.store().commit_runner_log_segment(second).await?;
+        assert_eq!(
+            notifications.receive().await?,
+            HumanLogCommitHint::new(stream_id, LogSequence::new(1), true)
+        );
 
         let cancellation_operation = OperationId::new();
         let cancellation_reason = CancellationReason::new("stop after uploaded logs")?;

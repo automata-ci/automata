@@ -21,6 +21,7 @@ automata-ci-key-management.workspace = true
 automata-ci-oidc-github.workspace = true
 automata-ci-schedule.workspace = true
 automata-ci-store = { workspace = true, features = ["adapter-spi"] }
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
