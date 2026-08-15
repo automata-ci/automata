@@ -73,6 +73,7 @@ anyhow = "1.0.99"
 async-trait = "0.1.91"
 aws-sdk-s3 = { version = "=1.141.0", default-features = false, features = ["behavior-version-latest", "http-1x", "rt-tokio"] }
 aws-smithy-http-client = { version = "=1.2.0", default-features = false, features = ["rustls-ring"] }
+bollard = { version = "=0.21.0", default-features = false, features = ["pipe"] }
 automata-ci-auth = { path = "crates/automata-ci-auth", version = "0.1.0" }
 automata-ci-auth-postgres = { path = "crates/automata-ci-auth-postgres", version = "0.1.0" }
 automata-ci-action = { path = "crates/automata-ci-action", version = "0.1.0" }

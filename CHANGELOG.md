@@ -30,7 +30,11 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   sensitivity.
 - Read-only `automata local doctor` preflight for the initial x86-64 Linux,
   Apple Silicon macOS, and x86-64 Windows host tuples, a local Linux Docker
-  Engine, and Docker Compose plugin 2.20.0 or newer.
+  Engine, and Docker Compose plugin 2.20.0 or newer. Docker daemon probes are
+  pinned to the exact endpoint resolved from the context selected first;
+  stable JSON schema 3 and human output report its bounded name. The internal
+  adapter can strictly inspect or create-and-adopt a repository-agnostic
+  installation identity anchor without exposing a product mutation command.
 
 ### Known limitations
 

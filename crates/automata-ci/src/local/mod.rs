@@ -63,6 +63,7 @@ fn print_human_report(report: &DoctorReport) {
         None => println!("Container engine: unavailable"),
     }
     if let Some(selection) = report.selected_engine() {
+        println!("Docker context: {}", selection.context_name());
         println!("Engine endpoint: {}", endpoint_name(selection.endpoint()));
         println!("Engine identity: {}", selection.engine_id());
         println!(

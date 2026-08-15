@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::{collections::BTreeMap, io, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, fmt, io, process::Stdio, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
@@ -16,9 +16,20 @@ use tokio::{
     time::timeout,
 };
 
+mod engine;
+mod installation;
+
+pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
+pub use installation::{
+    ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
+    InstallationSelectorKey,
+};
+
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TERMINATION_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_COMMAND_STREAM_BYTES: usize = 64 * 1024;
+const MAX_DOCKER_CONTEXT_NAME_BYTES: usize = 128;
+const MAX_DOCKER_ENDPOINT_BYTES: usize = 4096;
 const MIN_DOCKER_API: ApiVersion = ApiVersion {
     major: 1,
     minor: 44,
@@ -51,18 +62,31 @@ impl DoctorRequest {
 
 /// Inspects the local host without creating state or containers.
 pub async fn inspect(request: DoctorRequest) -> DoctorReport {
-    let (context, version, info, compose) = tokio::join!(
-        capture_docker(
-            DoctorProbe::DockerContext,
-            &["context", "inspect", "--format", "{{json .}}"]
-        ),
-        capture_docker(DoctorProbe::DockerVersion, &["version", "--format", "json"]),
-        capture_docker(DoctorProbe::DockerInfo, &["info", "--format", "json"]),
-        capture_docker(
-            DoctorProbe::DockerCompose,
-            &["compose", "version", "--format", "json"]
-        ),
-    );
+    let context = capture_docker(
+        DoctorProbe::DockerContext,
+        &["context", "inspect", "--format", "{{json .}}"],
+    )
+    .await;
+    let endpoint = validated_context_output(&context, std::env::consts::OS);
+    let compose_arguments = ["compose", "version", "--format", "json"];
+    let (version, info, compose) = if let Some(endpoint) = endpoint.as_ref() {
+        let version_arguments = [
+            "--host",
+            endpoint.host.as_str(),
+            "version",
+            "--format",
+            "json",
+        ];
+        let info_arguments = ["--host", endpoint.host.as_str(), "info", "--format", "json"];
+        tokio::join!(
+            capture_docker(DoctorProbe::DockerVersion, &version_arguments),
+            capture_docker(DoctorProbe::DockerInfo, &info_arguments),
+            capture_docker(DoctorProbe::DockerCompose, &compose_arguments),
+        )
+    } else {
+        let compose = capture_docker(DoctorProbe::DockerCompose, &compose_arguments).await;
+        (ProbeOutput::Skipped, ProbeOutput::Skipped, compose)
+    };
     let probes = ProbeSet {
         context,
         version,
@@ -297,6 +321,34 @@ pub enum EngineEndpoint {
     WindowsNamedPipe,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct DockerConnection {
+    context_name: String,
+    host: String,
+    endpoint: EngineEndpoint,
+}
+
+impl fmt::Debug for DockerConnection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DockerConnection")
+            .field("context_name", &self.context_name)
+            .field("endpoint", &self.endpoint)
+            .field("host", &"<validated-local-endpoint>")
+            .finish()
+    }
+}
+
+impl DockerConnection {
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) const fn endpoint(&self) -> EngineEndpoint {
+        self.endpoint
+    }
+}
+
 /// Supported Linux engine architecture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -312,12 +364,15 @@ pub enum EngineArchitecture {
 pub struct EngineSelection {
     engine: Engine,
     compose: ComposeFrontend,
+    context_name: String,
     endpoint: EngineEndpoint,
     engine_id: String,
     server_version: String,
     api_version: String,
     architecture: EngineArchitecture,
     compose_version: String,
+    #[serde(skip)]
+    connection: DockerConnection,
 }
 
 impl EngineSelection {
@@ -329,6 +384,11 @@ impl EngineSelection {
     /// Returns the selected Compose frontend.
     pub const fn compose(&self) -> ComposeFrontend {
         self.compose
+    }
+
+    /// Returns the exact Docker context name observed during preflight.
+    pub fn context_name(&self) -> &str {
+        &self.context_name
     }
 
     /// Returns the validated local endpoint class.
@@ -346,7 +406,7 @@ impl EngineSelection {
         &self.server_version
     }
 
-    /// Returns the negotiated Docker API version reported by the client.
+    /// Returns the exact Docker API version selected for adapter requests.
     pub fn api_version(&self) -> &str {
         &self.api_version
     }
@@ -359,6 +419,10 @@ impl EngineSelection {
     /// Returns the exact Docker Compose plugin version.
     pub fn compose_version(&self) -> &str {
         &self.compose_version
+    }
+
+    pub(crate) const fn connection(&self) -> &DockerConnection {
+        &self.connection
     }
 }
 
@@ -398,7 +462,7 @@ fn build_report(
     let selected_engine = evaluate_engine(operating_system, host_architecture, probes, &mut issues);
     issues.sort_by_key(|issue| issue.probe.sort_key());
     DoctorReport {
-        schema: 2,
+        schema: 3,
         ready: selected_engine.is_some() && issues.is_empty(),
         platform: Platform {
             operating_system: operating_system.to_owned(),
@@ -430,6 +494,7 @@ struct ProbeSet {
 enum ProbeOutput {
     Success(Vec<u8>),
     Failure(CommandFailure),
+    Skipped,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -665,7 +730,7 @@ fn evaluate_engine(
     let compose: Option<DockerComposeDocument> =
         parse_probe(DoctorProbe::DockerCompose, &probes.compose, issues);
 
-    let endpoint = context.as_ref().and_then(|context| {
+    let connection = context.as_ref().and_then(|context| {
         record_validation(
             DoctorProbe::DockerContext,
             validate_context(context, operating_system),
@@ -698,12 +763,14 @@ fn evaluate_engine(
     Some(EngineSelection {
         engine: Engine::Docker,
         compose: ComposeFrontend::DockerPlugin,
-        endpoint: endpoint?,
+        context_name: connection.as_ref()?.context_name.clone(),
+        endpoint: connection.as_ref()?.endpoint,
         engine_id: engine_id?,
         server_version: version.as_ref()?.server_version.clone(),
         api_version: version.as_ref()?.api_version.clone(),
         architecture: version.as_ref()?.architecture,
         compose_version: compose_version?,
+        connection: connection?,
     })
 }
 
@@ -718,6 +785,7 @@ fn parse_probe<T: DeserializeOwned>(
             issues.push(DoctorIssue::new(probe, failure.issue_code()));
             return None;
         }
+        ProbeOutput::Skipped => return None,
     };
     if let Ok(document) = serde_json::from_slice(bytes) {
         Some(document)
@@ -780,15 +848,42 @@ struct DockerContextEndpoint {
     skip_tls_verify: bool,
 }
 
+fn validated_context_output(
+    output: &ProbeOutput,
+    operating_system: &str,
+) -> Option<DockerConnection> {
+    let ProbeOutput::Success(bytes) = output else {
+        return None;
+    };
+    let document: DockerContextDocument = serde_json::from_slice(bytes).ok()?;
+    validate_context(&document, operating_system).ok()
+}
+
 fn validate_context(
     context: &DockerContextDocument,
     operating_system: &str,
-) -> Result<EngineEndpoint, DoctorIssueCode> {
-    if context.name.is_empty() || context.endpoints.docker.skip_tls_verify {
+) -> Result<DockerConnection, DoctorIssueCode> {
+    if !valid_context_name(&context.name)
+        || context.endpoints.docker.host.len() > MAX_DOCKER_ENDPOINT_BYTES
+        || context.endpoints.docker.skip_tls_verify
+    {
         return Err(DoctorIssueCode::UntrustedDockerEndpoint);
     }
-    local_endpoint(&context.endpoints.docker.host, operating_system)
-        .ok_or(DoctorIssueCode::UntrustedDockerEndpoint)
+    let endpoint = local_endpoint(&context.endpoints.docker.host, operating_system)
+        .ok_or(DoctorIssueCode::UntrustedDockerEndpoint)?;
+    Ok(DockerConnection {
+        context_name: context.name.clone(),
+        host: context.endpoints.docker.host.clone(),
+        endpoint,
+    })
+}
+
+fn valid_context_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_DOCKER_CONTEXT_NAME_BYTES
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn local_endpoint(host: &str, operating_system: &str) -> Option<EngineEndpoint> {
@@ -940,9 +1035,12 @@ fn validate_version(
         .get("MinAPIVersion")
         .and_then(|value| ApiVersion::parse(value))
         .ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
+    let adapter_api =
+        capped_adapter_api(client_api).ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
     if client_api < MIN_DOCKER_API
+        || adapter_api < MIN_DOCKER_API
         || server_api < client_api
-        || minimum_api > client_api
+        || minimum_api > adapter_api
         || component_api != server_api
         || component_minimum_api != minimum_api
     {
@@ -950,7 +1048,7 @@ fn validate_version(
     }
     Ok(ValidatedVersion {
         server_version: server.version.clone(),
-        api_version: client.api_version.clone(),
+        api_version: format!("{}.{}", adapter_api.major, adapter_api.minor),
         architecture,
     })
 }
@@ -976,6 +1074,14 @@ impl ApiVersion {
             minor: minor.parse().ok()?,
         })
     }
+}
+
+fn capped_adapter_api(selected: ApiVersion) -> Option<ApiVersion> {
+    let supported = ApiVersion {
+        major: u16::try_from(bollard::API_DEFAULT_VERSION.major_version).ok()?,
+        minor: u16::try_from(bollard::API_DEFAULT_VERSION.minor_version).ok()?,
+    };
+    Some(selected.min(supported))
 }
 
 const fn normalize_architecture(value: &str) -> Option<EngineArchitecture> {
@@ -1191,10 +1297,11 @@ mod tests {
         assert!(report.issues().is_empty());
         let engine = report.selected_engine().expect("validated engine");
         assert_eq!(engine.endpoint(), EngineEndpoint::UnixSocket);
+        assert_eq!(engine.context_name(), "default");
         assert_eq!(engine.architecture(), EngineArchitecture::Amd64);
         assert_eq!(engine.compose(), ComposeFrontend::DockerPlugin);
         assert_eq!(engine.engine_id(), "engine-identity");
-        assert_eq!(engine.api_version(), "1.55");
+        assert_eq!(engine.api_version(), "1.53");
         assert_eq!(engine.compose_version(), "5.4.0");
     }
 
@@ -1240,6 +1347,8 @@ mod tests {
         for context in [
             CONTEXT_UNIX.replace("unix:///var/run/docker.sock", "tcp://127.0.0.1:2375"),
             CONTEXT_UNIX.replace("\"SkipTLSVerify\":false", "\"SkipTLSVerify\":true"),
+            CONTEXT_UNIX.replace("\"default\"", "\"context with spaces\""),
+            CONTEXT_UNIX.replace("\"default\"", &format!("\"{}\"", "a".repeat(129))),
         ] {
             let report = report("linux", "x86_64", &healthy_probes(&context));
             assert_eq!(
@@ -1307,7 +1416,21 @@ mod tests {
     }
 
     #[test]
-    fn reports_the_negotiated_client_api_not_the_server_ceiling() {
+    fn rejects_a_daemon_minimum_above_the_adapter_model_ceiling() {
+        let mut probes = healthy_probes(CONTEXT_UNIX);
+        probes.version = success(
+            VERSION_AMD64
+                .replace("\"MinAPIVersion\":\"1.40\"", "\"MinAPIVersion\":\"1.54\"")
+                .into_bytes(),
+        );
+        assert_eq!(
+            issue_codes(&report("linux", "x86_64", &probes)),
+            vec![DoctorIssueCode::UnsupportedDockerApi]
+        );
+    }
+
+    #[test]
+    fn retains_an_older_negotiated_api_below_the_adapter_ceiling() {
         let mut probes = healthy_probes(CONTEXT_UNIX);
         probes.version = success(
             VERSION_AMD64
@@ -1579,7 +1702,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(report).expect("doctor report must serialize"),
             json!({
-                "schema": 2,
+                "schema": 3,
                 "ready": true,
                 "platform": {
                     "operating_system": "linux",
@@ -1589,10 +1712,11 @@ mod tests {
                 "selected_engine": {
                     "engine": "docker",
                     "compose": "docker_plugin",
+                    "context_name": "default",
                     "endpoint": "unix_socket",
                     "engine_id": "engine-identity",
                     "server_version": "29.7.2",
-                    "api_version": "1.55",
+                    "api_version": "1.53",
                     "architecture": "amd64",
                     "compose_version": "5.4.0"
                 },

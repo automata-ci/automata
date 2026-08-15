@@ -36,7 +36,7 @@ fn failed_local_doctor_is_typed_actionable_json_and_is_read_only() {
     assert!(!output.status.success());
     let report: Value =
         serde_json::from_slice(&output.stdout).expect("stdout must contain one JSON document");
-    assert_eq!(report["schema"], 2);
+    assert_eq!(report["schema"], 3);
     assert_eq!(report["ready"], false);
     assert!(report["selected_engine"].is_null());
     assert!(report.get("state_directory").is_none());
@@ -88,7 +88,7 @@ fn failed_local_doctor_is_typed_actionable_json_and_is_read_only() {
 }
 
 #[test]
-fn interrupted_local_doctor_terminates_every_probe_process_tree() {
+fn interrupted_local_doctor_terminates_the_context_probe_process_tree() {
     let fixture = Fixture::new();
     let fake_bin = fixture.path().join("bin");
     let process_directory = fixture.path().join("processes");
@@ -107,7 +107,49 @@ fn interrupted_local_doctor_terminates_every_probe_process_tree() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let process = ChildGuard::spawn(&mut command);
-    let probe_processes = wait_for_probe_processes(&process_directory);
+    let probe_processes = wait_for_probe_processes(&process_directory, 2, "context probe");
+    let mut cleanup = ProcessCleanup::new(probe_processes.clone());
+
+    kill_process(process.pid(), Signal::INT).expect("interrupt local doctor");
+    let output = process.wait_for_output(Duration::from_secs(5));
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "an interrupted doctor emits no partial JSON: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("doctor diagnostics must be UTF-8");
+    assert!(
+        stderr.contains("local preflight interrupted by a process shutdown signal"),
+        "unexpected interrupted-doctor diagnostics: {stderr}"
+    );
+
+    wait_for_processes_to_exit(&probe_processes);
+    cleanup.disarm();
+}
+
+#[test]
+fn interrupted_local_doctor_terminates_all_post_context_probe_trees() {
+    let fixture = Fixture::new();
+    let fake_bin = fixture.path().join("bin");
+    let process_directory = fixture.path().join("processes");
+    fs::create_dir(&fake_bin).expect("create isolated executable directory");
+    fs::create_dir(&process_directory).expect("create process evidence directory");
+    install_post_context_hanging_fake_docker(&fake_bin.join("docker"));
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_automata"));
+    command
+        .args(["local", "doctor", "--json"])
+        .env_clear()
+        .env("PATH", &fake_bin)
+        .env("HOME", fixture.path())
+        .env("FAKE_DOCKER_PROCESS_DIRECTORY", &process_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let process = ChildGuard::spawn(&mut command);
+    let probe_processes =
+        wait_for_probe_processes(&process_directory, 6, "version, info, and Compose probes");
     let mut cleanup = ProcessCleanup::new(probe_processes.clone());
 
     kill_process(process.pid(), Signal::INT).expect("interrupt local doctor");
@@ -147,7 +189,8 @@ case "${{1-}}" in
   context)
     printf '%s\n' '{{"Name":"default","Endpoints":{{"docker":{{"Host":"unix:///var/run/docker.sock","SkipTLSVerify":false}}}}}}'
     ;;
-  version|info)
+  --host)
+    test "${{2-}}" = 'unix:///var/run/docker.sock'
     printf '%s\n' '{FAILURE_SENTINEL}' >&2
     exit 1
     ;;
@@ -183,18 +226,40 @@ wait
         .expect("make hanging fake docker executable owner-only");
 }
 
-fn wait_for_probe_processes(directory: &Path) -> Vec<Pid> {
+fn install_post_context_hanging_fake_docker(path: &Path) {
+    fs::write(
+        path,
+        r#"#!/bin/sh
+set -eu
+if [ "${1-}" = 'context' ]; then
+  printf '%s\n' '{"Name":"default","Endpoints":{"docker":{"Host":"unix:///var/run/docker.sock","SkipTLSVerify":false}}}'
+  exit 0
+fi
+/bin/sleep 30 &
+descendant=$!
+printf '%s %s\n' "$$" "$descendant" > "${FAKE_DOCKER_PROCESS_DIRECTORY}/$$"
+wait
+"#,
+    )
+    .expect("write post-context hanging fake docker executable");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .expect("make post-context fake docker executable owner-only");
+}
+
+fn wait_for_probe_processes(directory: &Path, expected: usize, description: &str) -> Vec<Pid> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let processes = recorded_probe_processes(directory);
-        if processes.len() == 8 {
+        if processes.len() == expected {
             return processes;
         }
         if Instant::now() >= deadline {
             for process in &processes {
                 let _ignored = kill_process(*process, Signal::KILL);
             }
-            panic!("expected four probe leaders and descendants, found {processes:?}");
+            panic!(
+                "expected {description} process trees ({expected} processes), found {processes:?}"
+            );
         }
         thread::sleep(Duration::from_millis(10));
     }
