@@ -64,7 +64,10 @@ fn reviewed_command_fixture_matches_golden() {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n";
-    assert_eq!(rendered, include_str!("fixtures/workflow_commands.golden"));
+    assert_eq!(
+        rendered,
+        include_str!("fixtures/workflow_commands.golden").replace("\r\n", "\n")
+    );
 }
 
 #[test]

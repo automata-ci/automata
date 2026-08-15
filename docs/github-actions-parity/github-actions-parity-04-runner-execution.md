@@ -85,21 +85,26 @@ Tasks:
   share those prefixes.
 - [x] Preserve the documented `CI` exception.
 - [x] Continue blocking `NODE_OPTIONS` through `GITHUB_ENV`.
-- [ ] Rotate environment, output, path, state, summary, and artifact files for
+- [x] Rotate environment, output, path, state, summary, and artifact files for
   every phase.
-- [ ] Match BOM, CRLF, multiline delimiter, duplicate-key, and invalid-name
+- [x] Match BOM, CRLF, multiline delimiter, duplicate-key, and invalid-name
   behavior.
-- [ ] Test command-file collection after success, failure, timeout, and
+- [x] Test command-file collection after success, failure, timeout, and
   cancellation.
 - [ ] Aggregate step summaries in completed-step order, define deletion and
   empty-file behavior, and preserve a deterministic truncation indicator.
-- [ ] Verify summary isolation across pre, main, post, composite, and repeated
+  - [x] Completed-step ordering plus missing, deleted, and empty summaries are
+    defined and covered.
+  - [ ] Match the pinned runner's diagnostic-and-skip behavior for a summary
+    larger than 1 MiB across the bounded copy interface. The pinned runner does
+    not truncate the file, so no truncation policy is inferred.
+- [x] Verify summary isolation across pre, main, post, composite, and repeated
   action occurrences.
 
 Acceptance:
 
 - [x] A step cannot shadow runner identity or command-file paths.
-- [ ] Phase files never leak between steps or action occurrences.
+- [x] Phase files never leak between steps or action occurrences.
 
 ### ACT-01 — Checked-out local action `pre`
 

@@ -27,17 +27,19 @@ fn render_name_values(file: &ParsedCommandFile) -> String {
 #[test]
 fn env_fixture_matches_reviewed_runner_golden() {
     let parser = GithubCommandFileDecoder::default();
+    let source =
+        String::from_utf8_lossy(include_bytes!("fixtures/command_files.env")).replace("\r\n", "\n");
     let parsed = parser
         .decode(
             CommandFileKind::Environment,
-            include_bytes!("fixtures/command_files.env"),
+            source.as_bytes(),
             CommandFilePlatform::Unix,
         )
         .expect("valid fixture");
 
     assert_eq!(
         render_name_values(&parsed),
-        include_str!("fixtures/command_files.golden")
+        include_str!("fixtures/command_files.golden").replace("\r\n", "\n")
     );
 }
 
@@ -77,6 +79,85 @@ fn heredoc_newlines_follow_the_selected_runner_platform() {
 }
 
 #[test]
+fn ordinary_records_follow_the_selected_runner_platform_line_reader() {
+    let parser = GithubCommandFileDecoder::default();
+    let source = b"FIRST=one\r\nSECOND=two\n";
+
+    let unix = parser
+        .decode(CommandFileKind::Output, source, CommandFilePlatform::Unix)
+        .expect("valid Unix records");
+    let windows = parser
+        .decode(
+            CommandFileKind::Output,
+            source,
+            CommandFilePlatform::Windows,
+        )
+        .expect("valid Windows records");
+
+    assert_eq!(render_name_values(&unix), "FIRST=one\\r\nSECOND=two\n");
+    assert_eq!(render_name_values(&windows), "FIRST=one\nSECOND=two\n");
+}
+
+#[test]
+fn heredoc_delimiters_match_only_an_exact_complete_line() {
+    let parser = GithubCommandFileDecoder::default();
+    let parsed = parser
+        .decode(
+            CommandFileKind::Output,
+            b"VALUE<<EOF\nfirst\nEOF suffix\nprefix EOF\nEOF\nAFTER=next\n",
+            CommandFilePlatform::Unix,
+        )
+        .expect("delimiter substrings remain value bytes");
+
+    assert_eq!(
+        render_name_values(&parsed),
+        "VALUE=first\\nEOF suffix\\nprefix EOF\nAFTER=next\n"
+    );
+}
+
+#[test]
+fn duplicate_records_are_retained_in_source_order_for_later_last_write_wins_application() {
+    let parser = GithubCommandFileDecoder::default();
+    for kind in [
+        CommandFileKind::Environment,
+        CommandFileKind::Output,
+        CommandFileKind::State,
+    ] {
+        let parsed = parser
+            .decode(
+                kind,
+                b"NAME=first\nNAME=second\n",
+                CommandFilePlatform::Unix,
+            )
+            .expect("duplicate records use the runner grammar");
+        assert_eq!(render_name_values(&parsed), "NAME=first\nNAME=second\n");
+    }
+}
+
+#[test]
+fn empty_names_and_delimiters_are_rejected_for_every_name_value_file() {
+    let parser = GithubCommandFileDecoder::default();
+    for kind in [
+        CommandFileKind::Environment,
+        CommandFileKind::Output,
+        CommandFileKind::State,
+    ] {
+        assert_eq!(
+            parser.decode(kind, b"=value\n", CommandFilePlatform::Unix),
+            Err(CommandFileError::EmptyName { kind })
+        );
+        assert_eq!(
+            parser.decode(kind, b"<<EOF\nvalue\nEOF\n", CommandFilePlatform::Unix),
+            Err(CommandFileError::EmptyName { kind })
+        );
+        assert_eq!(
+            parser.decode(kind, b"NAME<<\n", CommandFilePlatform::Unix),
+            Err(CommandFileError::EmptyDelimiter { kind })
+        );
+    }
+}
+
+#[test]
 fn path_file_uses_universal_line_endings_and_preserves_order() {
     let parser = GithubCommandFileDecoder::default();
     let source = include_bytes!("fixtures/path_file.txt");
@@ -87,7 +168,10 @@ fn path_file_uses_universal_line_endings_and_preserves_order() {
         panic!("wrong decoded file kind");
     };
     let rendered = path.paths().collect::<Vec<_>>().join("\n") + "\n";
-    assert_eq!(rendered, include_str!("fixtures/path_file.golden"));
+    assert_eq!(
+        rendered,
+        include_str!("fixtures/path_file.golden").replace("\r\n", "\n")
+    );
 
     let ParsedCommandFile::Path(mixed) = parser
         .decode(
@@ -125,6 +209,18 @@ fn utf8_bom_is_consumed_and_summary_content_is_preserved() {
         panic!("wrong decoded file kind");
     };
     assert_eq!(summary.markdown(), "# title\r\n\r\nbody\n");
+
+    let ParsedCommandFile::StepSummary(summary) = parser
+        .decode(
+            CommandFileKind::StepSummary,
+            b"\xEF\xBB\xBF# title\n",
+            CommandFilePlatform::Unix,
+        )
+        .expect("summary BOM is accepted")
+    else {
+        panic!("wrong decoded file kind");
+    };
+    assert_eq!(summary.markdown(), "# title\n");
 }
 
 #[test]

@@ -13,9 +13,9 @@ use automata_ci_runner_runtime::{
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 
 use support::{
-    Fixture, PhaseResponse, SECRET, credential_free_envelope, envelope_with_environment,
-    envelope_with_working_directory, environment_map, run_step, run_step_with_named_shell,
-    run_step_with_working_directory,
+    Fixture, PHASE_FILE_ENVIRONMENT_NAMES, PhaseResponse, SECRET, credential_free_envelope,
+    envelope_with_environment, envelope_with_working_directory, environment_map, run_step,
+    run_step_with_named_shell, run_step_with_working_directory,
 };
 
 #[tokio::test]
@@ -214,6 +214,215 @@ async fn summaries_and_structured_annotations_are_masked_and_retained() {
         !serde_json::to_string(&result)
             .expect("serialize")
             .contains(secret)
+    );
+}
+
+#[tokio::test]
+async fn phase_files_are_collected_after_failure_timeout_and_cancelled_termination() {
+    for (termination, expected, summary) in [
+        (
+            automata_ci_execution::ExecutionTermination::Exited(19),
+            JobConclusion::Failure,
+            "failure summary\n",
+        ),
+        (
+            automata_ci_execution::ExecutionTermination::TimedOut,
+            JobConclusion::TimedOut,
+            "timeout summary\n",
+        ),
+        (
+            automata_ci_execution::ExecutionTermination::Cancelled,
+            JobConclusion::Cancelled,
+            "cancelled summary\n",
+        ),
+    ] {
+        let mut response = PhaseResponse::success()
+            .with_file(CommandFileKind::StepSummary, summary.as_bytes().to_vec());
+        response.termination = termination;
+        let fixture = Fixture::new(Vec::new(), vec![response]);
+        let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+        let result = fixture
+            .executor
+            .execute(
+                fixture.request(support::envelope(vec![run_step("phase", "Phase", "true")])),
+                events,
+                ExecutionCancellation::new(),
+            )
+            .await
+            .expect("primary process outcome remains a terminal job result");
+
+        assert_eq!(result.conclusion(), expected);
+        assert_eq!(result.steps().len(), 1);
+        assert_eq!(result.steps()[0].summary_markdown(), Some(summary));
+        assert_eq!(
+            fixture
+                .endpoint_state
+                .lock()
+                .expect("endpoint lock")
+                .copy_from_calls_since_exec,
+            6,
+            "five standard command files and the artifact declaration file are collected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_collection_cannot_replace_a_known_primary_process_outcome() {
+    for (termination, expected) in [
+        (
+            automata_ci_execution::ExecutionTermination::Exited(23),
+            JobConclusion::Failure,
+        ),
+        (
+            automata_ci_execution::ExecutionTermination::TimedOut,
+            JobConclusion::TimedOut,
+        ),
+        (
+            automata_ci_execution::ExecutionTermination::Cancelled,
+            JobConclusion::Cancelled,
+        ),
+    ] {
+        let mut response = PhaseResponse::success()
+            .with_file(CommandFileKind::Environment, b"=invalid-name\n".to_vec());
+        response.termination = termination;
+        let fixture = Fixture::new(Vec::new(), vec![response]);
+        let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+        let result = fixture
+            .executor
+            .execute(
+                fixture.request(support::envelope(vec![run_step("phase", "Phase", "true")])),
+                events,
+                ExecutionCancellation::new(),
+            )
+            .await
+            .expect("command-file error must not replace the primary process outcome");
+
+        assert_eq!(result.conclusion(), expected);
+        assert_eq!(result.steps()[0].conclusion(), expected);
+        assert_eq!(
+            fixture
+                .endpoint_state
+                .lock()
+                .expect("endpoint lock")
+                .copy_from_calls_since_exec,
+            1,
+            "collection was attempted before the malformed first command file was rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_deleted_step_summary_is_empty_without_suppressing_other_phase_files() {
+    let fixture = Fixture::new(
+        Vec::new(),
+        vec![
+            PhaseResponse::success()
+                .with_file(CommandFileKind::Environment, b"LATER=retained\n".to_vec())
+                .delete_file(CommandFileKind::StepSummary),
+            PhaseResponse::success(),
+        ],
+    );
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(
+            fixture.request(support::envelope(vec![
+                run_step("delete-summary", "Delete summary", "true"),
+                run_step("observe", "Observe", "true"),
+            ])),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect("a missing summary is the same as no summary");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    assert_eq!(result.steps()[0].summary_markdown(), None);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let runs = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/usr/bin/bash")
+        .collect::<Vec<_>>();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(
+        environment_map(runs[1]).get("LATER").map(String::as_str),
+        Some("retained")
+    );
+}
+
+#[tokio::test]
+async fn recovery_reinitializes_all_phase_files_before_reusing_stable_attempt_paths() {
+    let fixture = Fixture::new(
+        Vec::new(),
+        vec![PhaseResponse::success(), PhaseResponse::success()],
+    );
+    let request = fixture.request(support::envelope(vec![run_step("phase", "Phase", "true")]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    fixture
+        .executor
+        .execute(
+            request.clone(),
+            events.clone(),
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect("initial execution succeeds");
+
+    let original_paths = {
+        let mut state = fixture.endpoint_state.lock().expect("endpoint lock");
+        let command = state
+            .commands
+            .iter()
+            .find(|command| command.argv().program().as_str() == "/usr/bin/bash")
+            .expect("initial phase command");
+        let environment = environment_map(command);
+        let paths = PHASE_FILE_ENVIRONMENT_NAMES.map(|name| environment[name].clone());
+        for path in &paths {
+            state
+                .files
+                .insert(path.clone(), b"stale recovery bytes".to_vec());
+        }
+        paths
+    };
+
+    fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("same-attempt recovery succeeds");
+
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let recovered = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/usr/bin/bash")
+        .nth(1)
+        .expect("recovered phase command");
+    let recovered_environment = environment_map(recovered);
+    assert_eq!(
+        original_paths,
+        PHASE_FILE_ENVIRONMENT_NAMES.map(|name| recovered_environment[name].clone())
+    );
+
+    let recovered_initial = state
+        .phase_file_initial_contents
+        .get(1)
+        .expect("recovered phase snapshot");
+    for name in &PHASE_FILE_ENVIRONMENT_NAMES[..6] {
+        assert_eq!(
+            recovered_initial.get(*name).map(Vec::as_slice),
+            Some(&[][..]),
+            "{name} retained stale bytes during recovery"
+        );
+    }
+    assert!(
+        recovered_initial["GITHUB_ARTIFACTS_LIST"].starts_with(br#"{"version":1,"subjects":["#),
+        "recovery did not rebuild the canonical artifact-list input"
     );
 }
 

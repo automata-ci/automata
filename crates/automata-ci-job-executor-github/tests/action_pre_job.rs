@@ -8,8 +8,9 @@ use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExec
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 
 use support::{
-    Fixture, PhaseResponse, action_step, envelope, environment_map, local_action_step,
-    prepared_node24_action_with_pre, prepared_node24_action_with_pre_condition, run_step,
+    Fixture, PhaseResponse, action_step, assert_fresh_isolated_phase_files, envelope,
+    environment_map, local_action_step, prepared_node24_action_with_pre,
+    prepared_node24_action_with_pre_condition, run_step,
 };
 
 #[tokio::test]
@@ -19,11 +20,21 @@ async fn repository_action_pre_runs_before_every_main_job_step() {
         vec![
             PhaseResponse::success()
                 .with_file(CommandFileKind::Environment, b"PRE_JOB=ready\n".to_vec())
-                .with_file(CommandFileKind::State, b"from_pre=yes\n".to_vec()),
-            PhaseResponse::success(),
-            PhaseResponse::success(),
-            PhaseResponse::success(),
-            PhaseResponse::success(),
+                .with_file(CommandFileKind::State, b"from_pre=yes\n".to_vec())
+                .with_file(CommandFileKind::StepSummary, b"pre\n".to_vec())
+                .with_artifacts_list_write(b"corrupt pre list".to_vec()),
+            PhaseResponse::success()
+                .with_file(CommandFileKind::StepSummary, b"first run\n".to_vec())
+                .with_artifacts_list_write(b"corrupt first-run list".to_vec()),
+            PhaseResponse::success()
+                .with_file(CommandFileKind::StepSummary, b"main\n".to_vec())
+                .with_artifacts_list_write(b"corrupt main list".to_vec()),
+            PhaseResponse::success()
+                .with_file(CommandFileKind::StepSummary, b"last run\n".to_vec())
+                .with_artifacts_list_write(b"corrupt last-run list".to_vec()),
+            PhaseResponse::success()
+                .with_file(CommandFileKind::StepSummary, b"post\n".to_vec())
+                .with_artifacts_list_write(b"corrupt post list".to_vec()),
         ],
     );
     let request = fixture.request(envelope(vec![
@@ -40,9 +51,25 @@ async fn repository_action_pre_runs_before_every_main_job_step() {
         .expect("action lifecycle executes");
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
+    assert_eq!(result.steps()[0].summary_markdown(), Some("first run\n"));
+    assert_eq!(
+        result.steps()[1].summary_markdown(),
+        Some("pre\nmain\npost\n")
+    );
+    assert_eq!(result.steps()[2].summary_markdown(), Some("last run\n"));
     let state = fixture.endpoint_state.lock().expect("endpoint lock");
-    let phases = state
+    let phase_commands = state
         .commands
+        .iter()
+        .filter(|command| {
+            matches!(
+                command.argv().program().as_str(),
+                "/usr/bin/bash" | "/opt/node24/bin/node"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_fresh_isolated_phase_files(&state, &phase_commands);
+    let phases = phase_commands
         .iter()
         .filter_map(|command| match command.argv().program().as_str() {
             "/usr/bin/bash" => Some("run".to_owned()),

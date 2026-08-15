@@ -411,6 +411,8 @@ impl Fixture {
         };
         let endpoint_state = Arc::new(Mutex::new(EndpointState {
             files: BTreeMap::new(),
+            missing_files: BTreeSet::new(),
+            phase_file_initial_contents: Vec::new(),
             commands: Vec::new(),
             scripts: Vec::new(),
             copy_from_calls: 0,
@@ -1113,6 +1115,7 @@ pub struct PhaseResponse {
     pub termination: ExecutionTermination,
     pub output: Vec<(ExecutionOutputStream, Vec<u8>)>,
     pub files: Vec<(CommandFileKind, Vec<u8>)>,
+    deleted_files: Vec<CommandFileKind>,
     artifacts_list_write: Option<Vec<u8>>,
     truncated: bool,
     cancellation: Option<ExecutionCancellation>,
@@ -1126,6 +1129,7 @@ impl PhaseResponse {
             termination: ExecutionTermination::Exited(0),
             output: Vec::new(),
             files: Vec::new(),
+            deleted_files: Vec::new(),
             artifacts_list_write: None,
             truncated: false,
             cancellation: None,
@@ -1148,6 +1152,11 @@ impl PhaseResponse {
 
     pub fn with_file(mut self, kind: CommandFileKind, value: impl Into<Vec<u8>>) -> Self {
         self.files.push((kind, value.into()));
+        self
+    }
+
+    pub fn delete_file(mut self, kind: CommandFileKind) -> Self {
+        self.deleted_files.push(kind);
         self
     }
 
@@ -1184,6 +1193,8 @@ impl PhaseResponse {
 
 pub struct EndpointState {
     pub files: BTreeMap<String, Vec<u8>>,
+    missing_files: BTreeSet<String>,
+    pub phase_file_initial_contents: Vec<BTreeMap<String, Vec<u8>>>,
     pub commands: Vec<ExecutionCommand>,
     pub scripts: Vec<Vec<u8>>,
     pub copy_from_calls: usize,
@@ -1204,6 +1215,75 @@ impl fmt::Debug for FakeEndpoint {
         formatter
             .debug_struct("FakeEndpoint")
             .finish_non_exhaustive()
+    }
+}
+
+fn capture_phase_file_initial_contents(
+    request: &ExecutionCommand,
+    state: &EndpointState,
+) -> BTreeMap<String, Vec<u8>> {
+    PHASE_FILE_ENVIRONMENT_NAMES
+        .into_iter()
+        .map(|name| {
+            let path = request
+                .environment()
+                .values()
+                .iter()
+                .find(|value| value.name().as_str() == name)
+                .expect("phase file environment")
+                .value()
+                .expose();
+            (
+                name.to_owned(),
+                state
+                    .files
+                    .get(path)
+                    .cloned()
+                    .expect("initialized phase file"),
+            )
+        })
+        .collect()
+}
+
+fn apply_phase_response_files(
+    request: &ExecutionCommand,
+    state: &mut EndpointState,
+    response: &PhaseResponse,
+) {
+    for (kind, bytes) in &response.files {
+        let path = request
+            .environment()
+            .values()
+            .iter()
+            .find(|value| value.name().as_str() == kind.environment_variable())
+            .expect("command file env")
+            .value()
+            .expose();
+        state.files.insert(path.to_owned(), bytes.clone());
+    }
+    for kind in &response.deleted_files {
+        let path = request
+            .environment()
+            .values()
+            .iter()
+            .find(|value| value.name().as_str() == kind.environment_variable())
+            .expect("command file env")
+            .value()
+            .expose()
+            .to_owned();
+        state.files.remove(&path);
+        state.missing_files.insert(path);
+    }
+    if let Some(bytes) = &response.artifacts_list_write {
+        let path = request
+            .environment()
+            .values()
+            .iter()
+            .find(|value| value.name().as_str() == "GITHUB_ARTIFACTS_LIST")
+            .expect("artifact list env")
+            .value()
+            .expose();
+        state.files.insert(path.to_owned(), bytes.clone());
     }
 }
 
@@ -1275,6 +1355,10 @@ impl ExecutionEndpoint for FakeEndpoint {
         if let Some(output) = artifact_hash_output(request, &state.files) {
             return output;
         }
+        let phase_file_initial_contents = capture_phase_file_initial_contents(request, &state);
+        state
+            .phase_file_initial_contents
+            .push(phase_file_initial_contents);
         let response = state
             .responses
             .pop_front()
@@ -1283,32 +1367,11 @@ impl ExecutionEndpoint for FakeEndpoint {
             cancellation.signal(ExecutionCancellationReason::ServerRequest);
         }
         state.copy_from_calls_since_exec = 0;
-        state.cancellation_before_copy_from = response.cancellation_before_copy_from;
         if !response.delay.is_zero() {
             std::thread::sleep(response.delay);
         }
-        for (kind, bytes) in &response.files {
-            let path = request
-                .environment()
-                .values()
-                .iter()
-                .find(|value| value.name().as_str() == kind.environment_variable())
-                .expect("command file env")
-                .value()
-                .expose();
-            state.files.insert(path.to_owned(), bytes.clone());
-        }
-        if let Some(bytes) = &response.artifacts_list_write {
-            let path = request
-                .environment()
-                .values()
-                .iter()
-                .find(|value| value.name().as_str() == "GITHUB_ARTIFACTS_LIST")
-                .expect("artifact list env")
-                .value()
-                .expose();
-            state.files.insert(path.to_owned(), bytes.clone());
-        }
+        apply_phase_response_files(request, &mut state, &response);
+        state.cancellation_before_copy_from = response.cancellation_before_copy_from;
         execution_output(response.termination, response.output, response.truncated)
             .map_err(|_| execution_error(ExecutionStage::Exec))
     }
@@ -1335,6 +1398,7 @@ impl ExecutionEndpoint for FakeEndpoint {
         _cancellation: &dyn Cancellation,
     ) -> Result<(), ExecutionError> {
         let mut state = self.state.lock().expect("endpoint lock");
+        state.missing_files.remove(request.target().as_str());
         state.files.insert(
             request.target().as_str().to_owned(),
             request.content().to_vec(),
@@ -1365,6 +1429,12 @@ impl ExecutionEndpoint for FakeEndpoint {
         }
         state.copy_from_calls += 1;
         state.copy_from_calls_since_exec += 1;
+        if state.missing_files.contains(request.source().as_str()) {
+            return Err(ExecutionError::new(
+                ExecutionErrorKind::NotFound,
+                ExecutionStage::CopyFrom,
+            ));
+        }
         Ok(state
             .files
             .get(request.source().as_str())
@@ -2393,6 +2463,88 @@ pub fn environment_map(command: &ExecutionCommand) -> BTreeMap<String, String> {
             )
         })
         .collect()
+}
+
+pub const PHASE_FILE_ENVIRONMENT_NAMES: [&str; 7] = [
+    "GITHUB_ENV",
+    "GITHUB_OUTPUT",
+    "GITHUB_PATH",
+    "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY",
+    "GITHUB_ARTIFACTS",
+    "GITHUB_ARTIFACTS_LIST",
+];
+
+pub fn assert_fresh_isolated_phase_files(state: &EndpointState, phases: &[&ExecutionCommand]) {
+    assert_eq!(
+        state.phase_file_initial_contents.len(),
+        phases.len(),
+        "every executed phase must expose one initialized file set"
+    );
+    let mut all_paths = BTreeSet::new();
+    let mut attempt_command_directories = BTreeSet::new();
+
+    for (phase_index, (command, initial)) in phases
+        .iter()
+        .zip(&state.phase_file_initial_contents)
+        .enumerate()
+    {
+        let environment = environment_map(command);
+        let mut ordinal = None;
+        for name in PHASE_FILE_ENVIRONMENT_NAMES {
+            let path = environment
+                .get(name)
+                .unwrap_or_else(|| panic!("phase {phase_index} is missing {name}"));
+            assert!(
+                all_paths.insert(path.clone()),
+                "phase file path was reused: {path}"
+            );
+            let (directory, file_name) = path
+                .rsplit_once(['/', '\\'])
+                .unwrap_or_else(|| panic!("phase file has no command directory: {path}"));
+            attempt_command_directories.insert(directory.to_owned());
+            let phase_ordinal = file_name
+                .strip_prefix("phase-")
+                .and_then(|value| value.split_once('-'))
+                .map_or_else(
+                    || panic!("phase file name is not ordinal-scoped: {path}"),
+                    |(value, _)| value,
+                );
+            match ordinal {
+                Some(expected) => assert_eq!(phase_ordinal, expected),
+                None => ordinal = Some(phase_ordinal),
+            }
+            assert!(
+                state.files.contains_key(path),
+                "initialized phase file is absent after execution: {path}"
+            );
+        }
+
+        for name in &PHASE_FILE_ENVIRONMENT_NAMES[..6] {
+            assert_eq!(
+                initial.get(*name).map(Vec::as_slice),
+                Some(&[][..]),
+                "{name} was not empty before phase {phase_index}"
+            );
+        }
+        let artifacts_list = initial
+            .get("GITHUB_ARTIFACTS_LIST")
+            .expect("initialized artifact-list snapshot");
+        assert!(
+            artifacts_list.starts_with(br#"{"version":1,"subjects":["#),
+            "artifact-list input was not regenerated before phase {phase_index}"
+        );
+    }
+
+    assert_eq!(
+        all_paths.len(),
+        phases.len() * PHASE_FILE_ENVIRONMENT_NAMES.len()
+    );
+    assert_eq!(
+        attempt_command_directories.len(),
+        1,
+        "one execution must keep all phase files below its attempt root"
+    );
 }
 
 pub fn journal_identity() -> SandboxIdentity {

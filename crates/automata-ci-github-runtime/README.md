@@ -46,6 +46,20 @@ and PATH changes therefore become input to later steps, outputs belong only to
 the completed step, and `GITHUB_STATE` is keyed by the exact action invocation
 for its paired post action. A run step cannot publish post-action state.
 
+The command-file decoder consumes one leading UTF-8 BOM, selects the pinned
+runner's Unix or Windows line reader explicitly, and requires heredoc
+delimiters to match a complete line. Duplicate records remain in source order
+so the phase applicator produces the runner's last-write-wins environment,
+output, and state behavior. Empty names, empty heredoc delimiters, missing
+delimiters, and otherwise malformed records fail closed without including
+workflow-controlled contents in diagnostics.
+
+The pinned runner skips a step-summary file larger than 1 MiB after emitting a
+diagnostic; it does not truncate that file. Automata currently enforces the
+same byte ceiling as a fail-closed decoder limit. Preserving the runner's
+diagnostic-and-skip behavior across the bounded executor copy interface is a
+narrow compatibility follow-up; no truncation behavior is inferred here.
+
 The parser supports both current `::command::data` syntax and the runner's
 legacy `##[command]data` syntax. Deprecated `set-output` and `save-state` are
 represented as typed mutations. Insecure `set-env` and `add-path` stdout
