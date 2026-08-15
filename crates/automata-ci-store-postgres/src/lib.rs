@@ -52,6 +52,7 @@ mod live_log_ticket;
 mod log_notifications;
 mod logical_activation;
 mod logical_activation_preparation;
+mod logical_graph;
 mod logical_instance_result;
 mod logical_job_result;
 mod logical_materialization;

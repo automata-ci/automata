@@ -13,6 +13,7 @@ use super::{
         claim_logical_activation_preparation_in_transaction,
         consume_selected_preparation_in_transaction,
     },
+    logical_graph::lock_active_logical_graph,
     logical_materialization::{
         claim_logical_instance_materialization_in_transaction,
         consume_selected_materialization_in_transaction,
@@ -616,11 +617,11 @@ async fn require_active_consume_graph(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalActivationPreparationTarget,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
-    require_active_consume_graph_ids(
+    require_active_logical_graph(
         transaction,
         target.tenant(),
-        target.run_id().as_uuid(),
-        target.invocation_id().as_uuid(),
+        target.run_id(),
+        target.invocation_id(),
     )
     .await
 }
@@ -629,83 +630,26 @@ async fn require_active_materialization_consume_graph(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalInstanceMaterializationTarget,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
-    require_active_consume_graph_ids(
+    require_active_logical_graph(
         transaction,
         target.tenant(),
-        target.run_id().as_uuid(),
-        target.invocation_id().as_uuid(),
+        target.run_id(),
+        target.invocation_id(),
     )
     .await
 }
 
-async fn require_active_consume_graph_ids(
+async fn require_active_logical_graph(
     transaction: &mut Transaction<'_, Postgres>,
     tenant: &TenantScope,
-    run_id: Uuid,
-    invocation_id: Uuid,
+    run_id: RunId,
+    invocation_id: LogicalWorkflowInvocationId,
 ) -> Result<(), LogicalWorkSelectionStoreError> {
-    let schemas = current_durable_schemas();
-    let run_active: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = $4 AND run.plan_schema = $3
-        FROM workflow_runs AS run
-        JOIN repositories AS repository ON repository.id = run.repository_id
-        WHERE repository.tenant_id = $1 AND run.id = $2
-        FOR SHARE OF run
-        ",
-    )
-    .bind(tenant.as_str())
-    .bind(run_id)
-    .bind(schemas.workflow_plan_i32)
-    .bind(schemas.admission_epoch_i32)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if run_active != Some(true) {
-        return Err(LogicalWorkSelectionStoreError::SelectionExpired);
+    if lock_active_logical_graph(transaction, tenant, run_id, invocation_id).await? {
+        Ok(())
+    } else {
+        Err(LogicalWorkSelectionStoreError::SelectionExpired)
     }
-    let marker_active: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT marker.state IN ('pending', 'active')
-               AND marker.orchestration_schema = $3
-               AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND automata_logical_workflow_invocation_published(
-                   marker.run_id, $2
-               )
-        FROM logical_workflow_runs AS marker
-        WHERE marker.run_id = $1
-        FOR SHARE OF marker
-        ",
-    )
-    .bind(run_id)
-    .bind(invocation_id)
-    .bind(schemas.logical_orchestration_i16)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if marker_active != Some(true) {
-        return Err(LogicalWorkSelectionStoreError::SelectionExpired);
-    }
-    let invocation_active: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = $3
-        FROM logical_workflow_invocations AS invocation
-        WHERE invocation.run_id = $1 AND invocation.id = $2
-        FOR SHARE OF invocation
-        ",
-    )
-    .bind(run_id)
-    .bind(invocation_id)
-    .bind(schemas.workflow_plan_i16)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if invocation_active != Some(true) {
-        return Err(LogicalWorkSelectionStoreError::SelectionExpired);
-    }
-    Ok(())
 }
 
 async fn database_now_ms(
