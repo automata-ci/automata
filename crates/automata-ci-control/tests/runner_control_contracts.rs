@@ -70,7 +70,8 @@ fn envelope() -> JobIrEnvelope {
                     ShellTemplate::default_shell(),
                 )),
             )],
-        ),
+        )
+        .with_trust_snapshot(crate::runner_control_support::trusted_snapshot()),
     )
 }
 

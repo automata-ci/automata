@@ -19,8 +19,10 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
 use automata_ci_core::{
-    ContextValue, JobRuntimeContext, OperationId, Sha256Digest, UnixMillis,
-    WorkflowEventProvenance, WorkflowPlan,
+    ContextValue, JobRuntimeContext, OperationId, Sha256Digest, TrustActorEvidence, TrustActorKind,
+    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
+    TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, WorkflowEventProvenance,
+    WorkflowPlan,
 };
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, RepositoryId as ScmRepositoryId, RevisionSpec, ScmError,
@@ -936,7 +938,8 @@ impl GithubScheduleService {
         claimed: &ClaimedGithubScheduleFire,
         claim: GithubScheduleFireClaim,
     ) -> Result<automata_ci_core::RunId, FireFailure> {
-        let (source, available) = self.load_claimed_workflow_sources(claimed).await?;
+        let (source, available, repository_owner_id) =
+            self.load_claimed_workflow_sources(claimed).await?;
         let plan = compile_claimed_workflow(claimed, &source)?;
         let evidence =
             GithubScheduleEvidence::new(claimed.entry().cron_expression(), claimed.scheduled_at())
@@ -963,6 +966,35 @@ impl GithubScheduleService {
             || claimed.entry().workflow_path().to_owned(),
             |name| name.value().clone(),
         );
+        let repository =
+            TrustRepositoryEvidence::new(claimed.provider_repository_id(), repository_owner_id)
+                .map_err(|_| FireFailure::InvalidRegistry)?;
+        let actor = TrustActorEvidence::new(
+            GITHUB_SCHEDULE_SERVICE_ACTOR,
+            TrustActorKind::System,
+            TrustAutomationKind::None,
+        )
+        .map_err(|_| FireFailure::InvalidRegistry)?;
+        let trust_snapshot = TrustPolicy::current()
+            .evaluate(
+                TrustEvidence::new(TrustOriginKind::Schedule, TrustEventKind::Schedule)
+                    .with_original_actor(actor.clone())
+                    .with_triggering_actor(actor)
+                    .with_repositories(repository.clone(), repository)
+                    .with_refs(
+                        claimed.default_branch_ref(),
+                        claimed.default_branch_ref(),
+                        claimed.default_branch_ref(),
+                    )
+                    .with_revisions(
+                        claimed.source_revision(),
+                        claimed.source_revision(),
+                        claimed.source_revision(),
+                    )
+                    .with_fork(false)
+                    .with_token_recursion(TrustTokenRecursion::External),
+            )
+            .map_err(|_| FireFailure::InvalidRegistry)?;
         let request = WorkflowAdmissionRequest::builder(
             claimed.tenant().clone(),
             coordinates,
@@ -975,6 +1007,7 @@ impl GithubScheduleService {
                 claim.fire_id().as_uuid(),
             )),
         )
+        .trust_snapshot(trust_snapshot)
         .event_media_type(AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE)
         .commit_sha(claimed.source_revision())
         .git_ref(claimed.default_branch_ref())
@@ -984,17 +1017,19 @@ impl GithubScheduleService {
         .repository_workflow_sources(available)
         .build()
         .map_err(map_admission_request_error)?;
-        self.admission
-            .admit_scheduled_github_workflow(request, claim)
-            .await
-            .map(|result| result.receipt().run_id())
-            .map_err(|error| map_admission_error(&error))
+        Box::pin(
+            self.admission
+                .admit_scheduled_github_workflow(request, claim),
+        )
+        .await
+        .map(|result| result.receipt().run_id())
+        .map_err(|error| map_admission_error(&error))
     }
 
     async fn load_claimed_workflow_sources(
         &self,
         claimed: &ClaimedGithubScheduleFire,
-    ) -> Result<(Bytes, Vec<RepositoryWorkflowSource>), FireFailure> {
+    ) -> Result<(Bytes, Vec<RepositoryWorkflowSource>, String), FireFailure> {
         let manifest = self
             .manifests
             .load_github_provider_manifest_revision(
@@ -1005,6 +1040,11 @@ impl GithubScheduleService {
             .await
             .map_err(|_| FireFailure::Lost)?;
         let manifest = manifest.manifest();
+        let repository_owner_id = manifest
+            .github_repository_owner_id()
+            .ok_or(FireFailure::Lost)?
+            .get()
+            .to_string();
         if manifest.digest() != claimed.manifest_digest()
             || manifest.repository_id() != claimed.repository_id()
             || manifest.git_ref() != claimed.default_branch_ref()
@@ -1050,7 +1090,7 @@ impl GithubScheduleService {
         {
             return Err(FireFailure::InvalidRegistry);
         }
-        Ok((source, available))
+        Ok((source, available, repository_owner_id))
     }
 
     async fn complete_invalid_registry(

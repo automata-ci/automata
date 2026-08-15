@@ -2,7 +2,8 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use automata_ci_core::{
     Architecture, ContextValue, JobAuthorityProfile, JobConclusion, NeedContext, OperatingSystem,
-    PermissionLevel, RunnerId, RunnerPlatform, SemanticStep, StrategyContext, ValueSource,
+    PermissionLevel, RunnerId, RunnerPlatform, SemanticStep, StrategyContext, TrustOidcAuthority,
+    TrustPermissionAuthority, TrustResultsAuthority, TrustSecretAuthority, ValueSource,
 };
 use automata_ci_execution::{TargetPath, TargetPlatform};
 use automata_ci_expression_github::{
@@ -197,6 +198,16 @@ impl StandardGithubContext {
         authority
             .validate_for(request.job(), request.lease())
             .map_err(|_| invalid_data())?;
+        if request
+            .job()
+            .job()
+            .trust_snapshot()
+            .authority()
+            .permissions()
+            == TrustPermissionAuthority::DenyAll
+        {
+            return Err(invalid_data());
+        }
         let expected_security = if self.github.allow_insecure_http()
             && self
                 .github
@@ -232,6 +243,8 @@ impl StandardGithubContext {
             .validate_for(request.job(), request.lease())
             .map_err(|_| invalid_data())?;
         if request.job().source().provider() != "github"
+            || request.job().job().trust_snapshot().authority().oidc()
+                != TrustOidcAuthority::Eligible
             || request
                 .job()
                 .job()
@@ -373,17 +386,33 @@ impl GithubContextPort for StandardGithubContext {
         request: GithubContextRequest<'_>,
     ) -> Result<GithubContextSnapshot, PortError> {
         let workspace = self.workspace(request)?;
+        let trust = request.job().job().trust_snapshot();
+        if trust.is_construction_placeholder()
+            || (trust.authority().secrets() == TrustSecretAuthority::Denied
+                && !request.runtime_context().secrets().is_empty())
+        {
+            return Err(invalid_data());
+        }
         let (results, repository, oidc) = match request.job().job().authority_profile() {
             JobAuthorityProfile::Standard => {
                 let results = request
                     .runtime_authorities()
-                    .get(GITHUB_RESULTS_RUNTIME_AUTHORITY)
-                    .ok_or_else(invalid_data)?;
-                results
-                    .validate_for(request.job(), request.lease())
-                    .map_err(|_| invalid_data())?;
+                    .get(GITHUB_RESULTS_RUNTIME_AUTHORITY);
+                let results = match (trust.authority().results(), results) {
+                    (TrustResultsAuthority::Denied, None) => None,
+                    (
+                        TrustResultsAuthority::Standard | TrustResultsAuthority::Untrusted,
+                        Some(results),
+                    ) => {
+                        results
+                            .validate_for(request.job(), request.lease())
+                            .map_err(|_| invalid_data())?;
+                        Some(results)
+                    }
+                    _ => return Err(invalid_data()),
+                };
                 (
-                    Some(results),
+                    results,
                     self.repository_authority(request)?,
                     Self::oidc_authority(request)?,
                 )

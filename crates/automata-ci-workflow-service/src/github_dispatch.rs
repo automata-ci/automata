@@ -2,8 +2,10 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use automata_ci_auth::management::ManagementActor;
 use automata_ci_core::{
-    ContextValue, JobRuntimeContext, OperationId, SecretBinding, WorkflowEventProvenance,
-    WorkflowId, canonical_git_ref,
+    ContextValue, JobRuntimeContext, OperationId, SecretBinding, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
+    WorkflowEventProvenance, WorkflowId, canonical_git_ref,
 };
 use automata_ci_store::ResolveAuthenticatedWorkflowDispatchSource;
 use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
@@ -108,6 +110,7 @@ impl WorkflowDispatchAuthorization {
 pub struct GithubWorkflowDispatchRequest {
     authorization: WorkflowDispatchAuthorization,
     repository: AdmissionRepositoryCoordinates,
+    repository_owner_id: String,
     workflow_path: String,
     source: Bytes,
     commit_sha: String,
@@ -198,6 +201,7 @@ impl GithubWorkflowDispatchRequest {
     pub fn new(
         authorization: WorkflowDispatchAuthorization,
         repository: AdmissionRepositoryCoordinates,
+        repository_owner_id: impl Into<String>,
         workflow_path: impl Into<String>,
         source: Bytes,
         commit_sha: impl Into<String>,
@@ -209,6 +213,7 @@ impl GithubWorkflowDispatchRequest {
         Self {
             authorization,
             repository,
+            repository_owner_id: repository_owner_id.into(),
             workflow_name: workflow_path.clone(),
             workflow_path,
             source,
@@ -261,6 +266,7 @@ impl GithubWorkflowDispatchRequest {
     fn validate(&self) -> Result<TenantScope, GithubWorkflowDispatchRequestError> {
         if self.repository.provider() != "github"
             || self.operation_id.as_uuid().is_nil()
+            || !valid_text(&self.repository_owner_id)
             || !valid_text(&self.workflow_path)
             || !valid_text(&self.workflow_name)
             || self.source.is_empty()
@@ -350,6 +356,7 @@ impl GithubWorkflowDispatchService {
         let mut dispatch = GithubWorkflowDispatchRequest::new(
             request.authorization,
             repository,
+            source.repository_owner_id(),
             source.workflow_path(),
             bytes,
             request.commit_sha,
@@ -427,6 +434,7 @@ impl GithubWorkflowDispatchService {
         .map_err(|_| GithubWorkflowDispatchError::InvalidBaseContext)?;
         let evidence = GithubWorkflowDispatchEvidence::new(&request)?;
         let event_bytes = evidence.encode()?;
+        let trust_snapshot = workflow_dispatch_trust_snapshot(&request)?;
         let mut admission = WorkflowAdmissionRequest::builder(
             tenant,
             request.repository.clone(),
@@ -437,6 +445,7 @@ impl GithubWorkflowDispatchService {
             base_context,
             WorkflowAdmissionIdempotency::operation(request.operation_id),
         )
+        .trust_snapshot(trust_snapshot)
         .event_media_type(AUTOMATA_WORKFLOW_DISPATCH_EVIDENCE_V1_MEDIA_TYPE)
         .commit_sha(&request.commit_sha)
         .git_ref(&request.git_ref)
@@ -450,11 +459,52 @@ impl GithubWorkflowDispatchService {
             admission = admission.commit_subject(commit_subject);
         }
         let admission = admission.build()?;
-        self.admission
-            .admit_authenticated_workflow_dispatch(admission, request.authorization)
-            .await
-            .map_err(Into::into)
+        Box::pin(
+            self.admission
+                .admit_authenticated_workflow_dispatch(admission, request.authorization),
+        )
+        .await
+        .map_err(Into::into)
     }
+}
+
+fn workflow_dispatch_trust_snapshot(
+    request: &GithubWorkflowDispatchRequest,
+) -> Result<TrustSnapshot, GithubWorkflowDispatchError> {
+    let actor = TrustActorEvidence::new(
+        request.authorization.actor().principal_id().as_str(),
+        TrustActorKind::User,
+        TrustAutomationKind::None,
+    )
+    .map_err(|_| GithubWorkflowDispatchError::InvalidSourcePlan)?;
+    let repository = TrustRepositoryEvidence::new(
+        request.repository.provider_repository_id(),
+        request.repository_owner_id.as_str(),
+    )
+    .map_err(|_| GithubWorkflowDispatchError::InvalidSourcePlan)?;
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::WorkflowDispatch,
+                TrustEventKind::WorkflowDispatch,
+            )
+            .with_original_actor(actor.clone())
+            .with_triggering_actor(actor)
+            .with_repositories(repository.clone(), repository)
+            .with_refs(
+                request.git_ref.as_str(),
+                request.git_ref.as_str(),
+                request.git_ref.as_str(),
+            )
+            .with_revisions(
+                request.commit_sha.as_str(),
+                request.commit_sha.as_str(),
+                request.commit_sha.as_str(),
+            )
+            .with_fork(false)
+            .with_token_recursion(TrustTokenRecursion::External),
+        )
+        .map_err(|_| GithubWorkflowDispatchError::InvalidSourcePlan)
 }
 
 /// Canonical synthetic event retained as authenticated dispatch evidence.
@@ -494,6 +544,7 @@ impl GithubWorkflowDispatchEvidence {
                 repository_id: request.authorization.repository_id().as_uuid(),
                 provider: request.repository.provider().to_owned(),
                 provider_repository_id: request.repository.provider_repository_id().to_owned(),
+                provider_owner_id: request.repository_owner_id.clone(),
                 owner: request.repository.owner().to_owned(),
                 name: request.repository.name().to_owned(),
             },
@@ -546,6 +597,7 @@ impl GithubWorkflowDispatchEvidence {
             document.authority.session_id.as_str(),
             document.repository.provider.as_str(),
             document.repository.provider_repository_id.as_str(),
+            document.repository.provider_owner_id.as_str(),
             document.repository.owner.as_str(),
             document.repository.name.as_str(),
             document.workflow.path.as_str(),
@@ -585,6 +637,15 @@ impl GithubWorkflowDispatchEvidence {
             && self.document.repository.provider == request.repository().provider()
             && self.document.repository.provider_repository_id
                 == request.repository().provider_repository_id()
+            && request
+                .trust_snapshot()
+                .evidence()
+                .target_repository()
+                .is_some_and(|repository| {
+                    repository.id() == self.document.repository.provider_repository_id.as_str()
+                        && repository.owner_id()
+                            == self.document.repository.provider_owner_id.as_str()
+                })
             && self.document.repository.owner == request.repository().owner()
             && self.document.repository.name == request.repository().name()
             && self.document.workflow.path == request.workflow_path()
@@ -644,6 +705,7 @@ struct EvidenceRepository {
     repository_id: Uuid,
     provider: String,
     provider_repository_id: String,
+    provider_owner_id: String,
     owner: String,
     name: String,
 }
@@ -819,6 +881,7 @@ mod tests {
                 repository_id: Uuid::new_v4(),
                 provider: "github".to_owned(),
                 provider_repository_id: "123".to_owned(),
+                provider_owner_id: "456".to_owned(),
                 owner: "automata-ci".to_owned(),
                 name: "automata".to_owned(),
             },

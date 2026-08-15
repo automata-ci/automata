@@ -604,6 +604,12 @@ async fn admit_authorized_rerun(
     {
         let receipt =
             replay_receipt(&mut transaction, &request, request_digest, &idempotency_key).await?;
+        validate_copied_trust_snapshot(
+            &mut transaction,
+            request.source_run_id().as_uuid(),
+            receipt.run_id().as_uuid(),
+        )
+        .await?;
         transaction.commit().await.map_err(operation_error)?;
         return Ok(receipt);
     }
@@ -719,6 +725,7 @@ async fn persist_rerun(
         write.triggering_actor,
     )
     .await?;
+    copy_trust_snapshot(transaction, write.source, write.run_id).await?;
     insert_marker_and_invocation(
         transaction,
         write.source,
@@ -1840,6 +1847,66 @@ async fn insert_marker_and_invocation(
         invocation_rows,
         "workflow rerun source invocation disappeared",
     )
+}
+
+async fn copy_trust_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    source: &SourceRun,
+    run_id: Uuid,
+) -> Result<(), WorkflowRerunStoreError> {
+    let rows = sqlx::query(
+        r"
+        INSERT INTO workflow_run_trust_snapshots (
+            run_id, snapshot_schema, policy_revision, policy_digest,
+            snapshot_digest, snapshot_bytes, media_type, created_at_ms
+        )
+        SELECT $2, snapshot_schema, policy_revision, policy_digest,
+               snapshot_digest, snapshot_bytes, media_type, created_at_ms
+        FROM workflow_run_trust_snapshots
+        WHERE run_id = $1
+        ",
+    )
+    .bind(source.run_id)
+    .bind(run_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .rows_affected();
+    exact_one(rows, "workflow rerun source trust snapshot disappeared")
+}
+
+async fn validate_copied_trust_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    source_run_id: Uuid,
+    rerun_id: Uuid,
+) -> Result<(), WorkflowRerunStoreError> {
+    let exact: Option<bool> = sqlx::query_scalar(
+        r"
+        SELECT ROW(
+                   rerun.snapshot_schema, rerun.policy_revision,
+                   rerun.policy_digest, rerun.snapshot_digest,
+                   rerun.snapshot_bytes, rerun.media_type, rerun.created_at_ms
+               ) = ROW(
+                   source.snapshot_schema, source.policy_revision,
+                   source.policy_digest, source.snapshot_digest,
+                   source.snapshot_bytes, source.media_type, source.created_at_ms
+               )
+        FROM workflow_run_trust_snapshots AS source
+        JOIN workflow_run_trust_snapshots AS rerun ON rerun.run_id = $2
+        WHERE source.run_id = $1
+        FOR KEY SHARE OF source, rerun
+        ",
+    )
+    .bind(source_run_id)
+    .bind(rerun_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if exact == Some(true) {
+        Ok(())
+    } else {
+        Err(StoreError::corrupt_data("workflow rerun trust snapshot is not an exact copy").into())
+    }
 }
 
 async fn insert_attempt_and_request(

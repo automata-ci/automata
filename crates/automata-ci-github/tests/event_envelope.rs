@@ -1,13 +1,16 @@
 use std::fmt::Write as _;
 
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{
+    Sha256Digest, TrustPermissionAuthority, TrustPolicy, TrustSecretAuthority, TrustSourceClass,
+    TrustTokenRecursion, TrustUpstreamEvidence,
+};
 use automata_ci_github::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
     GithubEventEnvelopeError, GithubEventFacts, GithubEventRegistryV1, GithubEventTrustFact,
-    GithubSealedEventEnvelopeV1, GithubWebhookVerifier, GithubWorkflowEventKind,
-    MAX_GITHUB_EVENT_ENVELOPE_BYTES, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
-    X_HUB_SIGNATURE_256,
+    GithubSealedEventEnvelopeV1, GithubTrustDerivation, GithubWebhookVerifier,
+    GithubWorkflowEventKind, MAX_GITHUB_EVENT_ENVELOPE_BYTES, VerifiedGithubWebhook,
+    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256, derive_github_trust_snapshot,
 };
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -125,6 +128,143 @@ fn future_actor_kind_preserves_event_behavior_but_cannot_claim_complete_trust_fa
     assert_eq!(actor.login(), Some("octocat"));
     assert_eq!(actor.kind(), None);
     assert!(!actor.has_complete_classification());
+}
+
+#[test]
+fn sealed_push_and_fork_facts_drive_the_complete_trust_decision() {
+    let push = seal(&normalize(&push_payload(), "push"));
+    let push_snapshot = derive_github_trust_snapshot(
+        &push,
+        &TrustPolicy::current(),
+        &GithubTrustDerivation::new(),
+    )
+    .expect("push trust");
+    assert!(push_snapshot.evidence_complete());
+    assert_eq!(
+        push_snapshot.source_class(),
+        TrustSourceClass::SameRepository
+    );
+    assert_eq!(
+        push_snapshot.authority().permissions(),
+        TrustPermissionAuthority::Requested
+    );
+
+    let pull_request = seal(&normalize(&pull_request_payload(), "pull_request"));
+    let pull_request_snapshot = derive_github_trust_snapshot(
+        &pull_request,
+        &TrustPolicy::current(),
+        &GithubTrustDerivation::new(),
+    )
+    .expect("pull request trust");
+    assert!(pull_request_snapshot.evidence_complete());
+    assert_eq!(pull_request_snapshot.source_class(), TrustSourceClass::Fork);
+    assert_eq!(
+        pull_request_snapshot.authority().permissions(),
+        TrustPermissionAuthority::ReadOnly
+    );
+    assert_eq!(
+        pull_request_snapshot.authority().secrets(),
+        TrustSecretAuthority::Denied
+    );
+}
+
+#[test]
+fn sealed_dependabot_identity_reduces_a_same_repository_pull_request() {
+    let mut payload = pull_request_payload();
+    payload["pull_request"]["head"]["repo"] = base_repository();
+    payload["pull_request"]["user"] = actor(49_699_333, "dependabot[bot]", "Bot");
+    let envelope = seal(&normalize(&payload, "pull_request"));
+    let snapshot = derive_github_trust_snapshot(
+        &envelope,
+        &TrustPolicy::current(),
+        &GithubTrustDerivation::new(),
+    )
+    .expect("dependabot trust");
+
+    assert!(snapshot.evidence_complete());
+    assert_eq!(snapshot.source_class(), TrustSourceClass::Dependabot);
+    assert_eq!(
+        snapshot.authority().permissions(),
+        TrustPermissionAuthority::ReadOnly
+    );
+    assert_eq!(snapshot.authority().secrets(), TrustSecretAuthority::Denied);
+}
+
+#[test]
+fn incomplete_actor_classification_fails_closed_without_parsing_raw_json() {
+    let mut payload = push_payload();
+    payload["sender"]["type"] = json!("FutureProviderKind");
+    payload["untrusted"] = json!({
+        "fork": false,
+        "sender": {"login": "octocat", "type": "User"},
+        "permissions": "write"
+    });
+    let envelope = seal(&normalize(&payload, "push"));
+    let snapshot = derive_github_trust_snapshot(
+        &envelope,
+        &TrustPolicy::current(),
+        &GithubTrustDerivation::new(),
+    )
+    .expect("incomplete facts are deny-all");
+
+    assert!(!snapshot.evidence_complete());
+    assert_eq!(snapshot.source_class(), TrustSourceClass::Incomplete);
+    assert_eq!(
+        snapshot.authority().permissions(),
+        TrustPermissionAuthority::DenyAll
+    );
+}
+
+#[test]
+fn arbitrary_repository_dispatch_payload_cannot_change_trust() {
+    let first_payload = repository_dispatch_payload();
+    let mut second_payload = repository_dispatch_payload();
+    second_payload["client_payload"] = json!({
+        "fork": true,
+        "actor": "dependabot[bot]",
+        "permissions": {"contents": "write"},
+        "nested": {"private-payload-marker": "different"}
+    });
+    let first = seal(&normalize(&first_payload, "repository_dispatch"));
+    let second = seal(&normalize(&second_payload, "repository_dispatch"));
+    assert_ne!(first.digest(), second.digest(), "raw identities differ");
+
+    let derivation = GithubTrustDerivation::new()
+        .with_repository_dispatch_revision(HEAD_SHA)
+        .with_repository_dispatch_recursion(TrustTokenRecursion::External);
+    let first_snapshot = derive_github_trust_snapshot(&first, &TrustPolicy::current(), &derivation)
+        .expect("first trust");
+    let second_snapshot =
+        derive_github_trust_snapshot(&second, &TrustPolicy::current(), &derivation)
+            .expect("second trust");
+    assert_eq!(first_snapshot.digest(), second_snapshot.digest());
+    assert_eq!(
+        first_snapshot.canonical_bytes(),
+        second_snapshot.canonical_bytes()
+    );
+}
+
+#[test]
+fn merge_group_inherits_exact_upstream_restrictions() {
+    let envelope = seal(&normalize(&merge_group_payload(), "merge_group"));
+    let derivation = GithubTrustDerivation::new().with_merge_group_upstream(
+        TrustUpstreamEvidence::new(
+            Sha256Digest::from_bytes([9; 32]),
+            1,
+            true,
+            TrustSourceClass::Fork,
+        )
+        .expect("upstream"),
+    );
+    let snapshot = derive_github_trust_snapshot(&envelope, &TrustPolicy::current(), &derivation)
+        .expect("merge-group trust");
+
+    assert!(snapshot.evidence_complete());
+    assert_eq!(snapshot.source_class(), TrustSourceClass::Fork);
+    assert_eq!(
+        snapshot.authority().permissions(),
+        TrustPermissionAuthority::ReadOnly
+    );
 }
 
 #[test]

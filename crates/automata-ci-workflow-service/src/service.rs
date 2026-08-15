@@ -712,6 +712,7 @@ fn build_command(
         admitted_at,
     )
     .base_context(base_context.metadata.clone())
+    .trust_snapshot(request.trust_snapshot().clone())
     .concurrency(concurrency)
     .reusable_workflows(reusable_workflows);
     if let Some(actor) = request.actor() {
@@ -1736,6 +1737,7 @@ fn canonical_request_digest(
         &mut digest,
         &request.run_attempt().unwrap_or(1).to_be_bytes(),
     );
+    digest_field(&mut digest, request.trust_snapshot().digest().as_bytes());
     for blob in [source, event, plan, base_context] {
         digest_field(&mut digest, blob.metadata.digest().as_bytes());
         digest_field(&mut digest, &blob.metadata.encoded_size().to_be_bytes());

@@ -866,7 +866,7 @@ impl fmt::Debug for GithubProviderRepositoryConfig {
                 &self.workflow_permissions_authority,
             )
             .field("private_source_authority", &self.private_source_authority)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

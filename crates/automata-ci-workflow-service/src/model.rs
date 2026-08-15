@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use automata_ci_core::{JobRuntimeContext, WorkflowPlan, WorkflowPlanVersion};
+use automata_ci_core::{JobRuntimeContext, TrustSnapshot, WorkflowPlan, WorkflowPlanVersion};
 use automata_ci_store::{
     LogicalWorkflowAdmissionReceipt, MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES,
     TenantScope, WorkflowAdmissionIdempotency,
@@ -134,6 +134,7 @@ pub struct WorkflowAdmissionRequest {
     event_media_type: String,
     plan: WorkflowPlan,
     base_context: JobRuntimeContext,
+    trust_snapshot: TrustSnapshot,
     idempotency: WorkflowAdmissionIdempotency,
     commit_sha: String,
     git_ref: String,
@@ -175,6 +176,7 @@ impl WorkflowAdmissionRequest {
                 event_media_type: WORKFLOW_EVENT_MEDIA_TYPE.to_owned(),
                 plan,
                 base_context,
+                trust_snapshot: TrustSnapshot::deny_all_unclassified(),
                 idempotency,
                 commit_sha: String::new(),
                 git_ref: String::new(),
@@ -238,6 +240,12 @@ impl WorkflowAdmissionRequest {
         &self.base_context
     }
 
+    /// Returns the exact run-origin trust evidence and effective authority.
+    #[must_use]
+    pub const fn trust_snapshot(&self) -> &TrustSnapshot {
+        &self.trust_snapshot
+    }
+
     #[must_use]
     /// Returns the durable idempotency boundary for this admission.
     pub const fn idempotency(&self) -> &WorkflowAdmissionIdempotency {
@@ -294,6 +302,13 @@ impl WorkflowAdmissionRequest {
 }
 
 impl WorkflowAdmissionRequestBuilder {
+    /// Binds the pure trust-policy result derived from authenticated event facts.
+    #[must_use]
+    pub fn trust_snapshot(mut self, trust_snapshot: TrustSnapshot) -> Self {
+        self.request.trust_snapshot = trust_snapshot;
+        self
+    }
+
     /// Supplies verified exact-revision workflow files for reachable local reusable calls.
     #[must_use]
     pub fn repository_workflow_sources(

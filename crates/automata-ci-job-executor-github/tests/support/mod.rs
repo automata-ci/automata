@@ -20,8 +20,10 @@ use automata_ci_core::{
     JobOutputDefinition, JobPermissionRequest, JobResourceAllocation, JobRuntimeContext, JobSource,
     Lease, LeaseId, OperationId, ResourceCapacity, RunId, RunValueTemplates, RunnerId,
     RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest,
-    ShellTemplate, StepId, StepIr, StrategyContext, UnixMillis, ValueSource, ValueTemplate,
-    WorkflowId,
+    ShellTemplate, StepId, StepIr, StrategyContext, TrustActorEvidence, TrustActorKind,
+    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
+    TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis, ValueSource,
+    ValueTemplate, WorkflowId,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
@@ -73,6 +75,64 @@ pub const SECRET: &str = "super-secret-value";
 pub const CONTEXT_SECRET: &str = "context-only-token";
 pub const JOB_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
     "application/vnd.automata.job-runtime-context.protobuf";
+
+fn trusted_snapshot() -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(
+                    TrustActorEvidence::new(
+                        "octocat",
+                        TrustActorKind::User,
+                        TrustAutomationKind::None,
+                    )
+                    .expect("actor evidence"),
+                )
+                .with_repositories(
+                    TrustRepositoryEvidence::new("42", "7").expect("source repository"),
+                    TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+                )
+                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                .with_revisions("source-sha", "target-sha", "execution-sha")
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("trusted snapshot")
+}
+
+pub fn untrusted_fork_snapshot() -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::ProviderWebhook,
+                TrustEventKind::PullRequest,
+            )
+            .with_original_actor(
+                TrustActorEvidence::new(
+                    "target-actor",
+                    TrustActorKind::User,
+                    TrustAutomationKind::None,
+                )
+                .expect("target actor evidence"),
+            )
+            .with_source_actor(
+                TrustActorEvidence::new(
+                    "fork-actor",
+                    TrustActorKind::User,
+                    TrustAutomationKind::None,
+                )
+                .expect("source actor evidence"),
+            )
+            .with_repositories(
+                TrustRepositoryEvidence::new("84", "9").expect("source repository"),
+                TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+            )
+            .with_refs("refs/heads/feature", "refs/heads/main", "refs/pull/1/merge")
+            .with_revisions("source-sha", "target-sha", "execution-sha")
+            .with_fork(true),
+        )
+        .expect("untrusted fork snapshot")
+}
 
 pub struct Fixture {
     pub executor: GithubJobExecutor,
@@ -866,6 +926,7 @@ fn envelope_with_all_settings_and_environment_profile(
         JobAuthorityProfile::Standard => JobPermissionRequest::ProviderDefault,
         JobAuthorityProfile::CredentialFree => JobPermissionRequest::Mapping(Vec::new()),
     })
+    .with_trust_snapshot(trusted_snapshot())
     .with_environment(environment)
     .with_services(services)
     .with_output_definitions(outputs);

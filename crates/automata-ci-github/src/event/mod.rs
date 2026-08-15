@@ -5,6 +5,7 @@ mod pull_request;
 mod push;
 mod registry;
 mod repository_dispatch;
+mod trust;
 
 pub use actor::{GithubEventActor, GithubEventActorKind};
 pub use envelope::{
@@ -23,3 +24,4 @@ pub use registry::{
     GithubEventTriggerModel, GithubEventTrustFact, GithubWorkflowEventKind,
 };
 pub use repository_dispatch::GithubRepositoryDispatchEventFacts;
+pub use trust::{GithubTrustDerivation, derive_github_trust_snapshot};

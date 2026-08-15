@@ -10,7 +10,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 use async_trait::async_trait;
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobInstanceIdentity,
-    MAX_MATRIX_EXPANSION, RunId, RunIdAlias, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    MAX_MATRIX_EXPANSION, RunId, RunIdAlias, Sha256Digest, TrustSnapshot, UnixMillis, WorkflowId,
+    WorkflowJobKey,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -883,6 +884,7 @@ pub struct LogicalActivationExecutionContext {
     root_event_name: String,
     actor: Option<String>,
     triggering_actor: Option<String>,
+    trust_snapshot: TrustSnapshot,
     run_id_alias: RunIdAlias,
     run_number: u64,
     run_attempt: u32,
@@ -935,6 +937,7 @@ impl LogicalActivationExecutionContext {
             root_event_name,
             actor,
             triggering_actor: None,
+            trust_snapshot: TrustSnapshot::deny_all_unclassified(),
             run_id_alias,
             run_number,
             run_attempt,
@@ -979,6 +982,19 @@ impl LogicalActivationExecutionContext {
     #[must_use]
     pub fn triggering_actor(&self) -> Option<&str> {
         self.triggering_actor.as_deref()
+    }
+
+    /// Returns the exact trust snapshot inherited from the original run.
+    #[must_use]
+    pub const fn trust_snapshot(&self) -> &TrustSnapshot {
+        &self.trust_snapshot
+    }
+
+    /// Binds a snapshot loaded and digest-verified by the durable repository.
+    #[must_use]
+    pub fn with_trust_snapshot(mut self, trust_snapshot: TrustSnapshot) -> Self {
+        self.trust_snapshot = trust_snapshot;
+        self
     }
 
     /// Attaches the store-authenticated current physical-attempt initiator.

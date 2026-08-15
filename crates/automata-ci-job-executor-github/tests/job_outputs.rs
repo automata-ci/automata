@@ -6,8 +6,8 @@ use std::{
 };
 
 use automata_ci_core::{
-    JobConclusion, JobOutputDefinition, JobSecretExposure, OutputSensitivity, ValueSource,
-    ValueTemplate,
+    JobConclusion, JobIrEnvelope, JobOutputDefinition, JobPermissionRequest, JobSecretExposure,
+    OutputSensitivity, ValueSource, ValueTemplate,
 };
 use automata_ci_github_runtime::CommandFileKind;
 use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
@@ -15,7 +15,7 @@ use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase}
 
 use support::{
     CONTEXT_SECRET, FinalContextCancellationPoint, Fixture, PhaseResponse, SECRET,
-    envelope_with_output_definitions, run_step,
+    envelope_with_output_definitions, run_step, untrusted_fork_snapshot,
 };
 
 fn step_output_definition(name: &str, step_id: &str, output_name: &str) -> JobOutputDefinition {
@@ -75,6 +75,48 @@ async fn public_job_output_is_evaluated_after_steps_and_published() {
     let output = result.outputs().get("artifact").expect("published output");
     assert_eq!(output.sensitivity(), OutputSensitivity::Public);
     assert_eq!(output.public_value(), Some("bundle-42"));
+}
+
+#[tokio::test]
+async fn untrusted_fork_output_is_persisted_only_as_a_classification_marker() {
+    let fixture = Fixture::secretless(
+        Vec::new(),
+        vec![
+            PhaseResponse::success()
+                .with_file(CommandFileKind::Output, b"artifact=bundle-42\n".to_vec()),
+        ],
+    );
+    let trusted = envelope_with_output_definitions(
+        vec![run_step("producer", "Producer", "true")],
+        vec![step_output_definition("artifact", "producer", "artifact")],
+    );
+    let job = JobIrEnvelope::new(
+        trusted.workflow_id(),
+        trusted.source().clone(),
+        trusted.execution().clone(),
+        trusted
+            .job()
+            .clone()
+            .with_permission_request(JobPermissionRequest::ReadAll)
+            .with_trust_snapshot(untrusted_fork_snapshot()),
+    );
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(fixture.request(job), events, ExecutionCancellation::new())
+        .await
+        .expect("untrusted job executes without publishing plaintext outputs");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let output = result.outputs().get("artifact").expect("classified output");
+    assert_eq!(output.sensitivity(), OutputSensitivity::SecretDerived);
+    assert_eq!(output.public_value(), None);
+    assert!(
+        !serde_json::to_string(&result)
+            .expect("serialize result")
+            .contains("bundle-42")
+    );
 }
 
 #[tokio::test]

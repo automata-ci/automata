@@ -94,10 +94,8 @@ fn classify_dispatch_error(error: &GithubWorkflowDispatchError) -> WorkflowDispa
             LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected,
         )) => WorkflowDispatchApiBackendError::Forbidden,
         GithubWorkflowDispatchError::Admission(WorkflowAdmissionError::Store(
-            LogicalWorkflowAdmissionStoreError::IdempotencyConflict,
-        )) => WorkflowDispatchApiBackendError::Conflict,
-        GithubWorkflowDispatchError::Admission(WorkflowAdmissionError::Store(
-            LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
+            LogicalWorkflowAdmissionStoreError::IdempotencyConflict
+            | LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
         )) => WorkflowDispatchApiBackendError::Conflict,
         GithubWorkflowDispatchError::Admission(WorkflowAdmissionError::Store(
             LogicalWorkflowAdmissionStoreError::Store(StoreError::Operation(_)),

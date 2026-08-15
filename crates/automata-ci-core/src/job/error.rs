@@ -143,6 +143,18 @@ pub enum JobValidationError {
     /// Credential-free execution selected a Results cache or artifact action.
     #[error("credential-free execution cannot select a Results cache or artifact action")]
     CredentialFreeResultsAction,
+    /// Effective trust required repository permissions to be reduced before `JobIR`.
+    #[error("job provider permissions exceed the sealed trust snapshot")]
+    TrustPermissionReduction,
+    /// Effective trust denied a secret path retained by `JobIR`.
+    #[error("job retains a secret dependency denied by the sealed trust snapshot")]
+    TrustSecretDependency,
+    /// Effective trust denied an OIDC path retained by `JobIR`.
+    #[error("job retains an OIDC dependency denied by the sealed trust snapshot")]
+    TrustOidcDependency,
+    /// Effective trust denied a Results path retained by `JobIR`.
+    #[error("job retains a Results dependency denied by the sealed trust snapshot")]
+    TrustResultsDependency,
     /// A public output template attempted to read the secrets context.
     #[error("a public job output must not reference the secrets context")]
     PublicOutputReferencesSecrets,

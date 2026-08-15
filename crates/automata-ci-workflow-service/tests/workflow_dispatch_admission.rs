@@ -39,6 +39,7 @@ const SESSION: &str = "550e8400-e29b-41d4-a716-446655440011";
 const WORKFLOW_PATH: &str = ".ci/workflows/manual.yml";
 const COMMIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const GIT_REF: &str = "refs/heads/release";
+const REPOSITORY_OWNER_ID: &str = "424242";
 const SOURCE: &str = r"name: Synthetic manual dispatch
 on:
   workflow_dispatch:
@@ -441,6 +442,7 @@ impl Harness {
         .expect("repository descriptor");
         let source = AuthenticatedWorkflowDispatchSource::new(
             repository,
+            REPOSITORY_OWNER_ID,
             self.workflow_id,
             WORKFLOW_PATH,
             GIT_REF,
@@ -499,6 +501,7 @@ fn dispatch_request(
     GithubWorkflowDispatchRequest::new(
         authorization,
         coordinates,
+        REPOSITORY_OWNER_ID,
         WORKFLOW_PATH,
         Bytes::from_static(SOURCE.as_bytes()),
         COMMIT_SHA,

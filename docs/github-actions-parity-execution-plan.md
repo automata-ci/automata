@@ -231,7 +231,7 @@ that capacity during selection remains in Wave 2.
 
 Exit criteria:
 
-- [ ] fork and Dependabot authority is reduced correctly;
+- [x] fork and Dependabot authority is reduced correctly;
 - [ ] pull-request path filters are runnable;
 - [x] reserved runner environment names cannot be overwritten;
 - [x] matrix and expression behavior has exact external candidate fixtures;

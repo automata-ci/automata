@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::BlobStoreErrorKind;
 use automata_ci_core::{
-    ContextValue, JobRuntimeContext, Sha256Digest, UnixMillis, WorkflowEventProvenance,
+    ContextValue, JobRuntimeContext, Sha256Digest, TrustPolicy, TrustSnapshot, UnixMillis,
+    WorkflowEventProvenance,
 };
+use automata_ci_github::{GithubTrustDerivation, derive_github_trust_snapshot};
 use automata_ci_scm::{ArchiveFormat, RepositorySource};
 use automata_ci_store::{
     AuthenticatedGithubDeliveryClaim, GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_ARCHIVE_ACCEPT,
@@ -720,15 +722,8 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         plan: automata_ci_core::WorkflowPlan,
         base_context: JobRuntimeContext,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
-        let repository = request.event().repository();
         let event_coordinates = request.manifest_pinned_evidence().authenticated_event();
-        let coordinates = AdmissionRepositoryCoordinates::new(
-            GITHUB_PROVIDER,
-            request.identity().repository_id().get().to_string(),
-            repository.owner(),
-            repository.name(),
-        )
-        .map_err(|_| invalid_processor_state("repository_coordinates"))?;
+        let coordinates = admission_coordinates(request)?;
         let idempotency = WorkflowAdmissionIdempotency::provider_delivery(
             request.identity().delivery_id().to_owned(),
         )
@@ -737,6 +732,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             || request.workflow_path().to_owned(),
             |name| name.value().clone(),
         );
+        let trust_snapshot = event_trust_snapshot(request)?;
         let admission = WorkflowAdmissionRequest::builder(
             request.identity().tenant().clone(),
             coordinates,
@@ -747,6 +743,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             base_context,
             idempotency,
         )
+        .trust_snapshot(trust_snapshot)
         .commit_sha(request.repository_source().revision().as_str())
         .git_ref(event_coordinates.git_ref())
         .workflow_name(workflow_name)
@@ -788,10 +785,11 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             current_snapshot.expires_at(),
         )
         .map_err(|_| invalid_processor_state("authenticated_delivery_claim"))?;
-        let admission_result = self
-            .admission
-            .admit_authenticated_github_delivery(admission, current_claim)
-            .await;
+        let admission_result = Box::pin(
+            self.admission
+                .admit_authenticated_github_delivery(admission, current_claim),
+        )
+        .await;
         drop(operation);
         match admission_result {
             Ok(result) => {
@@ -818,6 +816,38 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             }
         }
     }
+}
+
+fn event_trust_snapshot(
+    request: &GithubDeliveryWorkflowRequest<'_>,
+) -> Result<TrustSnapshot, GithubDeliveryWorkflowProcessorError> {
+    let mut derivation = GithubTrustDerivation::new();
+    if matches!(
+        request.event(),
+        automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_)
+    ) {
+        derivation = derivation
+            .with_repository_dispatch_revision(request.repository_source().revision().as_str());
+    }
+    derive_github_trust_snapshot(
+        request.event_envelope(),
+        &TrustPolicy::current(),
+        &derivation,
+    )
+    .map_err(|_| invalid_processor_state("trust_snapshot"))
+}
+
+fn admission_coordinates(
+    request: &GithubDeliveryWorkflowRequest<'_>,
+) -> Result<AdmissionRepositoryCoordinates, GithubDeliveryWorkflowProcessorError> {
+    let repository = request.event().repository();
+    AdmissionRepositoryCoordinates::new(
+        GITHUB_PROVIDER,
+        request.identity().repository_id().get().to_string(),
+        repository.owner(),
+        repository.name(),
+    )
+    .map_err(|_| invalid_processor_state("repository_coordinates"))
 }
 
 impl fmt::Debug for GithubDeliveryWorkflowAdmissionProcessor {

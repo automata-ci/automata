@@ -14,9 +14,11 @@ use automata_ci_core::{
     Located, LogicalJobKind, LogicalJobTemplate, LogicalRunStepTemplate, LogicalRunnerTemplate,
     LogicalStepKind, LogicalStepTemplate, OperationId, PlanSourceLocation, PlanSourceOrigin,
     PlanSourceSpan, RunId, RunValueTemplates, RunnerRequirements, RuntimeBoolean, SemanticStep,
-    Sha256Digest, ShellTemplate, StepId, StepIr, StepJobTemplate, UnixMillis, ValueTemplate,
-    WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan, WorkflowSourceProvenance,
-    WorkflowStepKey,
+    Sha256Digest, ShellTemplate, StepId, StepIr, StepJobTemplate, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis,
+    ValueTemplate, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
+    WorkflowSourceProvenance, WorkflowStepKey,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::encode_job_ir;
@@ -674,7 +676,8 @@ fn instance_descriptor() -> (LogicalInstanceResultDescriptor, BlobPayload, BlobP
             identity,
             false,
             vec![step],
-        ),
+        )
+        .with_trust_snapshot(trusted_push_snapshot()),
     );
     let encoded_job_ir =
         encode_job_ir(&envelope, &ProtocolLimits::default()).expect("canonical JobIR");
@@ -733,6 +736,25 @@ fn instance_descriptor() -> (LogicalInstanceResultDescriptor, BlobPayload, BlobP
     )
     .expect("terminal descriptor");
     (descriptor, result_payload, job_ir_payload)
+}
+
+fn trusted_push_snapshot() -> TrustSnapshot {
+    let repository =
+        TrustRepositoryEvidence::new("100", "10").expect("stable repository trust evidence");
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(
+                    TrustActorEvidence::new("200", TrustActorKind::User, TrustAutomationKind::None)
+                        .expect("stable actor trust evidence"),
+                )
+                .with_repositories(repository.clone(), repository)
+                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                .with_revisions("0123456789abcdef", "0123456789abcdef", "0123456789abcdef")
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("complete same-repository trust snapshot")
 }
 
 fn server_cancellation_descriptor() -> (LogicalInstanceResultDescriptor, BlobPayload) {

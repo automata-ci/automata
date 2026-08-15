@@ -47,8 +47,8 @@ pub use event::{
     GithubEventRegistryError, GithubEventRegistryV1, GithubEventRepositoryFacts,
     GithubEventSourceRule, GithubEventTriggerModel, GithubEventTrustFact,
     GithubMergeGroupEventFacts, GithubPullRequestEventFacts, GithubPushEventFacts,
-    GithubRepositoryDispatchEventFacts, GithubSealedEventEnvelopeV1, GithubWorkflowEventKind,
-    MAX_GITHUB_EVENT_ENVELOPE_BYTES,
+    GithubRepositoryDispatchEventFacts, GithubSealedEventEnvelopeV1, GithubTrustDerivation,
+    GithubWorkflowEventKind, MAX_GITHUB_EVENT_ENVELOPE_BYTES, derive_github_trust_snapshot,
 };
 pub use webhook::{
     AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,

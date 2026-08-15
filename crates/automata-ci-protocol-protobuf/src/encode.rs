@@ -845,6 +845,8 @@ fn job_ir(value: &core::JobIr) -> wire::JobIr {
             .collect(),
         permission_request: Some(job_permission_request(value.permission_request())),
         authority_profile: Some(job_authority_profile(value.authority_profile())),
+        trust_snapshot: value.trust_snapshot().canonical_bytes().to_vec(),
+        trust_snapshot_digest: value.trust_snapshot().digest().as_bytes().to_vec(),
     }
 }
 

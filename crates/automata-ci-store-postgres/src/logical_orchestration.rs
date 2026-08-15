@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use automata_ci_core::{
     JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
-    UnixMillis, WorkflowId,
+    TRUST_SNAPSHOT_V1_MEDIA_TYPE, UnixMillis, WorkflowId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
@@ -195,6 +195,7 @@ async fn resolve_authenticated_dispatch_source(
         r"
         SELECT DISTINCT repository.scm_provider,
                repository.provider_repository_id,
+               current_manifest.github_repository_owner_id,
                repository.owner, repository.name, workflow.path,
                snapshot.source_digest, snapshot.source_object_key,
                snapshot.source_size_bytes, snapshot.source_media_type
@@ -225,6 +226,7 @@ async fn resolve_authenticated_dispatch_source(
           AND run.git_ref = $4
           AND run.head_sha = $5
           AND run.admission_epoch = $6
+          AND current_manifest.github_repository_owner_id IS NOT NULL
         LIMIT 2
         ",
     )
@@ -302,8 +304,17 @@ fn dispatch_source_from_row(
         row.try_get::<String, _>("name").map_err(operation_error)?,
     )
     .map_err(|_| StoreError::corrupt_data("signed GitHub repository identity is invalid"))?;
+    let repository_owner_id = row
+        .try_get::<i64, _>("github_repository_owner_id")
+        .map_err(operation_error)?;
+    if repository_owner_id <= 0 {
+        return Err(
+            StoreError::corrupt_data("signed GitHub repository owner identity is invalid").into(),
+        );
+    }
     AuthenticatedWorkflowDispatchSource::new(
         repository,
+        repository_owner_id.to_string(),
         request.workflow_id(),
         row.try_get::<String, _>("path").map_err(operation_error)?,
         request.git_ref(),
@@ -375,6 +386,7 @@ async fn admit_logical_workflow_transaction(
     if !claimed {
         let (receipt, admitted_at) =
             replay_receipt(&mut transaction, &command, github_subject_evidence_required).await?;
+        validate_trust_snapshot_replay(&mut transaction, &command).await?;
         validate_replayed_subject_evidence(
             &mut transaction,
             &command,
@@ -415,6 +427,7 @@ async fn admit_logical_workflow_transaction(
         .map_err(map_concurrency_error)?;
     }
     insert_run(&mut transaction, &command, run_number, &publication).await?;
+    insert_trust_snapshot(&mut transaction, &command).await?;
     insert_logical_run_and_invocation(&mut transaction, &command).await?;
     finalize_receipt(&mut transaction, &command).await?;
     record_new_subject_evidence(
@@ -1982,6 +1995,102 @@ async fn insert_run(
         return Err(LogicalWorkflowAdmissionStoreError::IdentityConflict(
             "workflow run",
         ));
+    }
+    Ok(())
+}
+
+async fn insert_trust_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let snapshot = command.trust_snapshot();
+    if snapshot.is_construction_placeholder() {
+        return Err(
+            StoreError::corrupt_data("workflow admission lacks sealed trust evidence").into(),
+        );
+    }
+    let snapshot_schema = i16::try_from(snapshot.schema())
+        .map_err(|_| StoreError::corrupt_data("trust snapshot schema exceeds SMALLINT"))?;
+    let policy_revision = i64::try_from(snapshot.policy_revision().get())
+        .map_err(|_| StoreError::corrupt_data("trust policy revision exceeds BIGINT"))?;
+    let rows = sqlx::query(
+        r"
+        INSERT INTO workflow_run_trust_snapshots (
+            run_id, snapshot_schema, policy_revision, policy_digest,
+            snapshot_digest, snapshot_bytes, media_type, created_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .bind(snapshot_schema)
+    .bind(policy_revision)
+    .bind(snapshot.policy_digest().as_bytes().as_slice())
+    .bind(snapshot.digest().as_bytes().as_slice())
+    .bind(snapshot.canonical_bytes())
+    .bind(TRUST_SNAPSHOT_V1_MEDIA_TYPE)
+    .bind(command.admitted_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .rows_affected();
+    if rows != 1 {
+        return Err(StoreError::corrupt_data("workflow trust snapshot was not sealed").into());
+    }
+    Ok(())
+}
+
+async fn validate_trust_snapshot_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let row = sqlx::query(
+        r"
+        SELECT snapshot_schema, policy_revision, policy_digest,
+               snapshot_digest, snapshot_bytes, media_type, created_at_ms
+        FROM workflow_run_trust_snapshots
+        WHERE run_id = $1
+        FOR KEY SHARE
+        ",
+    )
+    .bind(command.run_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or_else(|| StoreError::corrupt_data("workflow run lacks its trust snapshot"))?;
+    let snapshot = command.trust_snapshot();
+    let exact = row
+        .try_get::<i16, _>("snapshot_schema")
+        .map_err(operation_error)?
+        == i16::try_from(snapshot.schema()).unwrap_or(i16::MAX)
+        && row
+            .try_get::<i64, _>("policy_revision")
+            .map_err(operation_error)?
+            == i64::try_from(snapshot.policy_revision().get()).unwrap_or(i64::MAX)
+        && row
+            .try_get::<Vec<u8>, _>("policy_digest")
+            .map_err(operation_error)?
+            .as_slice()
+            == snapshot.policy_digest().as_bytes()
+        && row
+            .try_get::<Vec<u8>, _>("snapshot_digest")
+            .map_err(operation_error)?
+            .as_slice()
+            == snapshot.digest().as_bytes()
+        && row
+            .try_get::<Vec<u8>, _>("snapshot_bytes")
+            .map_err(operation_error)?
+            .as_slice()
+            == snapshot.canonical_bytes()
+        && row
+            .try_get::<String, _>("media_type")
+            .map_err(operation_error)?
+            == TRUST_SNAPSHOT_V1_MEDIA_TYPE
+        && row
+            .try_get::<i64, _>("created_at_ms")
+            .map_err(operation_error)?
+            == command.admitted_at().get();
+    if !exact {
+        return Err(LogicalWorkflowAdmissionStoreError::IdempotencyConflict);
     }
     Ok(())
 }

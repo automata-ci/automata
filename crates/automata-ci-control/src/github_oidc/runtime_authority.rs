@@ -428,6 +428,11 @@ fn github_oidc_is_permitted(request: RuntimeAuthorityIssueRequest<'_>) -> bool {
     if job.source().provider() != GITHUB_PROVIDER {
         return false;
     }
+    if job.job().trust_snapshot().authority().oidc()
+        != automata_ci_core::TrustOidcAuthority::Eligible
+    {
+        return false;
+    }
     job.job()
         .permission_request()
         .requested_level(ID_TOKEN_PERMISSION)

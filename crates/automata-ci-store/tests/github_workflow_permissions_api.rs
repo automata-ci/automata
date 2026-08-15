@@ -64,6 +64,7 @@ fn candidate_is_fresh_exact_and_rejects_every_authority_identity_disagreement() 
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One end-to-end lifecycle contract is clearer as a single test.
 fn observation_and_finalization_bind_release_generation_time_outcome_and_bootstrap() {
     let bootstrap = bootstrap();
     let authority = authority(bootstrap.manifest().manifest(), AuthorityMutation::Exact);

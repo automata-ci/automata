@@ -15,8 +15,8 @@ use automata_ci_core::{
     JobRuntimeContext, MAX_JOB_RESULT_ANNOTATIONS, MAX_JOB_RESULT_ATTACHMENT_BYTES,
     MAX_STEP_ANNOTATION_PROPERTIES, MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity,
     RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep,
-    StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, UnixMillis,
-    ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
+    StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, TrustOutputAuthority,
+    UnixMillis, ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
 };
 use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
@@ -1123,6 +1123,7 @@ impl GithubJobExecutor {
                     );
                     let evaluated = Self::evaluate_job_outputs(
                         request.job().job().output_definitions(),
+                        request.job().job().trust_snapshot().authority().outputs(),
                         &output_builder,
                         &output_context,
                         &cancellation,
@@ -4388,6 +4389,7 @@ impl GithubJobExecutor {
 
     fn evaluate_job_outputs(
         definitions: &[automata_ci_core::JobOutputDefinition],
+        trust: TrustOutputAuthority,
         builder: &EnvironmentBuilder<'_>,
         context: &crate::GithubContextSnapshot,
         cancellation: &ExecutionCancellation,
@@ -4409,7 +4411,8 @@ impl GithubJobExecutor {
             if value.is_empty() {
                 continue;
             }
-            let output = if definition.sensitivity() == OutputSensitivity::SecretDerived
+            let output = if trust == TrustOutputAuthority::Untrusted
+                || definition.sensitivity() == OutputSensitivity::SecretDerived
                 || masker.contains_secret(&value)?
             {
                 JobResultOutput::secret_derived()

@@ -8,7 +8,8 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{
     JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobRuntimeContext,
-    PlanSourceOrigin, RunId, Sha256Digest, UnixMillis, WorkflowJobKey, WorkflowPlan,
+    PlanSourceOrigin, RunId, Sha256Digest, TrustSnapshot, TrustSourceClass, UnixMillis,
+    WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_protocol::ProtocolLimits;
@@ -660,15 +661,7 @@ impl GithubLogicalJobOrchestrationService {
             return Ok(activation_payload_failure());
         };
         let job_references_secret = !credential_requirements.secret_names().is_empty();
-        let job_may_consume_secret = job_references_secret && !activation.instances().is_empty();
-        let Ok((event_trust, source_kind)) = github_job_source_evidence(
-            &plan,
-            prepared.execution(),
-            &event_bytes,
-            job_may_consume_secret,
-        ) else {
-            return Ok(activation_payload_failure());
-        };
+        let (event_trust, source_kind) = trust_gate_evidence(prepared.execution().trust_snapshot());
         let reusable_secret_permission =
             reusable_secret_permission(permission_ceiling.is_some(), job_references_secret);
         let gate_evidence = ActivationGateEvidence {
@@ -874,7 +867,8 @@ impl GithubLogicalJobOrchestrationService {
             prepared.authority_profile(),
             prepared.runtime_policy().policy().permission_policy(),
             prepared.runtime_policy().policy().resource_policy(),
-        );
+        )
+        .with_trust_snapshot(prepared.execution().trust_snapshot());
         if let Some(permission_ceiling) = permission_ceiling {
             projection = projection.with_permission_ceiling(permission_ceiling);
         }
@@ -1251,112 +1245,52 @@ pub(crate) fn github_activation_context(
         .map_err(|_| GithubLogicalJobOrchestrationError::InvalidEvent)
 }
 
-fn github_job_source_evidence(
-    plan: &WorkflowPlan,
-    execution: &LogicalActivationExecutionContext,
-    event_bytes: &[u8],
-    job_may_consume_secret: bool,
-) -> Result<(JobEventTrust, JobSourceKind), GithubLogicalJobOrchestrationError> {
-    let event: serde_json::Value = serde_json::from_slice(event_bytes)
-        .map_err(|_| GithubLogicalJobOrchestrationError::InvalidEvent)?;
-    let PlanSourceOrigin::Repository { repository, .. } = plan.source().origin() else {
-        return Err(GithubLogicalJobOrchestrationError::PlanClaimMismatch);
-    };
-    let actor = execution.actor().or_else(|| {
-        event
-            .pointer("/sender/login")
-            .and_then(serde_json::Value::as_str)
-    });
-    classify_github_job_source(
-        repository.as_str(),
-        execution.root_event_name(),
-        actor,
-        &event,
-        job_may_consume_secret,
-    )
-}
-
-fn classify_github_job_source(
-    repository: &str,
-    event_name: &str,
-    actor: Option<&str>,
-    event: &serde_json::Value,
-    job_may_consume_secret: bool,
-) -> Result<(JobEventTrust, JobSourceKind), GithubLogicalJobOrchestrationError> {
-    if event.pointer("/pull_request/head/repo/full_name").is_some()
-        && event
-            .pointer("/workflow_run/head_repository/full_name")
-            .is_some()
-    {
-        return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
-    }
-    // workflow_run identifies only the upstream actor, while merge_group omits
-    // constituent PR provenance. Neither payload can authorize a secret-bearing
-    // job until admission durably binds the transitive source dimensions.
-    if job_may_consume_secret && matches!(event_name, "workflow_run" | "merge_group") {
-        return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
-    }
-    let source = match event_name {
-        "pull_request"
-        | "pull_request_target"
-        | "pull_request_review"
-        | "pull_request_review_comment" => Some((
-            event
-                .pointer("/pull_request/head/repo/full_name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
-            event
-                .pointer("/pull_request/user/login")
-                .and_then(serde_json::Value::as_str)
-                .filter(|login| !login.is_empty())
-                .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
-        )),
-        "workflow_run" => Some((
-            event
-                .pointer("/workflow_run/head_repository/full_name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
-            event
-                .pointer("/workflow_run/actor/login")
-                .and_then(serde_json::Value::as_str)
-                .filter(|login| !login.is_empty())
-                .ok_or(GithubLogicalJobOrchestrationError::InvalidEvent)?,
-        )),
-        _ => None,
-    };
-    let Some((source_repository, source_actor)) = source else {
-        return Ok(if actor.is_some_and(is_dependabot_actor) {
+const fn trust_gate_evidence(snapshot: &TrustSnapshot) -> (JobEventTrust, JobSourceKind) {
+    match snapshot.source_class() {
+        TrustSourceClass::SameRepository => (JobEventTrust::Trusted, JobSourceKind::SameRepository),
+        TrustSourceClass::Dependabot | TrustSourceClass::Automation => {
             (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
-        } else {
-            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
-        });
-    };
-    let same_repository = source_repository.eq_ignore_ascii_case(repository);
-    if is_dependabot_actor(source_actor) {
-        // `JobSourceKind` is intentionally a closed single dimension. Do not
-        // collapse a workload that is both dependency automation and a fork
-        // into `dependabot`, because that would bypass an independently
-        // disabled fork policy. GitHub's ordinary Dependabot branches are in
-        // the target repository; any combined provenance fails closed.
-        if !same_repository {
-            return Err(GithubLogicalJobOrchestrationError::InvalidEvent);
         }
-        return Ok((JobEventTrust::Untrusted, JobSourceKind::Dependabot));
+        // The legacy gate has no `incomplete` variant. Snapshot authority is
+        // authoritative and denies environments/secrets; `fork` is retained
+        // only as a conservative storage-compatible projection.
+        TrustSourceClass::Fork | TrustSourceClass::Incomplete => {
+            (JobEventTrust::Untrusted, JobSourceKind::Fork)
+        }
     }
-    if same_repository {
-        Ok((JobEventTrust::Trusted, JobSourceKind::SameRepository))
-    } else {
-        Ok((JobEventTrust::Untrusted, JobSourceKind::Fork))
-    }
-}
-
-fn is_dependabot_actor(actor: &str) -> bool {
-    actor.eq_ignore_ascii_case("dependabot[bot]") || actor.eq_ignore_ascii_case("dependabot")
 }
 
 #[cfg(test)]
 mod source_evidence_tests {
+    use automata_ci_core::{
+        TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+        TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSourceClass,
+        TrustTokenRecursion,
+    };
+
     use super::*;
+
+    fn actor(automation: TrustAutomationKind) -> TrustActorEvidence {
+        TrustActorEvidence::new("100", TrustActorKind::User, automation).expect("valid actor")
+    }
+
+    fn repository(id: &str) -> TrustRepositoryEvidence {
+        TrustRepositoryEvidence::new(id, "7").expect("valid repository")
+    }
+
+    fn same_repository_push(automation: TrustAutomationKind) -> TrustSnapshot {
+        TrustPolicy::current()
+            .evaluate(
+                TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                    .with_original_actor(actor(automation))
+                    .with_repositories(repository("42"), repository("42"))
+                    .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                    .with_revisions("source", "target", "execution")
+                    .with_fork(false)
+                    .with_token_recursion(TrustTokenRecursion::Suppressed),
+            )
+            .expect("valid push trust")
+    }
 
     #[test]
     fn exact_github_integer_limit_has_exact_boundaries() {
@@ -1373,365 +1307,32 @@ mod source_evidence_tests {
             Some(GithubOrchestrationLimitRejection::ExactInteger)
         );
     }
-    use automata_ci_core::{
-        CompiledValueTemplate, Located, LogicalJobKind, LogicalJobTemplate, LogicalRunStepTemplate,
-        LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate, PlanSourceLocation,
-        PlanSourceSpan, StepJobTemplate, WorkflowEventProvenance, WorkflowSourceProvenance,
-        WorkflowStepKey,
-    };
-
-    fn repository_plan(event_name: &str) -> WorkflowPlan {
-        let span = PlanSourceSpan::new(
-            "reusable.yml",
-            PlanSourceLocation::new(0, 1, 1).expect("start"),
-            PlanSourceLocation::new(1, 1, 2).expect("end"),
-        )
-        .expect("span");
-        let step = LogicalStepTemplate::builder(
-            Located::new(
-                WorkflowStepKey::new("position/00000000").expect("step key"),
-                span.clone(),
-            ),
-            LogicalStepKind::Run(Box::new(LogicalRunStepTemplate::new(
-                Located::new(
-                    CompiledValueTemplate::Literal("true".to_owned()),
-                    span.clone(),
-                ),
-                None,
-                None,
-            ))),
-            span.clone(),
-        )
-        .build()
-        .expect("step");
-        let job = LogicalJobTemplate::builder(
-            Located::new(WorkflowJobKey::new("test").expect("job key"), span.clone()),
-            0,
-            LogicalJobKind::Steps(StepJobTemplate::new(
-                LogicalRunnerTemplate::new(
-                    None,
-                    vec![Located::new(
-                        CompiledValueTemplate::Literal("linux".to_owned()),
-                        span.clone(),
-                    )],
-                    span.clone(),
-                ),
-                vec![step],
-                span.clone(),
-            )),
-            span.clone(),
-        )
-        .build()
-        .expect("job");
-        WorkflowPlan::logical_builder(
-            WorkflowSourceProvenance::new(
-                "github",
-                "reusable.yml",
-                PlanSourceOrigin::Repository {
-                    repository: "owner/repository".to_owned(),
-                    revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
-                    path: ".ci/workflows/reusable.yml".to_owned(),
-                },
-            ),
-            WorkflowEventProvenance::new("github", event_name),
-            vec![job],
-            span,
-        )
-        .build()
-        .expect("repository plan")
-    }
-
-    fn execution(root_event_name: &str) -> LogicalActivationExecutionContext {
-        LogicalActivationExecutionContext::new(
-            automata_ci_core::WorkflowId::from_uuid(Uuid::from_u128(1)),
-            "Reusable".to_owned(),
-            "refs/heads/main".to_owned(),
-            root_event_name.to_owned(),
-            Some("human-reviewer".to_owned()),
-            automata_ci_core::RunIdAlias::new(1).expect("run alias"),
-            1,
-            1,
-        )
-        .expect("execution")
-    }
 
     #[test]
-    fn reusable_plan_uses_the_authenticated_root_event_provenance() {
-        let reusable = repository_plan("workflow_call");
-        let fork = serde_json::json!({
-            "pull_request": {
-                "head": {"repo": {"full_name": "someone/fork"}},
-                "user": {"login": "alice"}
-            }
-        });
+    fn legacy_job_gate_is_only_a_projection_of_the_exact_snapshot() {
+        let trusted = same_repository_push(TrustAutomationKind::None);
         assert_eq!(
-            github_job_source_evidence(
-                &reusable,
-                &execution("pull_request"),
-                &serde_json::to_vec(&fork).expect("event"),
-                true,
-            )
-            .expect("root event evidence"),
+            trust_gate_evidence(&trusted),
+            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
+        );
+
+        let automation = same_repository_push(TrustAutomationKind::Other);
+        assert_eq!(automation.source_class(), TrustSourceClass::Automation);
+        assert_eq!(
+            trust_gate_evidence(&automation),
+            (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
+        );
+
+        let incomplete = TrustPolicy::current()
+            .evaluate(TrustEvidence::new(
+                TrustOriginKind::ProviderWebhook,
+                TrustEventKind::Push,
+            ))
+            .expect("missing evidence fails closed");
+        assert_eq!(incomplete.source_class(), TrustSourceClass::Incomplete);
+        assert_eq!(
+            trust_gate_evidence(&incomplete),
             (JobEventTrust::Untrusted, JobSourceKind::Fork)
-        );
-        let dependabot = serde_json::json!({
-            "pull_request": {
-                "head": {"repo": {"full_name": "Owner/Repository"}},
-                "user": {"login": "Dependabot[bot]"}
-            }
-        });
-        assert_eq!(
-            github_job_source_evidence(
-                &reusable,
-                &execution("pull_request"),
-                &serde_json::to_vec(&dependabot).expect("event"),
-                true,
-            )
-            .expect("root Dependabot evidence"),
-            (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
-        );
-        assert!(matches!(
-            github_job_source_evidence(
-                &reusable,
-                &execution("workflow_run"),
-                &serde_json::to_vec(&serde_json::json!({
-                    "workflow_run": {
-                        "head_repository": {"full_name": "Owner/Repository"},
-                        "actor": {"login": "human-reviewer"}
-                    }
-                }))
-                .expect("event"),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-    }
-
-    #[test]
-    fn pull_request_source_is_compared_case_insensitively() {
-        let event = serde_json::json!({
-            "pull_request": {
-                "head": {"repo": {"full_name": "Owner/Repository"}},
-                "user": {"login": "alice"}
-            }
-        });
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request",
-                Some("alice"),
-                &event,
-                true,
-            )
-            .expect("source evidence"),
-            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
-        );
-    }
-
-    #[test]
-    fn fork_and_dependency_automation_are_untrusted_and_never_collapsed() {
-        let fork = serde_json::json!({
-            "pull_request": {
-                "head": {"repo": {"full_name": "someone/fork"}},
-                "user": {"login": "alice"}
-            }
-        });
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request",
-                Some("alice"),
-                &fork,
-                true,
-            )
-            .expect("fork evidence"),
-            (JobEventTrust::Untrusted, JobSourceKind::Fork)
-        );
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request",
-                Some("human-reviewer"),
-                &serde_json::json!({
-                    "pull_request": {
-                        "head": {"repo": {"full_name": "someone/fork"}},
-                        "user": {"login": "Dependabot[bot]"}
-                    }
-                }),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-        let same_repository = serde_json::json!({
-            "pull_request": {
-                "head": {"repo": {"full_name": "Owner/Repository"}},
-                "user": {"login": "Dependabot[bot]"}
-            }
-        });
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request",
-                Some("human-reviewer"),
-                &same_repository,
-                true,
-            )
-            .expect("same-repository dependency automation evidence"),
-            (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
-        );
-        let human_authored = serde_json::json!({
-            "pull_request": {
-                "head": {"repo": {"full_name": "Owner/Repository"}},
-                "user": {"login": "alice"}
-            }
-        });
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request_review_comment",
-                Some("Dependabot[bot]"),
-                &human_authored,
-                true,
-            )
-            .expect("the PR author, not the comment sender, defines source provenance"),
-            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
-        );
-        let workflow_run = serde_json::json!({
-            "workflow_run": {
-                "head_repository": {"full_name": "Owner/Repository"},
-                "actor": {"login": "Dependabot[bot]"}
-            }
-        });
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "workflow_run",
-                Some("human-rerunner"),
-                &workflow_run,
-                false,
-            )
-            .expect("non-secret workflow-run evidence remains classified"),
-            (JobEventTrust::Untrusted, JobSourceKind::Dependabot)
-        );
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "workflow_run",
-                Some("human-rerunner"),
-                &workflow_run,
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-    }
-
-    #[test]
-    fn missing_source_on_source_bearing_event_fails_closed() {
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "workflow_run",
-                Some("alice"),
-                &serde_json::json!({}),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request",
-                Some("Dependabot[bot]"),
-                &serde_json::json!({}),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request",
-                Some("alice"),
-                &serde_json::json!({
-                    "workflow_run": {"head_repository": {"full_name": "owner/repository"}}
-                }),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "workflow_run",
-                Some("alice"),
-                &serde_json::json!({
-                    "pull_request": {"head": {"repo": {"full_name": "owner/repository"}}}
-                }),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "pull_request",
-                Some("alice"),
-                &serde_json::json!({
-                    "pull_request": {"head": {"repo": {"full_name": "owner/repository"}}},
-                    "workflow_run": {"head_repository": {"full_name": "owner/repository"}}
-                }),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-    }
-
-    #[test]
-    fn non_source_event_is_same_repository() {
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "push",
-                Some("alice"),
-                &serde_json::json!({}),
-                false,
-            )
-            .expect("push evidence"),
-            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
-        );
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "push",
-                Some("alice"),
-                &serde_json::json!({
-                    "pull_request": {"head": {"repo": {"full_name": "someone/fork"}}}
-                }),
-                false,
-            )
-            .expect("unrelated payload fields do not redefine the authenticated event"),
-            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
-        );
-        assert!(matches!(
-            classify_github_job_source(
-                "owner/repository",
-                "merge_group",
-                Some("merge-queue[bot]"),
-                &serde_json::json!({}),
-                true,
-            ),
-            Err(GithubLogicalJobOrchestrationError::InvalidEvent)
-        ));
-        assert_eq!(
-            classify_github_job_source(
-                "owner/repository",
-                "merge_group",
-                Some("merge-queue[bot]"),
-                &serde_json::json!({}),
-                false,
-            )
-            .expect("non-secret or skipped merge-group jobs remain supported"),
-            (JobEventTrust::Trusted, JobSourceKind::SameRepository)
         );
     }
 }

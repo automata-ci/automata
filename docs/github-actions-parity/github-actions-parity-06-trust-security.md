@@ -115,29 +115,39 @@ Acceptance:
 
 Tasks:
 
-- [ ] Build a versioned trust snapshot from authenticated facts, not JSON
+- [x] Build a versioned trust snapshot from authenticated facts, not JSON
   pointer guesses.
 - [x] Preserve authenticated repository-owner ID through provider-manifest
   persistence and rehydration, and treat owner-ID changes as policy-evidence
   changes.
-- [ ] Retain event/activity, actors, source/target repository, source ref/SHA,
+- [x] Retain event/activity, actors, source/target repository, source ref/SHA,
   fork, Dependabot/automation, privileged transition, upstream-run evidence,
   and token recursion separately.
-- [ ] Apply fork write downgrade and only an explicit fork-write policy.
-- [ ] Remove normal secrets from fork and Dependabot jobs.
-- [ ] Handle target, merge-group, workflow-run, dispatch, schedule, and rerun
+- [x] Apply fork write downgrade and only an explicit fork-write policy.
+- [x] Remove normal secrets from fork and Dependabot jobs.
+- [x] Handle target, merge-group, workflow-run, dispatch, schedule, and rerun
   independently.
-- [ ] Preserve original actor authority on rerun while exposing triggering
+- [x] Preserve original actor authority on rerun while exposing triggering
   actor.
-- [ ] Feed one result to token, secret, cache, environment, OIDC, and output
+- [x] Feed one result to token, secret, cache, environment, OIDC, and output
   policies.
-- [ ] Pin policy revision and digest.
+- [x] Pin policy revision and digest.
 
 Acceptance:
 
-- [ ] A truth-table covers all supported events and ambiguous combinations.
-- [ ] Every consumer observes the same classification.
-- [ ] Missing or changed evidence fails closed.
+- [x] A truth-table covers all supported events and ambiguous combinations.
+- [x] Every consumer observes the same classification.
+- [x] Missing or changed evidence fails closed.
+
+Implementation note: AUTH-02 is the provider-neutral trust and authority
+contract; event packages still own ingress for event families that are not yet
+published. Typed ingress derives the snapshot once at run origin, PostgreSQL
+stores immutable canonical bytes plus their policy and snapshot digests, and
+activation revalidates the complete envelope before JobIR projection. Reruns
+copy the source snapshot byte for byte instead of reclassifying under the
+triggering actor. See [Trust snapshots and authority reduction](trust-snapshots.md)
+for the data model, authority table, consumer rules, and operational failure
+behavior.
 
 ### AUTH-03 — Runtime `GITHUB_TOKEN` issuance and lifecycle
 

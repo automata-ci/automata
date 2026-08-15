@@ -213,6 +213,9 @@ impl<'a> RuntimeAuthorityIssueRequest<'a> {
         }
         job.validate()
             .map_err(|_| RuntimeAuthorityIssueRequestError::InvalidJobIr)?;
+        if job.job().trust_snapshot().is_construction_placeholder() {
+            return Err(RuntimeAuthorityIssueRequestError::InvalidJobIr);
+        }
         lease
             .validate()
             .map_err(|_| RuntimeAuthorityIssueRequestError::InvalidLease)?;

@@ -1622,6 +1622,20 @@ fn job_ir(
         value.authority_profile,
         "job_ir.authority_profile",
     )?)?;
+    let trust_snapshot_digest =
+        value
+            .trust_snapshot_digest
+            .try_into()
+            .map_err(|_| DecodeError::InvalidValue {
+                field: "job_ir.trust_snapshot_digest",
+            })?;
+    let trust_snapshot = core::TrustSnapshot::from_canonical_bytes(
+        &value.trust_snapshot,
+        core::Sha256Digest::from_bytes(trust_snapshot_digest),
+    )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "job_ir.trust_snapshot",
+    })?;
     let environment = value_map(value.environment, limits, "job_ir.environment")?;
     let services = container_map(value.services, limits, "job_ir.services")?;
     let steps = value
@@ -1640,6 +1654,7 @@ fn job_ir(
     )
     .with_authority_profile(authority_profile)
     .with_permission_request(permission_request)
+    .with_trust_snapshot(trust_snapshot)
     .with_environment(environment)
     .with_services(services);
     if let Some(timeout) = value.timeout_seconds {

@@ -22,6 +22,7 @@ pub const MAX_SECRET_CUSTODY_CONFIGURED_KEYS: usize = 32;
 /// The only current immutable canary generation.
 pub const SECRET_CUSTODY_CANARY_GENERATION: u64 = 1;
 /// Durable schema for one encrypted secret-custody key canary.
+#[allow(dead_code)] // Consumed by the optional adapter SPI, not the default integration-test build.
 pub(crate) const SECRET_CUSTODY_CANARY_SCHEMA_VERSION: u16 = 1;
 
 const KEY_SET_DIGEST_DOMAIN: &[u8] = b"automata.store.secret-custody.key-set.v1\0";

@@ -12,7 +12,7 @@ use automata_ci_control::runner_control::{
     ControlPortError, JobIrObjectReader, OptionalRuntimeAuthorityIssuer,
     RuntimeAuthorityIssueRequest, verify_job_ir_blob,
 };
-use automata_ci_core::{JobAuthorityProfile, JobIrVersion};
+use automata_ci_core::{JobAuthorityProfile, JobIrVersion, TrustPermissionAuthority};
 use automata_ci_credential_github::{
     GithubRepositoryRuntimeAuthorityIssuer, GithubRuntimeAuthorityIdentityResolutionError,
     GithubRuntimeAuthorityIdentityResolver, GithubRuntimeAuthorityRequestResolver,
@@ -237,6 +237,16 @@ impl OptionalRuntimeAuthorityIssuer for GithubJobRuntimeAuthorityIssuer {
         if request.job().source().provider() != "github" {
             return Ok(None);
         }
+        if request
+            .job()
+            .job()
+            .trust_snapshot()
+            .authority()
+            .permissions()
+            == TrustPermissionAuthority::DenyAll
+        {
+            return Ok(None);
+        }
         let resolved = self
             .identities
             .resolve_github_runtime_authority_identity(request)
@@ -283,6 +293,13 @@ impl OptionalRuntimeAuthorityIssuer for UnavailableGithubJobRuntimeAuthorityIssu
     ) -> Result<Option<JobRuntimeAuthorities>, ControlPortError> {
         if request.job().source().provider() != "github"
             || request.job().job().authority_profile() == JobAuthorityProfile::CredentialFree
+            || request
+                .job()
+                .job()
+                .trust_snapshot()
+                .authority()
+                .permissions()
+                == TrustPermissionAuthority::DenyAll
         {
             Ok(None)
         } else {

@@ -8,6 +8,8 @@ use automata_ci_auth::{
 };
 use automata_ci_core::{
     JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile, OperationId, RunId, Sha256Digest,
+    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
     UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
@@ -76,6 +78,33 @@ fn object_with_media(key: String, digest: u8, media_type: &str) -> AdmissionObje
         media_type,
     )
     .expect("admission object")
+}
+
+fn trusted_snapshot(namespace: u128) -> TrustSnapshot {
+    let repository_id = namespace.to_string();
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(
+                    TrustActorEvidence::new(
+                        format!("actor-{namespace}"),
+                        TrustActorKind::User,
+                        TrustAutomationKind::None,
+                    )
+                    .expect("actor evidence"),
+                )
+                .with_repositories(
+                    TrustRepositoryEvidence::new(repository_id.as_str(), "owner-1")
+                        .expect("source repository"),
+                    TrustRepositoryEvidence::new(repository_id.as_str(), "owner-1")
+                        .expect("target repository"),
+                )
+                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                .with_revisions("source-sha", "target-sha", "execution-sha")
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("trusted snapshot")
 }
 
 async fn prepare_job(
@@ -312,6 +341,20 @@ fn logical_command_at_with_idempotency(
     idempotency: WorkflowAdmissionIdempotency,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
+    logical_command_at_with_trust_snapshot(
+        command,
+        idempotency,
+        admitted_at,
+        command.trust_snapshot().clone(),
+    )
+}
+
+fn logical_command_at_with_trust_snapshot(
+    command: &AdmitLogicalWorkflowRun,
+    idempotency: WorkflowAdmissionIdempotency,
+    admitted_at: UnixMillis,
+    trust_snapshot: TrustSnapshot,
+) -> TestResult<AdmitLogicalWorkflowRun> {
     let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
         idempotency,
@@ -339,6 +382,7 @@ fn logical_command_at_with_idempotency(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(trust_snapshot);
     Ok(builder.build()?)
 }
 
@@ -424,6 +468,7 @@ fn fixture_at(
         admitted_at,
     )
     .actor("sample-actor")
+    .trust_snapshot(trusted_snapshot(namespace))
     .base_context(object_with_media(
         format!("logical/{namespace}/base-context.pb"),
         4,
@@ -439,6 +484,8 @@ async fn assert_logical_admission_shape(
     run_id: RunId,
     root_id: LogicalWorkflowInvocationId,
     base_context: &AdmissionObject,
+    trust_snapshot: &TrustSnapshot,
+    admitted_at: UnixMillis,
 ) -> TestResult {
     let run_shape: (i32, i32, String) = sqlx::query_as(
         "SELECT admission_epoch, plan_schema, status FROM workflow_runs WHERE id = $1",
@@ -447,6 +494,31 @@ async fn assert_logical_admission_shape(
     .fetch_one(database.pool())
     .await?;
     assert_eq!(run_shape, (1, 1, "queued".to_owned()));
+
+    let durable_trust: (i16, i64, Vec<u8>, Vec<u8>, Vec<u8>, String, i64) = sqlx::query_as(
+        r"
+        SELECT snapshot_schema, policy_revision, policy_digest, snapshot_digest,
+               snapshot_bytes, media_type, created_at_ms
+        FROM workflow_run_trust_snapshots
+        WHERE run_id = $1
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(durable_trust.0, i16::try_from(trust_snapshot.schema())?);
+    assert_eq!(
+        durable_trust.1,
+        i64::try_from(trust_snapshot.policy_revision().get())?
+    );
+    assert_eq!(durable_trust.2, trust_snapshot.policy_digest().as_bytes());
+    assert_eq!(durable_trust.3, trust_snapshot.digest().as_bytes());
+    assert_eq!(durable_trust.4, trust_snapshot.canonical_bytes());
+    assert_eq!(
+        durable_trust.5,
+        automata_ci_core::TRUST_SNAPSHOT_V1_MEDIA_TYPE
+    );
+    assert_eq!(durable_trust.6, admitted_at.get());
 
     let snapshot_epoch: i32 =
         sqlx::query_scalar("SELECT admission_epoch FROM workflow_snapshots WHERE id = $1")
@@ -744,8 +816,24 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
             command
                 .base_context()
                 .expect("current admission base context"),
+            command.trust_snapshot(),
+            command.admitted_at(),
         )
         .await?;
+        let trust_tamper = sqlx::query(
+            "UPDATE workflow_run_trust_snapshots SET snapshot_digest = $2 WHERE run_id = $1",
+        )
+        .bind(run_id.as_uuid())
+        .bind(vec![0x77_u8; 32])
+        .execute(database.pool())
+        .await
+        .expect_err("run-origin trust snapshots must be immutable");
+        assert_eq!(
+            trust_tamper
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("workflow_run_trust_snapshots_immutable"),
+        );
         let tamper = sqlx::query(
             "UPDATE logical_workflow_runs SET base_context_digest = $2 WHERE run_id = $1",
         )
@@ -1220,6 +1308,24 @@ async fn concurrent_replay_has_one_insert_and_changed_digest_conflicts() -> Test
         assert_ne!(left.is_replay(), right.is_replay());
         assert_eq!(left.run_id(), right.run_id());
         assert_eq!(left.run_number(), right.run_number());
+
+        let conflicting_trust = logical_command_at_with_trust_snapshot(
+            &command,
+            command.idempotency().clone(),
+            command.admitted_at(),
+            trusted_snapshot(201),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_github_delivery(
+                    conflicting_trust,
+                    authenticated,
+                    command.admitted_at(),
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::IdempotencyConflict)
+        ));
 
         let changed = fixture("logical-replay", "delivery-replay", 52, 300);
         let (changed, changed_authenticated) =

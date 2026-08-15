@@ -13,6 +13,7 @@ pub mod id;
 pub mod job;
 pub mod log;
 pub mod time;
+pub mod trust;
 pub mod workflow;
 
 pub use capability::*;
@@ -22,6 +23,7 @@ pub use id::*;
 pub use job::*;
 pub use log::*;
 pub use time::*;
+pub use trust::*;
 pub use workflow::*;
 
 /// Current version of independently persisted core-domain envelopes.

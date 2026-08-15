@@ -778,6 +778,10 @@ message JobIr {
   JobPermissionRequest permission_request = 14;
   // Required immutable job-visible authority policy; omission is never defaulted.
   optional JobAuthorityProfile authority_profile = 15;
+  // Required canonical TrustSnapshot bytes sealed at logical-run origin.
+  bytes trust_snapshot = 16;
+  // Required domain-separated digest of trust_snapshot.
+  bytes trust_snapshot_digest = 17;
 }
 
 message JobIrEnvelope {
