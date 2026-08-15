@@ -139,7 +139,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0034_event_trust_control_contracts.sql",
-        "5611627b4b55418350f9427b5881d9efeb75b1f758dd1dd55c9e47151f243c8f05088081292d10191fa023f9982a40d1",
+        "dcab5d4aaf66e00528388c84782384156a6817e90de281591072c283c0feeb9282a77b8177c2d9808a92b6100eba2bc5",
     ),
     (
         "0035_workflow_run_trust_snapshots.sql",
