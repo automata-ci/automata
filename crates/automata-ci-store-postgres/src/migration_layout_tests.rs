@@ -189,6 +189,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0046_github_actions_cache_garbage.sql",
         "be9b180b7b989138962eb7e9f945611ecc2a6da1d7c89a2addf79c3651075f0e73f2e63c4492395788ce1a699df9b4ad",
     ),
+    (
+        "0046_workflow_runtime_runner_feature_policy.sql",
+        "5f0d78e97bb793cfec4c9eb5792ae2d821e56e8e42f3f84c61fe64c9312a5a430824a6c42d8331a3dabd1f007e123b7c",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -502,6 +506,38 @@ fn github_actions_cache_garbage_is_exact_bounded_and_durable() {
         assert!(
             !source.contains(forbidden),
             "cache-garbage migration retained compatibility surface: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn workflow_runtime_runner_feature_policy_is_relationally_exact() {
+    let source = include_str!("../migrations/0046_workflow_runtime_runner_feature_policy.sql");
+
+    for required in [
+        "ADD COLUMN runner_feature_schema smallint",
+        "ADD COLUMN runner_feature_count integer NOT NULL DEFAULT 0",
+        "runner_feature_schema IS NULL AND runner_feature_count = 0",
+        "runner_feature_schema = 1 AND runner_feature_count BETWEEN 0 AND 64",
+        "policy_schema IN (1, 2)",
+        "CREATE TABLE workflow_runtime_policy_runner_features",
+        "workflow_runtime_policy_runner_features_pk PRIMARY KEY",
+        "workflow_runtime_policy_runner_features_mapping_fk FOREIGN KEY",
+        "feature IN (",
+        "'automata.core/node24-actions@v1'",
+        "automata_require_staging_workflow_runtime_policy()",
+        "automata_reject_workflow_runtime_policy_retained_mutation()",
+        "CREATE OR REPLACE FUNCTION automata_workflow_runtime_policy_canonical",
+        "CREATE OR REPLACE FUNCTION automata_workflow_runtime_policy_digest",
+        "WHEN 1 THEN container.runner_feature_schema IS NULL",
+        "WHEN 2 THEN container.runner_feature_schema = 1",
+        "'runner-features'",
+        "runner.actual_feature_count = container.runner_feature_count",
+        "runner.profile_exact",
+    ] {
+        assert!(
+            source.contains(required),
+            "runner-feature policy migration lost required contract: {required}"
         );
     }
 }

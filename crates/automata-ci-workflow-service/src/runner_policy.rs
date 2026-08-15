@@ -4,7 +4,8 @@ use automata_ci_core::RunId;
 use automata_ci_store::{
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, MAX_WORKFLOW_RUNTIME_POLICY_BYTES,
     MAX_WORKFLOW_RUNTIME_POLICY_FEATURES, MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS,
-    WORKFLOW_RUNTIME_POLICY_MEDIA_TYPE, WorkflowRuntimePolicy,
+    MAX_WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURES, WORKFLOW_RUNTIME_POLICY_MEDIA_TYPE,
+    WorkflowRuntimePolicy,
 };
 use automata_ci_workflow_github::{GithubRunnerProfileCatalog, GithubRunnerProfileMapping};
 use thiserror::Error;
@@ -17,6 +18,9 @@ pub const MAX_GITHUB_RUNNER_POLICY_BYTES: usize = MAX_WORKFLOW_RUNTIME_POLICY_BY
 pub const MAX_GITHUB_RUNNER_POLICY_MAPPINGS: usize = MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS;
 /// Maximum provider-neutral container features retained by one mapping.
 pub const MAX_GITHUB_RUNNER_POLICY_CONTAINER_FEATURES: usize = MAX_WORKFLOW_RUNTIME_POLICY_FEATURES;
+/// Maximum known runner-runtime features retained by one profile.
+pub const MAX_GITHUB_RUNNER_POLICY_RUNNER_FEATURES: usize =
+    MAX_WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURES;
 
 /// Validated immutable GitHub runtime-policy contract.
 ///
@@ -67,8 +71,13 @@ impl GithubRunnerPolicy {
                     mapping.architecture().clone(),
                 )
                 .map(|mapping_value| {
+                    let mut mapping_value = mapping_value
+                        .with_container_features(mapping.container_features().iter().cloned());
+                    if let Some(policy) = mapping.runner_feature_policy() {
+                        mapping_value = mapping_value
+                            .with_supported_runner_features(policy.supported().iter().cloned());
+                    }
                     mapping_value
-                        .with_container_features(mapping.container_features().iter().cloned())
                 })
                 .map_err(|_| GithubRunnerPolicyError)
             })
@@ -136,6 +145,7 @@ mod tests {
     const POLICY: &[u8] = br#"{
       "workspace":{"derivation":1,"root":"/__w","schema":1},
       "mappings":[{
+        "runner_features":{"schema":1,"supported":["automata.core/bash-shell@v1","automata.core/command-files@v1","automata.core/default-posix-shell@v1","automata.core/job-summaries@v1","automata.core/sh-shell@v1","automata.core/shell-steps@v1"]},
         "container_features":["automata.core/job-containers@v1"],
         "architecture":"x86_64",
         "operating_system":"linux",
@@ -155,7 +165,7 @@ mod tests {
         "minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},
         "maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}
       },
-      "schema":1
+      "schema":2
     }"#;
 
     #[test]
@@ -168,6 +178,16 @@ mod tests {
             policy
         );
         assert!(GithubRunnerPolicy::decode_canonical(POLICY).is_err());
+        let selector = automata_ci_core::RunnerLabel::new("ubuntu-24.04").expect("selector");
+        assert!(
+            policy
+                .catalog()
+                .get(&selector)
+                .expect("profile")
+                .supported_runner_features()
+                .expect("feature policy")
+                .contains(&automata_ci_core::RunnerFeature::BASH_SHELL)
+        );
     }
 
     #[test]

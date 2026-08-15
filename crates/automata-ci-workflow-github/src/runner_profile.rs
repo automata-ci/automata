@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use automata_ci_core::{
-    Architecture, ContainerFeature, EnvironmentProfile, OperatingSystem, RunnerLabel,
+    Architecture, ContainerFeature, EnvironmentProfile, OperatingSystem, RunnerFeature, RunnerLabel,
 };
 /// One server-owned mapping from a GitHub runner selector to an attested image profile.
 ///
@@ -16,6 +16,7 @@ pub struct GithubRunnerProfileMapping {
     environment_profile: EnvironmentProfile,
     operating_system: OperatingSystem,
     architecture: Architecture,
+    supported_runner_features: Option<BTreeSet<RunnerFeature>>,
     container_features: BTreeSet<ContainerFeature>,
 }
 
@@ -39,6 +40,7 @@ impl GithubRunnerProfileMapping {
             environment_profile,
             operating_system,
             architecture,
+            supported_runner_features: None,
             container_features: BTreeSet::new(),
         })
     }
@@ -50,6 +52,16 @@ impl GithubRunnerProfileMapping {
         features: impl IntoIterator<Item = ContainerFeature>,
     ) -> Self {
         self.container_features = features.into_iter().collect();
+        self
+    }
+
+    /// Binds the immutable support ceiling guaranteed by this exact profile.
+    #[must_use]
+    pub fn with_supported_runner_features(
+        mut self,
+        features: impl IntoIterator<Item = RunnerFeature>,
+    ) -> Self {
+        self.supported_runner_features = Some(features.into_iter().collect());
         self
     }
 
@@ -81,6 +93,12 @@ impl GithubRunnerProfileMapping {
     /// Returns the provider-neutral container features guaranteed by the profile.
     pub const fn container_features(&self) -> &BTreeSet<ContainerFeature> {
         &self.container_features
+    }
+
+    /// Returns the immutable feature ceiling, or `None` for historical policies.
+    #[must_use]
+    pub const fn supported_runner_features(&self) -> Option<&BTreeSet<RunnerFeature>> {
+        self.supported_runner_features.as_ref()
     }
 }
 

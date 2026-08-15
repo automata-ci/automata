@@ -10,11 +10,24 @@ use automata_ci_store::{
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
     ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryVisibility, TenantScope, github_provider_repository_id,
+    ProviderRepositoryId, ProviderRepositoryVisibility, TenantScope, WorkflowRuntimePolicy,
+    github_provider_repository_id,
 };
 use uuid::Uuid;
 
 use crate::support::{TestResult, run_with_database};
+
+#[derive(sqlx::FromRow)]
+struct RuntimePolicyEvidence {
+    policy_schema: i16,
+    runner_feature_schema: i16,
+    runner_feature_count: i32,
+    runner_features: Vec<String>,
+    stored_canonical: Vec<u8>,
+    stored_digest: Vec<u8>,
+    regenerated_canonical: Vec<u8>,
+    regenerated_digest: Vec<u8>,
+}
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
@@ -117,6 +130,79 @@ async fn exact_bootstrap_creates_repository_and_replays_original_evidence() -> T
         .fetch_one(database.pool())
         .await?;
         assert_eq!(counts, (1, 1));
+
+        let runtime_policy = sqlx::query_as::<_, RuntimePolicyEvidence>(
+            r"
+            SELECT revision.policy_schema,
+                   mapping.runner_feature_schema,
+                   mapping.runner_feature_count,
+                   ARRAY(
+                       SELECT feature.feature
+                       FROM workflow_runtime_policy_runner_features AS feature
+                       WHERE feature.tenant_id = mapping.tenant_id
+                         AND feature.repository_id = mapping.repository_id
+                         AND feature.policy_revision = mapping.policy_revision
+                         AND feature.selector = mapping.selector
+                       ORDER BY feature.feature
+                   ) AS runner_features,
+                   revision.canonical_policy AS stored_canonical,
+                   revision.policy_digest AS stored_digest,
+                   automata_workflow_runtime_policy_canonical(
+                       revision.tenant_id,
+                       revision.repository_id,
+                       revision.policy_revision
+                   ) AS regenerated_canonical,
+                   automata_workflow_runtime_policy_digest(
+                       revision.tenant_id,
+                       revision.repository_id,
+                       revision.policy_revision
+                   ) AS regenerated_digest
+            FROM workflow_runtime_policy_revisions AS revision
+            JOIN workflow_runtime_policy_mappings AS mapping
+              ON mapping.tenant_id = revision.tenant_id
+             AND mapping.repository_id = revision.repository_id
+             AND mapping.policy_revision = revision.policy_revision
+            WHERE revision.tenant_id = $1
+              AND revision.repository_id = $2
+              AND revision.policy_revision = 1
+            ",
+        )
+        .bind(desired.tenant().as_str())
+        .bind(desired.repository_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(runtime_policy.policy_schema, 2);
+        assert_eq!(runtime_policy.runner_feature_schema, 1);
+        assert_eq!(
+            usize::try_from(runtime_policy.runner_feature_count)
+                .expect("positive runner-feature count"),
+            runtime_policy.runner_features.len()
+        );
+        assert_eq!(
+            runtime_policy.stored_canonical,
+            runtime_policy.regenerated_canonical
+        );
+        assert_eq!(
+            runtime_policy.stored_digest,
+            runtime_policy.regenerated_digest
+        );
+        let decoded = WorkflowRuntimePolicy::decode_canonical(&runtime_policy.stored_canonical)
+            .expect("PostgreSQL canonical policy must replay in the Rust codec");
+        assert_eq!(decoded.digest(), desired.runtime_policy_digest());
+        assert_eq!(
+            decoded.canonical_digest(),
+            desired.runner_policy().object().digest()
+        );
+        assert_eq!(
+            decoded.mappings()[0]
+                .runner_feature_policy()
+                .expect("current runner-feature policy")
+                .supported()
+                .iter()
+                .map(|feature| feature.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            runtime_policy.runner_features
+        );
 
         let rename_error = sqlx::query("UPDATE repositories SET owner = 'other' WHERE id = $1")
             .bind(desired.repository_id().as_uuid())

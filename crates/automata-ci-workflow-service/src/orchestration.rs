@@ -416,7 +416,13 @@ fn runtime_profile_catalog(
                 mapping.architecture().clone(),
             )
             .map(|profile| {
-                profile.with_container_features(mapping.container_features().iter().cloned())
+                let mut profile =
+                    profile.with_container_features(mapping.container_features().iter().cloned());
+                if let Some(policy) = mapping.runner_feature_policy() {
+                    profile =
+                        profile.with_supported_runner_features(policy.supported().iter().cloned());
+                }
+                profile
             })
             .map_err(|_| GithubLogicalJobOrchestrationError::Internal)
         })
@@ -947,8 +953,8 @@ impl GithubLogicalJobOrchestrationService {
             prepared.runtime_policy().policy().resource_policy(),
         )
         .with_trust_snapshot(prepared.execution().trust_snapshot())
-            .with_runtime_features(runtime_features.iter().cloned())
-            .with_activation_evaluation(activation_evaluator, prepared.status());
+        .with_runtime_features(runtime_features.iter().cloned())
+        .with_activation_evaluation(activation_evaluator, prepared.status());
         if let Some(permission_ceiling) = permission_ceiling {
             projection = projection.with_permission_ceiling(permission_ceiling);
         }
