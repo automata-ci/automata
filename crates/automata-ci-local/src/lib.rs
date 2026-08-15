@@ -1,21 +1,13 @@
-//! Cross-platform lifecycle boundary for disposable local Automata installations.
+//! Cross-platform boundary for disposable local Automata installations.
 //!
-//! The crate owns Docker Engine discovery and platform state-directory policy
-//! without depending on the product CLI. Lifecycle mutation is added in
-//! separately reviewed slices; [`inspect`] is read-only and creates no state or
-//! containers.
+//! The crate owns Docker Engine discovery without depending on the product CLI.
+//! Lifecycle mutation is added in separately reviewed slices; [`inspect`] is
+//! read-only and creates no engine resources or host state.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use std::{
-    collections::BTreeMap,
-    ffi::OsString,
-    io,
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::{collections::BTreeMap, io, process::Stdio, time::Duration};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
@@ -48,27 +40,17 @@ pub enum EngineRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoctorRequest {
     engine: EngineRequest,
-    state_directory: Option<PathBuf>,
 }
 
 impl DoctorRequest {
-    /// Creates a request with an optional explicit absolute, dedicated state root.
-    pub const fn new(engine: EngineRequest, state_directory: Option<PathBuf>) -> Self {
-        Self {
-            engine,
-            state_directory,
-        }
+    /// Creates a request for one container-engine selection.
+    pub const fn new(engine: EngineRequest) -> Self {
+        Self { engine }
     }
 }
 
 /// Inspects the local host without creating state or containers.
 pub async fn inspect(request: DoctorRequest) -> DoctorReport {
-    let state_environment = StateEnvironment::current();
-    let state_directory = resolve_state_directory(
-        request.state_directory.as_deref(),
-        std::env::consts::OS,
-        &state_environment,
-    );
     let (context, version, info, compose) = tokio::join!(
         capture_docker(
             DoctorProbe::DockerContext,
@@ -91,7 +73,6 @@ pub async fn inspect(request: DoctorRequest) -> DoctorReport {
         &request,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        state_directory,
         process_is_root(),
         std::env::var_os("DOCKER_API_VERSION").is_some(),
         &probes,
@@ -104,7 +85,6 @@ pub struct DoctorReport {
     schema: u32,
     ready: bool,
     platform: Platform,
-    state_directory: Option<String>,
     requested_engine: EngineRequest,
     selected_engine: Option<EngineSelection>,
     issues: Vec<DoctorIssue>,
@@ -126,11 +106,6 @@ impl DoctorReport {
         &self.platform.architecture
     }
 
-    /// Returns the resolved absolute local state root, when available.
-    pub fn state_directory(&self) -> Option<&str> {
-        self.state_directory.as_deref()
-    }
-
     /// Returns the validated engine and Compose selection, when available.
     pub const fn selected_engine(&self) -> Option<&EngineSelection> {
         self.selected_engine.as_ref()
@@ -146,8 +121,6 @@ impl DoctorReport {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorProbe {
-    /// Platform state-directory resolution.
-    StateDirectory,
     /// Host process identity.
     ProcessIdentity,
     /// Initially qualified host operating-system and architecture tuple.
@@ -166,14 +139,6 @@ pub enum DoctorProbe {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorIssueCode {
-    /// No platform default state root could be resolved.
-    StateDirectoryUnavailable,
-    /// An explicit state root was not absolute.
-    StateDirectoryNotAbsolute,
-    /// The exact state root cannot be represented in the JSON/Compose contract.
-    StateDirectoryNotUnicode,
-    /// The state root is broad, ambiguous, or contains unsafe lexical traversal.
-    StateDirectoryUnsafe,
     /// A Unix root process attempted to use the local lifecycle.
     RootProcess,
     /// The Docker command was not found on `PATH`.
@@ -220,16 +185,6 @@ impl DoctorIssueCode {
     /// Returns one static, non-sensitive remediation message.
     pub const fn message(self) -> &'static str {
         match self {
-            Self::StateDirectoryUnavailable => {
-                "no absolute platform state directory could be resolved"
-            }
-            Self::StateDirectoryNotAbsolute => "the explicit state directory must be absolute",
-            Self::StateDirectoryNotUnicode => {
-                "the state directory must have an exact Unicode representation"
-            }
-            Self::StateDirectoryUnsafe => {
-                "choose a dedicated state root below a user-owned directory"
-            }
             Self::RootProcess => "run the local lifecycle as an ordinary Unix user",
             Self::CommandNotFound => "install the Docker CLI and make it available on PATH",
             Self::CommandTimedOut => "the Docker probe timed out",
@@ -306,13 +261,12 @@ impl DoctorIssue {
 impl DoctorProbe {
     const fn sort_key(self) -> u8 {
         match self {
-            Self::StateDirectory => 0,
-            Self::ProcessIdentity => 1,
-            Self::HostPlatform => 2,
-            Self::DockerContext => 3,
-            Self::DockerVersion => 4,
-            Self::DockerInfo => 5,
-            Self::DockerCompose => 6,
+            Self::ProcessIdentity => 0,
+            Self::HostPlatform => 1,
+            Self::DockerContext => 2,
+            Self::DockerVersion => 3,
+            Self::DockerInfo => 4,
+            Self::DockerCompose => 5,
         }
     }
 }
@@ -418,32 +372,11 @@ fn build_report(
     request: &DoctorRequest,
     operating_system: &str,
     host_architecture: &str,
-    state_directory: Result<PathBuf, StateDirectoryError>,
     root_process: bool,
     docker_api_override: bool,
     probes: &ProbeSet,
 ) -> DoctorReport {
     let mut issues = Vec::new();
-    let state_directory = match state_directory {
-        Ok(path) => {
-            if let Ok(path) = path.into_os_string().into_string() {
-                Some(path)
-            } else {
-                issues.push(DoctorIssue::new(
-                    DoctorProbe::StateDirectory,
-                    DoctorIssueCode::StateDirectoryNotUnicode,
-                ));
-                None
-            }
-        }
-        Err(error) => {
-            issues.push(DoctorIssue::new(
-                DoctorProbe::StateDirectory,
-                error.issue_code(),
-            ));
-            None
-        }
-    };
     if root_process {
         issues.push(DoctorIssue::new(
             DoctorProbe::ProcessIdentity,
@@ -465,13 +398,12 @@ fn build_report(
     let selected_engine = evaluate_engine(operating_system, host_architecture, probes, &mut issues);
     issues.sort_by_key(|issue| issue.probe.sort_key());
     DoctorReport {
-        schema: 1,
-        ready: state_directory.is_some() && selected_engine.is_some() && issues.is_empty(),
+        schema: 2,
+        ready: selected_engine.is_some() && issues.is_empty(),
         platform: Platform {
             operating_system: operating_system.to_owned(),
             architecture: host_architecture.to_owned(),
         },
-        state_directory,
         requested_engine: request.engine,
         selected_engine,
         issues,
@@ -565,9 +497,7 @@ const fn unavailable_failure(probe: DoctorProbe) -> CommandFailure {
         DoctorProbe::DockerContext => CommandFailure::ContextUnavailable,
         DoctorProbe::DockerVersion | DoctorProbe::DockerInfo => CommandFailure::DaemonUnavailable,
         DoctorProbe::DockerCompose => CommandFailure::ComposeUnavailable,
-        DoctorProbe::StateDirectory | DoctorProbe::ProcessIdentity | DoctorProbe::HostPlatform => {
-            CommandFailure::Failed
-        }
+        DoctorProbe::ProcessIdentity | DoctorProbe::HostPlatform => CommandFailure::Failed,
     }
 }
 
@@ -1147,223 +1077,6 @@ fn parse_compose_version(value: &str) -> Option<(u64, u64, u64)> {
     (components.next().is_none()).then_some((major, minor, patch))
 }
 
-#[derive(Debug)]
-struct StateEnvironment {
-    local_app_data: Option<OsString>,
-    xdg_state_home: Option<OsString>,
-    home: Option<OsString>,
-}
-
-impl StateEnvironment {
-    fn current() -> Self {
-        Self {
-            local_app_data: std::env::var_os("LOCALAPPDATA"),
-            xdg_state_home: std::env::var_os("XDG_STATE_HOME"),
-            home: if cfg!(windows) {
-                std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
-            } else {
-                std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-            },
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StateDirectoryError {
-    Unavailable,
-    NotAbsolute,
-    Unsafe,
-}
-
-impl StateDirectoryError {
-    const fn issue_code(self) -> DoctorIssueCode {
-        match self {
-            Self::Unavailable => DoctorIssueCode::StateDirectoryUnavailable,
-            Self::NotAbsolute => DoctorIssueCode::StateDirectoryNotAbsolute,
-            Self::Unsafe => DoctorIssueCode::StateDirectoryUnsafe,
-        }
-    }
-}
-
-fn resolve_state_directory(
-    explicit: Option<&Path>,
-    operating_system: &str,
-    environment: &StateEnvironment,
-) -> Result<PathBuf, StateDirectoryError> {
-    let path = if let Some(path) = explicit {
-        if !path.is_absolute() {
-            return Err(StateDirectoryError::NotAbsolute);
-        }
-        path.to_path_buf()
-    } else if operating_system == "windows" {
-        environment
-            .local_app_data
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map(|path| path.join("Automata").join("local"))
-            .ok_or(StateDirectoryError::Unavailable)?
-    } else if operating_system == "macos" {
-        environment
-            .home
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map(|path| {
-                path.join("Library")
-                    .join("Application Support")
-                    .join("Automata")
-                    .join("local")
-            })
-            .ok_or(StateDirectoryError::Unavailable)?
-    } else {
-        environment
-            .xdg_state_home
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map(|path| path.join("automata").join("local"))
-            .or_else(|| {
-                environment
-                    .home
-                    .as_ref()
-                    .map(PathBuf::from)
-                    .filter(|path| path.is_absolute())
-                    .map(|path| {
-                        path.join(".local")
-                            .join("state")
-                            .join("automata")
-                            .join("local")
-                    })
-            })
-            .ok_or(StateDirectoryError::Unavailable)?
-    };
-    validate_state_directory(path, operating_system, environment)
-}
-
-fn validate_state_directory(
-    path: PathBuf,
-    operating_system: &str,
-    environment: &StateEnvironment,
-) -> Result<PathBuf, StateDirectoryError> {
-    use std::path::Component;
-
-    let mut normal_components = 0_usize;
-    for component in path.components() {
-        match component {
-            Component::Normal(_) => normal_components += 1,
-            Component::ParentDir => return Err(StateDirectoryError::Unsafe),
-            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
-        }
-    }
-    if normal_components < 2 || path.parent().is_none() {
-        return Err(StateDirectoryError::Unsafe);
-    }
-    #[cfg(unix)]
-    if !nearest_existing_ancestor_is_user_owned(&path) {
-        return Err(StateDirectoryError::Unsafe);
-    }
-    let candidate_roots = match operating_system {
-        "linux" => [
-            environment.xdg_state_home.as_ref(),
-            environment.home.as_ref(),
-        ],
-        "macos" => [environment.home.as_ref(), None],
-        "windows" => [
-            environment.local_app_data.as_ref(),
-            environment.home.as_ref(),
-        ],
-        _ => [None, None],
-    };
-    let user_roots = candidate_roots
-        .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .filter(|candidate| candidate_user_root_is_safe(candidate, operating_system))
-        .collect::<Vec<_>>();
-    if user_roots
-        .iter()
-        .any(|protected| path == *protected || protected.starts_with(&path))
-        || !user_roots
-            .iter()
-            .any(|protected| path.starts_with(protected))
-    {
-        return Err(StateDirectoryError::Unsafe);
-    }
-    Ok(path)
-}
-
-fn candidate_user_root_is_safe(path: &Path, operating_system: &str) -> bool {
-    use std::path::Component;
-
-    if !path.is_absolute() {
-        return false;
-    }
-    let mut normal = path.components().filter_map(|component| match component {
-        Component::Normal(value) => Some(value),
-        Component::ParentDir | Component::CurDir | Component::Prefix(_) | Component::RootDir => {
-            None
-        }
-    });
-    let Some(first) = normal.next() else {
-        return false;
-    };
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-    {
-        return false;
-    }
-    let first = first.to_string_lossy();
-    let reserved = if operating_system == "windows" {
-        [
-            "program files",
-            "program files (x86)",
-            "programdata",
-            "recovery",
-            "system volume information",
-            "windows",
-        ]
-        .iter()
-        .any(|reserved| first.eq_ignore_ascii_case(reserved))
-    } else {
-        [
-            "bin", "boot", "dev", "etc", "lib", "lib64", "opt", "proc", "run", "sbin", "sys",
-            "tmp", "usr", "var",
-        ]
-        .iter()
-        .any(|reserved| first.as_ref() == *reserved)
-    };
-    if reserved {
-        return false;
-    }
-    #[cfg(unix)]
-    if !nearest_existing_ancestor_is_user_owned(path) {
-        return false;
-    }
-    #[cfg(windows)]
-    if normal.next().is_none() {
-        return false;
-    }
-    true
-}
-
-#[cfg(unix)]
-fn nearest_existing_ancestor_is_user_owned(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-
-    for ancestor in path.ancestors() {
-        match std::fs::symlink_metadata(ancestor) {
-            Ok(metadata) => {
-                return metadata.is_dir() && metadata.uid() == rustix::process::geteuid().as_raw();
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(_) => return false,
-        }
-    }
-    false
-}
-
 #[cfg(unix)]
 fn process_is_root() -> bool {
     rustix::process::geteuid().is_root()
@@ -1379,16 +1092,13 @@ mod tests {
     use super::{
         CaptureFailure, CommandFailure, ComposeFrontend, DoctorIssueCode, DoctorProbe,
         DoctorRequest, EngineArchitecture, EngineEndpoint, EngineRequest, MAX_COMMAND_STREAM_BYTES,
-        ProbeOutput, ProbeSet, StateDirectoryError, StateEnvironment, build_report, read_bounded,
-        resolve_state_directory,
+        ProbeOutput, ProbeSet, build_report, read_bounded,
     };
     #[cfg(target_os = "linux")]
     use super::{spawn_contained, terminate_process_tree};
     use serde_json::json;
-    use std::{
-        ffi::OsString,
-        path::{Path, PathBuf},
-    };
+    #[cfg(target_os = "linux")]
+    use std::path::PathBuf;
     use tokio::io::AsyncReadExt as _;
     #[cfg(target_os = "linux")]
     use tokio::process::Command as ProcessCommand;
@@ -1461,10 +1171,9 @@ mod tests {
         probes: &ProbeSet,
     ) -> super::DoctorReport {
         build_report(
-            &DoctorRequest::new(EngineRequest::Auto, None),
+            &DoctorRequest::new(EngineRequest::Auto),
             operating_system,
             host_architecture,
-            Ok(Path::new("/state/automata/local").to_path_buf()),
             false,
             false,
             probes,
@@ -1645,10 +1354,9 @@ mod tests {
     #[test]
     fn rejects_a_forced_docker_api_version() {
         let report = build_report(
-            &DoctorRequest::new(EngineRequest::Auto, None),
+            &DoctorRequest::new(EngineRequest::Auto),
             "linux",
             "x86_64",
-            Ok(Path::new("/state/automata/local").to_path_buf()),
             false,
             true,
             &healthy_probes(CONTEXT_UNIX),
@@ -1865,158 +1573,18 @@ mod tests {
         .expect("descendant must be reaped after containment is dropped");
     }
 
-    fn native_absolute_root() -> PathBuf {
-        std::env::current_dir()
-            .expect("test current directory")
-            .join("target")
-            .join("automata-fixtures")
-    }
-
-    #[test]
-    fn state_directories_follow_each_platform_convention() {
-        let root = native_absolute_root();
-        let local_app_data = root.join("windows").join("local");
-        let xdg_state_home = root.join("xdg").join("state");
-        let home = root.join("users").join("example");
-        let environment = StateEnvironment {
-            local_app_data: Some(local_app_data.clone().into_os_string()),
-            xdg_state_home: Some(xdg_state_home.clone().into_os_string()),
-            home: Some(home.clone().into_os_string()),
-        };
-        assert_eq!(
-            resolve_state_directory(None, "windows", &environment)
-                .expect("Windows state directory"),
-            local_app_data.join("Automata").join("local")
-        );
-        assert_eq!(
-            resolve_state_directory(None, "macos", &environment).expect("macOS state directory"),
-            home.join("Library")
-                .join("Application Support")
-                .join("Automata")
-                .join("local")
-        );
-        assert_eq!(
-            resolve_state_directory(None, "linux", &environment).expect("Linux state directory"),
-            xdg_state_home.join("automata").join("local")
-        );
-    }
-
-    #[test]
-    fn explicit_state_directory_must_be_absolute() {
-        let root = native_absolute_root();
-        let environment = StateEnvironment {
-            local_app_data: None,
-            xdg_state_home: None,
-            home: Some(root.clone().into_os_string()),
-        };
-        assert_eq!(
-            resolve_state_directory(Some(Path::new("relative")), "linux", &environment),
-            Err(StateDirectoryError::NotAbsolute)
-        );
-        let absolute = root.join("state").join("automata");
-        assert_eq!(
-            resolve_state_directory(Some(&absolute), "linux", &environment)
-                .expect("absolute state directory"),
-            absolute
-        );
-    }
-
-    #[test]
-    fn explicit_state_directory_rejects_broad_or_ambiguous_roots() {
-        let root = native_absolute_root();
-        let home = root.join("users").join("example");
-        let environment = StateEnvironment {
-            local_app_data: None,
-            xdg_state_home: None,
-            home: Some(OsString::from(&home)),
-        };
-        let filesystem_root = root.ancestors().last().expect("filesystem root");
-        for unsafe_path in [
-            filesystem_root.to_path_buf(),
-            home.clone(),
-            home.parent().expect("home parent").to_path_buf(),
-            root.join("system").join("state"),
-            root.join("state").join("..").join("automata"),
-        ] {
-            assert_eq!(
-                resolve_state_directory(Some(&unsafe_path), "linux", &environment),
-                Err(StateDirectoryError::Unsafe),
-                "unsafe path: {}",
-                unsafe_path.display()
-            );
-        }
-    }
-
-    #[test]
-    fn forged_environment_roots_cannot_authorize_a_broad_state_directory() {
-        let root = native_absolute_root();
-        let filesystem_root = root.ancestors().last().expect("filesystem root");
-        let broad_root = filesystem_root.join("var");
-        let broad_state = broad_root.join("lib");
-        let cases = [
-            (
-                "linux",
-                StateEnvironment {
-                    local_app_data: None,
-                    xdg_state_home: Some(broad_root.clone().into_os_string()),
-                    home: None,
-                },
-            ),
-            (
-                "linux",
-                StateEnvironment {
-                    local_app_data: None,
-                    xdg_state_home: None,
-                    home: Some(broad_root.clone().into_os_string()),
-                },
-            ),
-            (
-                "linux",
-                StateEnvironment {
-                    local_app_data: Some(broad_root.clone().into_os_string()),
-                    xdg_state_home: None,
-                    home: None,
-                },
-            ),
-            (
-                "macos",
-                StateEnvironment {
-                    local_app_data: None,
-                    xdg_state_home: None,
-                    home: Some(broad_root.clone().into_os_string()),
-                },
-            ),
-            (
-                "windows",
-                StateEnvironment {
-                    local_app_data: Some(broad_root.clone().into_os_string()),
-                    xdg_state_home: None,
-                    home: None,
-                },
-            ),
-        ];
-        for (operating_system, environment) in cases {
-            assert_eq!(
-                resolve_state_directory(Some(&broad_state), operating_system, &environment),
-                Err(StateDirectoryError::Unsafe),
-                "forged {operating_system} environment root must fail closed"
-            );
-        }
-    }
-
     #[test]
     fn report_contract_is_schema_versioned_and_actionable() {
         let report = report("linux", "x86_64", &healthy_probes(CONTEXT_UNIX));
         assert_eq!(
             serde_json::to_value(report).expect("doctor report must serialize"),
             json!({
-                "schema": 1,
+                "schema": 2,
                 "ready": true,
                 "platform": {
                     "operating_system": "linux",
                     "architecture": "x86_64"
                 },
-                "state_directory": "/state/automata/local",
                 "requested_engine": "auto",
                 "selected_engine": {
                     "engine": "docker",

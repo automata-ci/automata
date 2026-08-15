@@ -19,16 +19,14 @@ use uuid::Uuid;
 const FAILURE_SENTINEL: &str = "FAKE_DOCKER_FAILURE_MUST_NOT_ESCAPE";
 
 #[test]
-fn failed_local_doctor_is_typed_actionable_json_and_does_not_create_state() {
+fn failed_local_doctor_is_typed_actionable_json_and_is_read_only() {
     let fixture = Fixture::new();
     let fake_bin = fixture.path().join("bin");
     fs::create_dir(&fake_bin).expect("create isolated executable directory");
     install_fake_docker(&fake_bin.join("docker"));
-    let state_directory = fixture.path().join("state");
 
     let output = Command::new(env!("CARGO_BIN_EXE_automata"))
-        .args(["local", "doctor", "--json", "--state-dir"])
-        .arg(&state_directory)
+        .args(["local", "doctor", "--json"])
         .env_clear()
         .env("PATH", &fake_bin)
         .env("HOME", fixture.path())
@@ -38,15 +36,10 @@ fn failed_local_doctor_is_typed_actionable_json_and_does_not_create_state() {
     assert!(!output.status.success());
     let report: Value =
         serde_json::from_slice(&output.stdout).expect("stdout must contain one JSON document");
-    assert_eq!(report["schema"], 1);
+    assert_eq!(report["schema"], 2);
     assert_eq!(report["ready"], false);
     assert!(report["selected_engine"].is_null());
-    assert_eq!(
-        report["state_directory"],
-        state_directory
-            .to_str()
-            .expect("fixture path must be Unicode")
-    );
+    assert!(report.get("state_directory").is_none());
 
     let issues = report["issues"]
         .as_array()
@@ -80,10 +73,6 @@ fn failed_local_doctor_is_typed_actionable_json_and_does_not_create_state() {
     );
     assert!(!stderr.contains(FAILURE_SENTINEL));
 
-    assert!(
-        !state_directory.exists(),
-        "the read-only preflight must not create its resolved state directory"
-    );
     let mut fixture_entries = fs::read_dir(fixture.path())
         .expect("read fixture root")
         .map(|entry| {
@@ -106,12 +95,10 @@ fn interrupted_local_doctor_terminates_every_probe_process_tree() {
     fs::create_dir(&fake_bin).expect("create isolated executable directory");
     fs::create_dir(&process_directory).expect("create process evidence directory");
     install_hanging_fake_docker(&fake_bin.join("docker"));
-    let state_directory = fixture.path().join("state");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_automata"));
     command
-        .args(["local", "doctor", "--json", "--state-dir"])
-        .arg(&state_directory)
+        .args(["local", "doctor", "--json"])
         .env_clear()
         .env("PATH", &fake_bin)
         .env("HOME", fixture.path())
@@ -139,10 +126,6 @@ fn interrupted_local_doctor_terminates_every_probe_process_tree() {
 
     wait_for_processes_to_exit(&probe_processes);
     cleanup.disarm();
-    assert!(
-        !state_directory.exists(),
-        "an interrupted preflight must not create its resolved state directory"
-    );
 }
 
 fn assert_issue(issues: &[Value], probe: &str, code: &str, message: &str) {

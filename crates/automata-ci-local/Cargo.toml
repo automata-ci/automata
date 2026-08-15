@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-local"
-description = "Cross-platform local installation lifecycle for Automata"
+description = "Cross-platform local installation support for Automata"
 publish.workspace = true
 readme = "README.md"
 keywords = ["ci", "github-actions", "local-development", "containers"]

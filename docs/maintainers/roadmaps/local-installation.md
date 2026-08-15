@@ -1,580 +1,960 @@
 # Local installation and deployment roadmap
 
-- Roadmap status: Planned
-- Available slice: read-only host preflight from a reviewed source checkout
-- Date: 2026-08-14
+- Roadmap status: Active
+- Available slice: read-only `automata local doctor` from a reviewed source checkout
+- Current implementation checkpoint: 2A, host-state retirement and reuse contract
+- Date: 2026-08-15
 
-This roadmap owns the work required to turn Automata into a product that a new
-user can run locally, connect to one GitHub repository, and later deploy using
-a production topology. Capability claims stay in
-[Compatibility](../../compatibility.md); this page records decisions, dependencies,
-merge checkpoints, and acceptance evidence.
+This roadmap owns the work required to make Automata easy to evaluate on one
+machine, optionally connect that installation to one GitHub repository, and then
+grow the tested deployment choices. Capability claims remain in
+[Compatibility](../../compatibility.md); this page records product decisions,
+reuse boundaries, merge checkpoints, and the evidence required to change those
+claims.
+
+The local product is an adapter around Automata's existing control plane and
+runner, not a second CI implementation. New local code may supply a source
+authority, a Docker sandbox provider, composition, and native credential-store
+adapters. It must not replace the existing workflow compiler, admission,
+scheduler, runner protocol, enrollment, result history, or secret-delivery
+model.
 
 ## Product outcome
 
-The first supported experience will run the complete control plane and `N`
-Linux workers on one machine. The host may be Arch Linux, Apple Silicon macOS,
-or Windows, but the quickstart jobs are Linux container jobs on every host.
-Native macOS and native Windows jobs remain separate, advanced execution
-profiles.
+The first supported experience starts the complete control plane and enough
+local execution capacity for `N` concurrent Linux jobs on Arch Linux, Apple
+Silicon macOS, or Windows x86-64. macOS and Windows use their Docker Desktop
+Linux engine. Native macOS and native Windows jobs remain separate advanced
+execution profiles.
 
-The final quickstart contract is:
+From an existing Git checkout containing a compatible workflow, the onboarding
+contract is:
 
 ```console
-automata local doctor
-automata local up --workers 3 --github OWNER/REPOSITORY
+cd my-repository
+automata local run
 ```
 
-`up` is a resumable operation. It may pause for browser confirmation while the
-user creates a private GitHub App, limits its installation to the requested
-repository, and signs in. It must never ask the user to edit JSON, copy numeric
-GitHub IDs, generate UUIDs, or create certificates by hand.
-
-The same flow also has an explicit split form:
+The optional workflow selector and concurrency flag are predictable:
 
 ```console
-automata local up --workers 3
-automata local github connect OWNER/REPOSITORY
+automata local run .github/workflows/ci.yml
+automata local run ci --workers 3
 ```
 
-The lifecycle surface will be:
+For the first topology, `--workers N` means `N` concurrent job slots on one
+ordinary runner identity. It maps to the runner's existing
+`max_parallel_jobs=N` capability instead of generating and enrolling `N`
+separate runners. A future advanced fleet-testing option may create several
+runner identities, but that is not part of first-run onboarding.
+
+On a new installation, omitting `--workers` selects one slot. On an existing
+installation, omitting it reuses the stored desired value. Supplying a different
+value is an explicit, validated desired-spec update and survives `down -> up`.
+
+`local run` will:
+
+1. discover the repository and build a bounded immutable snapshot of the
+   current worktree, including tracked modifications and non-ignored untracked
+   files, without changing the checkout;
+2. discover eligible workflows in that sealed snapshot, resolve the workflow
+   selector and event, then use the existing GitHub
+   Actions frontend and compiler to validate syntax, inputs, actions, reusable
+   workflows, runner selectors, and statically discoverable credential names
+   from those exact bytes;
+3. reconcile a deterministic Compose project containing the existing Automata
+   control plane, its dependencies, and one ordinary runner configured with the
+   requested parallelism;
+4. query the existing managed-secret provider for the compiler-discovered names
+   and prompt with echo disabled for missing supported user secrets;
+5. admit that same sealed snapshot through an explicit local source authority
+   into the existing admission, scheduling, runner, logging, and result path;
+6. stream progress and finish with the workflow's result status.
+
+Snapshot construction, compilation, credential discovery, and admission are
+one evidence chain: after the snapshot is sealed, no later step rereads workflow
+or reusable-workflow bytes from the live checkout.
+
+The first worktree run needs no GitHub App, browser, webhook, public hostname,
+or push. Optional GitHub connection comes later for authenticated remote refs,
+webhook-driven runs, Check Runs, and GitHub API authority.
+
+The workflow positional argument is optional. An exact eligible
+repository-relative path resolves directly. A filename, stem, or workflow
+display name is accepted only when it is unique. Interactive ambiguity opens a
+picker; non-interactive and JSON modes report the sorted choices and fail.
+
+Direct `.github/workflows/*.yml|yaml` and `.ci/workflows/*.yml|yaml` files are
+eligible; nested files are not initially. Supporting `.github/workflows` in the
+explicit local source adapter does not change the autonomous GitHub provider's
+discovery policy. Local compatibility also does not imply full GitHub Actions
+parity: unsupported syntax, actions, events, dynamic secret references, and
+runner selectors fail during read-only inspection.
+
+The first event set contains declared `workflow_dispatch` and a truthful local
+`push` context. A local event is never represented as a signed GitHub delivery,
+and it never produces a GitHub Check. `actions/checkout` resolves to the admitted
+snapshot; it does not silently fetch another revision or invent a
+`GITHUB_TOKEN`.
+
+The initial selector registry accepts `automata-local`, `ubuntu-24.04`, and a
+release-pinned `ubuntu-latest` alias. It records the exact local image, OS, and
+architecture. On Apple Silicon, substituting the ARM64 companion profile for an
+Ubuntu AMD64 alias requires explicit interactive confirmation or
+`--allow-architecture-substitution`; `automata-local` directly selects the
+host-native profile.
+
+## Command structure
+
+The target command surface keeps local lifecycle, runs, secrets, and optional
+integrations in distinct namespaces:
 
 ```console
+automata local doctor [--json]
+automata local check [WORKFLOW] [--event EVENT]
+  [--input NAME=VALUE]... [--json]
+automata local run [WORKFLOW] [--workers N] [--event EVENT]
+  [--input NAME=VALUE]... [--allow-architecture-substitution]
+  [--non-interactive] [--allow-missing-secrets] [--json]
+
+automata local init [--workers N]
+automata local up
 automata local status [--json]
-automata local logs [SERVICE] [--follow]
 automata local down
-automata local reset
+automata local reset [--yes]
+automata local services logs [SERVICE] [--follow]
+
+automata local runs list
+automata local runs view RUN
+automata local runs watch RUN
+automata local runs logs RUN [--job JOB]
+automata local runs cancel RUN
+
+automata local secret set NAME [--from-file PATH | --stdin]
+automata local secret list [--json]
+automata local secret delete NAME [--yes]
+
+automata local variable set NAME [--from-file PATH | --stdin]
+automata local variable list [--json]
+automata local variable delete NAME [--yes]
+
+automata local github connect [OWNER/REPOSITORY]
+automata local github status
+automata local github disconnect
 ```
 
-`down` preserves the installation and durable data. `reset` is destructive,
-requires confirmation, and removes only resources owned by the exact local
-installation.
+`local run` is the primary onboarding path and implicitly initializes and starts
+the stack when necessary. The explicit lifecycle commands are for inspection,
+recovery, and repeated use; their existence must not turn the quickstart into a
+manual assembly guide. `up` never prompts for a workflow, secret, browser, or
+GitHub connection.
+
+Every command that addresses an installation accepts the same
+`--installation NAME` selector. Host-only `doctor` and source-only `check` do
+not invent or select an installation. Any native cache location is an internal
+platform choice, not installation identity or a public lifecycle selector.
+JSON reserves stdout for one stable document and never prompts.
+Non-interactive execution never reads values from implicit environment
+variables or command arguments. Secret setters use hidden TTY input when no
+explicit input source is supplied; variables use ordinary TTY input.
+
+`down` removes the running, replaceable Compose topology without `--volumes` and
+preserves installation identity, desired spec, persistent service data, run
+history, and OS credentials. `reset` requires confirmation and removes those
+exact persistent resources as well. Neither command performs a global Docker
+prune or uninstalls an external GitHub App.
 
 ## Current baseline
 
-The source tree does not yet provide that experience. The existing paths have
-different purposes and cannot be combined into a cross-platform quickstart by
-changing documentation alone.
+The source tree has useful production components, but not yet the complete
+onboarding path:
 
-| Existing path | Evidence in the source tree | Why it is not the quickstart |
+| Existing path | Reusable capability | Remaining local gap |
 | --- | --- | --- |
-| `automata preview` | Starts the SSR interface and health endpoints without dependencies | It does not accept webhooks, schedule jobs, or run workers |
-| `deploy/dev/compose.yaml` | Starts PostgreSQL and RustFS | It does not start the control plane, initialize the bucket, or start workers |
-| Manual control-plane guide | Starts the complete server with hand-created keys and certificates | It is long, Unix-oriented, and contains values that must be reconciled manually |
-| Rootless Podman runner | Hardened Linux provider and three example identities | It needs dedicated users, delegated cgroups, subordinate IDs, exact tmpfs mounts, helpers, and host networking policy |
-| Native Windows runner | Trusted host-process provider | Durable enrollment rejects non-Unix hosts and `uses:` actions are unsupported |
-| macOS runner | Disposable macOS VM provider | It requires Apple Silicon, signed helpers, a sealed image, and dedicated quota-managed APFS storage |
-| GitHub provider | Strict provider registry accepted by the server | No App creation, installation discovery, or repository-connect command exists |
-| Distribution | Linux x86-64 release automation with publication guards | No public product release or cross-platform installer exists |
+| `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retires checkpoint 1's proposed native state-root input because installation identity will be engine-owned |
+| `deploy/dev/compose.yaml` | Pinned PostgreSQL and object-storage development dependencies with health checks | It does not compose the product control plane and runner |
+| Control-plane deployment guide and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
+| GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
+| Workflow service | Credential requirement discovery, admission, and orchestration boundaries | It needs local provenance as an additional source authority |
+| Runner and runner journal | Enrollment/redeem, mTLS protocol, durable slots, result delivery, `max_parallel_jobs` | There is no evaluation-only Docker Engine job provider |
+| Secret and key-management crates | Secret domain, versioned providers, envelope encryption, delivery, and masking | CLI credential custody is Linux-only and local prompting is absent |
+| Rootless Podman, macOS VM, and native Windows providers | Hardened production or advanced execution profiles | None is the portable Linux-container evaluation provider |
+| Release automation | Guarded Linux x86-64 release flow | Native CLI artifacts and multi-architecture images are not public |
 
-The first implemented slice is deliberately smaller: `automata local doctor`
-validates the initial host tuple, a local Linux Docker Engine, negotiated API
-and architecture agreement, Compose plugin version 2.20.0 or newer, a dedicated
-root strictly below the platform's user-state directories, and the Unix
-non-root process requirement. It is read-only and does not imply that `up` or
-workers are already available.
+`automata preview` remains a dependency-free SSR and health preview. It is not a
+local CI stack and must remain clearly separate from `automata local run`.
+
+## Reuse decisions
+
+The following decisions are constraints, not implementation suggestions. A PR
+that cannot reuse one of these paths must document the missing contract and
+improve the shared abstraction instead of creating a local duplicate.
+
+| Concern | Required reuse | Permitted local addition |
+| --- | --- | --- |
+| Operation identity | `automata_ci_core::OperationId` | Local provenance fields around the shared ID |
+| Service lifecycle | Docker Compose convergence, health, project labels, and engine inspection | A deterministic project specification and CLI supervisor |
+| Installation identity | A deterministic external Docker volume with immutable identity labels | Exact create/adopt inspection and engine-scoped serialization |
+| Desired specification | Canonical product configuration and Compose rendering contracts | One minimal value-free document in an engine-managed config volume |
+| Workflow syntax | `GithubWorkflowFrontend`, the existing compiler, typed input and reusable-workflow contracts | A source-policy adapter that admits local workflow locations |
+| Admission and orchestration | Existing workflow service, transaction boundary, scheduler, cancellation, and run history | An explicit `LocalSnapshot` authority and provenance |
+| Runner | Existing runner process, mTLS protocol, journal/spool, and `max_parallel_jobs` | Local runner configuration and a Docker sandbox provider |
+| Enrollment | Existing issuance and one-use redeem semantics | A private local bootstrap transport into the existing application service if one is missing |
+| Sandbox contract | Existing provider/executor interfaces, custody, output bounds, and results path | Evaluation-only `LocalDocker` implementation |
+| Secrets | Existing `SecretName`, `SecretValue`, `SecretProvider`, key-management, managed provider, delivery, and masking | Native OS credential adapters and guided CLI collection |
+| CLI credentials | Existing exact-schema Linux Secret Service custody | One portable port plus Keychain and Credential Manager adapters |
+| Logs and results | Existing stored run identities, log stream, conclusions, cancellation, and history | Local CLI presentation only |
+
+The following designs are explicitly rejected:
+
+- a local-specific operation ID type;
+- a second workflow parser, compiler, scheduler, result store, or cancellation
+  model;
+- a host manifest that mirrors every container, network, volume, Compose phase,
+  or Docker version;
+- an authoritative host installation manifest or host lifecycle journal;
+- using live containers as the only copy of desired parallelism or render
+  inputs needed after `down`;
+- an independent local lifecycle state machine layered over Compose;
+- a new `automata-runner run-local` protocol or local-only enrollment token;
+- one runner identity per requested job slot in the default topology;
+- a second durable workflow-secret provider or a second permanent encrypted
+  vault containing the same values; and
+- generated Compose topology that unnecessarily copies the checked-in
+  development dependency definitions.
 
 ## Accepted local architecture
 
-### One Linux container model on all hosts
+### Topology
 
-Every long-running local component runs in a generated Compose project:
+Every long-running service runs in one deterministic Compose project. The
+checked-in local Compose definition extends or reuses the existing dependency
+definition and is itself testable. Runtime rendering is limited to a small,
+value-free environment/configuration surface; it does not generate an
+unreviewable topology from scratch.
 
 ```text
-GitHub and browser
+local Git worktree
         |
- public HTTPS origin
-        |
- loopback-published local gateway
-        |
-   control plane -------- PostgreSQL
-        |                     |
-        +--------------- object storage
-        |
-  runner mTLS and private Results route
-        |
- worker-01 ... worker-N
-        |
- Docker Engine API
-        |
- sibling Linux job and service containers
+        v
+bounded immutable snapshot ---- LocalSnapshot authority
+                                      |
+                                      v
+                             existing workflow service
+                                      |
+                         existing scheduler and history
+                                      |
+        +-----------------------------+---------------------------+
+        | deterministic Compose project                           |
+        |                                                         |
+        | control plane ---- PostgreSQL ---- object storage       |
+        |       |                                                 |
+        |       +---- ordinary runner (max_parallel_jobs = N)     |
+        |                         |                               |
+        +-------------------------|-------------------------------+
+                                  v
+                         LocalDocker provider
+                                  |
+                         sibling job containers
+
+optional GitHub App/tunnel ---> existing signed-GitHub provider boundary
 ```
 
-Docker Engine is the initial supported engine on all three platforms. Arch
-uses Docker Engine directly; macOS and Windows use Docker Desktop's Linux
-engine. Podman may be added only after it passes the same provider and
-lifecycle conformance suite; it is not an automatic fallback in the supported
-quickstart.
+The control plane and runner continue to use their production protocols. Local
+composition does not bypass admission or call an executor directly from the
+CLI.
 
-Docker Desktop is third-party software with terms that vary by organization
-and use. The macOS and Windows gates must verify and disclose the then-current
-prerequisites and must not imply universal free-use eligibility. A future
-alternative engine enters the quickstart only through the same conformance and
-support gate.
+### Compose identity, desired spec, and realized topology
 
-The existing rootless Podman, Kubernetes, native Windows, and macOS VM
-providers retain their production or advanced contracts. The local path uses a
-separate evaluation-only container-engine provider instead of weakening any of
-those providers.
+The supervisor separates three kinds of state. An immutable external volume
+anchors installation identity. A persistent engine-managed config volume holds
+minimal desired intent. Compose and fresh Engine inspection are the live source
+of truth for realized resources and health. No host lifecycle journal mirrors
+any of them.
 
-Before public artifacts exist, the contributor lane builds a dedicated
-multi-stage local image from the reviewed checkout and records the source
-revision and image identity in state. The final reader quickstart replaces that
-development override with digest-pinned multi-architecture product images; it
-does not present an unpublished image name as downloadable.
+#### Immutable identity anchor
 
-### Workers and jobs
+A deterministic external named Docker volume is created once as the
+installation anchor. Its exact Automata-managed label allowlist contains the
+managed marker, identity schema, installation UUID, installation selector key,
+canonical repository binding, deterministic Compose project, and the anchor
+resource-kind discriminator. The selector key is an identifier, not
+cryptographic key material. Changing an identity field requires confirmed reset
+or an explicit migration; it is never an in-place update.
 
-`--workers N` generates `N` explicit, one-slot runner services. Each worker
-has a stable runner ID, certificate, journal, encrypted spool, configuration,
-and engine-managed state volume. Compose scaling is not used because replica
-ordinals are not a durable identity contract.
+Create and adoption require `Driver=local`, `Scope=local`, empty driver options,
+no host-bind option, and no container attachment. The supervisor always
+re-inspects after `volume create`, because that API may return a pre-existing
+name. It validates driver, scope, options, mount attachments, and managed labels
+before adopting the returned volume or creating any attached topology. The
+identity anchor itself is never mounted.
 
-The first successful `up --workers N` fixes the worker count for that named
-installation. Repeating the same value is idempotent; requesting another value
-fails with reset/recreate instructions until runner drain, disable, and delete
-operations exist. This avoids inventing scale-down semantics that the current
-control plane cannot enforce safely.
+Label comparison is exact only within Automata's reserved managed namespace.
+Every role has a required-and-allowed key set, and an unknown managed key fails
+closed. Engine- and Compose-owned labels outside that namespace are not mistaken
+for Automata ownership and do not cause whole-map equality checks. Standard
+Compose labels used for independent project discovery are validated separately.
 
-Worker containers use the host Docker Engine API to create sibling job and
-service containers. The worker is therefore engine-admin-equivalent. This is
-acceptable only for an explicitly local, trusted-repository evaluation mode.
-Job containers never receive the engine socket, control-plane credentials, or
-access to the Compose dependency network.
+#### Persistent desired specification
 
-The local provider must:
+A separate engine-managed config volume persists one schema-versioned,
+credential-value-free desired-spec document. It contains only the installation
+binding, requested `max_parallel_jobs`, exact local profile and architecture
+decision, image/render inputs, renderer version, and canonical plan digest
+needed to reconstruct the same stack after `down`. It contains no credential
+value, container or network ID, live phase, daemon version, or resource
+inventory.
 
-- require an explicit runner `run-local` boundary that production `run` does
-  not accept;
-- accept only a local Unix socket from inside the Linux worker container;
-- verify a Linux engine, API version, engine identity, and architecture;
-- use digest-pinned, preloaded images and pull-never execution;
-- label every resource with installation, runner, operation, generation,
-  profile, and specification identities;
-- verify labels and the realized resource policy before every mutation;
-- reject foreign name collisions without deleting or adopting them;
-- prohibit privileged jobs, host namespaces, host binds, devices, and the
-  engine socket inside jobs; and
-- clean exact owned resources without a global prune or broad label delete.
+The digest is computed from the canonical document with its digest field
+excluded, then read back and recomputed before rendering. A digest-pinned helper
+container with only the config volume mounted performs bounded decode, temporary
+write, file and directory synchronization, and atomic rename. The supervisor
+checks the helper by container ID, reads the committed document back through a
+fresh helper, and accepts the update only when its recomputed digest and
+installation binding agree. An interruption therefore leaves either the prior
+complete document or the next complete document, never a partial desired spec.
 
-Initial profiles are truthful local container profiles rather than aliases for
-the existing hardened rootless profile:
+Every persistent service volume carries only immutable Automata
+contract/identity/role labels: managed marker, contract and resource kind,
+installation UUID, selector key, project, and exact role. The identity anchor
+has the additional immutable schema and repository-binding labels described
+above. Persistent volume labels never carry a plan digest, so a plan update
+cannot make durable PostgreSQL, object, runner, or desired-spec data look
+foreign.
 
-- `automata.local/ubuntu-24-04-amd64-container-v1`
-- `automata.local/ubuntu-24-04-arm64-container-v1`
+#### Replaceable topology and `down`
 
-The ARM64 profile requires native ARM64 product, worker, job, and JavaScript
-action toolchain artifacts. Silent x86 emulation is not the supported macOS
-path.
+The canonical desired spec renders a checked-in Compose configuration. Its
+containers, networks, initialization helpers, and generated-config volumes are
+replaceable and carry the exact plan digest plus their role in the managed
+namespace. Reconciliation refuses a mixed-digest or unknown-role topology,
+replaces only resources whose ownership was proven, and inspects the result.
+Mutable parallelism, profile selection, image identity, and render inputs are
+therefore bound both to the durable desired document and to every replaceable
+resource that realizes that plan.
+
+`down` holds the engine lock, validates the identity, desired document, and
+discovered resource union, then runs exact-project Compose teardown without
+`--volumes`. It removes any separately managed replaceable generated-config
+volume after proving its digest and lack of foreign attachment. It preserves the
+identity anchor, desired-spec volume, PostgreSQL/object/runner persistent
+volumes, and OS-held key material. `up` later reads and verifies the stored
+desired document, renders its digest-bound topology, and reconciles it. Thus
+`down -> up` retains `N`, profile, render inputs, data, and run history without a
+host manifest.
+
+#### Engine-scoped mutation lock
+
+Every initialize, desired-spec update, up, down, reset, and ordinary
+reconciliation mutation holds one deterministic engine lock container. The
+lock uses an exact inert
+configuration: digest-pinned helper image and fixed lock-holder command,
+non-root user, read-only root, `network=none`, all capabilities dropped,
+no-new-privileges, `restart=no`, auto-remove disabled, and no mount, device,
+port, secret, credential, or user-supplied environment. Before starting it, the
+manager attaches the helper's sole stdin stream. The fixed helper command reads
+until EOF and then exits; it has no wall-clock or heartbeat lease that could
+expire while an old Compose request is still mutating the daemon. A paused or
+hung manager therefore retains a live lock and reports busy rather than
+creating a second writer. Its managed labels contain only the lock role,
+installation key, installation UUID, Compose project, and core operation ID
+allowed for that role. The retained immutable container ID is the holder token;
+there is no second local operation-identity type.
+
+Successful creation is followed by exact inspection and retention of the
+returned container ID. On graceful release, the manager first waits for every
+mutation and child process to settle, closes stdin, waits for the helper to
+stop, re-inspects the same ID, and removes it by ID, never by name. Unexpected
+holder-stream loss makes the manager cancel its child process and stop issuing
+requests, but it does not assert that an already accepted daemon operation was
+retracted. The stopped exact-ID container remains as sticky
+interrupted-operation evidence and automatic acquisition never deletes it. A
+colliding live holder reports busy; a stopped holder reports recovery required.
+The exceptional lock-recovery path must establish positive engine/process
+quiescence and receive explicit operator authorization before removing that
+exact ID. Unknown configuration or indeterminate liveness fails closed; elapsed
+time alone never authorizes lock deletion.
+
+#### Exact reset
+
+Reset runs under that lock and uses this ordered transaction:
+
+1. discover the union of deterministic names, exact Compose-project resources,
+   all resources with the installation's managed labels, volume/network
+   attachments, the desired-spec and identity volumes, and the lock ID;
+2. prevalidate every candidate's role-specific managed-label allowlist,
+   identity, digest where replaceable, driver/options where a volume, realized
+   configuration, and attachment graph, plus the exact OS credential selectors
+   and credential-store availability; any unknown, foreign, or indeterminate
+   candidate stops before the first mutation;
+3. tear down the exact replaceable topology, then exact persistent service and
+   desired-spec volumes, re-inspecting after each bounded phase while preserving
+   the identity anchor and lock;
+4. delete the installation's exact OS credential/key entries; an indeterminate
+   result preserves the identity anchor and lock for explicit recovery;
+5. rediscover, require that only the validated identity anchor and lock remain,
+   then remove the re-inspected identity anchor last among installation data;
+6. re-inspect and release the exact retained lock ID last; and
+7. immediately rediscover by deterministic names, Compose project, and managed
+   labels and requery the exact credential selectors, reporting any residue or
+   concurrently created installation rather than claiming success.
+
+No reset path trusts resource IDs from a host file, deletes by broad label
+query, removes a caller-supplied directory, or uses a global prune.
+
+### Workers and job sandboxes
+
+The local stack starts one normal Automata runner with
+`max_parallel_jobs=--workers`. The runner uses its existing stable slot journal,
+spool, enrollment, mTLS, scheduling, cancellation, and result paths. Existing
+issuance and redeem semantics create its identity; local setup may add a private
+bootstrap transport, but not a second enrollment authority.
+
+`LocalDocker` is a genuinely new, evaluation-only implementation of the
+existing sandbox/provider interfaces. It creates sibling Linux job and service
+containers through the host engine. The runner container is therefore
+engine-admin-equivalent, which is acceptable only for an explicitly local,
+trusted-repository evaluation mode.
+
+The provider must:
+
+- validate a Linux Docker Engine, negotiated API, engine identity, and
+  architecture;
+- use digest-pinned images for released profiles;
+- label each job resource with installation, runner, operation, slot, profile,
+  and specification identity;
+- inspect the realized configuration before attach, mutation, or destroy;
+- reject foreign name or label collisions without adoption or deletion;
+- prohibit privileged jobs, host namespaces, devices, arbitrary host binds,
+  and the Docker socket inside jobs;
+- keep jobs off the control-plane dependency network; and
+- clean exact owned resources without a global prune.
+
+The initial truthful profiles are
+`automata.local/ubuntu-24-04-amd64-container-v1` and
+`automata.local/ubuntu-24-04-arm64-container-v1`. The local selector registry
+maps aliases to those exact profiles and records the mapping as run provenance.
+
+### Local worktree source
+
+The new source boundary builds a deterministic, bounded archive from Git's
+tracked and non-ignored worktree inventory. It rejects unsafe file types,
+escaping symlinks, submodule ambiguity, case collisions, and concurrent
+mutation. The archive digest—not a possibly dirty HEAD—is the execution source
+identity. HEAD, dirty state, repository identity, selected workflow, inputs,
+and architecture decisions remain explicit provenance.
+
+`LocalSnapshot` is a distinct admission authority accepted only in the local
+deployment context. It parameterizes source location and archive policy around
+the existing workflow frontend/compiler and then enters the existing workflow
+service. It cannot create signed-GitHub evidence, publish a Check Run, or enter
+the autonomous provider inbox.
+
+Jobs receive a copy of the admitted immutable snapshot, never a writable host
+bind. Workflows that require GitHub API authority fail with an actionable
+instruction to connect GitHub or configure a separately supported credential.
+
+### Internal native cache and secrets
+
+The implementation may use a platform-standard native directory for a
+process-local coordinator lock, discardable inspection cache, or redacted
+diagnostic evidence. That path is internal and is not accepted as a public
+installation selector. Deleting it cannot create, adopt, lose, rebind, or reset
+an installation. Installation identity comes from the immutable external volume
+labels, desired intent comes from the digest-bound config-volume document, and
+live state comes from inspected Compose topology.
+
+If a later implementation genuinely needs a crash-safe host document, that
+cross-cutting contract is designed separately after auditing the runner
+journal, spool, CLI receipts, and provider persistence; none is treated as a
+safe drop-in abstraction for another domain. Service data, certificates, and
+server key material remain in exact engine volumes. Native filesystem code does
+not recursively manage a parallel copy of the stack.
+
+The existing managed-secret provider is the single durable runtime source of
+truth for workflow secrets. Existing secret types, envelope encryption,
+versioning, runner delivery, and masking remain unchanged. Local work adds:
+
+- value-free comparison of compiler-discovered names with provider metadata;
+- hidden, bounded, zeroizing interactive collection after workflow validation;
+- an authenticated local-manager call to create or replace the existing
+  provider version;
+- a portable OS credential-store port based on the current Linux Secret Service
+  implementation, with macOS Keychain and Windows Credential Manager adapters;
+  and
+- exact OS records for the local-manager credential and any small installation
+  root required to unlock server bootstrap material.
+
+Workflow values are not duplicated permanently in the OS credential manager or
+a second local vault. This avoids Windows item-size limits and competing sources
+of truth. The OS store protects bounded bootstrap/session material; PostgreSQL's
+existing encrypted provider protects workflow values.
+
+Before prompting, `local run` completes value-free workflow validation. For an
+existing stack it queries provider metadata and prompts only for absent supported
+names in sorted order. For a new stack it may collect statically referenced
+values into bounded zeroizing memory, then creates the installation and writes
+them directly into the provider before admission. Cancellation drops those
+buffers. If reconciliation fails, no plaintext recovery file is created.
+
+Built-in credentials such as `GITHUB_TOKEN` are classified separately and are
+never prompted as ordinary repository secrets. Non-interactive and JSON modes
+fail with missing names and exact `automata local secret set NAME --stdin`
+recovery commands unless `--allow-missing-secrets` is explicit. Generated
+Compose YAML, argv, status, debug output, and evidence contain references or
+redacted values only.
 
 ### Network boundary
 
-Only the human UI, OAuth callbacks, setup callbacks, and GitHub webhook route
-are reachable through the public HTTPS origin. PostgreSQL, object storage,
-Results, runner mTLS, and the Docker socket are never tunneled.
+The human UI and local-manager API bind to loopback. PostgreSQL, object storage,
+runner mTLS, Results, and the Docker socket are private to exact Compose
+networks or mounts. Job containers use a separate network and reach Results
+through an exact gateway/proxy; they cannot join the dependency network.
 
-The control plane and dependencies use a generated private Compose network.
-Current server validation accepts plaintext database and object-store endpoints
-only at literal loopback, while a containerized server sees those dependencies
-at private addresses. A single hidden local-container deployment context will
-allow only a complete, generated RFC1918 tuple and will leave standard server
-validation unchanged. Independent `allow private` flags are not part of the
-design.
+An optional public HTTPS origin is added only for GitHub connection. Its
+gateway exposes the minimum human callback, setup, and webhook routes. A tunnel
+provider must preserve webhook bytes and headers, persist its origin across
+restart, and keep local-manager and dependency routes private.
 
-Job containers use a separate job network. They reach Results through an exact
-local gateway alias or a narrowly scoped private proxy; they do not join the
-control-plane network. This route must pass live tests independently on Docker
-Engine, Docker Desktop for macOS, and Docker Desktop for Windows.
+### Engine and Docker Desktop trust
 
-The tunnel is a pluggable boundary with a managed evaluation default and an
-escape hatch for a user-supplied HTTPS origin. The chosen default must preserve
-webhook method, headers, and bytes; redact credentials; and resume the exact
-persisted hostname across `down -> up`, sleep, and reboot on all three hosts.
-App creation is blocked unless that stability contract is available. Ephemeral
-origins are not a supported recovery mode because callback/setup URLs and old
-Check Details links cannot all be repaired through the webhook API; replacing
-an origin requires a separately tested complete App and configuration migration.
+The active Docker context and daemon are part of installation scope. Doctor,
+status, and every mutation report the selected context and verified engine
+identity; an installation on another context is not silently adopted. A new
+installation plan names the active context before creating its anchor. Context
+switching can therefore make an installation appear absent until the operator
+returns to its daemon, and the documentation treats context migration as a
+separate export/restore operation rather than name reuse.
 
-### State and secrets
+Anyone authorized to control that daemon is trusted as an installation
+administrator. Docker access can mount or delete volumes, alter labels, inspect
+containers, and bypass CLI ownership checks; labels and the engine lock prevent
+accidents and cross-installation cleanup, not a malicious engine-authorized
+user. Repositories run locally must also be trusted because the runner itself
+has engine-administrator authority even though job containers do not.
 
-The local supervisor owns a named installation below the native platform state
-root:
+On Docker Desktop, named volumes live inside the Desktop Linux VM. Qualification
+must prove persistence across `down`, ordinary Desktop restart, host sleep, and
+host reboot on the tested version. It cannot promise survival across factory
+reset, uninstall, destructive Docker cleanup, VM-disk loss, or manual daemon
+mutation; those operations can destroy installation identity, desired spec,
+database, object, and runner volumes. The local stack is not a backup, and docs
+must identify export/backup needs before those operations.
 
-| Host | Default state root |
-| --- | --- |
-| Linux | `${XDG_STATE_HOME:-$HOME/.local/state}/automata/local` |
-| macOS | `$HOME/Library/Application Support/Automata/local` |
-| Windows | `%LOCALAPPDATA%\Automata\local` |
-
-The state manifest is schema-versioned and records only non-secret identities:
-installation UUID, project name, engine identity, architecture, ports,
-network, image digests, desired worker count, public origin, GitHub connection
-revision, and lifecycle state. Every mutation takes a cross-platform advisory
-lock and writes state atomically.
-
-Secrets and Linux permission-sensitive runner material live in
-engine-managed volumes. Generated Compose YAML, process arguments, status JSON,
-logs, debug representations, and evidence bundles contain references or
-redacted values, never plaintext credentials. `reset` validates an exact
-installation marker and resource inventory before removing volumes. It does
-not uninstall or delete the external GitHub App silently.
-
-The caller-supplied state root must be a strict descendant of the current
-platform home, profile, or user-state directory. It is a container for named
-installations and is never itself recursively removed. Before host-file
-deletion, the manager rejects
-filesystem, drive, and share roots; home/profile roots and their ancestors;
-lexical parent traversal; Unix symlink components; and Windows junction or
-reparse components. It performs handle-anchored deletion only beneath the exact
-marked installation child and revalidates containment at each traversal step.
-
-Visible lifecycle states include `services_ready`, `awaiting_github`,
-`app_installed`, `authenticated`, `enrolling_workers`, `ready`, and `degraded`.
-An interrupted operation resumes from durable evidence instead of starting a
-second installation.
-
-## GitHub repository connection
-
-The GitHub App Manifest flow is the target setup path. The implementation will
-verify its exact permission and callback contract against GitHub's current
-official documentation when that checkpoint begins. The provisional minimum is
-`push`, `pull_request`, `merge_group`, and `repository_dispatch` events with
-Checks write, Contents read, Pull requests read, and Merge queues read. A
-webhook-only relay is insufficient because the dashboard and GitHub Check
-Details URL need the same public HTTPS origin.
-
-The resumable connect operation will:
-
-1. start or attach the public HTTPS origin;
-2. resolve `OWNER` through a bounded GitHub account lookup, retain its numeric
-   identity and `User`/`Organization` type, and choose the corresponding personal
-   or organization App Manifest endpoint without attempting to infer private
-   repository visibility;
-3. open the App Manifest flow with single-use, time-bounded local state and fail
-   actionably if the browser identity lacks App-manager authority;
-4. exchange the temporary manifest code and store the returned App key, App and
-   client IDs, webhook secret, and OAuth client secret in private state;
-5. open the new App's installation URL with `request_oauth_on_install=false`
-   and ask the user to select the exact repository;
-6. capture the exact HMAC-verified `installation` event, bind its sender as the
-   installer identity, and fail actionably when repository-install authority is
-   absent;
-7. verify the completed installation with an App JWT and a short-lived token
-   rather than trusting an `installation_id` query parameter, then discard that
-   token;
-8. list accessible repositories and select only the requested owner/name;
-9. discover canonical owner, repository, installation, visibility, and default
-   branch data;
-10. cross-check the signed event sender's stable numeric ID and login through a
-    bounded GitHub account lookup without asking the user to copy either value;
-11. generate connection UUIDs, authority revisions, the one-use installation
-   bootstrap tuple, human-auth configuration, and the strict provider registry;
-12. validate generated configuration through the production decoders before an
-    atomic install and control-plane reload or restart;
-13. open the anonymous `/setup` bootstrap, have the configured identity finish
-    its one permitted setup, and verify the first administrator browser session;
-14. use a new browser-approved, local-only handoff to authorize `N` one-use
-    runner enrollment credentials without depending on Linux Secret Service or
-    persisting a CLI bearer on macOS or Windows; and
-15. enroll/start the requested workers and report the dashboard and readiness
-    URLs.
-
-The current runner-token API accepts only CLI-audience sessions, and the
-operator CLI has no Windows credential-custody implementation. The local
-browser-to-manager handoff is therefore product work with its own single-use
-state, origin binding, CSRF protection, expiry, replay rejection, and secret
-redaction tests; ordinary browser login cannot be substituted for it.
-
-Reconnect is idempotent. Stable semantics reuse identities; changed policy or
-credentials increment the relevant revision. A multi-repository App
-installation never widens the local repository registry beyond the exact
-repository requested by the user.
-
-The quickstart warns that this local engine-admin mode is for repositories the
-operator trusts. The connect checkpoint adds an exact local admission rule that
-rejects a pull request whose head repository differs from its base repository;
-restricting fork credentials alone does not disable fork execution.
-
-The smoke repository contract is intentionally small and observable:
-
-- workflows are direct lowercase `.yml` or `.yaml` files under
-  `.ci/workflows/`;
-- no `.github/workflows/` copy exists that would also run on native GitHub
-  Actions;
-- `runs-on: automata-local` selects the host-native local profile without
-  redefining GitHub's `ubuntu-24.04` architecture semantics;
-- a three-entry matrix demonstrates three workers concurrently; and
-- `push`, `pull_request`, `merge_group`, and `repository_dispatch` live evidence
-  is added only when each event has an asserted product test.
+macOS and Windows commands require Docker Desktop's Linux engine. Windows
+preflight additionally verifies Linux-container/WSL2 mode and fails before
+anchor or lock creation when the daemon reports Windows containers. The current
+context, volume driver/scope behavior, Desktop persistence boundary, and
+factory-reset limitation are clean-host qualification evidence, not assumptions.
 
 ## Platform qualification matrix
 
-The initial qualified host tuples are Arch Linux x86-64, Apple Silicon macOS
-ARM64, and Windows x86-64. Preflight rejects Intel macOS and Windows on ARM for
-the supported quickstart; adding either requires native artifacts and its own
-clean-host evidence rather than merely passing Docker API inspection.
+The first host tuples are Arch Linux x86-64, Apple Silicon macOS ARM64, and
+Windows x86-64. Intel macOS and Windows ARM are unsupported until native
+artifacts and clean-host evidence exist.
 
-| Gate | Arch Linux | Apple Silicon macOS | Windows |
+| Gate | Arch Linux | Apple Silicon macOS | Windows x86-64 |
 | --- | --- | --- | --- |
-| Host engine | Docker Engine | Docker Desktop Linux engine | Docker Desktop/WSL2 Linux engine |
-| Worker/job architecture | `linux/amd64` | `linux/arm64` | `linux/amd64` |
-| Orchestrator | Native `automata` | Native `automata` | Native `automata.exe` from PowerShell |
-| Durable sensitive state | Engine-managed volumes | Engine-managed volumes | Engine-managed volumes |
-| Host-specific proof | engine/socket ownership, restart, cleanup | paths with spaces, host gateway, sleep/reboot, native ARM64 | Linux-container mode, drive/path handling, CRLF, shutdown/reboot |
-| Job claim | Linux containers | Linux containers, not native macOS jobs | Linux containers, not native Windows jobs |
+| Engine | Docker Engine | Docker Desktop Linux engine | Docker Desktop/WSL2 Linux engine |
+| Job architecture | `linux/amd64` | `linux/arm64` | `linux/amd64` |
+| CLI | Native `automata` | Native ARM64 `automata` | Native `automata.exe` from PowerShell |
+| Workflow secret storage | Existing encrypted managed provider | Existing encrypted managed provider | Existing encrypted managed provider |
+| CLI credential custody | Secret Service | Keychain | Credential Manager |
+| Host-specific evidence | socket ownership, restart, exact teardown | paths with spaces, sleep/reboot, host gateway | Linux-container mode, path/drive handling, CRLF, shutdown/reboot |
+| Job claim | Linux containers | Linux containers, not native macOS | Linux containers, not native Windows |
 
-A platform is qualified only after a clean host can:
+Docker Desktop is third-party software whose terms vary by organization and
+use. macOS and Windows documentation must verify and disclose the current
+prerequisites and must not imply universal free eligibility. Another engine may
+join the quickstart only after the same lifecycle, provider, networking, and
+clean-host gates pass.
 
-- run the documented command without hand-editing JSON, certificates, UUIDs,
-  revisions, or numeric GitHub IDs;
-- complete only the expected browser confirmations for App creation,
-  repository installation, and login;
-- produce a useful and redacted `status --json` document;
-- run three matrix jobs concurrently on three distinct runner identities;
-- show live logs, final results, and the exact GitHub Check Details page;
-- recover from one worker crash and a complete stack restart;
-- preserve data across `down` and remove only exact owned state on confirmed
-  `reset`; and
-- keep App keys, source credentials, webhook secrets, and enrollment tokens out
-  of command lines, logs, non-secret configuration, and test evidence.
+A platform is qualified only when a clean host can:
+
+- complete a first workflow with `automata local run` and no manual JSON,
+  certificate, UUID, numeric ID, browser, or public ingress steps;
+- run a common `.github/workflows` workflow through the existing compiler,
+  scheduler, runner, and result store without editing or copying it;
+- prompt once for an absent referenced secret, keep it masked, and reuse the
+  existing managed-provider version without prompting on the next run;
+- overlap three matrix jobs with `--workers 3` and show the runner's three
+  existing execution slots;
+- stream logs, expose durable history, and distinguish infrastructure failure
+  from workflow conclusion;
+- recover from a runner crash and complete stack restart;
+- preserve desired `N`, profile, render inputs, and data across `down`, Desktop
+  restart where applicable, and host reboot;
+- expose the active context and documented factory-reset/data-loss boundary; and
+- remove only exact owned state on confirmed `reset`.
 
 ## Merge checkpoints
 
-Each checkpoint uses a sibling worktree created from the latest merged
-`origin/main`. A dependent checkpoint starts only after its predecessor merges.
-Every PR states its contract, security impact, non-goals, tests, and live
-evidence; it does not depend on issue linkage.
+Each checkpoint uses a sibling worktree from the latest merged `origin/main`.
+Dependent work starts only after its predecessor merges. Every PR states its
+contract, reused production surfaces, new trust boundary, non-goals, tests, and
+live evidence. GitHub issues are not planning authority for this roadmap.
 
-### 1. Local host foundation and accepted design
+The order intentionally reaches an Arch end-to-end workflow early. Platform
+polish, optional GitHub connection, and production deployment guides follow a
+working local vertical slice.
 
-Add the dedicated local lifecycle crate, the `automata local doctor`
-command, platform state-root policy, Docker/Compose discovery, stable JSON
-preflight output, this roadmap, and CLI contract tests.
+### 1. Host preflight and accepted direction
 
-Gate: Linux tests and a live Arch preflight pass; Windows x86-64 and Apple
-Silicon targets cross-check; Docker Desktop fixtures cover both endpoint forms;
-unsafe broad state roots are rejected; preflight makes no state or container
-changes; and the normal operator CLI cannot route `local` as a remote command.
+Checkpoint 1 originally added `automata local doctor`, host/engine/Compose
+discovery, a proposed platform state-root policy, stable read-only JSON, and
+cross-target contract tests.
 
-### 2. Durable lifecycle and state kernel
+Gate at merge time: live Arch preflight passes; Apple and Windows targets
+cross-check with warnings denied; proposed unsafe state roots and incompatible
+engines fail actionably; and preflight creates no file, credential, or engine
+resource.
 
-Add the versioned installation manifest, transition state machine, advisory
-locking, atomic writes, exact resource inventory, backend trait, and anchored
-filesystem ownership/deletion primitives. Keep this internal and exercise it
-with a fake backend; do not advertise `up` before a real stack exists.
+Status: available. Host, Docker, Compose, and architecture behavior remains
+useful and is retained. Checkpoint 2A removes public state-root resolution and
+its readiness gate because installation identity will be engine-owned and any
+optional native cache will be internal and discardable.
 
-Gate: interruption and concurrent-manager tests preserve one installation;
-filesystem roots, drive or share roots, home/profile roots, ancestors, and
-caller-supplied state roots themselves are never deletion targets; Unix
-symlinks and Windows junctions/reparse points fail closed; all recursive work is
-handle-anchored beneath the exact marked installation child; and adversarial
-Linux, macOS, and Windows fixtures prove that `reset` cannot escape it.
+### 2A. Retire host lifecycle state and freeze the reuse boundary
 
-### 3. Durable zero-worker service composition
+Remove checkpoint 1's unused public state-root option and JSON field before any
+mutating local command depends on them. Record the reuse-first architecture and
+delete the draft host installation manifest, mirrored resource inventory,
+local-specific operation ID, broad lifecycle state machine, and duplicated
+platform filesystem framework. Do not publish an engine label schema or
+repository-binding algorithm until a real adapter consumes and
+integration-tests it. Do not extract the runner journal into a premature
+generic state library: journal, spool, CLI receipt, provider, and installation
+identity have different custody and recovery contracts.
 
-Add `up`, `status`, `logs`, `down`, and `reset`; generated configuration; random
-keys and certificates; Compose rendering; the scoped local-container server
-policy; a multi-stage source-checkout image; health waits; idempotent RustFS
-bucket creation; and interruption recovery. Stop in `awaiting_github` with zero
-workers.
+This checkpoint changes only the read-only preflight and the accepted design
+direction. It does not create, inspect, adopt, or delete engine resources and
+does not claim that `local up` is available.
 
-Gate: repeated `up` is idempotent, `down` preserves data, confirmed `reset`
-revalidates exact state and resource ownership, no secret reaches arguments or
-generated YAML, dependency failures become actionable degraded states, and
-`up -> down -> up -> reset` passes live on Arch.
+Gate: `local doctor` rejects the removed `--state-dir` option, JSON schema 2 has
+no state path or state-path issue codes, preflight creates no host or engine
+state, all reader-facing docs agree, and the focused native and package-scoped
+cross-target checks pass. The diff contains no unconsumed engine identity API,
+host lifecycle journal, or new platform filesystem substrate.
 
-### 4. Local container-engine sandbox provider
+### 2B. Engine identity and desired-spec adapter
 
-Add a separate Docker Engine API provider, fake-daemon contract tests, exact
-resource ownership, exec/copy/attach/cancel/destroy behavior, resource
-inspection, the truthful AMD64 local profile, and an ignored live Docker suite.
+Add the first Docker Engine adapter together with the contracts it consumes.
+Define deterministic Compose project identity; a strictly inspected external
+identity anchor; exact role-specific managed-label allowlists; and the atomic,
+digest-bound desired-spec document in an engine config volume. Persistent
+volumes carry immutable identity-only labels while replaceable resources carry
+the rendered plan digest. Compose and fresh engine inspection are resource
+truth; no host manifest mirrors them.
 
-Gate: restart attach works, cancellation kills exact owned containers,
-foreign collisions fail without mutation, copy and output bounds fail closed,
-and destroy leaves no owned job resources.
+Before assigning contract version 1 or creating a volume, define the exact
+versioned byte preimage for repository identity, including Git worktrees,
+symlinks, non-Unicode paths, case behavior, checkout moves, and clones on Linux,
+macOS, and Windows. The adapter, not an arbitrary digest wrapper, constructs
+that binding. Likewise, parsing a resource requires the exact expected role
+from the checked-in rendered plan; a merely well-formed unknown role is not
+owned.
 
-### 5. Stable public-origin boundary
+Gate: create and adoption always post-inspect local driver/scope, empty options,
+no bind, exact managed-label allowlist, and no attachments; foreign name/key,
+repository, role, project, or truncated-name collisions fail without mutation;
+the helper atomically commits and verifies a bounded value-free desired
+document; `N`, profile, and render inputs reconstruct the same digest after an
+adapter restart with no realized topology; and fake-daemon plus ignored
+live-Docker tests exercise the public adapter rather than value objects in
+isolation.
 
-Add the local HTTP gateway, persisted public-origin state, user-supplied origin
-support, a fake tunnel for tests, and one evaluated default tunnel after its
+### 2C. Convergent Compose lifecycle and exact reset
+
+Add checked-in value-free rendering, persistent identity-only volume labels,
+digest-labeled replaceable topology, the inert ID-held engine lock, union
+discovery, `up`, `status`, `down`, and exact reset. The command layer remains
+private until these operations are convergent and their destructive boundary is
+proven.
+
+Gate: persistent volumes never carry a mutable plan digest; every replaceable
+resource carries the current digest; unknown managed keys, unexpected roles,
+and mixed digests fail closed. Concurrent mutation tests prove graceful
+ID-based release only after child quiescence, busy-live behavior,
+manager-crash/EOF retention as a stopped recovery-required record, cancellation
+on holder-stream loss, and no automatic or age-based stale deletion. Reset tests
+prove all-before-any validation, ordered topology and OS-credential deletion,
+anchor-last, lock-last, and immediate reinspection. Deleting an optional host
+cache cannot affect installation identity or recovery. `down -> up` preserves
+the desired `N`, profile, render inputs, data, and run history.
+
+### 3A. `LocalDocker` provider
+
+Implement the evaluation-only Docker Engine provider behind the existing
+sandbox/provider interfaces. Reuse executor requests, operation identity,
+runner custody, copy/exec/attach/output bounds, cancellation, and result
+delivery. Add fake-daemon conformance and an ignored live Docker suite.
+
+Gate: shell and JavaScript-action sandboxes execute; restart attach and exact
+cancellation work; realized configuration is inspected; foreign collisions
+fail without mutation; prohibited privilege, namespace, bind, device, socket,
+and network requests fail closed; output/copy bounds hold; and destroy leaves no
+owned job resources.
+
+### 3B. `LocalSnapshot` source adapter
+
+Add bounded Git worktree snapshotting and a provider-distinct local source
+authority. Parameterize source location/archive loading around the existing
+GitHub Actions frontend and compiler. Feed compiled requests into the existing
+workflow service, admission transaction, scheduler, cancellation, logs, and
+history. Add `automata local check` as a read-only view of that path.
+
+Gate: clean and dirty worktrees produce deterministic digests; ignored files,
+`.git`, sockets, devices, escaping symlinks, submodule ambiguity, concurrent
+mutation, oversized archives, and case collisions fail closed; direct
+`.github/workflows` and `.ci/workflows` files and admitted same-tree reusable
+workflows use the existing compiler; no source operation mutates Git; and no
+local subject can enter signed-GitHub admission or create a GitHub Check.
+
+### 3C. Arch secretless vertical slice
+
+Extend/reuse the checked-in dependency Compose definition with the control
+plane, initialization service, and one ordinary runner. Use existing enrollment
+issuance/redeem and configure `max_parallel_jobs=N`. Wire `LocalDocker` and
+`LocalSnapshot` through the production pipeline. Expose the smallest complete
+`automata local run`, `status`, `down`, reset, infrastructure logs, and run
+history needed to operate the slice. Start with workflows requiring no user
+secrets.
+
+Gate: from a clean Arch state, `cd fixture && automata local run` completes a
+common `ubuntu-latest` shell and JavaScript-action workflow without GitHub, a
+browser, or public ingress; `--workers 3` overlaps a three-entry matrix on the
+existing runner's three slots; the engine config volume retains the canonical
+desired digest while Compose is realized-resource truth; repeated run/up is
+convergent; down removes replaceable topology and up restores the same
+three-slot/profile plan; Ctrl-C, explicit cancellation, runner restart, exact
+reset, and the positively fenced interrupted-lock recovery path work; and the
+CLI never bypasses admission or invokes the provider directly.
+
+This is the first checkpoint allowed to describe local execution as available
+to contributors.
+
+### 4A. Portable CLI credential custody
+
+Extract the existing Linux Secret Service implementation behind one bounded
+credential-store port and add native macOS Keychain and Windows Credential
+Manager adapters. Define exact-match schemas for local-manager credentials and
+small installation bootstrap roots only.
+
+Gate: native tests or faithful platform fixtures prove exact create, load,
+replace, and delete; ambiguous entries and locked/unavailable stores fail
+closed; bytes never enter argv, implicit environment variables, debug output,
+or evidence; helper cancellation is bounded; and a missing root never causes
+silent regeneration.
+
+### 4B. Existing-provider secret onboarding
+
+Add value-free comparison of compiler-discovered credential requirements with
+the existing managed-provider metadata, hidden first-run collection, direct
+create/replace through the existing provider API, and the local secret/variable
+commands. Reuse existing envelope encryption, versioning, runner delivery,
+masking, and deletion. Do not add a second durable vault or local provider
+protocol.
+
+Gate: a first referenced user secret prompts once after workflow validation,
+remains in bounded zeroizing memory, reaches the existing provider, and is
+masked through all log/output variants; the second run does not prompt;
+canceled collection creates no plaintext recovery state; non-interactive and
+JSON modes fail with names and exact stdin recovery commands; list/status are
+value-free; variables remain separate; replacement, deletion, restart, and
+reset use existing provider semantics.
+
+### 4C. Conditional cross-domain host-state consolidation
+
+After the Arch vertical slice, audit runner journal, runner spool, CLI credential
+receipts, provider persistence, and any residual local host files as separate
+security domains. Only if at least two have the same durability, confidentiality,
+locking, descriptor, and recovery contract should a dedicated foundational PR
+extract a shared primitive. This work is separate from the local supervisor and
+must not block it merely to create an abstraction.
+
+Gate, when the checkpoint is needed: the audit states which contracts are
+identical and which must remain separate; callers retain their domain schemas
+and fault semantics; native Linux, macOS, and Windows tests exercise the shared
+lowest-level behavior; migration is explicit; and no secret-bearing spool or
+journal becomes readable through a weaker local-installation API. If the audit
+finds no honest common contract, record that decision and do not add a library.
+
+### 5. Arch local-first qualification
+
+Confirm or create the designated dummy repository under `AlexanderDzhoganov`,
+then test its local checkout without installing a GitHub App. Commit a redacted,
+executable smoke harness and evidence format covering `.github/workflows`,
+`.ci/workflows`, typed inputs, a user secret, a variable, dispatch, truthful
+local push, cancellation, restart, persistence, and cleanup.
+
+Gate: the one-command run works from clean state; the second secret-bearing run
+does not prompt; `--workers 3` overlaps three jobs; history and logs are useful;
+`down -> up` preserves identity, desired digest, `N`, profile, and data; and the
+ordered reset deletes only the prevalidated topology, credentials, anchor, and
+lock, with no residue on immediate reinspection.
+
+### 6. Apple Silicon macOS qualification
+
+Build and privately stage native ARM64 CLI plus native ARM64 product, runner,
+job, and JavaScript-action images. Qualify Docker Desktop, Keychain, paths with
+spaces, hidden prompting, host gateway behavior, sleep, restart, and reboot on
+the Mac mini. Keep public artifacts and GitHub connection disabled.
+
+Gate: the same Arch smoke contract passes with `--workers 1` and `3`, without
+x86 emulation or Linux Secret Service assumptions. Native tests cover locked
+Keychain behavior, private discardable cache/lock creation, immutable external
+identity-volume labels, atomic desired-spec updates, interruption, and exact
+reset. The selected context and local driver/scope are reported; identity,
+desired spec, and persistent data survive down/up, Desktop restart, sleep, and
+host reboot. Deleting the host cache leaves Compose discovery and recovery
+correct. The guide records current Docker Desktop prerequisites and terms,
+engine-authorized-user trust, and the factory-reset/uninstall data-loss boundary.
+
+### 7. Windows x86-64 qualification
+
+Build the native Windows CLI and qualify it from PowerShell with Docker
+Desktop/WSL2 Linux-container mode, Credential Manager, hidden prompting, drive
+and space-containing paths, CRLF, process shutdown, restart, and reboot. Runner
+and jobs remain Linux containers.
+
+Gate: the same smoke contract passes with `--workers 1` and `3`; native tests
+cover locked Credential Manager, private discardable cache/lock creation,
+junction and reparse-point refusal where a cache path is used, long paths,
+immutable external identity-volume labels, interruption, and exact reset.
+The selected context, Linux daemon mode, and local driver/scope are reported;
+identity, desired spec, and persistent data survive down/up, Desktop restart,
+and host reboot. Deleting the host cache leaves Compose discovery and recovery
+correct; no native Windows execution provider is involved. Docker Desktop
+prerequisites, terms, engine-authorized-user trust, and the
+factory-reset/uninstall data-loss boundary are current.
+
+### 8A. Frozen signed release candidate
+
+Build checksummed native CLIs and digest-pinned multi-architecture Linux images,
+SBOMs, and provenance. Apply Developer ID signing/notarization/stapling and
+Authenticode before qualification. Freeze every artifact and image identity;
+keep publication disabled.
+
+Gate: build inputs and signing custody are reviewed, installer tests consume the
+private candidates, every identity is recorded, and no documentation claims an
+unpublished URL exists.
+
+### 8B. Exact-final-byte qualification
+
+Install the frozen candidates on clean Arch, Apple Silicon macOS, and Windows
+x86-64 hosts and repeat the complete local matrix. Any rebuild, resign,
+renotarization, or repackaging returns to 8A.
+
+Gate: the exact final bytes pass signature, checksum, SBOM, provenance,
+no-Rust-toolchain install, one-command run, secret prompt/reuse, three-slot
+parallelism, cancellation, crash/restart, down/up, and exact reset on all three
+hosts.
+
+### 9. Public artifacts and onboarding documentation
+
+Stage the root README and documentation information architecture against the
+frozen candidates, rehearse publication/rollback, publish the exact qualified
+artifacts, verify them publicly, and then activate the documentation. The first
+README procedure becomes the tested local flow.
+
+Gate: public download and installer smoke tests pass on all three hosts; the
+README commands are exercised by the same smoke harness; links and anchors
+pass; no Rust toolchain is required; and preview, contributor assembly, native
+execution hosts, and production deployment remain clearly distinguished.
+
+### 10. Optional public-origin boundary
+
+Add a restricted public HTTP gateway, persisted public-origin state,
+user-supplied origins, a fake tunnel, and one evaluated default tunnel after its
 privacy, licensing, and cross-platform behavior are accepted.
 
-Gate: only intended HTTP routes are forwarded; signed webhook headers and body
-remain byte-exact; the default hostname survives `down -> up`, sleep, and reboot
-for the installation lifetime; tunnel credentials are redacted. An origin that
-cannot be resumed fails before App creation. Ephemeral-hostname replacement is
-not the quickstart recovery path and would require a separately tested complete
-App/configuration migration.
+Gate: only intended routes are forwarded; webhook headers and body remain
+byte-exact; local-manager, Results, runner mTLS, dependencies, and Docker remain
+private; the hostname resumes across down/up, sleep, and reboot; credentials are
+redacted; and an unstable origin fails before App creation.
 
-### 6. GitHub App creation and verified repository connection
+### 11. Optional GitHub repository connection
 
-Resolve the owner type and numeric owner through a bounded GitHub account lookup,
-route App Manifest creation to the personal or organization settings endpoint,
-then add Manifest generation/conversion, callback state, HMAC-verified
-installation-event capture, installation/API verification, exact repository
-discovery, and generated provider/human-auth configuration. Stop at
-`app_installed`; do not start workers or claim a connected installation yet.
+Implement `automata local github connect [OWNER/REPOSITORY]` with the GitHub App
+Manifest flow, exact personal/organization routing, callback state,
+HMAC-verified installation capture, API verification, exact repository
+selection, staged provider/human-auth configuration, one-use `/setup`, portable
+local-manager session custody, reconnect, status, and disconnect. Reuse the
+existing signed GitHub provider and do not reenroll local runners.
 
-Gate: protocol-emulator tests cover forged IDs, expired/replayed state,
-partial retries, public/private repositories, multi-repository installations,
-exact permissions/events, atomic writes, configuration decoding, and secret
-redaction. Personal and organization routing is exact; lack of App-manager or
-repository-install authority fails with an actionable browser recovery path;
-the signed `installation` event's sender identity is retained as the installer
-evidence and cross-checked by bounded API lookup. No manual App field, numeric
-ID, or registry JSON is required.
+Gate: emulator and live tests cover forged IDs, expired/replayed state, partial
+retry, permissions/events, authority failure, public/private and
+multi-repository installations, redaction, wrong setup identity, restart, and
+disconnect. No manual App fields, numeric IDs, registry JSON, or certificate
+steps are required. The original local worktree flow still works disconnected.
 
-### 7. Installation bootstrap and enrollment authorization
+### 12. Connected-GitHub qualification
 
-Bind the one-use bootstrap tuple to the verified installer identity, complete
-the anonymous `/setup` flow, add exact local fork rejection, and add the
-browser-approved, local-manager enrollment-authorization handoff. Ordinary
-browser sessions remain unable to call the CLI-audience runner-token API.
+Install the App only on the designated `AlexanderDzhoganov` dummy repository
+and exercise authenticated remote-ref and webhook paths on the three qualified
+hosts.
 
-Gate: wrong GitHub identity, origin/CSRF mismatch, expiry, replay, restart, and
-partial-completion tests fail closed; setup creates exactly one first
-administrator; the local handoff authorizes only the recorded bounded worker
-count and never persists a CLI bearer. Provider configuration reload is atomic
-and rollback-safe.
+Gate: signed deliveries are durably admitted through the existing provider; a
+completed Check has the exact Details link; queued/running/completed state
+agrees; fork heads follow the explicit local evaluation policy; public origin
+and connection resume; and event support is claimed only when backed by live
+evidence.
 
-### 8. Runner local-only composition
+### 13. Production Docker Compose deployment
 
-Add `automata-runner run-local`, the Linux worker image, engine-socket adapter,
-private Results route, `automata-local` selector, stable one-slot worker
-identities and volumes, automatic use of the approved enrollment handoff, and
-generated `N`-worker Compose services. Do not expose workers through ordinary
-production `run`.
-
-Gate: `N=1` and `N=3` start; shell and JavaScript-action jobs execute; three
-jobs overlap on three identities; worker restart reconciles exact sandboxes;
-job code cannot access the engine socket or dependency network. The first
-successful `up --workers N` makes `N` immutable until confirmed `reset`;
-repeating the same value is idempotent and a different value fails with exact
-reset/recreate guidance, avoiding stale runners before drain/delete exists.
-
-### 9. Arch end-to-end qualification
-
-Create the designated repository under `AlexanderDzhoganov` after confirming
-its exact name, install the App on only that repository, add the three-job
-fixture, and commit an executable redacted smoke harness/evidence format.
-
-Gate: a clean local state reaches its first completed GitHub Check; webhook
-delivery is durably accepted; queued/running/completed Check states and Details
-link work; three workers overlap; cancellation cleans owned resources; and
-`down -> up` preserves the installation.
-
-### 10. Native ARM64 artifacts and macOS qualification
-
-Build and privately stage native ARM64 control-plane, worker, job, and action
-toolchain candidates; qualify Docker Desktop, gateway/tunnel behavior, browser
-launch, paths with spaces, sleep, restart, and reboot on the Mac mini. Public
-publication remains disabled until checkpoint 13.
-
-Gate: the same command and GitHub fixture pass with `N=3` without x86
-emulation or Unix-host secret-file assumptions. The guide records Docker
-Desktop's current terms and licensing prerequisites and does not imply that its
-use is free for every organization.
-
-### 11. Windows orchestration and qualification
-
-Add the native Windows local-manager artifact and PowerShell UX; qualify Docker
-Desktop/WSL2 Linux-container mode, Windows state paths, CRLF, process shutdown,
-restart, and reset. The worker and jobs remain Linux containers.
-
-Gate: the same command and GitHub fixture pass with `N=3` from clean
-PowerShell, and no native Windows enrollment path is involved. The same Docker
-Desktop terms/licensing disclosure is verified for this host lane.
-
-### 12. Cross-platform release candidates and installers
-
-Build checksummed native local-manager artifacts and multi-architecture Linux
-images, SBOMs, provenance, and installer contract tests. Apply Developer ID
-signing, notarization, and stapling to the macOS candidate and Authenticode to
-the Windows candidate before qualification so the tested bytes are the bytes
-eventually published. Keep public publication disabled while candidates are
-qualified.
-
-Gate: clean-host installer tests consume exact final signed CI-produced
-candidates on all three operating systems, verify platform signatures,
-notarization where applicable, checksums, and provenance, and require no Rust
-toolchain.
-
-### 13. Publication authority and first public artifacts
-
-Resolve the release-authority design in a focused review, publish the exact
-qualified artifacts, and only then change release-status text and installer
-URLs. Do not remove the existing publication guard as a shortcut.
-
-Gate: exact registry/archive identities, signatures, checksums, SBOMs,
-provenance, rollback procedure, and public download smoke tests pass.
-
-### 14. README and documentation information architecture
-
-Make the now-public tested local flow the first root README procedure, split
-operator and maintainer material, and make the deployment chooser own topology
-selection.
-
-Gate: every quickstart command is exercised by the smoke harness; clean-reader
-tests consume the public artifacts on all three hosts; links and anchors pass;
-installation does not require a Rust toolchain; preview remains clearly
-dependency-free and separate.
-
-### 15. Durable Docker Compose deployment
-
-Build a production-oriented composition separate from the privileged local
-evaluation stack: TLS reverse proxy, external or explicitly development
+Build a production-oriented Compose topology separate from the engine-admin
+local evaluation stack: TLS reverse proxy, external or explicitly development
 PostgreSQL/S3 choices, secret files, persistence, probes, backup/restore,
-upgrade/rollback, and optional hardened runner profiles. This topology must not
-reuse the engine-admin local evaluation provider.
+upgrade/rollback, and supported hardened runner choices. Reuse the same product
+containers and configuration decoders, not the local Docker provider.
 
-Gate: configuration validation, restart persistence, real TLS/webhooks,
-backup restoration, dependency failure recovery, non-root images, and exact
-version/digest pins pass.
+Gate: real TLS/webhooks, configuration validation, restart persistence, backup
+restoration, dependency failure, non-root containers, and exact digest pins
+pass. The guide states the topology's threat model and non-goals.
 
-### 16. Linux systemd deployment
+### 14. Linux systemd deployment
 
-Add control-plane units and credential/tmpfiles packaging; implement or require
-runner disable, drain, and delete lifecycle operations; generalize runner units
-beyond exactly three instances; and retain the hardened rootless Podman guide
-as an advanced host deployment. The local engine-admin provider is forbidden.
+Add control-plane units, credential and tmpfiles packaging, runner lifecycle
+operations, and a generalized hardened rootless-Podman runner-host guide. The
+local engine-admin provider is forbidden.
 
-Gate: clean-VM installation, `systemd-analyze verify`, reboot, key/certificate
-rotation, drain/recovery, and backup restoration pass. Unimplemented automatic
-runner certificate rotation remains an explicit production blocker.
+Gate: clean-VM install, `systemd-analyze verify`, reboot, key/certificate
+rotation, runner drain/recovery, backup restoration, and documented upgrade and
+rollback pass.
 
-### 17. Helm/Kubernetes deployment
+### 15. Helm/Kubernetes deployment
 
 Start with one control-plane replica, external PostgreSQL and object storage,
-existing secret references, ingress, a runner mTLS service, probes, metrics,
-NetworkPolicy, and explicit migration behavior. Kubernetes runners remain
-experimental until their independent live gate passes; the chart never mounts
-the local evaluation engine socket into a production runner.
+existing secret references, ingress, runner mTLS, probes, metrics,
+NetworkPolicy, and explicit migration behavior. Kubernetes runners retain an
+independent experimental gate; the chart never mounts the local engine socket.
 
-Gate: chart lint/schema/template validation, kind or k3d integration,
-upgrade/rollback, dependency outages, secret non-disclosure, and documented
-node-traffic exceptions pass.
+Gate: chart lint/schema/template, kind or k3d integration, upgrade/rollback,
+dependency outages, secret non-disclosure, and documented network exceptions
+pass.
 
-### 18. Cloud reference deployments
+### 16. Cloud references
 
 Publish one provider-neutral validated topology, then one infrastructure PR per
-cloud. Start with AWS because PostgreSQL and S3 align with the existing storage
+cloud. Start with AWS because PostgreSQL and S3 match existing storage
 boundaries. GCP and Azure require a proven S3-compatible store or a separately
-implemented native object-store adapter. Terraform or OpenTofu follows a real
-manual deployment rather than preceding it.
+implemented native object-store adapter. Terraform/OpenTofu follows a real
+manual deployment.
 
-Each cloud gate names a separately qualified hardened runner provider; the
-local engine-admin provider is not accepted. The gate includes DNS/TLS, webhook
-delivery, an `N`-worker run, backup/restore, upgrade, teardown, security review,
-and an explicit cost inventory.
+Each cloud gate names a separately qualified hardened runner provider and
+includes DNS/TLS, webhook delivery, parallel execution, backup/restore,
+upgrade, teardown, security review, and an explicit cost inventory. The local
+engine-admin provider is never accepted as the production runner.
 
 ## Documentation migration
 
-User guides will be reorganized only as their product paths become real. Keep
-the stable high-traffic files as landing pages so existing links do not break.
-The target ownership is:
+User documentation moves only as tested product paths become available. Stable
+high-traffic files remain landing pages so existing links do not break. Target
+ownership is:
 
 ```text
-docs/local/                    local quickstart, lifecycle, GitHub connect
+docs/local/                    quickstart, lifecycle, worktree source, secrets
+docs/integrations/             optional GitHub connection and provider guides
 docs/deploy/                   chooser, Compose, systemd, Kubernetes, cloud
 docs/operations/               backup, restore, upgrade, observability
 docs/platforms/                advanced native execution-host guides
@@ -582,41 +962,26 @@ docs/reference/                configuration and command reference
 docs/maintainers/roadmaps/     plans, audits, and conformance work
 ```
 
-The current documentation has an explicit disposition so cleanup does not
-silently erase useful operational detail:
+| Current source | Disposition |
+| --- | --- |
+| Root `README.md` | Make the tested local flow its first procedure only after checkpoint 9 publishes qualified artifacts |
+| `docs/README.md` | Keep as the stable index and update categories when destinations exist |
+| `docs/getting-started.md` | Keep as a short chooser; move exact local steps to `docs/local/` |
+| `docs/deployment.md` | Keep current manual development assembly truthful, then convert it into the deployment chooser |
+| `docs/development.md` | Retain contributor build/test material; remove duplicated reader onboarding after publication |
+| `deploy/dev/README.md` | Retain contributor dependency usage; share its Compose definitions with local product composition where practical |
+| Runner host and platform guides | Retain as hardened/advanced execution references, not the portable quickstart |
+| Authentication and provider guides | Retain operator detail; move local credential custody to `docs/local/` and App setup to `docs/integrations/` |
+| Observability, inventory, and runbooks | Preserve executable operational detail under `docs/operations/` navigation |
+| Compatibility and conformance docs | Update only from executable gates, never from roadmap intent |
+| Architecture, ADR, security, governance, and release docs | Preserve as reference/maintainer material and repair links during migration |
+| Parity plans and dated audits | Move under maintainer ownership when touched; archive only after remaining decisions live elsewhere |
 
-| Current source | Disposition | Checkpoint |
-| --- | --- | --- |
-| Root `README.md` | Replace the opening procedure only after the three-host local smoke gate and public artifacts; retain project and security context | 14 |
-| `docs/getting-started.md` | Keep as a stable chooser; move the tested local procedure to `docs/local/` | 14 |
-| `docs/deployment.md` | Keep the manual development assembly truthful now; later convert it into the deployment chooser | 1, then 14 |
-| `deploy/dev/README.md` | Retain as contributor-only PostgreSQL/RustFS support, not a product deployment | 14 |
-| Runner configuration guide | Retain as the hardened Linux rootless-Podman host reference | 14 and 16 |
-| Arch and macOS platform guides | Retain as advanced execution-host references; do not use them as the portable local quickstart | 9, 10, and 16 |
-| Native Windows material in `docs/getting-started.md` | Move into a dedicated advanced Windows platform guide while keeping the chooser short | 11 and 14 |
-| Provider example and workflow claims | Reconcile against executable configuration, workflow discovery, and event tests | 1 and 6 |
-| Parity plans and dated audits | Move under maintainer ownership when touched; archive only after their remaining decisions are represented elsewhere | 14 |
-| Release documentation | Preserve publication authority and safeguards until qualified artifacts exist | 12 and 13 |
+Cleanup will remove stale CLI examples and contradictory quickstarts, not
+useful operational history. The provider example and runner profiles must be
+reconciled against executable configuration. Publication guards remain until
+the exact signed final-byte matrix passes.
 
-The cleanup checkpoints will:
-
-- replace the preview-first root README only after the real local flow passes
-  all three host gates;
-- keep `docs/getting-started.md` as a short chooser instead of mixing preview,
-  source installation, and native execution experiments;
-- turn `docs/deployment.md` into a deployment chooser and move exact procedures
-  to topology-specific guides;
-- keep `deploy/dev` explicitly contributor-only;
-- retitle the runner configuration guide as the hardened Linux runner-host
-  reference rather than a local bootstrap;
-- reconcile the provider example and runner profiles from one generated source
-  of truth;
-- correct stale CLI examples and workflow-selection claims against executable
-  help and product tests;
-- move parity plans and dated audits out of the operator path;
-- delete or archive branch-status plans that no longer own a decision; and
-- preserve publication safeguards in release documentation and workflows.
-
-The final README quickstart is generated from or tested by the same commands as
-the Arch, macOS, and Windows smoke harness. Documentation is not the evidence
-that makes a platform available; the clean-host acceptance record is.
+The final README quickstart is generated from or tested by the same Arch,
+macOS, and Windows smoke harness. Documentation records availability; it is not
+the evidence that creates it.
