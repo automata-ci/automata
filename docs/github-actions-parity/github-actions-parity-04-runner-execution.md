@@ -150,13 +150,16 @@ Tasks:
   behavior.
 - [x] Test command-file collection after success, failure, timeout, and
   cancellation.
-- [ ] Aggregate step summaries in completed-step order, define deletion and
+- [x] Aggregate step summaries in completed-step order, define deletion and
   empty-file behavior, and preserve a deterministic truncation indicator.
   - [x] Completed-step ordering plus missing, deleted, and empty summaries are
     defined and covered.
-  - [ ] Match the pinned runner's diagnostic-and-skip behavior for a summary
+  - [x] Match the pinned runner's diagnostic-and-skip behavior for a summary
     larger than 1 MiB across the bounded copy interface. The pinned runner does
-    not truncate the file, so no truncation policy is inferred.
+    not truncate the file, so no truncation policy is inferred. The executor
+    probes at most one byte beyond the attachment ceiling; either the sentinel
+    byte or the endpoint's bounded-output rejection emits the same non-fatal
+    diagnostic and omits the complete summary.
 - [x] Verify summary isolation across pre, main, post, composite, and repeated
   action occurrences.
 
