@@ -14,35 +14,6 @@ isolated runner provider on infrastructure you control.
 > checkout; do not use the documented crate or container names as if artifacts
 > had been published.
 
-## Explore Automata
-
-The [hosted UI demo](https://automata-ci.github.io/automata/) shows repositories,
-runs, jobs, logs, and administration screens with sample data. It is static: it
-cannot authenticate users, connect to repositories, or execute workflows.
-
-To run the same server-rendered interface locally, install
-[Git](https://git-scm.com/), [rustup](https://rustup.rs/), and a native C/C++
-build toolchain, then run:
-
-```console
-git clone https://github.com/automata-ci/automata.git
-cd automata
-cargo run --locked --bin automata -- preview
-```
-
-Open <http://127.0.0.1:8080>. Verify the process from another terminal:
-
-```console
-curl --fail http://127.0.0.1:8080/healthz
-curl --fail http://127.0.0.1:8080/readyz
-```
-
-Preview mode has no external dependencies. It does not accept webhooks, use
-durable storage, schedule jobs, or listen for runners. Continue with
-[Getting started](docs/getting-started.md) to install both commands, or use
-[Control-plane setup](docs/deployment.md) for the manual development
-composition backed by PostgreSQL and S3-compatible storage.
-
 ## Implementation status
 
 Automata reads GitHub Actions workflow and action syntax, but parsing a feature
