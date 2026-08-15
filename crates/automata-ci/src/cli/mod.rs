@@ -38,10 +38,11 @@ pub use commands::{
     AdminArgs, AdminCommand, AuthArgs, AuthCommand, Command, DatabaseTransport,
     EnvironmentReviewArgs, EnvironmentReviewDecision, InternalArgs, InternalCommand,
     InternalEnsureBucketArgs, InternalObjectStoreArgs, InternalObjectStoreCommand, LocalArgs,
-    LocalCommand, LocalContainerEngine, LocalDoctorArgs, OperatorArgs, PreviewArgs, RerunArgs,
-    RerunSelection, RunnerArgs, RunnerCommand, RunnerTokenArgs, S3ConnectionArgs, S3TlsTrustMode,
-    SecretArgs, SecretCommand, SecretCreateArgs, SecretDeleteArgs, SecretListArgs,
-    SecretProviderArgs, SecretProviderCommand, ServerArgs,
+    LocalCheckArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs, LocalWorkflowInput,
+    OperatorArgs, PreviewArgs, RerunArgs, RerunSelection, RunnerArgs, RunnerCommand,
+    RunnerTokenArgs, S3ConnectionArgs, S3TlsTrustMode, SecretArgs, SecretCommand,
+    SecretCreateArgs, SecretDeleteArgs, SecretListArgs, SecretProviderArgs,
+    SecretProviderCommand, ServerArgs,
 };
 pub use output::OutputFormat;
 pub use values::{RepositoryRef, SecretScope};

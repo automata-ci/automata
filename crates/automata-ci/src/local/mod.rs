@@ -1,15 +1,46 @@
 use anyhow::{Result, bail};
 use automata_ci_local::{
     ComposeFrontend, DoctorReport, DoctorRequest, Engine, EngineArchitecture, EngineEndpoint,
-    EngineRequest, inspect,
+    EngineRequest, LocalCheckReport, LocalCheckRequest, check_workflow, inspect,
 };
+use automata_ci_workflow_github::LocalWorkflowDispatchInputs;
 
-use crate::cli::{LocalArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs};
+use crate::cli::{LocalArgs, LocalCheckArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs};
 
 pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
     match &args.command {
         LocalCommand::Doctor(args) => Box::pin(doctor(args)).await,
+        LocalCommand::Check(args) => Box::pin(check(args)).await,
     }
+}
+
+async fn check(args: &LocalCheckArgs) -> Result<()> {
+    let inputs = LocalWorkflowDispatchInputs::try_new(
+        args.inputs
+            .iter()
+            .map(|input| (input.name().to_owned(), input.value().to_owned())),
+    )?;
+    let directory = std::env::current_dir()?;
+    let request = LocalCheckRequest::new(directory, args.workflow.clone(), inputs);
+    let mut checking = Box::pin(check_workflow(request));
+    let report = tokio::select! {
+        biased;
+        () = crate::shutdown::wait_without_logging() => {
+            drop(checking);
+            bail!("local workflow check interrupted by a process shutdown signal")
+        }
+        report = &mut checking => report,
+    };
+    if args.json {
+        serde_json::to_writer_pretty(std::io::stdout().lock(), &report)?;
+        println!();
+    } else {
+        print_human_check_report(&report);
+    }
+    if !report.valid() {
+        bail!("local workflow check failed; resolve the source issues above")
+    }
+    Ok(())
 }
 
 async fn doctor(args: &LocalDoctorArgs) -> Result<()> {
@@ -83,6 +114,66 @@ fn print_human_report(report: &DoctorReport) {
             issue.code(),
             issue.message()
         );
+    }
+}
+
+fn print_human_check_report(report: &LocalCheckReport) {
+    println!(
+        "Automata local workflow check: {}",
+        if report.valid() { "valid" } else { "invalid" }
+    );
+    if let Some(source) = report.source() {
+        println!(
+            "Snapshot: {} ({})",
+            source.snapshot_digest(),
+            if source.dirty() {
+                "dirty worktree"
+            } else {
+                "clean worktree"
+            }
+        );
+        if let Some(path) = source.workflow_path() {
+            println!("Workflow: {path}");
+        }
+    }
+    if !report.required_root_secrets().is_empty() {
+        println!(
+            "Required root secrets: {}",
+            report.required_root_secrets().join(", ")
+        );
+    }
+    for workflow in report.workflows() {
+        println!(
+            "{}: {}",
+            if workflow.reusable() {
+                "Reusable workflow"
+            } else {
+                "Root workflow"
+            },
+            workflow.path()
+        );
+        for job in workflow.jobs() {
+            println!("  Job: {} ({})", job.id(), job.kind());
+            if job.environment_required() {
+                println!("    Deployment environment: required");
+            }
+            if !job.secrets().is_empty() {
+                println!("    Secrets: {}", job.secrets().join(", "));
+            }
+            if !job.variables().is_empty() {
+                println!("    Variables: {}", job.variables().join(", "));
+            }
+        }
+    }
+    for diagnostic in report.diagnostics() {
+        println!(
+            "Diagnostic ({}): {}",
+            diagnostic.code(),
+            diagnostic.message()
+        );
+    }
+    if let Some(issue) = report.issue() {
+        println!("Problem ({}): {}", issue.code().as_str(), issue.message());
     }
 }
 

@@ -217,6 +217,7 @@ struct CompiledJobBody {
 }
 
 pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport {
+    let source_provider = request.selection.source_provider();
     let mut context = CompileContext {
         source: request.source_plan,
         diagnostics: Vec::new(),
@@ -229,7 +230,7 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
     if !matches!(event, CompiledEvent::Selected { .. }) {
         return finish_compilation(event, None, context.diagnostics);
     }
-    let source = compile_source(&context);
+    let source = compile_source(&context, source_provider);
     let name = compile_workflow_name(workflow.name(), &mut context);
     let mut workflow_references = BTreeMap::new();
     let run_name = workflow.run_name().and_then(|value| {

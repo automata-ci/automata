@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fmt, fs,
     io::{self, Cursor, Read as _, Write},
     path::{Path, PathBuf},
     process::Stdio,
@@ -34,6 +34,33 @@ const MAX_GIT_COORDINATE_FIELD_BYTES: usize = 16 * 1_024;
 const MAX_GIT_COORDINATES_BYTES: usize = 4 * (MAX_GIT_COORDINATE_FIELD_BYTES + 2);
 const MAX_GIT_LOCATOR_BYTES: usize = MAX_GIT_COORDINATE_FIELD_BYTES;
 const MAX_GIT_HEAD_BYTES: usize = 128;
+const LOCAL_REPOSITORY_ID_DOMAIN: &[u8] = b"automata.local.repository-identity.v1\0";
+
+/// Versioned host-local identity of one physical Git common directory.
+///
+/// The digest binds the platform's volume/device identity, stable file ID, and
+/// creation generation when the platform exposes one. It contains no path,
+/// remote URL, Git revision, or worktree bytes. Linked worktrees, filesystem
+/// aliases, and same-volume moves therefore retain one identity; clones,
+/// copies, and cross-volume moves do not.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct LocalRepositoryId(Sha256Digest);
+
+impl fmt::Debug for LocalRepositoryId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("LocalRepositoryId")
+            .field(&format_args!("{self}"))
+            .finish()
+    }
+}
+
+impl fmt::Display for LocalRepositoryId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 /// Request to seal one live Git worktree into a bounded immutable snapshot.
 #[derive(Clone, Debug)]
@@ -79,6 +106,7 @@ impl LocalSnapshotRequest {
 #[derive(Clone, Debug)]
 pub struct LocalSnapshot {
     root: PathBuf,
+    repository_id: LocalRepositoryId,
     head: String,
     dirty: bool,
     digest: Sha256Digest,
@@ -94,6 +122,13 @@ impl LocalSnapshot {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Returns the physical common-Git-directory identity retained as local
+    /// source provenance.
+    #[must_use]
+    pub const fn repository_id(&self) -> LocalRepositoryId {
+        self.repository_id
     }
 
     /// Returns the exact commit at `HEAD` while the worktree was sealed.
@@ -176,6 +211,7 @@ async fn capture_snapshot_with_git(
     let coordinates = discover_git_coordinates(git, &requested_path).await?;
     requested.verify_ambient_path(&requested_path)?;
     let authority = GitAuthority::pin(coordinates, &requested)?;
+    let repository_id = authority.repository_id()?;
     verify_bound_git_coordinates(git, &authority, LocalSnapshotErrorCode::NotGitWorktree).await?;
     let path_validator =
         RepositoryPathValidator::new(SNAPSHOT_ROOT, request.limits().maximum_entry_path_bytes())
@@ -203,6 +239,11 @@ async fn capture_snapshot_with_git(
         .await?;
     requested.verify_ambient_path(&requested_path)?;
     authority.verify(LocalSnapshotErrorCode::ConcurrentMutation)?;
+    if authority.repository_id()? != repository_id {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::ConcurrentMutation,
+        ));
+    }
 
     let archive = build_archive(&captured.entries, request.limits())?;
     let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
@@ -215,6 +256,7 @@ async fn capture_snapshot_with_git(
 
     Ok(LocalSnapshot {
         root: authority.worktree_path,
+        repository_id,
         head: initial.head,
         dirty: !initial.status.is_empty(),
         digest,
@@ -1064,6 +1106,15 @@ impl GitAuthority {
             .verify_ambient_path_for(&self.git_directory_path, failure)?;
         self.common_directory
             .verify_ambient_path_for(&self.common_directory_path, failure)
+    }
+
+    fn repository_id(&self) -> Result<LocalRepositoryId, LocalSnapshotError> {
+        self.common_directory
+            .verify_handle_identity(LocalSnapshotErrorCode::RepositoryIdentityUnavailable)?;
+        let metadata = self.common_directory.handle.dir_metadata().map_err(|_| {
+            LocalSnapshotError::new(LocalSnapshotErrorCode::RepositoryIdentityUnavailable)
+        })?;
+        physical_repository_identity(&metadata)
     }
 }
 
@@ -2041,6 +2092,171 @@ struct DirectoryIdentity {
     inode: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepositoryIdentityPlatform {
+    #[cfg(any(test, target_os = "linux"))]
+    Linux,
+    #[cfg(any(test, target_os = "macos"))]
+    Macos,
+    #[cfg(any(test, windows))]
+    Windows,
+}
+
+impl RepositoryIdentityPlatform {
+    const fn discriminant(self) -> u8 {
+        match self {
+            #[cfg(any(test, target_os = "linux"))]
+            Self::Linux => 1,
+            #[cfg(any(test, target_os = "macos"))]
+            Self::Macos => 2,
+            #[cfg(any(test, windows))]
+            Self::Windows => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BirthGeneration {
+    before_unix_epoch: bool,
+    seconds: u64,
+    nanoseconds: u32,
+}
+
+impl BirthGeneration {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn from_system_time(value: std::time::SystemTime) -> Self {
+        match value.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+            Ok(duration) => Self {
+                before_unix_epoch: false,
+                seconds: duration.as_secs(),
+                nanoseconds: duration.subsec_nanos(),
+            },
+            Err(error) => {
+                let duration = error.duration();
+                Self {
+                    before_unix_epoch: true,
+                    seconds: duration.as_secs(),
+                    nanoseconds: duration.subsec_nanos(),
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    const fn from_windows_filetime(value: u64) -> Self {
+        const TICKS_PER_SECOND: u64 = 10_000_000;
+        const NANOS_PER_TICK: u32 = 100;
+        Self {
+            before_unix_epoch: false,
+            seconds: value / TICKS_PER_SECOND,
+            nanoseconds: (value % TICKS_PER_SECOND) as u32 * NANOS_PER_TICK,
+        }
+    }
+}
+
+fn repository_identity_digest(
+    platform: RepositoryIdentityPlatform,
+    device: u64,
+    file_id: u64,
+    birth: Option<BirthGeneration>,
+) -> LocalRepositoryId {
+    let mut hasher = Sha256::new();
+    hasher.update(LOCAL_REPOSITORY_ID_DOMAIN);
+    hasher.update([platform.discriminant()]);
+    hasher.update(device.to_be_bytes());
+    hasher.update(file_id.to_be_bytes());
+    match birth {
+        Some(birth) => {
+            hasher.update([1, u8::from(birth.before_unix_epoch)]);
+            hasher.update(birth.seconds.to_be_bytes());
+            hasher.update(birth.nanoseconds.to_be_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    LocalRepositoryId(Sha256Digest::from_bytes(hasher.finalize().into()))
+}
+
+#[cfg(target_os = "linux")]
+fn physical_repository_identity(
+    metadata: &Metadata,
+) -> Result<LocalRepositoryId, LocalSnapshotError> {
+    use cap_fs_ext::MetadataExt as _;
+
+    let device = metadata.dev();
+    let inode = metadata.ino();
+    if device == 0 || inode == 0 {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::RepositoryIdentityUnavailable,
+        ));
+    }
+    let birth = metadata
+        .created()
+        .ok()
+        .map(|value| BirthGeneration::from_system_time(value.into_std()));
+    Ok(repository_identity_digest(
+        RepositoryIdentityPlatform::Linux,
+        device,
+        inode,
+        birth,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn physical_repository_identity(
+    metadata: &Metadata,
+) -> Result<LocalRepositoryId, LocalSnapshotError> {
+    use cap_fs_ext::MetadataExt as _;
+
+    let device = metadata.dev();
+    let inode = metadata.ino();
+    if device == 0 || inode == 0 {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::RepositoryIdentityUnavailable,
+        ));
+    }
+    let birth = metadata.created().map_err(|_| {
+        LocalSnapshotError::new(LocalSnapshotErrorCode::RepositoryIdentityUnavailable)
+    })?;
+    Ok(repository_identity_digest(
+        RepositoryIdentityPlatform::Macos,
+        device,
+        inode,
+        Some(BirthGeneration::from_system_time(birth.into_std())),
+    ))
+}
+
+#[cfg(windows)]
+fn physical_repository_identity(
+    metadata: &Metadata,
+) -> Result<LocalRepositoryId, LocalSnapshotError> {
+    use cap_fs_ext::MetadataExt as _;
+    use cap_std::fs::MetadataExt as _;
+
+    let device = metadata.dev();
+    let inode = metadata.ino();
+    let creation_time = metadata.creation_time();
+    if device == 0 || inode == 0 || creation_time == 0 {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::RepositoryIdentityUnavailable,
+        ));
+    }
+    Ok(repository_identity_digest(
+        RepositoryIdentityPlatform::Windows,
+        device,
+        inode,
+        Some(BirthGeneration::from_windows_filetime(creation_time)),
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn physical_repository_identity(
+    _metadata: &Metadata,
+) -> Result<LocalRepositoryId, LocalSnapshotError> {
+    Err(LocalSnapshotError::new(
+        LocalSnapshotErrorCode::RepositoryIdentityUnavailable,
+    ))
+}
+
 impl DirectoryIdentity {
     fn new(metadata: &Metadata) -> Self {
         use cap_fs_ext::MetadataExt as _;
@@ -2126,6 +2342,8 @@ pub enum LocalSnapshotErrorCode {
     GitOutput,
     /// The requested directory did not resolve to one pinned worktree and Git authority.
     NotGitWorktree,
+    /// The physical common Git directory lacks a trustworthy host-local file identity.
+    RepositoryIdentityUnavailable,
     /// One path cannot be represented as deterministic UTF-8 archive evidence.
     NonUnicodePath,
     /// One repository-relative path is noncanonical or reserved.
@@ -2173,6 +2391,9 @@ impl LocalSnapshotErrorCode {
             Self::GitOutput => "Git returned an unsupported worktree response",
             Self::NotGitWorktree => {
                 "run this command from one direct or standard linked Git worktree"
+            }
+            Self::RepositoryIdentityUnavailable => {
+                "the Git common directory lacks a trustworthy physical file identity"
             }
             Self::NonUnicodePath => "the worktree contains a path that is not valid Unicode",
             Self::UnsafePath => "the worktree contains a noncanonical or reserved path",
@@ -2252,7 +2473,10 @@ mod tests {
 
     #[cfg(unix)]
     use super::capture_snapshot_with_git;
-    use super::{LocalSnapshotErrorCode, LocalSnapshotRequest, capture_snapshot};
+    use super::{
+        BirthGeneration, LocalSnapshotErrorCode, LocalSnapshotRequest, RepositoryIdentityPlatform,
+        capture_snapshot, repository_identity_digest,
+    };
 
     const WORKFLOW: &str =
         "on: push\njobs:\n  check:\n    runs-on: linux\n    steps:\n      - run: true\n";
@@ -2269,6 +2493,7 @@ mod tests {
         let clean = fixture.capture().await.expect("clean snapshot");
         let repeated = fixture.capture().await.expect("repeated clean snapshot");
         assert_eq!(clean.digest(), repeated.digest());
+        assert_eq!(clean.repository_id(), repeated.repository_id());
         assert_eq!(clean.archive_bytes(), repeated.archive_bytes());
         assert!(!clean.dirty());
         assert_eq!(
@@ -2290,6 +2515,7 @@ mod tests {
         let cloned = clone.capture().await.expect("cloned clean snapshot");
         assert_eq!(cloned.digest(), clean.digest());
         assert_eq!(cloned.archive_bytes(), clean.archive_bytes());
+        assert_ne!(cloned.repository_id(), clean.repository_id());
 
         fixture.write("tracked.txt", "dirty tracked bytes\n");
         fixture.write("untracked.txt", "untracked bytes\n");
@@ -2305,6 +2531,57 @@ mod tests {
         let ignored_change = fixture.capture().await.expect("ignored change snapshot");
         assert_eq!(ignored_change.digest(), dirty.digest());
         assert_eq!(ignored_change.archive_bytes(), dirty.archive_bytes());
+    }
+
+    #[test]
+    fn repository_identity_preimage_has_stable_platform_value_fixtures() {
+        let birth = Some(BirthGeneration {
+            before_unix_epoch: false,
+            seconds: 1_700_000_000,
+            nanoseconds: 123_456_700,
+        });
+        let fixtures = [
+            (
+                RepositoryIdentityPlatform::Linux,
+                "a025ce0ea527b997daa2563ff39e25340f067753e13cb0d9316c995f03340728",
+            ),
+            (
+                RepositoryIdentityPlatform::Macos,
+                "9b77261132ed6b800e26a6ba6dc6d302f9128efd44d7bc490e40b275614a21ad",
+            ),
+            (
+                RepositoryIdentityPlatform::Windows,
+                "a26c27195f773518ecbbc65f29b676a36aa1f298cfffe6715d178cad9ab83fc1",
+            ),
+        ];
+        for (platform, expected) in fixtures {
+            assert_eq!(
+                repository_identity_digest(platform, 0x1122_3344, 0x5566_7788_99aa, birth)
+                    .to_string(),
+                expected,
+            );
+        }
+        assert_ne!(
+            repository_identity_digest(RepositoryIdentityPlatform::Linux, 1, 2, None),
+            repository_identity_digest(RepositoryIdentityPlatform::Linux, 1, 3, None),
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_identity_survives_a_same_volume_move() {
+        let mut fixture = Fixture::new();
+        fixture.write("tracked.txt", "stable physical repository\n");
+        fixture.commit_all("repository identity fixture");
+        let before = fixture.capture().await.expect("identity before move");
+        let moved = fixture.path().with_file_name(format!(
+            "automata-local-snapshot-moved-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::rename(fixture.path(), &moved).expect("same-volume repository move");
+        fixture.root = moved;
+        let after = fixture.capture().await.expect("identity after move");
+        assert_eq!(after.repository_id(), before.repository_id());
+        assert_eq!(after.digest(), before.digest());
     }
 
     #[tokio::test]
@@ -2404,8 +2681,13 @@ mod tests {
             "HEAD",
         ]);
         let linked = Fixture { root: linked_root };
+        let primary_snapshot = primary.capture().await.expect("primary worktree snapshot");
         let linked_snapshot = linked.capture().await.expect("linked worktree snapshot");
         assert_eq!(linked_snapshot.root(), linked.path());
+        assert_eq!(
+            linked_snapshot.repository_id(),
+            primary_snapshot.repository_id()
+        );
 
         let symlink_locator = Fixture::new();
         symlink_locator.write("tracked.txt", "tracked\n");

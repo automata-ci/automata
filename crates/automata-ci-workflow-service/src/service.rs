@@ -37,7 +37,8 @@ use thiserror::Error;
 
 use crate::{
     AdmissionClock, AdmissionIdGenerator, CredentialDiscoveryError, ExpandReusableWorkflowRequest,
-    GITHUB_WORKFLOW_MEDIA_TYPE, GithubReusableWorkflowCatalog, JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+    GITHUB_WORKFLOW_MEDIA_TYPE, GithubReusableWorkflowCatalog,
+    GithubReusableWorkflowSourceAuthority, JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
     NoopWorkflowAdmissionObserver, ReusableInputBindingSource, ReusableWorkflowExpander,
     ReusableWorkflowExpansionError, ReusableWorkflowPermissions, Sha256AdmissionIdGenerator,
     SystemAdmissionClock, WORKFLOW_PLAN_MEDIA_TYPE, WorkflowAdmissionFailure,
@@ -756,6 +757,7 @@ fn prepare_reusable_workflow_expansion(
         return Ok(None);
     }
     let catalog = GithubReusableWorkflowCatalog::compile_reachable(
+        GithubReusableWorkflowSourceAuthority::GithubDelivery,
         request.repository().slug(),
         request.commit_sha(),
         request.plan(),

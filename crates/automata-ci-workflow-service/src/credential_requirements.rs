@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use automata_ci_core::{
-    ExpressionInstruction, ExpressionLiteral, ExpressionProgram, LogicalJobTemplate,
-    LogicalWorkflowPlan, Sha256Digest,
+    ExpressionInstruction, ExpressionLiteral, ExpressionProgram, LogicalJobKind,
+    LogicalJobTemplate, LogicalWorkflowPlan, ReusableSecretForwarding, Sha256Digest,
 };
 use automata_ci_store::{
     JobCredentialRequirements, JobEnvironmentRequirement, ProtectedEnvironmentValueError,
@@ -17,7 +17,8 @@ use thiserror::Error;
 const ENVIRONMENT_TEMPLATE_DIGEST_DOMAIN: &[u8] =
     b"automata.workflow.deployment-environment-template.v1\0";
 
-/// Discovers exact static `secrets.<name>` and `vars.<name>` uses.
+/// Discovers exact static `secrets.<name>` and `vars.<name>` uses, including
+/// name-only caller sources in reusable-workflow secret mappings.
 ///
 /// The complete serialized logical job is walked so new template-bearing fields
 /// fail into the same analysis without a second hand-maintained field list.
@@ -38,6 +39,15 @@ pub fn discover_job_credential_requirements(
     let mut variables = BTreeSet::new();
     for program in programs {
         scan_program(&program, &mut secrets, &mut variables)?;
+    }
+    if let LogicalJobKind::ReusableWorkflow(invocation) = job.execution()
+        && let ReusableSecretForwarding::Mapping(bindings) = invocation.secrets()
+    {
+        secrets.extend(
+            bindings
+                .iter()
+                .map(|binding| binding.source().value().to_string()),
+        );
     }
     let environment = match job.deployment() {
         None => JobEnvironmentRequirement::None,

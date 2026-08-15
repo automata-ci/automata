@@ -17,6 +17,7 @@ homepage.workspace = true
 async-trait.workspace = true
 automata-ci-core.workspace = true
 automata-ci-workflow-github.workspace = true
+automata-ci-workflow-service.workspace = true
 bytes.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true

@@ -23,12 +23,15 @@ use automata_ci_core::{
 use automata_ci_store::{LogicalWorkflowInvocationId, LogicalWorkflowJobId};
 use automata_ci_workflow_github::{
     CompileWorkflowRequest, Diagnostic, GithubWorkflowCompiler, GithubWorkflowFrontend,
-    ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+    LocalWorkflowSourceEvidence, ParseWorkflowRequest, RepositoryWorkflowLocation, SourceId,
+    SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::credential_requirements::discover_job_credential_requirements;
 
 /// Maximum repository workflow files accepted by one reusable catalog.
 pub const MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES: usize = 50;
@@ -120,6 +123,39 @@ pub struct RepositoryWorkflowSource {
     source: Bytes,
 }
 
+/// Closed source authority and namespace used while recompiling reusable
+/// workflows in the GitHub Actions dialect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GithubReusableWorkflowSourceAuthority {
+    /// Authenticated GitHub delivery using Automata's `.ci/workflows` namespace.
+    GithubDelivery,
+    /// One exact local snapshot and its explicitly discovered namespace.
+    LocalSnapshot {
+        /// The sole workflow namespace admitted by the snapshot archive.
+        workflow_location: RepositoryWorkflowLocation,
+        /// SHA-256 over the exact immutable snapshot archive bytes.
+        snapshot_digest: Sha256Digest,
+    },
+}
+
+impl GithubReusableWorkflowSourceAuthority {
+    const fn provider(self) -> &'static str {
+        match self {
+            Self::GithubDelivery => "github",
+            Self::LocalSnapshot { .. } => "local",
+        }
+    }
+
+    const fn workflow_location(self) -> RepositoryWorkflowLocation {
+        match self {
+            Self::GithubDelivery => RepositoryWorkflowLocation::Automata,
+            Self::LocalSnapshot {
+                workflow_location, ..
+            } => workflow_location,
+        }
+    }
+}
+
 impl RepositoryWorkflowSource {
     /// Creates an uncompiled exact source candidate.
     #[must_use]
@@ -188,9 +224,25 @@ impl CatalogedReusableWorkflow {
 /// Closed exact-revision catalog used to resolve local workflow references.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubReusableWorkflowCatalog {
+    authority: GithubReusableWorkflowSourceAuthority,
     repository: String,
     revision: String,
     entries: BTreeMap<String, CatalogedReusableWorkflow>,
+}
+
+/// Value-free reusable-call analysis rooted at one exact compiled workflow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReusableWorkflowCallAnalysis {
+    required_root_secret_names: Vec<String>,
+}
+
+impl ReusableWorkflowCallAnalysis {
+    /// Returns canonical secret names that must be resolved at the root
+    /// invocation boundary after mapping and inheritance propagation.
+    #[must_use]
+    pub fn required_root_secret_names(&self) -> &[String] {
+        &self.required_root_secret_names
+    }
 }
 
 impl GithubReusableWorkflowCatalog {
@@ -204,6 +256,7 @@ impl GithubReusableWorkflowCatalog {
     ///
     /// Returns a fail-closed expansion error for any invalid reachable edge.
     pub fn compile_reachable(
+        authority: GithubReusableWorkflowSourceAuthority,
         repository: impl Into<String>,
         revision: impl Into<String>,
         root_plan: &WorkflowPlan,
@@ -219,11 +272,12 @@ impl GithubReusableWorkflowCatalog {
         else {
             return Err(ReusableWorkflowExpansionError::RootPlanMismatch);
         };
-        validate_plan_origin(root_plan, &repository, &revision, root_path)?;
+        let root_path = canonical_workflow_path(root_path, authority.workflow_location())?;
+        validate_plan_origin(root_plan, authority, &repository, &revision, &root_path)?;
 
         let mut available = BTreeMap::new();
         for source in sources {
-            let path = canonical_workflow_path(source.path())?;
+            let path = canonical_workflow_path(source.path(), authority.workflow_location())?;
             if source.source().is_empty()
                 || validate_reusable_workflow_source_bytes(source.source().len()).is_err()
             {
@@ -243,8 +297,8 @@ impl GithubReusableWorkflowCatalog {
             .collect::<Vec<_>>();
         let mut entries = BTreeMap::new();
         while let Some(reference) = pending.pop() {
-            let path = resolve_local_reference(&reference)?;
-            if path == *root_path {
+            let path = resolve_local_reference(&reference, authority.workflow_location())?;
+            if path == root_path {
                 return Err(ReusableWorkflowExpansionError::Cycle(path));
             }
             if entries.contains_key(&path) {
@@ -258,15 +312,7 @@ impl GithubReusableWorkflowCatalog {
             let source = available
                 .get(&path)
                 .ok_or_else(|| ReusableWorkflowExpansionError::MissingCatalogPath(path.clone()))?;
-            let plan = compile_github_source(
-                &repository,
-                &revision,
-                &path,
-                source,
-                automata_ci_core::WorkflowEventProvenance::new("github", "workflow_call")
-                    .with_commit_sha(&revision),
-                false,
-            )?;
+            let plan = compile_reusable_source(authority, &repository, &revision, &path, source)?;
             if plan.logical().invocation().is_none() {
                 return Err(ReusableWorkflowExpansionError::MissingInvocationContract(
                     path,
@@ -290,6 +336,7 @@ impl GithubReusableWorkflowCatalog {
             );
         }
         Ok(Self {
+            authority,
             repository,
             revision,
             entries,
@@ -304,6 +351,7 @@ impl GithubReusableWorkflowCatalog {
     /// rejected source, and workflows without an exact `workflow_call`
     /// contract.
     pub fn compile(
+        authority: GithubReusableWorkflowSourceAuthority,
         repository: impl Into<String>,
         revision: impl Into<String>,
         sources: impl IntoIterator<Item = RepositoryWorkflowSource>,
@@ -316,7 +364,7 @@ impl GithubReusableWorkflowCatalog {
         validate_reusable_catalog_entry_count(sources.len())?;
         let mut entries = BTreeMap::new();
         for source in sources {
-            let path = canonical_workflow_path(source.path())?;
+            let path = canonical_workflow_path(source.path(), authority.workflow_location())?;
             if source.source().is_empty() {
                 return Err(ReusableWorkflowExpansionError::InvalidSourceSize);
             }
@@ -324,15 +372,8 @@ impl GithubReusableWorkflowCatalog {
             if entries.contains_key(&path) {
                 return Err(ReusableWorkflowExpansionError::DuplicateCatalogPath(path));
             }
-            let plan = compile_github_source(
-                &repository,
-                &revision,
-                &path,
-                source.source(),
-                automata_ci_core::WorkflowEventProvenance::new("github", "workflow_call")
-                    .with_commit_sha(&revision),
-                false,
-            )?;
+            let plan =
+                compile_reusable_source(authority, &repository, &revision, &path, source.source())?;
             if plan.logical().invocation().is_none() {
                 return Err(ReusableWorkflowExpansionError::MissingInvocationContract(
                     path,
@@ -352,6 +393,7 @@ impl GithubReusableWorkflowCatalog {
             );
         }
         Ok(Self {
+            authority,
             repository,
             revision,
             entries,
@@ -376,11 +418,30 @@ impl GithubReusableWorkflowCatalog {
         self.entries.values()
     }
 
+    /// Validates every reachable call edge against the callee's exact typed
+    /// input, secret, output, matrix, cycle, and resource-limit contract.
+    ///
+    /// Secret names are treated symbolically: this proves which name-only
+    /// forwarding edges are structurally valid without claiming that any
+    /// credential value is available. Runtime admission continues to perform
+    /// its separate exact-availability expansion.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a root from another source authority, an invalid call edge, a
+    /// cycle, or an expansion that exceeds the public hard limits.
+    pub fn analyze_reachable_calls(
+        &self,
+        root_plan: &WorkflowPlan,
+    ) -> Result<ReusableWorkflowCallAnalysis, ReusableWorkflowExpansionError> {
+        analyze_reusable_call_graph(root_plan, self, ReusableWorkflowLimits::default())
+    }
+
     fn resolve(
         &self,
         reference: &str,
     ) -> Result<&CatalogedReusableWorkflow, ReusableWorkflowExpansionError> {
-        let path = resolve_local_reference(reference)?;
+        let path = resolve_local_reference(reference, self.authority.workflow_location())?;
         self.entries
             .get(&path)
             .ok_or(ReusableWorkflowExpansionError::MissingCatalogPath(path))
@@ -840,7 +901,7 @@ pub enum ReusableWorkflowExpansionError {
     /// A repository or immutable revision coordinate is invalid.
     #[error("reusable workflow repository coordinates are invalid")]
     InvalidRepositoryCoordinate,
-    /// A path is not a canonical direct `.ci` YAML path.
+    /// A path is not canonical in the authority's exact workflow namespace.
     #[error("reusable workflow path is not canonical")]
     InvalidWorkflowPath,
     /// A call uses something other than a canonical `./...` repository-local reference.
@@ -933,6 +994,9 @@ pub enum ReusableWorkflowExpansionError {
     /// A durable identity unexpectedly became nil.
     #[error("reusable workflow deterministic identity is invalid")]
     InvalidIdentity,
+    /// Static secret-name discovery rejected a malformed or dynamic reference.
+    #[error("reusable workflow credential requirements are invalid")]
+    CredentialRequirements,
 }
 
 const fn validate_reusable_catalog_entry_count(
@@ -1029,29 +1093,163 @@ struct ExpansionContext<'a> {
     job_count: usize,
 }
 
+struct CallValidationContext<'a> {
+    catalog: &'a GithubReusableWorkflowCatalog,
+    limits: ReusableWorkflowLimits,
+    invocation_count: usize,
+    job_count: usize,
+}
+
+fn analyze_reusable_call_graph(
+    root_plan: &WorkflowPlan,
+    catalog: &GithubReusableWorkflowCatalog,
+    limits: ReusableWorkflowLimits,
+) -> Result<ReusableWorkflowCallAnalysis, ReusableWorkflowExpansionError> {
+    let PlanSourceOrigin::Repository {
+        path: root_path, ..
+    } = root_plan.source().origin()
+    else {
+        return Err(ReusableWorkflowExpansionError::RootPlanMismatch);
+    };
+    let root_path = canonical_workflow_path(root_path, catalog.authority.workflow_location())?;
+    validate_plan_origin(
+        root_plan,
+        catalog.authority,
+        catalog.repository(),
+        catalog.revision(),
+        &root_path,
+    )?;
+    let mut context = CallValidationContext {
+        catalog,
+        limits,
+        invocation_count: 0,
+        job_count: 0,
+    };
+    let required_root_secret_names =
+        analyze_reusable_invocation(&mut context, &root_path, root_plan, 0, &mut Vec::new())?;
+    Ok(ReusableWorkflowCallAnalysis {
+        required_root_secret_names: required_root_secret_names.into_iter().collect(),
+    })
+}
+
+fn analyze_reusable_invocation(
+    context: &mut CallValidationContext<'_>,
+    workflow_path: &str,
+    plan: &WorkflowPlan,
+    depth: usize,
+    active_paths: &mut Vec<String>,
+) -> Result<BTreeSet<String>, ReusableWorkflowExpansionError> {
+    validate_reusable_workflow_depth(depth, context.limits.maximum_depth())?;
+    context.invocation_count = context
+        .invocation_count
+        .checked_add(1)
+        .ok_or(ReusableWorkflowExpansionError::InvocationLimitExceeded)?;
+    validate_reusable_workflow_invocation_count(
+        context.invocation_count,
+        context.limits.maximum_invocations(),
+    )?;
+    context.job_count = context
+        .job_count
+        .checked_add(plan.jobs().len())
+        .ok_or(ReusableWorkflowExpansionError::JobLimitExceeded)?;
+    validate_reusable_workflow_job_count(context.job_count, context.limits.maximum_jobs())?;
+    if active_paths.iter().any(|active| active == workflow_path) {
+        return Err(ReusableWorkflowExpansionError::Cycle(
+            workflow_path.to_owned(),
+        ));
+    }
+    active_paths.push(workflow_path.to_owned());
+    let result = (|| {
+        let mut required_secret_names = BTreeSet::new();
+        for job in plan.jobs() {
+            let requirements = discover_job_credential_requirements(plan.logical(), job)
+                .map_err(|_| ReusableWorkflowExpansionError::CredentialRequirements)?;
+            required_secret_names.extend(requirements.secret_names().iter().cloned());
+        }
+        if let Some(contract) = plan.logical().invocation() {
+            required_secret_names.extend(
+                contract
+                    .secrets()
+                    .iter()
+                    .filter(|secret| secret.required())
+                    .map(|secret| secret.key().value().as_str().to_ascii_uppercase()),
+            );
+        }
+        for job in plan.jobs() {
+            let LogicalJobKind::ReusableWorkflow(call) = job.execution() else {
+                continue;
+            };
+            if job.strategy().is_some() {
+                return Err(ReusableWorkflowExpansionError::MatrixCallUnsupported);
+            }
+            let callee = context.catalog.resolve(call.reference().value())?;
+            if active_paths.iter().any(|active| active == callee.path()) {
+                return Err(ReusableWorkflowExpansionError::Cycle(
+                    callee.path().to_owned(),
+                ));
+            }
+            let contract = callee.plan().logical().invocation().ok_or_else(|| {
+                ReusableWorkflowExpansionError::MissingInvocationContract(callee.path().to_owned())
+            })?;
+            validate_inputs(call, contract)?;
+            validate_call_outputs(job.outputs(), contract)?;
+            let child_required_secret_names = analyze_reusable_invocation(
+                context,
+                callee.path(),
+                callee.plan(),
+                depth + 1,
+                active_paths,
+            )?;
+            if matches!(call.secrets(), ReusableSecretForwarding::Inherit(_)) {
+                required_secret_names.extend(child_required_secret_names.iter().cloned());
+            }
+            let secrets = validate_secrets(call, contract, &required_secret_names)?;
+            let child_secret_names = secrets
+                .iter()
+                .map(|binding| binding.target.to_ascii_uppercase())
+                .collect::<BTreeSet<_>>();
+            if let Some(missing) = child_required_secret_names
+                .iter()
+                .find(|name| !child_secret_names.contains(*name))
+            {
+                return Err(ReusableWorkflowExpansionError::MissingRequiredSecret(
+                    missing.clone(),
+                ));
+            }
+        }
+        Ok(required_secret_names)
+    })();
+    active_paths.pop();
+    result
+}
+
 #[allow(clippy::too_many_lines)]
 fn expand_reusable_workflow(
     request: ExpandReusableWorkflowRequest<'_>,
     limits: ReusableWorkflowLimits,
 ) -> Result<ReusableWorkflowExpansion, ReusableWorkflowExpansionError> {
-    let root_path = canonical_workflow_path(request.root_path)?;
+    let root_path = canonical_workflow_path(
+        request.root_path,
+        request.catalog.authority.workflow_location(),
+    )?;
     if request.root_source.is_empty() {
         return Err(ReusableWorkflowExpansionError::InvalidSourceSize);
     }
     validate_reusable_workflow_source_bytes(request.root_source.len())?;
     validate_plan_origin(
         request.root_plan,
+        request.catalog.authority,
         request.catalog.repository(),
         request.catalog.revision(),
         &root_path,
     )?;
-    let recompiled_root = compile_github_source(
+    let recompiled_root = recompile_root_source(
+        request.catalog.authority,
         request.catalog.repository(),
         request.catalog.revision(),
         &root_path,
         request.root_source,
         request.root_plan.event().clone(),
-        true,
     )
     .map_err(|error| match error {
         ReusableWorkflowExpansionError::FrontendRejected(_)
@@ -1416,17 +1614,31 @@ fn validate_secrets(
                     ));
                 }
                 let source = binding.source().value().as_str();
-                if !available.contains(source) {
+                let Some(source) = available
+                    .iter()
+                    .find(|candidate| candidate.eq_ignore_ascii_case(source))
+                else {
                     return Err(ReusableWorkflowExpansionError::UnavailableSecret(
                         source.to_owned(),
                     ));
-                }
-                supplied.insert(target, source.to_owned());
+                };
+                supplied.insert(target, source.clone());
             }
         }
         ReusableSecretForwarding::Inherit(_) => {
             for source in available {
                 supplied.insert(source.as_str(), source.clone());
+            }
+            for definition in contract.secrets() {
+                let target = definition.key().value().as_str();
+                let Some(source) = available
+                    .iter()
+                    .find(|candidate| candidate.eq_ignore_ascii_case(target))
+                else {
+                    continue;
+                };
+                supplied.remove(source.as_str());
+                supplied.insert(target, source.clone());
             }
         }
     }
@@ -1548,13 +1760,58 @@ const fn minimum_permission(left: PermissionLevel, right: PermissionLevel) -> Pe
     }
 }
 
-fn compile_github_source(
+fn compile_reusable_source(
+    authority: GithubReusableWorkflowSourceAuthority,
+    repository: &str,
+    revision: &str,
+    path: &str,
+    source: &[u8],
+) -> Result<WorkflowPlan, ReusableWorkflowExpansionError> {
+    let selection = match authority {
+        GithubReusableWorkflowSourceAuthority::GithubDelivery => {
+            ReusableCompilationSelection::GithubWorkflowCall
+        }
+        GithubReusableWorkflowSourceAuthority::LocalSnapshot {
+            snapshot_digest, ..
+        } => ReusableCompilationSelection::LocalWorkflowCall(LocalWorkflowSourceEvidence::new(
+            snapshot_digest,
+        )),
+    };
+    compile_source(repository, revision, path, source, selection)
+}
+
+fn recompile_root_source(
+    authority: GithubReusableWorkflowSourceAuthority,
     repository: &str,
     revision: &str,
     path: &str,
     source: &[u8],
     event: automata_ci_core::WorkflowEventProvenance,
-    preselected: bool,
+) -> Result<WorkflowPlan, ReusableWorkflowExpansionError> {
+    let GithubReusableWorkflowSourceAuthority::GithubDelivery = authority else {
+        return Err(ReusableWorkflowExpansionError::RootPlanMismatch);
+    };
+    compile_source(
+        repository,
+        revision,
+        path,
+        source,
+        ReusableCompilationSelection::GithubPreselected(event),
+    )
+}
+
+enum ReusableCompilationSelection {
+    GithubPreselected(automata_ci_core::WorkflowEventProvenance),
+    GithubWorkflowCall,
+    LocalWorkflowCall(LocalWorkflowSourceEvidence),
+}
+
+fn compile_source(
+    repository: &str,
+    revision: &str,
+    path: &str,
+    source: &[u8],
+    selection: ReusableCompilationSelection,
 ) -> Result<WorkflowPlan, ReusableWorkflowExpansionError> {
     let source = std::str::from_utf8(source)
         .map_err(|_| ReusableWorkflowExpansionError::InvalidSourceEncoding)?;
@@ -1576,10 +1833,18 @@ fn compile_github_source(
     let source_plan = parsed
         .plan()
         .ok_or_else(|| ReusableWorkflowExpansionError::FrontendRejected("no plan".to_owned()))?;
-    let request = if preselected {
-        CompileWorkflowRequest::for_preselected_event(source_plan, event)
-    } else {
-        CompileWorkflowRequest::new(source_plan, event)
+    let request = match selection {
+        ReusableCompilationSelection::GithubPreselected(event) => {
+            CompileWorkflowRequest::for_preselected_event(source_plan, event)
+        }
+        ReusableCompilationSelection::GithubWorkflowCall => CompileWorkflowRequest::new(
+            source_plan,
+            automata_ci_core::WorkflowEventProvenance::new("github", "workflow_call")
+                .with_commit_sha(revision),
+        ),
+        ReusableCompilationSelection::LocalWorkflowCall(evidence) => {
+            CompileWorkflowRequest::for_local_workflow_call(source_plan, evidence)
+        }
     };
     let compiled = GithubWorkflowCompiler::new().compile(request);
     if !compiled.is_accepted() {
@@ -1595,6 +1860,7 @@ fn compile_github_source(
 
 fn validate_plan_origin(
     plan: &WorkflowPlan,
+    authority: GithubReusableWorkflowSourceAuthority,
     repository: &str,
     revision: &str,
     path: &str,
@@ -1607,7 +1873,7 @@ fn validate_plan_origin(
     else {
         return Err(ReusableWorkflowExpansionError::RootPlanMismatch);
     };
-    if plan.source().provider() != "github"
+    if plan.source().provider() != authority.provider()
         || plan.source().source_id() != path
         || plan_repository != repository
         || plan_revision != revision
@@ -1618,7 +1884,10 @@ fn validate_plan_origin(
     Ok(())
 }
 
-fn canonical_workflow_path(value: &str) -> Result<String, ReusableWorkflowExpansionError> {
+fn canonical_workflow_path(
+    value: &str,
+    workflow_location: RepositoryWorkflowLocation,
+) -> Result<String, ReusableWorkflowExpansionError> {
     validate_reusable_workflow_path_bytes(value.len())?;
     if value.is_empty()
         || value.starts_with('/')
@@ -1633,7 +1902,11 @@ fn canonical_workflow_path(value: &str) -> Result<String, ReusableWorkflowExpans
         return Err(ReusableWorkflowExpansionError::InvalidWorkflowPath);
     };
     let extension = Path::new(file).extension();
-    if *dot_ci != ".ci"
+    let expected_directory = match workflow_location {
+        RepositoryWorkflowLocation::Automata => ".ci",
+        RepositoryWorkflowLocation::Github => ".github",
+    };
+    if *dot_ci != expected_directory
         || *workflows != "workflows"
         || file.is_empty()
         || *file == "."
@@ -1645,14 +1918,21 @@ fn canonical_workflow_path(value: &str) -> Result<String, ReusableWorkflowExpans
     Ok(value.to_owned())
 }
 
-fn resolve_local_reference(reference: &str) -> Result<String, ReusableWorkflowExpansionError> {
-    let Some(file) = reference.strip_prefix("./.ci/workflows/") else {
+fn resolve_local_reference(
+    reference: &str,
+    workflow_location: RepositoryWorkflowLocation,
+) -> Result<String, ReusableWorkflowExpansionError> {
+    let prefix = match workflow_location {
+        RepositoryWorkflowLocation::Automata => "./.ci/workflows/",
+        RepositoryWorkflowLocation::Github => "./.github/workflows/",
+    };
+    let Some(file) = reference.strip_prefix(prefix) else {
         return Err(ReusableWorkflowExpansionError::NonLocalReference);
     };
     if file.is_empty() || file.contains('/') || file.contains('\\') {
         return Err(ReusableWorkflowExpansionError::NonLocalReference);
     }
-    canonical_workflow_path(&format!(".ci/workflows/{file}"))
+    canonical_workflow_path(reference.trim_start_matches("./"), workflow_location)
         .map_err(|_| ReusableWorkflowExpansionError::NonLocalReference)
 }
 

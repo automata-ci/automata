@@ -31,9 +31,10 @@ use automata_ci_workflow_github::{
 };
 use automata_ci_workflow_service::{
     ExpandReusableWorkflowRequest, GITHUB_RUNNER_POLICY_MEDIA_TYPE, GithubReusableWorkflowCatalog,
-    JOB_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryWorkflowSource, ReusableInputBindingSource,
-    ReusableWorkflowExpander, ReusableWorkflowPermissions, ReusableWorkflowRuntimeOutcome,
-    ReusableWorkflowRuntimeService, WORKFLOW_EVENT_MEDIA_TYPE, WORKFLOW_PLAN_MEDIA_TYPE,
+    GithubReusableWorkflowSourceAuthority, JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+    RepositoryWorkflowSource, ReusableInputBindingSource, ReusableWorkflowExpander,
+    ReusableWorkflowPermissions, ReusableWorkflowRuntimeOutcome, ReusableWorkflowRuntimeService,
+    WORKFLOW_EVENT_MEDIA_TYPE, WORKFLOW_PLAN_MEDIA_TYPE,
 };
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
@@ -367,6 +368,7 @@ async fn runtime_fixture(
         LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(12)).expect("root invocation");
     let root_plan = compile_root(root_source);
     let catalog = GithubReusableWorkflowCatalog::compile(
+        GithubReusableWorkflowSourceAuthority::GithubDelivery,
         REPOSITORY,
         REVISION,
         [RepositoryWorkflowSource::new(

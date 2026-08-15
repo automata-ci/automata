@@ -36,7 +36,9 @@ fn local_doctor_is_an_explicit_read_only_preflight() {
     let Command::Local(local) = cli.command else {
         panic!("local command expected");
     };
-    let LocalCommand::Doctor(args) = local.command;
+    let LocalCommand::Doctor(args) = local.command else {
+        panic!("local doctor command expected");
+    };
     assert_eq!(args.engine, LocalContainerEngine::Docker);
     assert!(args.json);
 
@@ -134,6 +136,41 @@ fn internal_object_store_bucket_initialization_is_hidden_exact_and_redacted() {
         ])
         .is_err(),
         "the internal command must not accept raw credential arguments"
+    );
+}
+
+#[test]
+fn local_check_is_explicit_source_only_workflow_dispatch_validation() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "local",
+        "check",
+        ".github/workflows/ci.yml",
+        "--input",
+        "target=staging",
+        "--json",
+    ])
+    .expect("local check must parse");
+    let Command::Local(local) = cli.command else {
+        panic!("local command expected");
+    };
+    let LocalCommand::Check(args) = local.command else {
+        panic!("local check command expected");
+    };
+    assert_eq!(args.workflow.as_deref(), Some(".github/workflows/ci.yml"));
+    assert_eq!(args.inputs.len(), 1);
+    assert_eq!(args.inputs[0].name(), "target");
+    assert!(args.json);
+    assert!(format!("{args:?}").contains("target"));
+    assert!(!format!("{args:?}").contains("staging"));
+
+    assert!(
+        Cli::try_parse_from(["automata", "local", "check", "--event", "push"]).is_err(),
+        "local check must not fabricate provider event evidence"
+    );
+    assert!(
+        Cli::try_parse_from(["automata", "local", "check", "--input", "missing-separator"])
+            .is_err()
     );
 }
 

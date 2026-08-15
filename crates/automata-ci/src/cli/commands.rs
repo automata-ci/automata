@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr};
 
 use clap::{Args, Subcommand, ValueEnum};
 use uuid::Uuid;
@@ -105,6 +105,8 @@ pub struct LocalArgs {
 pub enum LocalCommand {
     /// Check this host without creating containers or local state.
     Doctor(LocalDoctorArgs),
+    /// Validate one exact local workflow without admission or execution.
+    Check(LocalCheckArgs),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, serde::Serialize)]
@@ -128,6 +130,65 @@ pub struct LocalDoctorArgs {
     /// Render one stable JSON document instead of a human-readable report.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Args)]
+/// Read-only exact-snapshot workflow validation options.
+pub struct LocalCheckArgs {
+    /// Canonical repository-relative workflow path; omit only when exactly one exists.
+    pub workflow: Option<String>,
+    /// Manual-dispatch input in `NAME=VALUE` form.
+    #[arg(long = "input", value_name = "NAME=VALUE")]
+    pub inputs: Vec<LocalWorkflowInput>,
+    /// Render one stable JSON document instead of a human-readable report.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// One redacted local manual-dispatch input parsed from the command line.
+#[derive(Clone, Eq, PartialEq)]
+pub struct LocalWorkflowInput {
+    name: String,
+    value: String,
+}
+
+impl LocalWorkflowInput {
+    /// Returns the canonical input name candidate.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl FromStr for LocalWorkflowInput {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (name, value) = value
+            .split_once('=')
+            .ok_or("local workflow inputs must use NAME=VALUE")?;
+        if name.is_empty() {
+            return Err("local workflow input names must not be empty");
+        }
+        Ok(Self {
+            name: name.to_owned(),
+            value: value.to_owned(),
+        })
+    }
+}
+
+impl fmt::Debug for LocalWorkflowInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LocalWorkflowInput")
+            .field("name", &self.name)
+            .field("value", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Args)]

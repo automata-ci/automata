@@ -1,9 +1,10 @@
 # Local installation and deployment roadmap
 
 - Roadmap status: Active
-- Available slice: read-only `automata local doctor` from a reviewed source checkout
+- Available slice: read-only `automata local doctor` and source-only
+  `automata local check` from a reviewed source checkout
 - Current implementation checkpoints: 2B.2a shared sandbox-guest protocol v4
-  file primitives, plus the internal source-sealing foundation of 3B
+  file primitives, plus the read-only source-validation portion of 3B
 - Last completed engine-adapter checkpoint: 2B.1, pinned Docker context and
   immutable identity anchor
 - Date: 2026-08-15
@@ -83,10 +84,10 @@ The first worktree run needs no GitHub App, browser, webhook, public hostname,
 or push. Optional GitHub connection comes later for authenticated remote refs,
 webhook-driven runs, Check Runs, and GitHub API authority.
 
-The workflow positional argument is optional. An exact eligible
-repository-relative path resolves directly. A filename, stem, or workflow
-display name is accepted only when it is unique. Interactive ambiguity opens a
-picker; non-interactive and JSON modes report the sorted choices and fail.
+The workflow positional argument is optional only when exactly one direct
+workflow exists. Otherwise callers supply its exact canonical
+repository-relative path. Filename, stem, and display-name aliases are not a
+second selector grammar.
 
 Direct `.github/workflows/*.yml|yaml` and `.ci/workflows/*.yml|yaml` files are
 eligible; nested files are not initially. Supporting `.github/workflows` in the
@@ -115,8 +116,7 @@ integrations in distinct namespaces:
 
 ```console
 automata local doctor [--json]
-automata local check [WORKFLOW] [--event EVENT]
-  [--input NAME=VALUE]... [--json]
+automata local check [WORKFLOW] [--input NAME=VALUE]... [--json]
 automata local run [WORKFLOW] [--workers N] [--event EVENT]
   [--input NAME=VALUE]... [--allow-architecture-substitution]
   [--non-interactive] [--allow-missing-secrets] [--json]
@@ -185,7 +185,7 @@ onboarding path:
 | Existing path | Reusable capability | Remaining local gap |
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
-| `automata-ci-local` snapshot foundation | Deterministic bounded live-worktree archive, explicit workflow-location policy, and shared archive discovery | It remains an internal library seam until truthful local event compilation, same-tree reusable workflows, repository identity, and admission are composed |
+| `automata local check` | Deterministic bounded live-worktree archive, physical common-Git-directory identity, explicit workflow-location policy, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free credential discovery | It is deliberately read-only; local admission, scheduling, execution, and GitHub Checks remain absent |
 | `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
 | `automata-ci-sandbox-guest` | Protocol 4 bounded optional read and Unix durable compare-and-swap atomic commit, plus a non-root helper-image data mountpoint | No local adapter yet mounts a desired-spec volume or invokes these primitives |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
@@ -906,7 +906,7 @@ history. Define and retain the exact canonical repository identity as admitted
 source provenance here, not as an engine installation binding. Add
 `automata local check` as a read-only view of that path.
 
-Status: internal foundation available, checkpoint gate incomplete. The library
+Status: read-only source validation available, admission gate incomplete. The library
 seals Git's tracked plus non-ignored live-worktree inventory through pinned
 no-follow ancestor handles, normalizes tracked symlinks from Git mode, detects
 mutation, and hashes the exact deterministic gzip bytes consumed by shared
@@ -915,10 +915,12 @@ component-trie bounds and aliases, link cycles, sparse or assume-unchanged
 index flags, and workflow-namespace aliases fail closed. Ignored paths are
 classified through one bounded NUL-safe batch per worktree scan.
 `.github/workflows` and `.ci/workflows` are explicit first-class policies; if
-both namespaces are present the source fails as ambiguous. There is deliberately
-no partial `automata local check` command before event compilation, same-tree
-reusable-workflow loading, canonical repository identity, and local source
-provenance can be validated together.
+both namespaces are present the source fails as ambiguous. `automata local
+check` composes event compilation, same-tree reusable-workflow loading,
+typed call-graph validation and root-secret propagation, physical
+common-Git-directory identity, snapshot revision, and local source provenance
+without entering admission. Its only current event is an explicit local
+`workflow_dispatch`; it cannot synthesize GitHub delivery evidence.
 
 Gate: clean and dirty worktrees produce deterministic digests; ignored files,
 `.git`, sockets, devices, escaping symlinks, submodule ambiguity, concurrent

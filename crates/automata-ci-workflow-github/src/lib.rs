@@ -17,7 +17,8 @@ mod syntax;
 
 pub use compiler::{
     CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubWorkflowCompiler,
-    WorkflowNotSelectedReason,
+    LocalWorkflowDispatchEvidence, LocalWorkflowDispatchInputs, LocalWorkflowDispatchInputsError,
+    LocalWorkflowSourceEvidence, WorkflowNotSelectedReason,
 };
 pub use diagnostic::{Diagnostic, DiagnosticKind, DiagnosticSeverity, RelatedDiagnostic};
 pub use expression::{

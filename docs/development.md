@@ -296,7 +296,7 @@ and the worker composition remain planned; follow the
 [local installation and deployment roadmap](maintainers/roadmaps/local-installation.md) for
 their merge and host-qualification gates.
 
-The internal local-source foundation seals tracked and non-ignored live bytes
+The local-source path seals tracked and non-ignored live bytes
 through pinned, no-follow ancestor handles and feeds every exact digest-bound
 archive through source-policy-specific workflow discovery. Git mode normalizes
 tracked symlinks across native Unix links and Windows placeholders; Windows
@@ -309,9 +309,24 @@ component trie. Its adversarial fixture suite is available with:
 cargo test --locked -p automata-ci-local snapshot::tests
 ```
 
-There is deliberately no `automata local check` command yet. Exact local event
-semantics, same-tree reusable-workflow compilation, and admission must land
-together before that public validation surface is truthful.
+Use the same source path without starting Docker or mutating Git:
+
+```console
+cargo run --locked -p automata-ci -- local check
+cargo run --locked -p automata-ci -- local check .github/workflows/ci.yml \
+  --input target=staging --json
+```
+
+`local check` captures the archive once, requires an explicit local
+`workflow_dispatch`, recompiles reachable same-snapshot reusable workflows in
+the discovered `.github/workflows` or `.ci/workflows` namespace, validates
+typed inputs, secret forwarding, outputs, cycles, and expansion bounds, and
+reports value-free credential requirements with mapped and inherited root
+secret names propagated. When more than one direct workflow exists, the
+canonical repository-relative path is required. The command never inspects
+Docker, admits, schedules, runs, contacts GitHub, reads a GitHub token, or
+creates a Check Run; local admission and execution remain later roadmap
+checkpoints.
 
 The opt-in live adapter contract creates one randomly named identity volume,
 adopts the same UUID through the public adapter, then re-inspects and removes

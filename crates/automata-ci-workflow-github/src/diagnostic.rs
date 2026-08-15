@@ -14,6 +14,19 @@ pub enum DiagnosticKind {
     ResourceLimit,
 }
 
+impl DiagnosticKind {
+    /// Returns the stable machine-readable stage name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Syntax => "syntax",
+            Self::Semantic => "semantic",
+            Self::Unsupported => "unsupported",
+            Self::ResourceLimit => "resource_limit",
+        }
+    }
+}
+
 /// Whether a diagnostic prevents the source plan from being accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -22,6 +35,17 @@ pub enum DiagnosticSeverity {
     Warning,
     /// The source cannot be accepted by the relevant frontend stage.
     Error,
+}
+
+impl DiagnosticSeverity {
+    /// Returns the stable machine-readable severity name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// A secondary, source-bound location that provides context for a diagnostic.

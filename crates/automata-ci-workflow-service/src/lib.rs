@@ -93,9 +93,10 @@ pub use reusable_runtime::{
 pub use reusable_workflow::{
     CatalogedReusableWorkflow, ExpandReusableWorkflowRequest, ExpandedReusableInput,
     ExpandedReusableJob, ExpandedReusableOutput, ExpandedReusableOutputMapping,
-    ExpandedReusableSecret, GithubReusableWorkflowCatalog, MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES,
-    MAX_REUSABLE_WORKFLOW_DEPTH, MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS,
-    MAX_REUSABLE_WORKFLOW_INVOCATIONS, RepositoryWorkflowSource, ReusableInputBindingSource,
+    ExpandedReusableSecret, GithubReusableWorkflowCatalog, GithubReusableWorkflowSourceAuthority,
+    MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES, MAX_REUSABLE_WORKFLOW_DEPTH,
+    MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS, MAX_REUSABLE_WORKFLOW_INVOCATIONS,
+    RepositoryWorkflowSource, ReusableInputBindingSource, ReusableWorkflowCallAnalysis,
     ReusableWorkflowExpander, ReusableWorkflowExpansion, ReusableWorkflowExpansionError,
     ReusableWorkflowInvocationExpansion, ReusableWorkflowLimits, ReusableWorkflowPermissions,
 };

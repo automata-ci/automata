@@ -613,6 +613,7 @@ dependencies = [
  "async-trait",
  "automata-ci-core",
  "automata-ci-workflow-github",
+ "automata-ci-workflow-service",
  "bytes",
  "cap-fs-ext",
  "cap-std",

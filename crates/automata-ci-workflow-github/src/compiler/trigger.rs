@@ -6,7 +6,7 @@ use crate::{
     EventName, GithubChangedFiles, GithubCronExpression, GithubEventMetadata, GithubScheduleError,
     GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
     GithubWorkflowDispatchInputDefinition, GithubWorkflowDispatchInputType,
-    GithubWorkflowDispatchInputValue, MAX_GITHUB_SCHEDULE_ENTRIES,
+    GithubWorkflowDispatchInputValue, LocalWorkflowDispatchInputs, MAX_GITHUB_SCHEDULE_ENTRIES,
     MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES, MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES,
     MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, MergeGroupFilter, PushPullRequestFilter,
     RepositoryDispatchFilter, ScalarResolution, SourceSpan, Spanned, TriggerConfiguration,
@@ -735,8 +735,80 @@ fn workflow_dispatch_matches(
             return TriggerSelection::Rejected;
         }
     };
-    let Some(inputs) = resolve_workflow_dispatch_inputs(contract, inputs, trigger_span, context)
-    else {
+    let Some(inputs) = resolve_workflow_dispatch_inputs(
+        contract,
+        inputs,
+        DispatchInputAuthority::GithubVerified,
+        trigger_span,
+        context,
+    ) else {
+        return TriggerSelection::Rejected;
+    };
+    TriggerSelection::Selected(Some(CompiledWorkflowDispatch {
+        contract: contract.clone(),
+        inputs,
+    }))
+}
+
+pub(super) fn local_workflow_dispatch_matches(
+    contract: Option<&GithubWorkflowDispatchContract>,
+    inputs: &LocalWorkflowDispatchInputs,
+    trigger_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) -> TriggerSelection {
+    let Some(contract) = contract else {
+        return TriggerSelection::Rejected;
+    };
+    let mut typed = Vec::with_capacity(inputs.values().len());
+    let mut valid = true;
+    for (key, value) in inputs.values() {
+        let Some(definition) = contract.inputs().get(key) else {
+            context.semantic(
+                "github.compile.unknown_workflow_dispatch_input",
+                format!("local workflow_dispatch supplied undeclared input `{key}`"),
+                trigger_span.clone(),
+            );
+            valid = false;
+            continue;
+        };
+        let value = match definition.input_type() {
+            GithubWorkflowDispatchInputType::Boolean => match value.as_str() {
+                "true" => GithubWorkflowDispatchInputValue::Boolean(true),
+                "false" => GithubWorkflowDispatchInputValue::Boolean(false),
+                _ => {
+                    context.semantic(
+                        "github.compile.workflow_dispatch_input_type",
+                        format!("local workflow_dispatch Boolean input `{key}` must be `true` or `false`"),
+                        trigger_span.clone(),
+                    );
+                    valid = false;
+                    continue;
+                }
+            },
+            GithubWorkflowDispatchInputType::Choice | GithubWorkflowDispatchInputType::String => {
+                GithubWorkflowDispatchInputValue::String(value.clone())
+            }
+        };
+        typed.push((key.as_str().to_owned(), value));
+    }
+    if !valid {
+        return TriggerSelection::Rejected;
+    }
+    let Ok(typed) = crate::GithubWorkflowDispatchInputs::try_new(typed) else {
+        context.semantic(
+            "github.compile.invalid_workflow_dispatch_context",
+            "local workflow_dispatch inputs could not be represented canonically",
+            trigger_span.clone(),
+        );
+        return TriggerSelection::Rejected;
+    };
+    let Some(inputs) = resolve_workflow_dispatch_inputs(
+        contract,
+        &typed,
+        DispatchInputAuthority::LocalExplicit,
+        trigger_span,
+        context,
+    ) else {
         return TriggerSelection::Rejected;
     };
     TriggerSelection::Selected(Some(CompiledWorkflowDispatch {
@@ -768,9 +840,25 @@ pub(super) fn compile_preselected_workflow_dispatch(
     }
 }
 
+#[derive(Clone, Copy)]
+enum DispatchInputAuthority {
+    GithubVerified,
+    LocalExplicit,
+}
+
+impl DispatchInputAuthority {
+    const fn description(self) -> &'static str {
+        match self {
+            Self::GithubVerified => "verified workflow_dispatch payload",
+            Self::LocalExplicit => "explicit local workflow_dispatch selection",
+        }
+    }
+}
+
 fn resolve_workflow_dispatch_inputs(
     contract: &GithubWorkflowDispatchContract,
     payload: &crate::GithubWorkflowDispatchInputs,
+    authority: DispatchInputAuthority,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> Option<ContextValue> {
@@ -779,7 +867,10 @@ fn resolve_workflow_dispatch_inputs(
         if !contract.inputs().contains_key(key) {
             context.semantic(
                 "github.compile.unknown_workflow_dispatch_input",
-                format!("verified workflow_dispatch payload supplied undeclared input `{key}`"),
+                format!(
+                    "{} supplied undeclared input `{key}`",
+                    authority.description()
+                ),
                 trigger_span.clone(),
             );
             valid = false;
@@ -792,7 +883,9 @@ fn resolve_workflow_dispatch_inputs(
             Some(value) => {
                 coerce_workflow_dispatch_input(key, definition, value, trigger_span, context)
             }
-            None => default_workflow_dispatch_input(key, definition, trigger_span, context),
+            None => {
+                default_workflow_dispatch_input(key, definition, authority, trigger_span, context)
+            }
         };
         match value {
             Some(value) => {
@@ -878,6 +971,7 @@ fn coerce_workflow_dispatch_input(
 fn default_workflow_dispatch_input(
     key: &WorkflowInputKey,
     definition: &GithubWorkflowDispatchInputDefinition,
+    authority: DispatchInputAuthority,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> Option<ContextValue> {
@@ -891,7 +985,7 @@ fn default_workflow_dispatch_input(
         None if definition.required() => {
             context.semantic(
                 "github.compile.required_workflow_dispatch_input_missing",
-                format!("verified workflow_dispatch payload omitted required input `{key}`"),
+                format!("{} omitted required input `{key}`", authority.description()),
                 trigger_span.clone(),
             );
             None
