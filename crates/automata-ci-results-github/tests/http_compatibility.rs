@@ -587,26 +587,34 @@ async fn artifact_router_and_extractor_rejections_are_private() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Node >=24 and AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE"]
 async fn official_actions_artifact_6_2_client_completes_the_full_protocol() {
-    let module_path = std::env::var_os("AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE")
+    let upload_module_path = std::env::var_os("AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE")
         .map(PathBuf::from)
         .expect(
             "set AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE to @actions/artifact 6.2.0 lib/internal/client.js",
         );
-    run_official_artifact_client(module_path, "6.2.0").await;
+    run_official_artifact_clients(upload_module_path, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Node >=24 and AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE"]
+#[ignore = "requires Node >=24 and both exact upload/download @actions/artifact modules"]
 async fn official_download_action_artifact_6_2_1_client_completes_the_full_protocol() {
-    let module_path = std::env::var_os("AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE")
+    let upload_module_path = std::env::var_os("AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE")
+        .map(PathBuf::from)
+        .expect(
+            "set AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE to @actions/artifact 6.2.0 lib/internal/client.js",
+        );
+    let download_module_path = std::env::var_os("AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE")
         .map(PathBuf::from)
         .expect(
             "set AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE to download-artifact v8.0.1 @actions/artifact 6.2.1 lib/internal/client.js",
         );
-    run_official_artifact_client(module_path, "6.2.1").await;
+    run_official_artifact_clients(upload_module_path, Some(download_module_path)).await;
 }
 
-async fn run_official_artifact_client(module_path: PathBuf, expected_version: &'static str) {
+async fn run_official_artifact_clients(
+    upload_module_path: PathBuf,
+    download_module_path: Option<PathBuf>,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind action-client fixture");
@@ -631,29 +639,83 @@ async fn run_official_artifact_client(module_path: PathBuf, expected_version: &'
     .expect("write fixture input");
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/official_artifact_client.mjs");
-    let token = fixture.token;
+    let token = fixture.token.clone();
+    let upload_scratch = scratch.clone();
+    let upload_input = input.clone();
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("node")
+        isolated_node_command()
             .arg(script)
             .env("ACTIONS_RUNTIME_TOKEN", token)
             .env("ACTIONS_RESULTS_URL", format!("http://{address}/"))
             .env("GITHUB_SERVER_URL", "http://automata-git.ghe.com:8088/")
-            .env("GITHUB_WORKSPACE", &scratch)
-            .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE", module_path)
-            .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION", expected_version)
-            .env("AUTOMATA_TEST_ARTIFACT_INPUT", input)
-            .env("AUTOMATA_TEST_ARTIFACT_ROOT", scratch)
+            .env("GITHUB_WORKSPACE", &upload_scratch)
+            .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE", upload_module_path)
+            .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION", "6.2.0")
+            .env("AUTOMATA_TEST_ARTIFACT_INPUT", upload_input)
+            .env("AUTOMATA_TEST_ARTIFACT_ROOT", upload_scratch)
             .output()
             .expect("run official artifact client")
     })
     .await
     .expect("join Node client");
-    server.abort();
     assert!(
         output.status.success(),
         "official artifact client exited with {}",
         output.status
     );
+
+    if let Some(download_module_path) = download_module_path {
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/official_artifact_download_client.mjs");
+        let token = fixture.token;
+        let download_output = tokio::task::spawn_blocking(move || {
+            isolated_node_command()
+                .arg(script)
+                .env("ACTIONS_RUNTIME_TOKEN", token)
+                .env("ACTIONS_RESULTS_URL", format!("http://{address}/"))
+                .env("GITHUB_SERVER_URL", "http://automata-git.ghe.com:8088/")
+                .env("GITHUB_WORKSPACE", &scratch)
+                .env(
+                    "AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE",
+                    download_module_path,
+                )
+                .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION", "6.2.1")
+                .env("AUTOMATA_TEST_ARTIFACT_INPUT", input)
+                .env("AUTOMATA_TEST_ARTIFACT_ROOT", scratch)
+                .output()
+                .expect("run official download action artifact client")
+        })
+        .await
+        .expect("join Node download client");
+        assert!(
+            download_output.status.success(),
+            "official download action artifact client exited with {}",
+            download_output.status
+        );
+    }
+    server.abort();
+}
+
+fn isolated_node_command() -> std::process::Command {
+    let mut command = std::process::Command::new("node");
+    command.env_clear();
+    for name in [
+        "PATH",
+        "PATHEXT",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "HOME",
+        "USERPROFILE",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
 }
 
 #[tokio::test]

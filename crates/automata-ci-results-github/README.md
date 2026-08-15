@@ -9,7 +9,10 @@ The implemented clients are:
 
 - `actions/upload-artifact` v7.0.1 at commit
   `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`, using `@actions/artifact`
-  6.2.0; and
+  6.2.0;
+- `actions/download-artifact` v8.0.1 at commit
+  `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`, using `@actions/artifact`
+  6.2.1; and
 - `actions/cache` 5.0.5 using JSON Twirp CacheService v2.
 
 These are tested protocol slices, not general artifact or cache API
@@ -128,4 +131,8 @@ specifications.
 Ignored offline integration tests run the exact artifact and cache clients when
 their module paths are supplied through
 `AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE` and
-`AUTOMATA_TEST_ACTIONS_CACHE_MODULE`. The tests download no packages.
+`AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE`, plus
+`AUTOMATA_TEST_ACTIONS_CACHE_MODULE`. The tests download no packages. An
+additional ignored composition test requires PostgreSQL and production S3,
+runs all three clients through the real adapters, verifies downloaded bytes and
+durable metadata, and writes only closed-enum, identifier-free evidence.

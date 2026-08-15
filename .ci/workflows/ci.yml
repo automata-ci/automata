@@ -197,6 +197,143 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  results_client_acceptance:
+    name: Exact Results clients and production stores
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: docker.io/library/postgres:18.4-bookworm@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568
+        env:
+          POSTGRES_DB: automata_ci
+          POSTGRES_PASSWORD: automata-ci-local-only
+          POSTGRES_USER: automata_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --dbname=automata_ci --username=automata_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
+      AUTOMATA_TEST_DATABASE_NAMESPACE: res01_${{ github.run_id }}_${{ github.run_attempt }}
+      AUTOMATA_TEST_S3_ENDPOINT: http://127.0.0.1:9000/
+      AUTOMATA_TEST_S3_BUCKET: automata-res01
+      AUTOMATA_TEST_S3_ACCESS_KEY: automata-local
+      AUTOMATA_TEST_S3_SECRET_KEY: automata-local-secret-change-me
+      AUTOMATA_TEST_S3_KMS_KEY_ID: default
+      AUTOMATA_TEST_UPLOAD_ARTIFACT_ACTION_ROOT: ${{ github.workspace }}/target/exact-actions/upload-artifact
+      AUTOMATA_TEST_DOWNLOAD_ARTIFACT_ACTION_ROOT: ${{ github.workspace }}/target/exact-actions/download-artifact
+      AUTOMATA_TEST_CACHE_ACTION_ROOT: ${{ github.workspace }}/target/exact-actions/cache
+      AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE: ${{ github.workspace }}/target/exact-actions/upload-artifact/node_modules/@actions/artifact/lib/internal/client.js
+      AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE: ${{ github.workspace }}/target/exact-actions/download-artifact/node_modules/@actions/artifact/lib/internal/client.js
+      AUTOMATA_TEST_ACTIONS_CACHE_MODULE: ${{ github.workspace }}/target/exact-actions/cache/node_modules/@actions/cache/lib/cache.js
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prepare protected task scratch
+        run: install -d -m 0700 -- "$TMPDIR"
+
+      - name: Check out exact upload-artifact fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: actions/upload-artifact
+          ref: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+          path: target/exact-actions/upload-artifact
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out exact download-artifact fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: actions/download-artifact
+          ref: 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+          path: target/exact-actions/download-artifact
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out exact cache fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: actions/cache
+          ref: 27d5ce7f107fe9357f9df03efb73ab90386fccae
+          path: target/exact-actions/cache
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install exact Node.js runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+
+      - name: Hydrate exact offline clients
+        run: |
+          npm ci --prefix target/exact-actions/upload-artifact --ignore-scripts --no-audit --no-fund
+          npm ci --prefix target/exact-actions/download-artifact --ignore-scripts --no-audit --no-fund
+          npm ci --prefix target/exact-actions/cache --ignore-scripts --no-audit --no-fund
+
+      - name: Start pinned production-compatible object store
+        run: |
+          docker run --detach --rm \
+            --name automata-res01-rustfs \
+            --publish 127.0.0.1:9000:9000 \
+            --env RUSTFS_ACCESS_KEY="$AUTOMATA_TEST_S3_ACCESS_KEY" \
+            --env RUSTFS_SECRET_KEY="$AUTOMATA_TEST_S3_SECRET_KEY" \
+            --env RUSTFS_SSE_S3_MASTER_KEY=YXV0b21hdGEtbG9jYWwtc3NlLW1hc3Rlci1rZXktdjE= \
+            --env RUSTFS_ADDRESS=0.0.0.0:9000 \
+            docker.io/rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c \
+            /data
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs automata-res01-rustfs
+          exit 1
+
+      - name: Initialize and verify immutable object storage
+        run: >-
+          cargo test --locked -p automata-ci-blob-s3 --test blob_s3 --all-features
+          rustfs_contract:: -- --ignored --test-threads=1
+
+      - name: Verify immutable action and embedded-client pins
+        run: >-
+          cargo test --locked -p automata-ci-results-github --test client_matrix
+          supplied_action_roots_match_every_immutable_client_pin -- --ignored --exact
+
+      - name: Run exact client protocol tests
+        run: |
+          cargo test --locked -p automata-ci-results-github --test http_compatibility --all-features -- --ignored --test-threads=1
+          cargo test --locked -p automata-ci-results-github --test cache_http --all-features -- --ignored --test-threads=1
+
+      - name: Run exact clients across PostgreSQL and production object storage
+        run: >-
+          cargo test --locked -p automata-ci-results-github --test exact_client_real_store
+          --all-features exact_clients_cross_real_http_postgres_and_object_storage
+          -- --ignored --exact --test-threads=1
+
+      - name: Upload redacted Results acceptance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: exact-results-client-evidence
+          path: target/agent-scratch/exact-client-real-store/**/redacted-results-transcript.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Stop object store
+        if: ${{ always() }}
+        run: docker rm --force automata-res01-rustfs 2>/dev/null || true
+
   renderer_tests:
     name: Rust renderer tests
     runs-on: ubuntu-24.04
