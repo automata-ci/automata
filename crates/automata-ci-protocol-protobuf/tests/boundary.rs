@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use automata_ci_core::{
     AttemptId, JobIrVersion, Lease, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION,

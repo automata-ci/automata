@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_core::{WorkflowEventProvenance, WorkflowPlan, WorkflowPlanVersion};
 use automata_ci_workflow_github::{

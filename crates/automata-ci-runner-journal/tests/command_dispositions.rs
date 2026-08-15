@@ -1,4 +1,4 @@
-mod support;
+use super::support;
 
 use automata_ci_core::{OperationId, Sha256Digest};
 use automata_ci_protocol::CommandSequence;
