@@ -141,19 +141,6 @@ impl RbacPolicy {
         Self { grants }
     }
 
-    /// Returns the union of permissions explicitly granted to the supplied roles.
-    pub fn permissions_for<'a>(
-        &'a self,
-        roles: impl IntoIterator<Item = &'a RoleName>,
-    ) -> BTreeSet<Permission> {
-        roles
-            .into_iter()
-            .filter_map(|role| self.grants.get(role))
-            .flatten()
-            .cloned()
-            .collect()
-    }
-
     /// Reports whether any supplied role explicitly grants a permission.
     pub fn allows<'a>(
         &'a self,
@@ -164,19 +151,6 @@ impl RbacPolicy {
             .into_iter()
             .filter_map(|role| self.grants.get(role))
             .any(|permissions| permissions.contains(permission))
-    }
-}
-
-/// Authorization is a separate port from authentication so deployments can replace
-/// RBAC without replacing their identity provider.
-pub trait Authorizer: std::fmt::Debug + Send + Sync {
-    /// Reports whether the supplied roles explicitly grant a permission.
-    fn is_allowed(&self, roles: &BTreeSet<RoleName>, permission: &Permission) -> bool;
-}
-
-impl Authorizer for RbacPolicy {
-    fn is_allowed(&self, roles: &BTreeSet<RoleName>, permission: &Permission) -> bool {
-        self.allows(roles, permission)
     }
 }
 
@@ -745,20 +719,6 @@ impl CompositeAuthorizationPolicy {
         }
     }
 
-    /// Returns the explicit RBAC policy.
-    #[must_use]
-    pub const fn rbac(&self) -> &RbacPolicy {
-        &self.rbac
-    }
-
-    /// Returns publication policies keyed by exact repository identity.
-    #[must_use]
-    pub const fn repository_publications(
-        &self,
-    ) -> &BTreeMap<RepositoryResource, RepositoryPublicationPolicy> {
-        &self.repository_publications
-    }
-
     /// Applies tenant checks, scoped RBAC, and closed output publication policy.
     #[must_use]
     pub fn allows(&self, context: &AuthorizationContext, request: &AuthorizationRequest) -> bool {
@@ -800,25 +760,5 @@ impl CompositeAuthorizationPolicy {
                 OutputVisibility::Authenticated => authenticated,
                 OutputVisibility::Private => false,
             })
-    }
-}
-
-/// Resource-aware authorization port for server and management-plane composition.
-pub trait ResourceAuthorizer: fmt::Debug + Send + Sync {
-    /// Reports whether current identity evidence allows the exact request.
-    fn is_request_allowed(
-        &self,
-        context: &AuthorizationContext,
-        request: &AuthorizationRequest,
-    ) -> bool;
-}
-
-impl ResourceAuthorizer for CompositeAuthorizationPolicy {
-    fn is_request_allowed(
-        &self,
-        context: &AuthorizationContext,
-        request: &AuthorizationRequest,
-    ) -> bool {
-        self.allows(context, request)
     }
 }
