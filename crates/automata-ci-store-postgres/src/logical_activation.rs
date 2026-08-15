@@ -10,6 +10,7 @@ use super::{
     PostgresStore,
     durable_schema::current_durable_schemas,
     logical_activation_preparation::load_bound_preparation_for_activation_in_transaction,
+    logical_graph::lock_active_logical_graph,
     pg_bigint,
     protected_environment::{
         job_event_trust_name, job_source_kind_name, reusable_secret_permission_name,
@@ -98,7 +99,7 @@ impl LogicalActivationRepository for PostgresStore {
             return Err(LogicalActivationStoreError::ClaimRejected);
         }
         lock_activation_quarantine_custody(&mut transaction, request.claim()).await?;
-        if !lock_active_activation_graph(
+        if !lock_active_logical_graph(
             &mut transaction,
             request.claim().tenant(),
             request.claim().run_id(),
@@ -218,7 +219,7 @@ impl LogicalActivationRepository for PostgresStore {
     ) -> Result<LogicalActivationPublicationReceipt, LogicalActivationStoreError> {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         lock_activation_continuation_custody(&mut transaction, request.claim()).await?;
-        if !lock_active_activation_graph(
+        if !lock_active_logical_graph(
             &mut transaction,
             request.claim().tenant(),
             request.claim().run_id(),
@@ -647,7 +648,7 @@ pub(super) async fn claim_logical_job_activation_in_transaction(
     request: &ClaimLogicalJobActivation,
     origin_selection_id: Uuid,
 ) -> Result<Option<ClaimedLogicalJobActivation>, LogicalActivationStoreError> {
-    if !lock_active_activation_graph(
+    if !lock_active_logical_graph(
         transaction,
         request.tenant(),
         request.run_id(),
@@ -906,73 +907,6 @@ async fn reject_quarantined_activation(
     } else {
         Ok(())
     }
-}
-
-async fn lock_active_activation_graph(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant: &TenantScope,
-    run_id: RunId,
-    invocation_id: LogicalWorkflowInvocationId,
-) -> Result<bool, LogicalActivationStoreError> {
-    let schemas = current_durable_schemas();
-    let run_active: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT run.status IN ('queued', 'in_progress')
-               AND run.admission_epoch = $4 AND run.plan_schema = $3
-        FROM workflow_runs AS run
-        JOIN repositories AS repository ON repository.id = run.repository_id
-        WHERE repository.tenant_id = $1 AND run.id = $2
-        FOR SHARE OF run
-        ",
-    )
-    .bind(tenant.as_str())
-    .bind(run_id.as_uuid())
-    .bind(schemas.workflow_plan_i32)
-    .bind(schemas.admission_epoch_i32)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if run_active != Some(true) {
-        return Ok(false);
-    }
-    let marker_active: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT marker.state IN ('pending', 'active')
-               AND marker.orchestration_schema = $3
-               AND marker.admission_graph_sealed_at_ms IS NOT NULL
-               AND automata_logical_workflow_invocation_published(
-                   marker.run_id, $2
-               )
-        FROM logical_workflow_runs AS marker
-        WHERE marker.run_id = $1
-        FOR SHARE OF marker
-        ",
-    )
-    .bind(run_id.as_uuid())
-    .bind(invocation_id.as_uuid())
-    .bind(schemas.logical_orchestration_i16)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    if marker_active != Some(true) {
-        return Ok(false);
-    }
-    let invocation_active: Option<bool> = sqlx::query_scalar(
-        r"
-        SELECT invocation.state IN ('pending', 'active')
-               AND invocation.plan_schema = $3
-        FROM logical_workflow_invocations AS invocation
-        WHERE invocation.run_id = $1 AND invocation.id = $2
-        FOR SHARE OF invocation
-        ",
-    )
-    .bind(run_id.as_uuid())
-    .bind(invocation_id.as_uuid())
-    .bind(schemas.workflow_plan_i16)
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(operation_error)?;
-    Ok(invocation_active == Some(true))
 }
 
 async fn lock_claim_target(
