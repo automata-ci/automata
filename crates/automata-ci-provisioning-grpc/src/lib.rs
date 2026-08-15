@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! Canonical mTLS gRPC transport for workspace provisioning.
+//! Canonical mTLS gRPC transport for shard management and workspace provisioning.
 //!
 //! Protobuf remains a wire adapter. Callers cannot pass generated DTOs to the
 //! application port, and application implementations cannot observe TLS or
@@ -9,16 +9,32 @@
 
 use std::{fmt, sync::Arc};
 
+use automata_ci_core::JobAuthorityProfile;
 use automata_ci_provisioning::{
+    ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
     ApplyWorkspaceEntitlementCommand, ApplyWorkspaceEntitlementResult,
-    AuthorizedApplyWorkspaceEntitlement, AuthorizedProvisionWorkspace, ComputeSeconds,
+    ApplyWorkspaceGithubRepositoriesCommand, ApplyWorkspaceGithubRepositoriesResult,
+    AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyWorkspaceEntitlement,
+    AuthorizedApplyWorkspaceGithubRepositories, AuthorizedProvisionWorkspace, ComputeSeconds,
     DelegatedActorIssuer, DisplayName, EntitlementDurationSeconds, EntitlementFailure,
-    EntitlementFailureKind, EntitlementRevision, ExternalAccountSubject, OperationId,
-    ProvisionWorkspaceCommand, ProvisionWorkspaceResult, ProvisioningAuthenticationError,
-    ProvisioningFailure, ProvisioningFailureKind, ProvisioningWorkloadAuthenticator, ShardId,
+    EntitlementFailureKind, EntitlementRevision, ExternalAccountSubject,
+    GithubProviderConfiguration, GithubProviderConfigurationApplier,
+    GithubProviderConfigurationFailure, GithubProviderConfigurationFailureKind,
+    GithubProviderConfigurationRevision, GithubProviderRepositorySelection,
+    GithubProviderSchedulePolicy, GithubProviderSecret, OperationId, ProvisionWorkspaceCommand,
+    ProvisionWorkspaceResult, ProvisioningAuthenticationError, ProvisioningFailure,
+    ProvisioningFailureKind, ProvisioningWorkloadAuthenticator, ShardId,
     WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier, WorkspaceExecutionEntitlement,
-    WorkspaceId, WorkspaceProvisioner,
+    WorkspaceGithubRepositoriesApplier, WorkspaceGithubRepositoriesFailure,
+    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision, WorkspaceId,
+    WorkspaceProvisioner,
 };
+use automata_ci_store::{
+    GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceJwtIssuer, ProviderInstallationId,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+};
+use automata_ci_workflow_service::GithubRunnerPolicy;
 use bytes::Bytes;
 use prost::Message as _;
 use thiserror::Error;
@@ -26,6 +42,7 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Request, Response, Status};
+use url::Url;
 use zeroize::Zeroizing;
 
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
@@ -34,7 +51,7 @@ mod wire {
 }
 
 /// Maximum decoded request and encoded response size for management v1.
-pub const MAX_MANAGEMENT_MESSAGE_BYTES: usize = 16 * 1024;
+pub const MAX_MANAGEMENT_MESSAGE_BYTES: usize = 256 * 1024;
 
 const MAX_CLIENT_CA_PEM_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SERVER_CERTIFICATE_PEM_BYTES: usize = 4 * 1024 * 1024;
@@ -43,6 +60,10 @@ const FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ProvisionWorkspaceFailure";
 const ENTITLEMENT_FAILURE_TYPE_URL: &str =
     "type.googleapis.com/automata.management.v1.ApplyWorkspaceEntitlementFailure";
+const PROVIDER_CONFIGURATION_FAILURE_TYPE_URL: &str =
+    "type.googleapis.com/automata.management.v1.ApplyGithubProviderConfigurationFailure";
+const WORKSPACE_REPOSITORIES_FAILURE_TYPE_URL: &str =
+    "type.googleapis.com/automata.management.v1.ApplyWorkspaceGithubRepositoriesFailure";
 
 /// Bounded PEM inputs for an mTLS-only management listener.
 pub struct ManagementServerTlsConfig {
@@ -115,6 +136,8 @@ pub struct ManagementGrpcServer {
     authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
     provisioner: Arc<dyn WorkspaceProvisioner>,
     entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+    provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
+    workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
 }
 
 impl ManagementGrpcServer {
@@ -125,6 +148,8 @@ impl ManagementGrpcServer {
         authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
         provisioner: Arc<dyn WorkspaceProvisioner>,
         entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+        provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
+        workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
     ) -> Self {
         Self {
             listener,
@@ -132,6 +157,8 @@ impl ManagementGrpcServer {
             authenticator,
             provisioner,
             entitlement_applier,
+            provider_configuration_applier,
+            workspace_repositories_applier,
         }
     }
 
@@ -149,6 +176,8 @@ impl ManagementGrpcServer {
             authenticator: self.authenticator,
             provisioner: self.provisioner,
             entitlement_applier: self.entitlement_applier,
+            provider_configuration_applier: self.provider_configuration_applier,
+            workspace_repositories_applier: self.workspace_repositories_applier,
         };
         let service =
             wire::shard_management_service_server::ShardManagementServiceServer::new(adapter)
@@ -176,6 +205,14 @@ impl fmt::Debug for ManagementGrpcServer {
             .field("authenticator", &self.authenticator)
             .field("provisioner", &self.provisioner)
             .field("entitlement_applier", &self.entitlement_applier)
+            .field(
+                "provider_configuration_applier",
+                &self.provider_configuration_applier,
+            )
+            .field(
+                "workspace_repositories_applier",
+                &self.workspace_repositories_applier,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -185,6 +222,8 @@ struct ManagementGrpcAdapter {
     authenticator: Arc<dyn ProvisioningWorkloadAuthenticator>,
     provisioner: Arc<dyn WorkspaceProvisioner>,
     entitlement_applier: Arc<dyn WorkspaceEntitlementApplier>,
+    provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier>,
+    workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier>,
 }
 
 impl fmt::Debug for ManagementGrpcAdapter {
@@ -194,6 +233,14 @@ impl fmt::Debug for ManagementGrpcAdapter {
             .field("authenticator", &self.authenticator)
             .field("provisioner", &self.provisioner)
             .field("entitlement_applier", &self.entitlement_applier)
+            .field(
+                "provider_configuration_applier",
+                &self.provider_configuration_applier,
+            )
+            .field(
+                "workspace_repositories_applier",
+                &self.workspace_repositories_applier,
+            )
             .finish()
     }
 }
@@ -314,6 +361,112 @@ impl wire::shard_management_service_server::ShardManagementService for Managemen
         }
         Ok(Response::new(encode_entitlement_result(&result)))
     }
+
+    async fn apply_github_provider_configuration(
+        &self,
+        request: Request<wire::ApplyGithubProviderConfigurationRequest>,
+    ) -> Result<Response<wire::ApplyGithubProviderConfigurationResponse>, Status> {
+        let authority = authenticate_management_request(&self.authenticator, &request).await?;
+        let command =
+            decode_provider_configuration_command(request.into_inner()).map_err(|()| {
+                provider_configuration_contract_status(
+                    Code::InvalidArgument,
+                    wire::ApplyGithubProviderConfigurationFailureReason::InvalidRequest,
+                    "GitHub provider configuration request is invalid",
+                )
+            })?;
+        let authorized = AuthorizedApplyGithubProviderConfiguration::authorize(authority, command)
+            .map_err(|_| {
+                provider_configuration_contract_status(
+                    Code::PermissionDenied,
+                    wire::ApplyGithubProviderConfigurationFailureReason::Forbidden,
+                    "GitHub provider configuration is outside the workload authority",
+                )
+            })?;
+        let expected_operation_id = authorized.command().operation_id();
+        let expected_shard_id = authorized.command().shard_id().clone();
+        let expected_revision = authorized.command().revision();
+        let result = self
+            .provider_configuration_applier
+            .apply(authorized)
+            .await
+            .map_err(|error| provider_configuration_status(&error))?;
+        if result.operation_id() != expected_operation_id
+            || result.shard_id() != &expected_shard_id
+            || result.revision() != expected_revision
+        {
+            return Err(provider_configuration_contract_status(
+                Code::Internal,
+                wire::ApplyGithubProviderConfigurationFailureReason::InternalError,
+                "GitHub provider configuration returned an inconsistent result",
+            ));
+        }
+        Ok(Response::new(encode_provider_configuration_result(&result)))
+    }
+
+    async fn apply_workspace_github_repositories(
+        &self,
+        request: Request<wire::ApplyWorkspaceGithubRepositoriesRequest>,
+    ) -> Result<Response<wire::ApplyWorkspaceGithubRepositoriesResponse>, Status> {
+        let authority = authenticate_management_request(&self.authenticator, &request).await?;
+        let command =
+            decode_workspace_repositories_command(request.into_inner()).map_err(|()| {
+                workspace_repositories_contract_status(
+                    Code::InvalidArgument,
+                    wire::ApplyWorkspaceGithubRepositoriesFailureReason::InvalidRequest,
+                    "workspace GitHub repositories request is invalid",
+                )
+            })?;
+        let authorized = AuthorizedApplyWorkspaceGithubRepositories::authorize(authority, command)
+            .map_err(|_| {
+                workspace_repositories_contract_status(
+                    Code::PermissionDenied,
+                    wire::ApplyWorkspaceGithubRepositoriesFailureReason::Forbidden,
+                    "workspace GitHub repositories are outside the workload authority",
+                )
+            })?;
+        let expected_operation_id = authorized.command().operation_id();
+        let expected_shard_id = authorized.command().shard_id().clone();
+        let expected_workspace_id = authorized.command().workspace_id();
+        let expected_revision = authorized.command().revision();
+        let result = self
+            .workspace_repositories_applier
+            .apply(authorized)
+            .await
+            .map_err(|error| workspace_repositories_status(&error))?;
+        if result.operation_id() != expected_operation_id
+            || result.shard_id() != &expected_shard_id
+            || result.workspace_id() != expected_workspace_id
+            || result.revision() != expected_revision
+        {
+            return Err(workspace_repositories_contract_status(
+                Code::Internal,
+                wire::ApplyWorkspaceGithubRepositoriesFailureReason::InternalError,
+                "workspace GitHub repositories returned an inconsistent result",
+            ));
+        }
+        Ok(Response::new(encode_workspace_repositories_result(&result)))
+    }
+}
+
+async fn authenticate_management_request<T>(
+    authenticator: &Arc<dyn ProvisioningWorkloadAuthenticator>,
+    request: &Request<T>,
+) -> Result<automata_ci_provisioning::ProvisioningAuthority, Status> {
+    let certificates = request
+        .peer_certs()
+        .ok_or_else(|| Status::unauthenticated("workload authentication is required"))?;
+    let evidence = WorkloadAuthenticationEvidence::new(
+        certificates
+            .iter()
+            .map(|certificate| certificate.as_ref().to_vec())
+            .collect(),
+    )
+    .map_err(authentication_status)?;
+    authenticator
+        .authenticate(&evidence)
+        .await
+        .map_err(authentication_status)
 }
 
 fn decode_command(
@@ -399,6 +552,124 @@ fn encode_entitlement_result(
         revision: result.revision().get(),
         applied_at: Some(timestamp(result.applied_at())),
         expires_at: result.expires_at().map(timestamp),
+    }
+}
+
+fn decode_provider_configuration_command(
+    request: wire::ApplyGithubProviderConfigurationRequest,
+) -> Result<ApplyGithubProviderConfigurationCommand, ()> {
+    let configuration = request.configuration.ok_or(())?;
+    let jwt_issuer = match wire::GithubAppJwtIssuer::try_from(configuration.jwt_issuer) {
+        Ok(wire::GithubAppJwtIssuer::AppClientId) => GithubServerServiceJwtIssuer::AppClientId,
+        Ok(wire::GithubAppJwtIssuer::AppId) => GithubServerServiceJwtIssuer::AppId,
+        Ok(wire::GithubAppJwtIssuer::Unspecified) | Err(_) => return Err(()),
+    };
+    let schedule = configuration.schedule.ok_or(())?;
+    let schedule = GithubProviderSchedulePolicy::new(
+        i64::try_from(schedule.poll_millis).map_err(|_| ())?,
+        i64::try_from(schedule.discovery_claim_millis).map_err(|_| ())?,
+        i64::try_from(schedule.fire_claim_millis).map_err(|_| ())?,
+        i64::try_from(schedule.retry_millis).map_err(|_| ())?,
+        i64::try_from(schedule.staleness_millis).map_err(|_| ())?,
+        u16::try_from(schedule.maximum_manifests).map_err(|_| ())?,
+        u16::try_from(schedule.maximum_fires_per_pass).map_err(|_| ())?,
+    )
+    .map_err(|_| ())?;
+    let configuration = GithubProviderConfiguration::new(
+        Url::parse(&configuration.dashboard_url).map_err(|_| ())?,
+        GithubServerServiceAppId::new(configuration.app_id).map_err(|_| ())?,
+        GithubServerServiceAppClientId::new(configuration.app_client_id).map_err(|_| ())?,
+        jwt_issuer,
+        GithubProviderSecret::private_key(configuration.app_private_key_pem).map_err(|_| ())?,
+        GithubProviderSecret::webhook(configuration.webhook_secret).map_err(|_| ())?,
+        GithubCheckName::new(configuration.check_name).map_err(|_| ())?,
+        GithubRunnerPolicy::decode_configuration(&configuration.runner_policy).map_err(|_| ())?,
+        schedule,
+    )
+    .map_err(|_| ())?;
+    Ok(ApplyGithubProviderConfigurationCommand::new(
+        OperationId::parse(&request.operation_id).map_err(|_| ())?,
+        ShardId::new(request.shard_id).map_err(|_| ())?,
+        GithubProviderConfigurationRevision::new(request.revision).map_err(|_| ())?,
+        configuration,
+    ))
+}
+
+fn decode_workspace_repositories_command(
+    request: wire::ApplyWorkspaceGithubRepositoriesRequest,
+) -> Result<ApplyWorkspaceGithubRepositoriesCommand, ()> {
+    let repositories = request
+        .repositories
+        .into_iter()
+        .map(|repository| {
+            let visibility = match wire::GithubRepositoryVisibility::try_from(repository.visibility)
+            {
+                Ok(wire::GithubRepositoryVisibility::Public) => {
+                    ProviderRepositoryVisibility::Public
+                }
+                Ok(wire::GithubRepositoryVisibility::Private) => {
+                    ProviderRepositoryVisibility::Private
+                }
+                Ok(wire::GithubRepositoryVisibility::Unspecified) | Err(_) => return Err(()),
+            };
+            let authority_profile =
+                match wire::GithubJobAuthorityProfile::try_from(repository.authority_profile) {
+                    Ok(wire::GithubJobAuthorityProfile::Standard) => JobAuthorityProfile::Standard,
+                    Ok(wire::GithubJobAuthorityProfile::CredentialFree) => {
+                        JobAuthorityProfile::CredentialFree
+                    }
+                    Ok(wire::GithubJobAuthorityProfile::Unspecified) | Err(_) => return Err(()),
+                };
+            GithubProviderRepositorySelection::new(
+                ProviderInstallationId::new(repository.installation_id).map_err(|_| ())?,
+                ProviderRepositoryId::new(repository.repository_id).map_err(|_| ())?,
+                ProviderRepositoryOwnerId::new(repository.repository_owner_id).map_err(|_| ())?,
+                GithubRepositoryName::new(repository.repository_name).map_err(|_| ())?,
+                repository.default_branch,
+                visibility,
+                authority_profile,
+            )
+            .map_err(|_| ())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ApplyWorkspaceGithubRepositoriesCommand::new(
+        OperationId::parse(&request.operation_id).map_err(|_| ())?,
+        ShardId::new(request.shard_id).map_err(|_| ())?,
+        WorkspaceId::parse(&request.workspace_id).map_err(|_| ())?,
+        WorkspaceGithubRepositoriesRevision::new(request.revision).map_err(|_| ())?,
+        repositories,
+    )
+    .map_err(|_| ())
+}
+
+fn encode_provider_configuration_result(
+    result: &ApplyGithubProviderConfigurationResult,
+) -> wire::ApplyGithubProviderConfigurationResponse {
+    let applied_at = result.applied_at();
+    wire::ApplyGithubProviderConfigurationResponse {
+        operation_id: result.operation_id().to_string(),
+        shard_id: result.shard_id().as_str().to_owned(),
+        revision: result.revision().get(),
+        applied_at: Some(prost_types::Timestamp {
+            seconds: applied_at.seconds(),
+            nanos: i32::try_from(applied_at.nanoseconds()).expect("validated nanoseconds fit i32"),
+        }),
+    }
+}
+
+fn encode_workspace_repositories_result(
+    result: &ApplyWorkspaceGithubRepositoriesResult,
+) -> wire::ApplyWorkspaceGithubRepositoriesResponse {
+    let applied_at = result.applied_at();
+    wire::ApplyWorkspaceGithubRepositoriesResponse {
+        operation_id: result.operation_id().to_string(),
+        shard_id: result.shard_id().as_str().to_owned(),
+        workspace_id: result.workspace_id().to_string(),
+        revision: result.revision().get(),
+        applied_at: Some(prost_types::Timestamp {
+            seconds: applied_at.seconds(),
+            nanos: i32::try_from(applied_at.nanoseconds()).expect("validated nanoseconds fit i32"),
+        }),
     }
 }
 
@@ -490,6 +761,68 @@ fn entitlement_status(error: EntitlementFailure) -> Status {
     entitlement_contract_status(code, reason, message)
 }
 
+fn provider_configuration_status(error: &GithubProviderConfigurationFailure) -> Status {
+    let (code, reason, message) = match error.kind() {
+        GithubProviderConfigurationFailureKind::OperationConflict => (
+            Code::Aborted,
+            wire::ApplyGithubProviderConfigurationFailureReason::OperationConflict,
+            "provider configuration operation conflicts with its durable receipt",
+        ),
+        GithubProviderConfigurationFailureKind::StaleRevision => (
+            Code::FailedPrecondition,
+            wire::ApplyGithubProviderConfigurationFailureReason::StaleRevision,
+            "provider configuration revision is stale",
+        ),
+        GithubProviderConfigurationFailureKind::Forbidden => (
+            Code::PermissionDenied,
+            wire::ApplyGithubProviderConfigurationFailureReason::Forbidden,
+            "provider configuration is outside the workload authority",
+        ),
+        GithubProviderConfigurationFailureKind::Internal => (
+            Code::Internal,
+            wire::ApplyGithubProviderConfigurationFailureReason::InternalError,
+            "provider configuration failed internally",
+        ),
+        GithubProviderConfigurationFailureKind::TemporarilyUnavailable => (
+            Code::Unavailable,
+            wire::ApplyGithubProviderConfigurationFailureReason::TemporarilyUnavailable,
+            "provider configuration is temporarily unavailable",
+        ),
+    };
+    provider_configuration_contract_status(code, reason, message)
+}
+
+fn workspace_repositories_status(error: &WorkspaceGithubRepositoriesFailure) -> Status {
+    let (code, reason, message) = match error.kind() {
+        WorkspaceGithubRepositoriesFailureKind::OperationConflict => (
+            Code::Aborted,
+            wire::ApplyWorkspaceGithubRepositoriesFailureReason::OperationConflict,
+            "workspace repository operation conflicts with its durable receipt",
+        ),
+        WorkspaceGithubRepositoriesFailureKind::StaleRevision => (
+            Code::FailedPrecondition,
+            wire::ApplyWorkspaceGithubRepositoriesFailureReason::StaleRevision,
+            "workspace repository revision is stale",
+        ),
+        WorkspaceGithubRepositoriesFailureKind::WorkspaceUnavailable => (
+            Code::PermissionDenied,
+            wire::ApplyWorkspaceGithubRepositoriesFailureReason::WorkspaceUnavailable,
+            "workspace is unavailable to this management authority",
+        ),
+        WorkspaceGithubRepositoriesFailureKind::Internal => (
+            Code::Internal,
+            wire::ApplyWorkspaceGithubRepositoriesFailureReason::InternalError,
+            "workspace repository configuration failed internally",
+        ),
+        WorkspaceGithubRepositoriesFailureKind::TemporarilyUnavailable => (
+            Code::Unavailable,
+            wire::ApplyWorkspaceGithubRepositoriesFailureReason::TemporarilyUnavailable,
+            "workspace repository configuration is temporarily unavailable",
+        ),
+    };
+    workspace_repositories_contract_status(code, reason, message)
+}
+
 fn contract_status(
     code: Code,
     reason: wire::ProvisionWorkspaceFailureReason,
@@ -524,6 +857,44 @@ fn entitlement_contract_status(
         message: message.to_owned(),
         details: vec![prost_types::Any {
             type_url: ENTITLEMENT_FAILURE_TYPE_URL.to_owned(),
+            value: detail.encode_to_vec(),
+        }],
+    };
+    Status::with_details(code, message, Bytes::from(rich_status.encode_to_vec()))
+}
+
+fn provider_configuration_contract_status(
+    code: Code,
+    reason: wire::ApplyGithubProviderConfigurationFailureReason,
+    message: &'static str,
+) -> Status {
+    let detail = wire::ApplyGithubProviderConfigurationFailure {
+        reason: reason as i32,
+    };
+    let rich_status = tonic_types::pb::Status {
+        code: code as i32,
+        message: message.to_owned(),
+        details: vec![prost_types::Any {
+            type_url: PROVIDER_CONFIGURATION_FAILURE_TYPE_URL.to_owned(),
+            value: detail.encode_to_vec(),
+        }],
+    };
+    Status::with_details(code, message, Bytes::from(rich_status.encode_to_vec()))
+}
+
+fn workspace_repositories_contract_status(
+    code: Code,
+    reason: wire::ApplyWorkspaceGithubRepositoriesFailureReason,
+    message: &'static str,
+) -> Status {
+    let detail = wire::ApplyWorkspaceGithubRepositoriesFailure {
+        reason: reason as i32,
+    };
+    let rich_status = tonic_types::pb::Status {
+        code: code as i32,
+        message: message.to_owned(),
+        details: vec![prost_types::Any {
+            type_url: WORKSPACE_REPOSITORIES_FAILURE_TYPE_URL.to_owned(),
             value: detail.encode_to_vec(),
         }],
     };
@@ -565,8 +936,10 @@ mod tests {
 
     use super::*;
     use automata_ci_provisioning::{
-        EntitlementApplicationFuture, EntitlementTimestamp, InitialOwnerPrincipalId, ProvisionedAt,
-        ProvisioningAuthenticationFuture, ProvisioningAuthority, WorkspaceProvisioningFuture,
+        EntitlementApplicationFuture, EntitlementTimestamp,
+        GithubProviderConfigurationApplicationFuture, InitialOwnerPrincipalId, ProvisionedAt,
+        ProvisioningAuthenticationFuture, ProvisioningAuthority,
+        WorkspaceGithubRepositoriesApplicationFuture, WorkspaceProvisioningFuture,
     };
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose,
@@ -760,6 +1133,34 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct UnusedProviderConfigurationApplier;
+
+    impl GithubProviderConfigurationApplier for UnusedProviderConfigurationApplier {
+        fn apply(
+            &self,
+            _request: AuthorizedApplyGithubProviderConfiguration,
+        ) -> GithubProviderConfigurationApplicationFuture<'_> {
+            Box::pin(future::ready(Err(GithubProviderConfigurationFailure::new(
+                GithubProviderConfigurationFailureKind::Internal,
+            ))))
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnusedWorkspaceRepositoriesApplier;
+
+    impl WorkspaceGithubRepositoriesApplier for UnusedWorkspaceRepositoriesApplier {
+        fn apply(
+            &self,
+            _request: AuthorizedApplyWorkspaceGithubRepositories,
+        ) -> WorkspaceGithubRepositoriesApplicationFuture<'_> {
+            Box::pin(future::ready(Err(WorkspaceGithubRepositoriesFailure::new(
+                WorkspaceGithubRepositoriesFailureKind::Internal,
+            ))))
+        }
+    }
+
     fn valid_wire_request() -> wire::ProvisionWorkspaceRequest {
         wire::ProvisionWorkspaceRequest {
             operation_id: "55555555-5555-4555-8555-555555555555".to_owned(),
@@ -793,6 +1194,83 @@ mod tests {
                     },
                 )),
             }),
+        }
+    }
+
+    fn valid_runner_policy() -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "workspace": {"derivation": 1, "root": "/__w", "schema": 1},
+            "mappings": [{
+                "container_features": ["automata.core/job-containers@v1"],
+                "architecture": "x86_64",
+                "operating_system": "linux",
+                "environment_profile": {
+                    "manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "id": "automata.example/ubuntu-24-04"
+                },
+                "selector": "Ubuntu-24.04"
+            }],
+            "permissions": {
+                "provider_default": {"contents": "read", "packages": "read"},
+                "read_all": {"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},
+                "write_all": {"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}
+            },
+            "resources": {
+                "defaults": {
+                    "requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+                    "limits": {"cpu_millis": 1000, "memory_bytes": 1_073_741_824, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+                },
+                "minimum_requests": {"cpu_millis": 100, "memory_bytes": 268_435_456, "ephemeral_disk_bytes": 0, "gpu_count": 0},
+                "maximum_limits": {"cpu_millis": 4000, "memory_bytes": 8_589_934_592_u64, "ephemeral_disk_bytes": 0, "gpu_count": 0}
+            },
+            "schema": 1
+        }))
+        .expect("runner policy JSON")
+    }
+
+    fn valid_provider_wire_request() -> wire::ApplyGithubProviderConfigurationRequest {
+        wire::ApplyGithubProviderConfigurationRequest {
+            operation_id: "88888888-8888-4888-8888-888888888888".to_owned(),
+            shard_id: "prod-us-east-1-001".to_owned(),
+            revision: 3,
+            configuration: Some(wire::GithubProviderConfiguration {
+                dashboard_url: "https://cloud.automata.example/".to_owned(),
+                app_id: 42,
+                app_client_id: "Iv1.automata-provider".to_owned(),
+                jwt_issuer: wire::GithubAppJwtIssuer::AppClientId as i32,
+                app_private_key_pem: b"test App key material".to_vec(),
+                webhook_secret: b"test webhook secret".to_vec(),
+                check_name: "Automata CI".to_owned(),
+                runner_policy: valid_runner_policy(),
+                schedule: Some(wire::GithubProviderSchedulePolicy {
+                    poll_millis: 1_000,
+                    discovery_claim_millis: 300_000,
+                    fire_claim_millis: 300_000,
+                    retry_millis: 30_000,
+                    staleness_millis: 3_600_000,
+                    maximum_manifests: 256,
+                    maximum_fires_per_pass: 32,
+                }),
+            }),
+        }
+    }
+
+    fn valid_workspace_repositories_wire_request() -> wire::ApplyWorkspaceGithubRepositoriesRequest
+    {
+        wire::ApplyWorkspaceGithubRepositoriesRequest {
+            operation_id: "99999999-9999-4999-8999-999999999999".to_owned(),
+            shard_id: "prod-us-east-1-001".to_owned(),
+            workspace_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            revision: 2,
+            repositories: vec![wire::GithubRepositorySelection {
+                installation_id: 100,
+                repository_id: 200,
+                repository_owner_id: 300,
+                repository_name: "octo/repository".to_owned(),
+                default_branch: "main".to_owned(),
+                visibility: wire::GithubRepositoryVisibility::Public as i32,
+                authority_profile: wire::GithubJobAuthorityProfile::CredentialFree as i32,
+            }],
         }
     }
 
@@ -850,6 +1328,40 @@ mod tests {
         let mut request = valid_entitlement_wire_request();
         request.execution = None;
         assert!(decode_entitlement_command(request).is_err());
+    }
+
+    #[test]
+    fn provider_management_wire_requests_decode_to_validated_complete_state() {
+        let provider = decode_provider_configuration_command(valid_provider_wire_request())
+            .expect("provider configuration");
+        assert_eq!(provider.revision().get(), 3);
+        assert_eq!(provider.configuration().app_id().get(), 42);
+        assert_eq!(
+            provider.configuration().private_key().expose_secret(),
+            b"test App key material"
+        );
+
+        let repositories =
+            decode_workspace_repositories_command(valid_workspace_repositories_wire_request())
+                .expect("workspace repositories");
+        assert_eq!(repositories.revision().get(), 2);
+        assert_eq!(repositories.repositories().len(), 1);
+        assert_eq!(repositories.repositories()[0].repository_id().get(), 200);
+    }
+
+    #[test]
+    fn provider_management_rejects_partial_or_incoherent_state() {
+        let mut provider = valid_provider_wire_request();
+        provider
+            .configuration
+            .as_mut()
+            .expect("configuration")
+            .schedule = None;
+        assert!(decode_provider_configuration_command(provider).is_err());
+
+        let mut repositories = valid_workspace_repositories_wire_request();
+        repositories.repositories[0].visibility = wire::GithubRepositoryVisibility::Private as i32;
+        assert!(decode_workspace_repositories_command(repositories).is_err());
     }
 
     #[test]
@@ -932,6 +1444,8 @@ mod tests {
             authenticator.clone(),
             provisioner.clone(),
             entitlement_applier.clone(),
+            Arc::new(UnusedProviderConfigurationApplier),
+            Arc::new(UnusedWorkspaceRepositoriesApplier),
         );
         let cancellation = CancellationToken::new();
         let server_cancellation = cancellation.clone();

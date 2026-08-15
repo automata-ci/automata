@@ -47,15 +47,19 @@ use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_key_management::KeyEncryptionProvider;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_provisioning::{
-    ProvisioningWorkloadAuthenticator, WorkspaceEntitlementApplier, WorkspaceProvisioner,
+    GithubProviderConfigurationApplier, GithubProviderDesiredStateReader,
+    ProvisioningWorkloadAuthenticator, WorkspaceEntitlementApplier,
+    WorkspaceGithubRepositoriesApplier, WorkspaceProvisioner,
 };
 use automata_ci_provisioning_grpc::{ManagementGrpcServer, ManagementServerTlsConfig};
 use automata_ci_provisioning_postgres::{
-    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner,
+    PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
+    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceGithubRepositoriesApplier,
+    PostgresWorkspaceProvisioner,
 };
 use automata_ci_results_github::{
-    ArtifactRepository, ArtifactService, CacheLimits, CacheRepository, CacheService,
-    GithubCacheApi, GithubCacheHttpLimits, GithubResultsApi, GithubResultsHttpLimits,
+    ArtifactRepository, ArtifactService, CacheLimits, CacheRepository, CacheRepositoryMetadata,
+    CacheService, GithubCacheApi, GithubCacheHttpLimits, GithubResultsApi, GithubResultsHttpLimits,
     GithubResultsRuntimeAuthorityIssuer, HmacResultsAuthority, HmacResultsAuthorityConfig,
     ObservedResultsArtifactRepository, ObservedResultsBlobStore, PostgresArtifactRepository,
     PostgresCacheRepository, ResultsClock, ResultsIdGenerator, ResultsLimits, ResultsObserver,
@@ -108,11 +112,11 @@ use super::github_oidc::{
 };
 use super::state_metrics::ControlPlaneStateSampler;
 use super::{
-    ControlPlaneMaintenanceLoop, ControlPlaneMetrics, GithubProviderRuntime,
-    GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder, MaintenanceClock,
-    MaintenanceLoopConfigError, Readiness, ReadinessMonitor, ReadinessMonitorError, ReadinessProbe,
-    ReadinessProbeError, SecretEncryptionLoadError, SecretLoadError, ServerConfig,
-    SystemMaintenanceClock,
+    ControlPlaneMaintenanceLoop, ControlPlaneMetrics, DatabaseGithubProviderConfig,
+    GithubProviderRuntime, GithubProviderRuntimeBuildError, GithubProviderRuntimeBuilder,
+    MaintenanceClock, MaintenanceLoopConfigError, Readiness, ReadinessMonitor,
+    ReadinessMonitorError, ReadinessProbe, ReadinessProbeError, SecretEncryptionLoadError,
+    SecretLoadError, ServerConfig, SystemMaintenanceClock,
 };
 use crate::app::{
     conformance_api::{conformance_api_router, deployment_conformance_api_router},
@@ -267,12 +271,33 @@ impl ProductionComponents {
         // the migrator on every readiness tick repeatedly acquires migration
         // locks and emits expected duplicate-table diagnostics under SQLx.
         store.migrate().await?;
+        let github_provider_desired_state = PostgresGithubProviderDesiredStateReader::new(
+            store.postgres_pool().clone(),
+            Arc::clone(&control_plane_key_provider),
+        )
+        .load()
+        .await
+        .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
+        if let (Some(desired), Some(management)) =
+            (github_provider_desired_state.as_ref(), config.management())
+            && desired.shard_id() != management.authority().shard_id()
+        {
+            return Err(ServerCompositionError::InvalidGithubProviderConfiguration);
+        }
+        let github_provider_config = github_provider_desired_state
+            .map(super::GithubProviderConfig::from_desired_state)
+            .transpose()
+            .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
         let log_commit_notifications = Arc::new(HumanLogCommitNotificationHub::default());
         let log_commit_listener = PostgresLogCommitListener::connect(store.postgres_pool())
             .await
             .map_err(|_| ServerCompositionError::LiveLogStorage)?;
-        let management_server =
-            build_management_server(config, management_listener, store.as_ref())?;
+        let management_server = build_management_server(
+            config,
+            management_listener,
+            store.as_ref(),
+            Arc::clone(&control_plane_key_provider),
+        )?;
         let workflow_clock: Arc<dyn AdmissionClock> = Arc::new(SystemAdmissionClock);
         let logical_run_finalization_repository: Arc<dyn LogicalRunFinalizationRepository> =
             store.clone();
@@ -446,10 +471,15 @@ impl ProductionComponents {
             Arc::clone(&live_log_service),
         )
         .await?;
-        let github_provider_config = validate_effective_ui_tenant(config, &human.effective_tenant)?;
         let managed_secret_tenant =
             TenantScope::from_authenticated_tenant_id(human.effective_tenant.as_str().to_owned())
                 .map_err(|_| ServerCompositionError::InvalidSecretManagement)?;
+        let cache_repositories = github_provider_config
+            .as_ref()
+            .into_iter()
+            .flat_map(|provider| provider.config().repositories())
+            .map(|repository| repository.cache_repository().clone())
+            .collect::<Vec<_>>();
         let github_provider = build_github_provider_runtime(
             github_provider_config,
             Arc::clone(&store),
@@ -491,8 +521,13 @@ impl ProductionComponents {
         .await?;
 
         let maintenance_loop = build_maintenance_loop(config, store.clone(), metrics)?;
-        let (results_api, results_runtime_authority_issuer) =
-            build_results(config, store.as_ref(), blob_store.clone(), metrics)?;
+        let (results_api, results_runtime_authority_issuer) = build_results(
+            config,
+            store.as_ref(),
+            blob_store.clone(),
+            cache_repositories,
+            metrics,
+        )?;
         let runtime_authority_issuer = compose_runtime_authority_issuer(
             results_runtime_authority_issuer,
             github_oidc.authority_issuer,
@@ -657,6 +692,7 @@ fn build_management_server(
     config: &ServerConfig,
     listener: Option<TcpListener>,
     store: &PostgresStore,
+    key_provider: Arc<dyn KeyEncryptionProvider>,
 ) -> Result<Option<ManagementGrpcServer>, ServerCompositionError> {
     let (config, listener) = match (config.management(), listener) {
         (None, None) => return Ok(None),
@@ -685,12 +721,22 @@ fn build_management_server(
     let entitlement_applier: Arc<dyn WorkspaceEntitlementApplier> = Arc::new(
         PostgresWorkspaceEntitlementApplier::new(store.postgres_pool().clone()),
     );
+    let provider_configuration_applier: Arc<dyn GithubProviderConfigurationApplier> =
+        Arc::new(PostgresGithubProviderConfigurationApplier::new(
+            store.postgres_pool().clone(),
+            key_provider,
+        ));
+    let workspace_repositories_applier: Arc<dyn WorkspaceGithubRepositoriesApplier> = Arc::new(
+        PostgresWorkspaceGithubRepositoriesApplier::new(store.postgres_pool().clone()),
+    );
     Ok(Some(ManagementGrpcServer::new(
         listener,
         tls,
         authenticator,
         provisioner,
         entitlement_applier,
+        provider_configuration_applier,
+        workspace_repositories_applier,
     )))
 }
 
@@ -757,158 +803,32 @@ async fn connect_database(config: &ServerConfig) -> Result<DatabaseBuild, Server
     })
 }
 
-#[derive(Debug)]
-struct TenantAlignedGithubProviderConfig(Option<super::GithubProviderConfig>);
-
-fn validate_effective_ui_tenant(
-    config: &ServerConfig,
-    effective_tenant: &TenantId,
-) -> Result<TenantAlignedGithubProviderConfig, ServerCompositionError> {
-    let provider_repository_tenants = config
-        .github_provider()
-        .into_iter()
-        .flat_map(super::GithubProviderConfig::repositories)
-        .map(|repository| repository.tenant().as_str());
-    validate_tenant_alignment(effective_tenant.as_str(), provider_repository_tenants)?;
-    Ok(TenantAlignedGithubProviderConfig(
-        config.github_provider().cloned(),
-    ))
-}
-
-fn validate_tenant_alignment<'a>(
-    effective_tenant: &str,
-    provider_repository_tenants: impl IntoIterator<Item = &'a str>,
-) -> Result<(), ServerCompositionError> {
-    if provider_repository_tenants
-        .into_iter()
-        .any(|tenant| tenant != effective_tenant)
-    {
-        return Err(ServerCompositionError::InconsistentEffectiveUiTenant);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod effective_ui_tenant_tests {
-    use std::{fs, path::PathBuf};
-
-    use clap::Parser as _;
-
-    use super::*;
-    use crate::cli::{Cli, Command};
-
-    const EFFECTIVE_TENANT: &str = "effective-tenant-sentinel";
-    const FOREIGN_PROVIDER_TENANT: &str = "foreign-provider-tenant-sentinel";
-
-    fn provider_server_config() -> ServerConfig {
-        let directory = std::env::var_os("CARGO_TARGET_TMPDIR")
-            .map_or_else(std::env::temp_dir, PathBuf::from)
-            .join("effective-ui-tenant-composition");
-        fs::create_dir_all(&directory).expect("target-local configuration directory");
-        let path = directory.join(format!("github-provider-{}.json", std::process::id()));
-        fs::write(
-            &path,
-            include_bytes!("../../config/github-provider.example.json"),
-        )
-        .expect("provider configuration fixture");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                .expect("provider configuration fixture must be owner-only");
-        }
-        let source = format!("file:{}", path.display());
-        let cli_arguments = vec![
-            "automata",
-            "server",
-            "--results-public-url",
-            "https://results.example.test/",
-            "--github-provider-config-source",
-            source.as_str(),
-        ];
-        let cli = Cli::try_parse_from(cli_arguments).expect("tenant-alignment server syntax");
-        let Command::Server(server_args) = cli.command else {
-            panic!("server command expected");
-        };
-        ServerConfig::from_args(&server_args).expect("tenant-alignment server configuration")
-    }
-
-    #[test]
-    fn exact_single_tenant_topology_allows_every_enabled_surface() {
-        validate_tenant_alignment(EFFECTIVE_TENANT, [EFFECTIVE_TENANT, EFFECTIVE_TENANT])
-            .expect("one exact tenant must reach provider composition");
-    }
-
-    #[test]
-    fn no_provider_preserves_the_resolved_effective_tenant() {
-        validate_tenant_alignment(EFFECTIVE_TENANT, std::iter::empty::<&'static str>())
-            .expect("the resolved tenant remains valid without a configured provider");
-    }
-
-    #[test]
-    fn server_configuration_is_gated_without_loading_provider_secret_sources() {
-        let effective_tenant = TenantId::new("automata-main").expect("effective tenant");
-        let aligned = provider_server_config();
-        assert!(
-            validate_effective_ui_tenant(&aligned, &effective_tenant)
-                .expect("matching provider")
-                .0
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn any_mismatch_fails_the_pre_side_effect_gate_without_reflecting_tenants() {
-        let cases: [&[&str]; 2] = [
-            &[FOREIGN_PROVIDER_TENANT],
-            &[EFFECTIVE_TENANT, FOREIGN_PROVIDER_TENANT],
-        ];
-        for provider_tenants in cases {
-            let error =
-                validate_tenant_alignment(EFFECTIVE_TENANT, provider_tenants.iter().copied())
-                    .expect_err("tenant mismatch must stop before provider runtime composition");
-            assert!(matches!(
-                error,
-                ServerCompositionError::InconsistentEffectiveUiTenant
-            ));
-            let rendered = error.to_string();
-            assert_eq!(
-                rendered,
-                "human UI and GitHub provider tenant configuration is inconsistent"
-            );
-            for tenant in [EFFECTIVE_TENANT, FOREIGN_PROVIDER_TENANT] {
-                assert!(!rendered.contains(tenant));
-            }
-        }
-    }
-}
-
 async fn build_github_provider_runtime(
-    provider: TenantAlignedGithubProviderConfig,
+    provider: Option<DatabaseGithubProviderConfig>,
     store: Arc<PostgresStore>,
     blobs: Arc<dyn ImmutableBlobStore>,
     control_plane_key_provider: Arc<dyn KeyEncryptionProvider>,
     metrics: &ControlPlaneMetrics,
 ) -> Result<Option<GithubProviderRuntime>, ServerCompositionError> {
-    let TenantAlignedGithubProviderConfig(provider) = provider;
     let Some(provider) = provider else {
         return Ok(None);
     };
+    if provider.is_empty() {
+        return Ok(None);
+    }
+    let (provider, app_private_key, webhook_secret) = provider.into_parts();
     let app_key = {
-        let bytes = provider
-            .app()
-            .private_key_source()
-            .load_bytes(MAX_GITHUB_APP_PRIVATE_KEY_PEM_BYTES)?;
-        let value = std::str::from_utf8(&bytes)
+        if app_private_key.len() > MAX_GITHUB_APP_PRIVATE_KEY_PEM_BYTES {
+            return Err(ServerCompositionError::InvalidGithubProviderConfiguration);
+        }
+        let value = std::str::from_utf8(&app_private_key)
             .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?;
         SecretString::new(value.to_owned())
             .map_err(|_| ServerCompositionError::InvalidGithubProviderConfiguration)?
     };
-    let webhook_secret = provider
-        .webhook()
-        .hmac_secret_source()
-        .load_bytes(MAX_GITHUB_WEBHOOK_SECRET_BYTES)?;
+    if webhook_secret.len() > MAX_GITHUB_WEBHOOK_SECRET_BYTES {
+        return Err(ServerCompositionError::InvalidGithubProviderConfiguration);
+    }
     let observer: Arc<dyn WorkflowAdmissionObserver> = Arc::new(metrics.clone());
     let runtime = GithubProviderRuntimeBuilder::new(
         provider,
@@ -928,6 +848,7 @@ fn build_results(
     config: &ServerConfig,
     store: &PostgresStore,
     blob_store: Arc<dyn ImmutableBlobStore>,
+    cache_repositories: Vec<CacheRepositoryMetadata>,
     metrics: &ControlPlaneMetrics,
 ) -> Result<
     (
@@ -952,11 +873,6 @@ fn build_results(
         HmacResultsAuthority::new(&signing_key, authority_config, Arc::clone(&clock))
             .map_err(|_| ServerCompositionError::InvalidResultsConfiguration)?,
     );
-    let cache_repositories = config
-        .github_provider()
-        .into_iter()
-        .flat_map(super::GithubProviderConfig::repositories)
-        .map(|repository| repository.cache_repository().clone());
     let runtime_authority_issuer: Arc<
         dyn automata_ci_control::runner_control::RuntimeAuthorityIssuer,
     > = Arc::new(
@@ -2037,9 +1953,6 @@ pub enum ServerCompositionError {
     /// The unauthenticated UI fallback tenant is invalid.
     #[error("fallback tenant identity is invalid")]
     InvalidFallbackTenant,
-    /// Enabled UI and provider surfaces disagree on tenant scope.
-    #[error("human UI and GitHub provider tenant configuration is inconsistent")]
-    InconsistentEffectiveUiTenant,
     /// The configured human-authentication adapters or policies are invalid.
     #[error("human authentication configuration is invalid")]
     InvalidHumanAuthentication,

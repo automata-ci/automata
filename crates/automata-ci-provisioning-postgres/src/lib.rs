@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! `PostgreSQL` persistence for atomic Core workspace provisioning.
+//! `PostgreSQL` persistence for atomic Core provisioning and provider desired state.
 
 use std::fmt;
 
@@ -13,9 +13,14 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod entitlement;
+mod github_provider;
 mod usage;
 
 pub use entitlement::PostgresWorkspaceEntitlementApplier;
+pub use github_provider::{
+    PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
+    PostgresWorkspaceGithubRepositoriesApplier,
+};
 pub use usage::PostgresWorkspaceUsageExporter;
 
 const WORKSPACE_OWNER_ROLE_NAME: &str = "workspace-owner";

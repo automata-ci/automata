@@ -103,55 +103,6 @@ fn server_credentials_must_be_references_not_values() {
 }
 
 #[test]
-fn github_provider_configuration_is_one_redacted_source_reference() {
-    let marker = "AUTOMATA_SENSITIVE_GITHUB_PROVIDER_CONFIG";
-    let cli = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--github-provider-config-source",
-        &format!("env:{marker}"),
-    ])
-    .expect("GitHub provider source syntax must parse");
-    let Command::Server(args) = cli.command else {
-        panic!("server command expected");
-    };
-    assert!(args.github_provider_config_source.is_some());
-    let debug = format!("{args:?}");
-    assert!(debug.contains("[redacted]"));
-    assert!(!debug.contains(marker));
-
-    let raw_marker = "raw-github-provider-secret-marker";
-    let raw = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--github-provider-config-source",
-        raw_marker,
-    ])
-    .expect("raw value becomes a redacted invalid sentinel");
-    let Command::Server(raw_args) = raw.command else {
-        panic!("server command expected");
-    };
-    assert!(!format!("{raw_args:?}").contains(raw_marker));
-    assert!(matches!(
-        ServerConfig::from_args(&raw_args),
-        Err(ServerConfigError::InvalidSecretSource)
-    ));
-}
-
-#[test]
-fn github_provider_help_describes_the_exact_optional_runtime() {
-    let mut command = Cli::command();
-    let server = command
-        .find_subcommand_mut("server")
-        .expect("server command");
-    let help = server.render_long_help().to_string();
-
-    assert!(help.contains("signed webhook route"));
-    assert!(help.contains("supervising source delivery, Checks publication"));
-    assert!(!help.contains("does not currently install"));
-}
-
-#[test]
 fn server_help_distinguishes_human_and_app_credential_custody() {
     let mut command = Cli::command();
     let server = command

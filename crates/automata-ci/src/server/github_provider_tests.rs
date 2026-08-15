@@ -169,7 +169,7 @@ fn load_config(
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .expect("owner-only configuration");
     }
-    GithubProviderConfig::load(&super::super::SecretSource::File(path))
+    GithubProviderConfig::load_test_fixture(&super::super::SecretSource::File(path))
 }
 
 fn fixed_evidence_plan(
@@ -554,4 +554,99 @@ async fn duplicate_config_and_durable_manifest_selector_drift_fail_closed() {
             .is_empty(),
         "manifest drift must not partially register its runtime policy"
     );
+}
+
+fn database_desired_state() -> automata_ci_provisioning::GithubProviderDesiredState {
+    use automata_ci_core::JobAuthorityProfile;
+    use automata_ci_provisioning::{
+        GithubProviderConfiguration, GithubProviderConfigurationRevision,
+        GithubProviderRepositorySelection, GithubProviderSchedulePolicy, GithubProviderSecret,
+        ShardId, WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesRevision,
+        WorkspaceId,
+    };
+    use automata_ci_store::{
+        GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
+        GithubServerServiceAppId, GithubServerServiceJwtIssuer, ProviderInstallationId,
+        ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    };
+    use automata_ci_workflow_service::GithubRunnerPolicy;
+    use url::Url;
+
+    let policy = serde_json::to_vec(&runner_policy()).expect("runner policy JSON");
+    let configuration = GithubProviderConfiguration::new(
+        Url::parse("https://ci.automata.example/").expect("dashboard URL"),
+        GithubServerServiceAppId::new(42).expect("App ID"),
+        GithubServerServiceAppClientId::new("Iv1.automata-provider").expect("client ID"),
+        GithubServerServiceJwtIssuer::AppClientId,
+        GithubProviderSecret::private_key(b"database-app-key".to_vec()).expect("App key"),
+        GithubProviderSecret::webhook(b"database-webhook-secret".to_vec()).expect("webhook secret"),
+        GithubCheckName::new("Automata CI").expect("Check name"),
+        GithubRunnerPolicy::decode_configuration(&policy).expect("runner policy"),
+        GithubProviderSchedulePolicy::default(),
+    )
+    .expect("provider configuration");
+    let workspace_id =
+        WorkspaceId::parse("11111111-1111-4111-8111-111111111111").expect("workspace ID");
+    let repository = GithubProviderRepositorySelection::new(
+        ProviderInstallationId::new(101).expect("installation ID"),
+        ProviderRepositoryId::new(301).expect("repository ID"),
+        ProviderRepositoryOwnerId::new(401).expect("owner ID"),
+        GithubRepositoryName::new("octo/database-repository").expect("repository name"),
+        "main",
+        ProviderRepositoryVisibility::Public,
+        JobAuthorityProfile::CredentialFree,
+    )
+    .expect("repository selection");
+    automata_ci_provisioning::GithubProviderDesiredState::new(
+        ShardId::new("prod-us-east-1-001").expect("shard ID"),
+        GithubProviderConfigurationRevision::new(5).expect("configuration revision"),
+        3,
+        4,
+        configuration,
+        vec![
+            WorkspaceGithubRepositoriesDesiredState::new(
+                workspace_id,
+                WorkspaceGithubRepositoriesRevision::new(2).expect("workspace revision"),
+                vec![repository],
+            )
+            .expect("workspace desired state"),
+        ],
+    )
+    .expect("provider desired state")
+}
+
+#[test]
+fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
+    let first = GithubProviderConfig::from_desired_state(database_desired_state())
+        .expect("database projection");
+    let second = GithubProviderConfig::from_desired_state(database_desired_state())
+        .expect("stable database projection");
+    let first_repository = &first.config().repositories()[0];
+    let second_repository = &second.config().repositories()[0];
+
+    assert_eq!(
+        first_repository.tenant().as_str(),
+        "11111111-1111-4111-8111-111111111111"
+    );
+    assert_eq!(first_repository.manifest_revision().get(), 7);
+    assert_eq!(first_repository.policy_revision().get(), 7);
+    assert_eq!(first_repository.runtime_policy_revision().get(), 7);
+    assert_eq!(
+        first_repository.connection_id(),
+        second_repository.connection_id()
+    );
+    assert_eq!(
+        first_repository.checks_write_authority().authority_id(),
+        second_repository.checks_write_authority().authority_id()
+    );
+    assert_ne!(
+        first_repository.checks_write_authority().authority_id(),
+        first_repository
+            .workflow_permissions_authority()
+            .authority_id()
+    );
+    let debug = format!("{first:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("database-app-key"));
+    assert!(!debug.contains("database-webhook-secret"));
 }

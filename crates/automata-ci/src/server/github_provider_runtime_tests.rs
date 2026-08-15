@@ -194,7 +194,7 @@ fn load_config(document: &Value) -> GithubProviderConfig {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .expect("owner-only configuration");
     }
-    GithubProviderConfig::load(&super::super::SecretSource::File(path))
+    GithubProviderConfig::load_test_fixture(&super::super::SecretSource::File(path))
         .expect("valid provider configuration")
 }
 

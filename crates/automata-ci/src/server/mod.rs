@@ -70,12 +70,13 @@ pub use github_provider::{
     GithubProviderBootstrapError, GithubProviderBootstrapPlan, GithubProviderBootstrapReady,
     GithubProviderCredentialRequestResolver,
 };
+pub(crate) use github_provider_config::DatabaseGithubProviderConfig;
 pub use github_provider_config::{
     GithubProviderAppConfig, GithubProviderAuthorityConfig, GithubProviderAuthorityId,
     GithubProviderConfig, GithubProviderConfigError, GithubProviderConnectionId,
     GithubProviderInternalRepositoryId, GithubProviderRepositoryConfig,
     GithubProviderScheduleConfig, GithubProviderTransport, GithubProviderWebhookConfig,
-    MAX_GITHUB_PROVIDER_CONFIG_BYTES, MAX_GITHUB_PROVIDER_REPOSITORIES,
+    MAX_GITHUB_PROVIDER_REPOSITORIES,
 };
 pub use github_provider_credentials::{
     GithubProviderCredentialAdapterConfigurationError, GithubProviderCredentialAdapters,

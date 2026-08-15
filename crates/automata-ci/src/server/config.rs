@@ -32,7 +32,7 @@ use automata_ci_store_postgres::PostgresTransportSecurity;
 
 use crate::cli::{DatabaseTransport, ServerArgs};
 
-use super::{github_oidc::GithubOidcConfig, github_provider_config::GithubProviderConfig};
+use super::github_oidc::GithubOidcConfig;
 
 const MAX_SOURCE_REFERENCE_BYTES: usize = 4_096;
 const MAX_ENVIRONMENT_NAME_BYTES: usize = 255;
@@ -312,7 +312,6 @@ pub struct ServerConfig {
     pub(crate) results_public_endpoint: ResultsPublicEndpoint,
     pub(crate) results_signing_key: SecretSource,
     pub(crate) results_key_id: String,
-    pub(crate) github_provider: Option<GithubProviderConfig>,
     pub(crate) github_oidc: Option<GithubOidcConfig>,
     pub(crate) database_url: SecretSource,
     pub(crate) database_max_connections: u32,
@@ -656,12 +655,6 @@ impl ServerConfig {
             return Err(ServerConfigError::InvalidMaintenancePolicy);
         }
         let (results_public_endpoint, results_key_id) = results_configuration(args)?;
-        let github_provider = args
-            .github_provider_config_source
-            .as_ref()
-            .map(GithubProviderConfig::load)
-            .transpose()
-            .map_err(|_| ServerConfigError::InvalidGithubProviderConfiguration)?;
         let github_oidc = args
             .github_oidc_config_source
             .as_ref()
@@ -692,7 +685,6 @@ impl ServerConfig {
             results_public_endpoint,
             results_signing_key: args.results_signing_key_source.clone(),
             results_key_id,
-            github_provider,
             github_oidc,
             database_url: args.database_url_source.clone(),
             database_max_connections: args.database_max_connections,
@@ -769,11 +761,6 @@ impl ServerConfig {
     /// Returns the private shard-management configuration when explicitly enabled.
     pub const fn management(&self) -> Option<&ManagementConfig> {
         self.management.as_ref()
-    }
-
-    /// Returns the strict GitHub provider registry only when explicitly enabled.
-    pub const fn github_provider(&self) -> Option<&GithubProviderConfig> {
-        self.github_provider.as_ref()
     }
 
     /// Returns the complete OIDC configuration only when its strict manifest is enabled.
@@ -1252,7 +1239,6 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
     ];
     let optional = [
         args.s3_session_token_source.as_ref(),
-        args.github_provider_config_source.as_ref(),
         args.github_oidc_config_source.as_ref(),
         args.conformance_export_token_source.as_ref(),
         args.management_client_ca_certificate_source.as_ref(),
@@ -1433,9 +1419,6 @@ pub enum ServerConfigError {
     /// The optional OIDC manifest is incomplete, malformed, excessive, or requires plaintext.
     #[error("GitHub-compatible OIDC configuration is invalid")]
     InvalidGithubOidcConfiguration,
-    /// The optional GitHub provider registry is malformed, excessive, or incoherent.
-    #[error("GitHub provider configuration is invalid")]
-    InvalidGithubProviderConfiguration,
     /// The opt-in mTLS management listener is partial, malformed, or unbounded.
     #[error("management listener configuration is invalid")]
     InvalidManagementConfiguration,

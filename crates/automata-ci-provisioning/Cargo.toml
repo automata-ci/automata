@@ -15,6 +15,11 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
+automata-ci-core.workspace = true
+automata-ci-github.workspace = true
+automata-ci-store.workspace = true
+automata-ci-workflow-service.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true

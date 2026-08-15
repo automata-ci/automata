@@ -8,7 +8,7 @@ schemas over gRPC/HTTP/2. The currently composed management service requires a
 client certificate at the TLS handshake, authenticates that verified
 certificate chain for every request, validates and scope-checks the domain
 command, and calls transport-neutral workspace provisioning or
-entitlement-application ports.
+entitlement/provider desired-state application ports.
 
 The server accepts a pre-bound listener so the product composition root retains
 ownership of startup ordering and port conflicts. The Automata binary composes
@@ -25,6 +25,11 @@ immutable actual-execution facts. It is intentionally not registered or
 advertised yet. A later change will add the durable feed adapter and compose the
 service atomically with Core accounting before capability discovery announces
 support.
+
+The management service also accepts a complete shard-wide GitHub App
+configuration and complete repository selection revisions per workspace. App
+private-key and webhook-secret bytes travel only over the authenticated mTLS
+channel and are envelope-encrypted by the PostgreSQL adapter before commit.
 
 Cargo generates the private Rust wire module into `OUT_DIR` with Protox and
 Tonic. Building therefore needs no separately installed `protoc` or Buf binary,

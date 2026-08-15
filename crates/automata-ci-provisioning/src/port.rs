@@ -3,9 +3,13 @@ use std::{fmt, future::Future, pin::Pin};
 use thiserror::Error;
 
 use crate::{
-    ApplyWorkspaceEntitlementResult, AuthorizedApplyWorkspaceEntitlement,
+    ApplyGithubProviderConfigurationResult, ApplyWorkspaceEntitlementResult,
+    ApplyWorkspaceGithubRepositoriesResult, AuthorizedApplyGithubProviderConfiguration,
+    AuthorizedApplyWorkspaceEntitlement, AuthorizedApplyWorkspaceGithubRepositories,
     AuthorizedListWorkspaceUsage, AuthorizedProvisionWorkspace, EntitlementFailure,
-    ProvisionWorkspaceResult, ProvisioningAuthority, ProvisioningFailure, UsageExportFailure,
+    GithubProviderConfigurationFailure, GithubProviderDesiredState,
+    GithubProviderDesiredStateFailure, ProvisionWorkspaceResult, ProvisioningAuthority,
+    ProvisioningFailure, UsageExportFailure, WorkspaceGithubRepositoriesFailure,
     WorkspaceUsagePage,
 };
 
@@ -136,6 +140,80 @@ pub trait WorkspaceEntitlementApplier: fmt::Debug + Send + Sync {
         &self,
         request: AuthorizedApplyWorkspaceEntitlement,
     ) -> EntitlementApplicationFuture<'_>;
+}
+
+/// Boxed shard-wide GitHub provider configuration application.
+pub type GithubProviderConfigurationApplicationFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    ApplyGithubProviderConfigurationResult,
+                    GithubProviderConfigurationFailure,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Atomic, idempotent application port for the shard-wide GitHub App configuration.
+///
+/// Implementations must encrypt both credentials before persistence and commit
+/// the complete configuration, monotonically increasing revision, current
+/// pointer, and stable operation receipt in one transaction.
+pub trait GithubProviderConfigurationApplier: fmt::Debug + Send + Sync {
+    /// Applies one authorized complete provider configuration.
+    fn apply(
+        &self,
+        request: AuthorizedApplyGithubProviderConfiguration,
+    ) -> GithubProviderConfigurationApplicationFuture<'_>;
+}
+
+/// Boxed workspace GitHub repository desired-set application.
+pub type WorkspaceGithubRepositoriesApplicationFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    ApplyWorkspaceGithubRepositoriesResult,
+                    WorkspaceGithubRepositoriesFailure,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Atomic, idempotent application port for one complete workspace repository set.
+///
+/// Omission is authoritative: a successful revision replaces the complete
+/// desired set for that workspace. Implementations retain historical revisions
+/// for reconciliation and audit while exposing only the current head to the
+/// provider runtime.
+pub trait WorkspaceGithubRepositoriesApplier: fmt::Debug + Send + Sync {
+    /// Applies one authorized complete workspace repository selection.
+    fn apply(
+        &self,
+        request: AuthorizedApplyWorkspaceGithubRepositories,
+    ) -> WorkspaceGithubRepositoriesApplicationFuture<'_>;
+}
+
+/// Boxed load of the current database-backed GitHub provider desired state.
+pub type GithubProviderDesiredStateLoadFuture<'a> = Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    Option<GithubProviderDesiredState>,
+                    GithubProviderDesiredStateFailure,
+                >,
+            > + Send
+            + 'a,
+    >,
+>;
+
+/// Read port for one transactionally consistent provider desired-state snapshot.
+pub trait GithubProviderDesiredStateReader: fmt::Debug + Send + Sync {
+    /// Loads the current provider configuration and all current workspace sets.
+    ///
+    /// `None` means no shard-wide provider configuration has been installed.
+    fn load(&self) -> GithubProviderDesiredStateLoadFuture<'_>;
 }
 
 /// Boxed durable workspace usage-export operation.

@@ -1193,7 +1193,9 @@ fn load_config(
         &path,
         serde_json::to_vec(&config_document(manifest_revision, rotated))?,
     )?;
-    Ok(GithubProviderConfig::load(&SecretSource::File(path))?)
+    Ok(GithubProviderConfig::load_test_fixture(
+        &SecretSource::File(path),
+    )?)
 }
 
 fn test_file(name: &str) -> PathBuf {
