@@ -35,6 +35,28 @@ fn discovers_exact_direct_workflows_in_deterministic_path_order() {
 }
 
 #[test]
+fn discovery_accepts_only_exact_lowercase_yml_and_yaml_extensions() {
+    let archive = archive(&[
+        directory(ROOT),
+        regular(b"repository-deadbeef/.ci/workflows/a.yml", b"a"),
+        regular(b"repository-deadbeef/.ci/workflows/b.yaml", b"b"),
+        regular(b"repository-deadbeef/.ci/workflows/c.YML", b"c"),
+        regular(b"repository-deadbeef/.ci/workflows/d.Yaml", b"d"),
+        regular(b"repository-deadbeef/.ci/workflows/e.yaml.bak", b"e"),
+        regular(b"repository-deadbeef/.ci/workflows/f", b"f"),
+    ]);
+
+    let discovered = discover_repository_workflows(&archive, limits()).expect("valid archive");
+    assert_eq!(
+        discovered
+            .iter()
+            .map(RepositoryWorkflowDiscoveryOutcome::path)
+            .collect::<Vec<_>>(),
+        vec![".ci/workflows/a.yml", ".ci/workflows/b.yaml"]
+    );
+}
+
+#[test]
 fn rejects_the_github_actions_workflow_directory_as_a_second_runtime_authority() {
     for entries in [
         vec![

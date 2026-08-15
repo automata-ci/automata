@@ -83,8 +83,11 @@ pub const GITHUB_PROVIDER_ARCHIVE_MAX_EXPANDED_BYTES: u64 = 1_024 * 1_024 * 1_02
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES: u64 = 4 * 1_024;
 /// Exact direct workflow-file count ceiling supported by discovery.
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS: u64 = 256;
-/// Exact per-workflow source ceiling supported by discovery.
-pub const GITHUB_PROVIDER_WORKFLOW_MAX_BYTES: u64 = 1_024 * 1_024;
+/// Exact raw UTF-8 per-workflow source ceiling supported by discovery.
+///
+/// This duplicates the provider frontend's 500 KiB boundary deliberately so
+/// the persistence layer does not acquire a dependency on the frontend.
+pub const GITHUB_PROVIDER_WORKFLOW_MAX_BYTES: u64 = 500 * 1_024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GithubProviderManifestLimitRejection {

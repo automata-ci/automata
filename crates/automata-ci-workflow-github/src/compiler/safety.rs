@@ -71,6 +71,12 @@ fn scan_mapping_safety(node: &YamlNode, context: &mut CompileContext<'_>) {
                             .with_related("first definition is here", previous.clone()),
                         );
                     }
+                } else {
+                    context.unsupported(
+                        "github.compile.yaml_complex_mapping_key",
+                        "YAML mappings with non-scalar keys cannot be compiled without loss",
+                        entry.key().span().clone(),
+                    );
                 }
                 scan_mapping_safety(entry.key(), context);
                 scan_mapping_safety(entry.value(), context);

@@ -44,6 +44,19 @@ fn assert_rejected(source: &str, code: &str) {
 }
 
 #[test]
+fn run_name_is_limited_to_github_and_inputs_contexts() {
+    let accepted = compile(
+        "run-name: Deploy ${{ inputs.target }} from ${{ github.ref }}\non: workflow_dispatch\njobs:\n  build:\n    runs-on: linux\n    steps: [{run: echo ok}]\n",
+        "workflow_dispatch",
+    );
+    assert!(accepted.is_accepted(), "{:#?}", accepted.diagnostics());
+    assert_rejected(
+        "run-name: Deploy ${{ vars.target }}\non: workflow_dispatch\njobs:\n  build:\n    runs-on: linux\n    steps: [{run: echo ok}]\n",
+        "github.expression.unrecognized_context",
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn default_compiler_retains_dynamic_activation_execution_and_finalization_templates() {
     let source = r#"name: Synthetic matrix

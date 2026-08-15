@@ -222,6 +222,7 @@ fn validate_repository_dispatch_filter(
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) {
+    context.reject_extensions(filter.extensions());
     if filter.types_configured() && filter.types().is_empty() {
         context.semantic(
             "github.compile.empty_event_filter",
@@ -314,6 +315,7 @@ fn validate_merge_group_filter(
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) {
+    context.reject_extensions(filter.extensions());
     if filter.types_configured() && filter.types().is_empty() {
         context.semantic(
             "github.compile.empty_event_filter",
@@ -1134,6 +1136,7 @@ fn validate_filter(
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) {
+    context.reject_extensions(filter.extensions());
     validate_mutually_exclusive_filters(
         "branches",
         filter.branches_configured(),

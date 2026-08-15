@@ -21,6 +21,8 @@ const MAX_WORKFLOW_BYTES: u64 = 16_777_216;
 const MAX_GLOBAL_PAX_BYTES: u64 = 65_536;
 const OBSERVED_STREAM_TAIL_BYTES: usize = 2 * 1_024;
 
+use crate::MAX_GITHUB_WORKFLOW_SOURCE_BYTES;
+
 /// Maximum byte length of a workflow path returned by repository discovery.
 ///
 /// This must remain exactly aligned with the durable provider-delivery
@@ -201,7 +203,7 @@ impl Default for RepositoryWorkflowDiscoveryLimits {
             expanded_bytes: 1024 * 1_024 * 1_024,
             entry_path_bytes: 4 * 1_024,
             workflows: 256,
-            workflow_bytes: 1_024 * 1_024,
+            workflow_bytes: MAX_GITHUB_WORKFLOW_SOURCE_BYTES as u64,
         }
     }
 }

@@ -43,7 +43,9 @@ use super::{
     safety::scan_lossy_yaml,
 };
 
-const RUN_NAME_CONTEXTS: &[ExpressionContext] = &[
+const RUN_NAME_CONTEXTS: &[ExpressionContext] =
+    &[ExpressionContext::Github, ExpressionContext::Inputs];
+const WORKFLOW_CONCURRENCY_CONTEXTS: &[ExpressionContext] = &[
     ExpressionContext::Github,
     ExpressionContext::Inputs,
     ExpressionContext::Vars,
@@ -128,7 +130,7 @@ const WORKFLOW_ENV_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
 const WORKFLOW_CONCURRENCY_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(
     "workflow concurrency",
     PlanEvaluationPhase::Admission,
-    RUN_NAME_CONTEXTS,
+    WORKFLOW_CONCURRENCY_CONTEXTS,
     false,
 );
 const STRATEGY_POLICY: ValueExpressionPolicy = ValueExpressionPolicy::new(

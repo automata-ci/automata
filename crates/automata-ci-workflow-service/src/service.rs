@@ -49,13 +49,13 @@ use crate::{
     },
 };
 
-const REQUEST_DIGEST_DOMAIN_V4: &[u8] = b"automata.workflow-admission.request.v4\0";
-const AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V5: &[u8] =
-    b"automata.workflow-admission.request.v5\0";
-const AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6: &[u8] =
-    b"automata.workflow-admission.request.v6.control-plane-dispatch\0";
-const SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V7: &[u8] =
-    b"automata.workflow-admission.request.v7.scheduled-github\0";
+const REQUEST_DIGEST_DOMAIN_V8: &[u8] = b"automata.workflow-admission.request.v8.run-name\0";
+const AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V8: &[u8] =
+    b"automata.workflow-admission.request.v8.run-name.authenticated-github\0";
+const AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V8: &[u8] =
+    b"automata.workflow-admission.request.v8.run-name.control-plane-dispatch\0";
+const SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V8: &[u8] =
+    b"automata.workflow-admission.request.v8.run-name.scheduled-github\0";
 const PROVIDER_DELIVERY_NAMESPACE_DOMAIN: &[u8] =
     b"automata.workflow-admission.provider-delivery\0";
 const ADMISSION_GITHUB_PROPERTIES: &[&str] = &[
@@ -75,6 +75,7 @@ const ADMISSION_GITHUB_PROPERTIES: &[&str] = &[
     "workflow_ref",
     "workflow_sha",
 ];
+const MAX_RUN_DISPLAY_TITLE_BYTES: usize = 1_024;
 
 enum AdmissionAuthority {
     ProviderNeutral,
@@ -425,6 +426,7 @@ impl WorkflowAdmissionService {
 
         let command = self.observe_sync_stage(WorkflowAdmissionStage::Encode, || {
             let concurrency = resolve_workflow_concurrency(&request)?;
+            let display_title = resolve_run_display_title(&request)?;
             let request_digest = canonical_request_digest(
                 &request,
                 delivery_id,
@@ -434,6 +436,7 @@ impl WorkflowAdmissionService {
                 &event_blob,
                 &plan_blob,
                 &base_context_blob,
+                display_title.as_deref(),
                 concurrency.as_ref(),
                 reusable.as_ref().map(|prepared| &prepared.graph),
             );
@@ -451,6 +454,7 @@ impl WorkflowAdmissionService {
                 &event_blob,
                 &plan_blob,
                 &base_context_blob,
+                display_title.as_deref(),
                 concurrency,
                 reusable.as_ref().map(|prepared| prepared.graph.clone()),
             )
@@ -499,6 +503,7 @@ impl WorkflowAdmissionService {
                     &event_blob,
                     &plan_blob,
                     &base_context_blob,
+                    command.display_title(),
                     command.concurrency().cloned(),
                     command.reusable_workflows().cloned(),
                 )?;
@@ -522,6 +527,7 @@ impl WorkflowAdmissionService {
                     &event_blob,
                     &plan_blob,
                     &base_context_blob,
+                    command.display_title(),
                     command.concurrency().cloned(),
                     command.reusable_workflows().cloned(),
                 )?;
@@ -548,6 +554,7 @@ impl WorkflowAdmissionService {
                     &event_blob,
                     &plan_blob,
                     &base_context_blob,
+                    command.display_title(),
                     command.concurrency().cloned(),
                     command.reusable_workflows().cloned(),
                 )?;
@@ -628,6 +635,7 @@ fn build_command(
     event: &PreparedBlob,
     plan: &PreparedBlob,
     base_context: &PreparedBlob,
+    display_title: Option<&str>,
     concurrency: Option<WorkflowConcurrency>,
     reusable_workflows: Option<AdmittedReusableWorkflowExpansion>,
 ) -> Result<AdmitLogicalWorkflowRun, WorkflowAdmissionError> {
@@ -707,7 +715,7 @@ fn build_command(
     if let Some(actor) = request.actor() {
         command = command.actor(actor);
     }
-    if let Some(display_title) = request.display_title() {
+    if let Some(display_title) = display_title {
         command = command.display_title(display_title);
     }
     if let Some(commit_subject) = request.commit_subject() {
@@ -1332,6 +1340,53 @@ fn resolve_workflow_concurrency(
         .map_err(WorkflowAdmissionError::AdmissionValue)
 }
 
+fn resolve_run_display_title(
+    request: &WorkflowAdmissionRequest,
+) -> Result<Option<String>, WorkflowAdmissionError> {
+    let explicit = request.plan().logical().run_name().map(|run_name| {
+        let rendered = match run_name.value() {
+            CompiledValueTemplate::Literal(value) => Ok(value.clone()),
+            CompiledValueTemplate::Expression(expression) => {
+                if request.repository().provider() != "github" {
+                    return Err(WorkflowAdmissionError::RunNameEvaluation);
+                }
+                let context = admission_expression_context(request)
+                    .map_err(|_| WorkflowAdmissionError::RunNameEvaluation)?;
+                evaluate_admission_string(
+                    expression,
+                    &GithubExpressionEvaluator::default(),
+                    &context,
+                )
+                .map_err(|_| WorkflowAdmissionError::RunNameEvaluation)
+            }
+        }?;
+        validate_run_display_title(rendered)
+    });
+    if let Some(title) = explicit
+        .transpose()?
+        .filter(|title| !title.trim().is_empty())
+    {
+        return Ok(Some(title));
+    }
+    request
+        .display_title()
+        .filter(|title| !title.trim().is_empty())
+        .or_else(|| {
+            request
+                .commit_subject()
+                .filter(|subject| !subject.trim().is_empty())
+        })
+        .map(|title| validate_run_display_title(title.to_owned()))
+        .transpose()
+}
+
+fn validate_run_display_title(title: String) -> Result<String, WorkflowAdmissionError> {
+    if title.len() > MAX_RUN_DISPLAY_TITLE_BYTES || title.chars().any(char::is_control) {
+        return Err(WorkflowAdmissionError::RunNameEvaluation);
+    }
+    Ok(title)
+}
+
 fn admission_expression_context(
     request: &WorkflowAdmissionRequest,
 ) -> Result<MapContext, WorkflowAdmissionError> {
@@ -1643,18 +1698,19 @@ fn canonical_request_digest(
     event: &PreparedBlob,
     plan: &PreparedBlob,
     base_context: &PreparedBlob,
+    resolved_display_title: Option<&str>,
     concurrency: Option<&WorkflowConcurrency>,
     reusable_workflows: Option<&AdmittedReusableWorkflowExpansion>,
 ) -> Sha256Digest {
     let mut digest = Sha256::new();
     digest.update(if schedule_fire_id.is_some() {
-        SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V7
+        SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V8
     } else if dispatch_claim.is_some() {
-        AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V6
+        AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V8
     } else if delivery_id.is_some() {
-        AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V5
+        AUTHENTICATED_GITHUB_REQUEST_DIGEST_DOMAIN_V8
     } else {
-        REQUEST_DIGEST_DOMAIN_V4
+        REQUEST_DIGEST_DOMAIN_V8
     });
     for value in [
         request.tenant().as_str(),
@@ -1673,6 +1729,7 @@ fn canonical_request_digest(
     digest_optional_field(&mut digest, request.actor());
     digest_optional_field(&mut digest, request.display_title());
     digest_optional_field(&mut digest, request.commit_subject());
+    digest_optional_field(&mut digest, resolved_display_title);
     digest_field(
         &mut digest,
         &request.run_attempt().unwrap_or(1).to_be_bytes(),
@@ -1794,6 +1851,9 @@ pub enum WorkflowAdmissionError {
     /// Workflow-level concurrency could not be resolved from admission-safe context.
     #[error("workflow concurrency could not be resolved at admission")]
     ConcurrencyEvaluation,
+    /// Workflow `run-name` could not be resolved into a bounded durable title.
+    #[error("workflow run-name could not be resolved at admission")]
+    RunNameEvaluation,
     /// Canonical manual-dispatch evidence did not match the authenticated target.
     #[error("authenticated workflow dispatch evidence did not match admission")]
     WorkflowDispatchEvidence,
@@ -1814,6 +1874,7 @@ const fn observe_failure(error: &WorkflowAdmissionError) -> WorkflowAdmissionFai
         | WorkflowAdmissionError::CredentialDiscovery(_)
         | WorkflowAdmissionError::Serialization
         | WorkflowAdmissionError::ConcurrencyEvaluation
+        | WorkflowAdmissionError::RunNameEvaluation
         | WorkflowAdmissionError::WorkflowDispatchEvidence
         | WorkflowAdmissionError::Internal => WorkflowAdmissionFailure::InvalidState,
     }
