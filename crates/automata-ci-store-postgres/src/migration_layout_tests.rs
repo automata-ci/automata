@@ -145,6 +145,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0035_workflow_run_trust_snapshots.sql",
         "d089ea8658be480cef856ac775dae5c9612ac9bf2306d0a636938398c6f79bc88f6f11b05e23debd1d165df543fd50d7",
     ),
+    (
+        "0036_align_github_workflow_limit.sql",
+        "91ad604671bb15fa5ae6d593161a443427bfa77e8f50cb6267290f919742d15793659c94318044371d5e6bf22b51a9e7",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -256,6 +260,28 @@ fn logical_activation_scheduling_policy_is_relationally_exact() {
             "logical scheduling-policy migration lost required contract: {required}"
         );
     }
+}
+
+#[test]
+fn github_workflow_limit_matches_the_product_manifest_contract() {
+    let source = include_str!("../migrations/0036_align_github_workflow_limit.sql");
+
+    for required in [
+        "DROP CONSTRAINT github_provider_manifest_revisions_archive_limits",
+        "ADD CONSTRAINT github_provider_manifest_revisions_archive_limits",
+        "workflow_max_bytes = 512000",
+    ] {
+        assert!(
+            source.contains(required),
+            "GitHub workflow-limit migration lost required contract: {required}"
+        );
+    }
+
+    assert_eq!(
+        automata_ci_store::GITHUB_PROVIDER_WORKFLOW_MAX_BYTES,
+        512_000,
+        "product and durable GitHub workflow byte limits diverged"
+    );
 }
 
 fn migration_paths() -> Vec<PathBuf> {
