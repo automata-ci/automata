@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
+use automata_ci_control::runner_auth::RunnerMachineDirectory;
 use automata_ci_postgres::runner_auth::PostgresRunnerMachineDirectory;
-use automata_ci_runner_auth::RunnerMachineDirectory;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use static_assertions::assert_impl_all;
 

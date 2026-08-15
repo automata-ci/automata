@@ -7,6 +7,10 @@ use automata_ci_auth::{
     },
     time::{Clock, UnixTimestamp},
 };
+use automata_ci_control::runner_auth::{
+    DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits, RunnerMachineDirectory,
+    RunnerMachineDirectoryError,
+};
 use automata_ci_control::runner_control::{
     DesiredRunnerState, RunnerRegistrationAuthorizer as _,
     durable::{CurrentRunnerSession, CurrentRunnerSessionRepository as _},
@@ -18,10 +22,6 @@ use automata_ci_core::{
 use automata_ci_postgres::runner_auth::PostgresRunnerMachineDirectory;
 use automata_ci_postgres_test_support::TestClock;
 use automata_ci_protocol::SUPPORTED_PROTOCOL_RANGE;
-use automata_ci_runner_auth::{
-    DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits, RunnerMachineDirectory,
-    RunnerMachineDirectoryError,
-};
 use automata_ci_store::{CommandCursor, HeartbeatRunnerSession, RunnerGeneration, StoreError};
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;

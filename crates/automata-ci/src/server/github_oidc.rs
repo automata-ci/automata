@@ -9,6 +9,11 @@ use std::{
 };
 
 use async_trait::async_trait;
+use automata_ci_control::github_oidc::{
+    GithubOidcAuthorityProvisioner, GithubOidcRuntimeAuthorityIssuer,
+    RandomGithubOidcAuthorityIdGenerator, ReserveGithubOidcRuntimeAuthority,
+    ReservedGithubOidcRuntimeAuthority, UnavailableGithubOidcRuntimeAuthorityIssuer,
+};
 use automata_ci_control::runner_control::{
     CompositeRuntimeAuthorityIssuer, ControlPortError, OptionalRuntimeAuthorityIssuer,
     RuntimeAuthorityIssuer,
@@ -19,11 +24,6 @@ use automata_ci_oidc_github::{
     OidcClock, OidcClockError, OidcIssuanceRepository, OidcIssuer, OidcKeyId, OidcService,
     OidcSupportedClaims, OidcTokenLifetime, RequestBearerConfig, RequestBearerKey,
     RequestBearerKeyring, Rs256Keyring, Rs256SigningKey, RsaPublicJwk,
-};
-use automata_ci_oidc_github_control::{
-    GithubOidcAuthorityProvisioner, GithubOidcRuntimeAuthorityIssuer,
-    RandomGithubOidcAuthorityIdGenerator, ReserveGithubOidcRuntimeAuthority,
-    ReservedGithubOidcRuntimeAuthority, UnavailableGithubOidcRuntimeAuthorityIssuer,
 };
 use automata_ci_postgres::store::{
     PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository, PostgresStore,

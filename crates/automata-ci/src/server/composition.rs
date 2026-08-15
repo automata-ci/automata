@@ -20,6 +20,9 @@ use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, LeasePollConfig, RandomLeaseIdGenerator, SystemLeaseClock,
     repository::RunnerLeaseRequestRepository,
 };
+use automata_ci_control::runner_auth::{
+    DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits,
+};
 use automata_ci_control::runner_control::{
     ControlIdGenerator, DurableRunnerControlHandler, ImmutableBlobJobIrReader, JobIrObjectReader,
     LeaseOfferCommandPublisher, LeasePollAdapter, LeasePoller, ManagedSecretBindingIssuer,
@@ -60,7 +63,6 @@ use automata_ci_results_github::{
     PostgresCacheRepository, ResultsClock, ResultsIdGenerator, ResultsLimits, ResultsObserver,
     SystemResultsClock, SystemResultsIdGenerator,
 };
-use automata_ci_runner_auth::{DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits};
 use automata_ci_runner_transport::{
     ConfigurationError as TransportConfigurationError, RunnerControlHandler, RunnerControlServer,
     ServerTlsConfig, TransportLimits,

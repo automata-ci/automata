@@ -2,11 +2,11 @@ mod support;
 
 use std::time::Duration;
 
-use automata_ci_credential::CredentialErrorKind;
 use automata_ci_credential_github::{
     GithubAppHttpLimits, GithubInstallationTokenIndeterminateReason,
     GithubInstallationTokenMintOutcome,
 };
+use automata_ci_scm::credential::CredentialErrorKind;
 use axum::http::StatusCode;
 use support::{FixtureServer, ResponseSpec, request, success_response};
 

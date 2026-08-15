@@ -1,7 +1,7 @@
 use std::fmt;
 
 use automata_ci_auth::{secret::SecretString, time::UnixTimestamp};
-use automata_ci_credential::{
+use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, CredentialProvenance, IssuedRepositoryCredential,
     RepositoryCredentialRequest,
 };

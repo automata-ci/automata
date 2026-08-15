@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-description = "Provider-neutral immutable SCM snapshot contracts for Automata"
+description = "Provider-neutral SCM snapshot and workload credential contracts for Automata"
 publish.workspace = true
 
 [dependencies]

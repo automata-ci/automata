@@ -25,7 +25,6 @@ automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
 automata-ci-oidc-github.workspace = true
 automata-ci-provisioning.workspace = true
-automata-ci-runner-auth.workspace = true
 automata-ci-schedule.workspace = true
 automata-ci-secret.workspace = true
 automata-ci-store = { workspace = true, features = ["adapter-spi"] }

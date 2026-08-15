@@ -17,10 +17,6 @@ use automata_ci_core::{
     RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
     StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
-use automata_ci_credential::{
-    CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
-    PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
-};
 use automata_ci_credential_github::{
     GITHUB_REPOSITORY_AUTHORITY_NAMESPACE, GITHUB_REPOSITORY_RUNTIME_AUTHORITY,
     GithubInstallationTokenMintOutcome, GithubRepositoryRuntimeAuthorityIssuer,
@@ -38,6 +34,10 @@ use automata_ci_key_management::{
 };
 use automata_ci_protocol::{ProtocolLimits, RuntimeAuthorityEndpoint};
 use automata_ci_protocol_protobuf::encode_job_ir;
+use automata_ci_scm::credential::{
+    CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
+    PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
+};
 use automata_ci_scm::{RepositoryId as ScmRepositoryId, ScmProviderId};
 use automata_ci_store::{
     AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,

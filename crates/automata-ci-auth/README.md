@@ -4,9 +4,9 @@ This crate contains Automata's authentication and authorization domain contracts
 It deliberately has no HTTP client, database, web framework, or runtime dependency.
 
 Human identity providers, machine identity verification, session issuance, RBAC,
-provider-token custody, and key encryption are separate boundaries. The GitHub App
-module models the browser and device authorization protocols without deciding how
-HTTP or durable storage are implemented.
+provider-token custody, key encryption, and output publication policy are separate
+boundaries. The GitHub App module models the browser and device authorization
+protocols without deciding how HTTP or durable storage are implemented.
 
 Provider access and refresh tokens are secret-bearing, non-serializable values.
 They must be handed to a `ProviderTokenVault` implementation backed by authenticated
@@ -41,3 +41,7 @@ grants at tenant/resource scope with an independent repository publication polic
 for dashboard metadata, logs, and artifacts. Publication can grant read access
 only; readable-secret output safety may narrow logs and artifacts to private and
 cannot be overridden by a public repository preference.
+
+The namespaced `output_policy` module owns the shared publication lattice used by
+authentication, persistence, UI, and secret-delivery layers. Its stable Serde
+representations require all current audiences and reject unknown security fields.

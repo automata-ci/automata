@@ -1,6 +1,6 @@
 use std::{fmt, time::Duration};
 
-use automata_ci_credential::ProviderResourceId;
+use automata_ci_scm::credential::ProviderResourceId;
 use reqwest::header::HeaderValue;
 use thiserror::Error;
 use url::{Host, Url};

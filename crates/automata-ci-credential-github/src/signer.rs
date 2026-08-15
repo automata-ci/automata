@@ -1,7 +1,7 @@
 use std::fmt;
 
 use automata_ci_auth::{secret::SecretString, time::UnixTimestamp};
-use automata_ci_credential::ProviderResourceId;
+use automata_ci_scm::credential::ProviderResourceId;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
     rand::SystemRandom,

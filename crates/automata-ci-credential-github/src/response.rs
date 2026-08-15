@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, fmt, ops::Range};
 
 use automata_ci_auth::secret::SecretString;
-use automata_ci_credential::{
+use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, PermissionLevel, PermissionName, PermissionSet,
 };
 use reqwest::{

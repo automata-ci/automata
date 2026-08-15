@@ -229,7 +229,6 @@ dependencies = [
  "automata-ci-local",
  "automata-ci-metrics",
  "automata-ci-oidc-github",
- "automata-ci-oidc-github-control",
  "automata-ci-postgres",
  "automata-ci-postgres-test-support",
  "automata-ci-protocol",
@@ -237,7 +236,6 @@ dependencies = [
  "automata-ci-provisioning",
  "automata-ci-provisioning-grpc",
  "automata-ci-results-github",
- "automata-ci-runner-auth",
  "automata-ci-runner-transport",
  "automata-ci-scm",
  "automata-ci-secret",
@@ -301,27 +299,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-action-cache-file"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "automata-ci-action",
- "automata-ci-blob",
- "automata-ci-core",
- "automata-ci-scm",
- "bytes",
- "flate2",
- "libc",
- "rustix",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "static_assertions",
- "tar",
- "tokio",
-]
-
-[[package]]
 name = "automata-ci-action-github"
 version = "0.1.0"
 dependencies = [
@@ -343,7 +320,6 @@ dependencies = [
 name = "automata-ci-auth"
 version = "0.1.0"
 dependencies = [
- "automata-ci-output-policy",
  "base64 0.23.1",
  "futures",
  "getrandom 0.4.3",
@@ -403,6 +379,7 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
+ "automata-ci-oidc-github",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-runner-transport",
@@ -431,17 +408,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-credential"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "automata-ci-auth",
- "automata-ci-scm",
- "static_assertions",
- "thiserror",
-]
-
-[[package]]
 name = "automata-ci-credential-github"
 version = "0.1.0"
 dependencies = [
@@ -449,7 +415,6 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-control",
  "automata-ci-core",
- "automata-ci-credential",
  "automata-ci-key-management",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
@@ -569,7 +534,6 @@ dependencies = [
  "automata-ci-execution",
  "automata-ci-expression-github",
  "automata-ci-github-runtime",
- "automata-ci-output-policy",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-runner-journal",
@@ -649,33 +613,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "automata-ci-oidc-github-control"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "automata-ci-control",
- "automata-ci-core",
- "automata-ci-oidc-github",
- "automata-ci-protocol",
- "automata-ci-protocol-protobuf",
- "automata-ci-store",
- "sha2 0.11.0",
- "static_assertions",
- "subtle",
- "thiserror",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "automata-ci-output-policy"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "automata-ci-postgres"
 version = "0.1.0"
 dependencies = [
@@ -689,7 +626,6 @@ dependencies = [
  "automata-ci-postgres-test-support",
  "automata-ci-protocol",
  "automata-ci-provisioning",
- "automata-ci-runner-auth",
  "automata-ci-schedule",
  "automata-ci-secret",
  "automata-ci-store",
@@ -815,7 +751,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "automata-ci-action",
- "automata-ci-action-cache-file",
  "automata-ci-action-github",
  "automata-ci-auth",
  "automata-ci-blob",
@@ -845,8 +780,10 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "clap",
+ "flate2",
  "http 1.5.0",
  "kube",
+ "libc",
  "prometheus-client",
  "rcgen",
  "reqwest",
@@ -856,6 +793,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "thiserror",
  "time",
  "tokio",
@@ -866,22 +804,6 @@ dependencies = [
  "uuid",
  "x509-parser",
  "zeroize",
-]
-
-[[package]]
-name = "automata-ci-runner-auth"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "automata-ci-auth",
- "automata-ci-control",
- "automata-ci-core",
- "automata-ci-store",
- "sha2 0.11.0",
- "static_assertions",
- "subtle",
- "thiserror",
- "tokio",
 ]
 
 [[package]]

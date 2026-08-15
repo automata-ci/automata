@@ -1,9 +1,9 @@
 mod support;
 
-use automata_ci_credential::CredentialErrorKind;
 use automata_ci_credential_github::{
     GithubInstallationTokenIndeterminateReason, GithubInstallationTokenMintOutcome,
 };
+use automata_ci_scm::credential::CredentialErrorKind;
 use axum::http::StatusCode;
 use serde_json::Value;
 use support::{

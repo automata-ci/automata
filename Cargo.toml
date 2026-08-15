@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     "crates/automata-ci-action",
-    "crates/automata-ci-action-cache-file",
     "crates/automata-ci-action-github",
     "crates/automata-ci",
     "crates/automata-ci-auth",
@@ -11,7 +10,6 @@ members = [
     "crates/automata-ci-build-support",
     "crates/automata-ci-control",
     "crates/automata-ci-core",
-    "crates/automata-ci-credential",
     "crates/automata-ci-credential-github",
     "crates/automata-ci-execution",
     "crates/automata-ci-expression-github",
@@ -23,8 +21,6 @@ members = [
     "crates/automata-ci-local",
     "crates/automata-ci-metrics",
     "crates/automata-ci-oidc-github",
-    "crates/automata-ci-oidc-github-control",
-    "crates/automata-ci-output-policy",
     "crates/automata-ci-postgres",
     "crates/automata-ci-postgres-test-support",
     "crates/automata-ci-protocol",
@@ -33,7 +29,6 @@ members = [
     "crates/automata-ci-provisioning-grpc",
     "crates/automata-ci-results-github",
     "crates/automata-ci-runner",
-    "crates/automata-ci-runner-auth",
     "crates/automata-ci-runner-crypto",
     "crates/automata-ci-runner-journal",
     "crates/automata-ci-runner-runtime",
@@ -77,14 +72,12 @@ aws-sdk-s3 = { version = "=1.141.0", default-features = false, features = ["beha
 aws-smithy-http-client = { version = "=1.2.0", default-features = false, features = ["rustls-ring"] }
 automata-ci-auth = { path = "crates/automata-ci-auth", version = "0.1.0" }
 automata-ci-action = { path = "crates/automata-ci-action", version = "0.1.0" }
-automata-ci-action-cache-file = { path = "crates/automata-ci-action-cache-file", version = "0.1.0" }
 automata-ci-action-github = { path = "crates/automata-ci-action-github", version = "0.1.0" }
 automata-ci-blob = { path = "crates/automata-ci-blob", version = "0.1.0" }
 automata-ci-blob-s3 = { path = "crates/automata-ci-blob-s3", version = "0.1.0" }
 automata-ci-build-support = { path = "crates/automata-ci-build-support", version = "0.1.0" }
 automata-ci-control = { path = "crates/automata-ci-control", version = "0.1.0" }
 automata-ci-core = { path = "crates/automata-ci-core", version = "0.1.0" }
-automata-ci-credential = { path = "crates/automata-ci-credential", version = "0.1.0" }
 automata-ci-credential-github = { path = "crates/automata-ci-credential-github", version = "0.1.0" }
 automata-ci-execution = { path = "crates/automata-ci-execution", version = "0.1.0" }
 automata-ci-expression-github = { path = "crates/automata-ci-expression-github", version = "0.1.0" }
@@ -96,8 +89,6 @@ automata-ci-key-management = { path = "crates/automata-ci-key-management", versi
 automata-ci-local = { path = "crates/automata-ci-local", version = "0.1.0" }
 automata-ci-metrics = { path = "crates/automata-ci-metrics", version = "0.1.0" }
 automata-ci-oidc-github = { path = "crates/automata-ci-oidc-github", version = "0.1.0" }
-automata-ci-oidc-github-control = { path = "crates/automata-ci-oidc-github-control", version = "0.1.0" }
-automata-ci-output-policy = { path = "crates/automata-ci-output-policy", version = "0.1.0" }
 automata-ci-postgres = { path = "crates/automata-ci-postgres", version = "0.1.0" }
 automata-ci-postgres-test-support = { path = "crates/automata-ci-postgres-test-support", version = "0.1.0" }
 automata-ci-protocol = { path = "crates/automata-ci-protocol", version = "0.1.0" }
@@ -105,7 +96,6 @@ automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf",
 automata-ci-provisioning = { path = "crates/automata-ci-provisioning", version = "0.1.0" }
 automata-ci-provisioning-grpc = { path = "crates/automata-ci-provisioning-grpc", version = "0.1.0" }
 automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
-automata-ci-runner-auth = { path = "crates/automata-ci-runner-auth", version = "0.1.0" }
 automata-ci-runner-crypto = { path = "crates/automata-ci-runner-crypto", version = "0.1.0" }
 automata-ci-runner-journal = { path = "crates/automata-ci-runner-journal", version = "0.1.0" }
 automata-ci-runner-runtime = { path = "crates/automata-ci-runner-runtime", version = "0.1.0" }

@@ -3,13 +3,13 @@ mod support;
 use std::time::Duration;
 
 use automata_ci_auth::secret::SecretString;
-use automata_ci_credential::CredentialErrorKind;
 use automata_ci_credential_github::{
     GithubAppCredentialBroker, GithubAppHttpLimits, GithubInstallationTokenIndeterminateReason,
     GithubInstallationTokenMintOutcome, GithubInstallationTokenRevocationCandidate,
     GithubInstallationTokenRevocationFailureKind, GithubInstallationTokenRevocationOutcome,
     GithubInstallationTokenRevokePending, GithubReadyInstallationToken,
 };
+use automata_ci_scm::credential::CredentialErrorKind;
 use axum::http::StatusCode;
 use static_assertions::assert_not_impl_any;
 use support::{

@@ -23,10 +23,10 @@ pub(crate) mod error {
 #[path = "../src/output.rs"]
 mod output;
 
+use automata_ci_auth::output_policy::SecretExposureClass;
 use automata_ci_core::{JobSecretExposure, LogChannel};
 use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
 use automata_ci_github_runtime::{WorkflowCommandLimits, WorkflowCommandPolicy};
-use automata_ci_output_policy::SecretExposureClass;
 use output::{SecretMasker, parse_output};
 
 #[test]

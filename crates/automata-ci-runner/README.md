@@ -152,7 +152,8 @@ canonical lowercase 40-character Git commit without consuming the GitHub REST
 API quota. The first resolution downloads the immutable GitHub archive,
 performs the normal bounded archive inspection, and publishes the verified
 content-addressed bytes to the configured shared object store. Each runner also
-retains a verified local copy under its private journal state root. A warm job
+retains a verified local copy through its built-in product action cache under
+the private journal state root. A warm job
 therefore reads local disk first and falls back to the shared object store; it
 does not contact GitHub again.
 

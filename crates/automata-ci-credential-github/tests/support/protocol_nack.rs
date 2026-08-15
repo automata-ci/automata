@@ -10,7 +10,7 @@ use automata_ci_auth::{
     secret::SecretString,
     time::{Clock, UnixTimestamp},
 };
-use automata_ci_credential::{
+use automata_ci_scm::credential::{
     MinimumValidity, PermissionLevel, PermissionName, PermissionSet, ProviderResourceId,
     RepositoryCredentialRequest, RepositoryScope, WorkloadIdentity,
 };
