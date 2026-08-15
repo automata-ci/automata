@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::SystemTime};
+use std::{fmt, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -43,19 +43,6 @@ pub trait OidcClock: fmt::Debug + Send + Sync {
     ///
     /// Fails when the time source is unavailable or predates the epoch.
     fn now_seconds(&self) -> Result<u64, OidcClockError>;
-}
-
-/// Operating-system wall clock used by production HTTP composition.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemOidcClock;
-
-impl OidcClock for SystemOidcClock {
-    fn now_seconds(&self) -> Result<u64, OidcClockError> {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .map_err(|_| OidcClockError)
-    }
 }
 
 #[derive(Clone)]

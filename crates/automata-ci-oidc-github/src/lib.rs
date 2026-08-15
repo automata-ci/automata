@@ -29,7 +29,7 @@ pub use bearer::{
 };
 pub use http::{
     GithubOidcApi, OIDC_DISCOVERY_PATH, OIDC_JWKS_CACHE_SECONDS, OIDC_JWKS_PATH, OIDC_TOKEN_PATH,
-    OIDC_TOKEN_REQUEST_PATH_AND_QUERY, OidcClock, OidcClockError, SystemOidcClock,
+    OIDC_TOKEN_REQUEST_PATH_AND_QUERY, OidcClock, OidcClockError,
 };
 pub use keys::{
     JsonWebKeySet, OidcIdToken, Rs256KeyError, Rs256Keyring, Rs256SigningKey, RsaPublicJwk,
