@@ -1322,7 +1322,7 @@ exit 99
         expected_inventory = [
             "cargo test --workspace",
             "-p automata-ci-postgres --test postgres",
-            "-p automata-ci-postgres-test-support --test postgres_18",
+            "-p automata-ci-postgres --lib",
             "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
             "--test github_provider_end_to_end_matrix",
             "--test blob_s3",
@@ -1342,11 +1342,17 @@ exit 99
         assert all("--ignored" in command for command in commands[1:])
         assert "--test-threads=4" in commands[1]
         assert "--test-threads=1" in commands[2]
+        assert "test_support::tests::" in commands[2]
         assert "--tests" not in commands[1]
         assert sum(
             command.count("-p automata-ci-postgres-test-support")
             for command in commands
-        ) == 1
+        ) == 0
+        postgres_prefixes = json.loads(
+            (ROOT / "ci" / "rust-coverage-policy.json").read_text(encoding="utf-8")
+        )["lanes"]["postgres"]["source_prefixes"]
+        assert "crates/automata-ci-postgres/src/" in postgres_prefixes
+        assert "crates/automata-ci-postgres-test-support/src/" not in postgres_prefixes
         assert all("-p automata-ci-store" not in command for command in commands)
         unknown_plan = subprocess.run(
             [str(RUN), "--plan", str(scratch / "unknown-plan"), "ordinary", "policy-only"],

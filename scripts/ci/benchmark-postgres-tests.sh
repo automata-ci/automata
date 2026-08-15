@@ -413,7 +413,8 @@ timeout \
   --kill-after=30s \
   "${cleanup_timeout_seconds}s" \
   cargo build \
-    -p automata-ci-postgres-test-support \
+    -p automata-ci-postgres \
+    --features test-support \
     --example postgres-test-cleanup \
     --locked \
     --message-format=json-render-diagnostics \

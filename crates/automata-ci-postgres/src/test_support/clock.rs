@@ -1,6 +1,6 @@
 use sqlx::{PgPool, Row as _};
 
-use crate::{TestResult, message_error};
+use super::{TestResult, message_error};
 
 /// A schema-local replacement for `PostgreSQL`'s wall clock.
 ///
@@ -99,6 +99,7 @@ impl TestClock {
     ///
     /// Returns an error if `PostgreSQL` rejects the update or the singleton clock
     /// row is missing.
+    #[cfg(feature = "test-support")]
     pub async fn set(&self, now_ms: i64) -> TestResult {
         let result = sqlx::query(
             r"
@@ -168,7 +169,8 @@ impl TestClock {
     /// # Errors
     ///
     /// Returns an error if either fixture object cannot be removed exactly.
-    pub async fn restore(self) -> TestResult {
+    #[cfg(test)]
+    pub(super) async fn restore(self) -> TestResult {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("DROP FUNCTION automata_test.clock_timestamp()")
             .execute(&mut *transaction)

@@ -36,7 +36,7 @@ use automata_ci_postgres::auth::{
     },
 };
 use automata_ci_postgres::runner_auth::PostgresRunnerMachineDirectory;
-use automata_ci_postgres_test_support::TestClock;
+use automata_ci_postgres::test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 

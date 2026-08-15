@@ -81,7 +81,8 @@ automata_configure_postgres_test_namespace() {
 
 automata_cleanup_postgres_test_namespace() {
   LLVM_PROFILE_FILE=/dev/null cargo run \
-    -p automata-ci-postgres-test-support \
+    -p automata-ci-postgres \
+    --features test-support \
     --example postgres-test-cleanup \
     --locked \
     -q

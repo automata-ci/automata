@@ -10,9 +10,8 @@ use automata_ci_key_management::{
 };
 use automata_ci_postgres::store::PostgresStore;
 #[allow(unused_imports)] // Consolidated binaries consume different fixture subsets.
-pub use automata_ci_postgres_test_support::{DATABASE_URL_ENVIRONMENT, TestClock};
-use automata_ci_postgres_test_support::{
-    PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
+pub use automata_ci_postgres::test_support::{
+    PostgresTestDatabase as TestDatabase, TestClock, TestResult,
 };
 use automata_ci_store::{
     AdmitLogicalWorkflowRun, GithubProviderManifest, OpenRunnerSession, ProviderDeliveryClaimFence,
@@ -22,11 +21,9 @@ use automata_ci_store::{
     RunnerProtocolVersion, RunnerSessionFence,
 };
 use sqlx::PgPool;
-use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 pub type TestError = Box<dyn Error + Send + Sync>;
-pub type TestResult<T = ()> = Result<T, TestError>;
 
 #[allow(dead_code)]
 pub fn authenticated_github_event_object(
@@ -69,24 +66,6 @@ pub async fn register_provider_delivery_workflow_inventory(
     Ok(())
 }
 
-static PREPARED_TEMPLATE: OnceCell<PreparedTemplate> = OnceCell::const_new();
-
-async fn prepared_template() -> TestResult<&'static PreparedTemplate> {
-    PREPARED_TEMPLATE
-        .get_or_try_init(|| async {
-            PostgresTestHarness::from_environment()?
-                .prepare_template(|pool| async move {
-                    PostgresStore::from_postgres_pool(pool)
-                        .with_runner_payload_encryption(test_runner_payload_key_provider())
-                        .migrate()
-                        .await?;
-                    Ok(())
-                })
-                .await
-        })
-        .await
-}
-
 pub fn test_runner_payload_key_provider() -> Arc<dyn KeyEncryptionProvider> {
     let active = LocalKeyMaterial::new(
         KeyId::new("store-test-runner-payload-v1").expect("canonical test key ID"),
@@ -101,99 +80,27 @@ pub fn test_runner_payload_key_provider() -> Arc<dyn KeyEncryptionProvider> {
 
 pub async fn run_with_database<Test, TestFuture>(test: Test) -> TestResult
 where
-    Test: FnOnce(Arc<TestDatabase>) -> TestFuture,
+    Test: FnOnce(Arc<TestDatabase>) -> TestFuture + Send + 'static,
     TestFuture: Future<Output = TestResult> + Send + 'static,
 {
-    let database = Arc::new(TestDatabase::create().await?);
-    let outcome = tokio::spawn(test(Arc::clone(&database))).await;
-    let cleanup = database.cleanup().await;
-
-    match outcome {
-        Ok(result) => {
-            result?;
-            cleanup
-        }
-        Err(join_error) => {
-            cleanup?;
-            if join_error.is_panic() {
-                std::panic::resume_unwind(join_error.into_panic());
-            }
-            Err(join_error.into())
-        }
-    }
+    automata_ci_postgres::test_support::run_with_configured_database(
+        |store| store.with_runner_payload_encryption(test_runner_payload_key_provider()),
+        test,
+    )
+    .await
 }
 
 #[allow(dead_code)] // Only integration tests that control migration application use this fixture.
 pub async fn run_with_unmigrated_database<Test, TestFuture>(test: Test) -> TestResult
 where
-    Test: FnOnce(Arc<TestDatabase>) -> TestFuture,
+    Test: FnOnce(Arc<TestDatabase>) -> TestFuture + Send + 'static,
     TestFuture: Future<Output = TestResult> + Send + 'static,
 {
-    let database = Arc::new(TestDatabase::create_unmigrated().await?);
-    let outcome = tokio::spawn(test(Arc::clone(&database))).await;
-    let cleanup = database.cleanup().await;
-
-    match outcome {
-        Ok(result) => {
-            result?;
-            cleanup
-        }
-        Err(join_error) => {
-            cleanup?;
-            if join_error.is_panic() {
-                std::panic::resume_unwind(join_error.into_panic());
-            }
-            Err(join_error.into())
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct TestDatabase {
-    database: IsolatedTestDatabase,
-    store: PostgresStore,
-}
-
-impl TestDatabase {
-    pub async fn create() -> TestResult<Self> {
-        Self::create_inner(true).await
-    }
-
-    #[allow(dead_code)] // Each integration-test crate compiles this shared module independently.
-    pub async fn create_unmigrated() -> TestResult<Self> {
-        Self::create_inner(false).await
-    }
-
-    async fn create_inner(run_migrations: bool) -> TestResult<Self> {
-        let harness = PostgresTestHarness::from_environment()?;
-        let database = if run_migrations {
-            prepared_template().await?.create_database().await?
-        } else {
-            harness.create_empty_database().await?
-        };
-        let store = PostgresStore::from_postgres_pool(database.pool().clone())
-            .with_runner_payload_encryption(test_runner_payload_key_provider());
-        Ok(Self { database, store })
-    }
-
-    pub const fn store(&self) -> &PostgresStore {
-        &self.store
-    }
-
-    pub const fn pool(&self) -> &PgPool {
-        self.store().postgres_pool()
-    }
-
-    /// Creates another pool connected to this exact isolated database.
-    #[allow(dead_code)] // Only connection-replacement tests consume this helper.
-    pub async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
-        self.database.connect_pool(max_connections).await
-    }
-
-    pub async fn cleanup(&self) -> TestResult {
-        self.store.postgres_pool().close().await;
-        self.database.cleanup().await
-    }
+    automata_ci_postgres::test_support::run_with_unmigrated_database(
+        |store| store.with_runner_payload_encryption(test_runner_payload_key_provider()),
+        test,
+    )
+    .await
 }
 
 #[derive(Debug)]

@@ -7,7 +7,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::{TIMING_INVOCATION_ENVIRONMENT, TIMING_RUN_ENVIRONMENT, TIMINGS_DIRECTORY_ENVIRONMENT};
+use super::{TIMING_INVOCATION_ENVIRONMENT, TIMING_RUN_ENVIRONMENT, TIMINGS_DIRECTORY_ENVIRONMENT};
 
 static TIMING_WRITE_LOCK: Mutex<()> = Mutex::new(());
 const TIMING_RECORD_SCHEMA: &str = "automata-postgres-test-timing/v1";
@@ -41,7 +41,6 @@ pub(crate) enum TimingDetail {
     PreparedTemplate,
     EmptyTemplateZero,
     TestDatabase,
-    ExactTemplate,
     CompleteNamespace,
 }
 
@@ -51,7 +50,6 @@ impl TimingDetail {
             Self::PreparedTemplate => "prepared_template",
             Self::EmptyTemplateZero => "empty_template0",
             Self::TestDatabase => "test_database",
-            Self::ExactTemplate => "exact_template",
             Self::CompleteNamespace => "complete_namespace",
         }
     }

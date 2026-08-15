@@ -14,7 +14,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
-use crate::{
+use super::{
     DATABASE_NAMESPACE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT, INITIALIZER_FINGERPRINT_ENVIRONMENT,
     TestResult, message_error,
     timing::{TimingDetail, TimingOperation, TimingOutcome, TimingSpan},
@@ -67,11 +67,11 @@ enum TemplatePreparation {
 
 /// Databases removed by one exact namespace-cleanup operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct NamespaceCleanup {
+pub(super) struct NamespaceCleanup {
     /// Number of isolated clone or empty databases removed.
-    pub dropped_test_databases: usize,
+    pub(super) dropped_test_databases: usize,
     /// Whether the prepared template was present and removed.
-    pub dropped_template: bool,
+    pub(super) dropped_template: bool,
 }
 
 /// A validated namespace that scopes a prepared template to one test job.
@@ -79,7 +79,7 @@ pub struct NamespaceCleanup {
 /// Values contain only lowercase ASCII letters, digits, and underscores, and
 /// are capped so generated `PostgreSQL` identifiers remain within 63 bytes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct TestNamespace(String);
+pub(super) struct TestNamespace(String);
 
 impl TestNamespace {
     /// Validates an explicitly supplied job namespace.
@@ -88,7 +88,7 @@ impl TestNamespace {
     ///
     /// Returns an error if the value is empty, oversized, or contains a byte
     /// outside the canonical lowercase identifier subset.
-    pub fn new(value: impl Into<String>) -> TestResult<Self> {
+    pub(super) fn new(value: impl Into<String>) -> TestResult<Self> {
         let value = value.into();
         if value.is_empty() {
             return Err(message_error("PostgreSQL test namespace must not be empty"));
@@ -111,7 +111,7 @@ impl TestNamespace {
     }
 
     /// Returns the validated namespace text.
-    pub fn as_str(&self) -> &str {
+    pub(super) fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -185,16 +185,16 @@ impl DatabaseIdentifier {
 ///
 /// This value contains connection options, never an open connection or pool.
 #[derive(Clone)]
-pub struct PostgresTestHarness {
+pub(super) struct PostgresTestHarness {
     admin_options: PgConnectOptions,
     namespace: TestNamespace,
     initializer_fingerprint: Option<InitializerFingerprint>,
 }
 
 impl PostgresTestHarness {
-    /// Parses [`DATABASE_URL_ENVIRONMENT`](crate::DATABASE_URL_ENVIRONMENT).
+    /// Parses `DATABASE_URL_ENVIRONMENT`.
     ///
-    /// If [`DATABASE_NAMESPACE_ENVIRONMENT`](crate::DATABASE_NAMESPACE_ENVIRONMENT)
+    /// If `DATABASE_NAMESPACE_ENVIRONMENT`
     /// is unset, a stable process-local namespace is generated. Set an explicit
     /// job namespace when multiple test processes must share one template. CI
     /// and every reused `PostgreSQL` server must supply a namespace unique to the
@@ -203,7 +203,7 @@ impl PostgresTestHarness {
     /// # Errors
     ///
     /// Returns an error if either environment value is invalid or unavailable.
-    pub fn from_environment() -> TestResult<Self> {
+    pub(super) fn from_environment() -> TestResult<Self> {
         let namespace = match env::var(DATABASE_NAMESPACE_ENVIRONMENT) {
             Ok(value) => TestNamespace::new(value)?,
             Err(env::VarError::NotPresent) => TestNamespace::process_local(),
@@ -225,7 +225,8 @@ impl PostgresTestHarness {
     /// # Errors
     ///
     /// Returns an error if either environment value is unavailable or invalid.
-    pub fn from_environment_for_cleanup() -> TestResult<Self> {
+    #[cfg(feature = "test-support")]
+    pub(super) fn from_environment_for_cleanup() -> TestResult<Self> {
         let namespace = env::var(DATABASE_NAMESPACE_ENVIRONMENT).map_err(|error| {
             message_error(format!(
                 "set {DATABASE_NAMESPACE_ENVIRONMENT} explicitly before PostgreSQL test namespace cleanup: {error}"
@@ -240,7 +241,7 @@ impl PostgresTestHarness {
     ///
     /// Returns an error if the database URL environment value is unavailable
     /// or invalid.
-    pub fn from_environment_with_namespace(
+    pub(super) fn from_environment_with_namespace(
         namespace: impl Into<TestNamespace>,
     ) -> TestResult<Self> {
         let database_url = env::var(DATABASE_URL_ENVIRONMENT).map_err(|error| {
@@ -263,7 +264,7 @@ impl PostgresTestHarness {
     /// # Errors
     ///
     /// Returns an error if `database_url` is not a valid `PostgreSQL` URL.
-    pub fn new(database_url: &str, namespace: impl Into<TestNamespace>) -> TestResult<Self> {
+    pub(super) fn new(database_url: &str, namespace: impl Into<TestNamespace>) -> TestResult<Self> {
         let admin_options = PgConnectOptions::from_str(database_url).map_err(|error| {
             message_error(format!(
                 "invalid PostgreSQL URL supplied through {DATABASE_URL_ENVIRONMENT}: {error}"
@@ -288,7 +289,7 @@ impl PostgresTestHarness {
     ///
     /// Returns an error unless `fingerprint` is exactly 64 lowercase
     /// hexadecimal characters.
-    pub fn with_initializer_fingerprint(
+    pub(super) fn with_initializer_fingerprint(
         mut self,
         fingerprint: impl Into<String>,
     ) -> TestResult<Self> {
@@ -297,7 +298,7 @@ impl PostgresTestHarness {
     }
 
     /// Returns the job namespace used for template and database names.
-    pub const fn namespace(&self) -> &TestNamespace {
+    pub(super) const fn namespace(&self) -> &TestNamespace {
         &self.namespace
     }
 
@@ -306,7 +307,7 @@ impl PostgresTestHarness {
     /// The initializer executes at most once for a namespace across cooperating
     /// processes. Its pool searches `automata_test, pg_catalog`. Callers must
     /// supply a namespace unique to the complete CI run. Set
-    /// [`INITIALIZER_FINGERPRINT_ENVIRONMENT`](crate::INITIALIZER_FINGERPRINT_ENVIRONMENT)
+    /// `INITIALIZER_FINGERPRINT_ENVIRONMENT`
     /// or call [`Self::with_initializer_fingerprint`] so incompatible
     /// initializers fail closed. Without a fingerprint, callers must change the
     /// namespace whenever initializer contents or migrations change.
@@ -316,7 +317,7 @@ impl PostgresTestHarness {
     /// Returns an error when `PostgreSQL` 18 cannot be reached, the namespace is
     /// owned by a different fixture, initialization fails, or exact recovery
     /// and advisory-lock release cannot be completed.
-    pub async fn prepare_template<Initializer, InitializerFuture>(
+    pub(super) async fn prepare_template<Initializer, InitializerFuture>(
         &self,
         initializer: Initializer,
     ) -> TestResult<PreparedTemplate>
@@ -370,7 +371,7 @@ impl PostgresTestHarness {
     ///
     /// Returns an error when `PostgreSQL` 18 cannot create, bootstrap, connect to,
     /// or clean up the isolated database.
-    pub async fn create_empty_database(&self) -> TestResult<TestDatabase> {
+    pub(super) async fn create_empty_database(&self) -> TestResult<TestDatabase> {
         let timing = TimingSpan::start(TimingOperation::Clone, TimingDetail::EmptyTemplateZero);
         let database = self.create_empty_database_inner().await;
         timing.finish(if database.is_ok() {
@@ -433,7 +434,7 @@ impl PostgresTestHarness {
     ///
     /// Returns the database creation, test, task-join, or cleanup error. When
     /// both the test and cleanup fail, the returned error reports both.
-    pub async fn run_with_empty_database<Test, TestFuture>(&self, test: Test) -> TestResult
+    pub(super) async fn run_with_empty_database<Test, TestFuture>(&self, test: Test) -> TestResult
     where
         Test: FnOnce(Arc<TestDatabase>) -> TestFuture,
         TestFuture: Future<Output = TestResult> + Send + 'static,
@@ -452,7 +453,7 @@ impl PostgresTestHarness {
     ///
     /// Returns an error for an ownership mismatch, a malformed reserved name,
     /// an administrative `PostgreSQL` failure, or an advisory-lock release error.
-    pub async fn cleanup_namespace(&self) -> TestResult<NamespaceCleanup> {
+    pub(super) async fn cleanup_namespace(&self) -> TestResult<NamespaceCleanup> {
         let timing = TimingSpan::start(
             TimingOperation::NamespaceCleanup,
             TimingDetail::CompleteNamespace,
@@ -653,7 +654,7 @@ impl fmt::Debug for PostgresTestHarness {
 }
 
 impl TryFrom<&str> for TestNamespace {
-    type Error = crate::TestError;
+    type Error = super::TestError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         Self::new(value)
@@ -663,27 +664,21 @@ impl TryFrom<&str> for TestNamespace {
 /// A disconnected, fully initialized job template.
 ///
 /// The value contains no connection pool and can safely cross Tokio runtimes.
-/// It has no implicit drop hook: the wrapper that owns the namespace must call
-/// [`Self::cleanup`] or [`PostgresTestHarness::cleanup_namespace`] explicitly.
+/// The wrapper that owns the namespace performs final namespace cleanup.
 #[derive(Clone, Debug)]
-pub struct PreparedTemplate {
+pub(super) struct PreparedTemplate {
     harness: PostgresTestHarness,
     database_name: DatabaseIdentifier,
 }
 
 impl PreparedTemplate {
-    /// Returns the `PostgreSQL` template database identifier.
-    pub fn database_name(&self) -> &str {
-        self.database_name.as_str()
-    }
-
     /// Clones the prepared template into an isolated per-test database.
     ///
     /// # Errors
     ///
     /// Returns an error when `PostgreSQL` 18 cannot clone, connect to, or recover
     /// from a failed connection to the database.
-    pub async fn create_database(&self) -> TestResult<TestDatabase> {
+    pub(super) async fn create_database(&self) -> TestResult<TestDatabase> {
         let timing = TimingSpan::start(TimingOperation::Clone, TimingDetail::PreparedTemplate);
         let database = self.create_database_inner().await;
         timing.finish(if database.is_ok() {
@@ -736,60 +731,17 @@ impl PreparedTemplate {
     ///
     /// Returns the clone, test, task-join, or cleanup error. When both the test
     /// and cleanup fail, the returned error reports both.
-    pub async fn run<Test, TestFuture>(&self, test: Test) -> TestResult
+    pub(super) async fn run<Test, TestFuture>(&self, test: Test) -> TestResult
     where
         Test: FnOnce(Arc<TestDatabase>) -> TestFuture,
         TestFuture: Future<Output = TestResult> + Send + 'static,
     {
         run_test_database(self.create_database().await?, test).await
     }
-
-    /// Drops the job template after all cooperating processes have stopped.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the template is absent, its ownership marker does
-    /// not match, `PostgreSQL` cannot drop it, or the advisory lock cannot release.
-    pub async fn cleanup(self) -> TestResult {
-        let timing = TimingSpan::start(TimingOperation::Cleanup, TimingDetail::ExactTemplate);
-        let cleanup = async {
-            let mut admin = self.harness.admin_connection().await?;
-            require_postgres_18(&mut admin).await?;
-            acquire_template_lock(&mut admin, &self.database_name).await?;
-            let cleanup = async {
-                let state = database_state(&mut admin, &self.database_name).await?;
-                let Some((_allows_connections, marker)) = state else {
-                    return Err(message_error(format!(
-                        "PostgreSQL template {} was already absent during exact cleanup",
-                        self.database_name.as_str()
-                    )));
-                };
-                let expected_marker = self.harness.template_marker();
-                if marker.as_deref() != Some(expected_marker.as_str()) {
-                    return Err(message_error(format!(
-                        "refusing to drop PostgreSQL template {} because its ownership marker is {:?}, expected {expected_marker:?}",
-                        self.database_name.as_str(),
-                        marker
-                    )));
-                }
-                drop_database(&mut admin, &self.database_name).await
-            }
-            .await;
-            let unlock = release_template_lock(&mut admin, &self.database_name).await;
-            combine_operation_and_unlock(cleanup, unlock)
-        }
-        .await;
-        timing.finish(if cleanup.is_ok() {
-            TimingOutcome::Success
-        } else {
-            TimingOutcome::Error
-        });
-        cleanup
-    }
 }
 
 /// One isolated `PostgreSQL` database and its primary connection pool.
-pub struct TestDatabase {
+pub(super) struct TestDatabase {
     admin_options: PgConnectOptions,
     database_name: DatabaseIdentifier,
     expected_marker: String,
@@ -819,12 +771,13 @@ impl TestDatabase {
     }
 
     /// Returns the database's primary pool.
-    pub const fn pool(&self) -> &PgPool {
+    pub(super) const fn pool(&self) -> &PgPool {
         &self.pool
     }
 
     /// Returns the exact generated `PostgreSQL` database identifier.
-    pub fn database_name(&self) -> &str {
+    #[cfg(test)]
+    pub(super) fn database_name(&self) -> &str {
         self.database_name.as_str()
     }
 
@@ -834,7 +787,7 @@ impl TestDatabase {
     ///
     /// Returns an error if `max_connections` is zero or `PostgreSQL` cannot open
     /// the pool.
-    pub async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
+    pub(super) async fn connect_pool(&self, max_connections: u32) -> TestResult<PgPool> {
         connect_database_pool(&self.admin_options, &self.database_name, max_connections).await
     }
 
@@ -844,7 +797,7 @@ impl TestDatabase {
     ///
     /// Returns an error for repeated or concurrent cleanup, an administrative
     /// connection failure, or an inexact database drop.
-    pub async fn cleanup(&self) -> TestResult {
+    pub(super) async fn cleanup(&self) -> TestResult {
         let timing = TimingSpan::start(TimingOperation::Cleanup, TimingDetail::TestDatabase);
         let cleanup = self.cleanup_inner().await;
         timing.finish(if cleanup.is_ok() {
@@ -1218,7 +1171,7 @@ async fn drop_database(admin: &mut PgConnection, database_name: &DatabaseIdentif
 async fn cleanup_failed_database_creation(
     admin: &mut PgConnection,
     database_name: &DatabaseIdentifier,
-    primary_error: crate::TestError,
+    primary_error: super::TestError,
 ) -> TestResult {
     match drop_database(admin, database_name).await {
         Ok(()) => Err(primary_error),

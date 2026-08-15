@@ -3,5 +3,6 @@
 mod github_oidc;
 mod migration_layout;
 mod schema_bindings;
+#[cfg(feature = "test-support")]
 mod schema_catalog;
 mod secret_management;

@@ -44,7 +44,7 @@ use automata_ci_postgres::auth::{
     PostgresHumanSessionRepository, PostgresInstallationRepository,
     PostgresLoginTransactionRepository, PostgresProviderTokenVault,
 };
-use automata_ci_postgres_test_support::TestClock;
+use automata_ci_postgres::test_support::TestClock;
 use uuid::Uuid;
 
 const LOGIN_ID: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";

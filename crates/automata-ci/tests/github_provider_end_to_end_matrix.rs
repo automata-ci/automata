@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    error::Error,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -32,9 +31,8 @@ use automata_ci_github_delivery::{
     GithubDeliverySourceCredentialRequest, GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
     GithubDeliveryWorkflowAdmissionProcessor, GithubServerServiceCredentialRelease,
 };
-use automata_ci_postgres::store::PostgresStore;
-use automata_ci_postgres_test_support::{
-    PostgresTestHarness, PreparedTemplate, TestDatabase as IsolatedTestDatabase,
+use automata_ci_postgres::test_support::{
+    PostgresTestDatabase as TestDatabase, TestResult, run_with_database,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_scm::{
@@ -69,7 +67,7 @@ use ring::hmac;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Row as _, postgres::PgRow};
 use tar::{Builder, EntryType, Header};
-use tokio::{sync::OnceCell, time::Instant};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -78,8 +76,6 @@ const SOURCE_TOKEN: &str = "automata-provider-matrix-private-source-token";
 const BEFORE_COMMIT: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const AFTER_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
-
-static PREPARED_TEMPLATE: OnceCell<PreparedTemplate> = OnceCell::const_new();
 
 const ACTIVATION_RENEWAL_LINEAGE_QUERY: &str = r"
     SELECT repository.owner, repository.name, job.id AS logical_job_id,
@@ -420,9 +416,6 @@ impl AutonomousWorkflowPhaseExecutor for MatrixExecutorTrace {
     }
 }
 
-type TestError = Box<dyn Error + Send + Sync>;
-type TestResult<T = ()> = Result<T, TestError>;
-
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn public_private_x_profile_matrix_preserves_historical_job_ir_and_source_authentication()
@@ -433,7 +426,7 @@ async fn public_private_x_profile_matrix_preserves_historical_job_ir_and_source_
 #[allow(clippy::too_many_lines)] // Keeping the serialized four-row scenario linear makes its phase order auditable.
 async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
     eprintln!("matrix stage: initial-config");
-    let store = database.store();
+    let store = database.shared_store();
     let blobs = Arc::new(MemoryBlobStore::default());
     let broker = fixture_broker()?;
     let initial_config = load_config("initial", 1, false)?;
@@ -1482,65 +1475,4 @@ fn append_archive_entry(
     builder
         .append_data(&mut header, path, bytes)
         .expect("append archive entry");
-}
-
-#[derive(Debug)]
-struct TestDatabase {
-    database: IsolatedTestDatabase,
-    store: Arc<PostgresStore>,
-}
-
-impl TestDatabase {
-    async fn create() -> TestResult<Self> {
-        let harness = PostgresTestHarness::from_environment()?;
-        let template = PREPARED_TEMPLATE
-            .get_or_try_init(|| async {
-                harness
-                    .prepare_template(|pool| async move {
-                        PostgresStore::from_postgres_pool(pool).migrate().await?;
-                        Ok(())
-                    })
-                    .await
-            })
-            .await?;
-        let database = template.create_database().await?;
-        let store = Arc::new(PostgresStore::from_postgres_pool(database.pool().clone()));
-        Ok(Self { database, store })
-    }
-
-    fn store(&self) -> Arc<PostgresStore> {
-        self.store.clone()
-    }
-
-    fn pool(&self) -> &PgPool {
-        self.store.postgres_pool()
-    }
-
-    async fn cleanup(&self) -> TestResult {
-        self.store.postgres_pool().close().await;
-        self.database.cleanup().await
-    }
-}
-
-async fn run_with_database<Test, TestFuture>(test: Test) -> TestResult
-where
-    Test: FnOnce(Arc<TestDatabase>) -> TestFuture,
-    TestFuture: Future<Output = TestResult> + Send + 'static,
-{
-    let database = Arc::new(TestDatabase::create().await?);
-    let outcome = tokio::spawn(test(database.clone())).await;
-    let cleanup = database.cleanup().await;
-    match outcome {
-        Ok(result) => {
-            result?;
-            cleanup
-        }
-        Err(join_error) => {
-            cleanup?;
-            if join_error.is_panic() {
-                std::panic::resume_unwind(join_error.into_panic());
-            }
-            Err(join_error.into())
-        }
-    }
 }
