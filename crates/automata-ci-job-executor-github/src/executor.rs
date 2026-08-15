@@ -90,6 +90,11 @@ const MAX_EVENT_DEPTH: usize = 128;
 const COMPOSITE_ORDINAL_BASE: u32 = 1 << 24;
 const TRUNCATED_OUTPUT_DIAGNOSTIC: &str =
     "command output exceeded the configured capture limit; user output was suppressed";
+const MASKED_SUMMARY_LIMIT_DIAGNOSTIC: &str = "$GITHUB_STEP_SUMMARY content was omitted after secret masking exceeded the retained text limit";
+const STEP_SUMMARY_LIMIT_DIAGNOSTIC: &str =
+    "$GITHUB_STEP_SUMMARY content was omitted after the cumulative step summary limit was reached";
+const JOB_SUMMARY_LIMIT_DIAGNOSTIC: &str =
+    "$GITHUB_STEP_SUMMARY content was omitted after the job attachment limit was reached";
 const LOCAL_ACTION_PROBE_SCRIPT: &str = "# automata-local-action-metadata\nif [ -f \"$1\" ]; then printf yml; elif [ -f \"$2\" ]; then printf yaml; else exit 44; fi";
 const ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\npath=$1\nshift\nif [ ! -f \"$path\" ]; then exit 44; fi\nvalue=$(\"$0\" \"$@\" < \"$path\") || exit $?\ndigest=${value%% *}\nprintf '%s' \"$digest\"";
 const WINDOWS_ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\n$ErrorActionPreference = 'Stop'\n$path = $env:AUTOMATA_INTERNAL_ARTIFACT_PATH\nif (-not [System.IO.File]::Exists($path)) { exit 44 }\n$stream = $null\n$hasher = $null\ntry {\n  $stream = [System.IO.File]::OpenRead($path)\n  $hasher = [System.Security.Cryptography.SHA256]::Create()\n  $bytes = $hasher.ComputeHash($stream)\n  $digest = [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()\n  [Console]::Out.Write($digest)\n} finally {\n  if ($null -ne $stream) { $stream.Dispose() }\n  if ($null -ne $hasher) { $hasher.Dispose() }\n}";
@@ -5890,6 +5895,7 @@ struct ExecutionAttachments {
     by_step: BTreeMap<String, RetainedStepAttachments>,
     annotation_count: usize,
     aggregate_bytes: usize,
+    summary_budget_exhausted: bool,
 }
 
 impl ExecutionAttachments {
@@ -5902,16 +5908,8 @@ impl ExecutionAttachments {
         command_file_notice: Option<CommandFileNotice>,
         masker: &mut SecretMasker,
     ) -> Result<(), ExecutorAdapterError> {
-        let summary = masked_attachment_text(summary, masker)?;
+        self.record_summary(step_id, summary, command_file_notice, masker)?;
         let retained = self.by_step.entry(step_id.to_owned()).or_default();
-        if !summary.is_empty() {
-            if retained.summary.len().saturating_add(summary.len()) > MAX_STEP_ATTACHMENT_TEXT_BYTES
-            {
-                return Err(resource_exhausted());
-            }
-            charge_attachment_bytes(&mut self.aggregate_bytes, summary.len())?;
-            retained.summary.push_str(&summary);
-        }
 
         for annotation in annotations {
             let properties = annotation
@@ -5983,23 +5981,194 @@ impl ExecutionAttachments {
                 Vec::new(),
             ));
         }
+        Ok(())
+    }
+
+    fn record_summary(
+        &mut self,
+        step_id: &str,
+        summary: &str,
+        command_file_notice: Option<CommandFileNotice>,
+        masker: &mut SecretMasker,
+    ) -> Result<(), ExecutorAdapterError> {
+        if self.summary_budget_exhausted
+            || self
+                .by_step
+                .get(step_id)
+                .is_some_and(|retained| retained.summary_closed)
+        {
+            return Ok(());
+        }
+
         if let Some(CommandFileNotice::SummaryTooLarge { maximum_bytes }) = command_file_notice {
-            let message = format!(
-                "$GITHUB_STEP_SUMMARY upload aborted: content exceeds the {maximum_bytes}-byte limit"
-            );
-            charge_attachment_bytes(&mut self.aggregate_bytes, message.len())?;
-            self.annotation_count = self
-                .annotation_count
-                .checked_add(1)
-                .filter(|count| *count <= MAX_JOB_RESULT_ANNOTATIONS)
-                .ok_or_else(resource_exhausted)?;
-            retained.annotations.push(StepAnnotation::new(
+            self.record_summary_notice(
+                step_id,
+                &format!(
+                    "$GITHUB_STEP_SUMMARY upload aborted: content exceeds the {maximum_bytes}-byte limit"
+                ),
                 StepAnnotationLevel::Error,
-                message,
-                Vec::new(),
+                false,
+                masker,
+            )?;
+            return Ok(());
+        }
+        if summary.is_empty() {
+            return Ok(());
+        }
+
+        // Every source file is capped at one byte beyond the configured 1 MiB
+        // ceiling before it reaches this boundary. Mask replacement can expand
+        // that bounded input by at most three times, so the masking work and
+        // temporary allocation remain bounded even for a one-byte secret.
+        let redacted_bytes = masker.mask(summary.as_bytes())?;
+        if redacted_bytes.len() > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+            self.record_summary_notice(
+                step_id,
+                MASKED_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        }
+        let redacted = String::from_utf8(redacted_bytes)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        if redacted.is_empty() {
+            return Ok(());
+        }
+
+        let retained_bytes = self
+            .by_step
+            .get(step_id)
+            .map_or(0, |retained| retained.summary.len());
+        let Some(projected_step_bytes) = retained_bytes.checked_add(redacted.len()) else {
+            self.record_summary_notice(
+                step_id,
+                STEP_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        };
+        if projected_step_bytes > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+            self.record_summary_notice(
+                step_id,
+                STEP_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        }
+
+        if self
+            .aggregate_bytes
+            .checked_add(redacted.len())
+            .is_none_or(|projected| projected > MAX_JOB_RESULT_ATTACHMENT_BYTES)
+        {
+            self.summary_budget_exhausted = true;
+            self.record_summary_notice(
+                step_id,
+                JOB_SUMMARY_LIMIT_DIAGNOSTIC,
+                StepAnnotationLevel::Warning,
+                true,
+                masker,
+            )?;
+            return Ok(());
+        }
+
+        self.aggregate_bytes += redacted.len();
+        self.by_step
+            .entry(step_id.to_owned())
+            .or_default()
+            .summary
+            .push_str(&redacted);
+        Ok(())
+    }
+
+    fn record_summary_notice(
+        &mut self,
+        step_id: &str,
+        message: &str,
+        level: StepAnnotationLevel,
+        close_summary: bool,
+        masker: &mut SecretMasker,
+    ) -> Result<(), ExecutorAdapterError> {
+        let already_noted = {
+            let retained = self.by_step.entry(step_id.to_owned()).or_default();
+            retained.summary_closed |= close_summary;
+            retained.summary_notice_recorded
+        };
+        if already_noted {
+            return Ok(());
+        }
+
+        // Diagnostics are masked too: a dynamically registered short secret
+        // can otherwise coincide with text in this runner-owned message.
+        let message = String::from_utf8(masker.mask(message.as_bytes())?)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        if message.len() > MAX_STEP_ATTACHMENT_TEXT_BYTES {
+            return Err(resource_exhausted());
+        }
+        self.make_summary_notice_room(step_id, message.len());
+        let message = if self.aggregate_bytes.saturating_add(message.len())
+            <= MAX_JOB_RESULT_ATTACHMENT_BYTES
+        {
+            message
+        } else {
+            // The structured annotation remains a deterministic indicator even
+            // if unrelated, non-summary attachments left no reclaimable bytes.
+            String::new()
+        };
+        if self.annotation_count >= MAX_JOB_RESULT_ANNOTATIONS {
+            // Summary retention is observational and must never replace the
+            // process result merely because the annotation collection is full.
+            return Ok(());
+        }
+        self.aggregate_bytes += message.len();
+        self.annotation_count += 1;
+        let retained = self.by_step.entry(step_id.to_owned()).or_default();
+        retained.summary_notice_recorded = true;
+        retained
+            .annotations
+            .push(StepAnnotation::new(level, message, Vec::new()));
+        Ok(())
+    }
+
+    fn make_summary_notice_room(&mut self, preferred_step: &str, bytes: usize) {
+        let required = self
+            .aggregate_bytes
+            .saturating_add(bytes)
+            .saturating_sub(MAX_JOB_RESULT_ATTACHMENT_BYTES);
+        if required == 0 {
+            return;
+        }
+
+        let mut remaining = required;
+        if let Some(retained) = self.by_step.get_mut(preferred_step) {
+            remaining = remaining.saturating_sub(truncate_summary_suffix(
+                &mut retained.summary,
+                remaining,
+                &mut self.aggregate_bytes,
             ));
         }
-        Ok(())
+        if remaining == 0 {
+            return;
+        }
+        for (candidate, retained) in self.by_step.iter_mut().rev() {
+            if candidate == preferred_step {
+                continue;
+            }
+            remaining = remaining.saturating_sub(truncate_summary_suffix(
+                &mut retained.summary,
+                remaining,
+                &mut self.aggregate_bytes,
+            ));
+            if remaining == 0 {
+                break;
+            }
+        }
     }
 
     fn take(&mut self, step_id: &str) -> RetainedStepAttachments {
@@ -6011,6 +6180,24 @@ impl ExecutionAttachments {
 struct RetainedStepAttachments {
     summary: String,
     annotations: Vec<StepAnnotation>,
+    summary_closed: bool,
+    summary_notice_recorded: bool,
+}
+
+fn truncate_summary_suffix(
+    summary: &mut String,
+    requested: usize,
+    aggregate_bytes: &mut usize,
+) -> usize {
+    let original = summary.len();
+    let mut retained = original.saturating_sub(requested);
+    while !summary.is_char_boundary(retained) {
+        retained = retained.saturating_sub(1);
+    }
+    summary.truncate(retained);
+    let removed = original - retained;
+    *aggregate_bytes = aggregate_bytes.saturating_sub(removed);
+    removed
 }
 
 fn masked_attachment_text(

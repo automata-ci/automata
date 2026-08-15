@@ -2,7 +2,9 @@ mod support;
 
 use std::sync::Arc;
 
-use automata_ci_core::{JobConclusion, LogChannel};
+use automata_ci_core::{
+    JobConclusion, LogChannel, MAX_STEP_ATTACHMENT_TEXT_BYTES, StepAnnotationLevel,
+};
 use automata_ci_github_runtime::CommandFileKind;
 use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
@@ -96,6 +98,53 @@ async fn repository_action_pre_runs_before_every_main_job_step() {
         .nth(2)
         .expect("post command");
     assert_eq!(environment_map(post)["STATE_from_pre"], "yes");
+}
+
+#[tokio::test]
+async fn action_lifecycle_summary_crossing_the_cumulative_limit_is_nonfatal() {
+    const CUMULATIVE_DIAGNOSTIC: &str = "$GITHUB_STEP_SUMMARY content was omitted after the cumulative step summary limit was reached";
+    let half = MAX_STEP_ATTACHMENT_TEXT_BYTES / 2;
+    let fixture = Fixture::new(
+        vec![prepared_node24_action_with_pre()],
+        vec![
+            PhaseResponse::success().with_file(CommandFileKind::StepSummary, vec![b'p'; half]),
+            PhaseResponse::success().with_file(CommandFileKind::StepSummary, vec![b'm'; half]),
+            PhaseResponse::success().with_file(CommandFileKind::StepSummary, vec![b'x']),
+        ],
+    );
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(
+            fixture.request(envelope(vec![action_step("lifecycle", "owner/lifecycle")])),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect("summary retention must not replace the successful lifecycle result");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let step = &result.steps()[0];
+    assert_eq!(step.conclusion(), JobConclusion::Success);
+    let summary = step
+        .summary_markdown()
+        .expect("the exact-boundary pre and main summaries are retained");
+    assert_eq!(summary.len(), MAX_STEP_ATTACHMENT_TEXT_BYTES);
+    assert!(summary.as_bytes()[..half].iter().all(|byte| *byte == b'p'));
+    assert!(summary.as_bytes()[half..].iter().all(|byte| *byte == b'm'));
+    assert_eq!(step.annotations().len(), 1);
+    assert_eq!(step.annotations()[0].level(), StepAnnotationLevel::Warning);
+    assert_eq!(step.annotations()[0].message(), CUMULATIVE_DIAGNOSTIC);
+
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let phase_commands = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+        .collect::<Vec<_>>();
+    assert_eq!(phase_commands.len(), 3, "pre, main, and post all execute");
+    assert_fresh_isolated_phase_files(&state, &phase_commands);
 }
 
 #[tokio::test]

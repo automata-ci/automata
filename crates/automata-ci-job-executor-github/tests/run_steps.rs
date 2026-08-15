@@ -3,8 +3,8 @@ mod support;
 use std::{collections::BTreeMap, sync::Arc};
 
 use automata_ci_core::{
-    JobConclusion, JobSecretExposure, LogGroupKind, RunnerId, StepAnnotationLevel, StepIr,
-    ValueSource,
+    JobConclusion, JobSecretExposure, LogGroupKind, MAX_JOB_RESULT_ATTACHMENT_BYTES,
+    MAX_STEP_ATTACHMENT_TEXT_BYTES, RunnerId, StepAnnotationLevel, StepIr, ValueSource,
 };
 use automata_ci_execution::{RootFilesystemPolicy, SandboxCustody, SandboxPrivilegePolicy};
 use automata_ci_github_runtime::CommandFileKind;
@@ -301,6 +301,166 @@ async fn step_summary_boundary_is_bounded_and_oversized_content_is_diagnostic_on
             summary_requests[0].byte_limit(),
             MAXIMUM_SUMMARY_BYTES + 1,
             "{label}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn secret_mask_expansion_at_the_summary_boundary_is_omitted_without_leaking() {
+    const MASKED_BYTE: u8 = b'e';
+    let retained_source_bytes = MAX_STEP_ATTACHMENT_TEXT_BYTES / 3;
+    let expanded_source_bytes = retained_source_bytes + 1;
+    let fixture = Fixture::secretless(
+        Vec::new(),
+        vec![
+            PhaseResponse::success()
+                .with_stdout("::add-mask::e\n")
+                .with_file(
+                    CommandFileKind::StepSummary,
+                    vec![MASKED_BYTE; retained_source_bytes],
+                ),
+            PhaseResponse::success().with_file(
+                CommandFileKind::StepSummary,
+                vec![MASKED_BYTE; expanded_source_bytes],
+            ),
+        ],
+    );
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(
+            fixture.request(support::envelope(vec![
+                run_step("within-mask-limit", "Within mask limit", "true"),
+                run_step("over-mask-limit", "Over mask limit", "true"),
+            ])),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect("mask expansion is an attachment diagnostic, not a job failure");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let retained = result.steps()[0]
+        .summary_markdown()
+        .expect("the exact in-budget masked summary is retained");
+    assert_eq!(retained.len(), retained_source_bytes * 3);
+    assert!(retained.as_bytes().iter().all(|byte| *byte == b'*'));
+    assert!(result.steps()[0].annotations().is_empty());
+
+    let omitted = &result.steps()[1];
+    assert_eq!(omitted.conclusion(), JobConclusion::Success);
+    assert_eq!(omitted.summary_markdown(), None);
+    assert_eq!(omitted.annotations().len(), 1);
+    assert_eq!(
+        omitted.annotations()[0].level(),
+        StepAnnotationLevel::Warning
+    );
+    assert!(
+        !omitted.annotations()[0]
+            .message()
+            .contains(char::from(MASKED_BYTE)),
+        "the runner-owned indicator is masked against dynamically registered secrets"
+    );
+    assert!(omitted.annotations()[0].message().contains("***"));
+}
+
+#[tokio::test]
+async fn job_summary_aggregate_boundary_is_nonfatal_and_has_one_deterministic_indicator() {
+    const JOB_LIMIT_DIAGNOSTIC: &str =
+        "$GITHUB_STEP_SUMMARY content was omitted after the job attachment limit was reached";
+
+    for step_count in [8_usize, 10] {
+        let responses = (0..step_count)
+            .map(|_| {
+                PhaseResponse::success().with_file(
+                    CommandFileKind::StepSummary,
+                    vec![b's'; MAX_STEP_ATTACHMENT_TEXT_BYTES],
+                )
+            })
+            .collect::<Vec<_>>();
+        let steps = (0..step_count)
+            .map(|index| {
+                let id = format!("summary-{index}");
+                run_step(&id, &id, "true")
+            })
+            .collect::<Vec<_>>();
+        let fixture = Fixture::secretless(Vec::new(), responses);
+        let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+        let result = fixture
+            .executor
+            .execute(
+                fixture.request(support::envelope(steps)),
+                events,
+                ExecutionCancellation::new(),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("{step_count} valid summaries must not fail the job: {error:?}")
+            });
+
+        assert_eq!(result.conclusion(), JobConclusion::Success, "{step_count}");
+        assert!(
+            result
+                .steps()
+                .iter()
+                .all(|step| step.conclusion() == JobConclusion::Success),
+            "{step_count}"
+        );
+        if step_count == 8 {
+            assert!(result.steps().iter().all(|step| {
+                step.summary_markdown().map(str::len) == Some(MAX_STEP_ATTACHMENT_TEXT_BYTES)
+                    && step.annotations().is_empty()
+            }));
+        } else {
+            assert!(result.steps()[..7].iter().all(|step| {
+                step.summary_markdown().map(str::len) == Some(MAX_STEP_ATTACHMENT_TEXT_BYTES)
+                    && step.annotations().is_empty()
+            }));
+            assert_eq!(
+                result.steps()[7].summary_markdown().map(str::len),
+                Some(MAX_STEP_ATTACHMENT_TEXT_BYTES - JOB_LIMIT_DIAGNOSTIC.len())
+            );
+            assert!(result.steps()[7].annotations().is_empty());
+            assert_eq!(result.steps()[8].summary_markdown(), None);
+            assert_eq!(result.steps()[8].annotations().len(), 1);
+            assert_eq!(
+                result.steps()[8].annotations()[0].level(),
+                StepAnnotationLevel::Warning
+            );
+            assert_eq!(
+                result.steps()[8].annotations()[0].message(),
+                JOB_LIMIT_DIAGNOSTIC
+            );
+            assert_eq!(result.steps()[9].summary_markdown(), None);
+            assert!(result.steps()[9].annotations().is_empty());
+        }
+
+        let attachment_bytes = result
+            .steps()
+            .iter()
+            .map(|step| {
+                step.summary_markdown().map_or(0, str::len)
+                    + step
+                        .annotations()
+                        .iter()
+                        .map(|annotation| annotation.message().len())
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        assert_eq!(attachment_bytes, MAX_JOB_RESULT_ATTACHMENT_BYTES);
+        let state = fixture.endpoint_state.lock().expect("endpoint lock");
+        let summary_requests = state
+            .copy_from_requests
+            .iter()
+            .filter(|request| request.source().as_str().ends_with("-summary"))
+            .collect::<Vec<_>>();
+        assert_eq!(summary_requests.len(), step_count);
+        assert!(
+            summary_requests
+                .iter()
+                .all(|request| request.byte_limit() == MAX_STEP_ATTACHMENT_TEXT_BYTES + 1)
         );
     }
 }

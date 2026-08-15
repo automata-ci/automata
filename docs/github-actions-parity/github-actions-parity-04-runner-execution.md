@@ -160,6 +160,14 @@ Tasks:
     probes at most one byte beyond the attachment ceiling; either the sentinel
     byte or the endpoint's bounded-output rejection emits the same non-fatal
     diagnostic and omits the complete summary.
+  - [x] Bound retained summaries after masking and across repeated action or
+    composite phases. A phase that would take one step beyond 1 MiB is omitted,
+    the already-retained prefix is preserved, and one masked warning is retained
+    without changing the process conclusion.
+  - [x] Bound the complete job-result attachment set at 8 MiB. The first summary
+    crossing that ceiling closes further summary retention and leaves one
+    deterministic warning; enough previously retained summary suffix is removed
+    to keep that warning inside the durable result budget.
 - [x] Verify summary isolation across pre, main, post, composite, and repeated
   action occurrences.
 
