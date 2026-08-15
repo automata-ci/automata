@@ -721,31 +721,31 @@ all cancellation-time post behavior remain gaps.
 
 ## 12. Shell and script semantics
 
-- [ ] Implement arbitrary valid custom shell templates with exactly one `{0}`
-  placeholder.
-- [ ] Implement template parsing without invoking an extra shell unexpectedly.
-- [ ] Match default Linux and macOS fallback from missing `bash` to `sh`.
-- [ ] Match explicit `bash` fallback behavior.
-- [ ] Match Windows default fallback from PowerShell Core to Windows
+- [x] Publish and enforce the reviewed closed grammar for custom shell
+  templates with exactly one final `{0}` placeholder.
+- [x] Implement template parsing without invoking an extra shell unexpectedly.
+- [x] Match default Linux and macOS fallback from missing `bash` to `sh`.
+- [x] Match explicit `bash` missing-tool behavior.
+- [x] Match Windows default fallback from PowerShell Core to Windows
   PowerShell.
 - [ ] Support Git Bash for `shell: bash` on Windows.
 - [ ] Support `sh` on Windows where GitHub does.
-- [ ] Enable and configure PowerShell on the Linux compatibility profile.
-- [ ] Match script-file extensions.
-- [ ] Match script encoding and line endings.
-- [ ] Match GitHub's `cmd` invocation and quoting semantics, or document the
+- [x] Enable and configure PowerShell on the Linux compatibility profile.
+- [x] Match script-file extensions.
+- [x] Match script encoding and line endings.
+- [x] Match GitHub's `cmd` invocation and quoting semantics, or document the
   hardened divergence.
-- [ ] Test shell paths containing spaces and metacharacters.
-- [ ] Test exit-code propagation.
-- [ ] Test PowerShell `$LASTEXITCODE`.
+- [x] Test shell paths containing spaces and metacharacters.
+- [x] Test exit-code propagation.
+- [x] Test PowerShell `$LASTEXITCODE`.
 - [ ] Test signals and Ctrl-C or Ctrl-Break.
-- [ ] Test job and step `working-directory` precedence.
-- [ ] Decide whether absolute working directories outside the workspace are
-  supported.
+- [x] Test job and step `working-directory` precedence.
+- [x] Decide whether absolute working directories outside the workspace are
+  supported: they remain rejected by workspace confinement.
 - [ ] Match container shell defaults once job containers exist.
 - [ ] Add macOS shell behavior.
-- [ ] Add advertised Python runtime acceptance.
-- [ ] Add shell-not-found diagnostics matching the correct lifecycle phase.
+- [x] Add advertised Python runtime acceptance.
+- [x] Add shell-not-found diagnostics matching the correct lifecycle phase.
 
 ## 13. Docker actions, job containers, and service containers
 

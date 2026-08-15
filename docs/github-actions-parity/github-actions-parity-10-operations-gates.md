@@ -547,10 +547,10 @@ approved divergence must name its early rejection boundary and test.
 
 - [ ] **Service image mutability:** continue requiring immutable digests, or
   support tags with resolver-captured provenance (`PROV-02`).
-- [ ] **Absolute working directories:** keep workspace confinement, or define
-  additional safe roots and provider contracts (`RUN-02`).
-- [ ] **Custom shell templates:** support GitHub's one-`{0}` command templates
-  on each platform, or publish a strict supported grammar (`RUN-02`).
+- [x] **Absolute working directories:** keep workspace confinement; no
+  additional roots are exposed by the current provider contract (`RUN-02`).
+- [x] **Custom shell templates:** publish and enforce the strict one-`{0}`
+  grammar recorded in the executor README (`RUN-02`).
 - [ ] **Insecure legacy workflow commands:** honor
   `ACTIONS_ALLOW_UNSECURE_COMMANDS`, or retain a deliberate secure divergence
   with an admission diagnostic (`LOG-01`).

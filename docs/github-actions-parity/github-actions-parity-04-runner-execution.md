@@ -54,24 +54,35 @@ Acceptance:
 
 Tasks:
 
-- [ ] Support custom shell templates with exactly one `{0}` placeholder.
-- [ ] Reject zero or multiple placeholders without an unintended outer shell.
-- [ ] Implement default bash-to-sh fallback on POSIX.
-- [ ] Match explicit bash behavior.
-- [ ] Implement Windows PowerShell Core fallback to Windows PowerShell.
+- [x] Support custom shell templates with exactly one `{0}` placeholder under
+  the published closed grammar in the executor README.
+- [x] Reject zero or multiple placeholders without an unintended outer shell.
+- [x] Implement default bash-to-sh fallback on POSIX.
+- [x] Match explicit bash behavior.
+- [x] Implement Windows PowerShell Core fallback to Windows PowerShell.
 - [ ] Support configured Git Bash and `sh` on Windows.
-- [ ] Add Linux PowerShell profile support.
-- [ ] Match extensions, encoding, CRLF/LF, exit codes, and
+  The isolated Windows profile currently exposes neither executable; both
+  contracts reject during admission rather than probing the host. Add them only
+  with a pinned image/toolchain update and corresponding isolation evidence.
+- [x] Add Linux PowerShell profile support.
+- [x] Match extensions, encoding, CRLF/LF, exit codes, and
   `$LASTEXITCODE`.
-- [ ] Test executable and script paths containing spaces and metacharacters.
-- [ ] Verify workflow/job/step working-directory precedence.
-- [ ] Record the exact hardened `cmd` quoting decision.
-- [ ] Produce lifecycle-correct shell-not-found diagnostics.
+- [x] Test executable and script paths containing spaces and metacharacters.
+- [x] Verify workflow/job/step working-directory precedence. Workflow and job
+  defaults arrive as the frontend-resolved job default; step-local values
+  override it, then the executor falls back to the workspace.
+- [x] Record the exact hardened `cmd` quoting decision. Automata passes the
+  script as a bounded argv value under `/D /E:ON /V:OFF /C`, omits the pinned
+  runner's nested `/S /C CALL` string, and rejects active `cmd` path syntax.
+- [x] Produce lifecycle-correct shell-not-found diagnostics. Static literals
+  fail admission before provider work (`CapabilityChanged` for a missing
+  configured tool, `InvalidJob` for an invalid contract); expression-derived
+  shells fail before script copy or user execution.
 
 Acceptance:
 
-- [ ] A table-driven suite covers every advertised shell and operating system.
-- [ ] Workflow-controlled values cannot escape the selected template contract.
+- [x] A table-driven suite covers every advertised shell and operating system.
+- [x] Workflow-controlled values cannot escape the selected template contract.
 
 ### RUN-03 — Reserved environment variables and phase files
 
