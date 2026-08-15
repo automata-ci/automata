@@ -1215,7 +1215,7 @@ impl PodmanInner {
         let alias = lines.next();
         let create_command = lines.next();
         if lines.next().is_some()
-            || image != Some(entry.image())
+            || image.is_none_or(|value| !same_immutable_image(entry.image(), value))
             || publication != Some("unpublished")
             || alias != Some("alias")
             || create_command
@@ -3911,6 +3911,29 @@ mod command_completion_tests {
     }
 
     #[test]
+    fn immutable_image_comparison_accepts_only_podmans_tag_normalization() {
+        let digest = format!("sha256:{}", "a7".repeat(32));
+        let tagged = format!("registry.example.invalid:5443/team/postgres:18.4@{digest}");
+        let normalized = format!("registry.example.invalid:5443/team/postgres@{digest}");
+
+        assert!(same_immutable_image(&tagged, &normalized));
+        assert!(same_immutable_image(&normalized, &tagged));
+        assert!(same_immutable_image(&tagged, &tagged));
+
+        for rejected in [
+            format!("registry.example.invalid:5443/other/postgres@{digest}"),
+            format!("registry.example.invalid/team/postgres@{digest}"),
+            format!(
+                "registry.example.invalid:5443/team/postgres@sha256:{}",
+                "b8".repeat(32)
+            ),
+            "registry.example.invalid:5443/team/postgres:18.4".to_owned(),
+        ] {
+            assert!(!same_immutable_image(&tagged, &rejected));
+        }
+    }
+
+    #[test]
     fn owned_cgroup_path_accepts_exact_systemd_hex_escapes() {
         let delegated = r"/system.slice/system-automata\x2drunner.slice/automata-runner@2.service";
         let reported = format!("{delegated}/62c1f632b461fadf3d4cd0e8ac330ad1b\n");
@@ -4628,6 +4651,38 @@ fn service_configuration_format(network: &str, alias: &str) -> String {
          {{{{else}}}}missing{{{{end}}}}\n\
          {{{{json .Config.CreateCommand}}}}"
     )
+}
+
+fn same_immutable_image(expected: &str, observed: &str) -> bool {
+    if expected == observed {
+        return true;
+    }
+    let Some((expected_name, expected_digest)) = expected.rsplit_once('@') else {
+        return false;
+    };
+    let Some((observed_name, observed_digest)) = observed.rsplit_once('@') else {
+        return false;
+    };
+    !expected_name.contains('@')
+        && !observed_name.contains('@')
+        && expected_digest == observed_digest
+        && expected_digest
+            .strip_prefix("sha256:")
+            .is_some_and(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+        && image_repository(expected_name) == image_repository(observed_name)
+}
+
+fn image_repository(name: &str) -> &str {
+    let final_slash = name.rfind('/');
+    match name.rfind(':') {
+        Some(tag) if final_slash.is_none_or(|slash| tag > slash) => &name[..tag],
+        _ => name,
+    }
 }
 
 fn creation_command_has_exact_network_sysctl(bytes: &[u8]) -> bool {
