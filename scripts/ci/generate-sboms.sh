@@ -39,6 +39,9 @@ readonly output_directory
     die "Node.js 24.19.0 is required"
 [[ "$(npm --version)" == "${expected_npm_version}" ]] || \
     die "npm 11.17.0 is required"
+embedded_runtime_input="${repository_root}/ui/embedded-runtime"
+readonly embedded_runtime_input
+node "${script_directory}/verify-embedded-ui-runtime.mjs"
 
 source_date_epoch="${SOURCE_DATE_EPOCH:-}"
 if [[ -z "${source_date_epoch}" ]]; then
@@ -134,8 +137,9 @@ generate_rust_sbom \
     "${service_proxy_binary}" \
     automata-ci-service-proxy.cdx.json
 
-npm --prefix "${repository_root}/ui" sbom \
+npm --prefix "${embedded_runtime_input}" sbom \
     --omit=dev \
+    --offline \
     --package-lock-only \
     --sbom-format cyclonedx \
     --sbom-type application \

@@ -173,7 +173,17 @@ test("concurrent preparation is isolated and stages exact input before Cargo fet
   mkdirSync(fakeBin, { recursive: true });
   writeFileSync(
     path.join(fakeBin, "node"),
-    "#!/usr/bin/env bash\nset -euo pipefail\n[[ \"${1:-}\" == --version ]]\nprintf 'v24.19.0\\n'\n",
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      "if [[ \"${1:-}\" == --version ]]; then",
+      "    printf 'v24.19.0\\n'",
+      "    exit 0",
+      "fi",
+      "[[ \"${1:-}\" == \"${AUTOMATA_TEST_RUNTIME_VERIFIER}\" ]]",
+      "exec \"${AUTOMATA_TEST_REAL_NODE}\" \"$@\"",
+      "",
+    ].join("\n"),
     { mode: 0o755 },
   );
   writeFileSync(
@@ -185,6 +195,13 @@ test("concurrent preparation is isolated and stages exact input before Cargo fet
       "    printf '11.17.0\\n'",
       "    exit 0",
       "fi",
+      "[[ $# == 6 ]]",
+      "[[ \"$1\" == --prefix ]]",
+      "[[ \"$2\" == \"${AUTOMATA_TEST_EMBEDDED_RUNTIME_INPUT}\" ]]",
+      "[[ \"$3\" == ci ]]",
+      "[[ \"$4\" == --omit=dev ]]",
+      "[[ \"$5\" == --ignore-scripts ]]",
+      "[[ \"$6\" == --no-audit ]]",
       "install -m 0644 -- /dev/null \"${AUTOMATA_TEST_NPM_MARKER}\"",
       "",
     ].join("\n"),
@@ -233,7 +250,16 @@ test("concurrent preparation is isolated and stages exact input before Cargo fet
           env: {
             ...process.env,
             AUTOMATA_TEST_CARGO_MARKER: cargoMarker,
+            AUTOMATA_TEST_EMBEDDED_RUNTIME_INPUT: path.join(
+              repositoryRoot,
+              "ui/embedded-runtime",
+            ),
             AUTOMATA_TEST_NPM_MARKER: npmMarker,
+            AUTOMATA_TEST_REAL_NODE: realpathSync(process.execPath),
+            AUTOMATA_TEST_RUNTIME_VERIFIER: path.join(
+              repositoryRoot,
+              "scripts/ci/verify-embedded-ui-runtime.mjs",
+            ),
             AUTOMATA_TEST_THIRD_PARTY_LICENSE_RENDERER_INPUT: rendererInput,
             AUTOMATA_TEST_VENDOR_SOURCE: path.join(
               repositoryRoot,

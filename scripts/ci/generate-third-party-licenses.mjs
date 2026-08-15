@@ -21,6 +21,7 @@ import {
   resolveTargetChild,
   sha256,
 } from "./lib/third-party-licenses.mjs";
+import { verifyEmbeddedUiRuntime } from "./lib/embedded-ui-runtime.mjs";
 
 const expectedNodeVersion = "v24.19.0";
 const target = "x86_64-unknown-linux-musl";
@@ -84,7 +85,6 @@ function main() {
     repositoryRoot,
     "ui/renderer/wrapper.Cargo.lock",
   );
-  const npmLockPath = path.join(repositoryRoot, "ui/package-lock.json");
   const rendererInputDirectory = resolveTargetChild({
     repositoryRoot,
     candidate:
@@ -133,17 +133,7 @@ function main() {
   if (policy.schema !== 1) {
     fail("unsupported third-party license policy schema");
   }
-  const embeddedRuntimeRoots = policy.npm?.embeddedRuntimeRoots;
-  if (
-    !Array.isArray(embeddedRuntimeRoots) ||
-    embeddedRuntimeRoots.length === 0 ||
-    embeddedRuntimeRoots.some(
-      (name) => typeof name !== "string" || name.length === 0,
-    ) ||
-    new Set(embeddedRuntimeRoots).size !== embeddedRuntimeRoots.length
-  ) {
-    fail("npm policy must define unique embedded runtime roots");
-  }
+  const npmInput = verifyEmbeddedUiRuntime({ policy, repositoryRoot });
 
   const commonMetadataArguments = [
     "--locked",
@@ -199,10 +189,10 @@ function main() {
       rootSource: "generated:wasm-rquickjs-cli@0.4.1+automata-ui",
     }),
     collectNpmComponents({
-      lock: JSON.parse(readFileSync(npmLockPath, "utf8")),
-      uiDirectory: path.join(repositoryRoot, "ui"),
+      lock: npmInput.lock,
+      uiDirectory: npmInput.inputDirectory,
       artifact: "embedded-ui-runtime",
-      embeddedRuntimeRoots,
+      embeddedRuntimeRoots: npmInput.embeddedRuntimeRoots,
     }),
   ];
 
@@ -210,7 +200,10 @@ function main() {
     componentMaps,
     inputHashes: {
       "Cargo.lock": sha256(readFileSync(workspaceLockPath)),
-      "ui/package-lock.json": sha256(readFileSync(npmLockPath)),
+      "ui/package.json": sha256(npmInput.uiManifestBytes),
+      "ui/package-lock.json": sha256(npmInput.uiLockBytes),
+      "ui/embedded-runtime/package.json": sha256(npmInput.manifestBytes),
+      "ui/embedded-runtime/package-lock.json": sha256(npmInput.lockBytes),
       "ui/renderer/wrapper.Cargo.lock": sha256(readFileSync(rendererLockPath)),
       "ui/renderer/vendor": hashRegularTree(
         rendererVendorSourceDirectory,
