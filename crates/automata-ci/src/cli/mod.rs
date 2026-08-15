@@ -40,9 +40,8 @@ pub use commands::{
     InternalEnsureBucketArgs, InternalObjectStoreArgs, InternalObjectStoreCommand, LocalArgs,
     LocalCheckArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs, LocalWorkflowInput,
     OperatorArgs, PreviewArgs, RerunArgs, RerunSelection, RunnerArgs, RunnerCommand,
-    RunnerTokenArgs, S3ConnectionArgs, S3TlsTrustMode, SecretArgs, SecretCommand,
-    SecretCreateArgs, SecretDeleteArgs, SecretListArgs, SecretProviderArgs,
-    SecretProviderCommand, ServerArgs,
+    RunnerTokenArgs, S3ConnectionArgs, S3TlsTrustMode, SecretArgs, SecretCommand, SecretCreateArgs,
+    SecretDeleteArgs, SecretListArgs, SecretProviderArgs, SecretProviderCommand, ServerArgs,
 };
 pub use output::OutputFormat;
 pub use values::{RepositoryRef, SecretScope};
