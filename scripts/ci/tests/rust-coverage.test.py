@@ -1351,7 +1351,14 @@ exit 99
         postgres_prefixes = json.loads(
             (ROOT / "ci" / "rust-coverage-policy.json").read_text(encoding="utf-8")
         )["lanes"]["postgres"]["source_prefixes"]
-        assert "crates/automata-ci-postgres/src/" in postgres_prefixes
+        assert {
+            "crates/automata-ci-auth-postgres/src/",
+            "crates/automata-ci-postgres/src/",
+            "crates/automata-ci-provisioning-postgres/src/",
+            "crates/automata-ci-runner-auth-postgres/src/",
+            "crates/automata-ci-secret-postgres/src/",
+            "crates/automata-ci-store-postgres/src/",
+        }.issubset(postgres_prefixes)
         assert "crates/automata-ci-postgres-test-support/src/" not in postgres_prefixes
         assert all("-p automata-ci-store" not in command for command in commands)
         unknown_plan = subprocess.run(

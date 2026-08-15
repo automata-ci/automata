@@ -21,8 +21,6 @@ use uuid::Uuid;
 
 use crate::support::{TestClock, TestDatabase, TestResult, run_with_unmigrated_database};
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
 const CLAIM_DURATION_MILLIS: i64 = 2_000;
 const REQUEST_DURATION_MILLIS: i64 = 10_000;
 
@@ -342,7 +340,7 @@ async fn late_ready_result_is_retained_revoke_only_and_replays() -> TestResult {
 }
 
 async fn apply_authority_migrations(database: &TestDatabase) -> TestResult {
-    MIGRATOR.run(database.pool()).await?;
+    database.store().migrate().await?;
     Ok(())
 }
 

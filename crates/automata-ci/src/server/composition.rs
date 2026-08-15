@@ -12,6 +12,9 @@ use automata_ci_auth::{
     session::SessionKind,
     time::{Clock, SystemClock},
 };
+use automata_ci_auth_postgres::{
+    PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
+};
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
 use automata_ci_blob_s3::{
     S3BlobStore, S3BlobStoreConfig, S3BlobStoreConfigError, StaticS3Credentials,
@@ -42,21 +45,14 @@ use automata_ci_control::scheduling::{DeterministicScheduler, SchedulerPolicy};
 use automata_ci_core::RunId;
 use automata_ci_github::MAX_GITHUB_WEBHOOK_SECRET_BYTES;
 use automata_ci_key_management::KeyEncryptionProvider;
-use automata_ci_postgres::{
-    auth::{PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository},
-    provisioning::{PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner},
-    runner_auth::PostgresRunnerMachineDirectory,
-    secret::PostgresSecretProvider,
-    store::{
-        PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
-        PostgresStoreError,
-    },
-};
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_provisioning::{
     ProvisioningWorkloadAuthenticator, WorkspaceEntitlementApplier, WorkspaceProvisioner,
 };
 use automata_ci_provisioning_grpc::{ManagementGrpcServer, ManagementServerTlsConfig};
+use automata_ci_provisioning_postgres::{
+    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner,
+};
 use automata_ci_results_github::{
     ArtifactRepository, ArtifactService, CacheLimits, CacheRepository, CacheService,
     GithubCacheApi, GithubCacheHttpLimits, GithubResultsApi, GithubResultsHttpLimits,
@@ -65,11 +61,13 @@ use automata_ci_results_github::{
     PostgresCacheRepository, ResultsClock, ResultsIdGenerator, ResultsLimits, ResultsObserver,
     SystemResultsClock, SystemResultsIdGenerator,
 };
+use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use automata_ci_runner_transport::{
     ConfigurationError as TransportConfigurationError, RunnerControlHandler, RunnerControlServer,
     ServerTlsConfig, TransportLimits,
 };
 use automata_ci_secret::{SecretProvider, SecretProviderRegistry};
+use automata_ci_secret_postgres::PostgresSecretProvider;
 use automata_ci_store::{
     BuiltinSecretCleanupRepository, ConformanceReadRepository, HumanWorkflowReadRepository,
     LogicalActivationPreparationStore, LogicalActivationRepository, LogicalActivationWorkerId,
@@ -82,6 +80,10 @@ use automata_ci_store::{
     RepositorySecretManagementRepository, ReusableWorkflowRuntimeRepository, SecretCleanupWorkerId,
     SecretCustodyKeySet, SecretCustodyRepository, SecretMutationRecoveryRepository, TenantScope,
     WorkflowRerunRepository,
+};
+use automata_ci_store_postgres::{
+    PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
+    PostgresStoreError,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,

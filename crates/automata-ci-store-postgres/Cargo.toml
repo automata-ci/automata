@@ -1,0 +1,34 @@
+[package]
+name = "automata-ci-store-postgres"
+description = "PostgreSQL durable workflow and runner storage adapters for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[dependencies]
+async-trait.workspace = true
+automata-ci-auth.workspace = true
+automata-ci-blob.workspace = true
+automata-ci-control = { workspace = true, features = ["adapter-spi"] }
+automata-ci-core.workspace = true
+automata-ci-key-management.workspace = true
+automata-ci-oidc-github.workspace = true
+automata-ci-schedule.workspace = true
+automata-ci-store = { workspace = true, features = ["adapter-spi"] }
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

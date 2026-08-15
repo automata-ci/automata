@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, fs, path::Path};
 
 #[test]
 fn admission_epoch_and_workflow_plan_use_independent_sql_parameters() {
-    let postgres = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let postgres = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut inspected_queries = 0_usize;
 
     for path in source_files(&postgres) {
