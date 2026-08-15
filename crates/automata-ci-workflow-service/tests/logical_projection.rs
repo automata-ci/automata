@@ -955,6 +955,13 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
         .services()
         .get("database")
         .expect("database service");
+    assert!(
+        envelope
+            .job()
+            .requirements()
+            .container_features()
+            .contains(&ContainerFeature::SERVICE_CONTAINERS)
+    );
     assert_eq!(database.ports().len(), 2);
     assert_eq!(database.ports()[0].container_port(), 5432);
     assert_eq!(database.ports()[0].requested_host_port(), Some(5432));
@@ -1012,6 +1019,18 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
             && subpath == "subdir"
             && matches!(inputs.get("label"), Some(ValueSource::Template(_)))
     ));
+
+    let encoded_job = automata_ci_protocol_protobuf::encode_job_ir(envelope, &limits())
+        .expect("encode service JobIR");
+    let decoded_job = automata_ci_protocol_protobuf::decode_job_ir(&encoded_job, &limits())
+        .expect("decode service JobIR");
+    assert!(
+        decoded_job
+            .job()
+            .requirements()
+            .container_features()
+            .contains(&ContainerFeature::SERVICE_CONTAINERS)
+    );
 
     let decoded = automata_ci_protocol_protobuf::decode_job_runtime_context(
         projected.runtime_context_bytes(),

@@ -7,19 +7,19 @@ use std::{
 
 use automata_ci_core::{
     ActionReference, Architecture, CompiledBooleanTemplate, CompiledExpressionTemplate,
-    CompiledPositiveIntegerTemplate, CompiledValueTemplate, ContainerSpec, ExpressionProgram,
-    ExpressionSegment, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobIr,
-    JobIrEnvelope, JobOutputDefinition, JobPermissionGrant, JobPermissionRequest,
-    JobResourceAllocation, JobResourcePolicy, JobSource, JobValidationError, LogicalJobKind,
-    LogicalJobOutputSource, LogicalOutputMergePolicy, LogicalServiceContainerTemplate,
-    LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate, LogicalTimeoutUnit,
-    MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, OperatingSystem, PermissionLevel,
-    PermissionSnapshotRequest, PlanSourceOrigin, ResourceAllocationError, ResourceCapacity,
-    ResourcePolicyError, RunId, RunValueTemplates, RunnerFeature, RunnerRequirements,
-    RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, RuntimeTimeoutUnit,
-    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TemplateValueMap,
-    TrustEnvironmentAuthority, TrustPermissionAuthority, TrustSecretAuthority, TrustSnapshot,
-    ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId,
+    CompiledPositiveIntegerTemplate, CompiledValueTemplate, ContainerFeature, ContainerSpec,
+    ExpressionProgram, ExpressionSegment, JobAuthorityProfile, JobContentReference,
+    JobExecutionContext, JobId, JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant,
+    JobPermissionRequest, JobResourceAllocation, JobResourcePolicy, JobSource, JobValidationError,
+    LogicalJobKind, LogicalJobOutputSource, LogicalOutputMergePolicy,
+    LogicalServiceContainerTemplate, LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate,
+    LogicalTimeoutUnit, MAX_CONTEXT_VALUE_NODES, MAX_CONTEXT_VALUE_TEXT_BYTES, OperatingSystem,
+    PermissionLevel, PermissionSnapshotRequest, PlanSourceOrigin, ResourceAllocationError,
+    ResourceCapacity, ResourcePolicyError, RunId, RunValueTemplates, RunnerFeature,
+    RunnerRequirements, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate,
+    RuntimeTimeoutUnit, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    TemplateValueMap, TrustEnvironmentAuthority, TrustPermissionAuthority, TrustSecretAuthority,
+    TrustSnapshot, ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId,
     WorkflowJobKey, WorkflowPermissions,
 };
 use automata_ci_github_permissions::github_workflow_permission;
@@ -314,6 +314,7 @@ fn project_github_logical_job(
     let requirements = permission_requirements(requirements, &permission_request);
     let outputs = project_outputs(request.job.outputs())?;
     let services = project_services(step_job.services())?;
+    let requirements = service_requirements(requirements, &services);
     let mut job = JobIr::new(
         request.job_id,
         request.run_id,
@@ -568,6 +569,18 @@ fn runtime_requirements(
         }
     }
     Ok(requirements.with_features(features))
+}
+
+fn service_requirements(
+    requirements: RunnerRequirements,
+    services: &BTreeMap<String, ContainerSpec>,
+) -> RunnerRequirements {
+    if services.is_empty() {
+        return requirements;
+    }
+    let mut features = requirements.container_features().clone();
+    features.insert(ContainerFeature::SERVICE_CONTAINERS);
+    requirements.with_container_features(features)
 }
 
 fn literal_value_template(value: &ValueTemplate) -> Option<&str> {
