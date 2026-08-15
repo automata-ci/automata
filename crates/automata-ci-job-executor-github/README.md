@@ -108,14 +108,27 @@ generations and no `PATH` probe. The current Ubuntu profile advertises only its
 pinned Node 24 executable. Container-action execution and `runs.plugin` remain
 unsupported.
 
-`JobExecutor::admit` is synchronous and Job IR contains immutable action
-references rather than resolved `action.yml` bytes. Consequently repository
-runtime discovery cannot literally precede the lease in this component. A
-future cross-layer materialization/admission contract must carry the prepared
-action graph or its runtime requirements into Job IR to close that boundary.
-Checked-out local action metadata is created by preceding workflow code and is
-necessarily read from the isolated workspace after provider creation; it is
-still validated before any local action phase executes.
+The control-plane activation boundary anonymously resolves exact-commit public
+repository metadata before Job IR publication and carries the complete
+statically knowable runtime feature set in `RunnerRequirements`:
+JavaScript/composite execution, the exact Node generation, literal composite
+shells, repository/local action handling, command files, and summaries.
+Top-level literal and activation-resolved run shells are concretized by logical
+projection. Mutable tag/branch references and repository composite shell
+expressions fail closed pending ACT-02 resolution and binding support. Runner
+capability matching therefore happens before lease acquisition. This executor
+deliberately repeats repository preparation and runtime validation before
+secret-custody acknowledgement or provider work as a defense against
+capability drift.
+
+Checked-out local action metadata is different: it is created by preceding
+workflow code and cannot exist at control-plane activation time. Job IR records
+the local-action capability, then the executor reads and validates its metadata
+inside the isolated workspace after provider creation and before any local
+action phase executes. Expression-derived shells in checked-out local actions
+are likewise validated immediately after evaluation and before script copy or
+user execution. Private repository action resolution is not yet composed; it
+remains ACT-02 work rather than silently borrowing workflow credentials.
 
 Prepared inputs retain metadata declaration order and use case-insensitive
 caller lookup. Every declared input is present: an omitted input uses its

@@ -70,15 +70,33 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
             SandboxFeature::WINDOWS_HYPERV_CONTAINER,
         ])
     );
-    for feature in [RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES] {
+    for feature in [
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_WINDOWS_SHELL,
+        RunnerFeature::PWSH_SHELL,
+        RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+        RunnerFeature::CMD_SHELL,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+    ] {
         assert!(config.inventory().features().contains(&feature));
     }
-    assert!(
-        !config
-            .inventory()
-            .features()
-            .contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
-    );
+    for feature in [
+        RunnerFeature::DEFAULT_POSIX_SHELL,
+        RunnerFeature::BASH_SHELL,
+        RunnerFeature::SH_SHELL,
+        RunnerFeature::PYTHON_SHELL,
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::NODE12_ACTIONS,
+        RunnerFeature::NODE16_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ] {
+        assert!(!config.inventory().features().contains(&feature));
+    }
 
     let environment = config
         .environments()

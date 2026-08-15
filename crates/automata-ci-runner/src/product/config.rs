@@ -1682,6 +1682,7 @@ fn provider_capabilities(
     BTreeSet<ContainerFeature>,
     BTreeSet<RunnerFeature>,
 ) {
+    let runner_features = executor_runtime_features(executor.toolchain(), provider_kind);
     match provider_kind {
         ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes => {
             let mut sandbox_features = BTreeSet::from([
@@ -1709,11 +1710,7 @@ fn provider_capabilities(
             (
                 SandboxCapabilities::new(IsolationLevel::SharedKernel, sandbox_features),
                 container_features,
-                BTreeSet::from([
-                    RunnerFeature::SHELL_STEPS,
-                    RunnerFeature::JAVASCRIPT_ACTIONS,
-                    RunnerFeature::COMMAND_FILES,
-                ]),
+                runner_features,
             )
         }
         ProviderKind::WindowsHyperV => (
@@ -1737,8 +1734,151 @@ fn provider_capabilities(
                 ],
             ),
             BTreeSet::new(),
-            BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
+            runner_features,
         ),
+    }
+}
+
+fn executor_runtime_features(
+    toolchain: &ToolchainConfig,
+    provider_kind: ProviderKind,
+) -> BTreeSet<RunnerFeature> {
+    let mut features = BTreeSet::from([
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+    ]);
+    if provider_kind != ProviderKind::WindowsHyperV {
+        features.extend([
+            RunnerFeature::COMPOSITE_ACTIONS,
+            RunnerFeature::REPOSITORY_ACTIONS,
+            RunnerFeature::LOCAL_ACTIONS,
+        ]);
+    }
+    for (available, feature) in [
+        (toolchain.bash().is_some(), RunnerFeature::BASH_SHELL),
+        (toolchain.sh().is_some(), RunnerFeature::SH_SHELL),
+        (toolchain.python().is_some(), RunnerFeature::PYTHON_SHELL),
+        (toolchain.pwsh().is_some(), RunnerFeature::PWSH_SHELL),
+        (
+            toolchain.powershell().is_some(),
+            RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+        ),
+        (toolchain.cmd().is_some(), RunnerFeature::CMD_SHELL),
+    ] {
+        if available {
+            features.insert(feature);
+        }
+    }
+    match provider_kind {
+        ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization
+            if toolchain.bash().is_some() || toolchain.sh().is_some() =>
+        {
+            features.insert(RunnerFeature::DEFAULT_POSIX_SHELL);
+        }
+        ProviderKind::WindowsHyperV
+            if toolchain.pwsh().is_some() || toolchain.powershell().is_some() =>
+        {
+            features.insert(RunnerFeature::DEFAULT_WINDOWS_SHELL);
+        }
+        _ => {}
+    }
+    if provider_kind != ProviderKind::WindowsHyperV {
+        for (available, feature) in [
+            (toolchain.node12().is_some(), RunnerFeature::NODE12_ACTIONS),
+            (toolchain.node16().is_some(), RunnerFeature::NODE16_ACTIONS),
+            (toolchain.node20().is_some(), RunnerFeature::NODE20_ACTIONS),
+            (toolchain.node24().is_some(), RunnerFeature::NODE24_ACTIONS),
+        ] {
+            if available {
+                features.insert(feature);
+                features.insert(RunnerFeature::JAVASCRIPT_ACTIONS);
+            }
+        }
+    }
+    features
+}
+
+#[cfg(test)]
+mod runtime_feature_tests {
+    use super::*;
+
+    fn posix(value: &str) -> TargetPath {
+        TargetPath::posix(value.to_owned()).expect("POSIX target path")
+    }
+
+    fn windows(value: &str) -> TargetPath {
+        TargetPath::windows(value.to_owned()).expect("Windows target path")
+    }
+
+    #[test]
+    fn exact_linux_toolchain_features_are_derived_from_configured_paths() {
+        let toolchain = ToolchainConfig {
+            bash: Some(posix("/usr/bin/bash")),
+            sh: Some(posix("/usr/bin/sh")),
+            python: Some(posix("/usr/bin/python3")),
+            pwsh: Some(posix("/usr/bin/pwsh")),
+            powershell: None,
+            cmd: None,
+            install: Some(posix("/usr/bin/install")),
+            tar: Some(posix("/usr/bin/tar")),
+            sha256sum: Some(posix("/usr/bin/sha256sum")),
+            node12: None,
+            node16: None,
+            node20: None,
+            node24: Some(posix("/__e/node24/bin/node")),
+        };
+        assert_eq!(
+            executor_runtime_features(&toolchain, ProviderKind::Podman),
+            BTreeSet::from([
+                RunnerFeature::SHELL_STEPS,
+                RunnerFeature::DEFAULT_POSIX_SHELL,
+                RunnerFeature::BASH_SHELL,
+                RunnerFeature::SH_SHELL,
+                RunnerFeature::PYTHON_SHELL,
+                RunnerFeature::PWSH_SHELL,
+                RunnerFeature::JAVASCRIPT_ACTIONS,
+                RunnerFeature::NODE24_ACTIONS,
+                RunnerFeature::COMPOSITE_ACTIONS,
+                RunnerFeature::REPOSITORY_ACTIONS,
+                RunnerFeature::LOCAL_ACTIONS,
+                RunnerFeature::COMMAND_FILES,
+                RunnerFeature::JOB_SUMMARIES,
+            ])
+        );
+    }
+
+    #[test]
+    fn exact_windows_toolchain_features_do_not_invent_node_or_posix_shells() {
+        let toolchain = ToolchainConfig {
+            bash: None,
+            sh: None,
+            python: None,
+            pwsh: Some(windows(r"C:\Program Files\PowerShell\7\pwsh.exe")),
+            powershell: Some(windows(
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            )),
+            cmd: Some(windows(r"C:\Windows\System32\cmd.exe")),
+            install: None,
+            tar: None,
+            sha256sum: None,
+            node12: None,
+            node16: None,
+            node20: None,
+            node24: Some(windows(r"C:\automata\tools\node24\node.exe")),
+        };
+        assert_eq!(
+            executor_runtime_features(&toolchain, ProviderKind::WindowsHyperV),
+            BTreeSet::from([
+                RunnerFeature::SHELL_STEPS,
+                RunnerFeature::DEFAULT_WINDOWS_SHELL,
+                RunnerFeature::PWSH_SHELL,
+                RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+                RunnerFeature::CMD_SHELL,
+                RunnerFeature::COMMAND_FILES,
+                RunnerFeature::JOB_SUMMARIES,
+            ])
+        );
     }
 }
 

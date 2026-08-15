@@ -52,10 +52,17 @@ Tasks:
   - [x] Check JIT-prepared local action runtimes before their first action
     phase. Local metadata cannot exist before the preceding checkout/user step
     and therefore cannot be preflighted before provider creation.
-  - [ ] Carry prepared repository runtime requirements across the scheduling
-    boundary so the synchronous `JobExecutor::admit` path can reject them
-    literally before lease acquisition. Job IR currently carries only action
-    references, while metadata resolution is an async executor port.
+  - [x] Carry prepared repository runtime requirements across the scheduling
+    boundary for exact-commit public actions. Activation anonymously and
+    recursively resolves their metadata and records JavaScript/composite, exact
+    Node generation, literal composite shells, repository/local action,
+    command-file, and summary capabilities in Job IR. Activation-known
+    top-level shells are concretized. Capability matching rejects runners
+    missing any requirement before lease acquisition; the runner repeats
+    repository preflight before custody or provider work as defense in depth.
+  - [ ] Complete ACT-02 binding for mutable tag/branch resolution and private
+    repository action credentials. Until then those references, along with
+    repository composite shell expressions, fail closed before scheduling.
 - [x] Pin Node patch versions in profile manifests. The current Ubuntu profile
   records Node 24.19.0; no legacy runtime is advertised by that profile.
 - [x] Decide whether `runs.plugin` is supported; retain an explicit

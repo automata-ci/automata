@@ -318,10 +318,38 @@ capability_id_type! {
     RunnerFeature {
         /// Native shell steps can execute.
         SHELL_STEPS = "automata.core/shell-steps@v1",
+        /// The platform-default POSIX shell contract can execute.
+        DEFAULT_POSIX_SHELL = "automata.core/default-posix-shell@v1",
+        /// The platform-default Windows PowerShell contract can execute.
+        DEFAULT_WINDOWS_SHELL = "automata.core/default-windows-shell@v1",
+        /// Bash shell contracts can execute.
+        BASH_SHELL = "automata.core/bash-shell@v1",
+        /// POSIX `sh` shell contracts can execute.
+        SH_SHELL = "automata.core/sh-shell@v1",
+        /// Python shell contracts can execute.
+        PYTHON_SHELL = "automata.core/python-shell@v1",
+        /// PowerShell Core shell contracts can execute.
+        PWSH_SHELL = "automata.core/pwsh-shell@v1",
+        /// Windows PowerShell shell contracts can execute.
+        WINDOWS_POWERSHELL_SHELL = "automata.core/windows-powershell-shell@v1",
+        /// Windows command-interpreter shell contracts can execute.
+        CMD_SHELL = "automata.core/cmd-shell@v1",
         /// JavaScript actions can execute.
         JAVASCRIPT_ACTIONS = "automata.core/javascript-actions@v1",
+        /// JavaScript actions selecting the Node.js 12 generation can execute.
+        NODE12_ACTIONS = "automata.core/node12-actions@v1",
+        /// JavaScript actions selecting the Node.js 16 generation can execute.
+        NODE16_ACTIONS = "automata.core/node16-actions@v1",
+        /// JavaScript actions selecting the Node.js 20 generation can execute.
+        NODE20_ACTIONS = "automata.core/node20-actions@v1",
+        /// JavaScript actions selecting the Node.js 24 generation can execute.
+        NODE24_ACTIONS = "automata.core/node24-actions@v1",
         /// Composite actions can execute.
         COMPOSITE_ACTIONS = "automata.core/composite-actions@v1",
+        /// Immutable repository actions can be prepared and executed.
+        REPOSITORY_ACTIONS = "automata.core/repository-actions@v1",
+        /// Checked-out local actions can be prepared inside the job sandbox.
+        LOCAL_ACTIONS = "automata.core/local-actions@v1",
         /// GitHub-compatible command files are implemented.
         COMMAND_FILES = "automata.core/command-files@v1",
         /// Steps can publish job summaries.

@@ -52,4 +52,7 @@ pub use secret::{
     EphemeralJobSecret, EphemeralJobSecrets, EphemeralJobSecretsError,
     MAX_EPHEMERAL_JOB_SECRET_BYTES, MAX_EPHEMERAL_JOB_SECRETS, validate_ephemeral_job_secret_bytes,
 };
-pub use shell::{WindowsScriptShell, windows_script_arguments};
+pub use shell::{
+    StaticShellRequirementError, WindowsScriptShell, static_shell_requirement,
+    windows_script_arguments,
+};

@@ -12,6 +12,7 @@ use automata_ci_core::{
     WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
+use automata_ci_job_executor_github::ActionPreparationPort;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     ActivatedLogicalInstanceDescriptor, AdmissionObject, ClaimedLogicalJobActivation,
@@ -31,6 +32,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::activation_preparation::prepared_from_receipt;
+use crate::runtime_requirements::{
+    RuntimeRequirementDiscoveryError, discover_runtime_requirements,
+};
 use crate::{
     ActivateLogicalJobRequest, ActivationStatus, AdmissionClock, AutonomousActivationLease,
     AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError,
@@ -498,6 +502,7 @@ pub(crate) struct GithubLogicalJobOrchestrationService {
     activations: Arc<dyn LogicalActivationRepository>,
     clock: Arc<dyn AdmissionClock>,
     limits: ProtocolLimits,
+    actions: Option<Arc<dyn ActionPreparationPort>>,
 }
 
 /// Opaque exact activation publication prepared under one selected authority.
@@ -549,6 +554,23 @@ impl GithubLogicalJobOrchestrationService {
             activations,
             clock,
             limits,
+            actions: None,
+        }
+    }
+
+    pub(crate) fn with_limits_and_action_preparer(
+        blobs: Arc<dyn ImmutableBlobStore>,
+        activations: Arc<dyn LogicalActivationRepository>,
+        clock: Arc<dyn AdmissionClock>,
+        limits: ProtocolLimits,
+        actions: Arc<dyn ActionPreparationPort>,
+    ) -> Self {
+        Self {
+            blobs,
+            activations,
+            clock,
+            limits,
+            actions: Some(actions),
         }
     }
 
@@ -641,7 +663,8 @@ impl GithubLogicalJobOrchestrationService {
             Ok(context) => context,
             Err(error) => return Ok(classify_activation_failure(&error)),
         };
-        let activator = LogicalJobActivator::new(GithubLogicalActivationEvaluator::new(github));
+        let activation_evaluator = GithubLogicalActivationEvaluator::new(github);
+        let activator = LogicalJobActivator::new(activation_evaluator.clone());
         let Ok(activation) = activator.activate(ActivateLogicalJobRequest::new(
             logical_job,
             base.inputs(),
@@ -654,6 +677,43 @@ impl GithubLogicalJobOrchestrationService {
         };
         let Ok(profiles) = runtime_profile_catalog(prepared.runtime_policy()) else {
             return Ok(activation_relational_failure());
+        };
+        let runtime_features = if activation.instances().is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            let references = match crate::logical_projection::logical_action_references(logical_job)
+            {
+                Ok(references) => references,
+                Err(error) => {
+                    return Ok(classify_activation_failure(
+                        &GithubLogicalJobOrchestrationError::Projection(error),
+                    ));
+                }
+            };
+            let discovery = {
+                let mut before_prepare = || lease.before_io(shutdown);
+                discover_runtime_requirements(
+                    self.actions.as_ref(),
+                    &references,
+                    shutdown,
+                    &mut before_prepare,
+                )
+                .await
+            };
+            match discovery {
+                Ok(features) => features,
+                Err(RuntimeRequirementDiscoveryError::Cancelled) => {
+                    return Err(AutonomousWorkflowLeaseError::Shutdown);
+                }
+                Err(RuntimeRequirementDiscoveryError::Lease(error)) => return Err(error),
+                Err(
+                    RuntimeRequirementDiscoveryError::Unavailable
+                    | RuntimeRequirementDiscoveryError::Retryable,
+                ) => return Ok(AutonomousWorkflowExecutionOutcome::Retryable),
+                Err(RuntimeRequirementDiscoveryError::Invalid) => {
+                    return Ok(activation_payload_failure());
+                }
+            }
         };
         let Ok(credential_requirements) =
             crate::credential_requirements::discover_external_job_credentials(
@@ -692,6 +752,8 @@ impl GithubLogicalJobOrchestrationService {
                     logical_job,
                     instance,
                     &profiles,
+                    &runtime_features,
+                    &activation_evaluator,
                     permission_ceiling.as_ref(),
                     gate_evidence,
                 )
@@ -785,11 +847,21 @@ impl GithubLogicalJobOrchestrationService {
         job: crate::ValidatedLogicalJob<'_>,
         instance: &crate::ActivatedJobInstance,
         profiles: &GithubRunnerProfileCatalog,
+        runtime_features: &std::collections::BTreeSet<automata_ci_core::RunnerFeature>,
+        activation_evaluator: &GithubLogicalActivationEvaluator,
         permission_ceiling: Option<&automata_ci_store::ReusableWorkflowPermissionSnapshot>,
         gate_evidence: ActivationGateEvidence,
     ) -> Result<ActivatedLogicalInstanceDescriptor, SelectedActivationFailure> {
         let (runtime_payload, job_payload) = self
-            .project_instance_payloads(prepared, job, instance, profiles, permission_ceiling)
+            .project_instance_payloads(
+                prepared,
+                job,
+                instance,
+                profiles,
+                runtime_features,
+                activation_evaluator,
+                permission_ceiling,
+            )
             .map_err(SelectedActivationFailure::Operation)?;
         let runtime_descriptor = runtime_payload.descriptor().clone();
         let job_descriptor = job_payload.descriptor().clone();
@@ -820,12 +892,15 @@ impl GithubLogicalJobOrchestrationService {
         .map_err(SelectedActivationFailure::Operation)
     }
 
+    #[allow(clippy::too_many_arguments)] // Exact activation evidence stays explicit at projection.
     fn project_instance_payloads(
         &self,
         prepared: &PreparedLogicalJobActivation,
         job: crate::ValidatedLogicalJob<'_>,
         instance: &crate::ActivatedJobInstance,
         profiles: &GithubRunnerProfileCatalog,
+        runtime_features: &std::collections::BTreeSet<automata_ci_core::RunnerFeature>,
+        activation_evaluator: &GithubLogicalActivationEvaluator,
         permission_ceiling: Option<&automata_ci_store::ReusableWorkflowPermissionSnapshot>,
     ) -> Result<(BlobPayload, BlobPayload), GithubLogicalJobOrchestrationError> {
         let runtime_key = instance_object_key(prepared.target(), instance, "runtime-context.pb")?;
@@ -871,7 +946,9 @@ impl GithubLogicalJobOrchestrationService {
             prepared.runtime_policy().policy().permission_policy(),
             prepared.runtime_policy().policy().resource_policy(),
         )
-        .with_trust_snapshot(prepared.execution().trust_snapshot());
+        .with_trust_snapshot(prepared.execution().trust_snapshot())
+            .with_runtime_features(runtime_features.iter().cloned())
+            .with_activation_evaluation(activation_evaluator, prepared.status());
         if let Some(permission_ceiling) = permission_ceiling {
             projection = projection.with_permission_ceiling(permission_ceiling);
         }

@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use automata_ci_action_github::JavascriptRuntime;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
     MediaType, MemoryBlobStore, PutBlobOutcome, VerifiedBlob,
@@ -15,9 +16,14 @@ use automata_ci_blob::{
 use automata_ci_core::{
     ContextValue, JobAuthorityProfile, JobConclusion, JobPermissionRequest, JobRuntimeContext,
     OutputSensitivity, RunId, RunIdAlias, SecretBinding, Sha256Digest, TrustActorEvidence,
-    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
-    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, UnixMillis, WorkflowEventProvenance,
-    WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
+    RunnerFeature, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, UnixMillis,
+    WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
+};
+use automata_ci_job_executor_github::{
+    ActionPreparationError, ActionPreparationErrorKind, ActionPreparationPort,
+    ActionPreparationRequest, PreparedAction, PreparedActionDefinition, PreparedActionExecution,
+    PreparedJavascriptAction,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
@@ -54,8 +60,9 @@ use automata_ci_store::{
     WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend, ParseWorkflowRequest,
-    SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
+    CompileWorkflowRequest, GithubConditionCompiler, GithubConditionPhase, GithubWorkflowCompiler,
+    GithubWorkflowFrontend, ParseWorkflowRequest, SourceId, SourceOrigin, SourceProvenance,
+    WorkflowFrontend as _,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousActivationLease, AutonomousMaterializationLease,
@@ -67,6 +74,7 @@ use automata_ci_workflow_service::{
     WORKFLOW_EVENT_MEDIA_TYPE, WORKFLOW_PLAN_MEDIA_TYPE,
 };
 use bytes::Bytes;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -97,6 +105,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo autonomous
+";
+
+const WORKFLOW_WITH_REPOSITORY_ACTION_SOURCE: &str = r"name: Autonomous CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: synthetic/missing-runtime@0123456789abcdef0123456789abcdef01234567
 ";
 
 const WORKFLOW_WITH_NEEDS_SOURCE: &str = r"name: Autonomous CI
@@ -1502,6 +1519,15 @@ async fn new_harness_with(
     authority_profile: JobAuthorityProfile,
     prerequisites: Vec<LogicalActivationPrerequisiteEvidence>,
 ) -> Harness {
+    new_harness_with_action_preparer(source, authority_profile, prerequisites, None).await
+}
+
+async fn new_harness_with_action_preparer(
+    source: &str,
+    authority_profile: JobAuthorityProfile,
+    prerequisites: Vec<LogicalActivationPrerequisiteEvidence>,
+    actions: Option<Arc<dyn ActionPreparationPort>>,
+) -> Harness {
     let trace = HarnessTrace::default();
     let blobs = Arc::new(FaultBlobStore::new(trace.clone()));
     let plan = compile_plan(source);
@@ -1559,13 +1585,24 @@ async fn new_harness_with(
     .expect("preparation descriptor");
     let repository = Arc::new(HarnessRepository::new(descriptor, trace.clone()));
     let clock = Arc::new(TestClock::new(1_000));
-    let executor = Arc::new(GithubAutonomousWorkflowPhaseExecutor::new(
-        blobs.clone(),
-        repository.clone(),
-        repository.clone(),
-        repository.clone(),
-        clock.clone(),
-    ));
+    let executor = Arc::new(match actions {
+        Some(actions) => GithubAutonomousWorkflowPhaseExecutor::with_limits_and_action_preparer(
+            blobs.clone(),
+            repository.clone(),
+            repository.clone(),
+            repository.clone(),
+            clock.clone(),
+            ProtocolLimits::default(),
+            actions,
+        ),
+        None => GithubAutonomousWorkflowPhaseExecutor::new(
+            blobs.clone(),
+            repository.clone(),
+            repository.clone(),
+            repository.clone(),
+            clock.clone(),
+        ),
+    });
     assert_executor_debug(&executor);
     let service = Arc::new(AutonomousWorkflowService::new(
         repository.clone(),
@@ -3131,6 +3168,133 @@ async fn invalid_or_secret_derived_matrix_outputs_quarantine_without_publication
             harness.repository.quarantine_kinds().0,
             vec![LogicalWorkQuarantineKind::PayloadEvidence]
         );
+    }
+}
+
+#[derive(Debug, Default)]
+struct InvalidMetadataActionPreparer {
+    calls: Mutex<usize>,
+}
+
+#[async_trait]
+impl ActionPreparationPort for InvalidMetadataActionPreparer {
+    async fn prepare(
+        &self,
+        _request: ActionPreparationRequest<'_>,
+    ) -> Result<PreparedAction, ActionPreparationError> {
+        *self.calls.lock().expect("action calls") += 1;
+        Err(ActionPreparationError::new(
+            ActionPreparationErrorKind::Metadata,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn invalid_repository_metadata_quarantines_before_job_publication_or_lease() {
+    let actions = Arc::new(InvalidMetadataActionPreparer::default());
+    let action_port: Arc<dyn ActionPreparationPort> = actions.clone();
+    let harness = new_harness_with_action_preparer(
+        WORKFLOW_WITH_REPOSITORY_ACTION_SOURCE,
+        JobAuthorityProfile::Standard,
+        Vec::new(),
+        Some(action_port),
+    )
+    .await;
+    complete_preparation(&harness).await;
+    harness.blobs.reset_observation();
+
+    assert_eq!(
+        harness
+            .service
+            .run_once(CancellationToken::new())
+            .await
+            .expect("invalid action metadata classification"),
+        AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
+    );
+    assert_eq!(*actions.calls.lock().expect("action calls"), 1);
+    assert_eq!(harness.blobs.put_outcomes(), (0, 0));
+    assert!(harness.repository.publication_attempts().is_empty());
+    assert_eq!(harness.repository.successful_publications(), 0);
+    assert_eq!(harness.repository.mutation_counts(), (1, 0, 0));
+    assert_eq!(
+        harness.repository.quarantine_kinds().0,
+        vec![LogicalWorkQuarantineKind::PayloadEvidence]
+    );
+}
+
+#[derive(Debug, Default)]
+struct Node20ActionPreparer {
+    calls: Mutex<usize>,
+}
+
+#[async_trait]
+impl ActionPreparationPort for Node20ActionPreparer {
+    async fn prepare(
+        &self,
+        _request: ActionPreparationRequest<'_>,
+    ) -> Result<PreparedAction, ActionPreparationError> {
+        *self.calls.lock().expect("action calls") += 1;
+        let compiler = GithubConditionCompiler::default();
+        let always = compiler
+            .compile_condition(Some("always()"), GithubConditionPhase::Step)
+            .expect("condition");
+        let javascript = PreparedJavascriptAction::new(
+            JavascriptRuntime::Node20,
+            "dist/index.js",
+            None,
+            always.clone(),
+            None,
+            always,
+        )
+        .expect("JavaScript action");
+        let definition = PreparedActionDefinition::new(
+            Vec::new(),
+            Vec::new(),
+            PreparedActionExecution::Javascript(Box::new(javascript)),
+        )
+        .expect("action definition");
+        let archive = Bytes::from_static(b"node20-action-archive");
+        let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+        Ok(
+            PreparedAction::with_definition(digest, archive, "", definition)
+                .expect("prepared action"),
+        )
+    }
+}
+
+#[tokio::test]
+async fn repository_runtime_features_reach_published_job_ir() {
+    let actions = Arc::new(Node20ActionPreparer::default());
+    let action_port: Arc<dyn ActionPreparationPort> = actions.clone();
+    let harness = new_harness_with_action_preparer(
+        WORKFLOW_WITH_REPOSITORY_ACTION_SOURCE,
+        JobAuthorityProfile::Standard,
+        Vec::new(),
+        Some(action_port),
+    )
+    .await;
+    complete_preparation(&harness).await;
+    complete_activation(&harness).await;
+
+    assert_eq!(*actions.calls.lock().expect("action calls"), 1);
+    let publications = harness.repository.publication_attempts();
+    let publication = publications.last().expect("activation publication");
+    let [instance] = publication.instances() else {
+        panic!("one published instance expected")
+    };
+    let encoded = load_activation_blob(&harness.blobs.inner, instance.job_ir()).await;
+    let envelope =
+        automata_ci_protocol_protobuf::decode_job_ir(&encoded, &ProtocolLimits::default())
+            .expect("published JobIR");
+    let features = envelope.job().requirements().features();
+    for required in [
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+    ] {
+        assert!(features.contains(&required), "missing {required}");
     }
 }
 
