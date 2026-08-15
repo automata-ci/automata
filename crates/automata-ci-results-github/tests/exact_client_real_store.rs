@@ -36,6 +36,7 @@ use axum::{
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
 use support::postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane};
+use tokio::process::Command as TokioCommand;
 use tower::ServiceExt as _;
 use url::Url;
 use uuid::Uuid;
@@ -146,8 +147,9 @@ fn require_node_major(expected: u8) -> TestResult {
     Ok(())
 }
 
-fn isolated_node_command() -> Command {
-    let mut command = Command::new("node");
+fn isolated_node_command() -> TokioCommand {
+    let mut command = TokioCommand::new("node");
+    command.kill_on_drop(true);
     command.env_clear();
     for name in [
         "PATH",
@@ -284,7 +286,7 @@ async fn run_exact_clients(
 
     let scratch = test_scratch("exact-client-real-store");
     std::fs::create_dir_all(&scratch)?;
-    let client_result = run_clients(&environment, &scratch, &token, address);
+    let client_result = run_clients(&environment, &scratch, &token, address).await;
     let adversarial_result =
         run_real_store_adversarial_matrix(&adversarial_router, &token, &expired_token, execution)
             .await;
@@ -438,7 +440,7 @@ fn results_authority_and_tokens(
     Ok((authority, token, expired_token))
 }
 
-fn run_clients(
+async fn run_clients(
     environment: &RealStoreEnvironment,
     scratch: &Path,
     token: &str,
@@ -471,7 +473,8 @@ fn run_clients(
             .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION", "6.2.0")
             .env("AUTOMATA_TEST_ARTIFACT_INPUT", &artifact_input)
             .env("AUTOMATA_TEST_ARTIFACT_ROOT", &artifact_root),
-    )?;
+    )
+    .await?;
 
     let download_script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/official_artifact_download_client.mjs");
@@ -490,7 +493,8 @@ fn run_clients(
             .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION", "6.2.1")
             .env("AUTOMATA_TEST_ARTIFACT_INPUT", &artifact_input)
             .env("AUTOMATA_TEST_ARTIFACT_ROOT", &artifact_root),
-    )?;
+    )
+    .await?;
 
     let cache_input = cache_root.join("cache-input.txt");
     let runner_temp = cache_root.join("runner-temp");
@@ -516,6 +520,7 @@ fn run_clients(
             )
             .env("AUTOMATA_TEST_CACHE_INPUT", cache_input),
     )
+    .await
 }
 
 #[allow(clippy::too_many_lines)] // One ordered real-store transcript covers every RES-01 adversarial case.
@@ -711,8 +716,10 @@ fn path_and_query(url: &Url) -> String {
     )
 }
 
-fn run_node(label: &'static str, command: &mut Command) -> TestResult {
-    let output = command.output()?;
+async fn run_node(label: &'static str, command: &mut TokioCommand) -> TestResult {
+    let output = tokio::time::timeout(Duration::from_mins(2), command.output())
+        .await
+        .map_err(|_| format!("exact {label} client exceeded the 120-second timeout"))??;
     require_success(label, &output)
 }
 
