@@ -9,7 +9,10 @@ use automata_ci_expression_github::{
     GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
     GithubObject, GithubStatus, GithubValue,
 };
-use automata_ci_github_runtime::{CommandFilePlatform, JobCommandState};
+use automata_ci_github_runtime::{
+    CommandFilePlatform, EnvironmentMutationBlockReason, JobCommandState,
+    classify_environment_mutation,
+};
 
 use crate::{
     ExecutorAdapterError, GithubContextSnapshot, PreparedActionDefinition, PreparedValue,
@@ -167,6 +170,15 @@ impl<'a> EnvironmentBuilder<'a> {
         masker: &mut SecretMasker,
     ) -> Result<ResolvedPhaseValues, ExecutorAdapterError> {
         let platform = commands.platform();
+        validate_environment_overlay_names(platform, job.keys().map(String::as_str))?;
+        validate_environment_overlay_names(
+            platform,
+            commands
+                .environment()
+                .iter()
+                .map(automata_ci_github_runtime::NameValueCommand::name),
+        )?;
+        validate_environment_overlay_names(platform, step.keys().map(String::as_str))?;
         let mut values = BTreeMap::new();
         for variable in self.defaults.values() {
             if variable.is_secret() {
@@ -423,6 +435,28 @@ impl<'a> EnvironmentBuilder<'a> {
             .map(|value| value.coerce_to_string())
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))
     }
+}
+
+/// Rejects workflow-controlled names in the runner-owned default catalog.
+///
+/// `NODE_OPTIONS` remains valid in declarative environment maps. GitHub only
+/// blocks that name when it is written through `GITHUB_ENV` or legacy
+/// `set-env`, which is enforced by the runtime command applicator.
+pub(crate) fn validate_environment_overlay_names<'name>(
+    platform: CommandFilePlatform,
+    names: impl IntoIterator<Item = &'name str>,
+) -> Result<(), ExecutorAdapterError> {
+    if names.into_iter().any(|name| {
+        matches!(
+            classify_environment_mutation(platform, name),
+            Some(EnvironmentMutationBlockReason::Reserved(_))
+        )
+    }) {
+        return Err(ExecutorAdapterError::new(
+            ExecutorAdapterErrorKind::InvalidJob,
+        ));
+    }
+    Ok(())
 }
 
 struct EnvironmentEvaluationContext<'a> {

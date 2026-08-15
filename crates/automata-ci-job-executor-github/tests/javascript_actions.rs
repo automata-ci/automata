@@ -50,16 +50,10 @@ async fn sandbox_profile_defaults_are_the_lowest_execution_environment_layer() {
     let fixture =
         Fixture::with_default_environment(vec![prepared_node24_action()], responses, defaults);
     let setup = run_step("setup", "Setup", "true");
-    let action = action_step("checkout", "actions/example").with_environment(BTreeMap::from([
-        (
-            "STEP_WINS".to_owned(),
-            ValueSource::Literal("step".to_owned()),
-        ),
-        (
-            "GITHUB_ACTION_PATH".to_owned(),
-            ValueSource::Literal("step".to_owned()),
-        ),
-    ]));
+    let action = action_step("checkout", "actions/example").with_environment(BTreeMap::from([(
+        "STEP_WINS".to_owned(),
+        ValueSource::Literal("step".to_owned()),
+    )]));
     let job = envelope_with_environment(
         vec![setup, action],
         BTreeMap::from([
@@ -75,10 +69,6 @@ async fn sandbox_profile_defaults_are_the_lowest_execution_environment_layer() {
                 "STEP_WINS".to_owned(),
                 ValueSource::Literal("job".to_owned()),
             ),
-            (
-                "GITHUB_ACTION_PATH".to_owned(),
-                ValueSource::Literal("job".to_owned()),
-            ),
         ]),
     );
     let request = fixture.request(job);
@@ -91,6 +81,10 @@ async fn sandbox_profile_defaults_are_the_lowest_execution_environment_layer() {
         .expect("run and action steps execute");
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
+    assert_eq!(
+        result.steps()[0].annotations()[0].message(),
+        "a runner-owned GITHUB default from a command file was ignored"
+    );
     let state = fixture.endpoint_state.lock().expect("endpoint lock");
     let run = state
         .commands

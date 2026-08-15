@@ -175,8 +175,9 @@ Tasks:
 - [ ] Rotate command-file paths per phase.
 - [ ] Implement complete `steps` outcome/conclusion and reusable `jobs`
   context behavior.
-- [ ] Enforce `GITHUB_*` and `RUNNER_*` immutability while preserving the
-  documented `CI` exception.
+- [x] Enforce immutability for documented default variables in the `GITHUB_*`
+  and `RUNNER_*` namespaces while preserving custom names and the documented
+  `CI` exception.
 - [ ] Apply organization, repository, and environment variable precedence and
   limits.
 
@@ -184,7 +185,7 @@ Acceptance:
 
 - [ ] A generated field-by-field suite validates values and phase
   availability.
-- [ ] Lowercase or case-variant attempts cannot shadow reserved Windows
+- [x] Lowercase or case-variant attempts cannot shadow reserved Windows
   variables.
 - [ ] Unset values match GitHub empty/null behavior.
 

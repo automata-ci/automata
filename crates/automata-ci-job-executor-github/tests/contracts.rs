@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use automata_ci_core::{
     ActionReference, AttemptId, ExpressionDialect, ExpressionInstruction, ExpressionProgram,
-    JobIrEnvelope, RuntimeBoolean, SemanticStep, Sha256Digest, StepId, StepIr, ValueTemplate,
+    JobIrEnvelope, RuntimeBoolean, SemanticStep, Sha256Digest, StepId, StepIr, ValueSource,
+    ValueTemplate,
 };
 use automata_ci_job_executor_github::{
     ActionPreparationPort, DeterministicOperationIds, ExecutionClock, ExecutionOperationIds,
@@ -13,11 +14,11 @@ use automata_ci_job_executor_github::{
     PreparedCompositeUsesStep, PreparedKeyValue, PreparedValue, RepositoryCredentialPort,
     SandboxEnvironmentCatalog, SecretPort,
 };
-use automata_ci_runner_runtime::JobExecutor;
+use automata_ci_runner_runtime::{AdmissionRejection, JobExecutor};
 use bytes::Bytes;
 use static_assertions::assert_obj_safe;
 
-use support::{Fixture, envelope, prepared_node24_action, run_step};
+use support::{Fixture, envelope, envelope_with_environment, prepared_node24_action, run_step};
 
 assert_obj_safe!(ActionPreparationPort);
 assert_obj_safe!(RepositoryCredentialPort);
@@ -229,6 +230,79 @@ fn safe_local_actions_admit_while_container_actions_fail_closed() {
         ),
     )]);
     assert!(fixture.executor.admit(&container).is_err());
+}
+
+#[test]
+fn reserved_planned_environment_names_fail_admission_before_provider_work() {
+    let fixture = Fixture::new(Vec::new(), Vec::new());
+    let reserved = [
+        "GITHUB_WORKSPACE",
+        "RUNNER_OS",
+        "GITHUB_ENV",
+        "GITHUB_OUTPUT",
+        "GITHUB_PATH",
+        "GITHUB_STATE",
+        "GITHUB_STEP_SUMMARY",
+        "GITHUB_ARTIFACTS",
+        "GITHUB_ARTIFACTS_LIST",
+    ];
+
+    // Workflow and job environment are flattened into the planned job map, so
+    // this admission boundary protects both declaration levels.
+    for name in reserved {
+        let job = envelope_with_environment(
+            vec![run_step("run", "Run", "true")],
+            BTreeMap::from([(name.to_owned(), ValueSource::Literal("shadow".to_owned()))]),
+        );
+        assert_eq!(
+            fixture.executor.admit(&job),
+            Err(AdmissionRejection::InvalidJob),
+            "planned {name} must not shadow runner state"
+        );
+    }
+
+    for name in ["GITHUB_WORKSPACE", "RUNNER_OS", "GITHUB_ENV"] {
+        let step = run_step("run", "Run", "true").with_environment(BTreeMap::from([(
+            name.to_owned(),
+            ValueSource::Literal("shadow".to_owned()),
+        )]));
+        assert_eq!(
+            fixture.executor.admit(&envelope(vec![step])),
+            Err(AdmissionRejection::InvalidJob),
+            "step {name} must not shadow runner state"
+        );
+    }
+
+    let allowed = envelope_with_environment(
+        vec![
+            run_step("run", "Run", "true").with_environment(BTreeMap::from([(
+                "CI".to_owned(),
+                ValueSource::Literal("step-ci".to_owned()),
+            )])),
+        ],
+        BTreeMap::from([
+            (
+                "NODE_OPTIONS".to_owned(),
+                ValueSource::Literal("--no-warnings".to_owned()),
+            ),
+            (
+                "GITHUB_TOKEN".to_owned(),
+                ValueSource::Literal("workflow-mapped-token".to_owned()),
+            ),
+            (
+                "RUNNER_DIGEST".to_owned(),
+                ValueSource::Literal("custom-release-value".to_owned()),
+            ),
+            (
+                "github_workspace".to_owned(),
+                ValueSource::Literal("case-distinct-on-posix".to_owned()),
+            ),
+        ]),
+    );
+    fixture.executor.admit(&allowed).expect(
+        "CI, custom prefixed names, declarative NODE_OPTIONS, and POSIX case variants remain valid",
+    );
+    assert_eq!(fixture.provider.counts(), (0, 0, 0));
 }
 
 #[test]

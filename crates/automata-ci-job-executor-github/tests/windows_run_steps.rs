@@ -63,18 +63,7 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
             .with_file(CommandFileKind::Output, b"digest=abc123\r\n".to_vec()),
         PhaseResponse::success(),
     ]);
-    let producer = run_step("producer", "Producer", "Write-Output 'producer'").with_environment(
-        BTreeMap::from([
-            (
-                "github_artifacts".to_owned(),
-                ValueSource::Literal("shadow-artifacts".to_owned()),
-            ),
-            (
-                "github_artifacts_list".to_owned(),
-                ValueSource::Literal("shadow-artifacts-list".to_owned()),
-            ),
-        ]),
-    );
+    let producer = run_step("producer", "Producer", "Write-Output 'producer'");
     let second = run_step_with_working_directory(
         "consumer",
         "Consumer",
@@ -139,9 +128,7 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
             1,
             "artifact control variables must replace case-insensitive aliases"
         );
-        assert!(
-            !environment_value(commands[0], name).is_some_and(|value| value.starts_with("shadow"))
-        );
+        assert!(environment_value(commands[0], name).is_some());
     }
     assert_eq!(
         commands[1]
@@ -248,6 +235,45 @@ fn windows_action_steps_are_rejected_during_admission() {
         fixture.executor.admit(&job),
         Err(AdmissionRejection::InvalidJob)
     );
+    assert_eq!(fixture.provider.counts(), (0, 0, 0));
+}
+
+#[test]
+fn windows_reserved_environment_aliases_fail_admission() {
+    let fixture = Fixture::windows(Vec::new());
+
+    for name in ["github_workspace", "Github_Env", "runner_os", "RuNnEr_TeMp"] {
+        let step = run_step("run", "Run", "Write-Output run").with_environment(BTreeMap::from([(
+            name.to_owned(),
+            ValueSource::Literal("shadow".to_owned()),
+        )]));
+        let job = windows_envelope(vec![step]);
+        assert_eq!(
+            fixture.executor.admit(&job),
+            Err(AdmissionRejection::InvalidJob),
+            "Windows alias {name} must not shadow runner state"
+        );
+    }
+
+    let allowed = run_step("run", "Run", "Write-Output run").with_environment(BTreeMap::from([
+        ("ci".to_owned(), ValueSource::Literal("false".to_owned())),
+        (
+            "node_options".to_owned(),
+            ValueSource::Literal("--no-warnings".to_owned()),
+        ),
+        (
+            "github_token".to_owned(),
+            ValueSource::Literal("workflow-mapped-token".to_owned()),
+        ),
+        (
+            "runner_digest".to_owned(),
+            ValueSource::Literal("custom-release-value".to_owned()),
+        ),
+    ]));
+    fixture
+        .executor
+        .admit(&windows_envelope(vec![allowed]))
+        .expect("CI, custom prefixed names, and declarative NODE_OPTIONS remain valid on Windows");
     assert_eq!(fixture.provider.counts(), (0, 0, 0));
 }
 

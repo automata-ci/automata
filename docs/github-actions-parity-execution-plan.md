@@ -228,7 +228,7 @@ Exit criteria:
 
 - [ ] fork and Dependabot authority is reduced correctly;
 - [ ] pull-request path filters are runnable;
-- [ ] reserved runner environment names cannot be overwritten;
+- [x] reserved runner environment names cannot be overwritten;
 - [ ] matrix and expression behavior has differential fixtures;
 - [ ] official artifact/cache clients run against real product adapters;
 - [ ] unsupported jobs fail before a lease.

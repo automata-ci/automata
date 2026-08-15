@@ -79,10 +79,12 @@ Acceptance:
 
 Tasks:
 
-- [ ] Reject `GITHUB_*` and `RUNNER_*` writes from workflow and command-file
-  environments, case-insensitively on Windows.
-- [ ] Preserve the documented `CI` exception.
-- [ ] Continue blocking `NODE_OPTIONS` through `GITHUB_ENV`.
+- [x] Reject writes to documented default variables in the `GITHUB_*` and
+  `RUNNER_*` namespaces from workflow and command-file environments,
+  case-insensitively on Windows, without reserving custom names that merely
+  share those prefixes.
+- [x] Preserve the documented `CI` exception.
+- [x] Continue blocking `NODE_OPTIONS` through `GITHUB_ENV`.
 - [ ] Rotate environment, output, path, state, summary, and artifact files for
   every phase.
 - [ ] Match BOM, CRLF, multiline delimiter, duplicate-key, and invalid-name
@@ -96,7 +98,7 @@ Tasks:
 
 Acceptance:
 
-- [ ] A step cannot shadow runner identity or command-file paths.
+- [x] A step cannot shadow runner identity or command-file paths.
 - [ ] Phase files never leak between steps or action occurrences.
 
 ### ACT-01 — Checked-out local action `pre`

@@ -1,9 +1,65 @@
 use automata_ci_github_runtime::{
     ActionInvocationId, CommandFileDecoder, CommandFileKind, CommandFilePlatform,
-    CompletedStepApplicator, CompletedStepCommands, GithubCommandFileDecoder,
-    GithubCompletedStepApplicator, JobCommandState, ParsedCommandFile, PhaseApplicationNotice,
-    StepId, StepPhase, StepScope,
+    CompletedStepApplicator, CompletedStepCommands, EnvironmentMutationBlockReason,
+    GithubCommandFileDecoder, GithubCompletedStepApplicator, GithubWorkflowCommandSession,
+    JobCommandState, LegacyStepMutation, ParsedCommandFile, PhaseApplicationNotice,
+    ReservedEnvironmentNamespace, StepId, StepPhase, StepScope, WorkflowCommandEvent,
+    WorkflowCommandLimits, WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
+    classify_environment_mutation,
 };
+
+const GITHUB_PROTECTED_ENVIRONMENT_NAMES: &[&str] = &[
+    "GITHUB_ACTION",
+    "GITHUB_ACTION_PATH",
+    "GITHUB_ACTION_REF",
+    "GITHUB_ACTION_REPOSITORY",
+    "GITHUB_ACTIONS",
+    "GITHUB_ACTOR",
+    "GITHUB_ACTOR_ID",
+    "GITHUB_API_URL",
+    "GITHUB_ARTIFACTS",
+    "GITHUB_ARTIFACTS_LIST",
+    "GITHUB_BASE_REF",
+    "GITHUB_ENV",
+    "GITHUB_EVENT_NAME",
+    "GITHUB_EVENT_PATH",
+    "GITHUB_GRAPHQL_URL",
+    "GITHUB_HEAD_REF",
+    "GITHUB_JOB",
+    "GITHUB_OUTPUT",
+    "GITHUB_PATH",
+    "GITHUB_REF",
+    "GITHUB_REF_NAME",
+    "GITHUB_REF_PROTECTED",
+    "GITHUB_REF_TYPE",
+    "GITHUB_REPOSITORY",
+    "GITHUB_REPOSITORY_ID",
+    "GITHUB_REPOSITORY_OWNER",
+    "GITHUB_REPOSITORY_OWNER_ID",
+    "GITHUB_RETENTION_DAYS",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_NUMBER",
+    "GITHUB_SERVER_URL",
+    "GITHUB_SHA",
+    "GITHUB_STATE",
+    "GITHUB_STEP_SUMMARY",
+    "GITHUB_TRIGGERING_ACTOR",
+    "GITHUB_WORKFLOW",
+    "GITHUB_WORKFLOW_REF",
+    "GITHUB_WORKFLOW_SHA",
+    "GITHUB_WORKSPACE",
+];
+
+const RUNNER_PROTECTED_ENVIRONMENT_NAMES: &[&str] = &[
+    "RUNNER_ARCH",
+    "RUNNER_DEBUG",
+    "RUNNER_ENVIRONMENT",
+    "RUNNER_NAME",
+    "RUNNER_OS",
+    "RUNNER_TEMP",
+    "RUNNER_TOOL_CACHE",
+];
 
 fn commands(
     environment: &[u8],
@@ -272,4 +328,331 @@ fn environment_key_semantics_follow_target_platform() {
     // a later assignment replaces its value.
     assert_eq!(windows.environment()[0].name(), "Name");
     assert_eq!(windows.environment()[0].value(), "two");
+}
+
+#[test]
+fn protected_environment_classifier_covers_case_and_namespace_boundaries() {
+    for (catalog, namespace) in [
+        (
+            GITHUB_PROTECTED_ENVIRONMENT_NAMES,
+            ReservedEnvironmentNamespace::Github,
+        ),
+        (
+            RUNNER_PROTECTED_ENVIRONMENT_NAMES,
+            ReservedEnvironmentNamespace::Runner,
+        ),
+    ] {
+        for canonical in catalog {
+            assert_eq!(
+                classify_environment_mutation(CommandFilePlatform::Unix, canonical),
+                Some(EnvironmentMutationBlockReason::Reserved(namespace)),
+                "Unix must protect exact canonical name {canonical}"
+            );
+            for variant in [
+                canonical.to_ascii_lowercase(),
+                alternating_ascii_case(canonical),
+            ] {
+                assert_eq!(
+                    classify_environment_mutation(CommandFilePlatform::Windows, &variant),
+                    Some(EnvironmentMutationBlockReason::Reserved(namespace)),
+                    "Windows must protect case variant {variant}"
+                );
+                assert_eq!(
+                    classify_environment_mutation(CommandFilePlatform::Unix, &variant),
+                    None,
+                    "Unix must preserve distinct case variant {variant}"
+                );
+            }
+            assert_eq!(
+                classify_environment_mutation(CommandFilePlatform::Windows, canonical),
+                Some(EnvironmentMutationBlockReason::Reserved(namespace)),
+                "Windows must protect exact canonical name {canonical}"
+            );
+        }
+    }
+
+    for variant in ascii_case_variants("NODE_OPTIONS") {
+        for platform in [CommandFilePlatform::Unix, CommandFilePlatform::Windows] {
+            assert_eq!(
+                classify_environment_mutation(platform, &variant),
+                Some(EnvironmentMutationBlockReason::NodeOptions),
+                "NODE_OPTIONS protection must ignore ASCII case for {variant}"
+            );
+        }
+    }
+
+    for allowed in [
+        "CI",
+        "ci",
+        "Ci",
+        "cI",
+        "GITHUB",
+        "GITHUBX",
+        "GITHUB_TOKEN",
+        "GITHUB_CUSTOM",
+        "RUNNER",
+        "RUNNERX",
+        "RUNNER_DIGEST",
+        "RUNNER_CUSTOM",
+    ] {
+        for platform in [CommandFilePlatform::Unix, CommandFilePlatform::Windows] {
+            assert_eq!(
+                classify_environment_mutation(platform, allowed),
+                None,
+                "{allowed} is outside the protected default-variable catalog"
+            );
+        }
+    }
+}
+
+#[test]
+fn github_env_ignores_reserved_names_and_preserves_the_ci_exception() {
+    let files = commands(
+        b"GITHUB_ENV=attacker\nRUNNER_TEMP=attacker\nCI=custom\nGITHUB_TOKEN=token\nGITHUB_CUSTOM=github\nRUNNER_DIGEST=digest\nRUNNER_CUSTOM=runner\n",
+        b"",
+        b"",
+        b"",
+        b"",
+    );
+    let applied = GithubCompletedStepApplicator::default()
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &StepScope::new(
+                StepId::new("environment").expect("valid step ID"),
+                StepPhase::Run,
+            ),
+            &files,
+        )
+        .expect("bounded state");
+
+    assert_eq!(
+        value(applied.next_state().environment(), "GITHUB_ENV"),
+        None
+    );
+    assert_eq!(
+        value(applied.next_state().environment(), "RUNNER_TEMP"),
+        None
+    );
+    assert_eq!(
+        value(applied.next_state().environment(), "CI"),
+        Some("custom")
+    );
+    assert_eq!(
+        value(applied.next_state().environment(), "GITHUB_TOKEN"),
+        Some("token")
+    );
+    assert_eq!(
+        value(applied.next_state().environment(), "GITHUB_CUSTOM"),
+        Some("github")
+    );
+    assert_eq!(
+        value(applied.next_state().environment(), "RUNNER_DIGEST"),
+        Some("digest")
+    );
+    assert_eq!(
+        value(applied.next_state().environment(), "RUNNER_CUSTOM"),
+        Some("runner")
+    );
+    assert_eq!(
+        applied.notices(),
+        [
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Github,
+            ),
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Runner,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn github_env_default_name_case_follows_the_target_platform() {
+    let files = commands(
+        b"gItHuB_eNv=attacker\nrUnNeR_tEmP=attacker\nnode_options=attacker\nci=custom\n",
+        b"",
+        b"",
+        b"",
+        b"",
+    );
+    let scope = StepScope::new(
+        StepId::new("environment").expect("valid step ID"),
+        StepPhase::Run,
+    );
+    let applicator = GithubCompletedStepApplicator::default();
+
+    let unix = applicator
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &scope,
+            &files,
+        )
+        .expect("bounded Unix state");
+    assert_eq!(
+        value(unix.next_state().environment(), "gItHuB_eNv"),
+        Some("attacker")
+    );
+    assert_eq!(
+        value(unix.next_state().environment(), "rUnNeR_tEmP"),
+        Some("attacker")
+    );
+    assert_eq!(value(unix.next_state().environment(), "node_options"), None);
+    assert_eq!(value(unix.next_state().environment(), "ci"), Some("custom"));
+    assert_eq!(unix.notices(), [PhaseApplicationNotice::BlockedNodeOptions]);
+
+    let windows = applicator
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Windows),
+            &scope,
+            &files,
+        )
+        .expect("bounded Windows state");
+    assert_eq!(windows.next_state().environment().len(), 1);
+    assert_eq!(
+        value(windows.next_state().environment(), "ci"),
+        Some("custom")
+    );
+    assert_eq!(
+        windows.notices(),
+        [
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Github,
+            ),
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Runner,
+            ),
+            PhaseApplicationNotice::BlockedNodeOptions,
+        ]
+    );
+}
+
+#[test]
+fn legacy_set_env_default_names_are_applied_with_target_platform_semantics() {
+    let mutations = [
+        legacy_environment_mutation("GITHUB_ENV", "attacker"),
+        legacy_environment_mutation("RUNNER_TEMP", "attacker"),
+        legacy_environment_mutation("github_path", "unix-value"),
+        legacy_environment_mutation("runner_arch", "unix-value"),
+        legacy_environment_mutation("CI", "custom"),
+    ];
+    let files = commands(b"", b"", b"", b"", b"").with_legacy_mutations(&mutations);
+    let scope = StepScope::new(
+        StepId::new("legacy-environment").expect("valid step ID"),
+        StepPhase::Run,
+    );
+    let applicator = GithubCompletedStepApplicator::default();
+
+    let unix = applicator
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &scope,
+            &files,
+        )
+        .expect("bounded Unix state");
+    assert_eq!(
+        value(unix.next_state().environment(), "github_path"),
+        Some("unix-value")
+    );
+    assert_eq!(
+        value(unix.next_state().environment(), "runner_arch"),
+        Some("unix-value")
+    );
+    assert_eq!(value(unix.next_state().environment(), "CI"), Some("custom"));
+    assert_eq!(
+        unix.notices(),
+        [
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Github,
+            ),
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Runner,
+            ),
+        ]
+    );
+
+    let windows = applicator
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Windows),
+            &scope,
+            &files,
+        )
+        .expect("bounded Windows state");
+    assert_eq!(windows.next_state().environment().len(), 1);
+    assert_eq!(
+        value(windows.next_state().environment(), "CI"),
+        Some("custom")
+    );
+    assert_eq!(
+        windows.notices(),
+        [
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Github,
+            ),
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Runner,
+            ),
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Github,
+            ),
+            PhaseApplicationNotice::BlockedReservedEnvironment(
+                ReservedEnvironmentNamespace::Runner,
+            ),
+        ]
+    );
+}
+
+fn legacy_environment_mutation(name: &str, value: &str) -> LegacyStepMutation {
+    let mut session = GithubWorkflowCommandSession::new(
+        WorkflowCommandLimits::default(),
+        WorkflowCommandPolicy::new(true, true),
+    );
+    let line = format!("::set-env name={name}::{value}");
+    let event = session
+        .process_line(line.as_bytes())
+        .expect("valid legacy environment command");
+    let WorkflowLine::Command(WorkflowCommandEvent::LegacyMutation(mutation)) = event else {
+        panic!("expected a deferred legacy mutation for {name}");
+    };
+    mutation
+}
+
+fn ascii_case_variants(value: &str) -> Vec<String> {
+    value
+        .chars()
+        .fold(vec![String::new()], |variants, character| {
+            if character.is_ascii_alphabetic() {
+                variants
+                    .into_iter()
+                    .flat_map(|variant| {
+                        let mut lowercase = variant.clone();
+                        lowercase.push(character.to_ascii_lowercase());
+                        let mut uppercase = variant;
+                        uppercase.push(character.to_ascii_uppercase());
+                        [lowercase, uppercase]
+                    })
+                    .collect()
+            } else {
+                variants
+                    .into_iter()
+                    .map(|mut variant| {
+                        variant.push(character);
+                        variant
+                    })
+                    .collect()
+            }
+        })
+}
+
+fn alternating_ascii_case(value: &str) -> String {
+    value
+        .chars()
+        .enumerate()
+        .map(|(index, character)| {
+            if index.is_multiple_of(2) {
+                character.to_ascii_lowercase()
+            } else {
+                character.to_ascii_uppercase()
+            }
+        })
+        .collect()
 }

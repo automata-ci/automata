@@ -499,9 +499,11 @@ ID, but the corresponding runtime context/default variables remain missing.
   - [ ] 256 KB combined repository/organization delivery.
 - [ ] Treat configuration-variable names case-insensitively.
 - [ ] Prevent configuration variables from using the `GITHUB_` prefix.
-- [ ] Prevent jobs from overwriting `GITHUB_*` and `RUNNER_*`.
-- [ ] Continue allowing `CI` only as the documented exception.
-- [ ] Prevent `GITHUB_ENV` from setting `NODE_OPTIONS`.
+- [x] Prevent jobs from overwriting documented default variables in the
+  `GITHUB_*` and `RUNNER_*` namespaces without reserving custom names such as
+  `GITHUB_TOKEN` or `RUNNER_DIGEST`.
+- [x] Continue allowing `CI` only as the documented exception.
+- [x] Prevent `GITHUB_ENV` from setting `NODE_OPTIONS`.
 - [ ] Add a generated field-by-field context conformance suite.
 
 ## 8. Matrices, dependencies, and job graph execution
@@ -810,8 +812,9 @@ GitHub documents annotations, groups, masks, command stopping, state, and the
 - [ ] Preserve stop and resume command behavior across stdout and stderr.
 - [ ] Verify command parsing across fragmented output records.
 - [ ] Enforce annotation metadata fields and path, line, and column validation.
-- [ ] Enforce reserved `GITHUB_*` and `RUNNER_*` immutability.
-- [ ] Keep `NODE_OPTIONS` blocked through `GITHUB_ENV`.
+- [x] Enforce immutability for the documented default `GITHUB_*` and
+  `RUNNER_*` variables.
+- [x] Keep `NODE_OPTIONS` blocked through `GITHUB_ENV`.
 - [ ] Decide whether to support `ACTIONS_ALLOW_UNSECURE_COMMANDS`.
 - [ ] Match multiline environment/output delimiter parsing.
 - [ ] Match UTF-8 BOM behavior.
@@ -1333,7 +1336,7 @@ stating that a behavior is unsupported.
 - [ ] Correct `GITHUB_TOKEN` defaults, deny-all, OIDC-only, fork, and
   Dependabot behavior.
 - [ ] Make pull-request path filters runnable.
-- [ ] Enforce reserved environment variables.
+- [x] Enforce reserved runner-owned default environment variables.
 - [ ] Implement cancellation-aware cleanup and action posts.
 - [ ] Reject every parsed-but-unrunnable feature before scheduling.
 - [ ] Add the layered capability matrix.

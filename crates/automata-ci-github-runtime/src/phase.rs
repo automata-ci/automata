@@ -2,9 +2,10 @@ use std::fmt::Debug;
 
 use crate::model::{ActionState, SensitiveText, StepOutputState, artifact_list_byte_rejection};
 use crate::{
-    CommandFilePlatform, CompletedStepCommands, JobCommandState, MAX_ARTIFACT_LIST_BYTES,
-    MAX_ARTIFACT_SUBJECTS, NameValueCommand, PhaseApplication, PhaseApplicationError,
-    PhaseApplicationLimits, PhaseApplicationNotice, StepPhase, StepScope,
+    CommandFilePlatform, CompletedStepCommands, EnvironmentMutationBlockReason, JobCommandState,
+    MAX_ARTIFACT_LIST_BYTES, MAX_ARTIFACT_SUBJECTS, NameValueCommand, PhaseApplication,
+    PhaseApplicationError, PhaseApplicationLimits, PhaseApplicationNotice, StepPhase, StepScope,
+    classify_environment_mutation,
 };
 
 /// Object-safe pure port for committing command effects after step completion.
@@ -63,9 +64,18 @@ impl CompletedStepApplicator for GithubCompletedStepApplicator {
 
         let platform = next.platform;
         for command in commands.environment().commands() {
-            if command.name().eq_ignore_ascii_case("NODE_OPTIONS") {
-                notices.push(PhaseApplicationNotice::BlockedNodeOptions);
-                continue;
+            match classify_environment_mutation(platform, command.name()) {
+                Some(EnvironmentMutationBlockReason::NodeOptions) => {
+                    notices.push(PhaseApplicationNotice::BlockedNodeOptions);
+                    continue;
+                }
+                Some(EnvironmentMutationBlockReason::Reserved(namespace)) => {
+                    notices.push(PhaseApplicationNotice::BlockedReservedEnvironment(
+                        namespace,
+                    ));
+                    continue;
+                }
+                None => {}
             }
             replace_name_value(&mut next.environment, command.clone(), |left, right| {
                 environment_names_equal(platform, left, right)

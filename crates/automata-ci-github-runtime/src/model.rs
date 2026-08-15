@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::environment::ReservedEnvironmentNamespace;
 use crate::{ArtifactListEncodingError, ArtifactSubjectError, CommandScopeIdError};
 
 const MAX_SCOPE_ID_BYTES: usize = 512;
@@ -802,6 +803,8 @@ impl fmt::Debug for JobCommandState {
 pub enum PhaseApplicationNotice {
     /// A `NODE_OPTIONS` environment mutation was intentionally ignored.
     BlockedNodeOptions,
+    /// A mutation of a runner-owned default environment variable was ignored.
+    BlockedReservedEnvironment(ReservedEnvironmentNamespace),
     /// `GITHUB_STATE` content was ignored because a plain run step has no post phase.
     StateIgnoredForRunStep,
 }
