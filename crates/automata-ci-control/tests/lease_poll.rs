@@ -464,6 +464,30 @@ async fn unavailable_action_runtime_requirements_never_create_a_lease() {
 }
 
 #[tokio::test]
+async fn unavailable_service_container_requirement_never_creates_a_lease() {
+    let mut fixture = fixture(RunnerSlotAvailability::Available, true);
+    fixture.repository.candidates = vec![runnable(
+        RunId::new(),
+        50,
+        ["trusted"],
+        Some("trusted-group"),
+        RunnerRequirements::default()
+            .with_container_features([ContainerFeature::SERVICE_CONTAINERS]),
+    )];
+
+    let outcome = service(&fixture)
+        .poll(fixture.authenticated, &fixture.request)
+        .await
+        .expect("unsupported service containers are a normal pre-lease no-work result");
+
+    assert_eq!(outcome, LeasePollOutcome::NoWork { replayed: false });
+    assert_eq!(
+        fixture.repository.calls(),
+        ["lookup", "routing", "availability", "scan", "no_work"]
+    );
+}
+
+#[tokio::test]
 async fn ineligible_attempts_never_reach_scheduling_or_claim() {
     let fixture = fixture(RunnerSlotAvailability::Available, true);
     let expected_evaluations = fixture
