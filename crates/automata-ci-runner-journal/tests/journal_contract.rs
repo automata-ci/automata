@@ -11,7 +11,7 @@ use automata_ci_runner_journal::{
     RunnerJournal, SandboxHandle, SandboxIdentity,
 };
 use static_assertions::assert_obj_safe;
-use support::{Fixture, Scratch, record_and_ack_terminal};
+use support::{Fixture, Scratch, record_and_ack_runtime_authority, record_and_ack_terminal};
 
 assert_obj_safe!(RunnerJournal);
 
@@ -179,7 +179,6 @@ fn deserialized_offer_with_invalid_lease_interval_cannot_enter_journal() {
             invalid.slot(),
             invalid.lease().clone(),
             invalid.job_ir().clone(),
-            invalid.runtime_authorities().clone(),
             invalid.command(),
         ),
         Err(JournalInvariantError::InvalidLease)
@@ -501,6 +500,7 @@ fn provider_saga_requires_intent_and_preserves_recovery_identity() {
     journal
         .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
         .expect("accept");
+    record_and_ack_runtime_authority(&journal, &fixture);
 
     let create_id = OperationId::new();
     let sandbox = SandboxIdentity::new(
@@ -564,6 +564,7 @@ fn prepare_running_sandbox(journal: &dyn RunnerJournal, fixture: &Fixture) {
     journal
         .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
         .expect("accept");
+    record_and_ack_runtime_authority(journal, fixture);
     journal
         .transition_lifecycle(
             fixture.session_id,

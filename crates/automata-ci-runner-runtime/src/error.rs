@@ -14,6 +14,8 @@ use crate::{
 pub enum RemotePhase {
     /// Lease acceptance or rejection.
     LeaseResponse,
+    /// Post-accept runtime-authority request or acknowledgement.
+    RuntimeAuthorityDelivery,
     /// Active-lease heartbeat and renewal.
     LeaseHeartbeat,
     /// Fenced lifecycle publication.

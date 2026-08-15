@@ -12,17 +12,17 @@ current support. The [implementation plan](implementation-plan.md) owns release
 gates. This page is an execution aid: unchecked tasks are planned work, not
 availability claims.
 
-The refreshed greenfield baseline uses runner protocol v1, message schema v1,
-JobIR schema v1, runner-requirements schema v1, and one canonical
-`0001_initial_schema.sql`. It has no supported database or mixed-version
-upgrade source. It also contains a real Kubernetes product-composition path,
-three independent
-single-slot Linux runner processes, durable workflow reruns and protected
-environment lease authority, and immutable multi-workflow fanout. These are
-component or experimental foundations unless their package records product
-acceptance. Hosted Windows CI is currently disabled, so the Windows gate is an
-independent restoration task rather than a prerequisite for the repository's
-current Ubuntu-only CI workflow.
+The refreshed greenfield baseline uses runner protocol v2, message schema v1,
+JobIR schema v1, runner-requirements schema v1, and a frozen additive
+PostgreSQL migration lineage. The lineage is gap-free, checksum-verified, and
+extended only through a new migration. The baseline also contains a real
+Kubernetes product-composition path, three independent single-slot Linux runner
+processes, durable workflow reruns and protected environment lease authority,
+and immutable multi-workflow fanout. These are component or experimental
+foundations unless their package records product acceptance. Hosted Windows CI
+is currently disabled, so the Windows gate is an independent restoration task
+rather than a prerequisite for the repository's current Ubuntu-only CI
+workflow.
 
 The runtime preserves exact sandbox cleanup custody when an uncertain create
 failure returns a recovery handle. Missing-custody state remains fenced rather
@@ -139,9 +139,9 @@ These files and contracts are merge hotspots. Assign one owner at a time.
 
 Additional coordination rules:
 
-- [x] Keep the unreleased greenfield store as one canonical
-  `0001_initial_schema.sql`; fold schema changes into that baseline, and do not
-  create or reserve `0002` while there is no released schema to upgrade.
+- [x] Keep the frozen additive PostgreSQL migration lineage gap-free and
+  checksum-verified; add schema changes at the next version rather than
+  editing an existing migration.
 - [ ] Introduce ordered upgrade migrations only after a released schema creates
   durable state that the project commits to preserve. Before supporting an
   upgrade, define reservation, immutability, forward-reader, rollback, and

@@ -354,6 +354,39 @@ impl RunnerJournal for FileJournal {
         })
     }
 
+    fn record_runtime_authority_delivery(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        delivery: crate::RuntimeAuthorityDeliveryRecord,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Lease, |state| {
+            state.record_runtime_authority_delivery(session_id, slot, guard, delivery)
+        })
+    }
+
+    fn acknowledge_runtime_authority_delivery(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        generation: automata_ci_protocol::RuntimeAuthorityGeneration,
+        bundle_digest: automata_ci_core::Sha256Digest,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Lease, |state| {
+            state.acknowledge_runtime_authority_delivery(
+                session_id,
+                slot,
+                guard,
+                generation,
+                bundle_digest,
+                operation_id,
+            )
+        })
+    }
+
     fn reject_lease(
         &self,
         session_id: RunnerSessionId,

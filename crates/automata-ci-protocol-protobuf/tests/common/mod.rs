@@ -21,13 +21,15 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
-    HandshakeRejected, JobResultMessage, JobRuntimeAuthorities, JobRuntimeAuthority,
-    JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason,
-    LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch,
-    ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession, NoWork, OperationAck,
-    RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential,
-    RuntimeAuthorityEndpoint, RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
-    ServerHello, ServerTiming, ServerToRunner, SessionDisposition, SessionResume,
+    HandshakeRejected, INITIAL_RUNTIME_AUTHORITY_GENERATION, JobResultMessage,
+    JobRuntimeAuthorities, JobRuntimeAuthority, JobStateUpdate, LeaseDisposition, LeaseHeartbeat,
+    LeaseOffer, LeaseRejectionReason, LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage,
+    LogBatch, ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession, NoWork, OperationAck,
+    RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck,
+    RuntimeAuthorityCredential, RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint,
+    RuntimeAuthorityGrant, RuntimeAuthorityName, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
+    ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
+    SessionResume,
 };
 use uuid::Uuid;
 
@@ -35,6 +37,9 @@ pub fn runner_messages() -> Vec<(&'static str, RunnerToServer)> {
     let attempt_id = attempt_id(30);
     let guard = guard();
     let cursor = CommandCursor::through(sequence(7));
+    let offer = lease_offer_with_job(rich_job());
+    let binding = runtime_authority_binding(&offer);
+    let bundle_digest = Sha256Digest::from_bytes([0xc7; 32]);
     vec![
         (
             "hello",
@@ -107,12 +112,30 @@ pub fn runner_messages() -> Vec<(&'static str, RunnerToServer)> {
             "command_ack",
             RunnerToServer::CommandAck(CommandAck::new(request_header(18), cursor)),
         ),
+        (
+            "runtime_authority_request",
+            RunnerToServer::RuntimeAuthorityRequest(RuntimeAuthorityRequest::new(
+                request_header(19),
+                binding,
+            )),
+        ),
+        (
+            "runtime_authority_ack",
+            RunnerToServer::RuntimeAuthorityAck(RuntimeAuthorityAck::new(
+                request_header(20),
+                binding,
+                bundle_digest,
+            )),
+        ),
     ]
 }
 
 pub fn server_messages() -> Vec<(&'static str, ServerToRunner)> {
     let attempt_id = attempt_id(30);
     let guard = active_lease(attempt_id, runner_id(1)).guard();
+    let offer = lease_offer_with_job(rich_job());
+    let binding = runtime_authority_binding(&offer);
+    let authorities = runtime_authorities(offer.job(), offer.lease());
     vec![
         (
             "hello",
@@ -139,9 +162,15 @@ pub fn server_messages() -> Vec<(&'static str, ServerToRunner)> {
                 "no common JobIR schema",
             )),
         ),
+        ("lease_offer", ServerToRunner::LeaseOffer(Box::new(offer))),
         (
-            "lease_offer",
-            ServerToRunner::LeaseOffer(Box::new(lease_offer_with_job(rich_job()))),
+            "runtime_authority_grant",
+            ServerToRunner::RuntimeAuthorityGrant(Box::new(RuntimeAuthorityGrant::new(
+                reply_header(67, 19),
+                binding,
+                Sha256Digest::from_bytes([0xc7; 32]),
+                authorities,
+            ))),
         ),
         (
             "lease_renewal",
@@ -374,8 +403,19 @@ pub fn rich_job_with_requirements(requirements: RunnerRequirements) -> JobIrEnve
 
 pub fn lease_offer_with_job(job: JobIrEnvelope) -> LeaseOffer {
     let lease = active_lease(attempt_id(30), runner_id(1));
-    let authorities = runtime_authorities(&job, &lease);
-    LeaseOffer::new(command_header(55, 1), slot(), lease, job, authorities)
+    LeaseOffer::new(command_header(55, 1), slot(), lease, job)
+}
+
+pub fn runtime_authority_binding(offer: &LeaseOffer) -> RuntimeAuthorityDeliveryBinding {
+    RuntimeAuthorityDeliveryBinding::new(
+        offer.lease().attempt_id(),
+        offer.slot(),
+        offer.lease().guard(),
+        offer.header().operation_id(),
+        offer.header().sequence(),
+        Sha256Digest::from_bytes([0xb7; 32]),
+        INITIAL_RUNTIME_AUTHORITY_GENERATION,
+    )
 }
 
 pub fn managed_secret_overlay(lease: &Lease) -> ManagedSecretBindingOverlay {

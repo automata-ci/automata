@@ -17,7 +17,8 @@ use super::{
     LogSegmentAcknowledgement, LogSegmentPublication, OrphanAbandonmentReason,
     OrphanAuthorityGrant, OrphanDelivery, OrphanRecord, OutboundOperationCursor,
     OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation, ProviderOperationKind,
-    ProviderOperationOutcome, SandboxIdentity, TerminalResultRecord,
+    ProviderOperationOutcome, RuntimeAuthorityDeliveryRecord, SandboxIdentity,
+    TerminalResultRecord,
 };
 use crate::{
     JournalInvariantError, MAX_COMMAND_TOMBSTONES, MAX_JOURNALED_SLOTS,
@@ -204,6 +205,7 @@ impl LeasePollCheckpoint {
 pub struct SlotSnapshot {
     offer: LeaseOfferRecord,
     offer_status: LeaseOfferStatus,
+    runtime_authority_delivery: Option<RuntimeAuthorityDeliveryRecord>,
     rejection: Option<LeaseRejectionRecord>,
     rejection_enqueued_at: Option<UnixMillis>,
     expires_at: UnixMillis,
@@ -287,6 +289,7 @@ impl SlotSnapshot {
             expires_at: offer.expires_at(),
             offer,
             offer_status: LeaseOfferStatus::Recorded,
+            runtime_authority_delivery: None,
             rejection: None,
             rejection_enqueued_at: None,
             lifecycle: JobLifecycle::Leased,
@@ -318,6 +321,12 @@ impl SlotSnapshot {
     #[must_use]
     pub const fn offer_status(&self) -> LeaseOfferStatus {
         self.offer_status
+    }
+
+    /// Returns the protected post-accept authority delivery, when received.
+    #[must_use]
+    pub const fn runtime_authority_delivery(&self) -> Option<&RuntimeAuthorityDeliveryRecord> {
+        self.runtime_authority_delivery.as_ref()
     }
 
     /// Returns the exact rejected-offer outbox record, when rejected.
@@ -406,6 +415,7 @@ impl SlotSnapshot {
         session: &SessionSnapshot,
     ) -> Result<(), JournalInvariantError> {
         self.offer.validate()?;
+        self.validate_runtime_authority_delivery()?;
         if self.offer.lease().runner_id() != runner_id {
             return Err(JournalInvariantError::LeaseRunnerMismatch);
         }
@@ -497,6 +507,25 @@ impl SlotSnapshot {
         Ok(())
     }
 
+    fn validate_runtime_authority_delivery(&self) -> Result<(), JournalInvariantError> {
+        let Some(delivery) = &self.runtime_authority_delivery else {
+            return Ok(());
+        };
+        delivery.validate()?;
+        let binding = delivery.binding();
+        if self.offer_status != LeaseOfferStatus::Accepted
+            || binding.attempt_id() != self.offer.lease().attempt_id()
+            || binding.slot() != self.offer.slot()
+            || binding.guard() != self.offer.lease().guard()
+            || binding.offer_operation_id() != self.offer.command().operation_id()
+            || binding.offer_sequence() != self.offer.command().sequence()
+            || binding.job_ir_digest() != self.offer.job_ir().content().sha256()
+        {
+            return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
+        }
+        Ok(())
+    }
+
     fn validate_delivery_timestamps(&self) -> Result<(), JournalInvariantError> {
         if self.rejection.is_some() != self.rejection_enqueued_at.is_some()
             || self.terminal_result.is_some() != self.terminal_result_enqueued_at.is_some()
@@ -534,6 +563,14 @@ impl SlotSnapshot {
 
     fn validate_provider_state(&self) -> Result<(), JournalInvariantError> {
         if !self.provider_operations.is_empty() && self.offer_status != LeaseOfferStatus::Accepted {
+            return Err(JournalInvariantError::DecodedStateInvalid);
+        }
+        if (!self.provider_operations.is_empty() || self.sandbox.is_some())
+            && !self
+                .runtime_authority_delivery
+                .as_ref()
+                .is_some_and(RuntimeAuthorityDeliveryRecord::is_acknowledged)
+        {
             return Err(JournalInvariantError::DecodedStateInvalid);
         }
         if !self.provider_checkpoint.is_coherent() {
@@ -761,7 +798,11 @@ impl JournalSnapshot {
     pub fn content_references(&self) -> impl Iterator<Item = &DurableContentRef> {
         self.slots.iter().flat_map(|slot| {
             std::iter::once(slot.offer.job_ir().content())
-                .chain(std::iter::once(slot.offer.runtime_authorities().content()))
+                .chain(
+                    slot.runtime_authority_delivery
+                        .as_ref()
+                        .map(|delivery| delivery.content().content()),
+                )
                 .chain(
                     slot.terminal_result
                         .as_ref()
@@ -1140,6 +1181,55 @@ impl StoredJournal {
             LeaseOfferStatus::Accepted => Ok(false),
             LeaseOfferStatus::Rejected => Err(JournalInvariantError::OfferAlreadyRejected),
         }
+    }
+
+    pub(crate) fn record_runtime_authority_delivery(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        delivery: RuntimeAuthorityDeliveryRecord,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        if slot.offer_status != LeaseOfferStatus::Accepted {
+            return Err(JournalInvariantError::OfferNotAccepted);
+        }
+        delivery.validate()?;
+        let binding = delivery.binding();
+        if binding.attempt_id() != slot.offer.lease().attempt_id()
+            || binding.slot() != slot.offer.slot()
+            || binding.guard() != slot.offer.lease().guard()
+            || binding.offer_operation_id() != slot.offer.command().operation_id()
+            || binding.offer_sequence() != slot.offer.command().sequence()
+            || binding.job_ir_digest() != slot.offer.job_ir().content().sha256()
+        {
+            return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
+        }
+        match &slot.runtime_authority_delivery {
+            Some(existing) if existing == &delivery => Ok(false),
+            Some(_) => Err(JournalInvariantError::RuntimeAuthorityDeliveryReplayConflict),
+            None => {
+                slot.runtime_authority_delivery = Some(delivery);
+                Ok(true)
+            }
+        }
+    }
+
+    pub(crate) fn acknowledge_runtime_authority_delivery(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        generation: automata_ci_protocol::RuntimeAuthorityGeneration,
+        bundle_digest: automata_ci_core::Sha256Digest,
+        operation_id: OperationId,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        let delivery = slot
+            .runtime_authority_delivery
+            .as_mut()
+            .ok_or(JournalInvariantError::InvalidRuntimeAuthorityDelivery)?;
+        delivery.acknowledge(generation, bundle_digest, operation_id)
     }
 
     pub(crate) fn reject_offer(

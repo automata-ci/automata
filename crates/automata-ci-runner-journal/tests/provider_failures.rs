@@ -9,7 +9,7 @@ use automata_ci_runner_journal::{
     ProviderFailureOutcome, ProviderName, ProviderOperation, ProviderOperationKind,
     ProviderOperationOutcome, RunnerJournal, SandboxHandle, SandboxIdentity,
 };
-use support::{Fixture, Scratch, record_and_ack_terminal};
+use support::{Fixture, Scratch, record_and_ack_runtime_authority, record_and_ack_terminal};
 
 #[derive(Debug)]
 struct FailAfterRename;
@@ -41,6 +41,7 @@ fn prepare_accepted(journal: &dyn RunnerJournal, fixture: &Fixture) {
     journal
         .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
         .expect("accept offer");
+    record_and_ack_runtime_authority(journal, fixture);
     journal
         .transition_lifecycle(
             fixture.session_id,

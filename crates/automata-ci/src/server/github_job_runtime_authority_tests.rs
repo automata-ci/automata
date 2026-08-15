@@ -40,7 +40,10 @@ use automata_ci_store::{
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use super::{GithubJobRuntimeAuthorityResolver, UnavailableGithubJobRuntimeAuthorityIssuer};
+use super::{
+    GithubJobRuntimeAuthorityResolver, UnavailableGithubJobRuntimeAuthorityIssuer,
+    github_repository_authority_is_requested,
+};
 
 const ISSUED_AT: i64 = 1_800_000_000_000;
 
@@ -60,7 +63,6 @@ impl Fixture {
     }
 
     fn new(provider: &str, profile: JobAuthorityProfile) -> Self {
-        let runner_id = RunnerId::new();
         let permissions = match profile {
             JobAuthorityProfile::Standard => JobPermissionRequest::mapping([
                 JobPermissionGrant::new("contents", PermissionLevel::Read),
@@ -68,6 +70,15 @@ impl Fixture {
             ]),
             JobAuthorityProfile::CredentialFree => JobPermissionRequest::mapping([]),
         };
+        Self::with_permissions(provider, profile, permissions)
+    }
+
+    fn with_permissions(
+        provider: &str,
+        profile: JobAuthorityProfile,
+        permissions: JobPermissionRequest,
+    ) -> Self {
+        let runner_id = RunnerId::new();
         let job = JobIrEnvelope::new(
             WorkflowId::new(),
             JobSource::new(
@@ -456,6 +467,50 @@ async fn credential_free_and_foreign_jobs_decline_but_disabled_github_standard_i
             .issue_optional(standard.request())
             .await
             .expect_err("disabled GitHub Standard must fail"),
+        ControlPortError::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn oidc_only_and_explicit_repository_denial_never_request_a_github_token() {
+    let guard = UnavailableGithubJobRuntimeAuthorityIssuer;
+    for permissions in [
+        JobPermissionRequest::mapping([]),
+        JobPermissionRequest::mapping([JobPermissionGrant::new("contents", PermissionLevel::None)]),
+        JobPermissionRequest::mapping([JobPermissionGrant::new(
+            "id-token",
+            PermissionLevel::Write,
+        )]),
+        JobPermissionRequest::mapping([
+            JobPermissionGrant::new("contents", PermissionLevel::None),
+            JobPermissionGrant::new("id-token", PermissionLevel::Write),
+        ]),
+    ] {
+        let fixture =
+            Fixture::with_permissions("github", JobAuthorityProfile::Standard, permissions);
+        assert!(!github_repository_authority_is_requested(&fixture.job));
+        assert!(
+            guard
+                .issue_optional(fixture.request())
+                .await
+                .expect("repository-denied job must decline GitHub token issuance")
+                .is_none()
+        );
+    }
+
+    let repository_read = Fixture::with_permissions(
+        "github",
+        JobAuthorityProfile::Standard,
+        JobPermissionRequest::mapping([JobPermissionGrant::new("contents", PermissionLevel::Read)]),
+    );
+    assert!(github_repository_authority_is_requested(
+        &repository_read.job
+    ));
+    assert_eq!(
+        guard
+            .issue_optional(repository_read.request())
+            .await
+            .expect_err("disabled GitHub authority must not silently drop a repository grant"),
         ControlPortError::Unavailable
     );
 }

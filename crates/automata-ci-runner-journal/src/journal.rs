@@ -1,14 +1,14 @@
 use automata_ci_core::{
-    JobLifecycle, LeaseGuard, LogStreamId, OperationId, RunnerSessionId, UnixMillis,
+    JobLifecycle, LeaseGuard, LogStreamId, OperationId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
-use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal};
+use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal, RuntimeAuthorityGeneration};
 
 use crate::{
     CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef, JournalError,
     JournalSnapshot, LeaseOfferRecord, LogSegmentAcknowledgement, LogSegmentPublication,
     OrphanAbandonmentReason, OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanDelivery,
-    OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation, SandboxIdentity,
-    SessionBinding, TerminalResultRecord,
+    OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation,
+    RuntimeAuthorityDeliveryRecord, SandboxIdentity, SessionBinding, TerminalResultRecord,
 };
 
 /// Backend-neutral, object-safe port for crash-recoverable runner state.
@@ -109,6 +109,35 @@ pub trait RunnerJournal: Send + Sync {
         session_id: RunnerSessionId,
         slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Adopts protected authority bytes for an exact accepted offer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] unless the lease is accepted and every offer,
+    /// generation, digest, operation, and content binding is exact.
+    fn record_runtime_authority_delivery(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        delivery: RuntimeAuthorityDeliveryRecord,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Marks the exact protected authority generation acknowledged by control.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] for missing, stale, or conflicting delivery state.
+    fn acknowledge_runtime_authority_delivery(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        generation: RuntimeAuthorityGeneration,
+        bundle_digest: Sha256Digest,
+        operation_id: OperationId,
     ) -> Result<JournalSnapshot, JournalError>;
 
     /// Persists the exact rejected-offer response and its caller-observed

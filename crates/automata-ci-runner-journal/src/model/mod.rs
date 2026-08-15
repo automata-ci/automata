@@ -8,7 +8,7 @@ mod value;
 
 pub use command::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, CommandTombstone, DurableCommand,
-    LeaseOfferRecord, LeaseRejectionRecord,
+    LeaseOfferRecord, LeaseRejectionRecord, RuntimeAuthorityDeliveryRecord,
 };
 pub use content::{JobIrContentRef, RuntimeAuthorityContentRef, TerminalResultRecord};
 pub use cursor::{

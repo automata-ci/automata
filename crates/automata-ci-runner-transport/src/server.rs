@@ -1143,6 +1143,9 @@ fn sync_response_matches_request(request: &RunnerToServer, response: &ServerToRu
             .header()
             .validate_for(header.protocol_version(), header.session_id())
             .is_ok(),
+        ServerToRunner::RuntimeAuthorityGrant(grant) => {
+            grant.header().validate_reply_for(header).is_ok()
+        }
         ServerToRunner::CancelJob(cancel) => cancel
             .header()
             .validate_for(header.protocol_version(), header.session_id())
@@ -1164,6 +1167,8 @@ const fn runner_request_header(
         RunnerToServer::Hello(_) => None,
         RunnerToServer::LeaseRequest(value) => Some(value.header()),
         RunnerToServer::LeaseResponse(value) => Some(value.header()),
+        RunnerToServer::RuntimeAuthorityRequest(value) => Some(value.header()),
+        RunnerToServer::RuntimeAuthorityAck(value) => Some(value.header()),
         RunnerToServer::Heartbeat(value) => Some(value.header()),
         RunnerToServer::JobState(value) => Some(value.header()),
         RunnerToServer::JobResult(value) => Some(value.header()),

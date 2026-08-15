@@ -9,11 +9,14 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobIrVersion, JobLifecycle, Lease, LeaseId, LogSequence, LogStreamId,
     OperationId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
-use automata_ci_protocol::{CommandSequence, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal};
+use automata_ci_protocol::{
+    CommandSequence, INITIAL_RUNTIME_AUTHORITY_GENERATION, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal,
+    RuntimeAuthorityDeliveryBinding,
+};
 use automata_ci_runner_journal::{
     ContentKind, DurableCommand, DurableContentRef, FileJournal, JobIrContentRef, LeaseOfferRecord,
-    LogSegment, LogSegmentPublication, RunnerJournal, RuntimeAuthorityContentRef, SessionBinding,
-    StateRoot, TerminalResultRecord,
+    LogSegment, LogSegmentPublication, RunnerJournal, RuntimeAuthorityContentRef,
+    RuntimeAuthorityDeliveryRecord, SessionBinding, StateRoot, TerminalResultRecord,
 };
 use automata_ci_runner_spool::ProtectionId;
 use automata_ci_runner_spool::{ContentProtectionError, ContentProtector, SpoolRoot};
@@ -172,7 +175,6 @@ impl Fixture {
                 Self::content(ContentKind::JobIr, 128, 0x5a),
             )
             .expect("valid JobIR content"),
-            Self::runtime_authority(),
             Self::command(sequence),
         )
         .expect("valid offer")
@@ -210,6 +212,36 @@ impl Fixture {
             .expect("valid runtime-authority content")
     }
 
+    pub fn runtime_authority_delivery(
+        &self,
+        offer: &LeaseOfferRecord,
+    ) -> RuntimeAuthorityDeliveryRecord {
+        self.runtime_authority_delivery_with_content(offer, Self::runtime_authority())
+    }
+
+    pub fn runtime_authority_delivery_with_content(
+        &self,
+        offer: &LeaseOfferRecord,
+        content: RuntimeAuthorityContentRef,
+    ) -> RuntimeAuthorityDeliveryRecord {
+        RuntimeAuthorityDeliveryRecord::new(
+            RuntimeAuthorityDeliveryBinding::new(
+                self.lease.attempt_id(),
+                offer.slot(),
+                self.lease.guard(),
+                offer.command().operation_id(),
+                offer.command().sequence(),
+                offer.job_ir().content().sha256(),
+                INITIAL_RUNTIME_AUTHORITY_GENERATION,
+            ),
+            OperationId::new(),
+            OperationId::new(),
+            content.content().sha256(),
+            content,
+        )
+        .expect("valid runtime-authority delivery")
+    }
+
     pub fn terminal_result() -> TerminalResultRecord {
         TerminalResultRecord::new(
             OperationId::new(),
@@ -245,6 +277,38 @@ impl Fixture {
     pub fn open(&self, scratch: &Scratch) -> FileJournal {
         FileJournal::open(scratch.state_root(), self.runner_id).expect("open journal")
     }
+}
+
+pub fn record_and_ack_runtime_authority(journal: &dyn RunnerJournal, fixture: &Fixture) {
+    let snapshot = journal.snapshot().expect("snapshot accepted offer");
+    let offer = snapshot
+        .slot(fixture.slot)
+        .expect("accepted slot")
+        .offer()
+        .clone();
+    let delivered = journal
+        .record_runtime_authority_delivery(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            fixture.runtime_authority_delivery(&offer),
+        )
+        .expect("record runtime-authority delivery");
+    let delivery = delivered
+        .slot(fixture.slot)
+        .expect("accepted slot")
+        .runtime_authority_delivery()
+        .expect("runtime-authority delivery");
+    journal
+        .acknowledge_runtime_authority_delivery(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            delivery.binding().generation(),
+            delivery.bundle_digest(),
+            delivery.acknowledgement_operation_id(),
+        )
+        .expect("acknowledge runtime-authority delivery");
 }
 
 pub fn journal_file(root: &Path) -> PathBuf {

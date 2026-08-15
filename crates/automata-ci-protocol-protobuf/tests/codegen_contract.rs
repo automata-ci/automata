@@ -1,14 +1,19 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
+#[cfg(unix)]
 fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
 #[test]
+#[cfg(unix)]
 fn checked_in_dto_matches_fresh_pinned_codegen() {
     let root = crate_root();
     let output = Command::new(root.join("tools/protobuf-codegen.sh"))

@@ -37,7 +37,7 @@ use automata_ci_control::runner_control::{
     capability_admission::{RunnerCapabilityAdmissionRepository as _, RunnerCapabilityReadiness},
     durable::{
         CurrentRunnerSessionRepository, RunnerControlTransactionRepository,
-        RunnerLeaseOfferRepository,
+        RunnerLeaseOfferRepository, RuntimeAuthorityDeliveryRepository,
     },
     repository::{RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository},
 };
@@ -550,6 +550,8 @@ impl ProductionComponents {
         let receipts: Arc<dyn RunnerOperationReceiptRepository> = store.clone();
         let lease_requests: Arc<dyn RunnerLeaseRequestRepository> = store.clone();
         let command_outbox: Arc<dyn RunnerCommandOutbox> = store.clone();
+        let runtime_authority_deliveries: Arc<dyn RuntimeAuthorityDeliveryRepository> =
+            store.clone();
         let authorizer: Arc<dyn RunnerRegistrationAuthorizer> = authenticator.clone();
         let managed_secret_binding_issuer: Option<Arc<dyn ManagedSecretBindingIssuer>> =
             if secret_build.delivery_provider.is_some() {
@@ -571,6 +573,7 @@ impl ProductionComponents {
                 receipts,
                 lease_requests,
                 command_outbox,
+                runtime_authority_deliveries,
             ),
             lease_clock,
             control_ids,

@@ -39,6 +39,8 @@ pub(super) fn validate_runner_message(
         }
         RunnerToServer::LeaseRequest(request) => request.validate(),
         RunnerToServer::LeaseResponse(response) => response.header().validate_request(),
+        RunnerToServer::RuntimeAuthorityRequest(request) => request.validate(),
+        RunnerToServer::RuntimeAuthorityAck(acknowledgement) => acknowledgement.validate(),
         RunnerToServer::Heartbeat(heartbeat) => heartbeat.header().validate_request(),
         RunnerToServer::JobState(update) => update.header().validate_request(),
         RunnerToServer::JobResult(message) => {
@@ -77,15 +79,12 @@ pub(super) fn validate_server_message(
             offer.header().validate()?;
             offer.lease().validate()?;
             validate_job(offer.job(), limits)?;
-            offer
-                .runtime_authorities()
-                .ok_or(MessageValidationError::MissingRuntimeAuthorities)?
-                .validate_for(offer.job(), offer.lease())?;
             if let Some(overlay) = offer.managed_secret_bindings() {
                 overlay.validate_for(offer.lease())?;
             }
             Ok(())
         }
+        ServerToRunner::RuntimeAuthorityGrant(grant) => grant.validate(),
         ServerToRunner::LeaseRenewal(renewal) => renewal.header().validate_reply(),
         ServerToRunner::CancelJob(cancel) => {
             cancel.header().validate()?;
@@ -845,9 +844,6 @@ pub enum MessageValidationError {
     /// A command acknowledgement carries the initial empty cursor.
     #[error("command acknowledgement must advance through at least one command")]
     EmptyCommandAcknowledgement,
-    /// A lease offer omits its protected runtime-authority bundle.
-    #[error("current protocol lease offers require protected runtime authority")]
-    MissingRuntimeAuthorities,
     /// A named scalar whose protocol contract requires a positive value is zero.
     #[error("{0} must be nonzero")]
     ZeroValue(&'static str),
@@ -926,6 +922,9 @@ pub enum MessageValidationError {
     /// A runtime-authority bundle violates schema, bounds, or execution binding.
     #[error(transparent)]
     RuntimeAuthority(#[from] super::RuntimeAuthorityError),
+    /// Runtime-authority delivery metadata is invalid or conflicting.
+    #[error(transparent)]
+    RuntimeAuthorityDelivery(#[from] super::RuntimeAuthorityDeliveryError),
     /// A managed-secret overlay violates canonical form, digest, or lease binding.
     #[error(transparent)]
     ManagedSecretBindingOverlay(#[from] super::ManagedSecretBindingOverlayError),

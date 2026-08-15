@@ -3,7 +3,10 @@
 pub struct Unit {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RunnerFrame {
-    #[prost(oneof = "runner_frame::Payload", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
+    #[prost(
+        oneof = "runner_frame::Payload",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10"
+    )]
     pub payload: ::core::option::Option<runner_frame::Payload>,
 }
 /// Nested message and enum types in `RunnerFrame`.
@@ -26,11 +29,18 @@ pub mod runner_frame {
         LogBatch(super::LogBatch),
         #[prost(message, tag = "8")]
         CommandAck(super::CommandAck),
+        #[prost(message, tag = "9")]
+        RuntimeAuthorityRequest(super::RuntimeAuthorityRequest),
+        #[prost(message, tag = "10")]
+        RuntimeAuthorityAck(super::RuntimeAuthorityAck),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerFrame {
-    #[prost(oneof = "server_frame::Payload", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(
+        oneof = "server_frame::Payload",
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10"
+    )]
     pub payload: ::core::option::Option<server_frame::Payload>,
 }
 /// Nested message and enum types in `ServerFrame`.
@@ -55,6 +65,8 @@ pub mod server_frame {
         NoWork(super::NoWork),
         #[prost(message, tag = "9")]
         Error(super::ErrorMessage),
+        #[prost(message, tag = "10")]
+        RuntimeAuthorityGrant(super::RuntimeAuthorityGrant),
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -392,8 +404,6 @@ pub struct LeaseOffer {
     pub lease: ::core::option::Option<Lease>,
     #[prost(message, optional, tag = "4")]
     pub job: ::core::option::Option<JobIrEnvelope>,
-    #[prost(message, optional, tag = "5")]
-    pub runtime_authorities: ::core::option::Option<JobRuntimeAuthorities>,
     #[prost(message, optional, tag = "6")]
     pub managed_secret_bindings: ::core::option::Option<ManagedSecretBindingOverlay>,
 }
@@ -425,7 +435,8 @@ pub struct ManagedSecretBindingOverlay {
     pub sha256_digest: ::prost::alloc::vec::Vec<u8>,
 }
 /// Short-lived bearer material is sent only over the authenticated runner
-/// transport and must be protected in the runner spool before lease acceptance.
+/// transport after lease acceptance and must be protected in the runner spool
+/// before the grant is acknowledged or user code can start.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct JobRuntimeAuthority {
     #[prost(string, tag = "1")]
@@ -1117,6 +1128,50 @@ pub struct JobIr {
     /// Required domain-separated digest of trust_snapshot.
     #[prost(bytes = "vec", tag = "17")]
     pub trust_snapshot_digest: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RuntimeAuthorityDeliveryBinding {
+    #[prost(bytes = "vec", tag = "1")]
+    pub attempt_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "2")]
+    pub slot: u32,
+    #[prost(message, optional, tag = "3")]
+    pub guard: ::core::option::Option<LeaseGuard>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub offer_operation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "5")]
+    pub offer_sequence: u64,
+    #[prost(bytes = "vec", tag = "6")]
+    pub job_ir_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "7")]
+    pub generation: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RuntimeAuthorityRequest {
+    #[prost(message, optional, tag = "1")]
+    pub header: ::core::option::Option<MessageHeader>,
+    #[prost(message, optional, tag = "2")]
+    pub binding: ::core::option::Option<RuntimeAuthorityDeliveryBinding>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RuntimeAuthorityGrant {
+    #[prost(message, optional, tag = "1")]
+    pub header: ::core::option::Option<MessageHeader>,
+    #[prost(message, optional, tag = "2")]
+    pub binding: ::core::option::Option<RuntimeAuthorityDeliveryBinding>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub bundle_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "4")]
+    pub authorities: ::core::option::Option<JobRuntimeAuthorities>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RuntimeAuthorityAck {
+    #[prost(message, optional, tag = "1")]
+    pub header: ::core::option::Option<MessageHeader>,
+    #[prost(message, optional, tag = "2")]
+    pub binding: ::core::option::Option<RuntimeAuthorityDeliveryBinding>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub bundle_sha256: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JobIrEnvelope {

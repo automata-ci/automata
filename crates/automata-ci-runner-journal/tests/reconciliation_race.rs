@@ -32,7 +32,6 @@ fn offer(fixture: &Fixture, content: DurableContentRef) -> LeaseOfferRecord {
         fixture.slot,
         fixture.lease.clone(),
         JobIrContentRef::new(JobIrVersion::current(), content).expect("JobIR content"),
-        Fixture::runtime_authority(),
         Fixture::command(1),
     )
     .expect("lease offer")

@@ -276,6 +276,13 @@ impl RunnerRuntimeControlClient for CompletionClient {
                     self.shutdown.cancel();
                     ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
                 }
+                RunnerToServer::RuntimeAuthorityRequest(_)
+                | RunnerToServer::RuntimeAuthorityAck(_) => {
+                    return Err(RuntimeControlError::new(
+                        RuntimeControlErrorKind::InvalidResponse,
+                        RuntimeControlRetry::Never,
+                    ));
+                }
             };
             runtime_reply(response, &self.limits)
         })
@@ -820,7 +827,7 @@ async fn running_authority_expiry_has_distinct_cancellation_and_failure_observat
 }
 
 #[tokio::test]
-async fn recovered_durable_cancellation_observes_the_actual_executor_signal_once() {
+async fn recovered_durable_cancellation_observes_without_invoking_the_executor() {
     let scratch = support::Scratch::new("semantic-recovered-cancellation");
     let runner_id = RunnerId::new();
     let (journal, spool) = support::durable_ports(&scratch, runner_id);
@@ -866,12 +873,9 @@ async fn recovered_durable_cancellation_observes_the_actual_executor_signal_once
     runtime
         .run(shutdown)
         .await
-        .expect("recovered cancellation quiesces and completes the executor");
+        .expect("recovered cancellation terminalizes before the executor");
 
-    assert_eq!(
-        executor.observed_reason(),
-        Some(ExecutionCancellationReason::ServerRequest)
-    );
+    assert_eq!(executor.observed_reason(), None);
     assert_eq!(
         observer
             .events()

@@ -27,9 +27,12 @@ use automata_ci_control::runner_control::{
     RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
     RuntimeAuthorityIssuer,
     durable::{
+        AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
         CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-        CommitRunnerLogSegment, CommitRunnerTerminalResult, LeaseResponseAction, RawLogDisposition,
-        RunnerControlTransactionRepository, RunnerLogAdmission, RunnerLogAdmissionRequest,
+        CommitRunnerLogSegment, CommitRunnerTerminalResult, CommitRuntimeAuthorityDelivery,
+        LeaseResponseAction, RawLogDisposition, RunnerControlTransactionRepository,
+        RunnerLogAdmission, RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryAdmission,
+        RuntimeAuthorityDeliveryDisposition, RuntimeAuthorityDeliveryRepository,
     },
     repository::{RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository},
 };
@@ -496,6 +499,9 @@ pub struct Transactions {
     pub last_renewal: Mutex<Option<RenewLease>>,
     pub last_reported_lifecycle: Mutex<Option<automata_ci_core::JobLifecycle>>,
     pub receipts: Mutex<Vec<RunnerOperationReceipt>>,
+    pub runtime_authority_admission: Mutex<Option<RuntimeAuthorityDeliveryAdmission>>,
+    pub runtime_authority_commits: Mutex<Vec<CommitRuntimeAuthorityDelivery>>,
+    pub runtime_authority_acknowledgements: Mutex<Vec<AcknowledgeRuntimeAuthorityDelivery>>,
 }
 
 impl Default for Transactions {
@@ -517,6 +523,9 @@ impl Default for Transactions {
             last_renewal: Mutex::new(None),
             last_reported_lifecycle: Mutex::new(None),
             receipts: Mutex::new(Vec::new()),
+            runtime_authority_admission: Mutex::new(None),
+            runtime_authority_commits: Mutex::new(Vec::new()),
+            runtime_authority_acknowledgements: Mutex::new(Vec::new()),
         }
     }
 }
@@ -663,6 +672,111 @@ impl RunnerControlTransactionRepository for Transactions {
             self.log_segments.fetch_add(1, Ordering::SeqCst);
         }
         Ok(receipt)
+    }
+}
+
+#[async_trait]
+impl RuntimeAuthorityDeliveryRepository for Transactions {
+    async fn authorize_runtime_authority_delivery(
+        &self,
+        request: AuthorizeRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryAdmission, StoreError> {
+        let admission = self
+            .runtime_authority_admission
+            .lock()
+            .expect("runtime-authority admission lock")
+            .clone()
+            .expect("runtime-authority authorization is not expected");
+        if admission.request() != &request {
+            return Err(StoreError::OperationConflict {
+                session_id: request.request().session().session_id(),
+                operation_id: request.request().operation_id(),
+            });
+        }
+        let committed_bundle_digest = self
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock")
+            .first()
+            .map(CommitRuntimeAuthorityDelivery::bundle_digest);
+        RuntimeAuthorityDeliveryAdmission::new(
+            admission.request().clone(),
+            admission.offer().clone(),
+            committed_bundle_digest,
+        )
+        .map_err(|error| StoreError::corrupt_data(error.to_string()))
+    }
+
+    async fn commit_runtime_authority_delivery(
+        &self,
+        request: CommitRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError> {
+        let mut commits = self
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock");
+        if let Some(existing) = commits.first() {
+            let same_delivery = existing.admission().request() == request.admission().request()
+                && existing.admission().offer() == request.admission().offer()
+                && existing.bundle_digest() == request.bundle_digest();
+            return if same_delivery {
+                Ok(RuntimeAuthorityDeliveryDisposition::Replayed)
+            } else {
+                Err(StoreError::OperationConflict {
+                    session_id: request
+                        .admission()
+                        .request()
+                        .request()
+                        .session()
+                        .session_id(),
+                    operation_id: request.admission().request().request().operation_id(),
+                })
+            };
+        }
+        commits.push(request);
+        Ok(RuntimeAuthorityDeliveryDisposition::Committed)
+    }
+
+    async fn acknowledge_runtime_authority_delivery(
+        &self,
+        request: AcknowledgeRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError> {
+        let commits = self
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock");
+        let Some(delivery) = commits.first() else {
+            return Err(StoreError::corrupt_data(
+                "runtime-authority acknowledgement has no committed delivery",
+            ));
+        };
+        let admission = delivery.admission();
+        if request.protocol_version() != admission.request().protocol_version()
+            || request.binding() != admission.request().binding()
+            || request.bundle_digest() != delivery.bundle_digest()
+        {
+            return Err(StoreError::OperationConflict {
+                session_id: request.request().session().session_id(),
+                operation_id: request.request().operation_id(),
+            });
+        }
+        drop(commits);
+        let mut acknowledgements = self
+            .runtime_authority_acknowledgements
+            .lock()
+            .expect("runtime-authority acknowledgement lock");
+        if let Some(existing) = acknowledgements.first() {
+            return if existing == &request {
+                Ok(RuntimeAuthorityDeliveryDisposition::Replayed)
+            } else {
+                Err(StoreError::OperationConflict {
+                    session_id: request.request().session().session_id(),
+                    operation_id: request.request().operation_id(),
+                })
+            };
+        }
+        acknowledgements.push(request);
+        Ok(RuntimeAuthorityDeliveryDisposition::Committed)
     }
 }
 

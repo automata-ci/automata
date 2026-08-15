@@ -1,6 +1,7 @@
 use automata_ci_core::{Lease, OperationId, Sha256Digest, UnixMillis};
 use automata_ci_protocol::{
     CommandSequence, LeaseRejectionReason, ManagedSecretBindingOverlay, RunnerSlotOrdinal,
+    RuntimeAuthorityDeliveryBinding, RuntimeAuthorityGeneration,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -111,7 +112,6 @@ pub struct LeaseOfferRecord {
     slot: RunnerSlotOrdinal,
     lease: Lease,
     job_ir: JobIrContentRef,
-    runtime_authorities: RuntimeAuthorityContentRef,
     #[serde(deserialize_with = "deserialize_required_option")]
     managed_secret_bindings: Option<ManagedSecretBindingOverlay>,
     command: DurableCommand,
@@ -135,19 +135,16 @@ impl LeaseOfferRecord {
         slot: RunnerSlotOrdinal,
         lease: Lease,
         job_ir: JobIrContentRef,
-        runtime_authorities: RuntimeAuthorityContentRef,
         command: DurableCommand,
     ) -> Result<Self, JournalInvariantError> {
         lease
             .validate()
             .map_err(|_| JournalInvariantError::InvalidLease)?;
         job_ir.validate()?;
-        runtime_authorities.validate()?;
         Ok(Self {
             slot,
             lease,
             job_ir,
-            runtime_authorities,
             managed_secret_bindings: None,
             command,
         })
@@ -193,12 +190,6 @@ impl LeaseOfferRecord {
         &self.job_ir
     }
 
-    /// Returns the protected per-attempt authority content identity.
-    #[must_use]
-    pub const fn runtime_authorities(&self) -> &RuntimeAuthorityContentRef {
-        &self.runtime_authorities
-    }
-
     /// Returns the lease-scoped value-free bindings, when carried by the offer.
     #[must_use]
     pub const fn managed_secret_bindings(&self) -> Option<&ManagedSecretBindingOverlay> {
@@ -216,11 +207,114 @@ impl LeaseOfferRecord {
             .validate()
             .map_err(|_| JournalInvariantError::InvalidLease)?;
         self.job_ir.validate()?;
-        self.runtime_authorities.validate()?;
         if let Some(overlay) = &self.managed_secret_bindings {
             overlay
                 .validate_for(&self.lease)
                 .map_err(|_| JournalInvariantError::InvalidManagedSecretBindings)?;
+        }
+        Ok(())
+    }
+}
+
+/// Crash-durable adoption state for one post-accept authority grant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthorityDeliveryRecord {
+    binding: RuntimeAuthorityDeliveryBinding,
+    request_operation_id: OperationId,
+    acknowledgement_operation_id: OperationId,
+    bundle_digest: Sha256Digest,
+    content: RuntimeAuthorityContentRef,
+    acknowledged: bool,
+}
+
+impl RuntimeAuthorityDeliveryRecord {
+    /// Creates an unacknowledged delivery from already protected and durable bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid protected content or a digest that differs from its
+    /// plaintext spool identity.
+    pub fn new(
+        binding: RuntimeAuthorityDeliveryBinding,
+        request_operation_id: OperationId,
+        acknowledgement_operation_id: OperationId,
+        bundle_digest: Sha256Digest,
+        content: RuntimeAuthorityContentRef,
+    ) -> Result<Self, JournalInvariantError> {
+        let record = Self {
+            binding,
+            request_operation_id,
+            acknowledgement_operation_id,
+            bundle_digest,
+            content,
+            acknowledged: false,
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    /// Returns the exact offer and delivery-generation binding.
+    #[must_use]
+    pub const fn binding(&self) -> RuntimeAuthorityDeliveryBinding {
+        self.binding
+    }
+
+    /// Returns the stable authority-request operation identity.
+    #[must_use]
+    pub const fn request_operation_id(&self) -> OperationId {
+        self.request_operation_id
+    }
+
+    /// Returns the stable grant-acknowledgement operation identity.
+    #[must_use]
+    pub const fn acknowledgement_operation_id(&self) -> OperationId {
+        self.acknowledgement_operation_id
+    }
+
+    /// Returns the canonical plaintext bundle digest.
+    #[must_use]
+    pub const fn bundle_digest(&self) -> Sha256Digest {
+        self.bundle_digest
+    }
+
+    /// Returns the protected spool content identity.
+    #[must_use]
+    pub const fn content(&self) -> &RuntimeAuthorityContentRef {
+        &self.content
+    }
+
+    /// Reports whether the control plane acknowledged protected adoption.
+    #[must_use]
+    pub const fn is_acknowledged(&self) -> bool {
+        self.acknowledged
+    }
+
+    pub(crate) fn acknowledge(
+        &mut self,
+        generation: RuntimeAuthorityGeneration,
+        bundle_digest: Sha256Digest,
+        operation_id: OperationId,
+    ) -> Result<bool, JournalInvariantError> {
+        if self.binding.generation() != generation
+            || self.bundle_digest != bundle_digest
+            || self.acknowledgement_operation_id != operation_id
+        {
+            return Err(JournalInvariantError::RuntimeAuthorityDeliveryReplayConflict);
+        }
+        if self.acknowledged {
+            return Ok(false);
+        }
+        self.acknowledged = true;
+        Ok(true)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
+        self.content.validate()?;
+        if self.binding.generation().get() == 0
+            || self.content.content().sha256() != self.bundle_digest
+        {
+            return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
         }
         Ok(())
     }

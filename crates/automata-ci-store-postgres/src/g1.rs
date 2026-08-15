@@ -26,13 +26,16 @@ use automata_ci_control::{
         },
     },
     runner_control::{
+        INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding,
         durable::{
+            AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
             CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-            CommitRunnerLogSegment, CommitRunnerTerminalResult, CurrentRunnerSession,
-            CurrentRunnerSessionRepository, LeaseOfferClaim, LeaseOfferClaimStatus,
-            LeaseResponseAction, PublishLeaseOffer, PublishedLeaseOffer, RawLogDisposition,
-            RunnerControlTransactionRepository, RunnerLeaseOfferRepository, RunnerLogAdmission,
-            RunnerLogAdmissionRequest,
+            CommitRunnerLogSegment, CommitRunnerTerminalResult, CommitRuntimeAuthorityDelivery,
+            CurrentRunnerSession, CurrentRunnerSessionRepository, LeaseOfferClaim,
+            LeaseOfferClaimStatus, LeaseResponseAction, PublishLeaseOffer, PublishedLeaseOffer,
+            RawLogDisposition, RunnerControlTransactionRepository, RunnerLeaseOfferRepository,
+            RunnerLogAdmission, RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryAdmission,
+            RuntimeAuthorityDeliveryDisposition, RuntimeAuthorityDeliveryRepository,
         },
         repository::{
             RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository,
@@ -72,7 +75,9 @@ use automata_ci_store::{
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v1";
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
+const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
+const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
     b"automata-ci/control-plane/runner-command-metadata:v1";
 const RESPONSE_ENVELOPE_METADATA_DOMAIN: &[u8] =
@@ -1773,6 +1778,180 @@ impl RunnerLeaseOfferRepository for PostgresStore {
         .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(publication)
+    }
+}
+
+#[async_trait]
+impl RuntimeAuthorityDeliveryRepository for PostgresStore {
+    async fn authorize_runtime_authority_delivery(
+        &self,
+        request: AuthorizeRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryAdmission, StoreError> {
+        let encryption = self.require_runner_payload_encryption()?;
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        super::pin_runner_attempt_read_committed(&mut transaction).await?;
+        super::admission::lock_attempt_concurrency(
+            &mut transaction,
+            request.binding().attempt_id(),
+        )
+        .await?;
+        let (offer, delivery) = lock_runtime_authority_delivery_admission(
+            &mut transaction,
+            encryption,
+            request.request().session(),
+            request.protocol_version(),
+            request.binding(),
+        )
+        .await?;
+        if request.request().kind().as_str() != RUNTIME_AUTHORITY_REQUEST_KIND {
+            return Err(StoreError::OperationConflict {
+                session_id: request.request().session().session_id(),
+                operation_id: request.request().operation_id(),
+            });
+        }
+        if let Some(delivery) = delivery.as_ref()
+            && (delivery.request_operation_id != request.request().operation_id()
+                || delivery.request_digest != request.request().request_digest())
+        {
+            return Err(StoreError::OperationConflict {
+                session_id: request.request().session().session_id(),
+                operation_id: request.request().operation_id(),
+            });
+        }
+        let admission = RuntimeAuthorityDeliveryAdmission::new(
+            request,
+            offer,
+            delivery.map(|delivery| delivery.bundle_digest),
+        )
+        .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(admission)
+    }
+
+    async fn commit_runtime_authority_delivery(
+        &self,
+        request: CommitRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError> {
+        let encryption = self.require_runner_payload_encryption()?;
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        super::pin_runner_attempt_read_committed(&mut transaction).await?;
+        let requested = request.admission().request();
+        super::admission::lock_attempt_concurrency(
+            &mut transaction,
+            requested.binding().attempt_id(),
+        )
+        .await?;
+        let (offer, delivery) = lock_runtime_authority_delivery_admission(
+            &mut transaction,
+            encryption,
+            requested.request().session(),
+            requested.protocol_version(),
+            requested.binding(),
+        )
+        .await?;
+        if requested.request().kind().as_str() != RUNTIME_AUTHORITY_REQUEST_KIND
+            || &offer != request.admission().offer()
+        {
+            return Err(StoreError::OperationConflict {
+                session_id: requested.request().session().session_id(),
+                operation_id: requested.request().operation_id(),
+            });
+        }
+        if let Some(delivery) = delivery {
+            if delivery.request_operation_id != requested.request().operation_id()
+                || delivery.request_digest != requested.request().request_digest()
+                || delivery.bundle_digest != request.bundle_digest()
+            {
+                return Err(StoreError::OperationConflict {
+                    session_id: requested.request().session().session_id(),
+                    operation_id: requested.request().operation_id(),
+                });
+            }
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(RuntimeAuthorityDeliveryDisposition::Replayed);
+        }
+        let database_now = super::runner_attempt_database_now(&mut transaction).await?;
+        if database_now >= offer.offer_valid_until() {
+            return Err(StoreError::AttemptFenceRejected(offer.lease().attempt_id()));
+        }
+        insert_runtime_authority_delivery(
+            &mut transaction,
+            request.admission(),
+            request.bundle_digest(),
+            database_now,
+        )
+        .await?;
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(RuntimeAuthorityDeliveryDisposition::Committed)
+    }
+
+    async fn acknowledge_runtime_authority_delivery(
+        &self,
+        request: AcknowledgeRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError> {
+        let encryption = self.require_runner_payload_encryption()?;
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        super::pin_runner_attempt_read_committed(&mut transaction).await?;
+        super::admission::lock_attempt_concurrency(
+            &mut transaction,
+            request.binding().attempt_id(),
+        )
+        .await?;
+        let (_offer, delivery) = lock_runtime_authority_delivery_admission(
+            &mut transaction,
+            encryption,
+            request.request().session(),
+            request.protocol_version(),
+            request.binding(),
+        )
+        .await?;
+        if request.request().kind().as_str() != RUNTIME_AUTHORITY_ACK_KIND {
+            return Err(StoreError::OperationConflict {
+                session_id: request.request().session().session_id(),
+                operation_id: request.request().operation_id(),
+            });
+        }
+        let delivery = delivery.ok_or_else(|| {
+            StoreError::corrupt_data("runtime-authority acknowledgement has no committed delivery")
+        })?;
+        if delivery.bundle_digest != request.bundle_digest() {
+            return Err(StoreError::OperationConflict {
+                session_id: request.request().session().session_id(),
+                operation_id: request.request().operation_id(),
+            });
+        }
+        match (
+            delivery.acknowledgement_operation_id,
+            delivery.acknowledgement_digest,
+            delivery.acknowledged_at,
+        ) {
+            (Some(operation_id), Some(digest), Some(_)) => {
+                if operation_id != request.request().operation_id()
+                    || digest != request.request().request_digest()
+                {
+                    return Err(StoreError::OperationConflict {
+                        session_id: request.request().session().session_id(),
+                        operation_id: request.request().operation_id(),
+                    });
+                }
+                transaction.commit().await.map_err(operation_error)?;
+                Ok(RuntimeAuthorityDeliveryDisposition::Replayed)
+            }
+            (None, None, None) => {
+                let database_now = super::runner_attempt_database_now(&mut transaction).await?;
+                acknowledge_runtime_authority_delivery_row(
+                    &mut transaction,
+                    &request,
+                    database_now,
+                )
+                .await?;
+                transaction.commit().await.map_err(operation_error)?;
+                Ok(RuntimeAuthorityDeliveryDisposition::Committed)
+            }
+            _ => Err(StoreError::corrupt_data(
+                "runtime-authority delivery has partial acknowledgement evidence",
+            )),
+        }
     }
 }
 
@@ -4483,6 +4662,432 @@ fn decode_receipt_lease_offer_completion(
             "runner RPC receipt has a partial lease-offer completion",
         )),
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LockedRuntimeAuthorityDelivery {
+    request_operation_id: OperationId,
+    request_digest: Sha256Digest,
+    bundle_digest: Sha256Digest,
+    committed_at: UnixMillis,
+    acknowledgement_operation_id: Option<OperationId>,
+    acknowledgement_digest: Option<Sha256Digest>,
+    acknowledged_at: Option<UnixMillis>,
+}
+
+async fn lock_runtime_authority_delivery_admission(
+    transaction: &mut Transaction<'_, Postgres>,
+    encryption: &RunnerPayloadEncryption,
+    session: RunnerSessionFence,
+    protocol_version: RunnerProtocolVersion,
+    binding: RuntimeAuthorityDeliveryBinding,
+) -> Result<(PublishedLeaseOffer, Option<LockedRuntimeAuthorityDelivery>), StoreError> {
+    let routing = lock_live_routing(transaction, session).await?;
+    routing.require_online(session)?;
+    if routing.protocol_version != protocol_version {
+        return Err(StoreError::OperationConflict {
+            session_id: session.session_id(),
+            operation_id: binding.offer_operation_id(),
+        });
+    }
+    let sequence = CommandSequence::new(binding.offer_sequence().get())
+        .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+    let identity = LeaseOfferCommandIdentity::new(session, binding.offer_operation_id(), sequence);
+    let offer = load_lease_offer_publication_by_command(transaction, encryption, identity)
+        .await?
+        .ok_or_else(|| StoreError::OperationConflict {
+            session_id: session.session_id(),
+            operation_id: binding.offer_operation_id(),
+        })?;
+    if !runtime_authority_binding_matches_offer(binding, protocol_version, &offer) {
+        return Err(StoreError::OperationConflict {
+            session_id: session.session_id(),
+            operation_id: binding.offer_operation_id(),
+        });
+    }
+    if !matches!(
+        classify_locked_published_lease_offer(transaction, &offer).await?,
+        LockedLeaseOfferDeliveryStatus::Live
+    ) || !lock_accepted_runtime_authority_attempt(transaction, &offer).await?
+    {
+        return Err(StoreError::AttemptFenceRejected(binding.attempt_id()));
+    }
+    let delivery = lock_runtime_authority_delivery_row(transaction, &offer, binding).await?;
+    Ok((offer, delivery))
+}
+
+fn runtime_authority_binding_matches_offer(
+    binding: RuntimeAuthorityDeliveryBinding,
+    protocol_version: RunnerProtocolVersion,
+    offer: &PublishedLeaseOffer,
+) -> bool {
+    binding.generation() == INITIAL_RUNTIME_AUTHORITY_GENERATION
+        && offer.protocol_version() == protocol_version
+        && binding.attempt_id() == offer.lease().attempt_id()
+        && binding.slot().get() == offer.slot().ordinal()
+        && binding.guard() == offer.lease().guard()
+        && binding.offer_operation_id() == offer.command().request().operation_id()
+        && binding.offer_sequence().get() == offer.command().sequence().get()
+        && binding.job_ir_digest() == offer.job_ir().digest()
+}
+
+async fn lock_accepted_runtime_authority_attempt(
+    transaction: &mut Transaction<'_, Postgres>,
+    offer: &PublishedLeaseOffer,
+) -> Result<bool, StoreError> {
+    let session = offer.request().session();
+    let row = sqlx::query(
+        r"
+        SELECT attempt.lifecycle IN ('preparing', 'running') AS lifecycle_accepted,
+               COALESCE(attempt.lease_id = $2
+                   AND attempt.fencing_token = $3
+                   AND attempt.runner_id = $4
+                   AND attempt.runner_session_id = $5
+                   AND attempt.runner_session_epoch = $6
+                   AND attempt.runner_generation = $7
+                   AND attempt.runner_slot = $8
+                   AND attempt.lease_issued_at_ms = $9
+                   AND attempt.lease_expires_at_ms >= $10, FALSE) AS exact_fence,
+               COALESCE(attempt.job_id = $11
+                   AND job.run_id = $12
+                   AND job.job_ir_schema = $13
+                   AND job.job_ir_size_bytes = $14
+                   AND job.job_ir_digest = $15
+                   AND job.job_ir_object_key = $16, FALSE) AS exact_job_ir
+        FROM job_attempts AS attempt
+        LEFT JOIN jobs AS job ON job.id = attempt.job_id
+        WHERE attempt.id = $1
+        FOR UPDATE OF attempt
+        ",
+    )
+    .bind(offer.lease().attempt_id().as_uuid())
+    .bind(offer.lease().lease_id().as_uuid())
+    .bind(fencing_i64(offer.lease().fencing_token())?)
+    .bind(session.runner_id().as_uuid())
+    .bind(session.session_id().as_uuid())
+    .bind(epoch_i64(session.session_epoch())?)
+    .bind(generation_i64(session.runner_generation())?)
+    .bind(i32::from(offer.slot().ordinal()))
+    .bind(offer.lease().issued_at().get())
+    .bind(offer.offer_valid_until().get())
+    .bind(offer.job_ir().job_id().as_uuid())
+    .bind(offer.job_ir().run_id().as_uuid())
+    .bind(i32::from(offer.job_ir().version().get()))
+    .bind(i64::try_from(offer.job_ir().encoded_size()).map_err(|_| {
+        StoreError::corrupt_data("runtime-authority JobIR size exceeds PostgreSQL BIGINT")
+    })?)
+    .bind(offer.job_ir().digest().as_bytes().as_slice())
+    .bind(offer.job_ir().object_key().as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    if !row
+        .try_get::<bool, _>("exact_job_ir")
+        .map_err(operation_error)?
+    {
+        return Err(StoreError::corrupt_data(
+            "accepted runtime-authority attempt disagrees with immutable JobIR",
+        ));
+    }
+    let accepted = row
+        .try_get::<bool, _>("lifecycle_accepted")
+        .map_err(operation_error)?
+        && row
+            .try_get::<bool, _>("exact_fence")
+            .map_err(operation_error)?;
+    if !accepted {
+        return Ok(false);
+    }
+    let database_now = super::runner_attempt_database_now(transaction).await?;
+    Ok(database_now >= offer.command().request().created_at()
+        && database_now < offer.offer_valid_until())
+}
+
+async fn lock_runtime_authority_delivery_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    offer: &PublishedLeaseOffer,
+    binding: RuntimeAuthorityDeliveryBinding,
+) -> Result<Option<LockedRuntimeAuthorityDelivery>, StoreError> {
+    let row = sqlx::query(
+        r"
+        SELECT attempt_id, fencing_token, delivery_generation,
+               runner_id, runner_session_id, runner_session_epoch,
+               runner_generation, protocol_version, runner_slot, lease_id,
+               offer_operation_id, offer_command_sequence,
+               job_id, run_id, job_ir_schema, job_ir_size_bytes,
+               job_ir_digest, job_ir_object_key,
+               request_operation_id, request_digest, bundle_digest,
+               committed_at_ms, acknowledgement_operation_id,
+               acknowledgement_digest, acknowledged_at_ms
+        FROM runner_runtime_authority_deliveries
+        WHERE attempt_id = $1
+          AND fencing_token = $2
+          AND delivery_generation = $3
+        FOR UPDATE
+        ",
+    )
+    .bind(binding.attempt_id().as_uuid())
+    .bind(fencing_i64(binding.guard().fencing_token())?)
+    .bind(i32::try_from(binding.generation().get()).map_err(|_| {
+        StoreError::corrupt_data("runtime-authority generation exceeds PostgreSQL INTEGER")
+    })?)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    validate_locked_runtime_authority_delivery_identity(&row, offer, binding)?;
+    decode_locked_runtime_authority_delivery(&row, offer).map(Some)
+}
+
+fn validate_locked_runtime_authority_delivery_identity(
+    row: &sqlx::postgres::PgRow,
+    offer: &PublishedLeaseOffer,
+    binding: RuntimeAuthorityDeliveryBinding,
+) -> Result<(), StoreError> {
+    let session = offer.request().session();
+    let attempt_id = AttemptId::from_uuid(row.try_get("attempt_id").map_err(operation_error)?);
+    let fencing_token = u64::try_from(
+        row.try_get::<i64, _>("fencing_token")
+            .map_err(operation_error)?,
+    )
+    .ok()
+    .and_then(|value| FencingToken::new(value).ok())
+    .ok_or_else(|| StoreError::corrupt_data("invalid runtime-authority fencing token"))?;
+    let delivery_generation = u32::try_from(
+        row.try_get::<i32, _>("delivery_generation")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| StoreError::corrupt_data("invalid runtime-authority generation"))?;
+    let runner_id = RunnerId::from_uuid(row.try_get("runner_id").map_err(operation_error)?);
+    let runner_session_id =
+        RunnerSessionId::from_uuid(row.try_get("runner_session_id").map_err(operation_error)?);
+    let runner_session_epoch = decode_epoch(
+        row.try_get("runner_session_epoch")
+            .map_err(operation_error)?,
+    )?;
+    let runner_generation =
+        decode_generation(row.try_get("runner_generation").map_err(operation_error)?)?;
+    let protocol_version =
+        decode_protocol(row.try_get("protocol_version").map_err(operation_error)?)?;
+    let runner_slot = u16::try_from(
+        row.try_get::<i32, _>("runner_slot")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| StoreError::corrupt_data("invalid runtime-authority runner slot"))?;
+    let lease_id = LeaseId::from_uuid(row.try_get("lease_id").map_err(operation_error)?);
+    let offer_operation_id =
+        OperationId::from_uuid(row.try_get("offer_operation_id").map_err(operation_error)?);
+    let offer_sequence = decode_sequence(
+        row.try_get("offer_command_sequence")
+            .map_err(operation_error)?,
+    )?;
+    let job_id = JobId::from_uuid(row.try_get("job_id").map_err(operation_error)?);
+    let run_id = RunId::from_uuid(row.try_get("run_id").map_err(operation_error)?);
+    let job_ir_version =
+        decode_job_ir_version(row.try_get("job_ir_schema").map_err(operation_error)?)?;
+    let job_ir_size = u64::try_from(
+        row.try_get::<i64, _>("job_ir_size_bytes")
+            .map_err(operation_error)?,
+    )
+    .map_err(|_| StoreError::corrupt_data("invalid runtime-authority JobIR size"))?;
+    let job_ir_digest =
+        decode_sha256_digest(row.try_get("job_ir_digest").map_err(operation_error)?)
+            .map_err(|error| StoreError::corrupt_data(error.clone()))?;
+    let job_ir_object_key: String = row.try_get("job_ir_object_key").map_err(operation_error)?;
+    if attempt_id != offer.lease().attempt_id()
+        || fencing_token != offer.lease().fencing_token()
+        || delivery_generation != binding.generation().get()
+        || runner_id != session.runner_id()
+        || runner_session_id != session.session_id()
+        || runner_session_epoch != session.session_epoch()
+        || runner_generation != session.runner_generation()
+        || protocol_version != offer.protocol_version()
+        || runner_slot != offer.slot().ordinal()
+        || lease_id != offer.lease().lease_id()
+        || offer_operation_id != offer.command().request().operation_id()
+        || offer_sequence != offer.command().sequence()
+        || job_id != offer.job_ir().job_id()
+        || run_id != offer.job_ir().run_id()
+        || job_ir_version != offer.job_ir().version()
+        || job_ir_size != offer.job_ir().encoded_size()
+        || job_ir_digest != offer.job_ir().digest()
+        || job_ir_object_key != offer.job_ir().object_key().as_str()
+    {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority delivery row disagrees with its accepted offer",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_locked_runtime_authority_delivery(
+    row: &sqlx::postgres::PgRow,
+    offer: &PublishedLeaseOffer,
+) -> Result<LockedRuntimeAuthorityDelivery, StoreError> {
+    let committed_at = UnixMillis::new(row.try_get("committed_at_ms").map_err(operation_error)?);
+    if committed_at < offer.command().request().created_at()
+        || committed_at >= offer.offer_valid_until()
+    {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority delivery commit is outside its offer horizon",
+        ));
+    }
+    let acknowledgement_operation_id = row
+        .try_get::<Option<Uuid>, _>("acknowledgement_operation_id")
+        .map_err(operation_error)?
+        .map(OperationId::from_uuid);
+    let acknowledgement_digest = row
+        .try_get::<Option<Vec<u8>>, _>("acknowledgement_digest")
+        .map_err(operation_error)?
+        .map(decode_sha256_digest)
+        .transpose()
+        .map_err(|error| StoreError::corrupt_data(error.clone()))?;
+    let acknowledged_at = row
+        .try_get::<Option<i64>, _>("acknowledged_at_ms")
+        .map_err(operation_error)?
+        .map(UnixMillis::new);
+    if acknowledged_at.is_some_and(|acknowledged| acknowledged < committed_at) {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority acknowledgement predates delivery commit",
+        ));
+    }
+    Ok(LockedRuntimeAuthorityDelivery {
+        request_operation_id: OperationId::from_uuid(
+            row.try_get("request_operation_id")
+                .map_err(operation_error)?,
+        ),
+        request_digest: decode_sha256_digest(
+            row.try_get("request_digest").map_err(operation_error)?,
+        )
+        .map_err(|error| StoreError::corrupt_data(error.clone()))?,
+        bundle_digest: decode_sha256_digest(row.try_get("bundle_digest").map_err(operation_error)?)
+            .map_err(|error| StoreError::corrupt_data(error.clone()))?,
+        committed_at,
+        acknowledgement_operation_id,
+        acknowledgement_digest,
+        acknowledged_at,
+    })
+}
+
+async fn insert_runtime_authority_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    admission: &RuntimeAuthorityDeliveryAdmission,
+    bundle_digest: Sha256Digest,
+    committed_at: UnixMillis,
+) -> Result<(), StoreError> {
+    let request = admission.request();
+    let binding = request.binding();
+    let offer = admission.offer();
+    let session = request.request().session();
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO runner_runtime_authority_deliveries (
+            attempt_id, fencing_token, delivery_generation,
+            runner_id, runner_session_id, runner_session_epoch,
+            runner_generation, protocol_version, runner_slot, lease_id,
+            offer_operation_id, offer_command_sequence,
+            job_id, run_id, job_ir_schema, job_ir_size_bytes,
+            job_ir_digest, job_ir_object_key,
+            request_operation_id, request_digest, bundle_digest, committed_at_ms
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, $18, $19, $20, $21, $22
+        )
+        ",
+    )
+    .bind(binding.attempt_id().as_uuid())
+    .bind(fencing_i64(binding.guard().fencing_token())?)
+    .bind(i32::try_from(binding.generation().get()).map_err(|_| {
+        StoreError::corrupt_data("runtime-authority generation exceeds PostgreSQL INTEGER")
+    })?)
+    .bind(session.runner_id().as_uuid())
+    .bind(session.session_id().as_uuid())
+    .bind(epoch_i64(session.session_epoch())?)
+    .bind(generation_i64(session.runner_generation())?)
+    .bind(protocol_i32(request.protocol_version()))
+    .bind(i32::from(offer.slot().ordinal()))
+    .bind(offer.lease().lease_id().as_uuid())
+    .bind(binding.offer_operation_id().as_uuid())
+    .bind(sequence_i64(offer.command().sequence())?)
+    .bind(offer.job_ir().job_id().as_uuid())
+    .bind(offer.job_ir().run_id().as_uuid())
+    .bind(i32::from(offer.job_ir().version().get()))
+    .bind(i64::try_from(offer.job_ir().encoded_size()).map_err(|_| {
+        StoreError::corrupt_data("runtime-authority JobIR size exceeds PostgreSQL BIGINT")
+    })?)
+    .bind(binding.job_ir_digest().as_bytes().as_slice())
+    .bind(offer.job_ir().object_key().as_str())
+    .bind(request.request().operation_id().as_uuid())
+    .bind(request.request().request_digest().as_bytes().as_slice())
+    .bind(bundle_digest.as_bytes().as_slice())
+    .bind(committed_at.get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .rows_affected();
+    if inserted != 1 {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority delivery insert affected an unexpected row count",
+        ));
+    }
+    Ok(())
+}
+
+async fn acknowledge_runtime_authority_delivery_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &AcknowledgeRuntimeAuthorityDelivery,
+    acknowledged_at: UnixMillis,
+) -> Result<(), StoreError> {
+    let binding = request.binding();
+    let updated = sqlx::query(
+        r"
+        UPDATE runner_runtime_authority_deliveries
+        SET acknowledgement_operation_id = $4,
+            acknowledgement_digest = $5,
+            acknowledged_at_ms = $6
+        WHERE attempt_id = $1
+          AND fencing_token = $2
+          AND delivery_generation = $3
+          AND runner_session_id = $7
+          AND offer_operation_id = $8
+          AND offer_command_sequence = $9
+          AND job_ir_digest = $10
+          AND bundle_digest = $11
+          AND acknowledgement_operation_id IS NULL
+          AND acknowledgement_digest IS NULL
+          AND acknowledged_at_ms IS NULL
+        ",
+    )
+    .bind(binding.attempt_id().as_uuid())
+    .bind(fencing_i64(binding.guard().fencing_token())?)
+    .bind(i32::try_from(binding.generation().get()).map_err(|_| {
+        StoreError::corrupt_data("runtime-authority generation exceeds PostgreSQL INTEGER")
+    })?)
+    .bind(request.request().operation_id().as_uuid())
+    .bind(request.request().request_digest().as_bytes().as_slice())
+    .bind(acknowledged_at.get())
+    .bind(request.request().session().session_id().as_uuid())
+    .bind(binding.offer_operation_id().as_uuid())
+    .bind(i64::try_from(binding.offer_sequence().get()).map_err(|_| {
+        StoreError::corrupt_data("runtime-authority offer sequence exceeds PostgreSQL BIGINT")
+    })?)
+    .bind(binding.job_ir_digest().as_bytes().as_slice())
+    .bind(request.bundle_digest().as_bytes().as_slice())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if updated.rows_affected() != 1 {
+        return Err(StoreError::OperationConflict {
+            session_id: request.request().session().session_id(),
+            operation_id: request.request().operation_id(),
+        });
+    }
+    Ok(())
 }
 
 async fn load_lease_offer_publication(

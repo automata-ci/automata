@@ -7,8 +7,10 @@ use automata_ci_core::{
     JobPermissionRequest, JobSource, Lease, LeaseId, OperationId, OutputSensitivity,
     PermissionLevel, RunId, RunIdAlias, RunValueTemplates, RunnerId, RunnerRequirements,
     RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep,
-    Sha256Digest, ShellTemplate, StepId, StepIr, UnixMillis, ValueSource, ValueTemplate,
-    ValueTemplateSegment, WorkflowId,
+    Sha256Digest, ShellTemplate, StepId, StepIr, TrustActorEvidence, TrustActorKind,
+    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
+    TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis, ValueSource,
+    ValueTemplate, ValueTemplateSegment, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandSequence, JobRuntimeAuthorities, LeaseOffer, MessageValidationError, ProtocolLimits,
@@ -51,6 +53,30 @@ fn template(prefix: &str, source: &str, root: &str) -> ValueTemplate {
 
 fn current_envelope_with_permission(permission_request: JobPermissionRequest) -> JobIrEnvelope {
     current_envelope_with_profile(permission_request, JobAuthorityProfile::Standard)
+}
+
+fn trusted_snapshot() -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(
+                    TrustActorEvidence::new(
+                        "actor-1",
+                        TrustActorKind::User,
+                        TrustAutomationKind::None,
+                    )
+                    .expect("actor evidence"),
+                )
+                .with_repositories(
+                    TrustRepositoryEvidence::new("42", "7").expect("source repository"),
+                    TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+                )
+                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                .with_revisions("source-sha", "target-sha", "execution-sha")
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("trusted snapshot")
 }
 
 fn current_envelope_with_profile(
@@ -115,6 +141,7 @@ fn current_envelope_with_profile(
     )
     .with_authority_profile(authority_profile)
     .with_permission_request(permission_request)
+    .with_trust_snapshot(trusted_snapshot())
     .with_environment(BTreeMap::from([(
         "CHANNEL".to_owned(),
         ValueSource::Template(template("channel-", "vars.channel", "vars")),
@@ -345,7 +372,7 @@ fn authority_profile_is_required_closed_and_round_trips_without_defaulting() {
 }
 
 #[test]
-fn credential_free_offer_round_trips_with_a_present_empty_authority_bundle() {
+fn credential_free_offer_round_trips_without_pre_accept_authority_material() {
     let limits = ProtocolLimits::default();
     let job = current_envelope_with_profile(
         JobPermissionRequest::Mapping(Vec::new()),
@@ -360,8 +387,7 @@ fn credential_free_offer_round_trips_with_a_present_empty_authority_bundle() {
         UnixMillis::new(10_000),
     )
     .expect("lease");
-    let authorities =
-        JobRuntimeAuthorities::new(Vec::new(), &job, &lease).expect("empty authority bundle");
+    JobRuntimeAuthorities::new(Vec::new(), &job, &lease).expect("empty authority bundle");
     let message = ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
         ServerCommandHeader::new(
             SUPPORTED_PROTOCOL_RANGE.max(),
@@ -372,7 +398,6 @@ fn credential_free_offer_round_trips_with_a_present_empty_authority_bundle() {
         RunnerSlotOrdinal::new(1).expect("runner slot"),
         lease,
         job,
-        authorities,
     )));
 
     let encoded = encode_server_frame(&message, &limits).expect("encode credential-free offer");
@@ -383,12 +408,9 @@ fn credential_free_offer_round_trips_with_a_present_empty_authority_bundle() {
     let ServerToRunner::LeaseOffer(offer) = decoded else {
         panic!("expected credential-free lease offer")
     };
-    assert!(
-        offer
-            .runtime_authorities()
-            .expect("present empty bundle")
-            .as_slice()
-            .is_empty()
+    assert_eq!(
+        offer.job().job().authority_profile(),
+        JobAuthorityProfile::CredentialFree
     );
 }
 

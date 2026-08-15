@@ -33,6 +33,10 @@ pub enum RunnerControlMessageKind {
     LeaseRequest,
     /// Lease-offer acceptance or rejection.
     LeaseResponse,
+    /// Post-accept request for one runtime-authority generation.
+    RuntimeAuthorityRequest,
+    /// Protected-spool acknowledgement for one authority generation.
+    RuntimeAuthorityAck,
     /// Lease heartbeat and renewal request.
     Heartbeat,
     /// Redundant job-state update, unsupported in the current application.

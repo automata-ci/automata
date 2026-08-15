@@ -11,7 +11,7 @@ use automata_ci_runner_journal::{
     OrphanDelivery, ProviderName, ProviderOperation, ProviderOperationKind, RunnerJournal,
     SandboxHandle, SandboxIdentity, SessionBinding,
 };
-use support::{Fixture, Scratch};
+use support::{Fixture, Scratch, record_and_ack_runtime_authority};
 
 struct GrantingVerifier {
     authority_operation_id: OperationId,
@@ -119,6 +119,7 @@ fn prepare_running_sandbox(journal: &dyn RunnerJournal, fixture: &Fixture) {
     journal
         .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
         .expect("accept");
+    record_and_ack_runtime_authority(journal, fixture);
     journal
         .transition_lifecycle(
             fixture.session_id,

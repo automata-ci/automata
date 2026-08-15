@@ -124,6 +124,12 @@ fn runner_frame(
         Payload::Hello(value) => runner_hello(value, limits).map(Domain::Hello),
         Payload::LeaseRequest(value) => lease_request(value).map(Domain::LeaseRequest),
         Payload::LeaseResponse(value) => lease_response(value).map(Domain::LeaseResponse),
+        Payload::RuntimeAuthorityRequest(value) => {
+            runtime_authority_request(value).map(Domain::RuntimeAuthorityRequest)
+        }
+        Payload::RuntimeAuthorityAck(value) => {
+            runtime_authority_ack(value).map(Domain::RuntimeAuthorityAck)
+        }
         Payload::Heartbeat(value) => lease_heartbeat(value).map(Domain::Heartbeat),
         Payload::JobState(value) => job_state_update(value).map(Domain::JobState),
         Payload::JobResult(value) => job_result_message(value, limits).map(Domain::JobResult),
@@ -147,6 +153,8 @@ fn server_frame(
         Payload::LeaseOffer(value) => {
             lease_offer(value, limits).map(|item| Domain::LeaseOffer(Box::new(item)))
         }
+        Payload::RuntimeAuthorityGrant(value) => runtime_authority_grant(value, limits)
+            .map(|item| Domain::RuntimeAuthorityGrant(Box::new(item))),
         Payload::LeaseRenewal(value) => lease_renewal(value).map(Domain::LeaseRenewal),
         Payload::CancelJob(value) => cancel_job(value).map(Domain::CancelJob),
         Payload::LogAck(value) => log_ack_message(value).map(Domain::LogAck),
@@ -903,17 +911,11 @@ fn lease_offer(
     let slot = runner_slot(value.slot, "lease_offer.slot")?;
     let lease = lease(required(value.lease, "lease_offer.lease")?)?;
     let job = job_ir_envelope(required(value.job, "lease_offer.job")?, limits)?;
-    let authorities = runtime_authorities(
-        required(value.runtime_authorities, "lease_offer.runtime_authorities")?,
-        &job,
-        &lease,
-        limits,
-    )?;
     let managed_secret_bindings = value
         .managed_secret_bindings
         .map(|overlay| managed_secret_binding_overlay(overlay, &lease, limits))
         .transpose()?;
-    let offer = protocol::LeaseOffer::new(header, slot, lease, job, authorities);
+    let offer = protocol::LeaseOffer::new(header, slot, lease, job);
     match managed_secret_bindings {
         Some(overlay) => {
             offer
@@ -924,6 +926,99 @@ fn lease_offer(
         }
         None => Ok(offer),
     }
+}
+
+fn runtime_authority_delivery_binding(
+    value: wire::RuntimeAuthorityDeliveryBinding,
+) -> Result<protocol::RuntimeAuthorityDeliveryBinding, DecodeError> {
+    let job_ir_digest = value
+        .job_ir_sha256
+        .try_into()
+        .map_err(|_| DecodeError::InvalidValue {
+            field: "runtime_authority_delivery_binding.job_ir_sha256",
+        })?;
+    Ok(protocol::RuntimeAuthorityDeliveryBinding::new(
+        core::AttemptId::from_uuid(uuid(
+            value.attempt_id,
+            "runtime_authority_delivery_binding.attempt_id",
+        )?),
+        runner_slot(value.slot, "runtime_authority_delivery_binding.slot")?,
+        lease_guard(required(
+            value.guard,
+            "runtime_authority_delivery_binding.guard",
+        )?)?,
+        core::OperationId::from_uuid(uuid(
+            value.offer_operation_id,
+            "runtime_authority_delivery_binding.offer_operation_id",
+        )?),
+        protocol::CommandSequence::new(value.offer_sequence).map_err(|_| {
+            DecodeError::InvalidValue {
+                field: "runtime_authority_delivery_binding.offer_sequence",
+            }
+        })?,
+        core::Sha256Digest::from_bytes(job_ir_digest),
+        protocol::RuntimeAuthorityGeneration::new(value.generation).map_err(|_| {
+            DecodeError::InvalidValue {
+                field: "runtime_authority_delivery_binding.generation",
+            }
+        })?,
+    ))
+}
+
+fn runtime_authority_request(
+    value: wire::RuntimeAuthorityRequest,
+) -> Result<protocol::RuntimeAuthorityRequest, DecodeError> {
+    Ok(protocol::RuntimeAuthorityRequest::new(
+        message_header(required(value.header, "runtime_authority_request.header")?)?,
+        runtime_authority_delivery_binding(required(
+            value.binding,
+            "runtime_authority_request.binding",
+        )?)?,
+    ))
+}
+
+fn runtime_authority_grant(
+    value: wire::RuntimeAuthorityGrant,
+    limits: &protocol::ProtocolLimits,
+) -> Result<protocol::RuntimeAuthorityGrant, DecodeError> {
+    let bundle_digest = value
+        .bundle_sha256
+        .try_into()
+        .map_err(|_| DecodeError::InvalidValue {
+            field: "runtime_authority_grant.bundle_sha256",
+        })?;
+    let authorities = runtime_authorities_unbound(
+        required(value.authorities, "runtime_authority_grant.authorities")?,
+        limits,
+    )?;
+    Ok(protocol::RuntimeAuthorityGrant::new(
+        message_header(required(value.header, "runtime_authority_grant.header")?)?,
+        runtime_authority_delivery_binding(required(
+            value.binding,
+            "runtime_authority_grant.binding",
+        )?)?,
+        core::Sha256Digest::from_bytes(bundle_digest),
+        authorities,
+    ))
+}
+
+fn runtime_authority_ack(
+    value: wire::RuntimeAuthorityAck,
+) -> Result<protocol::RuntimeAuthorityAck, DecodeError> {
+    let bundle_digest = value
+        .bundle_sha256
+        .try_into()
+        .map_err(|_| DecodeError::InvalidValue {
+            field: "runtime_authority_ack.bundle_sha256",
+        })?;
+    Ok(protocol::RuntimeAuthorityAck::new(
+        message_header(required(value.header, "runtime_authority_ack.header")?)?,
+        runtime_authority_delivery_binding(required(
+            value.binding,
+            "runtime_authority_ack.binding",
+        )?)?,
+        core::Sha256Digest::from_bytes(bundle_digest),
+    ))
 }
 
 fn managed_secret_binding_overlay(
@@ -1015,6 +1110,32 @@ fn runtime_authorities(
         .map(runtime_authority)
         .collect::<Result<Vec<_>, _>>()?;
     protocol::JobRuntimeAuthorities::new(authorities, job, lease).map_err(|_| {
+        DecodeError::InvalidValue {
+            field: "runtime_authorities",
+        }
+    })
+}
+
+fn runtime_authorities_unbound(
+    value: wire::JobRuntimeAuthorities,
+    limits: &protocol::ProtocolLimits,
+) -> Result<protocol::JobRuntimeAuthorities, DecodeError> {
+    check_schema(
+        value.schema_version,
+        protocol::RUNTIME_AUTHORITY_SCHEMA_VERSION,
+        "runtime_authorities.schema_version",
+    )?;
+    check_collection(
+        value.authorities.len(),
+        protocol::MAX_RUNTIME_AUTHORITIES.min(limits.max_collection_items()),
+        "runtime_authorities.authorities",
+    )?;
+    let authorities = value
+        .authorities
+        .into_iter()
+        .map(runtime_authority)
+        .collect::<Result<Vec<_>, _>>()?;
+    protocol::JobRuntimeAuthorities::from_unbound(authorities).map_err(|_| {
         DecodeError::InvalidValue {
             field: "runtime_authorities",
         }

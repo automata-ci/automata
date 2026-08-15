@@ -7,16 +7,17 @@ use std::sync::{
 use std::time::Duration;
 
 use automata_ci_core::{
-    JobConclusion, JobLifecycle, JobSecretExposure, LogChannel, OperationId, RunnerId,
+    JobConclusion, JobLifecycle, JobSecretExposure, LogAck, LogChannel, OperationId, RunnerId,
     RunnerSessionId, UnixMillis,
 };
 use automata_ci_protocol::{
-    MessageHeader, NegotiatedSession, OperationAck, RunnerToServer, SUPPORTED_PROTOCOL_RANGE,
-    ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
+    LogAckMessage, MessageHeader, NegotiatedSession, OperationAck, RunnerToServer,
+    SUPPORTED_PROTOCOL_RANGE, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
 };
 use automata_ci_runner_journal::{
     CommandDisposition, CommandIgnoredReason, ProviderFailureKind, ProviderFailureOutcome,
-    ProviderOperation, ProviderOperationKind, RunnerJournal, SessionBinding,
+    ProviderOperation, ProviderOperationKind, RunnerJournal, RuntimeAuthorityDeliveryRecord,
+    SessionBinding,
 };
 use automata_ci_runner_runtime::{
     ExecutionCancellationReason, MonotonicMillis, RetryPolicy, RunnerRuntimeControlClient,
@@ -220,6 +221,16 @@ impl RunnerRuntimeControlClient for WatchdogProbeClient {
                         RuntimeControlRetry::Never,
                     ))
                 }
+                RunnerToServer::LogBatch(batch) => {
+                    let last = batch.frames().last().expect("nonempty log batch");
+                    self.reply(ServerToRunner::LogAck(LogAckMessage::new(
+                        Self::reply_header(batch.header()),
+                        LogAck::new(last.stream_id(), Some(last.sequence())),
+                    )))
+                }
+                RunnerToServer::JobResult(result) => self.reply(ServerToRunner::OperationAck(
+                    OperationAck::new(Self::reply_header(result.header())),
+                )),
                 RunnerToServer::LeaseRequest(_) => {
                     cancellation.cancelled().await;
                     Err(RuntimeControlError::new(
@@ -382,7 +393,7 @@ async fn nested_offer_publication_unwinds_before_capacity_reconciliation_and_exa
         .expect("open capacity spool"),
     ));
     let shutdown = CancellationToken::new();
-    let client = Arc::new(support::CrossSlotReplayClient::new(
+    let client = Arc::new(support::CrossSlotReplayClient::with_authority_delivery(
         runner_id,
         session_id,
         shutdown.clone(),
@@ -393,7 +404,7 @@ async fn nested_offer_publication_unwinds_before_capacity_reconciliation_and_exa
             client,
             journal.clone(),
             spool.clone(),
-            Arc::new(support::NeverExecutor),
+            Arc::new(support::AdmittingExecutor),
             Arc::new(support::FixedClock::new(10_000, 50)),
             Arc::new(support::ImmediateSleeper),
             Arc::new(SystemRuntimeIds),
@@ -415,7 +426,13 @@ async fn nested_offer_publication_unwinds_before_capacity_reconciliation_and_exa
         .load(durable.offer().job_ir().content())
         .expect("retried JobIR content remains available");
     spool
-        .load(durable.offer().runtime_authorities().content())
+        .load(
+            durable
+                .runtime_authority_delivery()
+                .expect("post-accept authority delivery")
+                .content()
+                .content(),
+        )
         .expect("retried authority content remains available");
 }
 
@@ -988,6 +1005,178 @@ async fn crash_recovery_reuses_the_exact_deterministic_acceptance() {
     let second = second_client.acceptance();
     assert_eq!(first.operation_id, second.operation_id);
     assert_eq!(first.canonical_bytes, second.canonical_bytes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_after_protected_authority_resumes_with_only_the_exact_custody_ack() {
+    let scratch = support::Scratch::new("authority-custody-ack-restart");
+    let runner_id = RunnerId::new();
+    let (initial_journal, initial_spool) = support::durable_ports(&scratch, runner_id);
+    let fixture = support::seed_accepted_offer_with_unacknowledged_runtime_authority(
+        initial_journal.as_ref(),
+        initial_spool.as_ref(),
+        runner_id,
+    );
+    let expected = initial_journal
+        .snapshot()
+        .expect("pre-restart snapshot")
+        .slot(fixture.slot)
+        .and_then(|slot| slot.runtime_authority_delivery())
+        .cloned()
+        .expect("protected unacknowledged authority delivery");
+    assert!(!expected.is_acknowledged());
+    drop(initial_journal);
+    drop(initial_spool);
+
+    let (journal, spool) = support::durable_ports(&scratch, runner_id);
+    let shutdown = CancellationToken::new();
+    let client = Arc::new(support::AuthorityDeliveryClient::new(
+        &fixture,
+        support::AuthorityDeliveryReply::Acknowledge,
+        shutdown.clone(),
+    ));
+    let executor = Arc::new(support::AckProgressExecutor::default());
+    let runtime = RunnerSessionSupervisor::new(
+        support::config(runner_id),
+        RunnerRuntimePorts::new(
+            client.clone(),
+            journal.clone(),
+            spool,
+            executor.clone(),
+            Arc::new(support::FixedClock::new(10_000, 50)),
+            Arc::new(support::ImmediateSleeper),
+            Arc::new(SystemRuntimeIds),
+        ),
+    );
+    let task_shutdown = shutdown.clone();
+    let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
+
+    tokio::time::timeout(support::TEST_WATCHDOG, async {
+        while executor.started_slots() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("execution starts only after recovered authority custody is acknowledged");
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("recovered runtime shuts down")
+        .expect("recovered runtime task")
+        .expect("recovered authority delivery remains executable");
+
+    assert_eq!(
+        client.authority_requests(),
+        0,
+        "protected authority bytes are never re-requested after restart"
+    );
+    assert_eq!(
+        client.authority_acknowledgements(),
+        vec![(
+            expected.binding(),
+            expected.bundle_digest(),
+            expected.acknowledgement_operation_id(),
+        )],
+        "restart replays the exact stable custody acknowledgement"
+    );
+    assert!(
+        journal
+            .snapshot()
+            .expect("post-restart snapshot")
+            .slot(fixture.slot)
+            .and_then(|slot| slot.runtime_authority_delivery())
+            .is_some_and(RuntimeAuthorityDeliveryRecord::is_acknowledged),
+        "the operation ACK is durably committed before execution"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_during_authority_request_or_ack_never_reaches_user_code() {
+    for reply in [
+        support::AuthorityDeliveryReply::CancelRequest,
+        support::AuthorityDeliveryReply::CancelAcknowledgement,
+    ] {
+        let scratch = support::Scratch::new(match reply {
+            support::AuthorityDeliveryReply::CancelRequest => "cancel-authority-request",
+            support::AuthorityDeliveryReply::CancelAcknowledgement => "cancel-authority-ack",
+            support::AuthorityDeliveryReply::Acknowledge => unreachable!("cancellation cases"),
+        });
+        let runner_id = RunnerId::new();
+        let (journal, spool) = support::durable_ports(&scratch, runner_id);
+        let fixture = match reply {
+            support::AuthorityDeliveryReply::CancelRequest => {
+                support::seed_accepted_offer_without_runtime_authority(
+                    journal.as_ref(),
+                    spool.as_ref(),
+                    runner_id,
+                )
+            }
+            support::AuthorityDeliveryReply::CancelAcknowledgement => {
+                support::seed_accepted_offer_with_unacknowledged_runtime_authority(
+                    journal.as_ref(),
+                    spool.as_ref(),
+                    runner_id,
+                )
+            }
+            support::AuthorityDeliveryReply::Acknowledge => unreachable!("cancellation cases"),
+        };
+        let shutdown = CancellationToken::new();
+        let client = Arc::new(support::AuthorityDeliveryClient::new(
+            &fixture,
+            reply,
+            shutdown.clone(),
+        ));
+        let executor = Arc::new(support::AckProgressExecutor::default());
+        let runtime = RunnerSessionSupervisor::new(
+            support::config(runner_id),
+            RunnerRuntimePorts::new(
+                client.clone(),
+                journal.clone(),
+                spool,
+                executor.clone(),
+                Arc::new(support::FixedClock::new(10_000, 50)),
+                Arc::new(support::ImmediateSleeper),
+                Arc::new(SystemRuntimeIds),
+            ),
+        );
+
+        tokio::time::timeout(support::TEST_WATCHDOG, runtime.run(shutdown))
+            .await
+            .expect("authority-stage cancellation does not hang")
+            .expect("authority-stage cancellation is terminalized locally");
+
+        assert!(client.command_acknowledged());
+        assert_eq!(
+            executor.started_slots(),
+            0,
+            "authority-stage cancellation must not admit or execute user code: {reply:?}"
+        );
+        let snapshot = journal.snapshot().expect("cancelled authority snapshot");
+        let durable = snapshot
+            .slot(fixture.slot)
+            .expect("cancelled slot remains durable");
+        assert!(durable.cancellation().is_some());
+        assert_eq!(durable.lifecycle(), JobLifecycle::Cancelled);
+        assert!(durable.terminal_result().is_some());
+        match reply {
+            support::AuthorityDeliveryReply::CancelRequest => {
+                assert_eq!(client.authority_requests(), 1);
+                assert!(client.authority_acknowledgements().is_empty());
+                assert!(durable.runtime_authority_delivery().is_none());
+            }
+            support::AuthorityDeliveryReply::CancelAcknowledgement => {
+                assert_eq!(client.authority_requests(), 0);
+                assert_eq!(client.authority_acknowledgements().len(), 1);
+                assert!(
+                    durable
+                        .runtime_authority_delivery()
+                        .is_some_and(|delivery| !delivery.is_acknowledged()),
+                    "cancellation supersedes custody acknowledgement"
+                );
+            }
+            support::AuthorityDeliveryReply::Acknowledge => unreachable!("cancellation cases"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -1672,12 +1861,13 @@ async fn monotonic_watchdog_contains_an_expired_slot_without_stopping_the_superv
     let shutdown = CancellationToken::new();
     let task_shutdown = shutdown.clone();
     let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
-    for _ in 0..100 {
-        if client.heartbeat_requests().len() >= 2 {
-            break;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while client.heartbeat_requests().len() < 2 {
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("the exact heartbeat request is retried before containment");
     let heartbeats = client.heartbeat_requests();
     assert!(heartbeats.len() >= 2);
     assert_exact_retry(&heartbeats);
@@ -1854,11 +2044,17 @@ async fn lease_renewal_stale_at_resampled_database_time_fails_closed_synchronous
 }
 
 #[tokio::test]
-async fn recorded_offer_authority_liveness_uses_the_monotonic_database_beacon() {
+async fn acknowledged_delivery_authority_liveness_uses_the_monotonic_database_beacon() {
     let scratch = support::Scratch::new("offer-authority-db-beacon");
     let runner_id = RunnerId::new();
     let (journal, spool) = support::durable_ports(&scratch, runner_id);
-    let fixture = support::seed_recorded_offer(journal.as_ref(), spool.as_ref(), runner_id);
+    let fixture = support::seed_accepted_offer_with_authority_expiries(
+        journal.as_ref(),
+        spool.as_ref(),
+        runner_id,
+        80_000,
+        &[30_000],
+    );
     let monotonic = Arc::new(support::ManualClock::new(10_000, 50));
     let clock = Arc::new(RegressingWallClock::new(Arc::clone(&monotonic)));
     let sleeper = Arc::new(support::ManualDeadlineSleeper::new(Arc::clone(&monotonic)));
@@ -1886,14 +2082,14 @@ async fn recorded_offer_authority_liveness_uses_the_monotonic_database_beacon() 
 
     client.wait_for_lease_responses(1).await;
     assert!(
-        client.invalid_job_rejected(),
-        "the DB-expired authority cannot be admitted through a regressed local wall clock"
+        !client.invalid_job_rejected(),
+        "post-accept authority expiry terminalizes the accepted attempt instead of rewriting its admission"
     );
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if journal
                 .snapshot()
-                .expect("rejected authority snapshot")
+                .expect("expired authority snapshot")
                 .slot(fixture.slot)
                 .is_none()
             {
@@ -1903,7 +2099,7 @@ async fn recorded_offer_authority_liveness_uses_the_monotonic_database_beacon() 
         }
     })
     .await
-    .expect("invalid authority rejection releases the recorded offer");
+    .expect("DB-expired acknowledged authority terminalizes and releases the accepted attempt");
 
     shutdown.cancel();
     tokio::time::timeout(Duration::from_secs(1), task)

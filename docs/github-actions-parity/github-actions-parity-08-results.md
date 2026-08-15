@@ -44,8 +44,10 @@ S3 blob implementation and retains an identifier-free transcript. The ordinary
 CI workflow supplies its isolated PostgreSQL, RustFS, Node, and exact-module
 environment; direct local invocation remains opt-in because it requires those
 same services and immutable inputs.
-Runner protocol v1 carries a required, per-attempt Results authority bundle;
-there is no runner- or fleet-wide Results credential.
+After exact lease acceptance, runner protocol v2 delivers the required
+per-attempt Results authority bundle through the separate runtime-authority
+exchange. Lease offers and their persisted outbox payloads contain no
+credential values; there is no runner- or fleet-wide Results credential.
 
 Tasks:
 

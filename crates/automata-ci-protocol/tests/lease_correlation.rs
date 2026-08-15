@@ -5,10 +5,9 @@ use automata_ci_core::{
     StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
-    CommandSequence, JobRuntimeAuthorities, JobRuntimeAuthority, LeaseDisposition, LeaseHeartbeat,
-    LeaseOffer, LeaseRenewal, LeaseResponse, MessageHeader, MessageValidationError,
-    RunnerSlotOrdinal, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint, RuntimeAuthorityName,
-    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
+    CommandSequence, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRenewal, LeaseResponse,
+    MessageHeader, MessageValidationError, RunnerSlotOrdinal, SUPPORTED_PROTOCOL_RANGE,
+    ServerCommandHeader,
 };
 
 fn slot(ordinal: u16) -> RunnerSlotOrdinal {
@@ -82,20 +81,6 @@ fn acceptance_must_correlate_to_offer_session_slot_attempt_and_guard() {
     let attempt_id = AttemptId::new();
     let active_lease = lease(attempt_id, RunnerId::new());
     let job = job();
-    let authority = JobRuntimeAuthority::new(
-        RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
-        job.job().run_id(),
-        job.job().job_id(),
-        active_lease.attempt_id(),
-        active_lease.fencing_token(),
-        RuntimeAuthorityEndpoint::new("https://results.example.test/").expect("endpoint"),
-        RuntimeAuthorityCredential::new("header.payload.signature").expect("credential"),
-        UnixMillis::new(10),
-        UnixMillis::new(3_600_010),
-    )
-    .expect("runtime authority");
-    let authorities = JobRuntimeAuthorities::new(vec![authority], &job, &active_lease)
-        .expect("runtime authorities");
     let offer = LeaseOffer::new(
         ServerCommandHeader::new(
             SUPPORTED_PROTOCOL_RANGE.max(),
@@ -106,7 +91,6 @@ fn acceptance_must_correlate_to_offer_session_slot_attempt_and_guard() {
         slot(1),
         active_lease.clone(),
         job,
-        authorities,
     );
     let accepted = LeaseResponse::new(
         MessageHeader::request(

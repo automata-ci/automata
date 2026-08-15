@@ -296,3 +296,9 @@ keeps them in zeroizing execution-local custody, registers every value with the
 output masker, and acknowledges only after complete custody. This boundary does
 not establish end-to-end workflow compatibility; external/dynamic providers and
 variable-value delivery remain unsupported.
+
+GitHub workload credentials use the same value-free lease boundary and a
+separate versioned post-accept request/grant/acknowledgement exchange. The
+[runtime-authority delivery reference](runtime-authority-delivery.md) defines
+its exact attempt, offer, `JobIR`, session, restart, cancellation, and durable
+metadata invariants.

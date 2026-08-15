@@ -171,16 +171,17 @@ Acceptance:
 
 **Owner:** rotating integration owner. **Size:** S. **Dependencies:** none.
 
-Current baseline: runner protocol v1, message schema v1, JobIR schema v1,
-runner-requirements schema v1, and one canonical greenfield
-`0001_initial_schema.sql`. There is no released schema or supported database
-upgrade source. Version, reader, rejection, and limit tests remain with their
+Current baseline: runner protocol v2, message schema v1, JobIR schema v1,
+runner-requirements schema v1, and a frozen additive PostgreSQL migration
+lineage. The lineage is gap-free, checksum-verified, and extended only through
+a new migration. Version, reader, rejection, and limit tests remain with their
 owning product crates.
 
 Tasks:
 
-- [x] Keep schema changes in the canonical greenfield migration while there is
-  no released schema to upgrade.
+- [x] Keep the frozen additive PostgreSQL migration lineage gap-free and
+  checksum-verified; add each schema change at the next version without
+  editing an existing migration.
 - [x] Keep version declarations and focused reader or forward-version rejection
   tests in the crate that owns each durable or wire contract.
 - [x] Retain existing boundary tests beside the product limits they exercise
@@ -191,7 +192,7 @@ Tasks:
 Acceptance:
 
 - [x] Parallel schema branches coordinate changes through one owner of the
-  canonical baseline.
+  ordered migration lineage.
 - [x] Owning readers retain their existing focused compatibility or
   unsupported-version tests.
 - [x] Existing enforced product limits retain owner-local boundary tests.
