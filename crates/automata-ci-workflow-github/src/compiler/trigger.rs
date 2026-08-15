@@ -72,7 +72,7 @@ impl TriggerSelection {
     ) -> CompiledEvent {
         match self {
             Self::Selected(workflow_dispatch) => CompiledEvent::Selected {
-                event: event.with_configured_trigger_span(span),
+                event: Box::new(event.with_configured_trigger_span(span)),
                 workflow_dispatch: workflow_dispatch.map(Box::new),
             },
             Self::RequiresChangedFiles => CompiledEvent::RequiresChangedFiles,
@@ -1490,7 +1490,7 @@ fn path_filter_matches(
     let Some(changed_files) = changed_files else {
         return PathFilterSelection::RequiresChangedFiles;
     };
-    let GithubChangedFiles::Complete(files) = changed_files else {
+    let Some(files) = changed_files.complete_files() else {
         return PathFilterSelection::Matched(true);
     };
     if !valid_changed_files(files) {

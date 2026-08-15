@@ -31,7 +31,7 @@ use automata_ci_workflow_service::{
     WorkflowAdmissionRequest, WorkflowAdmissionRequestError, WorkflowAdmissionService,
 };
 use bytes::Bytes;
-use thiserror::Error;
+use sha2::{Digest as _, Sha256};
 use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
@@ -83,8 +83,14 @@ pub enum GithubPushChangedFilesAuthority<'credential> {
 }
 
 /// Exact repository authority supplied to a pull-request changed-files call.
-pub type GithubPullRequestChangedFilesAuthority<'credential> =
-    GithubPushChangedFilesAuthority<'credential>;
+///
+/// Private authority is intentionally absent until the manifest can pin a
+/// distinct `pull requests: read` selector. A `contents: read` token therefore
+/// cannot be passed to this port by construction.
+pub enum GithubPullRequestChangedFilesAuthority {
+    /// Query public pull-request file evidence anonymously.
+    PublicAnonymous,
+}
 
 #[cfg(test)]
 mod changed_files_provider_tests;
@@ -96,6 +102,14 @@ impl fmt::Debug for GithubPushChangedFilesAuthority<'_> {
             Self::PrivateInstallationContentsRead(_) => {
                 formatter.write_str("PrivateInstallationContentsRead([redacted])")
             }
+        }
+    }
+}
+
+impl fmt::Debug for GithubPullRequestChangedFilesAuthority {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PublicAnonymous => formatter.write_str("PublicAnonymous"),
         }
     }
 }
@@ -124,7 +138,7 @@ pub struct GithubPullRequestChangedFilesRequest<'a> {
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
     required_through: UnixMillis,
-    authority: GithubPullRequestChangedFilesAuthority<'a>,
+    authority: GithubPullRequestChangedFilesAuthority,
 }
 
 impl GithubPullRequestChangedFilesRequest<'_> {
@@ -166,19 +180,14 @@ impl GithubPullRequestChangedFilesRequest<'_> {
 
     /// Returns the exact anonymous or request-scoped private authority.
     #[must_use]
-    pub const fn authority(&self) -> &GithubPullRequestChangedFilesAuthority<'_> {
+    pub const fn authority(&self) -> &GithubPullRequestChangedFilesAuthority {
         &self.authority
     }
 
     /// Returns the disjoint server-service action for a private request.
     #[must_use]
     pub const fn private_action(&self) -> Option<GithubDeliveryPrivateRepositoryAction> {
-        match self.authority {
-            GithubPullRequestChangedFilesAuthority::PublicAnonymous => None,
-            GithubPullRequestChangedFilesAuthority::PrivateInstallationContentsRead(_) => {
-                Some(GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles)
-            }
-        }
+        None
     }
 }
 
@@ -268,47 +277,51 @@ impl fmt::Debug for GithubPushChangedFilesRequest<'_> {
     }
 }
 
-/// Sanitized failure from exact provider changed-file selection.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+/// Closed provider disposition for exact changed-file selection.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum GithubPushChangedFilesError {
-    /// Provider authority or transport is temporarily unavailable.
-    #[error("GitHub changed-file selection is temporarily unavailable")]
-    Unavailable,
-    /// The provider response could not be bound to the exact push request.
-    #[error("GitHub changed-file evidence is invalid")]
-    InvalidEvidence,
+pub enum GithubChangedFilesDisposition {
+    /// Complete bounded paths and their canonical provider evidence digest.
+    Complete {
+        /// Canonical repository-relative paths.
+        files: Vec<String>,
+        /// Digest of exact provider request/page evidence.
+        evidence_digest: Sha256Digest,
+    },
+    /// Affirmative evidence that GitHub Actions runs regardless of path filters.
+    ProviderRunAll {
+        /// Digest of exact evidence proving run-all behavior.
+        evidence_digest: Sha256Digest,
+    },
+    /// Transport, rate-limit, credential, or deadline state may recover on retry.
+    RetryableUnavailable,
+    /// Evidence is malformed, mismatched, or unsupported and must fail closed.
+    Invalid,
 }
 
 /// Least-authority provider port for one exact GitHub push diff.
 ///
-/// Implementations must reproduce the provider's push path-filter selection,
+/// Implementations must reproduce the provider's path-filter selection,
 /// return at most its documented 3,000-file window, and return
-/// [`GithubChangedFiles::BypassPathFilters`] only with affirmative provider
-/// evidence that path filters are bypassed. Returned paths must never enter
-/// diagnostics.
+/// [`GithubChangedFilesDisposition::ProviderRunAll`] only with affirmative
+/// provider evidence that path filters are bypassed. Returned paths must never
+/// enter diagnostics.
 #[async_trait]
 pub trait GithubPushChangedFilesProvider: fmt::Debug + Send + Sync {
     /// Resolves provider-verified changed-file evidence for one exact push.
-    ///
-    /// # Errors
-    ///
-    /// Returns only a sanitized transient or invalid-evidence classification.
+    /// Returns one closed evidence disposition; transport never becomes match or skip.
     async fn changed_files(
         &self,
         request: GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError>;
+    ) -> GithubChangedFilesDisposition;
 
     /// Resolves provider-verified changed-file evidence for one exact pull request.
-    ///
-    /// # Errors
-    ///
-    /// Returns only a sanitized transient or invalid-evidence classification.
+    /// Returns one closed evidence disposition; invalid evidence is never run-all.
     async fn pull_request_changed_files(
         &self,
         _request: GithubPullRequestChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
-        Err(GithubPushChangedFilesError::InvalidEvidence)
+    ) -> GithubChangedFilesDisposition {
+        GithubChangedFilesDisposition::Invalid
     }
 }
 
@@ -316,15 +329,6 @@ pub trait GithubPushChangedFilesProvider: fmt::Debug + Send + Sync {
 enum ChangedFilesEvent<'event> {
     Push(&'event automata_ci_github::VerifiedGithubPush),
     PullRequest(&'event automata_ci_github::VerifiedGithubPullRequest),
-}
-
-impl ChangedFilesEvent<'_> {
-    fn repository_owner_id(self) -> u64 {
-        match self {
-            Self::Push(push) => push.repository().owner_id().get(),
-            Self::PullRequest(pull_request) => pull_request.repository().owner_id().get(),
-        }
-    }
 }
 
 /// Product-composed GitHub delivery processor backed by logical admission.
@@ -471,6 +475,13 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         request: &GithubDeliveryWorkflowRequest<'_>,
         event: ChangedFilesEvent<'_>,
     ) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
+        if request.identity().repository_visibility() == ProviderRepositoryVisibility::Private
+            && matches!(event, ChangedFilesEvent::PullRequest(_))
+        {
+            return Err(GithubDeliveryWorkflowProcessorError::Prerequisite(
+                GithubDeliveryWorkerPrerequisite::PrivatePullRequestFilesAuthority,
+            ));
+        }
         if let ChangedFilesEvent::Push(push) = event {
             let path_filter_commit_limit = request
                 .manifest_pinned_evidence()
@@ -478,7 +489,15 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 .limits()
                 .path_filter_max_commits();
             if u64::try_from(push.commit_count()).unwrap_or(u64::MAX) > path_filter_commit_limit {
-                return Ok(Some(GithubChangedFiles::bypass_path_filters()));
+                return changed_files_result(
+                    provider_run_all_disposition(request, b"push_commit_limit"),
+                    request
+                        .manifest_pinned_evidence()
+                        .manifest()
+                        .limits()
+                        .path_filter_max_changed_files(),
+                    request,
+                );
             }
         }
         let provider = self.changed_files.as_ref().ok_or(
@@ -577,6 +596,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 .manifest()
                 .limits()
                 .path_filter_max_changed_files(),
+            request,
         )
     }
 
@@ -586,6 +606,9 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         event: ChangedFilesEvent<'_>,
         provider: &dyn GithubPushChangedFilesProvider,
     ) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
+        let ChangedFilesEvent::Push(push) = event else {
+            return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
+        };
         let (authority_selector, credentials) = private_changed_files_context(request)?;
         let observed_at = request.clock().now();
         let (requested_snapshot, observed_at) = request
@@ -597,7 +620,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         }
         let credential_request = private_changed_files_credential_request(
             request.identity(),
-            event.repository_owner_id(),
+            push.repository().owner_id().get(),
             authority_selector,
             requested_snapshot,
             observed_at,
@@ -616,7 +639,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 request_private_changed_files(
                     provider,
                     request,
-                    event,
+                    push,
                     requested_snapshot,
                     provider_observed_at,
                     credential_request.required_through(),
@@ -665,6 +688,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                     .manifest()
                     .limits()
                     .path_filter_max_changed_files(),
+                request,
             ),
             Err(_) => Err(GithubDeliveryWorkflowProcessorError::Unavailable),
         };
@@ -880,18 +904,77 @@ impl GithubDeliveryWorkflowProcessor for GithubDeliveryWorkflowAdmissionProcesso
 }
 
 fn changed_files_result(
-    result: Result<GithubChangedFiles, GithubPushChangedFilesError>,
+    result: GithubChangedFilesDisposition,
     maximum_changed_files: u64,
+    request: &GithubDeliveryWorkflowRequest<'_>,
 ) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
     match result {
-        Ok(changed_files) if valid_changed_files_limit(&changed_files, maximum_changed_files) => {
-            Ok(Some(changed_files))
+        GithubChangedFilesDisposition::Complete {
+            files,
+            evidence_digest,
+        } if u64::try_from(files.len()).is_ok_and(|count| count <= maximum_changed_files) => {
+            let digest = bind_selection_digest(request, b"complete", evidence_digest);
+            Ok(Some(GithubChangedFiles::complete_with_evidence(
+                files, digest,
+            )))
         }
-        Ok(_) | Err(GithubPushChangedFilesError::InvalidEvidence) => Ok(None),
-        Err(GithubPushChangedFilesError::Unavailable) => {
+        GithubChangedFilesDisposition::ProviderRunAll { evidence_digest } => {
+            let digest = bind_selection_digest(request, b"provider_run_all", evidence_digest);
+            Ok(Some(GithubChangedFiles::bypass_path_filters_with_evidence(
+                digest,
+            )))
+        }
+        GithubChangedFilesDisposition::RetryableUnavailable => {
             Err(GithubDeliveryWorkflowProcessorError::Unavailable)
         }
+        GithubChangedFilesDisposition::Complete { .. } | GithubChangedFilesDisposition::Invalid => {
+            Ok(None)
+        }
     }
+}
+
+fn provider_run_all_disposition(
+    request: &GithubDeliveryWorkflowRequest<'_>,
+    reason: &[u8],
+) -> GithubChangedFilesDisposition {
+    GithubChangedFilesDisposition::ProviderRunAll {
+        evidence_digest: selection_evidence_digest(
+            b"automata.github.provider-run-all.v1\0",
+            &[request.request_digest().as_bytes(), reason],
+        ),
+    }
+}
+
+fn bind_selection_digest(
+    request: &GithubDeliveryWorkflowRequest<'_>,
+    disposition: &[u8],
+    provider_digest: Sha256Digest,
+) -> Sha256Digest {
+    let workflow_source_digest = Sha256::digest(request.workflow_source());
+    selection_evidence_digest(
+        b"automata.github.workflow-selection.v1\0",
+        &[
+            request.request_digest().as_bytes(),
+            request.workflow_path().as_bytes(),
+            workflow_source_digest.as_slice(),
+            disposition,
+            provider_digest.as_bytes(),
+        ],
+    )
+}
+
+fn selection_evidence_digest(domain: &[u8], parts: &[&[u8]]) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    for part in parts {
+        digest.update(
+            u64::try_from(part.len())
+                .expect("bounded selection evidence")
+                .to_be_bytes(),
+        );
+        digest.update(part);
+    }
+    Sha256Digest::from_bytes(digest.finalize().into())
 }
 
 fn private_changed_files_credential_request<'a>(
@@ -1000,16 +1083,6 @@ async fn acquire_private_changed_files_credential(
     Ok((credential, operation, provider_observed_at))
 }
 
-fn valid_changed_files_limit(changed_files: &GithubChangedFiles, maximum: u64) -> bool {
-    match changed_files {
-        GithubChangedFiles::Complete(files) => {
-            u64::try_from(files.len()).is_ok_and(|count| count <= maximum)
-        }
-        GithubChangedFiles::BypassPathFilters => true,
-        _ => false,
-    }
-}
-
 fn private_credential_error(
     error: GithubDeliverySourceCredentialProviderError,
 ) -> GithubDeliveryWorkflowProcessorError {
@@ -1034,45 +1107,23 @@ fn provider_tail() -> std::time::Duration {
 async fn request_private_changed_files(
     provider: &dyn GithubPushChangedFilesProvider,
     request: &GithubDeliveryWorkflowRequest<'_>,
-    event: ChangedFilesEvent<'_>,
+    push: &automata_ci_github::VerifiedGithubPush,
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
     required_through: UnixMillis,
     token: &SecretString,
-) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
-    match event {
-        ChangedFilesEvent::Push(push) => {
-            provider
-                .changed_files(GithubPushChangedFilesRequest {
-                    identity: request.identity(),
-                    request_digest: request.request_digest(),
-                    push,
-                    snapshot,
-                    observed_at,
-                    required_through,
-                    authority: GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(
-                        token,
-                    ),
-                })
-                .await
-        }
-        ChangedFilesEvent::PullRequest(pull_request) => {
-            provider
-                .pull_request_changed_files(GithubPullRequestChangedFilesRequest {
-                    identity: request.identity(),
-                    request_digest: request.request_digest(),
-                    pull_request,
-                    snapshot,
-                    observed_at,
-                    required_through,
-                    authority:
-                        GithubPullRequestChangedFilesAuthority::PrivateInstallationContentsRead(
-                            token,
-                        ),
-                })
-                .await
-        }
-    }
+) -> GithubChangedFilesDisposition {
+    provider
+        .changed_files(GithubPushChangedFilesRequest {
+            identity: request.identity(),
+            request_digest: request.request_digest(),
+            push,
+            snapshot,
+            observed_at,
+            required_through,
+            authority: GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(token),
+        })
+        .await
 }
 
 fn authenticated_event_source_provenance(
@@ -1412,7 +1463,6 @@ mod renewal_tests {
         RejectProviderDelivery, RenewedProviderDeliveryClaim, RepositoryId as StoreRepositoryId,
         RetryProviderDelivery, TenantScope,
     };
-    use automata_ci_workflow_github::GithubChangedFiles;
     use automata_ci_workflow_service::{
         GithubWorkflowPlanVerifier, ReusableWorkflowExpansionError, WorkflowAdmissionError,
         WorkflowAdmissionService,
@@ -1426,9 +1476,9 @@ mod renewal_tests {
     use uuid::Uuid;
 
     use super::{
-        GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
-        GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
-        admission_error, admission_error_stage,
+        GithubChangedFilesDisposition, GithubDeliveryWorkflowAdmissionProcessor,
+        GithubPushChangedFilesAuthority, GithubPushChangedFilesProvider,
+        GithubPushChangedFilesRequest, admission_error, admission_error_stage,
     };
     use crate::{
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
@@ -1948,7 +1998,7 @@ mod renewal_tests {
         async fn changed_files(
             &self,
             request: GithubPushChangedFilesRequest<'_>,
-        ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+        ) -> GithubChangedFilesDisposition {
             let successor_token = match request.authority() {
                 GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(token) => {
                     token.expose_secret() == SUCCESSOR_TOKEN
@@ -1963,7 +2013,10 @@ mod renewal_tests {
                     action: request.private_action(),
                     successor_token,
                 });
-            Ok(GithubChangedFiles::complete(["docs/readme.md"]))
+            GithubChangedFilesDisposition::Complete {
+                files: vec!["docs/readme.md".to_owned()],
+                evidence_digest: Sha256Digest::from_bytes([0x5a; 32]),
+            }
         }
     }
 

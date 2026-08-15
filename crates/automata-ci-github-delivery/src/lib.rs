@@ -45,9 +45,9 @@ pub use checks_publisher::{
 pub use changed_files::GithubRestPushChangedFilesProvider;
 
 pub use processor::{
-    GithubDeliveryWorkflowAdmissionProcessor, GithubPullRequestChangedFilesAuthority,
-    GithubPullRequestChangedFilesRequest, GithubPushChangedFilesAuthority,
-    GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+    GithubChangedFilesDisposition, GithubDeliveryWorkflowAdmissionProcessor,
+    GithubPullRequestChangedFilesAuthority, GithubPullRequestChangedFilesRequest,
+    GithubPushChangedFilesAuthority, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
 };
 
 pub use service::{

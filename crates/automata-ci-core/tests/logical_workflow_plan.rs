@@ -11,8 +11,8 @@ use automata_ci_core::{
     MatrixAxisValues, MatrixPatch, MatrixPatchSet, MatrixTemplate, MatrixValue,
     MatrixValueTemplate, OutputSensitivity, PlanEvaluationPhase, PlanExpression,
     PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, ReusableInputBinding,
-    ReusableSecretBinding, ReusableSecretForwarding, ReusableWorkflowInvocation, StepJobTemplate,
-    WORKFLOW_PLAN_SCHEMA_VERSION, WorkflowEventProvenance, WorkflowInputKey,
+    ReusableSecretBinding, ReusableSecretForwarding, ReusableWorkflowInvocation, Sha256Digest,
+    StepJobTemplate, WORKFLOW_PLAN_SCHEMA_VERSION, WorkflowEventProvenance, WorkflowInputKey,
     WorkflowInvocationContract, WorkflowJobKey, WorkflowOutputDefinition, WorkflowOutputKey,
     WorkflowPlan, WorkflowPlanVersion, WorkflowSecretKey, WorkflowSourceProvenance,
     WorkflowStepKey, WorkflowStrategyTemplate,
@@ -337,6 +337,27 @@ fn logical_plan_round_trips_with_strategy_contracts_and_result_references() {
     assert!(encoded.get("logical").is_some());
     let decoded: WorkflowPlan = serde_json::from_value(encoded).expect("deserialize");
     assert_eq!(decoded, plan);
+}
+
+#[test]
+fn optional_event_selection_digest_is_backward_compatible_and_round_trips() {
+    let legacy = serde_json::to_value(valid_plan()).expect("serialize legacy plan shape");
+    assert!(legacy["event"].get("selection_digest").is_none());
+    let decoded_legacy: WorkflowPlan =
+        serde_json::from_value(legacy.clone()).expect("decode plan without selection digest");
+    assert_eq!(decoded_legacy.event().selection_digest(), None);
+
+    let expected = Sha256Digest::from_bytes([0x5a; 32]);
+    let mut bound = legacy;
+    bound["event"]["selection_digest"] =
+        serde_json::to_value(expected).expect("serialize selection digest");
+    let decoded: WorkflowPlan =
+        serde_json::from_value(bound.clone()).expect("decode evidence-bound plan");
+    assert_eq!(decoded.event().selection_digest(), Some(expected));
+    assert_eq!(
+        serde_json::to_value(decoded).expect("re-encode evidence-bound plan"),
+        bound
+    );
 }
 
 #[test]

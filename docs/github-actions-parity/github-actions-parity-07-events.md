@@ -34,21 +34,48 @@ Tasks:
   pull requests.
 - [ ] Match two-dot, three-dot, new-branch, forced/diverged, rename, deletion,
   300-file, and 1,000-commit behavior.
-- [ ] Separate complete file evidence, provider-proven run-all behavior,
+- [x] Separate complete file evidence, provider-proven run-all behavior,
   retryable unavailability, and invalid evidence.
-- [ ] Never turn transport failure into match or skip.
-- [ ] Match positive/negative path order and branch/tag/path interaction.
-- [ ] Complete pull-request activity defaults.
+- [x] Never turn transport failure into match or skip.
+- [x] Match positive/negative path order and branch/tag/path interaction.
+- [x] Complete pull-request activity defaults.
 - [ ] Implement supported commit-message skip directives and intentional
   skipped-check projection.
-- [ ] Bind evidence digest to the exact event and workflow selection.
+- [x] Bind evidence digest to the exact event and workflow selection.
 
 Acceptance:
 
 - [ ] Differential fixtures cover all documented diff shapes and boundaries.
-- [ ] Pagination cannot reorder, duplicate, or omit files undetected.
-- [ ] Missing evidence never silently skips a workflow.
-- [ ] Restart after any page is deterministic.
+- [x] Pagination cannot reorder, duplicate, or omit files undetected.
+- [x] Missing evidence never silently skips a workflow.
+- [x] Restart after any page is deterministic.
+
+Current portable boundary:
+
+- Public same-repository and fork pull requests use anonymous, paginated
+  `pulls/{number}/files` reads. Exact pre/post pull-request snapshots bind the
+  base repository, head repository, pull-request number, base SHA, head SHA,
+  state, and provider-reported file count. The documented first 3,000 files
+  are consumed in exact 100-file pages.
+- Each page is order-digested; the aggregate evidence digest also binds the
+  canonical path set. Duplicate, omitted, malformed, renamed, or snapshot-
+  drifting evidence is invalid. Transport, rate-limit, and server failures are
+  retryable and never become run-all.
+- A retry deliberately starts again at page one; partial pages are not cached.
+  Exact snapshot binding and canonical page digests make the replay
+  deterministic. Once a workflow is admitted, the selection digest is part of
+  immutable workflow-plan provenance and therefore its plan/admission digest;
+  a terminal path miss is retained by durable per-workflow delivery progress.
+- Private pull-request file reads remain blocked before credential acquisition
+  or provider I/O. The current manifest-pinned private source authority is
+  `contents: read`, while this endpoint requires a separately reviewed and
+  pinned `pull requests: read` selector. Completing that AUTH-02 integration
+  is required before the first two tasks or the Wave 1 runnable-private exit
+  criterion can be checked.
+- New-branch and forced/diverged push comparisons and rename parity remain
+  fail-closed. Commit-message skip directives and live GitHub differential
+  evidence also remain open; this component coverage is not a production
+  compatibility claim.
 
 ### EVT-03 — Manual dispatch core parity
 

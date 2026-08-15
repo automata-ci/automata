@@ -241,7 +241,7 @@ pub(super) struct CompileContext<'plan> {
 #[derive(Debug)]
 pub(super) enum CompiledEvent {
     Selected {
-        event: WorkflowEventProvenance,
+        event: Box<WorkflowEventProvenance>,
         workflow_dispatch: Option<Box<CompiledWorkflowDispatch>>,
     },
     RequiresChangedFiles,
@@ -443,15 +443,21 @@ fn compile_event(
             selected.span(),
             context,
         ),
-        EventSelection::Metadata(metadata) => trigger::event_matches(
-            &event,
-            selected.configuration(),
-            selected_dispatch_contract.as_ref(),
-            Some(metadata),
-            selected.span(),
-            context,
-        )
-        .with_event(event, span),
+        EventSelection::Metadata(metadata) => {
+            let event = match metadata.changed_files_evidence_digest() {
+                Some(digest) => event.with_selection_digest(digest),
+                None => event,
+            };
+            trigger::event_matches(
+                &event,
+                selected.configuration(),
+                selected_dispatch_contract.as_ref(),
+                Some(metadata),
+                selected.span(),
+                context,
+            )
+            .with_event(event, span)
+        }
         EventSelection::Unverified => trigger::event_matches(
             &event,
             selected.configuration(),
@@ -502,7 +508,7 @@ fn compile_preselected_event(
             return CompiledEvent::Rejected;
         }
         return CompiledEvent::Selected {
-            event,
+            event: Box::new(event),
             workflow_dispatch: None,
         };
     }
@@ -515,7 +521,7 @@ fn compile_preselected_event(
         return CompiledEvent::Rejected;
     };
     CompiledEvent::Selected {
-        event,
+        event: Box::new(event),
         workflow_dispatch: Some(Box::new(workflow_dispatch)),
     }
 }

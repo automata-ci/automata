@@ -1,22 +1,26 @@
 use std::{fmt, time::Instant};
 
 use async_trait::async_trait;
+use automata_ci_core::Sha256Digest;
 use automata_ci_github::{
-    GithubHttpEndpoint, GithubPullRequestDiffError, GithubPullRequestDiffOutcome,
-    GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffError,
-    GithubPushDiffOutcome, GithubPushDiffRange, GithubPushDiffRequest, GithubPushRefKind,
-    GithubRepositoryVisibility, VerifiedGithubPullRequest, VerifiedGithubPush,
+    GithubHttpEndpoint, GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome,
+    GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffOutcome,
+    GithubPushDiffRange, GithubPushDiffRequest, GithubPushRefKind, GithubRepositoryVisibility,
+    VerifiedGithubPullRequest, VerifiedGithubPush,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use automata_ci_store::ProviderRepositoryVisibility;
-use automata_ci_workflow_github::GithubChangedFiles;
 
 use crate::{
+    GithubChangedFilesDisposition, GithubPullRequestChangedFilesAuthority,
     GithubPullRequestChangedFilesRequest, GithubPushChangedFilesAuthority,
-    GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+    GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
 };
 
-/// Product-composed delivery adapter for GitHub's bounded Compare REST evidence.
+/// Product-composed delivery adapter for bounded GitHub changed-file evidence.
+///
+/// Pushes use Compare REST. Pull requests use the paginated pull-request-files
+/// endpoint with exact pre/post pull-request snapshots.
 #[derive(Clone)]
 pub struct GithubRestPushChangedFilesProvider {
     endpoint: GithubHttpEndpoint,
@@ -32,15 +36,22 @@ impl GithubRestPushChangedFilesProvider {
     async fn resolve(
         &self,
         request: &GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
-        validate_delivery_binding(request)?;
-        let repository = RepositoryId::new(request.push().repository().full_name())
-            .map_err(|_| GithubPushChangedFilesError::InvalidEvidence)?;
-        let range = push_range(request.push())?;
+    ) -> GithubChangedFilesDisposition {
+        if !validate_delivery_binding(request) {
+            return GithubChangedFilesDisposition::Invalid;
+        }
+        let Ok(repository) = RepositoryId::new(request.push().repository().full_name()) else {
+            return GithubChangedFilesDisposition::Invalid;
+        };
+        let Ok(range) = push_range(request.push()) else {
+            return GithubChangedFilesDisposition::Invalid;
+        };
         let authority = push_authority(request.authority());
-        let deadline = Instant::now()
-            .checked_add(self.endpoint.trusted_origins().limits().request_timeout())
-            .ok_or(GithubPushChangedFilesError::Unavailable)?;
+        let Some(deadline) =
+            Instant::now().checked_add(self.endpoint.trusted_origins().limits().request_timeout())
+        else {
+            return GithubChangedFilesDisposition::RetryableUnavailable;
+        };
         let outcome = self
             .endpoint
             .push_changed_files(GithubPushDiffRequest::new(
@@ -49,35 +60,48 @@ impl GithubRestPushChangedFilesProvider {
                 authority,
                 deadline,
             ))
-            .await
-            .map_err(map_http_error)?;
+            .await;
         translate_outcome(outcome)
     }
 
     async fn resolve_pull_request(
         &self,
         request: &GithubPullRequestChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
-        validate_pull_request_delivery_binding(request)?;
+    ) -> GithubChangedFilesDisposition {
+        if !validate_pull_request_delivery_binding(request) {
+            return GithubChangedFilesDisposition::Invalid;
+        }
         let pull_request = request.pull_request();
-        let repository = RepositoryId::new(pull_request.repository().full_name())
-            .map_err(|_| GithubPushChangedFilesError::InvalidEvidence)?;
-        let authority = push_authority(request.authority());
-        let deadline = Instant::now()
-            .checked_add(self.endpoint.trusted_origins().limits().request_timeout())
-            .ok_or(GithubPushChangedFilesError::Unavailable)?;
+        let Ok(repository) = RepositoryId::new(pull_request.repository().full_name()) else {
+            return GithubChangedFilesDisposition::Invalid;
+        };
+        let Ok(head_repository) = RepositoryId::new(pull_request.head_repository().full_name())
+        else {
+            return GithubChangedFilesDisposition::Invalid;
+        };
+        let authority = match request.authority() {
+            GithubPullRequestChangedFilesAuthority::PublicAnonymous => {
+                GithubPullRequestDiffAuthority::PublicAnonymous
+            }
+        };
+        let Some(deadline) =
+            Instant::now().checked_add(self.endpoint.trusted_origins().limits().request_timeout())
+        else {
+            return GithubChangedFilesDisposition::RetryableUnavailable;
+        };
         let outcome = self
             .endpoint
             .pull_request_changed_files(GithubPullRequestDiffRequest::new(
                 &repository,
+                &head_repository,
+                pull_request.number(),
                 pull_request.base_revision(),
                 pull_request.head_revision(),
                 authority,
                 deadline,
             ))
-            .await
-            .map_err(map_pull_request_http_error)?;
-        Ok(translate_pull_request_outcome(outcome))
+            .await;
+        translate_pull_request_outcome(outcome)
     }
 }
 
@@ -95,25 +119,23 @@ impl GithubPushChangedFilesProvider for GithubRestPushChangedFilesProvider {
     async fn changed_files(
         &self,
         request: GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+    ) -> GithubChangedFilesDisposition {
         self.resolve(&request).await
     }
 
     async fn pull_request_changed_files(
         &self,
         request: GithubPullRequestChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+    ) -> GithubChangedFilesDisposition {
         self.resolve_pull_request(&request).await
     }
 }
 
-fn validate_delivery_binding(
-    request: &GithubPushChangedFilesRequest<'_>,
-) -> Result<(), GithubPushChangedFilesError> {
+fn validate_delivery_binding(request: &GithubPushChangedFilesRequest<'_>) -> bool {
     let push = request.push();
     let identity = request.identity();
     if identity.provider() != "github" || identity.delivery_id() != push.delivery_id() {
-        return Err(GithubPushChangedFilesError::InvalidEvidence);
+        return false;
     }
     let visibility_matches = matches!(
         (
@@ -137,14 +159,14 @@ fn validate_delivery_binding(
         || identity.installation_id().get() != push.installation_id().get()
         || request.required_through() <= request.observed_at()
     {
-        return Err(GithubPushChangedFilesError::InvalidEvidence);
+        return false;
     }
-    Ok(())
+    true
 }
 
 fn validate_pull_request_delivery_binding(
     request: &GithubPullRequestChangedFilesRequest<'_>,
-) -> Result<(), GithubPushChangedFilesError> {
+) -> bool {
     let pull_request = request.pull_request();
     validate_common_delivery_binding(
         request.identity(),
@@ -158,12 +180,12 @@ fn validate_pull_request_delivery_binding(
 fn validate_common_delivery_binding(
     identity: &automata_ci_store::ProviderDeliveryIdentity,
     pull_request: &VerifiedGithubPullRequest,
-    authority: &GithubPushChangedFilesAuthority<'_>,
+    authority: &GithubPullRequestChangedFilesAuthority,
     observed_at: automata_ci_core::UnixMillis,
     required_through: automata_ci_core::UnixMillis,
-) -> Result<(), GithubPushChangedFilesError> {
+) -> bool {
     if identity.provider() != "github" || identity.delivery_id() != pull_request.delivery_id() {
-        return Err(GithubPushChangedFilesError::InvalidEvidence);
+        return false;
     }
     let visibility_matches = matches!(
         (
@@ -174,11 +196,7 @@ fn validate_common_delivery_binding(
         (
             ProviderRepositoryVisibility::Public,
             GithubRepositoryVisibility::Public,
-            GithubPushChangedFilesAuthority::PublicAnonymous,
-        ) | (
-            ProviderRepositoryVisibility::Private,
-            GithubRepositoryVisibility::Private,
-            GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(_),
+            GithubPullRequestChangedFilesAuthority::PublicAnonymous,
         )
     );
     if !visibility_matches
@@ -187,16 +205,14 @@ fn validate_common_delivery_binding(
         || identity.installation_id().get() != pull_request.installation_id().get()
         || required_through <= observed_at
     {
-        return Err(GithubPushChangedFilesError::InvalidEvidence);
+        return false;
     }
-    Ok(())
+    true
 }
 
-fn push_range(
-    push: &VerifiedGithubPush,
-) -> Result<GithubPushDiffRange, GithubPushChangedFilesError> {
+fn push_range(push: &VerifiedGithubPush) -> Result<GithubPushDiffRange, ()> {
     if push.git_ref().kind() != GithubPushRefKind::Branch {
-        return Err(GithubPushChangedFilesError::InvalidEvidence);
+        return Err(());
     }
     if push.deleted() {
         return Ok(GithubPushDiffRange::Deleted);
@@ -207,13 +223,9 @@ fn push_range(
     if push.forced() {
         return Ok(GithubPushDiffRange::Forced);
     }
-    let before = ExactRevision::new(push.before_commit_sha())
-        .map_err(|_| GithubPushChangedFilesError::InvalidEvidence)?;
-    let after = ExactRevision::new(push.after_commit_sha())
-        .map_err(|_| GithubPushChangedFilesError::InvalidEvidence)?;
-    let pushed_commits = push
-        .complete_pushed_commit_revisions()
-        .ok_or(GithubPushChangedFilesError::InvalidEvidence)?;
+    let before = ExactRevision::new(push.before_commit_sha()).map_err(|_| ())?;
+    let after = ExactRevision::new(push.after_commit_sha()).map_err(|_| ())?;
+    let pushed_commits = push.complete_pushed_commit_revisions().ok_or(())?;
     Ok(GithubPushDiffRange::Existing {
         before,
         after,
@@ -234,36 +246,38 @@ fn push_authority<'credential>(
     }
 }
 
-fn translate_outcome(
-    outcome: GithubPushDiffOutcome,
-) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+fn translate_outcome(outcome: GithubPushDiffOutcome) -> GithubChangedFilesDisposition {
     match outcome {
-        GithubPushDiffOutcome::Complete(evidence) => {
-            Ok(GithubChangedFiles::complete(evidence.into_changed_paths()))
+        GithubPushDiffOutcome::Complete(evidence) => GithubChangedFilesDisposition::Complete {
+            evidence_digest: core_digest(evidence.evidence_digest()),
+            files: evidence.into_changed_paths(),
+        },
+        GithubPushDiffOutcome::RetryableUnavailable => {
+            GithubChangedFilesDisposition::RetryableUnavailable
         }
-        _ => Err(GithubPushChangedFilesError::InvalidEvidence),
+        _ => GithubChangedFilesDisposition::Invalid,
     }
 }
 
-fn translate_pull_request_outcome(outcome: GithubPullRequestDiffOutcome) -> GithubChangedFiles {
+fn translate_pull_request_outcome(
+    outcome: GithubPullRequestDiffOutcome,
+) -> GithubChangedFilesDisposition {
     match outcome {
         GithubPullRequestDiffOutcome::Complete(evidence) => {
-            GithubChangedFiles::complete(evidence.into_changed_paths())
+            GithubChangedFilesDisposition::Complete {
+                evidence_digest: core_digest(evidence.evidence_digest()),
+                files: evidence.into_changed_paths(),
+            }
         }
-        _ => GithubChangedFiles::bypass_path_filters(),
+        GithubPullRequestDiffOutcome::RetryableUnavailable => {
+            GithubChangedFilesDisposition::RetryableUnavailable
+        }
+        _ => GithubChangedFilesDisposition::Invalid,
     }
 }
 
-fn map_http_error(error: GithubPushDiffError) -> GithubPushChangedFilesError {
-    match error {
-        GithubPushDiffError::Unavailable => GithubPushChangedFilesError::Unavailable,
-    }
-}
-
-fn map_pull_request_http_error(error: GithubPullRequestDiffError) -> GithubPushChangedFilesError {
-    match error {
-        GithubPullRequestDiffError::Unavailable => GithubPushChangedFilesError::Unavailable,
-    }
+fn core_digest(digest: automata_ci_github::GithubChangedFilesEvidenceDigest) -> Sha256Digest {
+    Sha256Digest::from_bytes(*digest.as_bytes())
 }
 
 #[cfg(test)]
@@ -314,10 +328,7 @@ mod tests {
             GithubPushDiffRange::Forced
         ));
         let tag = push("refs/tags/v1", BEFORE, AFTER, false, false, false);
-        assert_eq!(
-            push_range(&tag).unwrap_err(),
-            GithubPushChangedFilesError::InvalidEvidence
-        );
+        assert!(push_range(&tag).is_err());
     }
 
     #[test]
@@ -350,13 +361,13 @@ mod tests {
             GithubPushDiffIncompleteReason::ProviderRejected,
         ] {
             assert_eq!(
-                translate_outcome(GithubPushDiffOutcome::Incomplete(reason)).unwrap_err(),
-                GithubPushChangedFilesError::InvalidEvidence
+                translate_outcome(GithubPushDiffOutcome::Invalid(reason)),
+                GithubChangedFilesDisposition::Invalid
             );
         }
         assert_eq!(
-            map_http_error(GithubPushDiffError::Unavailable),
-            GithubPushChangedFilesError::Unavailable
+            translate_outcome(GithubPushDiffOutcome::RetryableUnavailable),
+            GithubChangedFilesDisposition::RetryableUnavailable
         );
     }
 

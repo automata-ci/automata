@@ -1,6 +1,6 @@
 use crate::support;
 
-use automata_ci_core::WorkflowEventProvenance;
+use automata_ci_core::{Sha256Digest, WorkflowEventProvenance};
 use automata_ci_workflow_github::{
     CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubChangedFiles,
     GithubEventMetadata, GithubWorkflowCompiler, WorkflowNotSelectedReason,
@@ -367,6 +367,51 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
             WorkflowNotSelectedReason::EventFiltersNotMatched,
         );
     }
+}
+
+#[test]
+fn changed_file_evidence_digest_is_part_of_immutable_event_provenance() {
+    let source = "on:\n  pull_request:\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let expected = Sha256Digest::from_bytes([0x6c; 32]);
+    let report = compile(
+        source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
+            GithubChangedFiles::complete_with_evidence(["src/lib.rs"], expected),
+        )),
+    );
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let plan = report.plan().expect("evidence-bound plan");
+    assert_eq!(plan.event().selection_digest(), Some(expected));
+
+    let changed = Sha256Digest::from_bytes([0x6d; 32]);
+    let changed_report = compile(
+        source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
+            GithubChangedFiles::complete_with_evidence(["src/lib.rs"], changed),
+        )),
+    );
+    let changed_plan = changed_report.plan().expect("changed evidence plan");
+    assert_eq!(changed_plan.event().selection_digest(), Some(changed));
+    assert_ne!(changed_plan, plan);
+    assert_ne!(
+        serde_json::to_vec(changed_plan).expect("serialize changed evidence plan"),
+        serde_json::to_vec(plan).expect("serialize original evidence plan")
+    );
+
+    let parsed = support::parse(source);
+    let replay =
+        GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_preselected_event(
+            parsed.plan().expect("replay source plan"),
+            plan.event().clone(),
+        ));
+    assert!(replay.is_accepted(), "{:#?}", replay.diagnostics());
+    assert_eq!(replay.plan(), Some(plan));
 }
 
 #[test]

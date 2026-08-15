@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Sha256Digest;
+
 /// One source coordinate: a zero-based byte offset and one-based display position.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(try_from = "UncheckedPlanSourceLocation")]
@@ -244,6 +246,8 @@ pub struct WorkflowEventProvenance {
     delivery_id: Option<String>,
     commit_sha: Option<String>,
     git_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection_digest: Option<Sha256Digest>,
     configured_trigger_span: Option<PlanSourceSpan>,
 }
 
@@ -257,6 +261,7 @@ impl WorkflowEventProvenance {
             delivery_id: None,
             commit_sha: None,
             git_ref: None,
+            selection_digest: None,
             configured_trigger_span: None,
         }
     }
@@ -279,6 +284,16 @@ impl WorkflowEventProvenance {
     #[must_use]
     pub fn with_git_ref(mut self, git_ref: impl Into<String>) -> Self {
         self.git_ref = Some(git_ref.into());
+        self
+    }
+
+    /// Attaches the digest of provider evidence used to select this exact workflow.
+    ///
+    /// The digest grants no provider authority. It makes external selection
+    /// evidence part of immutable logical admission and replay evidence.
+    #[must_use]
+    pub const fn with_selection_digest(mut self, digest: Sha256Digest) -> Self {
+        self.selection_digest = Some(digest);
         self
     }
 
@@ -317,6 +332,12 @@ impl WorkflowEventProvenance {
     #[must_use]
     pub fn git_ref(&self) -> Option<&str> {
         self.git_ref.as_deref()
+    }
+
+    /// Returns provider-selection evidence retained by the immutable plan.
+    #[must_use]
+    pub const fn selection_digest(&self) -> Option<Sha256Digest> {
+        self.selection_digest
     }
 
     /// Returns source evidence for the configured trigger that selected the workflow.
