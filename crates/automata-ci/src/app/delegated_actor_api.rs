@@ -8,8 +8,8 @@ use std::{
 
 use automata_ci_auth::{
     delegated_actor::{
-        DelegatedActorAssertion, DelegatedActorResolver, DelegatedActorResolverError,
-        ResolveDelegatedActorOutcome, ResolveDelegatedActorRequest,
+        DelegatedActorAssertion, DelegatedActorRequestSnapshot, DelegatedActorResolver,
+        DelegatedActorResolverError, ResolveDelegatedActorOutcome, ResolveDelegatedActorRequest,
     },
     human::TenantId,
     time::UnixTimestamp,
@@ -28,11 +28,22 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse as _, Response},
-    routing::get,
+    routing::{get, post},
 };
+
+use super::{
+    live_log::{
+        LiveLogService, issued_response, parse_job_id, parse_run_id, repository_path,
+        service_error_response,
+    },
+    web::{RequestContext, Viewer},
+};
+use automata_ci_store::HumanLiveLogBrowserOrigin;
 
 /// Protected Core endpoint used by Cloud to resolve the current viewer.
 pub const DELEGATED_ACTOR_VIEWER_PATH: &str = "/internal/v1/workspaces/{workspace_id}/viewer";
+/// Protected Core endpoint used by Cloud to authorize one browser log tail.
+pub const DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket";
 
 const MAX_ASSERTION_BYTES: usize = 8 * 1024;
 const MAX_JWT_SEGMENT_BYTES: usize = 6 * 1024;
@@ -350,6 +361,8 @@ pub(crate) enum DelegatedActorVerificationError {
 struct DelegatedActorApiState {
     verifier: Arc<DelegatedActorVerifier>,
     resolver: Arc<dyn DelegatedActorResolver>,
+    live_logs: Arc<LiveLogService>,
+    browser_origin: HumanLiveLogBrowserOrigin,
 }
 
 impl std::fmt::Debug for DelegatedActorApiState {
@@ -358,6 +371,8 @@ impl std::fmt::Debug for DelegatedActorApiState {
             .debug_struct("DelegatedActorApiState")
             .field("verifier", &self.verifier)
             .field("resolver", &self.resolver)
+            .field("live_logs", &self.live_logs)
+            .field("browser_origin", &self.browser_origin)
             .finish()
     }
 }
@@ -375,10 +390,21 @@ struct WorkspaceViewerResponse {
 pub(crate) fn router(
     verifier: Arc<DelegatedActorVerifier>,
     resolver: Arc<dyn DelegatedActorResolver>,
+    live_logs: Arc<LiveLogService>,
+    browser_origin: HumanLiveLogBrowserOrigin,
 ) -> Router {
     Router::new()
         .route(DELEGATED_ACTOR_VIEWER_PATH, get(workspace_viewer))
-        .with_state(DelegatedActorApiState { verifier, resolver })
+        .route(
+            DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
+            post(workspace_live_log_ticket),
+        )
+        .with_state(DelegatedActorApiState {
+            verifier,
+            resolver,
+            live_logs,
+            browser_origin,
+        })
 }
 
 async fn workspace_viewer(
@@ -389,34 +415,9 @@ async fn workspace_viewer(
     let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
         return status_response(StatusCode::NOT_FOUND);
     };
-    let Some(token) = bearer_token(&headers) else {
-        return unauthorized();
-    };
-    let now = unix_time();
-    let verified = match state.verifier.verify(token, now).await {
-        Ok(value) if value.workspace_id == workspace_uuid => value,
-        Ok(_) | Err(DelegatedActorVerificationError::Rejected) => return unauthorized(),
-        Err(DelegatedActorVerificationError::Unavailable) => {
-            return status_response(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    };
-    let Ok(tenant_id) = TenantId::new(workspace_id.clone()) else {
-        return status_response(StatusCode::NOT_FOUND);
-    };
-    let request = ResolveDelegatedActorRequest::new(verified.assertion, tenant_id);
-    let snapshot = match state.resolver.resolve(&request).await {
-        Ok(ResolveDelegatedActorOutcome::Authenticated(snapshot)) => snapshot,
-        Ok(
-            ResolveDelegatedActorOutcome::NotFound
-            | ResolveDelegatedActorOutcome::PrincipalDisabled
-            | ResolveDelegatedActorOutcome::MembershipSuspended,
-        ) => return status_response(StatusCode::FORBIDDEN),
-        Err(DelegatedActorResolverError::Unavailable) => {
-            return status_response(StatusCode::SERVICE_UNAVAILABLE);
-        }
-        Err(DelegatedActorResolverError::CorruptData) => {
-            return status_response(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+    let snapshot = match resolve_actor(&state, workspace_uuid, &headers).await {
+        Ok(snapshot) => snapshot,
+        Err(response) => return response,
     };
     let authorization = snapshot.authorization();
     let Some(principal_id) = authorization.principal_id() else {
@@ -439,6 +440,96 @@ async fn workspace_viewer(
         }),
     )
         .into_response()
+}
+
+async fn workspace_live_log_ticket(
+    State(state): State<DelegatedActorApiState>,
+    Path((workspace_id, owner, repository, run_id, job_id)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let snapshot = match resolve_actor(&state, workspace_uuid, &headers).await {
+        Ok(snapshot) => snapshot,
+        Err(response) => return response,
+    };
+    let Some(repository) = repository_path(owner, repository) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let (Some(run_id), Some(job_id)) = (parse_run_id(&run_id), parse_job_id(&job_id)) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let Ok(tenant_id) = TenantId::new(workspace_id) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let Ok(context) = RequestContext::new(
+        tenant_id,
+        snapshot.authorization().clone(),
+        Some(Viewer {
+            display_name: snapshot.viewer().display_name().to_owned(),
+        }),
+        None,
+    ) else {
+        return status_response(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    match state
+        .live_logs
+        .issue(
+            &context,
+            &repository,
+            run_id,
+            job_id,
+            state.browser_origin.clone(),
+        )
+        .await
+    {
+        Ok(Some(issued)) => issued_response(&issued),
+        Ok(None) => status_response(StatusCode::NOT_FOUND),
+        Err(error) => service_error_response(error),
+    }
+}
+
+async fn resolve_actor(
+    state: &DelegatedActorApiState,
+    workspace_uuid: Uuid,
+    headers: &HeaderMap,
+) -> Result<Box<DelegatedActorRequestSnapshot>, Response> {
+    let Some(token) = bearer_token(headers) else {
+        return Err(unauthorized());
+    };
+    let now = unix_time();
+    let verified = match state.verifier.verify(token, now).await {
+        Ok(value) if value.workspace_id == workspace_uuid => value,
+        Ok(_) | Err(DelegatedActorVerificationError::Rejected) => return Err(unauthorized()),
+        Err(DelegatedActorVerificationError::Unavailable) => {
+            return Err(status_response(StatusCode::SERVICE_UNAVAILABLE));
+        }
+    };
+    let Ok(tenant_id) = TenantId::new(workspace_uuid.hyphenated().to_string()) else {
+        return Err(status_response(StatusCode::NOT_FOUND));
+    };
+    let request = ResolveDelegatedActorRequest::new(verified.assertion, tenant_id);
+    match state.resolver.resolve(&request).await {
+        Ok(ResolveDelegatedActorOutcome::Authenticated(snapshot)) => Ok(snapshot),
+        Ok(
+            ResolveDelegatedActorOutcome::NotFound
+            | ResolveDelegatedActorOutcome::PrincipalDisabled
+            | ResolveDelegatedActorOutcome::MembershipSuspended,
+        ) => Err(status_response(StatusCode::FORBIDDEN)),
+        Err(DelegatedActorResolverError::Unavailable) => {
+            Err(status_response(StatusCode::SERVICE_UNAVAILABLE))
+        }
+        Err(DelegatedActorResolverError::CorruptData) => {
+            Err(status_response(StatusCode::INTERNAL_SERVER_ERROR))
+        }
+    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

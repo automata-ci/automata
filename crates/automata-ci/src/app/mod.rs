@@ -7,6 +7,7 @@ pub(crate) mod github_auth;
 pub mod http;
 pub(crate) mod human_auth;
 pub(crate) mod human_auth_middleware;
+pub(crate) mod live_log;
 pub(crate) mod management_api;
 pub(crate) mod protected_environment_review_api;
 pub(crate) mod publication_settings;

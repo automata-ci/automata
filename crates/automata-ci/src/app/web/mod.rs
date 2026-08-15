@@ -12,6 +12,7 @@ pub(crate) use data::{
     RbacRoleListPage, RbacRoleListRequest, RbacUserDetailPage, RbacUserDetailRequest,
     RbacUserListPage, RbacUserListRequest, RbacWebDataError, RbacWebReadOutcome,
 };
+pub(crate) use data::{LiveLogBatch, LiveLogRecord, LogChannel, RepositoryPath, WebDataError};
 pub(crate) use data::{ManagementRbacWebData, RbacWebData, RequestContext, Viewer, WebData};
 pub(crate) use data::{
     SetupPageAvailability, SetupPageAvailabilityError, SetupPageAvailabilityState,

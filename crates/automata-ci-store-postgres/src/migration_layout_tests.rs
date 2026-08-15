@@ -125,6 +125,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0030_finalize_expired_lease_claims.sql",
         "68a3755eb8e238649342c7e19a99c467351a6f735cd01a55846e3451e6eabf812ddd922192a3c2a4b9f6fcb3c65cb8a5",
     ),
+    (
+        "0031_human_live_log_tickets.sql",
+        "63fba5e432f071d107bfa0b28859bca6396054890ee2c0f448a4a06b44c323ba1ead27056e1d7d4e60306a54920bc968",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
