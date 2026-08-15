@@ -519,6 +519,7 @@ pub fn logical_activation_publication_digest(
     input_digest: Sha256Digest,
     condition_matched: bool,
     instances: &[crate::ActivatedLogicalInstanceDescriptor],
+    scheduling_policy: &crate::ResolvedLogicalJobSchedulingPolicy,
 ) -> Sha256Digest {
     crate::logical_activation::rederive_publication_digest(
         run_id,
@@ -527,6 +528,7 @@ pub fn logical_activation_publication_digest(
         input_digest,
         condition_matched,
         instances,
+        scheduling_policy,
     )
 }
 

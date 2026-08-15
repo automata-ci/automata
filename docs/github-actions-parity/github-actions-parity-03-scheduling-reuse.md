@@ -81,9 +81,9 @@ Evidence:
 
 Tasks:
 
-- [ ] Persist resolved matrix identity and `max-parallel` relationally rather
+- [x] Persist resolved matrix identity and `max-parallel` relationally rather
   than only in plan blobs.
-- [ ] Add positive and bounded constraints.
+- [x] Add positive and bounded constraints.
 - [ ] Gate materialization or selection by nonterminal sibling count.
 - [ ] Promote waiting cells transactionally on terminal transitions.
 - [ ] Recover capacity after success, cancellation, executor loss, retry, and
@@ -95,7 +95,27 @@ Acceptance:
 
 - [ ] No race exceeds the configured cap.
 - [ ] Capacity is never permanently leaked.
-- [ ] Workflows without the option retain existing behavior.
+- [x] Workflows without the option retain existing behavior.
+
+Wave 1 contract status:
+
+- The typed schema-1 policy is scoped to tenant, run, invocation, and logical
+  job. It retains an evaluated positive `u32` request exactly and derives the
+  effective bound as `min(requested, activated instance count)`; omission uses
+  the full activated count. Zero-instance activation has effective capacity
+  zero while preserving an evaluated request, and a false job condition
+  records no request because strategy evaluation is skipped.
+- Activation publication, receipt, canonical digest, exact replay, and
+  conflict detection bind the same immutable policy. PostgreSQL migration
+  `0032_logical_activation_scheduling_policy.sql` appends the relational
+  columns and exact checks to the repository's frozen migration lineage, and
+  the repository exposes a tenant-scoped read seam for Wave 2.
+- Static, dynamic-expression, omitted-option, false-condition, empty-matrix,
+  exact-replay, divergent-replay, corruption, and service/store roundtrip
+  tests cover this contract.
+- This Wave 1 work does not gate materialization or selection, promote waiting
+  cells, or recover capacity. Those transactional throttling requirements and
+  the first two unchecked acceptance criteria remain Wave 2 work.
 
 ### MAT-03 — Durable `strategy.fail-fast`
 

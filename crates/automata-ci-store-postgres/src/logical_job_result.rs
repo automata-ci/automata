@@ -9,7 +9,10 @@ use automata_ci_core::{
 use sqlx::{PgPool, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
-use super::{PostgresStore, durable_schema::current_durable_schemas, pg_bigint};
+use super::{
+    PostgresStore, durable_schema::current_durable_schemas,
+    logical_activation::decode_scheduling_policy, pg_bigint,
+};
 use automata_ci_store::{
     ActivatedLogicalInstanceDescriptor, AdmissionObject, ClaimLogicalJobResult,
     ClaimNextLogicalJobResult, ClaimedLogicalJobResult, CommitLogicalJobResult,
@@ -21,8 +24,9 @@ use automata_ci_store::{
     LogicalJobResultGeneration, LogicalJobResultOutput, LogicalJobResultQuarantineKind,
     LogicalJobResultQuarantineOutcome, LogicalJobResultReceipt, LogicalJobResultRepository,
     LogicalJobResultStoreError, LogicalJobResultTarget, LogicalJobResultWorkerId,
-    LogicalWorkflowInstanceId, LogicalWorkflowInvocationId, LogicalWorkflowJobId, ObjectKey,
-    QuarantineLogicalJobResult, StoreError, TenantScope, WORKFLOW_PLAN_SCHEMA,
+    LogicalJobSchedulingPolicyScope, LogicalWorkflowInstanceId, LogicalWorkflowInvocationId,
+    LogicalWorkflowJobId, ObjectKey, QuarantineLogicalJobResult, StoreError, TenantScope,
+    WORKFLOW_PLAN_SCHEMA,
 };
 
 const MAX_SELECTION_CLOCK_SKEW_MILLIS: i64 = 60_000;
@@ -1024,7 +1028,10 @@ async fn lock_target(
                publication.activation_input_digest,
                publication.activation_output_digest,
                publication.condition_matched, publication.instance_count,
-               publication.published_at_ms
+               publication.published_at_ms,
+               publication.scheduling_policy_schema,
+               publication.requested_max_parallel,
+               publication.effective_max_parallel
         FROM logical_workflow_jobs AS job
         JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = job.run_id AND invocation.id = job.invocation_id
@@ -1319,6 +1326,15 @@ async fn load_descriptor(
     let condition_matched = row.try_get("condition_matched").map_err(operation_error)?;
     let activation_input_digest = decode_digest(row, "activation_input_digest")?;
     let activation_output_digest = decode_digest(row, "activation_output_digest")?;
+    let scheduling_scope = LogicalJobSchedulingPolicyScope::new(
+        target.tenant().clone(),
+        target.run_id(),
+        target.invocation_id(),
+        target.logical_job_id(),
+    )
+    .map_err(corrupt_value)?;
+    let scheduling_policy = decode_scheduling_policy(row, &scheduling_scope)
+        .map_err(LogicalJobResultStoreError::from)?;
     let Some(instances) = load_instances(
         transaction,
         &target,
@@ -1326,6 +1342,7 @@ async fn load_descriptor(
         activation_input_digest,
         activation_output_digest,
         condition_matched,
+        &scheduling_policy,
     )
     .await?
     else {
@@ -1358,6 +1375,7 @@ async fn load_instances(
     activation_input_digest: Sha256Digest,
     activation_output_digest: Sha256Digest,
     condition_matched: bool,
+    scheduling_policy: &automata_ci_store::ResolvedLogicalJobSchedulingPolicy,
 ) -> Result<Option<Vec<LogicalJobInstanceResultEvidence>>, LogicalJobResultStoreError> {
     let rows = sqlx::query(
         r"
@@ -1424,6 +1442,7 @@ async fn load_instances(
         activation_input_digest,
         condition_matched,
         &activation_instances,
+        scheduling_policy,
     ) != activation_output_digest
     {
         return Err(StoreError::corrupt_data(

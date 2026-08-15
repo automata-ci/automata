@@ -129,6 +129,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0031_human_live_log_tickets.sql",
         "63fba5e432f071d107bfa0b28859bca6396054890ee2c0f448a4a06b44c323ba1ead27056e1d7d4e60306a54920bc968",
     ),
+    (
+        "0032_logical_activation_scheduling_policy.sql",
+        "a1344c653b8d8b115265dfbe92caab6e4253167d68ee3cf996e368dfaffa7c39f61e7a81cd437bf73d11c7ce86ea2a7f",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -213,6 +217,31 @@ fn migrations_are_bounded_and_the_baseline_is_explicit() {
         assert!(
             lines <= MAX_MIGRATION_LINES,
             "migration {file_name} has {lines} lines; maximum is {MAX_MIGRATION_LINES}"
+        );
+    }
+}
+
+#[test]
+fn logical_activation_scheduling_policy_is_relationally_exact() {
+    let source = include_str!("../migrations/0032_logical_activation_scheduling_policy.sql");
+
+    for required in [
+        "ADD COLUMN scheduling_policy_schema smallint NOT NULL",
+        "ADD COLUMN requested_max_parallel bigint",
+        "ADD COLUMN effective_max_parallel integer NOT NULL",
+        "CHECK (scheduling_policy_schema = 1)",
+        "requested_max_parallel BETWEEN 1 AND 4294967295",
+        "instance_count = 0 AND effective_max_parallel = 0",
+        "instance_count > 0",
+        "effective_max_parallel BETWEEN 1 AND instance_count",
+        "requested_max_parallel IS NULL",
+        "effective_max_parallel = instance_count",
+        "requested_max_parallel IS NOT NULL",
+        "effective_max_parallel = LEAST(requested_max_parallel, instance_count)",
+    ] {
+        assert!(
+            source.contains(required),
+            "logical scheduling-policy migration lost required contract: {required}"
         );
     }
 }

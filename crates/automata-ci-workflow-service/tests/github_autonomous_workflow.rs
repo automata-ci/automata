@@ -176,6 +176,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1
       matrix:
         target: [alpha, beta]
     steps:
@@ -1138,10 +1139,11 @@ fn wrong_activation_receipt(
             .checked_add(1)
             .expect("different publication time"),
     );
-    let different = PublishLogicalJobActivation::new(
+    let different = PublishLogicalJobActivation::new_with_scheduling_policy(
         request.claim().clone(),
         request.condition_matched(),
         request.instances().to_vec(),
+        request.scheduling_policy().clone(),
         published_at,
     )
     .expect("different activation publication");
@@ -2175,6 +2177,10 @@ fn assert_exact_publication_replay(attempts: &[PublishLogicalJobActivation]) {
         "activation retry must preserve the full pending publication"
     );
     assert_eq!(attempts[0].published_at(), attempts[1].published_at());
+    assert_eq!(
+        attempts[0].scheduling_policy(),
+        attempts[1].scheduling_policy()
+    );
 }
 
 fn assert_exact_commit_replay(attempts: &[CommitLogicalInstanceMaterialization]) {
@@ -3123,6 +3129,12 @@ async fn bounded_matrix_projects_credential_free_job_ir_for_every_instance() {
     assert!(publication.condition_matched());
     assert_eq!(publication.instances().len(), 2);
     assert_eq!(
+        publication.scheduling_policy().requested_max_parallel(),
+        Some(1)
+    );
+    assert_eq!(publication.scheduling_policy().effective_max_parallel(), 1);
+    assert_eq!(publication.scheduling_policy().instance_count(), 2);
+    assert_eq!(
         publication
             .instances()
             .iter()
@@ -3183,6 +3195,11 @@ async fn unmatched_condition_publishes_zero_instances_without_output_blobs() {
     let publication = publications.last().expect("zero-instance publication");
     assert!(!publication.condition_matched());
     assert!(publication.instances().is_empty());
+    assert_eq!(
+        publication.scheduling_policy().requested_max_parallel(),
+        None
+    );
+    assert_eq!(publication.scheduling_policy().effective_max_parallel(), 0);
     assert_eq!(harness.blobs.operations(), 4);
     assert_eq!(harness.blobs.put_outcomes(), (0, 0));
     assert_eq!(harness.repository.renewal_counts(), (1, 1, 0));

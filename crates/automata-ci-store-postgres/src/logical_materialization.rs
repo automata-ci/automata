@@ -14,6 +14,7 @@ use super::{
     CurrentAttemptOutputSafety, PostgresStore,
     durable_schema::current_durable_schemas,
     github_checks::{GithubJobCheckInsertError, insert_github_job_check_subject},
+    logical_activation::decode_scheduling_policy,
     pg_bigint,
 };
 use automata_ci_store::{
@@ -29,16 +30,18 @@ use automata_ci_store::{
     LogicalInstanceTerminalOrdinal, LogicalJobInstanceOutput, LogicalJobInstanceResultEvidence,
     LogicalJobPrerequisiteEvidence, LogicalJobResultDescriptor, LogicalJobResultGeneration,
     LogicalJobResultOutput, LogicalJobResultTarget, LogicalJobResultWorkerId,
-    LogicalMaterializationClaimFence, LogicalMaterializationGeneration,
-    LogicalMaterializationReceipt, LogicalMaterializationRepository,
-    LogicalMaterializationStoreError, LogicalRunFinalizationClaimFence,
-    LogicalRunFinalizationDescriptor, LogicalRunFinalizationGeneration,
-    LogicalRunFinalizationOpenState, LogicalRunFinalizationTarget, LogicalRunFinalizationWorkerId,
+    LogicalJobSchedulingPolicyScope, LogicalMaterializationClaimFence,
+    LogicalMaterializationGeneration, LogicalMaterializationReceipt,
+    LogicalMaterializationRepository, LogicalMaterializationStoreError,
+    LogicalRunFinalizationClaimFence, LogicalRunFinalizationDescriptor,
+    LogicalRunFinalizationGeneration, LogicalRunFinalizationOpenState,
+    LogicalRunFinalizationTarget, LogicalRunFinalizationWorkerId,
     LogicalRunFinalizationWorkflowStatus, LogicalRunJobResultEvidence, LogicalTerminalResultObject,
     LogicalWorkflowInstanceId, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     MIN_LOGICAL_WORK_SELECTION_HANDOFF_MILLIS, ObjectKey, RenewLogicalInstanceMaterialization,
-    RenewedLogicalInstanceMaterialization, RepositoryId, SelectedLogicalInstanceMaterialization,
-    StoreError, WORKFLOW_PLAN_SCHEMA, WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
+    RenewedLogicalInstanceMaterialization, RepositoryId, ResolvedLogicalJobSchedulingPolicy,
+    SelectedLogicalInstanceMaterialization, StoreError, WORKFLOW_PLAN_SCHEMA,
+    WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
 
 const MATERIALIZATION_COMMIT_DIGEST_DOMAIN: &[u8] =
@@ -1744,7 +1747,10 @@ async fn load_terminal_job_base_rows(
                publication.activation_input_digest,
                publication.activation_output_digest,
                publication.condition_matched, publication.instance_count,
-               publication.published_at_ms
+               publication.published_at_ms,
+               publication.scheduling_policy_schema,
+               publication.requested_max_parallel,
+               publication.effective_max_parallel
         FROM logical_workflow_jobs AS job
         JOIN logical_workflow_invocations AS invocation
           ON invocation.run_id = job.run_id AND invocation.id = job.invocation_id
@@ -1839,14 +1845,27 @@ async fn reauthenticate_terminal_job(
         .map_err(operation_error)?;
     let activation_input_digest = decode_digest(base, "activation_input_digest")?;
     let activation_output_digest = decode_digest(base, "activation_output_digest")?;
+    let scheduling_scope = LogicalJobSchedulingPolicyScope::new(
+        target.tenant().clone(),
+        target.run_id(),
+        target.invocation_id(),
+        target.logical_job_id(),
+    )
+    .map_err(corrupt_value)?;
+    let scheduling_policy = decode_scheduling_policy(base, &scheduling_scope)
+        .map_err(LogicalMaterializationStoreError::from)?;
+    let activation_publication = ActivationPublicationDigestEvidence {
+        input_digest: activation_input_digest,
+        output_digest: activation_output_digest,
+        condition_matched,
+        scheduling_policy: &scheduling_policy,
+    };
     let instances = load_terminal_instance_evidence(
         transaction,
         &target,
         &logical_key,
         instance_count,
-        activation_input_digest,
-        activation_output_digest,
-        condition_matched,
+        &activation_publication,
     )
     .await?;
     let prerequisites = prerequisite_jobs
@@ -2051,15 +2070,20 @@ async fn load_terminal_job_outputs(
         .collect()
 }
 
+struct ActivationPublicationDigestEvidence<'a> {
+    input_digest: Sha256Digest,
+    output_digest: Sha256Digest,
+    condition_matched: bool,
+    scheduling_policy: &'a ResolvedLogicalJobSchedulingPolicy,
+}
+
 #[allow(clippy::too_many_lines)]
 async fn load_terminal_instance_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     target: &LogicalJobResultTarget,
     logical_key: &WorkflowJobKey,
     expected_count: u32,
-    activation_input_digest: Sha256Digest,
-    activation_output_digest: Sha256Digest,
-    condition_matched: bool,
+    activation_publication: &ActivationPublicationDigestEvidence<'_>,
 ) -> Result<Vec<LogicalJobInstanceResultEvidence>, LogicalMaterializationStoreError> {
     let rows = sqlx::query(
         r"
@@ -2166,10 +2190,11 @@ async fn load_terminal_instance_evidence(
         target.run_id(),
         target.invocation_id(),
         target.logical_job_id(),
-        activation_input_digest,
-        condition_matched,
+        activation_publication.input_digest,
+        activation_publication.condition_matched,
         &activation_instances,
-    ) != activation_output_digest
+        activation_publication.scheduling_policy,
+    ) != activation_publication.output_digest
     {
         return Err(StoreError::corrupt_data(
             "terminal activation publication digest failed reauthentication",

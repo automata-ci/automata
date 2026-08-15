@@ -5,7 +5,7 @@
 //! of its exact immutable activation inputs, writes every resulting blob, and
 //! finally publishes only their credential-free descriptors atomically.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
 use async_trait::async_trait;
 use automata_ci_core::{
@@ -34,7 +34,12 @@ pub const LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE: &str =
     automata_ci_core::JOB_RUNTIME_CONTEXT_MEDIA_TYPE;
 
 const INSTANCE_ID_DOMAIN: &[u8] = b"automata.store.logical-instance-id.v1\0";
-const PUBLICATION_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-activation-output.v1\0";
+const PUBLICATION_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-activation-output.v2\0";
+const SCHEDULING_POLICY_DIGEST_DOMAIN: &[u8] =
+    b"automata.store.logical-activation-scheduling-policy.v1\0";
+
+/// Exact current relational schema for a resolved logical-job scheduling policy.
+pub const LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA: u16 = 1;
 
 /// Non-nil durable identity of an activation worker.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -385,6 +390,178 @@ impl LogicalActivationClaimFence {
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
+    }
+}
+
+/// Authenticated relational identity of one logical job's scheduling policy.
+///
+/// The three durable workflow identities make capacity independent between
+/// logical jobs, reusable-workflow invocations, and workflow runs. The tenant
+/// remains part of the read authority but is not duplicated in the publication
+/// primary key.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LogicalJobSchedulingPolicyScope {
+    tenant: TenantScope,
+    run_id: RunId,
+    invocation_id: LogicalWorkflowInvocationId,
+    logical_job_id: LogicalWorkflowJobId,
+}
+
+impl LogicalJobSchedulingPolicyScope {
+    /// Constructs one exact authenticated logical-job scope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the nil workflow-run sentinel.
+    pub fn new(
+        tenant: TenantScope,
+        run_id: RunId,
+        invocation_id: LogicalWorkflowInvocationId,
+        logical_job_id: LogicalWorkflowJobId,
+    ) -> Result<Self, LogicalActivationValueError> {
+        if run_id.as_uuid().is_nil() {
+            return Err(LogicalActivationValueError::NilUuid("workflow run ID"));
+        }
+        Ok(Self {
+            tenant,
+            run_id,
+            invocation_id,
+            logical_job_id,
+        })
+    }
+
+    /// Derives the exact scope authenticated by an activation claim.
+    #[must_use]
+    pub fn for_claim(claim: &LogicalActivationClaimFence) -> Self {
+        Self {
+            tenant: claim.tenant().clone(),
+            run_id: claim.run_id(),
+            invocation_id: claim.invocation_id(),
+            logical_job_id: claim.logical_job_id(),
+        }
+    }
+
+    /// Returns the authenticated tenant scope.
+    #[must_use]
+    pub const fn tenant(&self) -> &TenantScope {
+        &self.tenant
+    }
+
+    /// Returns the workflow-run identity.
+    #[must_use]
+    pub const fn run_id(&self) -> RunId {
+        self.run_id
+    }
+
+    /// Returns the logical invocation identity.
+    #[must_use]
+    pub const fn invocation_id(&self) -> LogicalWorkflowInvocationId {
+        self.invocation_id
+    }
+
+    /// Returns the logical-job identity.
+    #[must_use]
+    pub const fn logical_job_id(&self) -> LogicalWorkflowJobId {
+        self.logical_job_id
+    }
+}
+
+/// Immutable activation-time resolution of `strategy.max-parallel`.
+///
+/// `requested_max_parallel` is the exact positive value produced by the
+/// workflow when the option was present and evaluated. `None` means the option
+/// was omitted or strategy evaluation was skipped by a false job condition.
+/// `effective_max_parallel` is the runnable sibling bound:
+/// `min(requested, instance_count)` when requested, otherwise every instance.
+/// It is zero only when activation produced zero instances. This package
+/// persists the decision but deliberately does not enforce selection capacity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedLogicalJobSchedulingPolicy {
+    scope: LogicalJobSchedulingPolicyScope,
+    requested_max_parallel: Option<NonZeroU32>,
+    effective_max_parallel: u16,
+    instance_count: u16,
+}
+
+impl ResolvedLogicalJobSchedulingPolicy {
+    /// Resolves one canonical scheduling policy for an activation result.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an explicit zero request or an instance count above the current
+    /// activation boundary.
+    pub fn new(
+        scope: LogicalJobSchedulingPolicyScope,
+        requested_max_parallel: Option<u32>,
+        instance_count: usize,
+    ) -> Result<Self, LogicalActivationValueError> {
+        if instance_count > MAX_LOGICAL_ACTIVATED_INSTANCES {
+            return Err(LogicalActivationValueError::TooManyInstances);
+        }
+        let requested_max_parallel = requested_max_parallel
+            .map(|value| {
+                NonZeroU32::new(value)
+                    .ok_or(LogicalActivationValueError::InvalidRequestedMaxParallel)
+            })
+            .transpose()?;
+        let instance_count = u16::try_from(instance_count)
+            .map_err(|_| LogicalActivationValueError::TooManyInstances)?;
+        let effective = requested_max_parallel
+            .map_or(u32::from(instance_count), NonZeroU32::get)
+            .min(u32::from(instance_count));
+        let effective_max_parallel =
+            u16::try_from(effective).map_err(|_| LogicalActivationValueError::TooManyInstances)?;
+        Ok(Self {
+            scope,
+            requested_max_parallel,
+            effective_max_parallel,
+            instance_count,
+        })
+    }
+
+    /// Resolves a policy under an exact activation claim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an explicit zero request or an instance count above the current
+    /// activation boundary.
+    pub fn for_claim(
+        claim: &LogicalActivationClaimFence,
+        requested_max_parallel: Option<u32>,
+        instance_count: usize,
+    ) -> Result<Self, LogicalActivationValueError> {
+        Self::new(
+            LogicalJobSchedulingPolicyScope::for_claim(claim),
+            requested_max_parallel,
+            instance_count,
+        )
+    }
+
+    /// Returns the exact logical-job scope.
+    #[must_use]
+    pub const fn scope(&self) -> &LogicalJobSchedulingPolicyScope {
+        &self.scope
+    }
+
+    /// Returns the explicitly requested resolved limit, if evaluated.
+    #[must_use]
+    pub const fn requested_max_parallel(&self) -> Option<u32> {
+        match self.requested_max_parallel {
+            Some(value) => Some(value.get()),
+            None => None,
+        }
+    }
+
+    /// Returns the bounded capacity later selectors must enforce.
+    #[must_use]
+    pub const fn effective_max_parallel(&self) -> u16 {
+        self.effective_max_parallel
+    }
+
+    /// Returns the immutable activated sibling count.
+    #[must_use]
+    pub const fn instance_count(&self) -> u16 {
+        self.instance_count
     }
 }
 
@@ -1118,6 +1295,7 @@ pub struct PublishLogicalJobActivation {
     claim: LogicalActivationClaimFence,
     condition_matched: bool,
     instances: Vec<ActivatedLogicalInstanceDescriptor>,
+    scheduling_policy: ResolvedLogicalJobSchedulingPolicy,
     output_digest: Sha256Digest,
     published_at: UnixMillis,
 }
@@ -1128,7 +1306,9 @@ impl PublishLogicalJobActivation {
     /// A false condition requires zero instances. A matched condition may also
     /// produce zero instances when a dynamic matrix expands to the empty set.
     /// Non-empty matrices must be in exact zero-based index order and carry the
-    /// same total equal to the descriptor count.
+    /// same total equal to the descriptor count. This compatibility constructor
+    /// explicitly records `strategy.max-parallel` as omitted; callers that
+    /// evaluated the option must use [`Self::new_with_scheduling_policy`].
     ///
     /// # Errors
     ///
@@ -1140,6 +1320,31 @@ impl PublishLogicalJobActivation {
         instances: Vec<ActivatedLogicalInstanceDescriptor>,
         published_at: UnixMillis,
     ) -> Result<Self, LogicalActivationValueError> {
+        let scheduling_policy =
+            ResolvedLogicalJobSchedulingPolicy::for_claim(&claim, None, instances.len())?;
+        Self::new_with_scheduling_policy(
+            claim,
+            condition_matched,
+            instances,
+            scheduling_policy,
+            published_at,
+        )
+    }
+
+    /// Constructs and hashes one activation result with its exact resolved
+    /// `strategy.max-parallel` policy.
+    ///
+    /// # Errors
+    ///
+    /// In addition to [`Self::new`] validation, rejects a policy for a
+    /// different logical-job scope or instance count.
+    pub fn new_with_scheduling_policy(
+        claim: LogicalActivationClaimFence,
+        condition_matched: bool,
+        instances: Vec<ActivatedLogicalInstanceDescriptor>,
+        scheduling_policy: ResolvedLogicalJobSchedulingPolicy,
+        published_at: UnixMillis,
+    ) -> Result<Self, LogicalActivationValueError> {
         validate_timestamp(published_at, "activation publication time")?;
         if published_at < claim.claimed_at() || published_at >= claim.expires_at() {
             return Err(LogicalActivationValueError::PublicationOutsideClaim);
@@ -1149,6 +1354,11 @@ impl PublishLogicalJobActivation {
         }
         if !condition_matched && !instances.is_empty() {
             return Err(LogicalActivationValueError::UnmatchedConditionHasInstances);
+        }
+        if scheduling_policy.scope() != &LogicalJobSchedulingPolicyScope::for_claim(&claim)
+            || usize::from(scheduling_policy.instance_count()) != instances.len()
+        {
+            return Err(LogicalActivationValueError::SchedulingPolicyMismatch);
         }
         let total = u32::try_from(instances.len())
             .map_err(|_| LogicalActivationValueError::TooManyInstances)?;
@@ -1165,11 +1375,13 @@ impl PublishLogicalJobActivation {
                 return Err(LogicalActivationValueError::NoncanonicalMatrixInstances);
             }
         }
-        let output_digest = publication_digest(&claim, condition_matched, &instances);
+        let output_digest =
+            publication_digest(&claim, condition_matched, &instances, &scheduling_policy);
         Ok(Self {
             claim,
             condition_matched,
             instances,
+            scheduling_policy,
             output_digest,
             published_at,
         })
@@ -1193,6 +1405,12 @@ impl PublishLogicalJobActivation {
         &self.instances
     }
 
+    /// Returns the immutable resolved scheduling policy.
+    #[must_use]
+    pub const fn scheduling_policy(&self) -> &ResolvedLogicalJobSchedulingPolicy {
+        &self.scheduling_policy
+    }
+
     /// Returns the canonical activation-output digest.
     #[must_use]
     pub const fn output_digest(&self) -> Sha256Digest {
@@ -1213,6 +1431,7 @@ pub struct LogicalActivationPublicationReceipt {
     condition_matched: bool,
     output_digest: Sha256Digest,
     instance_count: u16,
+    scheduling_policy: ResolvedLogicalJobSchedulingPolicy,
     published_at: UnixMillis,
     replayed: bool,
 }
@@ -1227,6 +1446,7 @@ impl LogicalActivationPublicationReceipt {
             condition_matched: request.condition_matched,
             output_digest: request.output_digest,
             instance_count: u16::try_from(request.instances.len()).unwrap_or(u16::MAX),
+            scheduling_policy: request.scheduling_policy.clone(),
             published_at: request.published_at,
             replayed,
         }
@@ -1254,6 +1474,12 @@ impl LogicalActivationPublicationReceipt {
     #[must_use]
     pub const fn instance_count(&self) -> u16 {
         self.instance_count
+    }
+
+    /// Returns the immutable resolved scheduling policy.
+    #[must_use]
+    pub const fn scheduling_policy(&self) -> &ResolvedLogicalJobSchedulingPolicy {
+        &self.scheduling_policy
     }
 
     /// Returns the durable publication time.
@@ -1326,6 +1552,12 @@ pub enum LogicalActivationValueError {
     /// A typed runtime policy disagreed with its tenant or propagation chain.
     #[error("logical activation runtime policy does not match its target")]
     RuntimePolicyMismatch,
+    /// An explicitly evaluated `strategy.max-parallel` value was zero.
+    #[error("resolved strategy max-parallel must be greater than zero")]
+    InvalidRequestedMaxParallel,
+    /// A resolved scheduling policy belongs to another target or instance set.
+    #[error("logical activation scheduling policy does not match its publication")]
+    SchedulingPolicyMismatch,
     /// Matrix descriptors were not the exact canonical expansion sequence.
     #[error("logical instance descriptors are not in canonical matrix order")]
     NoncanonicalMatrixInstances,
@@ -1377,6 +1609,16 @@ pub trait LogicalActivationRepository: std::fmt::Debug + Send + Sync {
         Ok(None)
     }
 
+    /// Loads the immutable resolved scheduling policy for one published
+    /// logical job. This is the Wave-2 selection boundary; Wave 1 does not
+    /// consume or enforce the returned capacity.
+    async fn resolved_logical_job_scheduling_policy(
+        &self,
+        _scope: &LogicalJobSchedulingPolicyScope,
+    ) -> Result<Option<ResolvedLogicalJobSchedulingPolicy>, LogicalActivationStoreError> {
+        Ok(None)
+    }
+
     /// Replaces an exact live claim with the next generation and a new bounded
     /// interval. Concurrent exact retries replay the replacement fence; stale
     /// or divergent renewals fail closed.
@@ -1398,6 +1640,7 @@ fn publication_digest(
     claim: &LogicalActivationClaimFence,
     condition_matched: bool,
     instances: &[ActivatedLogicalInstanceDescriptor],
+    scheduling_policy: &ResolvedLogicalJobSchedulingPolicy,
 ) -> Sha256Digest {
     rederive_publication_digest(
         claim.run_id(),
@@ -1406,6 +1649,7 @@ fn publication_digest(
         claim.input_digest(),
         condition_matched,
         instances,
+        scheduling_policy,
     )
 }
 
@@ -1416,6 +1660,7 @@ pub(crate) fn rederive_publication_digest(
     input_digest: Sha256Digest,
     condition_matched: bool,
     instances: &[ActivatedLogicalInstanceDescriptor],
+    scheduling_policy: &ResolvedLogicalJobSchedulingPolicy,
 ) -> Sha256Digest {
     let mut hasher = Sha256::new();
     hasher.update(PUBLICATION_DIGEST_DOMAIN);
@@ -1429,6 +1674,7 @@ pub(crate) fn rederive_publication_digest(
             .unwrap_or(u32::MAX)
             .to_be_bytes(),
     );
+    hash_scheduling_policy(&mut hasher, scheduling_policy);
     for instance in instances {
         hasher.update(instance.id().as_uuid().as_bytes());
         hasher.update(instance.matrix_index().to_be_bytes());
@@ -1446,6 +1692,23 @@ pub(crate) fn rederive_publication_digest(
         hash_environment_gate(&mut hasher, instance.environment_gate());
     }
     Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn hash_scheduling_policy(
+    hasher: &mut Sha256,
+    scheduling_policy: &ResolvedLogicalJobSchedulingPolicy,
+) {
+    hasher.update(SCHEDULING_POLICY_DIGEST_DOMAIN);
+    hasher.update(LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA.to_be_bytes());
+    match scheduling_policy.requested_max_parallel() {
+        Some(requested) => {
+            hasher.update([1]);
+            hasher.update(requested.to_be_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update(scheduling_policy.effective_max_parallel().to_be_bytes());
+    hasher.update(scheduling_policy.instance_count().to_be_bytes());
 }
 
 fn hash_environment_gate(hasher: &mut Sha256, evidence: Option<&JobEnvironmentActivationEvidence>) {
@@ -1593,6 +1856,18 @@ mod tests {
     }
 
     fn digest(instance: ActivatedLogicalInstanceDescriptor) -> Sha256Digest {
+        let scheduling_policy = ResolvedLogicalJobSchedulingPolicy::new(
+            LogicalJobSchedulingPolicyScope::new(
+                TenantScope::from_authenticated_tenant_id("activation-digest").expect("tenant"),
+                RunId::from_uuid(Uuid::from_u128(1)),
+                LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(2)).expect("invocation"),
+                LogicalWorkflowJobId::from_uuid(Uuid::from_u128(3)).expect("job"),
+            )
+            .expect("scope"),
+            None,
+            1,
+        )
+        .expect("scheduling policy");
         rederive_publication_digest(
             RunId::from_uuid(Uuid::from_u128(1)),
             LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(2)).expect("invocation"),
@@ -1600,7 +1875,47 @@ mod tests {
             Sha256Digest::from_bytes([7; 32]),
             true,
             &[instance],
+            &scheduling_policy,
         )
+    }
+
+    #[test]
+    fn scheduling_policy_distinguishes_requested_effective_omitted_and_empty() {
+        let scope = LogicalJobSchedulingPolicyScope::new(
+            TenantScope::from_authenticated_tenant_id("scheduling-policy").expect("tenant"),
+            RunId::from_uuid(Uuid::from_u128(11)),
+            LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(12)).expect("invocation"),
+            LogicalWorkflowJobId::from_uuid(Uuid::from_u128(13)).expect("job"),
+        )
+        .expect("scope");
+
+        let omitted = ResolvedLogicalJobSchedulingPolicy::new(scope.clone(), None, 3)
+            .expect("omitted policy");
+        assert_eq!(omitted.requested_max_parallel(), None);
+        assert_eq!(omitted.effective_max_parallel(), 3);
+        assert_eq!(omitted.instance_count(), 3);
+
+        let bounded = ResolvedLogicalJobSchedulingPolicy::new(scope.clone(), Some(2), 3)
+            .expect("bounded policy");
+        assert_eq!(bounded.requested_max_parallel(), Some(2));
+        assert_eq!(bounded.effective_max_parallel(), 2);
+
+        let clamped = ResolvedLogicalJobSchedulingPolicy::new(scope.clone(), Some(u32::MAX), 3)
+            .expect("clamped policy");
+        assert_eq!(clamped.requested_max_parallel(), Some(u32::MAX));
+        assert_eq!(clamped.effective_max_parallel(), 3);
+
+        for requested in [None, Some(7)] {
+            let empty = ResolvedLogicalJobSchedulingPolicy::new(scope.clone(), requested, 0)
+                .expect("empty policy");
+            assert_eq!(empty.requested_max_parallel(), requested);
+            assert_eq!(empty.effective_max_parallel(), 0);
+            assert_eq!(empty.instance_count(), 0);
+        }
+        assert_eq!(
+            ResolvedLogicalJobSchedulingPolicy::new(scope, Some(0), 1),
+            Err(LogicalActivationValueError::InvalidRequestedMaxParallel)
+        );
     }
 
     #[test]
@@ -1639,7 +1954,7 @@ mod tests {
     fn evidence_free_descriptor_has_canonical_publication_digest() {
         assert_eq!(
             digest(instance(None)).to_string(),
-            "9e354947a483da281cf6bde73e5a0b4e066237228e83c8879a9a2f75b4029b84"
+            "21ec02e3a9a16f32c5bf89c3f427f88639fae2cfca6a2298c4672f3d5fb56f17"
         );
     }
 }
