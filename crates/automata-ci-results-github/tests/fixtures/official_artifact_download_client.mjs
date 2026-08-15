@@ -1,6 +1,6 @@
-import { pathToFileURL } from 'node:url'
 import { mkdir, readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const modulePath = process.env.AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE
 const expectedVersion = process.env.AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION
@@ -8,7 +8,7 @@ const inputPath = process.env.AUTOMATA_TEST_ARTIFACT_INPUT
 const rootDirectory = process.env.AUTOMATA_TEST_ARTIFACT_ROOT
 
 if (!modulePath || !expectedVersion || !inputPath || !rootDirectory) {
-  throw new Error('official artifact-client fixture environment is incomplete')
+  throw new Error('official artifact-download fixture environment is incomplete')
 }
 
 const moduleUrl = pathToFileURL(modulePath)
@@ -26,41 +26,31 @@ if (
 
 const { DefaultArtifactClient } = await import(moduleUrl.href)
 const client = new DefaultArtifactClient()
-const result = await client.uploadArtifact(
-  'official-actions-artifact-client',
-  [inputPath],
-  rootDirectory,
-  { compressionLevel: 6 },
-)
-
-if (!result.id || !result.digest || !result.size) {
-  throw new Error(`official client returned an incomplete result: ${JSON.stringify(result)}`)
-}
-
 const listed = await client.listArtifacts()
-const artifact = listed.artifacts.find(candidate => candidate.id === result.id)
-const expectedListedDigest = `sha256:${result.digest}`
-if (!artifact || artifact.digest !== expectedListedDigest || artifact.size !== result.size) {
-  throw new Error(`official client list result did not match upload: ${JSON.stringify(listed)}`)
+const artifact = listed.artifacts.find(
+  candidate => candidate.name === 'official-actions-artifact-client',
+)
+if (!artifact?.digest) {
+  throw new Error('official download client did not list the uploaded artifact')
 }
 
 const found = await client.getArtifact('official-actions-artifact-client')
-if (found.artifact.id !== result.id || found.artifact.digest !== expectedListedDigest) {
-  throw new Error(`official client get result did not match upload: ${JSON.stringify(found)}`)
+if (found.artifact.id !== artifact.id || found.artifact.digest !== artifact.digest) {
+  throw new Error('official download client resolved inconsistent artifact metadata')
 }
 
-const downloadRoot = join(rootDirectory, 'downloaded')
+const downloadRoot = join(rootDirectory, 'downloaded-by-download-action-client')
 await mkdir(downloadRoot, { recursive: true })
-const downloaded = await client.downloadArtifact(result.id, {
+const downloaded = await client.downloadArtifact(artifact.id, {
   path: downloadRoot,
-  expectedHash: expectedListedDigest,
+  expectedHash: artifact.digest,
 })
 if (downloaded.digestMismatch) {
-  throw new Error('official client reported a download digest mismatch')
+  throw new Error('official download client reported a digest mismatch')
 }
 
 const originalBytes = await readFile(inputPath)
 const downloadedBytes = await readFile(join(downloadRoot, basename(inputPath)))
 if (!downloadedBytes.equals(originalBytes)) {
-  throw new Error('official client download did not reproduce the uploaded file')
+  throw new Error('official download client changed the uploaded file')
 }

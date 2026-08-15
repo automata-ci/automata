@@ -31,12 +31,17 @@ definition of done.
 This package turns the existing protocol slices into reproducible client
 compatibility tests. It does not add new protocol operations.
 
-Current `upstream/main` documents the upload-artifact v7.0.1 protocol slice at
-commit `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` with
-`@actions/artifact` 6.2.0, plus `@actions/cache` 5.0.5 over CacheService v2.
-Ignored offline tests import explicitly supplied local client modules and never
-download packages. They are focused client-library and protocol evidence, not
-ordinary-CI acceptance of every exact action wrapper or the production stores.
+The closed client matrix pins upload-artifact v7.0.1 at commit
+`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` with `@actions/artifact` 6.2.0,
+download-artifact v8.0.1 at commit
+`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` with `@actions/artifact` 6.2.1,
+and cache v5.0.5 at commit `27d5ce7f107fe9357f9df03efb73ab90386fccae`
+with `@actions/cache` 5.0.5. It verifies every declared Node entry and embedded
+lockfile integrity. Ignored offline tests import explicitly supplied local
+client modules and never download packages. The production-composition test
+connects those clients to the real HTTP adapters, PostgreSQL repositories, and
+S3 blob implementation and retains an identifier-free transcript, but remains
+an opt-in acceptance test until its PostgreSQL/S3 environment is available.
 Runner protocol v1 carries a required, per-attempt Results authority bundle;
 there is no runner- or fleet-wide Results credential.
 
@@ -46,19 +51,20 @@ Tasks:
   CacheService v2 client versions with immutable release or commit identity.
 - [x] Require explicit local module paths for the current ignored exact-client
   tests; never download mutable dependencies in those tests.
-- [ ] Pin and verify exact `actions/download-artifact` and complete action
+- [x] Pin and verify exact `actions/download-artifact` and complete action
   wrappers, including each embedded client version, from one immutable fixture.
-- [ ] Build one reusable harness that supplies Results URLs, scoped runtime
+- [x] Build one reusable harness that supplies Results URLs, scoped runtime
   tokens, repository/ref/run identity, PostgreSQL, production object storage,
   and deterministic time.
 - [x] Exercise CreateArtifact, block upload, block-list commit, finalize, list,
   signed download, cache reserve/finalize/restore, exact keys, restore-key
   precedence, and single-range responses in focused adapter tests.
-- [ ] Carry that matrix through the reusable real-store harness and complete
+- [x] Carry that matrix through the reusable real-store harness and complete
   malformed-route, expired-token, wrong-scope, replay, size-mismatch,
   duplicate-finalize, truncated-body, and range-request coverage.
-- [ ] Record request/response transcripts with credentials redacted.
-- [ ] Publish the supported client/version matrix from one machine-readable
+- [x] Record request/response and production object-store transcripts with
+  credentials and identifiers structurally excluded.
+- [x] Publish the supported client/version matrix from one machine-readable
   fixture used by documentation and tests.
 
 Acceptance:
