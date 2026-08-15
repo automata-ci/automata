@@ -360,15 +360,11 @@ impl ManifestPinnedGithubDeliveryEvidence {
             &private_pull_request_files_authority,
         ) {
             (ProviderRepositoryVisibility::Public, _, None)
-            | (ProviderRepositoryVisibility::Private, GithubAuthenticatedEventKind::Push, None)
             | (
                 ProviderRepositoryVisibility::Private,
-                GithubAuthenticatedEventKind::MergeGroup,
-                None,
-            )
-            | (
-                ProviderRepositoryVisibility::Private,
-                GithubAuthenticatedEventKind::RepositoryDispatch,
+                GithubAuthenticatedEventKind::Push
+                | GithubAuthenticatedEventKind::MergeGroup
+                | GithubAuthenticatedEventKind::RepositoryDispatch,
                 None,
             ) => {}
             (

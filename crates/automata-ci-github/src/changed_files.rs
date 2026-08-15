@@ -1,4 +1,9 @@
-use std::{collections::HashSet, fmt, num::NonZeroU64, time::Instant};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+    num::NonZeroU64,
+    time::Instant,
+};
 
 use automata_ci_auth::{github::GithubEndpointError, secret::SecretString};
 use automata_ci_scm::{ExactRevision, RepositoryId};
@@ -16,21 +21,20 @@ use crate::{
 const ACCEPT_API_JSON: &str = "application/vnd.github+json";
 const COMPARE_COMMITS_PER_PAGE: usize = 100;
 const PULL_REQUEST_FILES_PER_PAGE: usize = 100;
-const MAX_PULL_REQUEST_FILES: usize = 3_000;
 const MAX_ACTIONS_PUSH_COMMITS: usize = 1_000;
 const MAX_CHANGED_PATH_BYTES: usize = 4_096;
 
-/// Largest GitHub Compare JSON file collection that is demonstrably complete.
+/// Exact github.com Actions path-filter selection window.
 ///
-/// GitHub documents a 300-file response cap without a total-file count. An
-/// exactly 300-entry response is therefore ambiguous and is never accepted as
-/// complete.
-pub const MAX_COMPLETE_GITHUB_COMPARE_FILES: usize = 299;
+/// Compare REST exposes at most these first 300 files. Pull-request REST can
+/// expose up to 3,000, but github.com Actions evaluates only its first 300-file
+/// window; later files must never influence selection.
+pub const MAX_GITHUB_ACTIONS_PATH_FILTER_FILES: usize = 300;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GithubChangedFilesLimitRejection {
     ActionsPushCommitCount,
-    CompareFileCount,
+    ActionsPathFilterFileCount,
     ChangedPathBytes,
 }
 
@@ -43,11 +47,11 @@ const fn actions_push_commit_count_rejection(
     None
 }
 
-const fn complete_compare_file_count_rejection(
+const fn actions_path_filter_file_count_rejection(
     observed: usize,
 ) -> Option<GithubChangedFilesLimitRejection> {
-    if observed > MAX_COMPLETE_GITHUB_COMPARE_FILES {
-        return Some(GithubChangedFilesLimitRejection::CompareFileCount);
+    if observed > MAX_GITHUB_ACTIONS_PATH_FILTER_FILES {
+        return Some(GithubChangedFilesLimitRejection::ActionsPathFilterFileCount);
     }
     None
 }
@@ -228,10 +232,8 @@ pub enum GithubPushDiffIncompleteReason {
     DeletedPush,
     /// A forced or divergent update cannot use merge-base results as a two-dot diff.
     DivergedPush,
-    /// The Compare JSON file list reached its undocumented-completeness boundary.
+    /// The provider returned more than the documented 300-file selection window.
     FileListCapped,
-    /// Rename status cannot be losslessly represented by the current path-only model.
-    RenamedPath,
     /// Provider evidence was malformed or did not bind to the exact signed push.
     InvalidEvidence,
     /// GitHub rejected the request or supplied authority.
@@ -256,11 +258,43 @@ impl fmt::Debug for GithubChangedFilesEvidenceDigest {
     }
 }
 
+/// One provider file record in github.com Actions' selected diff window.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GithubChangedFile {
+    current_path: String,
+    previous_path: Option<String>,
+}
+
+impl GithubChangedFile {
+    /// Returns the file's current repository-relative path.
+    #[must_use]
+    pub fn current_path(&self) -> &str {
+        &self.current_path
+    }
+
+    /// Returns the previous path for a rename record.
+    #[must_use]
+    pub fn previous_path(&self) -> Option<&str> {
+        self.previous_path.as_deref()
+    }
+}
+
+impl fmt::Debug for GithubChangedFile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubChangedFile")
+            .field("renamed", &self.previous_path.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Complete, exact provider evidence for one supported existing-branch push.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubCompletePushDiff {
     before: ExactRevision,
     after: ExactRevision,
+    selected_file_count: usize,
+    changed_files: Vec<GithubChangedFile>,
     changed_paths: Vec<String>,
     evidence_digest: GithubChangedFilesEvidenceDigest,
 }
@@ -271,6 +305,8 @@ pub struct GithubCompletePullRequestDiff {
     number: NonZeroU64,
     base: ExactRevision,
     head: ExactRevision,
+    selected_file_count: usize,
+    changed_files: Vec<GithubChangedFile>,
     changed_paths: Vec<String>,
     total_changed_files: u64,
     page_digests: Vec<GithubChangedFilesEvidenceDigest>,
@@ -294,6 +330,24 @@ impl GithubCompletePullRequestDiff {
     #[must_use]
     pub const fn head(&self) -> &ExactRevision {
         &self.head
+    }
+
+    /// Returns the number of provider file records in Actions' exact window.
+    #[must_use]
+    pub const fn selected_file_count(&self) -> usize {
+        self.selected_file_count
+    }
+
+    /// Returns the exact provider file records in Actions' selected window.
+    #[must_use]
+    pub fn changed_files(&self) -> &[GithubChangedFile] {
+        &self.changed_files
+    }
+
+    /// Consumes the evidence and returns its exact provider file records.
+    #[must_use]
+    pub fn into_changed_files(self) -> Vec<GithubChangedFile> {
+        self.changed_files
     }
 
     /// Returns the canonical lexicographically sorted changed paths.
@@ -364,6 +418,24 @@ impl GithubCompletePushDiff {
     #[must_use]
     pub const fn after(&self) -> &ExactRevision {
         &self.after
+    }
+
+    /// Returns the number of provider file records in Actions' exact window.
+    #[must_use]
+    pub const fn selected_file_count(&self) -> usize {
+        self.selected_file_count
+    }
+
+    /// Returns the exact provider file records in Actions' selected window.
+    #[must_use]
+    pub fn changed_files(&self) -> &[GithubChangedFile] {
+        &self.changed_files
+    }
+
+    /// Consumes the evidence and returns its exact provider file records.
+    #[must_use]
+    pub fn into_changed_files(self) -> Vec<GithubChangedFile> {
+        self.changed_files
     }
 
     /// Returns the canonical lexicographically sorted changed paths.
@@ -508,9 +580,10 @@ impl GithubHttpEndpoint {
     /// Existing non-forced updates are accepted only when Compare REST proves
     /// that the exact `before` commit is also the merge base, every paginated
     /// commit equals the signed webhook set, the final commit is exact `after`,
-    /// and fewer than 300 unique non-renamed paths are returned. Other push
-    /// shapes return an explicit incomplete disposition without inventing an
-    /// empty or truncated path list.
+    /// and the provider returns no more than Actions' first 300 file records.
+    /// Renames contribute both their previous and current repository-relative
+    /// paths. Other push shapes return an explicit incomplete disposition
+    /// without inventing an empty path list.
     ///
     /// # Errors
     ///
@@ -558,8 +631,9 @@ impl GithubHttpEndpoint {
     /// comparison. This operation snapshots the exact pull-request number,
     /// base repository, head repository, base revision, and head revision on
     /// both sides of GitHub's paginated pull-request-files endpoint. It accepts
-    /// the provider's documented 3,000-file selection window only when every
-    /// expected page is present and globally duplicate-free.
+    /// github.com Actions' exact first-300-file selection window only when all
+    /// three possible 100-file pages are present and globally duplicate-free.
+    /// A provider-reported 301st file is deliberately not fetched or matched.
     ///
     /// # Errors
     ///
@@ -597,7 +671,7 @@ impl GithubHttpEndpoint {
         let page_count =
             comparison_page_count(expected_commits.len(), self.trusted.limits().max_pages)?;
         let mut observed_commits = Vec::with_capacity(expected_commits.len());
-        let mut changed_paths = None;
+        let mut changed_files = None;
         for page_number in 1..=page_count {
             let endpoint = self.compare_url(
                 request.repository,
@@ -611,14 +685,16 @@ impl GithubHttpEndpoint {
             validate_page_identity(&response, request.before, expected_commits.len())?;
             validate_page_length(&response, page_number, page_count, expected_commits.len())?;
             if page_number == 1 {
-                changed_paths = Some(complete_changed_paths(response.files)?);
+                changed_files = Some(complete_changed_files(response.files)?);
             } else if response.files.is_some() {
                 return Err(invalid_evidence());
             }
             observed_commits.extend(response.commits.into_iter().map(|commit| commit.sha));
         }
         validate_observed_commits(&observed_commits, &expected_commits, request.after)?;
-        let changed_paths = changed_paths.ok_or_else(invalid_evidence)?;
+        let changed_files = changed_files.ok_or_else(invalid_evidence)?;
+        let selected_file_count = changed_files.len();
+        let changed_paths = canonical_changed_paths(&changed_files);
         let evidence_digest = changed_files_evidence_digest(
             ChangedFilesEvidenceCoordinates {
                 event_kind: b"push",
@@ -631,11 +707,14 @@ impl GithubHttpEndpoint {
                 provider_total_changed_files: None,
             },
             &[],
+            selected_file_count,
             &changed_paths,
         );
         Ok(GithubCompletePushDiff {
             before: request.before.clone(),
             after: request.after.clone(),
+            selected_file_count,
+            changed_files,
             changed_paths,
             evidence_digest,
         })
@@ -655,14 +734,15 @@ impl GithubHttpEndpoint {
             .await?;
         validate_pull_request_snapshot(&initial, &request)?;
         let maximum_pull_request_files =
-            u64::try_from(MAX_PULL_REQUEST_FILES).map_err(|_| invalid_evidence())?;
+            u64::try_from(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES).map_err(|_| invalid_evidence())?;
         let selected_count = usize::try_from(initial.changed_files.min(maximum_pull_request_files))
             .map_err(|_| invalid_evidence())?;
         let page_count = selected_count.div_ceil(PULL_REQUEST_FILES_PER_PAGE);
         if page_count > self.trusted.limits().max_pages {
             return Err(invalid_evidence());
         }
-        let mut changed_paths = Vec::with_capacity(selected_count);
+        let mut changed_files = Vec::with_capacity(selected_count);
+        let mut observed_filenames = HashSet::with_capacity(selected_count);
         let mut page_digests = Vec::with_capacity(page_count);
         for page_number in 1..=page_count {
             let endpoint =
@@ -678,8 +758,14 @@ impl GithubHttpEndpoint {
             if files.len() != expected {
                 return Err(invalid_evidence());
             }
-            let (mut paths, page_digest) = complete_pull_request_file_page(page_number, files)?;
-            changed_paths.append(&mut paths);
+            let (page_files, page_digest) = complete_pull_request_file_page(page_number, files)?;
+            if page_files
+                .iter()
+                .any(|file| !observed_filenames.insert(file.current_path().to_owned()))
+            {
+                return Err(invalid_evidence());
+            }
+            changed_files.extend(page_files);
             page_digests.push(page_digest);
         }
         let final_endpoint = self.pull_request_url(request.repository, request.number, None)?;
@@ -690,12 +776,10 @@ impl GithubHttpEndpoint {
         if final_snapshot != initial {
             return Err(invalid_evidence());
         }
-        changed_paths.sort_unstable();
-        if changed_paths.len() != selected_count
-            || changed_paths.windows(2).any(|pair| pair[0] == pair[1])
-        {
+        if observed_filenames.len() != selected_count {
             return Err(invalid_evidence());
         }
+        let changed_paths = canonical_changed_paths(&changed_files);
         let evidence_digest = changed_files_evidence_digest(
             ChangedFilesEvidenceCoordinates {
                 event_kind: b"pull_request",
@@ -708,12 +792,15 @@ impl GithubHttpEndpoint {
                 provider_total_changed_files: Some(initial.changed_files),
             },
             &page_digests,
+            selected_count,
             &changed_paths,
         );
         Ok(GithubCompletePullRequestDiff {
             number: request.number,
             base: request.base.clone(),
             head: request.head.clone(),
+            selected_file_count: selected_count,
+            changed_files,
             changed_paths,
             total_changed_files: initial.changed_files,
             page_digests,
@@ -967,9 +1054,9 @@ fn validate_pull_request_snapshot(
 fn complete_pull_request_file_page(
     page_number: usize,
     files: Vec<PullRequestFile>,
-) -> Result<(Vec<String>, GithubChangedFilesEvidenceDigest), CompareFailure> {
+) -> Result<(Vec<GithubChangedFile>, GithubChangedFilesEvidenceDigest), CompareFailure> {
     let mut digest = DigestContext::new(&SHA256);
-    digest.update(b"automata.github.pull-request-file-page.v1\0");
+    digest.update(b"automata.github.pull-request-file-page.v2\0");
     digest_u64(
         &mut digest,
         u64::try_from(page_number).map_err(|_| invalid_evidence())?,
@@ -978,37 +1065,40 @@ fn complete_pull_request_file_page(
         &mut digest,
         u64::try_from(files.len()).map_err(|_| invalid_evidence())?,
     );
-    let mut paths = Vec::with_capacity(files.len());
+    let mut changed_files = Vec::with_capacity(files.len());
+    let mut filenames = HashSet::with_capacity(files.len());
     for file in files {
         if ExactRevision::new(&file.sha).is_err() {
             return Err(invalid_evidence());
         }
-        if file.status == "renamed" {
-            return Err(CompareFailure::Incomplete(
-                GithubPushDiffIncompleteReason::RenamedPath,
-            ));
-        }
-        if !matches!(file.status.as_str(), "added" | "modified" | "removed")
-            || file.previous_filename.is_some()
-            || !valid_changed_path(&file.filename)
-        {
+        let changed_file = complete_changed_file(
+            &file.status,
+            &file.filename,
+            file.previous_filename.as_deref(),
+        )?;
+        if !filenames.insert(file.filename.clone()) {
             return Err(invalid_evidence());
         }
         digest_part(&mut digest, file.sha.as_bytes())?;
         digest_part(&mut digest, file.status.as_bytes())?;
         digest_part(&mut digest, file.filename.as_bytes())?;
-        paths.push(file.filename);
+        digest_optional_part(
+            &mut digest,
+            file.previous_filename.as_deref().map(str::as_bytes),
+        );
+        changed_files.push(changed_file);
     }
-    Ok((paths, finish_digest(digest)))
+    Ok((changed_files, finish_digest(digest)))
 }
 
 fn changed_files_evidence_digest(
     coordinates: ChangedFilesEvidenceCoordinates<'_>,
     page_digests: &[GithubChangedFilesEvidenceDigest],
+    selected_file_count: usize,
     changed_paths: &[String],
 ) -> GithubChangedFilesEvidenceDigest {
     let mut digest = DigestContext::new(&SHA256);
-    digest.update(b"automata.github.changed-files-evidence.v1\0");
+    digest.update(b"automata.github.changed-files-evidence.v2\0");
     // These values were already validated by their typed constructors, so
     // their bounded lengths cannot fail this infallible aggregate step.
     digest_part(&mut digest, coordinates.event_kind).expect("fixed event kind is bounded");
@@ -1047,6 +1137,10 @@ fn changed_files_evidence_digest(
     for page_digest in page_digests {
         digest.update(page_digest.as_bytes());
     }
+    digest_u64(
+        &mut digest,
+        u64::try_from(selected_file_count).expect("bounded selected-file count"),
+    );
     digest_u64(
         &mut digest,
         u64::try_from(changed_paths.len()).expect("bounded changed-path count"),
@@ -1159,33 +1253,66 @@ fn validate_observed_commits(
     Ok(())
 }
 
-fn complete_changed_paths(files: Option<Vec<CompareFile>>) -> Result<Vec<String>, CompareFailure> {
+fn complete_changed_files(
+    files: Option<Vec<CompareFile>>,
+) -> Result<Vec<GithubChangedFile>, CompareFailure> {
     let files = files.ok_or_else(invalid_evidence)?;
-    if complete_compare_file_count_rejection(files.len()).is_some() {
+    let selected_file_count = files.len();
+    if actions_path_filter_file_count_rejection(selected_file_count).is_some() {
         return Err(CompareFailure::Incomplete(
             GithubPushDiffIncompleteReason::FileListCapped,
         ));
     }
-    let mut paths = Vec::with_capacity(files.len());
+    let mut filenames = HashSet::with_capacity(selected_file_count);
+    let mut changed_files = Vec::with_capacity(selected_file_count);
     for file in files {
-        if file.status == "renamed" {
-            return Err(CompareFailure::Incomplete(
-                GithubPushDiffIncompleteReason::RenamedPath,
-            ));
-        }
-        if !matches!(file.status.as_str(), "added" | "modified" | "removed")
-            || file.previous_filename.is_some()
-            || !valid_changed_path(&file.filename)
-        {
+        let changed_file = complete_changed_file(
+            &file.status,
+            &file.filename,
+            file.previous_filename.as_deref(),
+        )?;
+        if !filenames.insert(file.filename) {
             return Err(invalid_evidence());
         }
-        paths.push(file.filename);
+        changed_files.push(changed_file);
     }
-    paths.sort_unstable();
-    if paths.windows(2).any(|pair| pair[0] == pair[1]) {
+    Ok(changed_files)
+}
+
+fn complete_changed_file(
+    status: &str,
+    filename: &str,
+    previous_filename: Option<&str>,
+) -> Result<GithubChangedFile, CompareFailure> {
+    if !valid_changed_path(filename) {
         return Err(invalid_evidence());
     }
-    Ok(paths)
+    match (status, previous_filename) {
+        ("added" | "modified" | "removed", None) => Ok(GithubChangedFile {
+            current_path: filename.to_owned(),
+            previous_path: None,
+        }),
+        ("renamed", Some(previous_filename))
+            if previous_filename != filename && valid_changed_path(previous_filename) =>
+        {
+            Ok(GithubChangedFile {
+                current_path: filename.to_owned(),
+                previous_path: Some(previous_filename.to_owned()),
+            })
+        }
+        _ => Err(invalid_evidence()),
+    }
+}
+
+fn canonical_changed_paths(files: &[GithubChangedFile]) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    for file in files {
+        if let Some(previous_path) = &file.previous_path {
+            paths.insert(previous_path.clone());
+        }
+        paths.insert(file.current_path.clone());
+    }
+    paths.into_iter().collect()
 }
 
 fn valid_changed_path(path: &str) -> bool {
@@ -1219,18 +1346,18 @@ mod limit_contract_tests {
     }
 
     #[test]
-    fn complete_compare_file_count_limit_has_exact_boundaries() {
+    fn actions_path_filter_file_count_limit_has_exact_boundaries() {
         assert_eq!(
-            complete_compare_file_count_rejection(MAX_COMPLETE_GITHUB_COMPARE_FILES - 1),
+            actions_path_filter_file_count_rejection(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES - 1),
             None
         );
         assert_eq!(
-            complete_compare_file_count_rejection(MAX_COMPLETE_GITHUB_COMPARE_FILES),
+            actions_path_filter_file_count_rejection(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES),
             None
         );
         assert_eq!(
-            complete_compare_file_count_rejection(MAX_COMPLETE_GITHUB_COMPARE_FILES + 1),
-            Some(GithubChangedFilesLimitRejection::CompareFileCount)
+            actions_path_filter_file_count_rejection(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES + 1),
+            Some(GithubChangedFilesLimitRejection::ActionsPathFilterFileCount)
         );
     }
 

@@ -10,8 +10,11 @@ use super::GithubWorkflowDispatchInputs;
 pub enum GithubChangedFiles {
     /// The exact bounded file list considered by GitHub's diff selection.
     Complete {
-        /// Canonical repository-relative paths.
+        /// Canonical repository-relative path candidates. A rename contributes
+        /// both its previous and current path.
         files: Vec<String>,
+        /// Provider file records represented by the path candidates.
+        selected_file_count: usize,
         /// Provider evidence digest when selection used production evidence.
         evidence_digest: Option<Sha256Digest>,
     },
@@ -26,8 +29,10 @@ impl GithubChangedFiles {
     /// Creates a complete changed-file selection.
     #[must_use]
     pub fn complete(files: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
         Self::Complete {
-            files: files.into_iter().map(Into::into).collect(),
+            selected_file_count: files.len(),
+            files,
             evidence_digest: None,
         }
     }
@@ -38,8 +43,25 @@ impl GithubChangedFiles {
         files: impl IntoIterator<Item = impl Into<String>>,
         evidence_digest: Sha256Digest,
     ) -> Self {
+        let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
+        Self::Complete {
+            selected_file_count: files.len(),
+            files,
+            evidence_digest: Some(evidence_digest),
+        }
+    }
+
+    /// Creates a complete provider selection where rename records may produce
+    /// two repository-relative path candidates.
+    #[must_use]
+    pub fn complete_selection_with_evidence(
+        files: impl IntoIterator<Item = impl Into<String>>,
+        selected_file_count: usize,
+        evidence_digest: Sha256Digest,
+    ) -> Self {
         Self::Complete {
             files: files.into_iter().map(Into::into).collect(),
+            selected_file_count,
             evidence_digest: Some(evidence_digest),
         }
     }
@@ -79,14 +101,31 @@ impl GithubChangedFiles {
             Self::BypassPathFilters { .. } => None,
         }
     }
+
+    /// Returns provider file records represented by complete path candidates.
+    #[must_use]
+    pub const fn selected_file_count(&self) -> Option<usize> {
+        match self {
+            Self::Complete {
+                selected_file_count,
+                ..
+            } => Some(*selected_file_count),
+            Self::BypassPathFilters { .. } => None,
+        }
+    }
 }
 
 impl fmt::Debug for GithubChangedFiles {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Complete { files, .. } => formatter
+            Self::Complete {
+                files,
+                selected_file_count,
+                ..
+            } => formatter
                 .debug_struct("Complete")
-                .field("file_count", &files.len())
+                .field("selected_file_count", selected_file_count)
+                .field("path_candidate_count", &files.len())
                 .field("evidence_bound", &self.evidence_digest().is_some())
                 .finish_non_exhaustive(),
             Self::BypassPathFilters { .. } => formatter

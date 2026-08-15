@@ -370,7 +370,9 @@ async fn public_request_is_anonymous_at_the_real_http_boundary() {
     assert!(matches!(
         outcome,
         GithubChangedFilesDisposition::Complete { ref files, .. }
-            if files == &[CHANGED_PATH]
+            if files.len() == 1
+                && files[0].current_path() == CHANGED_PATH
+                && files[0].previous_path().is_none()
     ));
 
     let captured = http.finish().await;
@@ -395,7 +397,9 @@ async fn private_request_sends_only_the_exact_token_at_the_real_http_boundary() 
     assert!(matches!(
         outcome,
         GithubChangedFilesDisposition::Complete { ref files, .. }
-            if files == &[CHANGED_PATH]
+            if files.len() == 1
+                && files[0].current_path() == CHANGED_PATH
+                && files[0].previous_path().is_none()
     ));
 
     let captured = http.finish().await;

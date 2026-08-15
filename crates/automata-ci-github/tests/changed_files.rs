@@ -10,7 +10,7 @@ use automata_ci_github::{
     GithubChangedFilesEvidenceDigest, GithubHttpEndpoint, GithubHttpLimits,
     GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome, GithubPullRequestDiffRequest,
     GithubPushDiffAuthority, GithubPushDiffIncompleteReason, GithubPushDiffOutcome,
-    GithubPushDiffRange, GithubPushDiffRequest, MAX_COMPLETE_GITHUB_COMPARE_FILES,
+    GithubPushDiffRange, GithubPushDiffRequest, MAX_GITHUB_ACTIONS_PATH_FILTER_FILES,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use axum::http::StatusCode;
@@ -271,52 +271,58 @@ async fn pull_request_transport_and_authority_failures_have_disjoint_disposition
 }
 
 #[tokio::test]
-async fn pull_request_files_are_paginated_through_the_documented_three_thousand_window() {
-    const REPORTED_CHANGED_FILES: usize = 3_001;
-    let fixture = FixtureServer::spawn().await;
-    fixture.enqueue(ResponseSpec::json(
-        StatusCode::OK,
-        pull_request_snapshot(17, BEFORE, AFTER, REPORTED_CHANGED_FILES),
-    ));
-    for page in 0..30 {
-        let files = (0..100)
-            .map(|offset| {
-                pull_request_file(
-                    &format!("src/file-{:04}.rs", page * 100 + offset),
-                    "modified",
-                )
-            })
-            .collect::<Vec<_>>();
+async fn pull_request_selection_is_pinned_to_the_first_three_hundred_files() {
+    for reported_changed_files in [299_usize, 300, 301] {
+        let selected_file_count = reported_changed_files.min(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES);
+        let fixture = FixtureServer::spawn().await;
         fixture.enqueue(ResponseSpec::json(
             StatusCode::OK,
-            serde_json::to_string(&files).expect("pull-request page JSON"),
+            pull_request_snapshot(17, BEFORE, AFTER, reported_changed_files),
         ));
-    }
-    fixture.enqueue(ResponseSpec::json(
-        StatusCode::OK,
-        pull_request_snapshot(17, BEFORE, AFTER, REPORTED_CHANGED_FILES),
-    ));
+        for page in 0..selected_file_count.div_ceil(100) {
+            let page_start = page * 100;
+            let page_end = (page_start + 100).min(selected_file_count);
+            let files = (page_start..page_end)
+                .map(|index| pull_request_file(&format!("src/file-{index:03}.rs"), "modified"))
+                .collect::<Vec<_>>();
+            fixture.enqueue(ResponseSpec::json(
+                StatusCode::OK,
+                serde_json::to_string(&files).expect("pull-request page JSON"),
+            ));
+        }
+        fixture.enqueue(ResponseSpec::json(
+            StatusCode::OK,
+            pull_request_snapshot(17, BEFORE, AFTER, reported_changed_files),
+        ));
 
-    let outcome = pull_request_diff(
-        &fixture.endpoint(),
-        &repository(),
-        &revision(BEFORE),
-        &revision(AFTER),
-    )
-    .await;
-    let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
-        panic!("expected complete provider selection window");
-    };
-    assert_eq!(evidence.total_changed_files(), 3_001);
-    assert_eq!(evidence.changed_paths().len(), 3_000);
-    assert_eq!(evidence.page_digests().len(), 30);
-    let requests = fixture.requests();
-    assert_eq!(requests.len(), 32);
-    assert!(requests[30].uri.ends_with("per_page=100&page=30"));
-    assert_eq!(
-        requests[31].uri,
-        "/api/repos/octo-org/private-repo/pulls/17"
-    );
+        let outcome = pull_request_diff(
+            &fixture.endpoint(),
+            &repository(),
+            &revision(BEFORE),
+            &revision(AFTER),
+        )
+        .await;
+        let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
+            panic!("expected complete provider selection window");
+        };
+        assert_eq!(
+            evidence.total_changed_files(),
+            u64::try_from(reported_changed_files).expect("bounded fixture count")
+        );
+        assert_eq!(evidence.selected_file_count(), selected_file_count);
+        assert_eq!(evidence.changed_paths().len(), selected_file_count);
+        assert_eq!(evidence.page_digests().len(), 3);
+        assert!(
+            !evidence
+                .changed_paths()
+                .iter()
+                .any(|path| path == "src/file-300.rs")
+        );
+        let requests = fixture.requests();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[3].uri.ends_with("per_page=100&page=3"));
+        assert_eq!(requests[4].uri, "/api/repos/octo-org/private-repo/pulls/17");
+    }
 }
 
 #[tokio::test]
@@ -561,7 +567,7 @@ async fn pull_request_authority_and_fork_repository_are_exactly_bound() {
 }
 
 #[tokio::test]
-async fn pull_request_deletions_are_complete_and_renames_fail_closed() {
+async fn pull_request_deletions_and_both_rename_paths_are_complete() {
     let deletion = FixtureServer::spawn().await;
     deletion.enqueue(ResponseSpec::json(
         StatusCode::OK,
@@ -602,16 +608,27 @@ async fn pull_request_deletions_are_complete_and_renames_fail_closed() {
         })])
         .unwrap(),
     ));
+    rename.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 1),
+    ));
+    let outcome = pull_request_diff(
+        &rename.endpoint(),
+        &repository(),
+        &revision(BEFORE),
+        &revision(AFTER),
+    )
+    .await;
+    let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
+        panic!("expected rename evidence");
+    };
+    assert_eq!(evidence.selected_file_count(), 1);
+    assert_eq!(evidence.changed_files()[0].current_path(), "src/new.rs");
     assert_eq!(
-        pull_request_diff(
-            &rename.endpoint(),
-            &repository(),
-            &revision(BEFORE),
-            &revision(AFTER),
-        )
-        .await,
-        GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::RenamedPath)
+        evidence.changed_files()[0].previous_path(),
+        Some("src/old.rs")
     );
+    assert_eq!(evidence.changed_paths(), ["src/new.rs", "src/old.rs"]);
 }
 
 #[tokio::test]
@@ -738,34 +755,44 @@ async fn unsupported_push_shapes_are_typed_incomplete_without_provider_io() {
 }
 
 #[tokio::test]
-async fn exactly_three_hundred_files_are_never_labeled_complete() {
-    assert_eq!(MAX_COMPLETE_GITHUB_COMPARE_FILES, 299);
-    let fixture = FixtureServer::spawn().await;
-    let files = (0..300)
-        .map(|index| changed_file(&format!("files/{index:03}.txt"), "modified"))
-        .collect();
-    fixture.enqueue(ResponseSpec::json(
-        StatusCode::OK,
-        compare_page(BEFORE, BEFORE, 1, &[AFTER.to_owned()], Some(files)),
-    ));
-    let repository = repository();
-    let before = revision(BEFORE);
-    let after = revision(AFTER);
-    let commits = [after.clone()];
+async fn compare_selection_has_exact_299_300_301_boundaries() {
+    assert_eq!(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES, 300);
+    for file_count in [299_usize, 300, 301] {
+        let fixture = FixtureServer::spawn().await;
+        let files = (0..file_count)
+            .map(|index| changed_file(&format!("files/{index:03}.txt"), "modified"))
+            .collect();
+        fixture.enqueue(ResponseSpec::json(
+            StatusCode::OK,
+            compare_page(BEFORE, BEFORE, 1, &[AFTER.to_owned()], Some(files)),
+        ));
+        let repository = repository();
+        let before = revision(BEFORE);
+        let after = revision(AFTER);
+        let commits = [after.clone()];
 
-    let outcome = existing_diff(
-        &fixture.endpoint(),
-        &repository,
-        &before,
-        &after,
-        &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
-    )
-    .await;
-    assert_eq!(
-        outcome,
-        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::FileListCapped)
-    );
+        let outcome = existing_diff(
+            &fixture.endpoint(),
+            &repository,
+            &before,
+            &after,
+            &commits,
+            GithubPushDiffAuthority::PublicAnonymous,
+        )
+        .await;
+        if file_count <= MAX_GITHUB_ACTIONS_PATH_FILTER_FILES {
+            let GithubPushDiffOutcome::Complete(evidence) = outcome else {
+                panic!("expected complete {file_count}-file selection");
+            };
+            assert_eq!(evidence.selected_file_count(), file_count);
+            assert_eq!(evidence.changed_paths().len(), file_count);
+        } else {
+            assert_eq!(
+                outcome,
+                GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::FileListCapped)
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -840,7 +867,7 @@ async fn pagination_must_equal_the_complete_signed_commit_set_and_end_at_after()
 }
 
 #[tokio::test]
-async fn divergence_and_renames_are_explicitly_incomplete() {
+async fn divergence_is_invalid_and_push_renames_include_both_paths() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
@@ -889,10 +916,16 @@ async fn divergence_and_renames_are_explicitly_incomplete() {
         GithubPushDiffAuthority::PublicAnonymous,
     )
     .await;
+    let GithubPushDiffOutcome::Complete(evidence) = outcome else {
+        panic!("expected complete rename selection");
+    };
+    assert_eq!(evidence.selected_file_count(), 1);
+    assert_eq!(evidence.changed_files()[0].current_path(), "new/name.rs");
     assert_eq!(
-        outcome,
-        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::RenamedPath)
+        evidence.changed_files()[0].previous_path(),
+        Some("old/name.rs")
     );
+    assert_eq!(evidence.changed_paths(), ["new/name.rs", "old/name.rs"]);
 }
 
 #[tokio::test]
@@ -906,6 +939,17 @@ async fn duplicate_or_malformed_paths_fail_closed() {
         vec![changed_file("double//separator", "modified")],
         vec![changed_file("control\npath", "modified")],
         vec![changed_file("valid", "copied")],
+        vec![json!({"filename": "new/path", "status": "renamed"})],
+        vec![json!({
+            "filename": "new/path",
+            "previous_filename": "../old/path",
+            "status": "renamed"
+        })],
+        vec![json!({
+            "filename": "same/path",
+            "previous_filename": "same/path",
+            "status": "renamed"
+        })],
     ] {
         let fixture = FixtureServer::spawn().await;
         fixture.enqueue(ResponseSpec::json(

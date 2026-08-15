@@ -1664,38 +1664,14 @@ async fn insert_delivery_evidence(
     pin: &CurrentManifestPin,
 ) -> Result<(), GithubSubjectEvidenceStoreError> {
     let identity = request.delivery().identity();
-    let private_id = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| selector.authority_id().as_uuid());
-    let private_digest = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| selector.identity_digest().as_bytes().to_vec());
-    let private_app_revision = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| pg_bigint(selector.app_configuration_revision().get()));
-    let private_policy_revision = pin
-        .private_source_authority
-        .as_ref()
-        .map(|selector| pg_bigint(selector.policy_revision().get()));
-    let private_pull_request_files_id = pin
-        .private_pull_request_files_authority
-        .as_ref()
-        .map(|selector| selector.authority_id().as_uuid());
-    let private_pull_request_files_digest = pin
-        .private_pull_request_files_authority
-        .as_ref()
-        .map(|selector| selector.identity_digest().as_bytes().to_vec());
-    let private_pull_request_files_app_revision = pin
-        .private_pull_request_files_authority
-        .as_ref()
-        .map(|selector| pg_bigint(selector.app_configuration_revision().get()));
-    let private_pull_request_files_policy_revision = pin
-        .private_pull_request_files_authority
-        .as_ref()
-        .map(|selector| pg_bigint(selector.policy_revision().get()));
+    let (private_id, private_digest, private_app_revision, private_policy_revision) =
+        optional_authority_columns(pin.private_source_authority.as_ref());
+    let (
+        private_pull_request_files_id,
+        private_pull_request_files_digest,
+        private_pull_request_files_app_revision,
+        private_pull_request_files_policy_revision,
+    ) = optional_authority_columns(pin.private_pull_request_files_authority.as_ref());
     let authenticated_event = request.authenticated_event();
     let authenticated_event_name = authenticated_event.kind().as_str();
     let authenticated_event_git_ref = authenticated_event.git_ref();
@@ -1778,6 +1754,19 @@ async fn insert_delivery_evidence(
         return Err(GithubSubjectEvidenceStoreError::CorruptData);
     }
     Ok(())
+}
+
+type OptionalAuthorityColumns = (Option<Uuid>, Option<Vec<u8>>, Option<i64>, Option<i64>);
+
+fn optional_authority_columns(
+    selector: Option<&GithubServerServiceAuthoritySelector>,
+) -> OptionalAuthorityColumns {
+    (
+        selector.map(|value| value.authority_id().as_uuid()),
+        selector.map(|value| value.identity_digest().as_bytes().to_vec()),
+        selector.map(|value| pg_bigint(value.app_configuration_revision().get())),
+        selector.map(|value| pg_bigint(value.policy_revision().get())),
+    )
 }
 
 async fn insert_queued_check(

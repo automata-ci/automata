@@ -499,7 +499,7 @@ fn invalid_changed_file_metadata_is_bounded_and_sanitized() {
 #[test]
 fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
     let source = "on:\n  push:\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    let files = (0..3_000).map(|index| format!("src/file-{index}.rs"));
+    let files = (0..300).map(|index| format!("src/file-{index}.rs"));
     let report = compile(
         source,
         event("push", "refs/heads/main"),
@@ -510,7 +510,7 @@ fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
 
-    let files = (0..3_001).map(|index| format!("src/file-{index}.rs"));
+    let files = (0..301).map(|index| format!("src/file-{index}.rs"));
     let report = compile(
         source,
         event("push", "refs/heads/main"),
@@ -520,6 +520,29 @@ fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
         )),
     );
     assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
+}
+
+#[test]
+fn renamed_file_matches_both_previous_and_current_paths() {
+    for matched_path in ["legacy/module.rs", "src/module.rs"] {
+        let source = format!(
+            "on:\n  pull_request:\n    paths: ['{matched_path}']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n"
+        );
+        let report = compile(
+            &source,
+            event("pull_request", "refs/pull/42/merge"),
+            Some(GithubEventMetadata::pull_request_with_changed_files(
+                "opened",
+                "main",
+                GithubChangedFiles::complete_selection_with_evidence(
+                    ["legacy/module.rs", "src/module.rs"],
+                    1,
+                    Sha256Digest::from_bytes([0x44; 32]),
+                ),
+            )),
+        );
+        assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    }
 }
 
 #[test]

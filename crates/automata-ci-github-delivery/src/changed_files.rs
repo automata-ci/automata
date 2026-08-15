@@ -12,9 +12,9 @@ use automata_ci_scm::{ExactRevision, RepositoryId};
 use automata_ci_store::ProviderRepositoryVisibility;
 
 use crate::{
-    GithubChangedFilesDisposition, GithubPullRequestChangedFilesAuthority,
-    GithubPullRequestChangedFilesRequest, GithubPushChangedFilesAuthority,
-    GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+    GithubChangedFileSelection, GithubChangedFilesDisposition,
+    GithubPullRequestChangedFilesAuthority, GithubPullRequestChangedFilesRequest,
+    GithubPushChangedFilesAuthority, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
 };
 
 /// Product-composed delivery adapter for bounded GitHub changed-file evidence.
@@ -257,7 +257,11 @@ fn translate_outcome(outcome: GithubPushDiffOutcome) -> GithubChangedFilesDispos
     match outcome {
         GithubPushDiffOutcome::Complete(evidence) => GithubChangedFilesDisposition::Complete {
             evidence_digest: core_digest(evidence.evidence_digest()),
-            files: evidence.into_changed_paths(),
+            files: evidence
+                .into_changed_files()
+                .iter()
+                .map(changed_file_selection)
+                .collect(),
         },
         GithubPushDiffOutcome::RetryableUnavailable => {
             GithubChangedFilesDisposition::RetryableUnavailable
@@ -273,7 +277,11 @@ fn translate_pull_request_outcome(
         GithubPullRequestDiffOutcome::Complete(evidence) => {
             GithubChangedFilesDisposition::Complete {
                 evidence_digest: core_digest(evidence.evidence_digest()),
-                files: evidence.into_changed_paths(),
+                files: evidence
+                    .into_changed_files()
+                    .iter()
+                    .map(changed_file_selection)
+                    .collect(),
             }
         }
         GithubPullRequestDiffOutcome::RetryableUnavailable => {
@@ -285,6 +293,17 @@ fn translate_pull_request_outcome(
 
 fn core_digest(digest: automata_ci_github::GithubChangedFilesEvidenceDigest) -> Sha256Digest {
     Sha256Digest::from_bytes(*digest.as_bytes())
+}
+
+fn changed_file_selection(
+    file: &automata_ci_github::GithubChangedFile,
+) -> GithubChangedFileSelection {
+    match file.previous_path() {
+        Some(previous_path) => {
+            GithubChangedFileSelection::renamed(previous_path, file.current_path())
+        }
+        None => GithubChangedFileSelection::changed(file.current_path()),
+    }
 }
 
 #[cfg(test)]
@@ -363,7 +382,6 @@ mod tests {
             GithubPushDiffIncompleteReason::DeletedPush,
             GithubPushDiffIncompleteReason::DivergedPush,
             GithubPushDiffIncompleteReason::FileListCapped,
-            GithubPushDiffIncompleteReason::RenamedPath,
             GithubPushDiffIncompleteReason::InvalidEvidence,
             GithubPushDiffIncompleteReason::ProviderRejected,
         ] {

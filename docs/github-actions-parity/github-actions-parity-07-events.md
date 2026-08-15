@@ -55,12 +55,15 @@ Current implementation boundary:
 - Public same-repository and fork pull requests use anonymous, paginated
   `pulls/{number}/files` reads. Exact pre/post pull-request snapshots bind the
   base repository, head repository, pull-request number, base SHA, head SHA,
-  state, and provider-reported file count. The documented first 3,000 files
-  are consumed in exact 100-file pages.
+  state, and provider-reported file count. The github.com Actions product
+  target consumes exactly the first 300 provider file records in at most three
+  exact 100-file pages; a reported 301st file is neither fetched nor matched.
 - Each page is order-digested; the aggregate evidence digest also binds the
-  canonical path set. Duplicate, omitted, malformed, renamed, or snapshot-
-  drifting evidence is invalid. Transport, rate-limit, and server failures are
-  retryable and never become run-all.
+  canonical path set. A well-formed rename contributes both its previous and
+  current path while retaining one provider-record count. Duplicate primary
+  filenames, malformed rename pairs, omitted pages, or snapshot-drifting
+  evidence is invalid. Transport, rate-limit, and server failures are retryable
+  and never become run-all.
 - A retry deliberately starts again at page one; partial pages are not cached.
   Exact snapshot binding and canonical page digests make the replay
   deterministic. Once a workflow is admitted, the selection digest is part of
@@ -73,10 +76,18 @@ Current implementation boundary:
   credential handoff. Acquisition happens only after the compiler demands
   path evidence, and the existing `contents: read` source selector cannot be
   substituted at the typed, adapter, or database boundary.
-- New-branch and forced/diverged push comparisons and rename parity remain
-  fail-closed. Commit-message skip directives and live GitHub differential
-  evidence also remain open; this component coverage is not a production
-  compatibility claim.
+- Existing-push Compare evidence accepts its documented first 300 file records;
+  rename records likewise contribute both old and new paths. Exact 299/300/301
+  fixtures pin the boundary and prove a 301st PR file cannot affect selection.
+- GitHub's [generic troubleshooting guidance](https://docs.github.com/en/actions/how-tos/troubleshoot-workflows#filtering-and-diff-limits)
+  currently says 300 files, while its [Enterprise Cloud trigger guidance](https://docs.github.com/en/enterprise-cloud@latest/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#using-filters-to-target-specific-paths-for-pull-request-or-push-events)
+  says 3,000. Automata pins github.com generic's 300-file behavior. This
+  documentation observation is not live differential evidence; a protected
+  provider run must resolve the contradiction before a broader compatibility
+  claim.
+- New-branch and forced/diverged push comparisons remain fail-closed.
+  Commit-message skip directives and live GitHub differential evidence also
+  remain open; this component coverage is not a production compatibility claim.
 
 ### EVT-03 — Manual dispatch core parity
 

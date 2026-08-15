@@ -7,7 +7,9 @@ use automata_ci_core::{
     ContextValue, JobRuntimeContext, Sha256Digest, TrustPolicy, TrustSnapshot, UnixMillis,
     WorkflowEventProvenance,
 };
-use automata_ci_github::{GithubTrustDerivation, derive_github_trust_snapshot};
+use automata_ci_github::{
+    GithubTrustDerivation, MAX_GITHUB_ACTIONS_PATH_FILTER_FILES, derive_github_trust_snapshot,
+};
 use automata_ci_scm::{ArchiveFormat, RepositorySource};
 use automata_ci_store::{
     AuthenticatedGithubDeliveryClaim, GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_ARCHIVE_ACCEPT,
@@ -288,14 +290,66 @@ impl fmt::Debug for GithubPushChangedFilesRequest<'_> {
     }
 }
 
+/// One provider file record in github.com Actions' selected diff window.
+#[derive(Clone, Eq, PartialEq)]
+pub struct GithubChangedFileSelection {
+    current_path: String,
+    previous_path: Option<String>,
+}
+
+impl GithubChangedFileSelection {
+    /// Creates an added, modified, or removed file record.
+    #[must_use]
+    pub fn changed(current_path: impl Into<String>) -> Self {
+        Self {
+            current_path: current_path.into(),
+            previous_path: None,
+        }
+    }
+
+    /// Creates a rename record carrying both its previous and current paths.
+    #[must_use]
+    pub fn renamed(previous_path: impl Into<String>, current_path: impl Into<String>) -> Self {
+        Self {
+            current_path: current_path.into(),
+            previous_path: Some(previous_path.into()),
+        }
+    }
+
+    /// Returns the file's current repository-relative path.
+    #[must_use]
+    pub fn current_path(&self) -> &str {
+        &self.current_path
+    }
+
+    /// Returns the previous path for a rename record.
+    #[must_use]
+    pub fn previous_path(&self) -> Option<&str> {
+        self.previous_path.as_deref()
+    }
+
+    fn into_path_candidates(self) -> impl Iterator<Item = String> {
+        self.previous_path.into_iter().chain([self.current_path])
+    }
+}
+
+impl fmt::Debug for GithubChangedFileSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubChangedFileSelection")
+            .field("renamed", &self.previous_path.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Closed provider disposition for exact changed-file selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum GithubChangedFilesDisposition {
-    /// Complete bounded paths and their canonical provider evidence digest.
+    /// Complete bounded file records and their canonical provider evidence digest.
     Complete {
-        /// Canonical repository-relative paths.
-        files: Vec<String>,
+        /// Exact provider records. A rename retains both paths in one record.
+        files: Vec<GithubChangedFileSelection>,
         /// Digest of exact provider request/page evidence.
         evidence_digest: Sha256Digest,
     },
@@ -313,7 +367,7 @@ pub enum GithubChangedFilesDisposition {
 /// Least-authority provider port for one exact GitHub push diff.
 ///
 /// Implementations must reproduce the provider's path-filter selection,
-/// return at most its documented 3,000-file window, and return
+/// return exactly github.com Actions' first-300-file window, and return
 /// [`GithubChangedFilesDisposition::ProviderRunAll`] only with affirmative
 /// provider evidence that path filters are bypassed. Returned paths must never
 /// enter diagnostics.
@@ -924,10 +978,18 @@ fn changed_files_result(
         GithubChangedFilesDisposition::Complete {
             files,
             evidence_digest,
-        } if u64::try_from(files.len()).is_ok_and(|count| count <= maximum_changed_files) => {
+        } if files.len() <= MAX_GITHUB_ACTIONS_PATH_FILTER_FILES
+            && u64::try_from(files.len()).is_ok_and(|count| count <= maximum_changed_files) =>
+        {
+            let selected_file_count = files.len();
+            let path_candidates = files
+                .into_iter()
+                .flat_map(GithubChangedFileSelection::into_path_candidates);
             let digest = bind_selection_digest(request, b"complete", evidence_digest);
-            Ok(Some(GithubChangedFiles::complete_with_evidence(
-                files, digest,
+            Ok(Some(GithubChangedFiles::complete_selection_with_evidence(
+                path_candidates,
+                selected_file_count,
+                digest,
             )))
         }
         GithubChangedFilesDisposition::ProviderRunAll { evidence_digest } => {
@@ -1527,9 +1589,10 @@ mod renewal_tests {
     use uuid::Uuid;
 
     use super::{
-        GithubChangedFilesDisposition, GithubDeliveryWorkflowAdmissionProcessor,
-        GithubPushChangedFilesAuthority, GithubPushChangedFilesProvider,
-        GithubPushChangedFilesRequest, admission_error, admission_error_stage,
+        GithubChangedFileSelection, GithubChangedFilesDisposition,
+        GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
+        GithubPushChangedFilesProvider, GithubPushChangedFilesRequest, admission_error,
+        admission_error_stage,
     };
     use crate::{
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
@@ -2068,7 +2131,7 @@ mod renewal_tests {
                     successor_token,
                 });
             GithubChangedFilesDisposition::Complete {
-                files: vec!["docs/readme.md".to_owned()],
+                files: vec![GithubChangedFileSelection::changed("docs/readme.md")],
                 evidence_digest: Sha256Digest::from_bytes([0x5a; 32]),
             }
         }

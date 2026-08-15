@@ -286,17 +286,20 @@ differential tests.
 Additional event work:
 
 - [ ] Implement the complete documented activity-type set for `pull_request`.
-- [ ] Implement pull-request changed-file retrieval for `paths` and
+- [x] Implement pull-request changed-file retrieval for `paths` and
   `paths-ignore`.
-- [ ] Handle fork pull-request changed-file retrieval with least privilege.
-- [ ] Handle renamed and deleted pull-request files correctly.
+- [x] Handle fork pull-request changed-file retrieval with least privilege.
+- [x] Handle renamed and deleted pull-request files correctly.
 - [ ] Match GitHub's two-dot and three-dot diff rules.
 - [ ] Match new-branch push diff behavior.
 - [ ] Handle pushes with more than 1,000 commits.
 - [ ] Handle changed-file truncation and diff timeouts.
-- [ ] Define fail-closed behavior when complete changed-file evidence cannot be
+- [x] Define fail-closed behavior when complete changed-file evidence cannot be
   obtained.
-- [ ] Differential-test the current 300-file filtering boundary.
+- [ ] Differential-test the current 300-file filtering boundary. Focused
+  299/300/301 component fixtures are pinned, but protected live GitHub
+  evidence remains required because GitHub's generic and Enterprise Cloud
+  documentation currently disagree on 300 versus 3,000.
 - [ ] Implement branch, tag, and path filter ordering exactly.
 - [ ] Match behavior when both positive and negative patterns are present.
 - [ ] Match required-check behavior when path or branch filtering skips a

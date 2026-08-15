@@ -19,12 +19,13 @@ use automata_ci_github::{
     rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFilesDisposition, GithubDeliveryClock,
-    GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceAuthority,
-    GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
-    GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
-    GithubDeliverySourceCredentialRequest, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
-    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
+    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
+    GithubDeliverySourceAuthority, GithubDeliverySourceCredential,
+    GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
+    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
+    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerError,
+    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
     GithubDeliveryWorkflowAdmissionProcessor, GithubPullRequestChangedFilesAuthority,
     GithubPullRequestChangedFilesRequest, GithubPushChangedFilesAuthority,
     GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
@@ -604,8 +605,12 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
 fn complete_changed_files(
     files: impl IntoIterator<Item = impl Into<String>>,
 ) -> GithubChangedFilesDisposition {
+    let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
     GithubChangedFilesDisposition::Complete {
-        files: files.into_iter().map(Into::into).collect(),
+        files: files
+            .into_iter()
+            .map(GithubChangedFileSelection::changed)
+            .collect(),
         evidence_digest: Sha256Digest::from_bytes([0x7a; 32]),
     }
 }
@@ -1130,6 +1135,36 @@ async fn public_pull_request_path_filters_admit_with_durable_selection_evidence(
 }
 
 #[tokio::test]
+async fn pull_request_rename_matches_both_previous_and_current_paths() {
+    for (previous_path, current_path) in
+        [("src/old.rs", "docs/new.rs"), ("docs/old.rs", "src/new.rs")]
+    {
+        let changed = Arc::new(ChangedFiles::new(GithubChangedFilesDisposition::Complete {
+            files: vec![GithubChangedFileSelection::renamed(
+                previous_path,
+                current_path,
+            )],
+            evidence_digest: Sha256Digest::from_bytes([0x79; 32]),
+        }));
+        let harness = pull_request_harness_with_visibility(
+            BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_PATH_WORKFLOW)]),
+            Some(changed),
+            ProviderRepositoryVisibility::Public,
+        )
+        .await;
+
+        process(&harness)
+            .await
+            .expect("renamed pull-request path processing");
+        assert_eq!(harness.logical.commands().len(), 1);
+        assert_eq!(
+            outcome_kind(harness.deliveries.completions()[0].outcomes()[0].conclusion()),
+            ("admitted", None)
+        );
+    }
+}
+
+#[tokio::test]
 async fn private_pull_request_path_filters_use_only_the_pinned_pr_read_authority() {
     let changed = Arc::new(ChangedFiles::new(complete_changed_files(["src/lib.rs"])));
     let harness = pull_request_harness(
@@ -1485,7 +1520,7 @@ async fn invalid_source_and_valid_non_selection_are_deterministic_path_outcomes(
 #[tokio::test]
 async fn changed_file_provider_failures_remain_closed_and_sanitized() {
     let oversized = Arc::new(ChangedFiles::new(complete_changed_files(
-        (0..=3_000).map(|index| format!("src/{index}.rs")),
+        (0..=300).map(|index| format!("src/{index}.rs")),
     )));
     let oversized_harness = harness(
         BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),

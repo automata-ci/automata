@@ -21,10 +21,10 @@ use automata_ci_github::{
     rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFilesDisposition, GithubDeliveryClock,
-    GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
-    GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
-    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
+    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
+    GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceConfigurationError,
+    GithubDeliveryServiceError, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
@@ -579,7 +579,7 @@ impl GithubPushChangedFilesProvider for RenewalRacingChangedFiles {
             return first_disposition.clone();
         }
         GithubChangedFilesDisposition::Complete {
-            files: vec!["README.md".to_owned()],
+            files: vec![GithubChangedFileSelection::changed("README.md")],
             evidence_digest: Sha256Digest::from_bytes([0x6a; 32]),
         }
     }
@@ -736,10 +736,8 @@ impl RecordingCredentialProvider {
                 GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision => {
                     GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
                 }
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
-                    GithubServerServiceAction::FetchPrivateRepositoryRevision
-                }
-                GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+                | GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
                     GithubServerServiceAction::FetchPrivateRepositoryRevision
                 }
             }
