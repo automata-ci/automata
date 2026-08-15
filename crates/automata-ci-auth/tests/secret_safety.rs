@@ -9,10 +9,7 @@ use automata_ci_auth::{
         CsrfToken, PkceVerifier, SecretBytes, SecretString, SessionToken, SharedSensitiveString,
     },
     session::IssuedSession,
-    vault::{
-        ProviderAccessToken, ProviderRefreshToken, ProviderTokenSet, VersionedProviderTokens,
-        WrappedDataKey,
-    },
+    vault::{ProviderAccessToken, ProviderRefreshToken, ProviderTokenSet, VersionedProviderTokens},
 };
 use static_assertions::{assert_impl_all, assert_not_impl_any};
 use support::{DeterministicRandom, secret, token_response};
@@ -25,7 +22,6 @@ assert_not_impl_any!(ProviderTokenSet: serde::Serialize, Clone);
 assert_not_impl_any!(ProviderCredential: serde::Serialize, Clone);
 assert_not_impl_any!(IssuedSession: serde::Serialize, Clone);
 assert_not_impl_any!(VersionedProviderTokens: serde::Serialize, Clone);
-assert_not_impl_any!(WrappedDataKey: serde::Serialize, Clone);
 assert_not_impl_any!(GithubTokenResponse: serde::Serialize, Clone);
 assert_not_impl_any!(SessionToken: serde::Serialize, Clone);
 assert_impl_all!(SharedSensitiveString: Clone, Send, Sync);

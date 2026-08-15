@@ -5,13 +5,12 @@ use thiserror::Error;
 
 use crate::{
     human::{ProviderId, ProviderSubject, TenantId},
-    secret::{SecretBytes, SecretString},
+    secret::SecretString,
     time::UnixTimestamp,
 };
 
 const MAX_TOKEN_TYPE_LENGTH: usize = 255;
 const MAX_SCOPE_LENGTH: usize = 255;
-const MAX_KEY_ENCRYPTION_PURPOSE_LENGTH: usize = 128;
 
 /// A redacted provider access token with explicit plaintext exposure.
 pub struct ProviderAccessToken(SecretString);
@@ -572,159 +571,4 @@ pub enum ProviderTokenVaultError {
     /// Authenticated ciphertext or its bound context failed validation.
     #[error("provider token ciphertext failed authentication")]
     IntegrityFailure,
-}
-
-/// Stable separation label for one use of a data-encryption key.
-#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct KeyEncryptionPurpose(String);
-
-impl KeyEncryptionPurpose {
-    /// Creates a portable, bounded key-encryption purpose.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an empty, oversized, or non-portable purpose.
-    pub fn new(value: impl Into<String>) -> Result<Self, KeyEncryptionContextError> {
-        let value = value.into();
-        if value.is_empty()
-            || value.len() > MAX_KEY_ENCRYPTION_PURPOSE_LENGTH
-            || !value.bytes().all(|character| {
-                character.is_ascii_alphanumeric()
-                    || matches!(character, b'-' | b'_' | b':' | b'.' | b'/')
-            })
-        {
-            return Err(KeyEncryptionContextError::InvalidPurpose);
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the stable domain-separation label.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for KeyEncryptionPurpose {
-    type Error = KeyEncryptionContextError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<KeyEncryptionPurpose> for String {
-    fn from(value: KeyEncryptionPurpose) -> Self {
-        value.0
-    }
-}
-
-/// Non-secret, authenticated context bound to a wrapped data-encryption key.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KeyEncryptionContext {
-    tenant_id: TenantId,
-    purpose: KeyEncryptionPurpose,
-}
-
-impl KeyEncryptionContext {
-    /// Binds a data-encryption key to one tenant and domain-separation purpose.
-    pub const fn new(tenant_id: TenantId, purpose: KeyEncryptionPurpose) -> Self {
-        Self { tenant_id, purpose }
-    }
-
-    /// Returns the tenant authenticated by key wrapping.
-    pub const fn tenant_id(&self) -> &TenantId {
-        &self.tenant_id
-    }
-
-    /// Returns the operation-specific domain-separation purpose.
-    pub const fn purpose(&self) -> &KeyEncryptionPurpose {
-        &self.purpose
-    }
-
-    /// Consumes the context into its authenticated components.
-    pub fn into_parts(self) -> (TenantId, KeyEncryptionPurpose) {
-        (self.tenant_id, self.purpose)
-    }
-}
-
-/// Opaque KMS/HSM output. It is ciphertext, but debug output still omits its bytes.
-pub struct WrappedDataKey(Vec<u8>);
-
-impl WrappedDataKey {
-    /// Creates an opaque wrapped data key from non-empty ciphertext.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for empty ciphertext.
-    pub fn new(bytes: Vec<u8>) -> Result<Self, KeyEncryptionError> {
-        if bytes.is_empty() {
-            return Err(KeyEncryptionError::InvalidCiphertext);
-        }
-        Ok(Self(bytes))
-    }
-
-    /// Borrows the opaque wrapped-key ciphertext.
-    pub fn ciphertext(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// Consumes the wrapper into its opaque ciphertext bytes.
-    pub fn into_ciphertext(self) -> Vec<u8> {
-        self.0
-    }
-}
-
-impl fmt::Debug for WrappedDataKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("WrappedDataKey")
-            .field("ciphertext_length", &self.0.len())
-            .finish()
-    }
-}
-
-/// A key-encryption operation whose failures never include key bytes.
-pub type KeyEncryptionFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, KeyEncryptionError>> + Send + 'a>>;
-
-/// Port implemented by a KMS, HSM, Vault transit engine, or equivalent KEK service.
-/// Token-vault adapters use it to wrap data-encryption keys; this is not itself an
-/// encryption implementation.
-pub trait KeyEncryptionProvider: fmt::Debug + Send + Sync {
-    /// Wraps a plaintext data-encryption key under authenticated context.
-    fn wrap_data_key<'a>(
-        &'a self,
-        plaintext_key: &'a SecretBytes,
-        context: &'a KeyEncryptionContext,
-    ) -> KeyEncryptionFuture<'a, WrappedDataKey>;
-
-    /// Unwraps a data-encryption key only under the identical context.
-    fn unwrap_data_key<'a>(
-        &'a self,
-        wrapped_key: &'a WrappedDataKey,
-        context: &'a KeyEncryptionContext,
-    ) -> KeyEncryptionFuture<'a, SecretBytes>;
-}
-
-/// Sanitized failures from the key-encryption provider boundary.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum KeyEncryptionError {
-    /// Wrapped-key ciphertext is empty, malformed, or unauthenticated.
-    #[error("wrapped data key is invalid")]
-    InvalidCiphertext,
-    #[error("key-encryption provider rejected the authenticated context")]
-    /// The ciphertext is not bound to the supplied tenant and purpose.
-    ContextMismatch,
-    /// The KMS, HSM, or equivalent provider is temporarily unavailable.
-    #[error("key-encryption provider is unavailable")]
-    Unavailable,
-}
-
-/// Validation failures for key-encryption domain separation.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum KeyEncryptionContextError {
-    /// The purpose is empty, oversized, or outside the portable alphabet.
-    #[error("key-encryption purpose is invalid")]
-    InvalidPurpose,
 }

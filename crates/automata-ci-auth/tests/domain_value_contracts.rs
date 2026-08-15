@@ -15,10 +15,9 @@ use automata_ci_auth::{
     },
     time::UnixTimestamp,
     vault::{
-        KeyEncryptionContext, KeyEncryptionPurpose, ProviderAccessToken, ProviderGrantKind,
-        ProviderRefreshToken, ProviderTokenKey, ProviderTokenMetadata, ProviderTokenMetadataError,
-        ProviderTokenSet, ProviderTokenSetError, TokenVersion, VersionedProviderTokens,
-        WrappedDataKey,
+        ProviderAccessToken, ProviderGrantKind, ProviderRefreshToken, ProviderTokenKey,
+        ProviderTokenMetadata, ProviderTokenMetadataError, ProviderTokenSet, ProviderTokenSetError,
+        TokenVersion, VersionedProviderTokens,
     },
 };
 use serde_json::json;
@@ -256,7 +255,7 @@ fn token_metadata_and_secret_material_cannot_become_inconsistent() {
 }
 
 #[test]
-fn vault_keys_and_encryption_purposes_are_typed_and_round_trip_safely() {
+fn vault_keys_are_typed_and_round_trip_safely() {
     let credential = ProviderCredential::new(provider_id(), secret("provider-access-secret"));
     assert_eq!(credential.provider_id().as_str(), "github");
     assert!(!format!("{credential:?}").contains("provider-access-secret"));
@@ -272,15 +271,4 @@ fn vault_keys_and_encryption_purposes_are_typed_and_round_trip_safely() {
         serde_json::from_value::<ProviderTokenKey>(encoded).expect("deserialize token key"),
         key
     );
-
-    assert!(KeyEncryptionPurpose::new("").is_err());
-    assert!(KeyEncryptionPurpose::new("provider tokens").is_err());
-    let purpose = KeyEncryptionPurpose::new("auth/provider-tokens:v1").expect("encryption purpose");
-    let context = KeyEncryptionContext::new(TenantId::new("tenant-1").expect("tenant ID"), purpose);
-    assert_eq!(context.tenant_id().as_str(), "tenant-1");
-    assert_eq!(context.purpose().as_str(), "auth/provider-tokens:v1");
-
-    let wrapped = WrappedDataKey::new(vec![11, 22, 33]).expect("wrapped data key");
-    assert!(!format!("{wrapped:?}").contains("11, 22, 33"));
-    assert_eq!(wrapped.into_ciphertext(), vec![11, 22, 33]);
 }

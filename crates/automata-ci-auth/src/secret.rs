@@ -170,7 +170,7 @@ fn constant_time_string_eq(left: &str, right: &str) -> bool {
     bool::from(equal)
 }
 
-/// Secret binary material, such as an unwrapped data-encryption key.
+/// Secret binary material, such as session-credential HMAC key material.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretBytes(Vec<u8>);
 
