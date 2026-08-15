@@ -520,7 +520,8 @@ pub(crate) fn issued_response(issued: &IssuedLiveLogAccess) -> Response {
 struct SseLogDocument<'a> {
     protocol_version: u16,
     stream_id: String,
-    sequence: u64,
+    /// Decimal text preserves the complete u64 identity in JavaScript.
+    sequence: String,
     fragment: Option<u32>,
     emitted_at_ms: i64,
     channel: &'static str,
@@ -536,7 +537,7 @@ fn sse_log_event(scope: &HumanLiveLogScope, record: &LiveLogRecord) -> Result<By
     let document = SseLogDocument {
         protocol_version: HUMAN_LIVE_LOG_PROTOCOL_VERSION,
         stream_id: scope.stream_id().to_string(),
-        sequence: record.line.sequence,
+        sequence: record.line.sequence.to_string(),
         fragment: record.line.fragment,
         emitted_at_ms: record.line.emitted_at.get(),
         channel,
@@ -829,6 +830,24 @@ mod tests {
         assert!(ticket_digest(ticket.expose_secret()).is_ok());
         assert!(ticket_digest("allt_v1_not-canonical").is_err());
         assert!(!format!("{ticket:?}").contains(ticket.expose_secret()));
+    }
+
+    #[test]
+    fn sse_log_sequences_remain_lossless_for_javascript_clients() {
+        let document = SseLogDocument {
+            protocol_version: HUMAN_LIVE_LOG_PROTOCOL_VERSION,
+            stream_id: Uuid::from_u128(5).to_string(),
+            sequence: u64::MAX.to_string(),
+            fragment: None,
+            emitted_at_ms: 1_777_890_010_000,
+            channel: "stdout",
+            text: "complete",
+        };
+
+        let json = serde_json::to_string(&document).expect("SSE JSON");
+
+        assert!(json.contains(r#""sequence":"18446744073709551615""#));
+        assert!(!json.contains(r#""sequence":18446744073709551615"#));
     }
 
     #[test]
