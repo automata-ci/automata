@@ -18,4 +18,5 @@ mod schedule_contract;
 mod support;
 mod trigger_selection;
 mod workflow_dispatch_inputs;
+mod yaml_aliases;
 mod yaml_semantics;
