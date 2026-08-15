@@ -58,7 +58,7 @@ Tasks:
   malformed-route, expired-token, wrong-scope, replay, size-mismatch,
   duplicate-finalize, truncated-body, and range-request coverage.
 - [ ] Record request/response transcripts with credentials redacted.
-- [ ] Publish the supported client/version matrix from one machine-readable
+- [x] Publish the supported client/version matrix from one machine-readable
   fixture used by documentation and tests.
 
 Acceptance:

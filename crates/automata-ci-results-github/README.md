@@ -15,6 +15,21 @@ The implemented clients are:
 These are tested protocol slices, not general artifact or cache API
 compatibility.
 
+The canonical client inventory is
+[`tests/fixtures/exact-client-matrix-v1.json`](tests/fixtures/exact-client-matrix-v1.json).
+`component` means the exact client library passes focused adapter tests;
+`candidate` means the immutable action is pinned but product acceptance is not
+yet complete. Only `product-accepted` may be advertised as real-store wrapper
+acceptance.
+
+<!-- exact-client-matrix:start -->
+| Action | Release | Commit | Embedded client | Status |
+| --- | --- | --- | --- | --- |
+| `actions/upload-artifact` | `v7.0.1` | `043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` | `@actions/artifact` `6.2.0` | `component` |
+| `actions/download-artifact` | `v8.0.1` | `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c` | `@actions/artifact` `6.2.1` | `candidate` |
+| `actions/cache` | `v5.0.5` | `27d5ce7f107fe9357f9df03efb73ab90386fccae` | `@actions/cache` `5.0.5` | `component` |
+<!-- exact-client-matrix:end -->
+
 ## Artifacts
 
 The upload sequence is:

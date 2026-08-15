@@ -592,6 +592,21 @@ async fn official_actions_artifact_6_2_client_completes_the_full_protocol() {
         .expect(
             "set AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE to @actions/artifact 6.2.0 lib/internal/client.js",
         );
+    run_official_artifact_client(module_path, "6.2.0").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Node >=24 and AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE"]
+async fn official_download_action_artifact_6_2_1_client_completes_the_full_protocol() {
+    let module_path = std::env::var_os("AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE")
+        .map(PathBuf::from)
+        .expect(
+            "set AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE to download-artifact v8.0.1 @actions/artifact 6.2.1 lib/internal/client.js",
+        );
+    run_official_artifact_client(module_path, "6.2.1").await;
+}
+
+async fn run_official_artifact_client(module_path: PathBuf, expected_version: &'static str) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind action-client fixture");
@@ -617,7 +632,7 @@ async fn official_actions_artifact_6_2_client_completes_the_full_protocol() {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/official_artifact_client.mjs");
     let token = fixture.token;
-    let status = tokio::task::spawn_blocking(move || {
+    let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("node")
             .arg(script)
             .env("ACTIONS_RUNTIME_TOKEN", token)
@@ -625,15 +640,20 @@ async fn official_actions_artifact_6_2_client_completes_the_full_protocol() {
             .env("GITHUB_SERVER_URL", "http://automata-git.ghe.com:8088/")
             .env("GITHUB_WORKSPACE", &scratch)
             .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE", module_path)
+            .env("AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION", expected_version)
             .env("AUTOMATA_TEST_ARTIFACT_INPUT", input)
             .env("AUTOMATA_TEST_ARTIFACT_ROOT", scratch)
-            .status()
+            .output()
             .expect("run official artifact client")
     })
     .await
     .expect("join Node client");
     server.abort();
-    assert!(status.success(), "official artifact client must complete");
+    assert!(
+        output.status.success(),
+        "official artifact client exited with {}",
+        output.status
+    );
 }
 
 #[tokio::test]
