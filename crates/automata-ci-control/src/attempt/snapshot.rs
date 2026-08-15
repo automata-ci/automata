@@ -1,10 +1,10 @@
+//! Validated durable attempt snapshots and their builder.
+
 use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, JobId, JobLifecycle, Lease, LeaseId, RunnerId,
     UnixMillis,
 };
-
-use crate::AttemptAssignment;
-use crate::AttemptSnapshotError;
+use automata_ci_store::{AttemptAssignment, AttemptSnapshotError};
 
 /// A validated, backend-neutral view of one durable job attempt.
 ///
@@ -54,21 +54,25 @@ impl AttemptSnapshot {
         }
     }
 
+    /// Returns the durable attempt identity.
     #[must_use]
     pub const fn attempt_id(self) -> AttemptId {
         self.attempt_id
     }
 
+    /// Returns the owning job identity.
     #[must_use]
     pub const fn job_id(self) -> JobId {
         self.job_id
     }
 
+    /// Returns the one-based attempt number.
     #[must_use]
     pub const fn attempt_number(self) -> AttemptNumber {
         self.attempt_number
     }
 
+    /// Returns the current durable lifecycle state.
     #[must_use]
     pub const fn lifecycle(self) -> JobLifecycle {
         self.lifecycle
@@ -81,11 +85,13 @@ impl AttemptSnapshot {
         self.fencing_token
     }
 
+    /// Returns the active lease identity, if any.
     #[must_use]
     pub const fn lease_id(self) -> Option<LeaseId> {
         self.lease_id
     }
 
+    /// Returns the active runner identity, if any.
     #[must_use]
     pub const fn runner_id(self) -> Option<RunnerId> {
         self.runner_id
@@ -97,26 +103,31 @@ impl AttemptSnapshot {
         self.assignment
     }
 
+    /// Returns the active lease issuance time, if any.
     #[must_use]
     pub const fn lease_issued_at(self) -> Option<UnixMillis> {
         self.lease_issued_at
     }
 
+    /// Returns the active lease expiration, if any.
     #[must_use]
     pub const fn lease_expires_at(self) -> Option<UnixMillis> {
         self.lease_expires_at
     }
 
+    /// Returns the number of prior lease failures.
     #[must_use]
     pub const fn lease_failures(self) -> u32 {
         self.lease_failures
     }
 
+    /// Returns the original queue time.
     #[must_use]
     pub const fn queued_at(self) -> UnixMillis {
         self.queued_at
     }
 
+    /// Returns the latest durable state-change time.
     #[must_use]
     pub const fn changed_at(self) -> UnixMillis {
         self.changed_at
@@ -155,6 +166,7 @@ impl AttemptSnapshotBuilder {
         self
     }
 
+    /// Sets the durable lease-failure count.
     #[must_use]
     pub const fn with_lease_failures(mut self, lease_failures: u32) -> Self {
         self.lease_failures = lease_failures;

@@ -6,14 +6,15 @@ use automata_ci_blob::ImmutableBlobStore as _;
 use automata_ci_blob_s3::{
     S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
 };
+use automata_ci_control::adapter_spi::{
+    AcquireLease, InternalAttemptRepository as _, QueuedAttempt,
+};
 use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, Sha256Digest, UnixMillis};
 use automata_ci_results_github::{
     ArtifactRepository as _, ArtifactService, ExecutionAuthority, PostgresArtifactRepository,
     ResolveArtifactDownload, ResultsClock, ResultsIdGenerator, ResultsLimits, UploadId,
 };
-use automata_ci_store::{
-    AcquireLease, InternalAttemptRepository as _, QueuedAttempt, StableRunnerSlot,
-};
+use automata_ci_store::StableRunnerSlot;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};

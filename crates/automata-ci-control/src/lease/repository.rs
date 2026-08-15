@@ -1,9 +1,10 @@
-use async_trait::async_trait;
-use automata_ci_store::{
+use crate::lease::{
     BeginLeaseRequest, BegunLeaseRequest, CompleteLeaseRequest, LeaseRequestCompletion,
-    LeaseRequestKey, NoWorkLeaseRequest, RunnableScanPage, RunnableScanRequest, StoreError,
-    TryClaimAttempt, TryClaimReceipt,
+    LeaseRequestKey, NoWorkLeaseRequest, RunnableScanPage, RunnableScanRequest, TryClaimAttempt,
+    TryClaimReceipt,
 };
+use async_trait::async_trait;
+use automata_ci_store::StoreError;
 
 /// Bounded exact-response ledger for lease-request chains.
 #[async_trait]

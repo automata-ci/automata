@@ -2,6 +2,13 @@ use std::{fmt, net::IpAddr, str::FromStr as _, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_auth::authorization::{OutputVisibility, SecretExposureClass};
+use automata_ci_control::{
+    adapter_spi::{
+        AcquireLease, AttemptSnapshot, ConcludeQueuedAttempt, InternalAttemptRepository,
+        QueuedAttempt, TenantAttemptQuery, TransitionAttempt,
+    },
+    attempt::RenewLease,
+};
 use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, IdentifierError, JobAuthorityProfile, JobId,
     JobLifecycle, Lease, LeaseGuard, LeaseId, RunnerId, RunnerSessionId, UnixMillis,
@@ -16,10 +23,8 @@ use uuid::Uuid;
 
 use crate::migration::MIGRATOR;
 use automata_ci_store::{
-    AcquireLease, AttemptAssignment, AttemptSnapshot, AttemptSnapshotError, AttemptStoreError,
-    ConcludeQueuedAttempt, InternalAttemptRepository, QueuedAttempt, RenewLease, RunnerGeneration,
-    RunnerSessionFence, SessionEpoch, StableRunnerSlot, TenantAttemptQuery, TenantScope,
-    TransitionAttempt,
+    AttemptAssignment, AttemptSnapshotError, AttemptStoreError, RunnerGeneration,
+    RunnerSessionFence, SessionEpoch, StableRunnerSlot, TenantScope,
 };
 
 mod admission;

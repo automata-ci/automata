@@ -2,7 +2,12 @@ use crate::github_manifest_fixture;
 
 use std::collections::BTreeMap;
 
-use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
+use automata_ci_control::{
+    cancellation::{
+        CancellationActor, CancellationReason, CancellationRepository as _, RequestCancellation,
+    },
+    runner_control::repository::RunnerSessionRepository as _,
+};
 use automata_ci_core::{
     Architecture, ContextValue, JobAuthorityProfile, JobConclusion, JobContentReference,
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
@@ -15,8 +20,7 @@ use automata_ci_core::{
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, ActivatedLogicalInstanceDescriptor,
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation, CancellationActor,
-    CancellationReason, CancellationRepository as _, ClaimLogicalInstanceResult,
+    AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation, ClaimLogicalInstanceResult,
     ClaimNextLogicalInstanceMaterialization, ClaimNextLogicalInstanceResult,
     ClaimNextLogicalJobOrchestration, ClaimProviderDelivery, ClaimedLogicalInstanceMaterialization,
     ClaimedLogicalJobActivation, CommitLogicalInstanceMaterialization, CommitLogicalInstanceResult,
@@ -45,8 +49,8 @@ use automata_ci_store::{
     ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     PublishLogicalJobActivation, QuarantineLogicalInstanceResult,
-    RegisterProviderDeliveryWorkflowInventory, RequestCancellation, ReusableSecretPermission,
-    RoutingDocument, RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, TenantScope,
+    RegisterProviderDeliveryWorkflowInventory, ReusableSecretPermission, RoutingDocument,
+    RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, TenantScope,
     WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};

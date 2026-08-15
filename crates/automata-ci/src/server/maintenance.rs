@@ -7,11 +7,11 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use automata_ci_core::UnixMillis;
-use automata_ci_store::{
-    ControlPlaneMaintenanceRepository, ControlPlaneMaintenanceRequest, LeaseFailureLimit,
-    MaintenanceBatchSize, StaleSessionTimeoutMillis,
+use automata_ci_control::maintenance::{
+    ControlPlaneMaintenanceRepository, ControlPlaneMaintenanceRequest, ExpiredAttemptDisposition,
+    LeaseFailureLimit, MaintenanceBatchSize, StaleSessionTimeoutMillis,
 };
+use automata_ci_core::UnixMillis;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
@@ -129,10 +129,7 @@ impl ControlPlaneMaintenanceLoop {
                 let requeued = report
                     .expired_attempts()
                     .iter()
-                    .filter(|attempt| {
-                        attempt.disposition()
-                            == automata_ci_store::ExpiredAttemptDisposition::Requeued
-                    })
+                    .filter(|attempt| attempt.disposition() == ExpiredAttemptDisposition::Requeued)
                     .count();
                 let lost = report.expired_attempts().len().saturating_sub(requeued);
                 let batch_size = usize::from(self.batch_size.get());

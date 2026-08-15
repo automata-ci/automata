@@ -19,11 +19,13 @@
 mod config;
 mod error;
 mod observer;
+mod operation;
 mod port;
 /// Durable lease polling and runnable-attempt repositories.
 pub mod repository;
 /// Authoritative runner routing and slot-availability contracts.
 pub mod routing;
+mod runnable;
 mod service;
 
 pub use config::{LeasePollConfig, LeaseTimeToLive, LeaseTimeToLiveError};
@@ -32,9 +34,19 @@ pub(crate) use observer::NoopLeasePollObserver;
 pub use observer::{
     LeaseClaimRejection, LeasePollFailure, LeasePollObservation, LeasePollObserver,
 };
+pub use operation::{
+    BeginLeaseRequest, BegunLeaseRequest, ClaimCommandError, ClaimRejection, ClaimedAttempt,
+    CompleteLeaseRequest, LeaseOfferCompletionError, LeaseRequestCompletion, LeaseRequestKey,
+    LeaseRequestKeyError, NoWorkLeaseRequest, RevokedLeaseOfferFallback, TryClaimAttempt,
+    TryClaimOutcome, TryClaimReceipt,
+};
 pub use port::{
     LeaseClock, LeaseIdGenerator, LeasePollRepository, RandomLeaseIdGenerator, RunnableAttemptGate,
     RunnableAttemptGateDisposition, SystemLeaseClock,
+};
+pub use runnable::{
+    RunnableAttempt, RunnableAttemptError, RunnableCursorAdvance, RunnableQueueKey,
+    RunnableScanError, RunnableScanLimit, RunnableScanPage, RunnableScanRequest,
 };
 pub use service::{
     AuthenticatedRunnerSession, ClaimedLeasePoll, LeasePollOutcome, LeasePollService,

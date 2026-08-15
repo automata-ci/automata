@@ -18,6 +18,9 @@ use zeroize::Zeroizing;
 
 use automata_ci_auth::{github::GithubClientId, installation::InstallationTenant};
 use automata_ci_blob_s3::S3AtRestEncryption;
+use automata_ci_control::maintenance::{
+    LeaseFailureLimit, MaintenanceBatchSize, StaleSessionTimeoutMillis,
+};
 use automata_ci_key_management::{
     KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes as KeySecretBytes,
 };
@@ -26,7 +29,6 @@ use automata_ci_provisioning::{
     DelegatedActorIssuer, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
 };
 use automata_ci_results_github::ResultsPublicEndpoint;
-use automata_ci_store::{LeaseFailureLimit, MaintenanceBatchSize, StaleSessionTimeoutMillis};
 
 use crate::cli::{DatabaseTransport, ServerArgs};
 

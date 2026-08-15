@@ -20,6 +20,8 @@ use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, LeasePollConfig, RandomLeaseIdGenerator, SystemLeaseClock,
     repository::RunnerLeaseRequestRepository,
 };
+use automata_ci_control::maintenance::ControlPlaneMaintenanceRepository;
+use automata_ci_control::observability::ControlPlaneStateRepository;
 use automata_ci_control::runner_auth::{
     DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits,
 };
@@ -69,11 +71,10 @@ use automata_ci_runner_transport::{
 };
 use automata_ci_secret::{SecretProvider, SecretProviderRegistry};
 use automata_ci_store::{
-    BuiltinSecretCleanupRepository, ConformanceReadRepository, ControlPlaneMaintenanceRepository,
-    ControlPlaneStateRepository, HumanWorkflowReadRepository, LogicalActivationPreparationStore,
-    LogicalActivationRepository, LogicalActivationWorkerId, LogicalInstanceResultRepository,
-    LogicalInstanceResultWorkerId, LogicalJobResultRepository, LogicalJobResultWorkerId,
-    LogicalMaterializationRepository, LogicalMaterializationWorkerId,
+    BuiltinSecretCleanupRepository, ConformanceReadRepository, HumanWorkflowReadRepository,
+    LogicalActivationPreparationStore, LogicalActivationRepository, LogicalActivationWorkerId,
+    LogicalInstanceResultRepository, LogicalInstanceResultWorkerId, LogicalJobResultRepository,
+    LogicalJobResultWorkerId, LogicalMaterializationRepository, LogicalMaterializationWorkerId,
     LogicalRunFinalizationRepository, LogicalRunFinalizationWorkerId,
     LogicalWorkSelectionRepository, LogicalWorkflowAdmissionRepository,
     ManagedSecretAuthorityRepository, ProtectedEnvironmentRepository,

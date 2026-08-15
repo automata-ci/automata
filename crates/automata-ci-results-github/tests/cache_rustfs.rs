@@ -5,14 +5,15 @@ use std::{env, sync::Arc, time::Duration};
 use automata_ci_blob_s3::{
     S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
 };
+use automata_ci_control::adapter_spi::{
+    AcquireLease, InternalAttemptRepository as _, QueuedAttempt,
+};
 use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, UnixMillis};
 use automata_ci_results_github::{
     CacheAccessScope, CacheAuthority, CacheLimits, CachePermission, CacheRepository, CacheService,
     ExecutionAuthority, PostgresCacheRepository, ResultsClock, ResultsIdGenerator, UploadId,
 };
-use automata_ci_store::{
-    AcquireLease, InternalAttemptRepository as _, QueuedAttempt, StableRunnerSlot,
-};
+use automata_ci_store::StableRunnerSlot;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use support::postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane};

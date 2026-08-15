@@ -5,13 +5,18 @@ use std::{
 };
 
 use crate::support::{TestDatabase, TestResult, run_with_database, seed_control_plane};
+use automata_ci_control::{
+    adapter_spi::{
+        AcquireLease, ConcludeQueuedAttempt, InternalAttemptRepository as _, QueuedAttempt,
+        TenantAttemptQuery as _, TransitionAttempt,
+    },
+    attempt::RenewLease,
+};
 use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, JobId, JobLifecycle, LeaseGuard, LeaseId, UnixMillis,
 };
 use automata_ci_store::{
-    AcquireLease, AttemptCommandError, AttemptStoreError, ConcludeQueuedAttempt,
-    InternalAttemptRepository as _, QueuedAttempt, RenewLease, RunnerSessionFence,
-    StableRunnerSlot, TenantAttemptQuery as _, TenantScope, TransitionAttempt,
+    AttemptCommandError, AttemptStoreError, RunnerSessionFence, StableRunnerSlot, TenantScope,
 };
 
 const LIVE_LEASE_MILLIS: i64 = 60_000;

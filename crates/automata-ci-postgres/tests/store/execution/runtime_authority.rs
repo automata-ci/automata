@@ -2,9 +2,13 @@ use crate::github_manifest_fixture;
 
 use std::{collections::BTreeMap, time::Duration};
 
-use automata_ci_control::runner_control::{
-    durable::{CommitLeaseHeartbeat, RunnerControlTransactionRepository as _},
-    repository::RunnerSessionRepository as _,
+use automata_ci_control::{
+    adapter_spi::InternalAttemptRepository as _,
+    attempt::RenewLease,
+    runner_control::{
+        durable::{CommitLeaseHeartbeat, RunnerControlTransactionRepository as _},
+        repository::RunnerSessionRepository as _,
+    },
 };
 use automata_ci_core::{
     Architecture, AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobContentReference,
@@ -45,8 +49,8 @@ use automata_ci_store::{
     GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository as _,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
     GithubSubjectEvidenceRepository as _, InspectGithubRuntimeAuthority,
-    InternalAttemptRepository as _, JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind,
-    LoadGithubRuntimeAuthority, LogicalActivationObject, LogicalActivationPreparationStore as _,
+    JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind, LoadGithubRuntimeAuthority,
+    LogicalActivationObject, LogicalActivationPreparationStore as _,
     LogicalActivationPreparationTarget, LogicalActivationRepository as _,
     LogicalActivationWorkerId, LogicalInstanceMaterializationSelectionOutcome,
     LogicalInstanceMaterializationTarget, LogicalJobOrchestrationSelectionOutcome,
@@ -60,7 +64,7 @@ use automata_ci_store::{
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
     QuarantineGithubRuntimeAuthority, ReconcileGithubRuntimeAuthorities,
-    RegisterProviderDeliveryWorkflowInventory, RejectGithubRuntimeAuthorityMint, RenewLease,
+    RegisterProviderDeliveryWorkflowInventory, RejectGithubRuntimeAuthorityMint,
     RetryGithubRuntimeAuthorityMint, RetryGithubRuntimeAuthorityRevocation,
     ReusableSecretPermission, RoutingDocument, RunnerGeneration, RunnerOperationKind,
     RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, StableRunnerSlot,

@@ -2,9 +2,11 @@ use std::{sync::Mutex, time::Duration};
 
 use async_trait::async_trait;
 use automata_ci_control::lease::{
-    AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig,
+    AuthenticatedRunnerSession, ClaimedAttempt, LeaseClock, LeaseIdGenerator, LeasePollConfig,
     LeasePollObservation, LeasePollObserver, LeasePollOutcome, LeasePollRepository,
-    LeasePollService, LeaseTimeToLive, RunnableAttemptGate, RunnableAttemptGateDisposition,
+    LeasePollService, LeaseRequestKey, LeaseTimeToLive, NoWorkLeaseRequest, RunnableAttempt,
+    RunnableAttemptGate, RunnableAttemptGateDisposition, RunnableScanLimit, RunnableScanPage,
+    RunnableScanRequest, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
     repository::{RunnableAttemptRepository, RunnerClaimRepository},
     routing::{
         RunnerGroupId, RunnerRoutingRepository, RunnerRoutingSnapshot, RunnerSlotAvailability,
@@ -21,10 +23,8 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{LeaseRequest, MessageHeader, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal};
 use automata_ci_store::{
-    AttemptAssignment, JobIrMetadata, NoWorkLeaseRequest, ObjectKey, RoutingDocument, RoutingLabel,
-    RunnableAttempt, RunnableScanLimit, RunnableScanPage, RunnableScanRequest, RunnerGeneration,
+    AttemptAssignment, JobIrMetadata, ObjectKey, RoutingDocument, RoutingLabel, RunnerGeneration,
     RunnerSessionFence, RunnerSlotCount, SessionEpoch, StableRunnerSlot, StoreError,
-    TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
 };
 
 #[derive(Debug)]
@@ -100,7 +100,7 @@ impl RunnableAttemptGate for IneligibleAttemptGate {
 #[derive(Debug)]
 struct FakeRepository {
     calls: Mutex<Vec<&'static str>>,
-    lease_keys: Mutex<Vec<automata_ci_store::LeaseRequestKey>>,
+    lease_keys: Mutex<Vec<LeaseRequestKey>>,
     lookup: Option<TryClaimReceipt>,
     routing: RunnerRoutingSnapshot,
     availability: RunnerSlotAvailability,
@@ -122,7 +122,7 @@ impl FakeRepository {
 impl RunnerClaimRepository for FakeRepository {
     async fn lookup_lease_request(
         &self,
-        request: automata_ci_store::LeaseRequestKey,
+        request: LeaseRequestKey,
     ) -> Result<Option<TryClaimReceipt>, StoreError> {
         self.called("lookup");
         self.lease_keys
@@ -143,7 +143,7 @@ impl RunnerClaimRepository for FakeRepository {
             request.expires_at(),
         )
         .expect("fake claim interval");
-        let claimed = automata_ci_store::ClaimedAttempt::try_new(
+        let claimed = ClaimedAttempt::try_new(
             lease,
             AttemptAssignment::new(request.session(), request.slot()),
             self.metadata.clone(),
@@ -533,7 +533,7 @@ async fn configured_slot_beyond_negotiated_capacity_is_no_work_not_corrupt_state
 #[tokio::test]
 async fn exact_no_work_retry_returns_before_every_scheduling_read() {
     let mut fixture = fixture(RunnerSlotAvailability::Available, true);
-    let key = automata_ci_store::LeaseRequestKey::first(
+    let key = LeaseRequestKey::first(
         fixture.authenticated.fence(),
         fixture.request.header().operation_id(),
         StableRunnerSlot::new(fixture.request.slot().get()).expect("slot"),
@@ -558,7 +558,7 @@ async fn protocol_successor_is_carried_into_the_durable_key_and_digest() {
         fixture.request.slot(),
         predecessor,
     );
-    let first = automata_ci_store::LeaseRequestKey::first(
+    let first = LeaseRequestKey::first(
         fixture.authenticated.fence(),
         fixture.request.header().operation_id(),
         StableRunnerSlot::new(fixture.request.slot().get()).expect("slot"),
@@ -581,7 +581,7 @@ async fn protocol_successor_is_carried_into_the_durable_key_and_digest() {
 #[tokio::test]
 async fn exact_claim_retry_uses_self_contained_receipt_and_never_reschedules() {
     let mut fixture = fixture(RunnerSlotAvailability::Available, true);
-    let key = automata_ci_store::LeaseRequestKey::first(
+    let key = LeaseRequestKey::first(
         fixture.authenticated.fence(),
         fixture.request.header().operation_id(),
         StableRunnerSlot::new(fixture.request.slot().get()).expect("slot"),
@@ -601,12 +601,8 @@ async fn exact_claim_retry_uses_self_contained_receipt_and_never_reschedules() {
         fixture.authenticated.fence(),
         StableRunnerSlot::new(1).expect("slot"),
     );
-    let claimed = automata_ci_store::ClaimedAttempt::try_new(
-        lease,
-        assignment,
-        fixture.repository.metadata.clone(),
-    )
-    .expect("claimed attempt");
+    let claimed = ClaimedAttempt::try_new(lease, assignment, fixture.repository.metadata.clone())
+        .expect("claimed attempt");
     fixture.repository.lookup = Some(TryClaimReceipt::new(
         key,
         TryClaimOutcome::Claimed(Box::new(claimed)),
@@ -638,7 +634,7 @@ async fn observer_separates_physical_replay_from_one_new_claim_transition() {
     assert!(matches!(outcome, LeasePollOutcome::Claimed(_)));
 
     let mut replay = fixture(RunnerSlotAvailability::Available, true);
-    let key = automata_ci_store::LeaseRequestKey::first(
+    let key = LeaseRequestKey::first(
         replay.authenticated.fence(),
         replay.request.header().operation_id(),
         StableRunnerSlot::new(replay.request.slot().get()).expect("slot"),
@@ -652,7 +648,7 @@ async fn observer_separates_physical_replay_from_one_new_claim_transition() {
         UnixMillis::new(2_000),
     )
     .expect("lease");
-    let claimed = automata_ci_store::ClaimedAttempt::try_new(
+    let claimed = ClaimedAttempt::try_new(
         lease,
         AttemptAssignment::new(
             replay.authenticated.fence(),

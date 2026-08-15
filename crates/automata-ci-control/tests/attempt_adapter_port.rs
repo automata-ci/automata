@@ -1,12 +1,15 @@
 use std::{error::Error, fmt};
 
 use async_trait::async_trait;
-use automata_ci_core::{AttemptId, AttemptNumber, JobId, JobLifecycle, Lease, UnixMillis};
-use automata_ci_store::{
-    AcquireLease, AttemptSnapshot, AttemptStoreError, ConcludeQueuedAttempt,
-    InternalAttemptRepository, QueuedAttempt, RenewLease, TenantAttemptQuery, TenantScope,
-    TransitionAttempt,
+use automata_ci_control::{
+    adapter_spi::{
+        AcquireLease, AttemptSnapshot, ConcludeQueuedAttempt, InternalAttemptRepository,
+        QueuedAttempt, TenantAttemptQuery, TransitionAttempt,
+    },
+    attempt::RenewLease,
 };
+use automata_ci_core::{AttemptId, AttemptNumber, JobId, JobLifecycle, Lease, UnixMillis};
+use automata_ci_store::{AttemptStoreError, TenantScope};
 
 #[derive(Debug)]
 struct AlternativeBackendError(&'static str);

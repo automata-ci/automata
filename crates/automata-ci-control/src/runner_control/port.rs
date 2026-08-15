@@ -1,5 +1,8 @@
 use std::{fmt, sync::Arc};
 
+use crate::cancellation::{
+    CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload,
+};
 use crate::lease::{
     AuthenticatedRunnerSession, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,
     LeasePollObserver, LeasePollOutcome, LeasePollRepository, LeasePollService,
@@ -22,7 +25,6 @@ use automata_ci_protocol::{
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_store::{
-    CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload,
     CommandSequence as StoreCommandSequence, DocumentSchema, DurableRunnerCommand,
     EnqueueRunnerCommand, JobIrMetadata,
     LeaseOfferCommandIdentity as StoreLeaseOfferCommandIdentity, RunnerCommandPayload,

@@ -1,10 +1,17 @@
 # automata-ci-control
 
-`automata-ci-control` owns Automata's transport-neutral scheduling, lease, and
-authenticated runner-control services. Its scheduling domain reduces
-server-owned requirements and validated runner capabilities to deterministic
-placement decisions. Its application services compose those decisions with
-durable ports and versioned runner messages.
+`automata-ci-control` owns Automata's transport-neutral scheduling and
+authenticated runner-control services. It also owns the execution durability
+contracts for attempt lifecycle, lease polling and runnable queues,
+cancellation, replica-safe maintenance, and identifier-free control-plane
+state snapshots. Its scheduling domain reduces server-owned requirements and
+validated runner capabilities to deterministic placement decisions. Its
+application services compose those decisions with durable ports and versioned
+runner messages.
+
+First-party repository adapters use the feature-gated, documentation-hidden
+`adapter-spi` trust boundary. That module is not a supported general-purpose
+API.
 
 The public `runner_auth` module binds transport-validated mTLS evidence to
 durable runner registrations without trusting certificate contents or protocol

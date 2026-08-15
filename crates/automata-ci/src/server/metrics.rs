@@ -7,6 +7,7 @@ use std::{
 use automata_ci_control::lease::{
     LeaseClaimRejection, LeasePollFailure, LeasePollObservation, LeasePollObserver,
 };
+use automata_ci_control::observability::ControlPlaneStateRepository;
 use automata_ci_control::runner_control::{
     LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
     RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
@@ -30,7 +31,6 @@ use automata_ci_runner_transport::{
     RunnerTransportRequestObservation, RunnerTransportResponseRejection, RunnerTransportRoute,
     RunnerTransportTlsOutcome,
 };
-use automata_ci_store::ControlPlaneStateRepository;
 use automata_ci_workflow_service::{
     WorkflowAdmissionFailure, WorkflowAdmissionObservation, WorkflowAdmissionObserver,
     WorkflowAdmissionStage, WorkflowAdmissionStageOutcome,

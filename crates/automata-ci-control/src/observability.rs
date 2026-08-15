@@ -1,3 +1,5 @@
+//! Durable control-plane snapshots used for bounded, identifier-free metrics.
+
 use std::{collections::BTreeSet, fmt, time::Duration};
 
 use async_trait::async_trait;
@@ -6,7 +8,7 @@ use automata_ci_core::{
 };
 use thiserror::Error;
 
-use crate::{
+use automata_ci_store::{
     RoutingLabel, RunnerSessionFence, RunnerSlotCount, StableRunnerSlot, StoreError,
     WorkflowRunStatus,
 };
@@ -59,11 +61,13 @@ impl ControlPlaneStateSnapshotRequest {
         })
     }
 
+    /// Returns the trusted time at which the snapshot is observed.
     #[must_use]
     pub const fn observed_at(self) -> UnixMillis {
         self.observed_at
     }
 
+    /// Returns the inclusive upper bound for near-expiry leases.
     #[must_use]
     pub const fn near_expiry_at(self) -> UnixMillis {
         self.near_expiry_at
@@ -73,11 +77,14 @@ impl ControlPlaneStateSnapshotRequest {
 /// Closed observed connectivity state persisted for a runner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerObservedState {
+    /// The runner has no live observed connection.
     Offline,
+    /// The runner has a live observed connection.
     Online,
 }
 
 impl RunnerObservedState {
+    /// Every observed runner state in stable metric order.
     pub const ALL: [Self; 2] = [Self::Offline, Self::Online];
 
     const fn index(self) -> usize {
@@ -91,12 +98,16 @@ impl RunnerObservedState {
 /// Closed operator intent persisted for a runner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerDesiredState {
+    /// The runner may accept work.
     Active,
+    /// The runner is draining existing work without accepting more.
     Draining,
+    /// The runner is administratively disabled.
     Disabled,
 }
 
 impl RunnerDesiredState {
+    /// Every desired runner state in stable metric order.
     pub const ALL: [Self; 3] = [Self::Active, Self::Draining, Self::Disabled];
 
     const fn index(self) -> usize {
@@ -111,11 +122,14 @@ impl RunnerDesiredState {
 /// Closed durable runner-session state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerSessionState {
+    /// The session is live.
     Live,
+    /// The session is durably disconnected.
     Disconnected,
 }
 
 impl RunnerSessionState {
+    /// Every durable runner-session state in stable metric order.
     pub const ALL: [Self; 2] = [Self::Live, Self::Disconnected];
 
     const fn index(self) -> usize {
@@ -129,12 +143,16 @@ impl RunnerSessionState {
 /// Closed lease-expiration band relative to one trusted observation time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LeaseState {
+    /// The lease remains outside the near-expiry window.
     Active,
+    /// The lease remains valid but falls within the near-expiry window.
     NearExpiry,
+    /// The lease has expired at the observation time.
     Expired,
 }
 
 impl LeaseState {
+    /// Every lease-expiration band in stable metric order.
     pub const ALL: [Self; 3] = [Self::Active, Self::NearExpiry, Self::Expired];
 
     const fn index(self) -> usize {
@@ -158,6 +176,7 @@ pub enum ArtifactState {
 }
 
 impl ArtifactState {
+    /// Every artifact publication state in stable metric order.
     pub const ALL: [Self; 3] = [
         Self::PendingUpload,
         Self::PublicationReserved,
@@ -176,11 +195,14 @@ impl ArtifactState {
 /// Closed immutable artifact-reservation kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactReservationKind {
+    /// An immutable artifact block reservation.
     Block,
+    /// An immutable artifact manifest reservation.
     Manifest,
 }
 
 impl ArtifactReservationKind {
+    /// Every artifact reservation kind in stable metric order.
     pub const ALL: [Self; 2] = [Self::Block, Self::Manifest];
 
     const fn index(self) -> usize {
@@ -194,12 +216,16 @@ impl ArtifactReservationKind {
 /// Closed durable status of a built-in secret-version cleanup operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltinSecretCleanupStatus {
+    /// Cleanup is waiting to start.
     Pending,
+    /// Cleanup is currently being processed.
     InProgress,
+    /// Cleanup exhausted its retry policy.
     DeadLetter,
 }
 
 impl BuiltinSecretCleanupStatus {
+    /// Every built-in cleanup status in stable metric order.
     pub const ALL: [Self; 3] = [Self::Pending, Self::InProgress, Self::DeadLetter];
 
     const fn index(self) -> usize {
@@ -216,6 +242,7 @@ impl BuiltinSecretCleanupStatus {
 pub struct WorkflowRunCounts([u64; 4]);
 
 impl WorkflowRunCounts {
+    /// Every workflow-run status in stable metric order.
     pub const ALL: [WorkflowRunStatus; 4] = [
         WorkflowRunStatus::Queued,
         WorkflowRunStatus::InProgress,
@@ -223,10 +250,12 @@ impl WorkflowRunCounts {
         WorkflowRunStatus::Cancelled,
     ];
 
+    /// Sets the count for one workflow-run status.
     pub fn set(&mut self, status: WorkflowRunStatus, count: u64) {
         self.0[workflow_run_status_index(status)] = count;
     }
 
+    /// Returns the count for one workflow-run status.
     #[must_use]
     pub const fn get(self, status: WorkflowRunStatus) -> u64 {
         self.0[workflow_run_status_index(status)]
@@ -236,14 +265,20 @@ impl WorkflowRunCounts {
 /// Closed durable state of a current `WorkflowPlan`-v1 orchestration marker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogicalWorkflowRunState {
+    /// The orchestration marker is waiting for activation.
     Pending,
+    /// The logical workflow run is active.
     Active,
+    /// The logical workflow run completed successfully.
     Completed,
+    /// The logical workflow run was cancelled.
     Cancelled,
+    /// The logical workflow run failed.
     Failed,
 }
 
 impl LogicalWorkflowRunState {
+    /// Every logical workflow-run state in stable metric order.
     pub const ALL: [Self; 5] = [
         Self::Pending,
         Self::Active,
@@ -268,10 +303,12 @@ impl LogicalWorkflowRunState {
 pub struct LogicalWorkflowRunCounts([u64; 5]);
 
 impl LogicalWorkflowRunCounts {
+    /// Sets the count for one logical workflow-run state.
     pub fn set(&mut self, state: LogicalWorkflowRunState, count: u64) {
         self.0[state.index()] = count;
     }
 
+    /// Returns the count for one logical workflow-run state.
     #[must_use]
     pub const fn get(self, state: LogicalWorkflowRunState) -> u64 {
         self.0[state.index()]
@@ -281,16 +318,24 @@ impl LogicalWorkflowRunCounts {
 /// Closed durable state of one current logical workflow job.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogicalJobState {
+    /// The logical job is waiting for activation.
     Pending,
+    /// Activation of the logical job is in progress.
     Activating,
+    /// The logical job has produced its current physical job.
     Activated,
+    /// The logical job completed successfully.
     Completed,
+    /// The logical job was skipped.
     Skipped,
+    /// The logical job was cancelled.
     Cancelled,
+    /// The logical job failed.
     Failed,
 }
 
 impl LogicalJobState {
+    /// Every logical-job state in stable metric order.
     pub const ALL: [Self; 7] = [
         Self::Pending,
         Self::Activating,
@@ -319,10 +364,12 @@ impl LogicalJobState {
 pub struct LogicalJobCounts([u64; 7]);
 
 impl LogicalJobCounts {
+    /// Sets the count for one logical-job state.
     pub fn set(&mut self, state: LogicalJobState, count: u64) {
         self.0[state.index()] = count;
     }
 
+    /// Returns the count for one logical-job state.
     #[must_use]
     pub const fn get(self, state: LogicalJobState) -> u64 {
         self.0[state.index()]
@@ -332,12 +379,16 @@ impl LogicalJobCounts {
 /// Closed activation backlog/claim band at one trusted observation time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LogicalActivationState {
+    /// Activation work is waiting to be claimed.
     Pending,
+    /// Activation work has a live claim.
     Activating,
+    /// Activation work has an expired claim.
     Expired,
 }
 
 impl LogicalActivationState {
+    /// Every logical-activation state in stable metric order.
     pub const ALL: [Self; 3] = [Self::Pending, Self::Activating, Self::Expired];
 
     const fn index(self) -> usize {
@@ -374,11 +425,13 @@ impl LogicalActivationCounts {
         Ok(())
     }
 
+    /// Returns the count for one logical-activation state.
     #[must_use]
     pub const fn get(self, state: LogicalActivationState) -> u64 {
         self.counts[state.index()]
     }
 
+    /// Returns the oldest timestamp for one logical-activation state.
     #[must_use]
     pub const fn oldest_at(self, state: LogicalActivationState) -> Option<UnixMillis> {
         self.oldest_at[state.index()]
@@ -390,6 +443,7 @@ impl LogicalActivationCounts {
 pub struct JobAttemptCounts([u64; 12]);
 
 impl JobAttemptCounts {
+    /// Every job-attempt lifecycle in stable metric order.
     pub const ALL: [JobLifecycle; 12] = [
         JobLifecycle::Queued,
         JobLifecycle::Leased,
@@ -405,10 +459,12 @@ impl JobAttemptCounts {
         JobLifecycle::Lost,
     ];
 
+    /// Sets the count for one job-attempt lifecycle.
     pub fn set(&mut self, lifecycle: JobLifecycle, count: u64) {
         self.0[job_lifecycle_index(lifecycle)] = count;
     }
 
+    /// Returns the count for one job-attempt lifecycle.
     #[must_use]
     pub const fn get(self, lifecycle: JobLifecycle) -> u64 {
         self.0[job_lifecycle_index(lifecycle)]
@@ -420,10 +476,12 @@ impl JobAttemptCounts {
 pub struct RunnerCounts([[u64; 3]; 2]);
 
 impl RunnerCounts {
+    /// Sets the count for one observed/desired runner-state pair.
     pub fn set(&mut self, observed: RunnerObservedState, desired: RunnerDesiredState, count: u64) {
         self.0[observed.index()][desired.index()] = count;
     }
 
+    /// Returns the count for one observed/desired runner-state pair.
     #[must_use]
     pub const fn get(self, observed: RunnerObservedState, desired: RunnerDesiredState) -> u64 {
         self.0[observed.index()][desired.index()]
@@ -435,10 +493,12 @@ impl RunnerCounts {
 pub struct RunnerSessionCounts([u64; 2]);
 
 impl RunnerSessionCounts {
+    /// Sets the count for one runner-session state.
     pub fn set(&mut self, state: RunnerSessionState, count: u64) {
         self.0[state.index()] = count;
     }
 
+    /// Returns the count for one runner-session state.
     #[must_use]
     pub const fn get(self, state: RunnerSessionState) -> u64 {
         self.0[state.index()]
@@ -450,10 +510,12 @@ impl RunnerSessionCounts {
 pub struct LeaseCounts([u64; 3]);
 
 impl LeaseCounts {
+    /// Sets the count for one lease-expiration band.
     pub fn set(&mut self, state: LeaseState, count: u64) {
         self.0[state.index()] = count;
     }
 
+    /// Returns the count for one lease-expiration band.
     #[must_use]
     pub const fn get(self, state: LeaseState) -> u64 {
         self.0[state.index()]
@@ -465,10 +527,12 @@ impl LeaseCounts {
 pub struct ArtifactCounts([u64; 3]);
 
 impl ArtifactCounts {
+    /// Sets the count for one artifact publication state.
     pub fn set(&mut self, state: ArtifactState, count: u64) {
         self.0[state.index()] = count;
     }
 
+    /// Returns the count for one artifact publication state.
     #[must_use]
     pub const fn get(self, state: ArtifactState) -> u64 {
         self.0[state.index()]
@@ -501,11 +565,13 @@ impl ArtifactReservations {
         Ok(())
     }
 
+    /// Returns the outstanding reservation count for one kind.
     #[must_use]
     pub const fn get(self, kind: ArtifactReservationKind) -> u64 {
         self.counts[kind.index()]
     }
 
+    /// Returns the oldest outstanding reservation time for one kind.
     #[must_use]
     pub const fn oldest_at(self, kind: ArtifactReservationKind) -> Option<UnixMillis> {
         self.oldest_at[kind.index()]
@@ -538,11 +604,13 @@ impl BuiltinSecretCleanupCounts {
         Ok(())
     }
 
+    /// Returns the operation count for one cleanup status.
     #[must_use]
     pub const fn get(self, status: BuiltinSecretCleanupStatus) -> u64 {
         self.counts[status.index()]
     }
 
+    /// Returns the oldest creation time for one cleanup status.
     #[must_use]
     pub const fn oldest_created_at(self, status: BuiltinSecretCleanupStatus) -> Option<UnixMillis> {
         self.oldest_created_at[status.index()]
@@ -922,6 +990,7 @@ impl ControlPlaneStateSnapshot {
         self
     }
 
+    /// Returns an identifier-free snapshot with every aggregate empty.
     #[must_use]
     pub const fn empty() -> Self {
         Self {
@@ -962,111 +1031,133 @@ impl ControlPlaneStateSnapshot {
         }
     }
 
+    /// Returns workflow-run counts.
     #[must_use]
     pub const fn workflow_runs(&self) -> WorkflowRunCounts {
         self.workflow_runs
     }
 
+    /// Returns logical workflow-run counts.
     #[must_use]
     pub const fn logical_workflow_runs(&self) -> LogicalWorkflowRunCounts {
         self.logical_workflow_runs
     }
 
+    /// Returns current logical-job counts.
     #[must_use]
     pub const fn logical_jobs(&self) -> LogicalJobCounts {
         self.logical_jobs
     }
 
+    /// Returns logical-activation counts and oldest timestamps.
     #[must_use]
     pub const fn logical_activations(&self) -> LogicalActivationCounts {
         self.logical_activations
     }
 
+    /// Returns the current activation-publication count.
     #[must_use]
     pub const fn activation_publications(&self) -> u64 {
         self.activation_publications
     }
 
+    /// Returns the current materialized-instance count.
     #[must_use]
     pub const fn materialized_instances(&self) -> u64 {
         self.materialized_instances
     }
 
+    /// Returns job-attempt lifecycle counts.
     #[must_use]
     pub const fn job_attempts(&self) -> JobAttemptCounts {
         self.job_attempts
     }
 
+    /// Returns runner counts by observed and desired state.
     #[must_use]
     pub const fn runners(&self) -> RunnerCounts {
         self.runners
     }
 
+    /// Returns durable runner-session counts.
     #[must_use]
     pub const fn runner_sessions(&self) -> RunnerSessionCounts {
         self.runner_sessions
     }
 
+    /// Returns the total queued-attempt depth.
     #[must_use]
     pub const fn queue_depth(&self) -> u64 {
         self.queue_depth
     }
 
+    /// Returns the oldest queued-attempt timestamp, when the queue is non-empty.
     #[must_use]
     pub const fn queue_oldest_at(&self) -> Option<UnixMillis> {
         self.queue_oldest_at
     }
 
+    /// Returns the exact scheduler-eligible queue depth.
     #[must_use]
     pub const fn eligible_queue_depth(&self) -> u64 {
         self.eligible_queue_depth
     }
 
+    /// Returns the oldest eligible queued-attempt timestamp, when present.
     #[must_use]
     pub const fn eligible_queue_oldest_at(&self) -> Option<UnixMillis> {
         self.eligible_queue_oldest_at
     }
 
+    /// Returns bounded inputs for scheduler-capacity classification.
     #[must_use]
     pub const fn capacity(&self) -> &ControlPlaneCapacitySnapshot {
         &self.capacity
     }
 
+    /// Returns active-lease counts by expiry band.
     #[must_use]
     pub const fn leases(&self) -> LeaseCounts {
         self.leases
     }
 
+    /// Returns the pending runner-command count.
     #[must_use]
     pub const fn pending_commands(&self) -> u64 {
         self.pending_commands
     }
 
+    /// Returns the oldest pending runner-command timestamp, when present.
     #[must_use]
     pub const fn pending_commands_oldest_at(&self) -> Option<UnixMillis> {
         self.pending_commands_oldest_at
     }
 
+    /// Returns the pending cancellation-intent count.
     #[must_use]
     pub const fn pending_cancellation_intents(&self) -> u64 {
         self.pending_cancellation_intents
     }
 
+    /// Returns the oldest pending cancellation-intent timestamp, when present.
     #[must_use]
     pub const fn pending_cancellation_intents_oldest_at(&self) -> Option<UnixMillis> {
         self.pending_cancellation_intents_oldest_at
     }
 
+    /// Returns built-in secret-version cleanup counts and oldest timestamps.
     #[must_use]
     pub const fn builtin_secret_cleanup(&self) -> BuiltinSecretCleanupCounts {
         self.builtin_secret_cleanup
     }
 
+    /// Returns artifact publication counts.
     #[must_use]
     pub const fn artifacts(&self) -> ArtifactCounts {
         self.artifacts
     }
 
+    /// Returns artifact-reservation counts and oldest timestamps.
     #[must_use]
     pub const fn artifact_reservations(&self) -> ArtifactReservations {
         self.artifact_reservations
@@ -1107,21 +1198,25 @@ impl DatabasePoolSnapshot {
         })
     }
 
+    /// Returns the configured maximum pool size.
     #[must_use]
     pub const fn maximum(self) -> u32 {
         self.maximum
     }
 
+    /// Returns the number of open pool connections.
     #[must_use]
     pub const fn open(self) -> u32 {
         self.open
     }
 
+    /// Returns the number of idle pool connections.
     #[must_use]
     pub const fn idle(self) -> u32 {
         self.idle
     }
 
+    /// Returns the number of checked-out pool connections.
     #[must_use]
     pub const fn in_use(self) -> u32 {
         self.in_use
@@ -1131,16 +1226,22 @@ impl DatabasePoolSnapshot {
 /// Invalid input or durable aggregate shape.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ControlPlaneStateValueError {
+    /// The lease near-expiry window was not a positive whole-millisecond duration.
     #[error("lease near-expiry window must be a positive whole-millisecond duration")]
     InvalidNearExpiryWindow,
+    /// Adding the near-expiry window overflowed the durable timestamp range.
     #[error("lease near-expiry cutoff is outside the durable timestamp range")]
     NearExpiryCutoffOutOfRange,
+    /// An aggregate count and its optional oldest timestamp disagreed.
     #[error("oldest timestamp presence does not match aggregate work count")]
     InconsistentOldestTimestamp,
+    /// Pool occupancy exceeded its configured or open-connection bounds.
     #[error("database pool occupancy is inconsistent")]
     InvalidPoolOccupancy,
+    /// Effective runner capacity state was invalid or outside its bounded contract.
     #[error("capacity runner state is invalid or outside the bounded product contract")]
     InvalidCapacityRunner,
+    /// Exact capacity inputs exceeded their bounded in-memory contract.
     #[error("exact capacity snapshot exceeds its bounded in-memory contract")]
     CapacitySnapshotTooLarge,
 }

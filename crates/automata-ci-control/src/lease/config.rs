@@ -1,6 +1,6 @@
 use std::num::NonZeroI64;
 
-use automata_ci_store::RunnableScanLimit;
+use crate::lease::RunnableScanLimit;
 use thiserror::Error;
 
 /// Positive lease lifetime measured in milliseconds.

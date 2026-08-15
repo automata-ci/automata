@@ -3,6 +3,9 @@ mod support;
 use std::time::Duration;
 
 use automata_ci_blob::{BlobDescriptor, BlobKey, BlobPayload, MediaType};
+use automata_ci_control::adapter_spi::{
+    AcquireLease, InternalAttemptRepository as _, QueuedAttempt,
+};
 use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, Sha256Digest, UnixMillis};
 use automata_ci_postgres::test_support::TestClock;
 use automata_ci_results_github::{
@@ -14,9 +17,7 @@ use automata_ci_results_github::{
     RecordArtifactVerification, RenewArtifactFinalization, ReserveArtifactBlock,
     ResolveArtifactDownload, UploadId,
 };
-use automata_ci_store::{
-    AcquireLease, InternalAttemptRepository as _, QueuedAttempt, StableRunnerSlot,
-};
+use automata_ci_store::StableRunnerSlot;
 use bytes::Bytes;
 use sqlx::PgPool;
 use support::postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane};

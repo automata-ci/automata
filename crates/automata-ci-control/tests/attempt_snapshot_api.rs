@@ -1,10 +1,11 @@
+use automata_ci_control::adapter_spi::AttemptSnapshot;
 use automata_ci_core::{
     AttemptId, AttemptNumber, CORE_SCHEMA_VERSION, FencingToken, JobId, JobLifecycle, Lease,
     LeaseError, LeaseId, RunnerId, RunnerSessionId, UnixMillis,
 };
 use automata_ci_store::{
-    AttemptAssignment, AttemptSnapshot, AttemptSnapshotError, RunnerGeneration, RunnerSessionFence,
-    SessionEpoch, StableRunnerSlot,
+    AttemptAssignment, AttemptSnapshotError, RunnerGeneration, RunnerSessionFence, SessionEpoch,
+    StableRunnerSlot,
 };
 
 fn attempt_number() -> AttemptNumber {

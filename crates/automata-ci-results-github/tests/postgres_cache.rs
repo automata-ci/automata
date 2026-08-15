@@ -3,6 +3,9 @@ mod support;
 use std::{io, time::Duration};
 
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
+use automata_ci_control::adapter_spi::{
+    AcquireLease, InternalAttemptRepository as _, QueuedAttempt, TransitionAttempt,
+};
 use automata_ci_core::{
     AttemptId, AttemptNumber, JobLifecycle, LeaseGuard, LeaseId, Sha256Digest, UnixMillis,
 };
@@ -14,10 +17,7 @@ use automata_ci_results_github::{
     ExecutionAuthority, LookupCacheEntry, PostgresCacheRepository, PrepareCacheFinalization,
     ReserveCacheBlock, ResolveCacheDownload,
 };
-use automata_ci_store::{
-    AcquireLease, InternalAttemptRepository as _, QueuedAttempt, RunnerSessionFence,
-    StableRunnerSlot, TransitionAttempt,
-};
+use automata_ci_store::{RunnerSessionFence, StableRunnerSlot};
 use sqlx::PgPool;
 use support::postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane};
 use uuid::Uuid;
