@@ -545,6 +545,7 @@ pub struct ResolvedActionBundle {
     resolved_revision: ResolvedRevision,
     subpath: ActionSubpath,
     archive: BlobDescriptor,
+    archive_bytes: Bytes,
     definition: ActionDefinitionDocument,
 }
 
@@ -579,6 +580,7 @@ impl ResolvedActionBundle {
     pub(crate) fn new(
         identity: ResolvedActionIdentity,
         archive: BlobDescriptor,
+        archive_bytes: Bytes,
         definition: ActionDefinitionDocument,
     ) -> Self {
         let ResolvedActionIdentity {
@@ -595,6 +597,7 @@ impl ResolvedActionBundle {
             resolved_revision,
             subpath,
             archive,
+            archive_bytes,
             definition,
         }
     }
@@ -633,6 +636,15 @@ impl ResolvedActionBundle {
     #[must_use]
     pub const fn archive(&self) -> &BlobDescriptor {
         &self.archive
+    }
+
+    /// Returns the verified archive bytes selected by the resolver.
+    ///
+    /// Cache hits retain the already-verified local or shared-cache payload so
+    /// downstream preparation does not repeat an object-store read.
+    #[must_use]
+    pub const fn archive_bytes(&self) -> &Bytes {
+        &self.archive_bytes
     }
 
     /// Returns the bounded, inspected definition selected from the archive.

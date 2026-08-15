@@ -975,7 +975,7 @@ fn build_executor(
     ephemeral: Arc<dyn RunnerEphemeralClient>,
 ) -> Result<Arc<dyn JobExecutor>, RunnerProductError> {
     let blobs = build_object_store(config)?;
-    let action_preparer = build_action_preparer(config, Arc::clone(&blobs))?;
+    let action_preparer = build_action_preparer(config, &blobs)?;
     let job_content = Arc::new(ImmutableJobContent::new(
         blobs,
         automata_ci_execution::MAX_COPY_BYTES as u64,
@@ -1026,11 +1026,11 @@ fn build_executor(
 
 fn build_action_preparer(
     config: &RunnerProductConfig,
-    blobs: Arc<dyn ImmutableBlobStore>,
+    blobs: &Arc<dyn ImmutableBlobStore>,
 ) -> Result<Arc<dyn ActionPreparationPort>, RunnerProductError> {
     let github_endpoint = config.github().http_endpoint()?;
     let scm: Arc<dyn ScmProvider> = Arc::new(github_endpoint);
-    let resolver = ImmutableActionResolver::new(scm, Arc::clone(&blobs));
+    let resolver = ImmutableActionResolver::new(scm, Arc::clone(blobs));
     #[cfg(unix)]
     let resolver = {
         let state_root = config.state().journal().as_path();
@@ -1052,7 +1052,6 @@ fn build_action_preparer(
     let resolver: Arc<dyn ActionResolver> = Arc::new(resolver);
     Ok(Arc::new(ResolvedBundleActionPreparer::new(
         resolver,
-        blobs,
         Arc::new(NoRepositoryCredentials),
         Arc::new(GithubActionMetadataDecoder::new(
             GithubActionMetadataLimits::default(),

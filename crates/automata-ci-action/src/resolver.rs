@@ -106,6 +106,7 @@ impl ActionResolver for ImmutableActionResolver {
             let definition =
                 inspect_archive_bytes(archive.bytes(), request.subpath(), request.limits())
                     .map_err(|_| ActionResolveError::new(ActionResolveErrorKind::Archive))?;
+            let archive_bytes = archive.into_bytes();
             return Ok(ResolvedActionBundle::new(
                 ResolvedActionIdentity::new(
                     reference.provider().clone(),
@@ -115,6 +116,7 @@ impl ActionResolver for ImmutableActionResolver {
                     reference.subpath().clone(),
                 ),
                 indexed.archive().clone(),
+                archive_bytes,
                 definition,
             ));
         }
@@ -174,6 +176,7 @@ impl ActionResolver for ImmutableActionResolver {
                 request.subpath().clone(),
             ),
             archive,
+            snapshot.bytes().clone(),
             definition,
         ))
     }
