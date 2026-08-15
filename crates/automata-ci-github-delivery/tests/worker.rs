@@ -65,6 +65,7 @@ use super::subject_evidence::{
 
 const BEFORE: &str = "fedcba9876543210fedcba9876543210fedcba98";
 const AFTER: &str = "0123456789abcdef0123456789abcdef01234567";
+const STALE_MERGE: &str = "89abcdef0123456789abcdef0123456789abcdef";
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const OWNER: &str = "octo-private";
 const REPOSITORY: &str = "private-repository";
@@ -961,7 +962,7 @@ fn claimed_fixture_with_visibility(
 
 fn pull_request_claimed_fixture() -> ClaimedFixture {
     let body = Bytes::from(format!(
-        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{AFTER}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{STALE_MERGE}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ));
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
     let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
@@ -1461,7 +1462,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
 }
 
 #[tokio::test]
-async fn authenticated_pull_request_reaches_the_generic_processor_with_exact_evidence() {
+async fn pull_request_uses_checked_head_when_webhook_merge_revision_is_stale() {
     let fixture = pull_request_claimed_fixture();
     let archive = archive(BTreeMap::from([(
         ".ci/workflows/ci.yml",

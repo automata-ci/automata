@@ -2088,8 +2088,13 @@ fn rehydrate_pending_repository_dispatch(
 fn source_revision(event: &VerifiedGithubWebhook) -> Option<&str> {
     match event {
         VerifiedGithubWebhook::Push(push) if !push.deleted() => Some(push.after_commit_sha()),
+        // A synchronize webhook can carry the previous merge-ref SHA while
+        // GitHub is still rematerializing refs/pull/<n>/merge. The signed head
+        // SHA is the immutable revision to which Checks are published, so use
+        // that same revision for source ingestion instead of compiling stale
+        // merge-ref contents under the new head's check.
         VerifiedGithubWebhook::PullRequest(pull_request) => {
-            Some(pull_request.merge_revision().as_str())
+            Some(pull_request.head_revision().as_str())
         }
         VerifiedGithubWebhook::MergeGroup(merge_group) => {
             Some(merge_group.head_revision().as_str())
