@@ -31,10 +31,6 @@ pub use installation::{
     ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
     InstallationSelectorKey,
 };
-pub use snapshot::{
-    LocalRepositoryId, LocalSnapshot, LocalSnapshotError, LocalSnapshotErrorCode,
-    LocalSnapshotRequest, capture_snapshot,
-};
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TERMINATION_TIMEOUT: Duration = Duration::from_secs(1);

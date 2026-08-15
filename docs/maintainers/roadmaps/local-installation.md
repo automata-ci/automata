@@ -7,7 +7,7 @@
   file primitives, plus the read-only source-validation portion of 3B
 - Last completed engine-adapter checkpoint: 2B.1, pinned Docker context and
   immutable identity anchor
-- Date: 2026-08-15
+- Date: 2026-08-16
 
 This roadmap owns the work required to make Automata easy to evaluate on one
 machine, run repository-scoped work through a repository-agnostic local
@@ -44,7 +44,7 @@ The optional workflow selector and concurrency flag are predictable:
 
 ```console
 automata local run .github/workflows/ci.yml
-automata local run ci --workers 3
+automata local run .github/workflows/ci.yml --workers 3
 ```
 
 For the first topology, `--workers N` means `N` concurrent job slots on one
@@ -89,18 +89,21 @@ workflow exists. Otherwise callers supply its exact canonical
 repository-relative path. Filename, stem, and display-name aliases are not a
 second selector grammar.
 
-Direct `.github/workflows/*.yml|yaml` and `.ci/workflows/*.yml|yaml` files are
-eligible; nested files are not initially. Supporting `.github/workflows` in the
-explicit local source adapter does not change the autonomous GitHub provider's
-discovery policy. Local compatibility also does not imply full GitHub Actions
-parity: unsupported syntax, actions, events, dynamic secret references, and
-runner selectors fail during read-only inspection.
+Only direct `.github/workflows/*.yml|yaml` files are eligible; nested files and
+`.ci/workflows` aliases are not. This explicit local source policy does not
+change the autonomous GitHub provider's production discovery policy. Local
+compatibility also does not imply full GitHub Actions parity: unsupported
+syntax, actions, events, dynamic secret references, and runner selectors fail
+during read-only inspection.
 
-The first event set contains declared `workflow_dispatch` and a truthful local
-`push` context. A local event is never represented as a signed GitHub delivery,
-and it never produces a GitHub Check. `actions/checkout` resolves to the admitted
-snapshot; it does not silently fetch another revision or invent a
-`GITHUB_TOKEN`.
+The available read-only check accepts only declared `workflow_dispatch`. A
+later executable slice may add a separately typed, truthful local `push`
+context, but a local event is never represented as a signed GitHub delivery and
+never produces a GitHub Check. `actions/checkout` will resolve to the admitted
+snapshot; it must not silently fetch another revision. `github.token` and
+`secrets.GITHUB_TOKEN` are closed built-in requirements, never promptable user
+secrets; the current check reports that requirement but does not claim to
+supply it for execution.
 
 The initial selector registry accepts `automata-local`, `ubuntu-24.04`, and a
 release-pinned `ubuntu-latest` alias. It records the exact local image, OS, and
@@ -160,12 +163,13 @@ platform choice, not installation identity or a public lifecycle selector.
 An installation is a repository-agnostic deployment and runner-capacity domain:
 the same selected installation may admit snapshots from different repositories,
 and repository identity never enters its selector key, engine labels, Compose
-project, or desired specification. Repository identity is derived and retained
-with `LocalSnapshot` admission instead. Repositories sharing one installation
-form one trusted set and share its runner capacity; separate installation names
-are useful for distinct trust sets or destructive test environments, but names
-on the same administrator-controlled daemon are not a hostile-code isolation
-boundary.
+project, or desired specification. The read-only check deliberately derives or
+reports no repository identity; a durable repository identity contract is
+deferred until local admission actually consumes and qualifies it. Repositories
+sharing one installation form one trusted set and share its runner capacity;
+separate installation names are useful for distinct trust sets or destructive
+test environments, but names on the same administrator-controlled daemon are
+not a hostile-code isolation boundary.
 JSON reserves stdout for one stable document and never prompts.
 Non-interactive execution never reads values from implicit environment
 variables or command arguments. Secret setters use hidden TTY input when no
@@ -185,7 +189,7 @@ onboarding path:
 | Existing path | Reusable capability | Remaining local gap |
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
-| `automata local check` | Deterministic bounded live-worktree archive, physical common-Git-directory identity, explicit workflow-location policy, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free credential discovery | It is deliberately read-only; local admission, scheduling, execution, and GitHub Checks remain absent |
+| `automata local check` | Deterministic bounded live-worktree archive, exact `.github/workflows` selection, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free external/built-in credential discovery | It is deliberately read-only and fails closed on Windows; repository identity, local admission, scheduling, execution, and GitHub Checks remain absent |
 | `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
 | `automata-ci-sandbox-guest` | Protocol 4 bounded optional read and Unix durable compare-and-swap atomic commit, plus a non-root helper-image data mountpoint | No local adapter yet mounts a desired-spec volume or invokes these primitives |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
@@ -252,7 +256,7 @@ adapter contract rather than a second operator-owned topology.
 local Git worktree
         |
         v
-bounded immutable snapshot ---- LocalSnapshot authority
+bounded immutable snapshot ---- future local admission authority
                                       |
                                       v
                              existing workflow service
@@ -473,19 +477,19 @@ tracked and non-ignored worktree inventory. It rejects unsafe file types,
 escaping symlinks, submodule ambiguity, sparse or assume-unchanged index state,
 Unicode-normalization and full-case-fold collisions, and concurrent mutation.
 The archive digest—not a possibly dirty HEAD—is the execution source identity.
-The source adapter also derives the canonical repository identity
-used by local admission. Before assigning that provenance contract version 1,
-its exact versioned byte preimage must define Git worktrees, symlinks,
-non-Unicode paths, case behavior, checkout moves, and clones on Linux, macOS,
-and Windows. HEAD, dirty state, repository identity, selected workflow, inputs,
-and architecture decisions remain explicit run provenance; none becomes local
-installation identity.
+The current check uses that digest only as its exact local revision and does not
+derive or report repository identity. Durable local admission will require a
+separately reviewed repository identity contract; its exact versioned byte
+preimage and native mutation evidence must be qualified before it exists.
+HEAD, dirty state, the selected workflow, inputs, and architecture decisions
+remain explicit run provenance; none becomes local installation identity.
 
-`LocalSnapshot` is a distinct admission authority accepted only in the local
-deployment context. It parameterizes source location and archive policy around
-the existing workflow frontend/compiler and then enters the existing workflow
-service. It cannot create signed-GitHub evidence, publish a Check Run, or enter
-the autonomous provider inbox.
+The planned sealed local-snapshot admission authority is accepted only in the
+local deployment context. It will parameterize source location and archive
+policy around the existing workflow frontend/compiler and then enter the
+existing workflow service. It cannot create signed-GitHub evidence, publish a
+Check Run, or enter the autonomous provider inbox. The available check stops
+before this authority boundary.
 
 Jobs receive a copy of the admitted immutable snapshot, never a writable host
 bind. Workflows that require GitHub API authority fail with an actionable
@@ -684,9 +688,9 @@ after renderer version one's complete input set is known; read-only volume I/O
 lands before locked mutation.
 
 Installation identity is a repository-agnostic deployment/capacity boundary;
-repository and snapshot identity remain owned by later `LocalSnapshot`
-admission. Compose and fresh engine inspection are resource truth throughout,
-and no host manifest mirrors them.
+repository and snapshot identity remain questions for later local admission.
+Compose and fresh engine inspection are resource truth throughout, and no host
+manifest mirrors them.
 
 #### 2B.1. Pinned Docker context and immutable identity anchor
 
@@ -902,34 +906,42 @@ Add bounded Git worktree snapshotting and a provider-distinct local source
 authority. Parameterize source location/archive loading around the existing
 GitHub Actions frontend and compiler. Feed compiled requests into the existing
 workflow service, admission transaction, scheduler, cancellation, logs, and
-history. Define and retain the exact canonical repository identity as admitted
-source provenance here, not as an engine installation binding. Add
-`automata local check` as a read-only view of that path.
+history. Define a durable repository identity only when admission consumes and
+qualifies it, never as an engine installation binding. `automata local check`
+is the read-only source-analysis precursor and intentionally exposes neither
+repository identity nor admission authority.
 
-Status: read-only source validation available, admission gate incomplete. The library
-seals Git's tracked plus non-ignored live-worktree inventory through pinned
-no-follow ancestor handles, normalizes tracked symlinks from Git mode, detects
-mutation, and hashes the exact deterministic gzip bytes consumed by shared
-repository archive discovery. Windows reparse points and junctions, portable
-component-trie bounds and aliases, link cycles, sparse or assume-unchanged
-index flags, and workflow-namespace aliases fail closed. Ignored paths are
-classified through one bounded NUL-safe batch per worktree scan.
-`.github/workflows` and `.ci/workflows` are explicit first-class policies; if
-both namespaces are present the source fails as ambiguous. `automata local
-check` composes event compilation, same-tree reusable-workflow loading,
-typed call-graph validation and root-secret propagation, physical
-common-Git-directory identity, snapshot revision, and local source provenance
-without entering admission. Its only current event is an explicit local
-`workflow_dispatch`; it cannot synthesize GitHub delivery evidence.
+Status: read-only source validation available, admission gate incomplete. The
+library seals Git's tracked plus non-ignored live-worktree inventory through
+pinned no-follow ancestor handles, normalizes tracked symlinks from Git mode,
+detects mutation, and hashes the exact deterministic gzip bytes consumed by
+shared repository archive discovery. Portable component-trie bounds and
+aliases, link cycles, sparse or assume-unchanged index flags, and workflow
+namespace aliases fail closed. Ignored paths are classified through one
+bounded NUL-safe batch per worktree scan. Source capture currently fails closed
+on Windows until exact native mutation evidence is qualified.
+
+Only direct `.github/workflows` members are eligible, with an exact canonical
+selector required when discovery is ambiguous; `.ci`, filename, stem, and
+display-name fallbacks do not exist. `automata local check` composes local event
+compilation, reachable same-snapshot reusable-workflow loading, the shared typed
+call-graph traversal, root-secret propagation, snapshot revision, and local
+source provenance without entering admission. Remote and dynamic reusable calls
+fail explicitly. Its only current event is an explicit local
+`workflow_dispatch`; it cannot synthesize GitHub delivery evidence. Reports
+contain value-free external names and closed built-in requirements, never
+credential or input values, absolute paths, archive bytes, environment values,
+or repository identity.
 
 Gate: clean and dirty worktrees produce deterministic digests; ignored files,
 `.git`, sockets, devices, escaping symlinks, submodule ambiguity, concurrent
 mutation, oversized archives, and case collisions fail closed; direct
-`.github/workflows` and `.ci/workflows` files and admitted same-tree reusable
-workflows use the existing compiler; the versioned repository-identity preimage
-has cross-platform worktree, symlink, non-Unicode, case, move, and clone
-fixtures; no source operation mutates Git; and no local subject can enter
-signed-GitHub admission or create a GitHub Check.
+`.github/workflows` files and same-snapshot reusable workflows use the existing
+compiler and canonical call-contract traversal; hostile Git environment,
+cancellation, bounds, redaction, and dirty-worktree fixtures pass; no source
+operation mutates Git; and no local subject can enter signed-GitHub admission or
+create a GitHub Check. Durable repository identity and Windows source capture
+remain separate future qualification gates rather than weak checkpoint claims.
 
 ### 3C. Arch secretless vertical slice
 
@@ -1005,8 +1017,9 @@ finds no honest common contract, record that decision and do not add a library.
 Confirm or create the designated dummy repository under `AlexanderDzhoganov`,
 then test its local checkout without installing a GitHub App. Commit a redacted,
 executable smoke harness and evidence format covering `.github/workflows`,
-`.ci/workflows`, typed inputs, a user secret, a variable, dispatch, truthful
-local push, cancellation, restart, persistence, and cleanup.
+exact canonical selectors, typed inputs, a user secret, a variable, dispatch,
+truthful local push once that event exists, cancellation, restart, persistence,
+and cleanup.
 
 Gate: the one-command run works from clean state; the second secret-bearing run
 does not prompt; `--workers 3` overlaps three jobs; history and logs are useful;

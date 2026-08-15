@@ -6,123 +6,24 @@ mod lowering;
 mod safety;
 mod trigger;
 
-use std::{collections::BTreeMap, error::Error, fmt};
-
 use automata_ci_core::{
     ContextValue, Located, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, Sha256Digest,
-    WorkflowEventProvenance, WorkflowInputKey, WorkflowPlan, WorkflowSourceProvenance,
+    WorkflowEventProvenance, WorkflowPlan, WorkflowSourceProvenance,
 };
 
 use crate::{
     Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, EventTrigger, GithubEventMetadata,
-    GithubWorkflowDispatchContract, GithubWorkflowSourcePlan,
-    MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS, MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
-    PreservedField, SourceOrigin, SourceSpan, TriggerConfiguration,
+    GithubWorkflowDispatchContract, GithubWorkflowSourcePlan, PreservedField, SourceOrigin,
+    SourceSpan, TriggerConfiguration,
 };
 
-/// Bounded, deterministically ordered textual inputs supplied by an explicit
-/// local `workflow_dispatch` selection.
-///
-/// Values remain textual until the compiler validates them against the exact
-/// source contract, where Boolean and choice inputs are interpreted without
-/// pretending they came from a GitHub payload.
-#[derive(Clone, Eq, PartialEq)]
-pub struct LocalWorkflowDispatchInputs {
-    values: BTreeMap<WorkflowInputKey, String>,
-}
-
-impl LocalWorkflowDispatchInputs {
-    /// Creates local manual-dispatch inputs from `NAME=VALUE` properties.
-    ///
-    /// # Errors
-    ///
-    /// Rejects invalid or duplicate names, excessive properties, control
-    /// characters in values, or an excessive aggregate character count.
-    pub fn try_new<K, V, I>(inputs: I) -> Result<Self, LocalWorkflowDispatchInputsError>
-    where
-        K: Into<String>,
-        V: Into<String>,
-        I: IntoIterator<Item = (K, V)>,
-    {
-        let mut values = BTreeMap::new();
-        let mut characters = 0_usize;
-        for (key, value) in inputs {
-            if values.len() == MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS {
-                return Err(LocalWorkflowDispatchInputsError::TooManyInputs);
-            }
-            let key = WorkflowInputKey::new(key.into())
-                .map_err(|_| LocalWorkflowDispatchInputsError::InvalidInputKey)?;
-            let value = value.into();
-            if value.chars().any(char::is_control) {
-                return Err(LocalWorkflowDispatchInputsError::InvalidInputValue);
-            }
-            characters = characters
-                .checked_add(key.as_str().chars().count())
-                .and_then(|count| count.checked_add(value.chars().count()))
-                .filter(|count| *count <= MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS)
-                .ok_or(LocalWorkflowDispatchInputsError::PayloadTooLarge)?;
-            if values.insert(key, value).is_some() {
-                return Err(LocalWorkflowDispatchInputsError::DuplicateInputKey);
-            }
-        }
-        Ok(Self { values })
-    }
-
-    const fn values(&self) -> &BTreeMap<WorkflowInputKey, String> {
-        &self.values
-    }
-}
-
-impl fmt::Debug for LocalWorkflowDispatchInputs {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LocalWorkflowDispatchInputs")
-            .field("input_count", &self.values.len())
-            .finish_non_exhaustive()
-    }
-}
-
-/// Structural failure while creating local manual-dispatch inputs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum LocalWorkflowDispatchInputsError {
-    /// More input properties were supplied than the dialect accepts.
-    TooManyInputs,
-    /// An input name is not a canonical workflow input key.
-    InvalidInputKey,
-    /// The same canonical input name appeared more than once.
-    DuplicateInputKey,
-    /// An input value contains a control character.
-    InvalidInputValue,
-    /// The aggregate name and value character budget was exceeded.
-    PayloadTooLarge,
-}
-
-impl fmt::Display for LocalWorkflowDispatchInputsError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::TooManyInputs => "too many local workflow_dispatch inputs",
-            Self::InvalidInputKey => "local workflow_dispatch input name is invalid",
-            Self::DuplicateInputKey => "local workflow_dispatch input name is duplicated",
-            Self::InvalidInputValue => "local workflow_dispatch input value contains control text",
-            Self::PayloadTooLarge => "local workflow_dispatch inputs exceed their character limit",
-        })
-    }
-}
-
-impl Error for LocalWorkflowDispatchInputsError {}
-
-/// Local snapshot evidence used by the GitHub-dialect compiler without
-/// granting GitHub provider authority.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LocalWorkflowSourceEvidence {
+pub(crate) struct LocalWorkflowSourceEvidence {
     snapshot_digest: Sha256Digest,
 }
 
 impl LocalWorkflowSourceEvidence {
-    /// Binds compilation to one exact local snapshot revision.
-    #[must_use]
-    pub const fn new(snapshot_digest: Sha256Digest) -> Self {
+    pub(crate) const fn new(snapshot_digest: Sha256Digest) -> Self {
         Self { snapshot_digest }
     }
 
@@ -131,19 +32,16 @@ impl LocalWorkflowSourceEvidence {
     }
 }
 
-/// Explicit local manual-dispatch evidence.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocalWorkflowDispatchEvidence {
+pub(crate) struct LocalWorkflowDispatchEvidence {
     source: LocalWorkflowSourceEvidence,
-    inputs: LocalWorkflowDispatchInputs,
+    inputs: crate::GithubWorkflowDispatchInputs,
 }
 
 impl LocalWorkflowDispatchEvidence {
-    /// Creates a local-only manual selection bound to exact snapshot bytes.
-    #[must_use]
-    pub const fn new(
+    pub(crate) const fn new(
         source: LocalWorkflowSourceEvidence,
-        inputs: LocalWorkflowDispatchInputs,
+        inputs: crate::GithubWorkflowDispatchInputs,
     ) -> Self {
         Self { source, inputs }
     }
@@ -247,7 +145,7 @@ impl<'plan> CompileWorkflowRequest<'plan> {
     /// source/event provenance and verifies the source repository revision is
     /// the exact evidence digest. It never accepts GitHub delivery metadata.
     #[must_use]
-    pub fn for_local_workflow_dispatch(
+    pub(crate) fn for_local_workflow_dispatch(
         source_plan: &'plan GithubWorkflowSourcePlan,
         evidence: LocalWorkflowDispatchEvidence,
     ) -> Self {
@@ -263,7 +161,7 @@ impl<'plan> CompileWorkflowRequest<'plan> {
     /// The request remains local source authority even though the parsed
     /// syntax and expression dialect are GitHub Actions compatible.
     #[must_use]
-    pub fn for_local_workflow_call(
+    pub(crate) fn for_local_workflow_call(
         source_plan: &'plan GithubWorkflowSourcePlan,
         evidence: LocalWorkflowSourceEvidence,
     ) -> Self {

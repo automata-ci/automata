@@ -630,6 +630,7 @@ dependencies = [
  "tar",
  "thiserror",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 
@@ -1155,6 +1156,7 @@ dependencies = [
  "jiff",
  "saphyr-parser",
  "serde_json",
+ "sha2 0.11.0",
  "tar",
  "thiserror",
  "unicode-normalization",

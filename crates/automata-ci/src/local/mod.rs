@@ -3,7 +3,9 @@ use automata_ci_local::{
     ComposeFrontend, DoctorReport, DoctorRequest, Engine, EngineArchitecture, EngineEndpoint,
     EngineRequest, LocalCheckReport, LocalCheckRequest, check_workflow, inspect,
 };
-use automata_ci_workflow_github::LocalWorkflowDispatchInputs;
+use automata_ci_workflow_github::GithubWorkflowDispatchInputs;
+use automata_ci_workflow_service::BuiltInCredentialRequirement;
+use tokio_util::sync::CancellationToken;
 
 use crate::cli::{LocalArgs, LocalCheckArgs, LocalCommand, LocalContainerEngine, LocalDoctorArgs};
 
@@ -15,18 +17,20 @@ pub(crate) async fn execute(args: &LocalArgs) -> Result<()> {
 }
 
 async fn check(args: &LocalCheckArgs) -> Result<()> {
-    let inputs = LocalWorkflowDispatchInputs::try_new(
+    let inputs = GithubWorkflowDispatchInputs::try_new(
         args.inputs
             .iter()
             .map(|input| (input.name().to_owned(), input.value().to_owned())),
     )?;
     let directory = std::env::current_dir()?;
     let request = LocalCheckRequest::new(directory, args.workflow.clone(), inputs);
-    let mut checking = Box::pin(check_workflow(request));
+    let cancellation = CancellationToken::new();
+    let mut checking = Box::pin(check_workflow(request, cancellation.clone()));
     let report = tokio::select! {
         biased;
         () = crate::shutdown::wait_without_logging() => {
-            drop(checking);
+            cancellation.cancel();
+            let _ = checking.await;
             bail!("local workflow check interrupted by a process shutdown signal")
         }
         report = &mut checking => report,
@@ -142,6 +146,17 @@ fn print_human_check_report(report: &LocalCheckReport) {
             report.required_root_secrets().join(", ")
         );
     }
+    if !report.required_built_in_credentials().is_empty() {
+        println!(
+            "Provider built-ins required: {} (not supplied by local check)",
+            report
+                .required_built_in_credentials()
+                .iter()
+                .map(|requirement| built_in_credential_name(*requirement))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     for workflow in report.workflows() {
         println!(
             "{}: {}",
@@ -154,26 +169,41 @@ fn print_human_check_report(report: &LocalCheckReport) {
         );
         for job in workflow.jobs() {
             println!("  Job: {} ({})", job.id(), job.kind());
-            if job.environment_required() {
-                println!("    Deployment environment: required");
-            }
             if !job.secrets().is_empty() {
                 println!("    Secrets: {}", job.secrets().join(", "));
             }
             if !job.variables().is_empty() {
                 println!("    Variables: {}", job.variables().join(", "));
             }
+            if !job.built_in_credentials().is_empty() {
+                println!(
+                    "    Provider built-ins: {}",
+                    job.built_in_credentials()
+                        .iter()
+                        .map(|requirement| built_in_credential_name(*requirement))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
         }
     }
     for diagnostic in report.diagnostics() {
         println!(
-            "Diagnostic ({}): {}",
+            "Diagnostic ({}): {}:{}:{}",
             diagnostic.code(),
-            diagnostic.message()
+            diagnostic.source(),
+            diagnostic.line(),
+            diagnostic.column()
         );
     }
     if let Some(issue) = report.issue() {
         println!("Problem ({}): {}", issue.code().as_str(), issue.message());
+    }
+}
+
+const fn built_in_credential_name(requirement: BuiltInCredentialRequirement) -> &'static str {
+    match requirement {
+        BuiltInCredentialRequirement::GithubToken => "github_token",
     }
 }
 

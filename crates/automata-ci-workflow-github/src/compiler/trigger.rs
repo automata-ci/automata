@@ -6,7 +6,7 @@ use crate::{
     EventName, GithubChangedFiles, GithubCronExpression, GithubEventMetadata, GithubScheduleError,
     GithubWorkflowDispatchContract, GithubWorkflowDispatchInputDefault,
     GithubWorkflowDispatchInputDefinition, GithubWorkflowDispatchInputType,
-    GithubWorkflowDispatchInputValue, LocalWorkflowDispatchInputs, MAX_GITHUB_SCHEDULE_ENTRIES,
+    GithubWorkflowDispatchInputValue, MAX_GITHUB_SCHEDULE_ENTRIES,
     MAX_GITHUB_SCHEDULE_EXPRESSION_BYTES, MAX_GITHUB_SCHEDULE_TIMEZONE_BYTES,
     MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, MergeGroupFilter, PushPullRequestFilter,
     RepositoryDispatchFilter, ScalarResolution, SourceSpan, Spanned, TriggerConfiguration,
@@ -752,59 +752,16 @@ fn workflow_dispatch_matches(
 
 pub(super) fn local_workflow_dispatch_matches(
     contract: Option<&GithubWorkflowDispatchContract>,
-    inputs: &LocalWorkflowDispatchInputs,
+    inputs: &crate::GithubWorkflowDispatchInputs,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> TriggerSelection {
     let Some(contract) = contract else {
         return TriggerSelection::Rejected;
     };
-    let mut typed = Vec::with_capacity(inputs.values().len());
-    let mut valid = true;
-    for (key, value) in inputs.values() {
-        let Some(definition) = contract.inputs().get(key) else {
-            context.semantic(
-                "github.compile.unknown_workflow_dispatch_input",
-                format!("local workflow_dispatch supplied undeclared input `{key}`"),
-                trigger_span.clone(),
-            );
-            valid = false;
-            continue;
-        };
-        let value = match definition.input_type() {
-            GithubWorkflowDispatchInputType::Boolean => match value.as_str() {
-                "true" => GithubWorkflowDispatchInputValue::Boolean(true),
-                "false" => GithubWorkflowDispatchInputValue::Boolean(false),
-                _ => {
-                    context.semantic(
-                        "github.compile.workflow_dispatch_input_type",
-                        format!("local workflow_dispatch Boolean input `{key}` must be `true` or `false`"),
-                        trigger_span.clone(),
-                    );
-                    valid = false;
-                    continue;
-                }
-            },
-            GithubWorkflowDispatchInputType::Choice | GithubWorkflowDispatchInputType::String => {
-                GithubWorkflowDispatchInputValue::String(value.clone())
-            }
-        };
-        typed.push((key.as_str().to_owned(), value));
-    }
-    if !valid {
-        return TriggerSelection::Rejected;
-    }
-    let Ok(typed) = crate::GithubWorkflowDispatchInputs::try_new(typed) else {
-        context.semantic(
-            "github.compile.invalid_workflow_dispatch_context",
-            "local workflow_dispatch inputs could not be represented canonically",
-            trigger_span.clone(),
-        );
-        return TriggerSelection::Rejected;
-    };
     let Some(inputs) = resolve_workflow_dispatch_inputs(
         contract,
-        &typed,
+        inputs,
         DispatchInputAuthority::LocalExplicit,
         trigger_span,
         context,

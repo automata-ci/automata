@@ -656,7 +656,10 @@ impl GithubLogicalJobOrchestrationService {
             return Ok(activation_relational_failure());
         };
         let Ok(credential_requirements) =
-            crate::discover_job_credential_requirements(plan.logical(), &logical_job)
+            crate::credential_requirements::discover_external_job_credentials(
+                plan.logical(),
+                &logical_job,
+            )
         else {
             return Ok(activation_payload_failure());
         };

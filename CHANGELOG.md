@@ -42,20 +42,23 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   adapter, Compose topology, or public local lifecycle command. Guest-bearing
   Kubernetes, Windows, and macOS artifacts must be rebuilt in lockstep because
   protocol versions 1 through 3 are deliberately rejected.
-- Read-only `automata local check [WORKFLOW]` over the `LocalSnapshot`
-  foundation for tracked and non-ignored live-worktree
-  source. It hashes the exact deterministic archive consumed by the existing
-  bounded workflow discovery, pins filesystem ancestors without following
-  links, normalizes tracked symlinks from Git mode, rejects Windows reparse
-  points, sparse or assume-unchanged index state, and bounded
-  Unicode-normalized portable path-graph aliases, and supports exactly one explicit
-  `.github/workflows` or `.ci/workflows` namespace. The command selects only an
-  explicit local `workflow_dispatch`, compiles reachable same-snapshot reusable
-  workflows with local rather than GitHub provider evidence, validates their
-  typed input/secret/output call graph, propagates mapped and inherited root
-  secret requirements, and reports value-free credential names. It performs no
-  Docker or network probe, admission, scheduling, execution, GitHub
-  authentication, or Check Run operation.
+- Read-only `automata local check [WORKFLOW]` over a private, bounded snapshot
+  of tracked and non-ignored live-worktree source. It hashes the exact
+  deterministic archive consumed by shared workflow discovery, pins filesystem
+  ancestors without following links, normalizes tracked symlinks from Git mode,
+  rejects sparse or assume-unchanged index state and portable path-graph
+  aliases, and accepts only direct `.github/workflows/*.{yml,yaml}` members. The
+  optional selector is one exact canonical archive path, and the selected root
+  must declare `workflow_dispatch`. Reachable reusable workflows must be local
+  members of the same snapshot; remote, dynamic, missing, cyclic, or invalid
+  calls fail closed. The shared compiler and reusable-call traversal validate
+  typed inputs, secrets, outputs, propagation, and resource bounds. Human and
+  JSON reports contain only value-free external credential names and closed
+  built-in requirements such as `github_token`, never values, absolute paths,
+  archive bytes, or repository identity. Windows source capture remains closed
+  until exact native mutation evidence is qualified. The command is independent
+  of `local doctor`, Docker, the network, and GitHub tokens, and performs no
+  admission, scheduling, execution, or Check Run operation.
 - Sandbox specifications now require one closed runner-custody variant across
   every provider; job custody includes a mandatory non-zero durable slot.
 - Exact private-CA HTTPS trust for S3-compatible storage and a hidden,

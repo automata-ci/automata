@@ -37,8 +37,7 @@ use thiserror::Error;
 
 use crate::{
     AdmissionClock, AdmissionIdGenerator, CredentialDiscoveryError, ExpandReusableWorkflowRequest,
-    GITHUB_WORKFLOW_MEDIA_TYPE, GithubReusableWorkflowCatalog,
-    GithubReusableWorkflowSourceAuthority, JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
+    GITHUB_WORKFLOW_MEDIA_TYPE, GithubReusableWorkflowCatalog, JOB_RUNTIME_CONTEXT_MEDIA_TYPE,
     NoopWorkflowAdmissionObserver, ReusableInputBindingSource, ReusableWorkflowExpander,
     ReusableWorkflowExpansionError, ReusableWorkflowPermissions, Sha256AdmissionIdGenerator,
     SystemAdmissionClock, WORKFLOW_PLAN_MEDIA_TYPE, WorkflowAdmissionFailure,
@@ -677,7 +676,10 @@ fn build_command(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let credential_requirements =
-                crate::discover_job_credential_requirements(request.plan().logical(), job)?;
+                crate::credential_requirements::discover_external_job_credentials(
+                    request.plan().logical(),
+                    job,
+                )?;
             AdmittedLogicalWorkflowJob::new(id, key, source_order, kind, prerequisites)
                 .map(|job| job.with_credential_requirements(credential_requirements))
                 .map_err(WorkflowAdmissionError::LogicalValue)
@@ -757,7 +759,6 @@ fn prepare_reusable_workflow_expansion(
         return Ok(None);
     }
     let catalog = GithubReusableWorkflowCatalog::compile_reachable(
-        GithubReusableWorkflowSourceAuthority::GithubDelivery,
         request.repository().slug(),
         request.commit_sha(),
         request.plan(),
@@ -954,10 +955,11 @@ fn prepare_reusable_workflow_expansion(
                     .iter()
                     .find(|candidate| candidate.key().value() == job.key())
                     .ok_or(WorkflowAdmissionError::Internal)?;
-                let credential_requirements = crate::discover_job_credential_requirements(
-                    invocation_plan.logical(),
-                    logical_job,
-                )?;
+                let credential_requirements =
+                    crate::credential_requirements::discover_external_job_credentials(
+                        invocation_plan.logical(),
+                        logical_job,
+                    )?;
                 Ok(AdmittedReusableJob::new(
                     job.id(),
                     job.key().clone(),

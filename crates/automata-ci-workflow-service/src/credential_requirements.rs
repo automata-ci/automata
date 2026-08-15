@@ -17,8 +17,45 @@ use thiserror::Error;
 const ENVIRONMENT_TEMPLATE_DIGEST_DOMAIN: &[u8] =
     b"automata.workflow.deployment-environment-template.v1\0";
 
-/// Discovers exact static `secrets.<name>` and `vars.<name>` uses, including
-/// name-only caller sources in reusable-workflow secret mappings.
+/// Closed built-in credential supplied by provider-bound runtime authority.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltInCredentialRequirement {
+    /// GitHub's job-bound token exposed as `github.token` and `secrets.GITHUB_TOKEN`.
+    GithubToken,
+}
+
+/// Static external and provider-built-in requirements for one logical job.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveredJobCredentials {
+    external: JobCredentialRequirements,
+    built_in: Vec<BuiltInCredentialRequirement>,
+}
+
+impl DiscoveredJobCredentials {
+    /// Returns secret, variable, and protected-environment requirements that
+    /// must be resolved outside provider-built-in runtime authority.
+    #[must_use]
+    pub const fn external(&self) -> &JobCredentialRequirements {
+        &self.external
+    }
+
+    /// Returns provider-built-in credentials in stable order.
+    #[must_use]
+    pub fn built_in(&self) -> &[BuiltInCredentialRequirement] {
+        &self.built_in
+    }
+
+    /// Consumes this analysis into its externally resolved requirements.
+    #[must_use]
+    pub fn into_external(self) -> JobCredentialRequirements {
+        self.external
+    }
+}
+
+/// Discovers exact static `secrets.<name>`, `vars.<name>`, and provider
+/// built-in credential uses, including name-only caller sources in
+/// reusable-workflow secret mappings.
 ///
 /// The complete serialized logical job is walked so new template-bearing fields
 /// fail into the same analysis without a second hand-maintained field list.
@@ -27,36 +64,65 @@ const ENVIRONMENT_TEMPLATE_DIGEST_DOMAIN: &[u8] =
 ///
 /// Rejects whole-context and dynamic-name access, malformed durable programs,
 /// or invalid canonical names.
-pub fn discover_job_credential_requirements(
+pub fn discover_job_credentials(
     workflow: &LogicalWorkflowPlan,
     job: &LogicalJobTemplate,
-) -> Result<JobCredentialRequirements, CredentialDiscoveryError> {
+) -> Result<DiscoveredJobCredentials, CredentialDiscoveryError> {
     let value = serde_json::to_value((workflow.environment(), job))
         .map_err(|_| CredentialDiscoveryError::InvalidLogicalPlan)?;
     let mut programs = Vec::new();
     collect_programs(&value, &mut programs)?;
     let mut secrets = BTreeSet::new();
     let mut variables = BTreeSet::new();
+    let mut built_in = BTreeSet::new();
     for program in programs {
-        scan_program(&program, &mut secrets, &mut variables)?;
+        scan_program(&program, &mut secrets, &mut variables, &mut built_in)?;
     }
     if let LogicalJobKind::ReusableWorkflow(invocation) = job.execution()
         && let ReusableSecretForwarding::Mapping(bindings) = invocation.secrets()
     {
-        secrets.extend(
-            bindings
-                .iter()
-                .map(|binding| binding.source().value().to_string()),
-        );
+        for binding in bindings {
+            let source = binding.source().value().as_str();
+            if source.eq_ignore_ascii_case("GITHUB_TOKEN") {
+                built_in.insert(BuiltInCredentialRequirement::GithubToken);
+            } else {
+                secrets.insert(source.to_owned());
+            }
+        }
     }
+    classify_builtin_secrets(&mut secrets, &mut built_in);
     let environment = match job.deployment() {
         None => JobEnvironmentRequirement::None,
         Some(deployment) => {
             JobEnvironmentRequirement::Environment(template_digest(deployment.name().value())?)
         }
     };
-    JobCredentialRequirements::new(environment, secrets, variables)
-        .map_err(CredentialDiscoveryError::InvalidRequirements)
+    let external = JobCredentialRequirements::new(environment, secrets, variables)
+        .map_err(CredentialDiscoveryError::InvalidRequirements)?;
+    Ok(DiscoveredJobCredentials {
+        external,
+        built_in: built_in.into_iter().collect(),
+    })
+}
+
+pub(crate) fn discover_external_job_credentials(
+    workflow: &LogicalWorkflowPlan,
+    job: &LogicalJobTemplate,
+) -> Result<JobCredentialRequirements, CredentialDiscoveryError> {
+    discover_job_credentials(workflow, job).map(DiscoveredJobCredentials::into_external)
+}
+
+fn classify_builtin_secrets(
+    secrets: &mut BTreeSet<String>,
+    built_in: &mut BTreeSet<BuiltInCredentialRequirement>,
+) {
+    let has_github_token = secrets
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case("GITHUB_TOKEN"));
+    if has_github_token {
+        secrets.retain(|name| !name.eq_ignore_ascii_case("GITHUB_TOKEN"));
+        built_in.insert(BuiltInCredentialRequirement::GithubToken);
+    }
 }
 
 fn template_digest(value: &impl Serialize) -> Result<Sha256Digest, CredentialDiscoveryError> {
@@ -102,6 +168,7 @@ fn collect_programs(
 #[derive(Clone)]
 enum TraceKind {
     SensitiveRoot(SensitiveContext),
+    GithubRoot,
     LiteralString(String),
     Value,
 }
@@ -117,6 +184,7 @@ struct Trace {
     kind: TraceKind,
     secrets: BTreeSet<String>,
     variables: BTreeSet<String>,
+    built_in: BTreeSet<BuiltInCredentialRequirement>,
 }
 
 impl Trace {
@@ -125,6 +193,7 @@ impl Trace {
             kind: TraceKind::Value,
             secrets: BTreeSet::new(),
             variables: BTreeSet::new(),
+            built_in: BTreeSet::new(),
         }
     }
 }
@@ -133,6 +202,7 @@ fn scan_program(
     program: &ExpressionProgram,
     secrets: &mut BTreeSet<String>,
     variables: &mut BTreeSet<String>,
+    built_in: &mut BTreeSet<BuiltInCredentialRequirement>,
 ) -> Result<(), CredentialDiscoveryError> {
     let mut stack = Vec::with_capacity(program.instructions().len());
     for instruction in program.instructions() {
@@ -150,6 +220,7 @@ fn scan_program(
                 kind: match name.as_str() {
                     "secrets" => TraceKind::SensitiveRoot(SensitiveContext::Secrets),
                     "vars" => TraceKind::SensitiveRoot(SensitiveContext::Variables),
+                    "github" => TraceKind::GithubRoot,
                     _ => TraceKind::Value,
                 },
                 ..Trace::value()
@@ -177,11 +248,15 @@ fn scan_program(
     let [trace] = stack.as_slice() else {
         return Err(CredentialDiscoveryError::InvalidLogicalPlan);
     };
-    if matches!(trace.kind, TraceKind::SensitiveRoot(_)) {
+    if matches!(
+        trace.kind,
+        TraceKind::SensitiveRoot(_) | TraceKind::GithubRoot
+    ) {
         return Err(CredentialDiscoveryError::DynamicReference);
     }
     secrets.extend(trace.secrets.iter().cloned());
     variables.extend(trace.variables.iter().cloned());
+    built_in.extend(trace.built_in.iter().copied());
     Ok(())
 }
 
@@ -191,6 +266,7 @@ fn index_sensitive(mut target: Trace, index: Trace) -> Result<Trace, CredentialD
     }
     target.secrets.extend(index.secrets);
     target.variables.extend(index.variables);
+    target.built_in.extend(index.built_in);
     if let TraceKind::SensitiveRoot(context) = target.kind {
         let TraceKind::LiteralString(name) = index.kind else {
             return Err(CredentialDiscoveryError::DynamicReference);
@@ -202,6 +278,15 @@ fn index_sensitive(mut target: Trace, index: Trace) -> Result<Trace, CredentialD
             SensitiveContext::Variables => {
                 target.variables.insert(name);
             }
+        }
+    } else if matches!(target.kind, TraceKind::GithubRoot) {
+        let TraceKind::LiteralString(name) = index.kind else {
+            return Err(CredentialDiscoveryError::DynamicReference);
+        };
+        if name.eq_ignore_ascii_case("token") {
+            target
+                .built_in
+                .insert(BuiltInCredentialRequirement::GithubToken);
         }
     }
     target.kind = TraceKind::Value;
@@ -217,11 +302,15 @@ fn combine(stack: &mut Vec<Trace>, count: usize) -> Result<Trace, CredentialDisc
         let trace = stack
             .pop()
             .ok_or(CredentialDiscoveryError::InvalidLogicalPlan)?;
-        if matches!(trace.kind, TraceKind::SensitiveRoot(_)) {
+        if matches!(
+            trace.kind,
+            TraceKind::SensitiveRoot(_) | TraceKind::GithubRoot
+        ) {
             return Err(CredentialDiscoveryError::DynamicReference);
         }
         output.secrets.extend(trace.secrets);
         output.variables.extend(trace.variables);
+        output.built_in.extend(trace.built_in);
     }
     Ok(output)
 }
@@ -283,7 +372,9 @@ mod tests {
         ]);
         let mut secrets = BTreeSet::new();
         let mut variables = BTreeSet::new();
-        scan_program(&expression, &mut secrets, &mut variables).expect("static references");
+        let mut built_in = BTreeSet::new();
+        scan_program(&expression, &mut secrets, &mut variables, &mut built_in)
+            .expect("static references");
         let requirements =
             JobCredentialRequirements::new(JobEnvironmentRequirement::None, secrets, variables)
                 .expect("requirements");
@@ -310,9 +401,51 @@ mod tests {
             ]),
         ] {
             assert_eq!(
-                scan_program(&expression, &mut BTreeSet::new(), &mut BTreeSet::new()),
+                scan_program(
+                    &expression,
+                    &mut BTreeSet::new(),
+                    &mut BTreeSet::new(),
+                    &mut BTreeSet::new(),
+                ),
                 Err(CredentialDiscoveryError::DynamicReference)
             );
         }
+    }
+
+    #[test]
+    fn github_token_spellings_are_closed_builtins() {
+        for (root, property) in [("github", "token"), ("secrets", "github_token")] {
+            let expression = program(vec![
+                ExpressionInstruction::NamedValue {
+                    name: root.to_owned(),
+                },
+                string(property),
+                ExpressionInstruction::Index,
+            ]);
+            let mut secrets = BTreeSet::new();
+            let mut variables = BTreeSet::new();
+            let mut built_in = BTreeSet::new();
+            scan_program(&expression, &mut secrets, &mut variables, &mut built_in)
+                .expect("static builtin");
+            classify_builtin_secrets(&mut secrets, &mut built_in);
+            assert!(secrets.is_empty());
+            assert_eq!(
+                built_in,
+                BTreeSet::from([BuiltInCredentialRequirement::GithubToken])
+            );
+        }
+
+        let mut duplicate_spellings = BTreeSet::from([
+            "GITHUB_TOKEN".to_owned(),
+            "github_token".to_owned(),
+            "EXTERNAL".to_owned(),
+        ]);
+        let mut built_in = BTreeSet::new();
+        classify_builtin_secrets(&mut duplicate_spellings, &mut built_in);
+        assert_eq!(duplicate_spellings, BTreeSet::from(["EXTERNAL".to_owned()]));
+        assert_eq!(
+            built_in,
+            BTreeSet::from([BuiltInCredentialRequirement::GithubToken])
+        );
     }
 }

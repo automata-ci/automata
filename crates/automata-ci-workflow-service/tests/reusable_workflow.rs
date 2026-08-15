@@ -10,10 +10,9 @@ use automata_ci_workflow_github::{
     SourceId, SourceOrigin, SourceProvenance, WorkflowFrontend as _,
 };
 use automata_ci_workflow_service::{
-    ExpandReusableWorkflowRequest, GithubReusableWorkflowCatalog,
-    GithubReusableWorkflowSourceAuthority, RepositoryWorkflowSource, ReusableInputBindingSource,
-    ReusableWorkflowExpander, ReusableWorkflowExpansionError, ReusableWorkflowLimits,
-    ReusableWorkflowPermissions,
+    ExpandReusableWorkflowRequest, GithubReusableWorkflowCatalog, RepositoryWorkflowSource,
+    ReusableInputBindingSource, ReusableWorkflowExpander, ReusableWorkflowExpansionError,
+    ReusableWorkflowLimits, ReusableWorkflowPermissions,
 };
 use bytes::Bytes;
 use uuid::Uuid;
@@ -101,7 +100,6 @@ fn catalog(
     sources: impl IntoIterator<Item = (&'static str, String)>,
 ) -> GithubReusableWorkflowCatalog {
     GithubReusableWorkflowCatalog::compile(
-        GithubReusableWorkflowSourceAuthority::GithubDelivery,
         REPOSITORY,
         REVISION,
         sources
@@ -238,10 +236,6 @@ jobs:
         "    secrets:\n      token: ${{ secrets.ROOT_TOKEN }}\n",
         "    secrets: inherit\n",
     );
-    let analysis = required_catalog
-        .analyze_reachable_calls(&compile_root(&required_inherit))
-        .expect("value-free analysis propagates the inherited name as a requirement");
-    assert_eq!(analysis.required_root_secret_names(), &["TOKEN"]);
     let available_required = BTreeSet::from(["TOKEN".to_owned()]);
     let satisfied = expand_with_secrets(
         &required_inherit,
@@ -264,10 +258,6 @@ jobs:
 #[test]
 fn exact_catalog_expands_typed_least_authority_call_deterministically() {
     let catalog = catalog([(CALLEE_PATH, CALLEE.to_owned())]);
-    let analysis = catalog
-        .analyze_reachable_calls(&compile_root(ROOT))
-        .expect("value-free call analysis validates the same contracts");
-    assert_eq!(analysis.required_root_secret_names(), &["ROOT_TOKEN"]);
     let first = expand(ROOT, &catalog, None).expect("first expansion");
     let replay = expand(ROOT, &catalog, None).expect("exact replay");
     assert_eq!(first, replay);
@@ -360,7 +350,6 @@ fn catalog_requires_a_resolved_lowercase_commit_digest() {
     ] {
         assert_eq!(
             GithubReusableWorkflowCatalog::compile(
-                GithubReusableWorkflowSourceAuthority::GithubDelivery,
                 REPOSITORY,
                 revision,
                 [RepositoryWorkflowSource::new(
@@ -401,12 +390,6 @@ jobs:
 ";
     let exact_catalog = catalog([(CALLEE_PATH, cyclic.to_owned())]);
     assert_eq!(
-        exact_catalog.analyze_reachable_calls(&compile_root(ROOT)),
-        Err(ReusableWorkflowExpansionError::Cycle(
-            CALLEE_PATH.to_owned()
-        ))
-    );
-    assert_eq!(
         expand(ROOT, &exact_catalog, None),
         Err(ReusableWorkflowExpansionError::Cycle(
             CALLEE_PATH.to_owned()
@@ -419,12 +402,6 @@ fn literal_input_type_mismatch_and_missing_secret_are_rejected() {
     let exact_catalog = catalog([(CALLEE_PATH, CALLEE.to_owned())]);
     let wrong_type = ROOT.replace("enabled: true", "enabled: stable");
     assert_eq!(
-        exact_catalog.analyze_reachable_calls(&compile_root(&wrong_type)),
-        Err(ReusableWorkflowExpansionError::InputTypeMismatch(
-            "enabled".to_owned()
-        ))
-    );
-    assert_eq!(
         expand(&wrong_type, &exact_catalog, None),
         Err(ReusableWorkflowExpansionError::InputTypeMismatch(
             "enabled".to_owned()
@@ -432,12 +409,6 @@ fn literal_input_type_mismatch_and_missing_secret_are_rejected() {
     );
 
     let missing_secret = ROOT.replace("    secrets:\n      token: ${{ secrets.ROOT_TOKEN }}\n", "");
-    assert_eq!(
-        exact_catalog.analyze_reachable_calls(&compile_root(&missing_secret)),
-        Err(ReusableWorkflowExpansionError::MissingRequiredSecret(
-            "token".to_owned()
-        ))
-    );
     assert_eq!(
         expand(&missing_secret, &exact_catalog, None),
         Err(ReusableWorkflowExpansionError::MissingRequiredSecret(
@@ -559,7 +530,6 @@ fn catalog_plan_provenance_is_bound_to_one_exact_repository_revision() {
 fn reachable_catalog_ignores_unreferenced_workflows_and_requires_every_edge() {
     let root_plan = compile_root(ROOT);
     let catalog = GithubReusableWorkflowCatalog::compile_reachable(
-        GithubReusableWorkflowSourceAuthority::GithubDelivery,
         REPOSITORY,
         REVISION,
         &root_plan,
@@ -580,7 +550,6 @@ fn reachable_catalog_ignores_unreferenced_workflows_and_requires_every_edge() {
 
     assert_eq!(
         GithubReusableWorkflowCatalog::compile_reachable(
-            GithubReusableWorkflowSourceAuthority::GithubDelivery,
             REPOSITORY,
             REVISION,
             &root_plan,

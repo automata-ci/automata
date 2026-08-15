@@ -15,7 +15,7 @@ Unix-socket or Windows-named-pipe endpoint, and JSON schema 3 reports the
 bounded context name. The private endpoint URI is retained only so the library
 adapter can connect to the same daemon and reverify its identity.
 
-The internal `LocalSnapshot` foundation uses live bytes for staged additions
+The private local-snapshot foundation uses live bytes for staged additions
 and tracked modifications, omits tracked deletions and ignored files, and seals
 each leaf through descriptor- or handle-relative, no-follow ancestor traversal.
 It pins the requested directory before Git runs, resolves Git's reported prefix
@@ -27,26 +27,30 @@ verified before and after the process. Caller-path or `.git` locator links,
 nested-repository confusion, locator retargeting, and `core.worktree`
 redirection therefore cannot select a separate tree.
 Git mode deterministically represents tracked executable files and symlinks,
-including Windows symlink placeholders. Contained Unix symlinks are preserved;
-Windows reparse points and junctions fail closed. Sparse-checkout and
-assume-unchanged index flags are rejected because they can hide live state.
-Ignored-path classification is one bounded NUL-safe batch per scan. Index
-conflicts, submodules, escaping or cyclic links, path-prefix type conflicts,
-namespace aliases, Unicode-normalization or full-case-fold aliases,
-nonportable device names, non-Unicode paths, bounded component-trie or ustar
-exhaustion, special files, and concurrent mutation are rejected.
-`.github/workflows` and `.ci/workflows` are explicit first-class locations; a
-worktree containing both namespaces is ambiguous and fails rather than
-preferring or falling back to either one.
+including symlink placeholders. Contained Unix symlinks are preserved in the
+archive; shared archive policy rejects escaping links, cycles, and aliases
+before analysis. Sparse-checkout and assume-unchanged index flags are rejected
+because they can hide live state. Ignored-path classification is one bounded
+NUL-safe batch per scan. Index conflicts, submodules, path-prefix type
+conflicts, Unicode-normalization or full-case-fold aliases, nonportable device
+names, non-Unicode paths, bounded component-trie or ustar exhaustion, special
+files, and concurrent mutation fail closed. The current source checkpoint is
+available on Unix and fails closed on Windows until exact native mutation
+evidence has been qualified.
 
-`local check` consumes the workflow bytes discovered from that one retained
-archive. It accepts only an explicit local `workflow_dispatch`, recompiles
-reachable repository-local reusable workflows from the same archive, validates
-their typed call contracts and call graph, and reports value-free static secret
-and variable requirements, including exact root secret names propagated through
-mapping and inheritance. Local source and event provenance is distinct from
-GitHub delivery evidence. The command performs no Docker probe, network call,
-admission, scheduling, execution, token lookup, or Check publication.
+`local check` consumes that archive through one high-level analysis boundary.
+Only direct `.github/workflows/*.{yml,yaml}` members are eligible, and an
+optional selector must be the exact canonical member path. It accepts only an
+explicit local `workflow_dispatch`, recompiles reachable same-archive reusable
+workflows, rejects remote or dynamic calls, and validates typed call contracts,
+cycles, propagation, and bounds through the shared traversal. Reports retain
+only discovered source metadata and value-free external secret/variable names
+plus closed built-in requirements. `github.token` and `secrets.GITHUB_TOKEN`
+are reported as the non-promptable `github_token` built-in; this checkpoint
+does not supply it for execution. Local source and event provenance is distinct
+from GitHub delivery evidence. The command is independent of `local doctor`,
+Docker, network access, and GitHub tokens, and performs no admission, scheduling,
+execution, or Check publication.
 
 The installation adapter can inspect or create-and-adopt one immutable external
 identity volume for a named installation. It always post-inspects Docker's
@@ -70,4 +74,5 @@ host installation manifest, mirrored resource inventory, lifecycle state
 machine, or secret value in this crate.
 
 This crate has no command-line parser. The `automata` product maps its public
-CLI into the typed requests exposed here.
+CLI into the high-level local-check request; snapshot and archive authority stay
+private.

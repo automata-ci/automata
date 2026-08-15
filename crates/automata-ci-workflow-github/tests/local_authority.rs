@@ -1,17 +1,19 @@
-use std::sync::Arc;
+use std::io;
 
-use automata_ci_core::{PlanSourceOrigin, Sha256Digest, WorkflowEventProvenance};
+use automata_ci_core::{PlanSourceOrigin, Sha256Digest};
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, GithubWorkflowCompiler, GithubWorkflowFrontend,
-    LocalWorkflowDispatchEvidence, LocalWorkflowDispatchInputs, LocalWorkflowDispatchInputsError,
-    LocalWorkflowSourceEvidence, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
-    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, ParseWorkflowRequest, SourceId, SourceOrigin,
-    SourceProvenance, WorkflowFrontend as _,
+    GithubWorkflowDispatchInputs, GithubWorkflowDispatchInputsError,
+    LocalGithubArchiveCompilationFailureKind, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
+    MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS, RepositoryWorkflowDiscoveryLimits,
+    compile_local_github_archive,
 };
+use flate2::{Compression, GzBuilder};
+use sha2::{Digest as _, Sha256};
+use tar::{Builder, EntryType, Header};
 
-const REPOSITORY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const PATH: &str = ".github/workflows/check.yml";
-const WORKFLOW: &str = r"on:
+const ROOT_PATH: &str = ".github/workflows/root.yml";
+const ROOT: &str = "worktree";
+const DISPATCH: &str = r"on:
   workflow_dispatch:
     inputs:
       enabled:
@@ -23,130 +25,246 @@ jobs:
     steps:
       - run: true
 ";
-
-fn parse(revision: &str, source: &str) -> automata_ci_workflow_github::GithubFrontendReport {
-    GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(
-        SourceProvenance::new(
-            SourceId::new(PATH),
-            SourceOrigin::Repository {
-                repository: Arc::from(REPOSITORY),
-                revision: Arc::from(revision),
-                path: Arc::from(PATH),
-            },
-        ),
-        source,
-    ))
-}
+const SIMPLE_DISPATCH: &[u8] =
+    b"on: workflow_dispatch\njobs:\n  check:\n    runs-on: linux\n    steps:\n      - run: true\n";
 
 #[test]
-fn local_dispatch_is_closed_snapshot_authority_and_values_are_redacted() {
-    let digest = Sha256Digest::from_bytes([7; 32]);
-    let revision = digest.to_string();
-    let parsed = parse(&revision, WORKFLOW);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let inputs = LocalWorkflowDispatchInputs::try_new([("enabled", "true")]).unwrap();
-    assert!(!format!("{inputs:?}").contains("true"));
+fn sealed_archive_derives_local_source_and_event_authority() {
+    let archive = archive(&[Entry::File(ROOT_PATH, DISPATCH.as_bytes())]);
+    let inputs = GithubWorkflowDispatchInputs::try_new([("enabled", true)]).unwrap();
     let report =
-        GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_local_workflow_dispatch(
-            parsed.plan().unwrap(),
-            LocalWorkflowDispatchEvidence::new(LocalWorkflowSourceEvidence::new(digest), inputs),
-        ));
-    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
-    let plan = report.plan().unwrap();
-    assert_eq!(plan.source().provider(), "local");
-    assert_eq!(plan.event().provider(), "local");
-    assert_eq!(plan.event().name(), "workflow_dispatch");
+        compile_local_github_archive(&archive, Some(ROOT_PATH), inputs, limits(), &|| false)
+            .expect("sealed local archive");
+
+    let expected_digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+    assert_eq!(report.snapshot_digest(), expected_digest);
+    assert_eq!(report.selected_path(), ROOT_PATH);
+    assert_eq!(report.root_plan().source().provider(), "local");
+    assert_eq!(report.root_plan().event().provider(), "local");
+    assert_eq!(report.root_plan().event().name(), "workflow_dispatch");
+    assert!(report.root_plan().event().delivery_id().is_none());
+    assert!(report.root_plan().event().commit_sha().is_none());
     let PlanSourceOrigin::Repository {
-        revision: actual, ..
-    } = plan.source().origin()
+        repository,
+        revision,
+        path,
+    } = report.root_plan().source().origin()
     else {
-        panic!("repository provenance");
+        panic!("repository-shaped local provenance")
     };
-    assert_eq!(actual, &revision);
-    assert!(plan.event().delivery_id().is_none());
-    assert!(plan.event().commit_sha().is_none());
+    assert_eq!(repository, "local");
+    assert_eq!(revision, &expected_digest.to_string());
+    assert_eq!(path, ROOT_PATH);
+}
 
-    let mismatched = parse(&Sha256Digest::from_bytes([8; 32]).to_string(), WORKFLOW);
-    let rejected =
-        GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_local_workflow_dispatch(
-            mismatched.plan().unwrap(),
-            LocalWorkflowDispatchEvidence::new(
-                LocalWorkflowSourceEvidence::new(digest),
-                LocalWorkflowDispatchInputs::try_new([("enabled", "true")]).unwrap(),
-            ),
-        ));
-    assert!(!rejected.is_accepted());
-    assert!(
-        rejected
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == "github.compile.local_snapshot_mismatch")
+#[test]
+fn exact_selector_github_namespace_and_explicit_dispatch_fail_closed() {
+    let two = archive(&[
+        Entry::File(ROOT_PATH, DISPATCH.as_bytes()),
+        Entry::File(
+            ".github/workflows/second.yml",
+            b"on: workflow_dispatch\njobs:\n  ok:\n    runs-on: linux\n    steps:\n      - run: true\n",
+        ),
+    ]);
+    assert_eq!(
+        compile(&two, None).unwrap_err().kind(),
+        LocalGithubArchiveCompilationFailureKind::WorkflowSelectionRequired
+    );
+    assert_eq!(
+        compile(&two, Some("root.yml")).unwrap_err().kind(),
+        LocalGithubArchiveCompilationFailureKind::WorkflowNotFound
+    );
+
+    let automata_namespace = archive(&[Entry::File(".ci/workflows/root.yml", DISPATCH.as_bytes())]);
+    assert_eq!(
+        compile(&automata_namespace, None).unwrap_err().kind(),
+        LocalGithubArchiveCompilationFailureKind::Archive
+    );
+
+    let push = archive(&[Entry::File(
+        ROOT_PATH,
+        b"on: push\njobs:\n  check:\n    runs-on: linux\n    steps:\n      - run: true\n",
+    )]);
+    assert_eq!(
+        compile(&push, Some(ROOT_PATH)).unwrap_err().kind(),
+        LocalGithubArchiveCompilationFailureKind::Compilation
     );
 }
 
 #[test]
-fn github_constructor_cannot_accept_local_event_provenance() {
-    let digest = Sha256Digest::from_bytes([9; 32]);
-    let parsed = parse(&digest.to_string(), WORKFLOW);
-    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
-        parsed.plan().unwrap(),
-        WorkflowEventProvenance::new("local", "workflow_dispatch"),
-    ));
-    assert!(!report.is_accepted());
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == "github.compile.event_provider")
+fn reachable_reusable_workflows_must_be_same_archive_local_members() {
+    let local = archive(&[
+        Entry::File(
+            ROOT_PATH,
+            b"on: workflow_dispatch\njobs:\n  call:\n    uses: ./.github/workflows/callee.yml\n",
+        ),
+        Entry::File(
+            ".github/workflows/callee.yml",
+            b"on: workflow_call\njobs:\n  check:\n    runs-on: linux\n    steps:\n      - run: true\n",
+        ),
+    ]);
+    let compiled = compile(&local, Some(ROOT_PATH)).expect("same-archive reusable call");
+    assert_eq!(compiled.reusable_workflows().len(), 1);
+    let callee = &compiled.reusable_workflows()[0];
+    assert_eq!(callee.path(), ".github/workflows/callee.yml");
+    assert_eq!(callee.plan().source().provider(), "local");
+    assert_eq!(callee.plan().event().provider(), "local");
+    assert_eq!(callee.plan().event().name(), "workflow_call");
+
+    for reference in [
+        "owner/repository/.github/workflows/callee.yml@main",
+        "./.github/workflows/missing.yml",
+    ] {
+        let body = format!("on: workflow_dispatch\njobs:\n  call:\n    uses: {reference}\n");
+        let rejected = archive(&[Entry::File(ROOT_PATH, body.as_bytes())]);
+        assert_eq!(
+            compile(&rejected, Some(ROOT_PATH)).unwrap_err().kind(),
+            LocalGithubArchiveCompilationFailureKind::ReusableWorkflow
+        );
+    }
+}
+
+#[test]
+fn local_archive_symlinks_are_contained_and_cannot_alias_workflow_authority() {
+    let contained = archive(&[
+        Entry::File(ROOT_PATH, SIMPLE_DISPATCH),
+        Entry::File("target", b"target"),
+        Entry::Symlink("safe/link", "../target"),
+    ]);
+    compile(&contained, Some(ROOT_PATH)).expect("contained unrelated symlink");
+
+    let alias = archive(&[
+        Entry::File(ROOT_PATH, SIMPLE_DISPATCH),
+        Entry::Symlink("alternate", ".github"),
+    ]);
+    assert_eq!(
+        compile(&alias, Some(ROOT_PATH)).unwrap_err().kind(),
+        LocalGithubArchiveCompilationFailureKind::Archive
+    );
+
+    let cycle = archive(&[
+        Entry::File(ROOT_PATH, SIMPLE_DISPATCH),
+        Entry::Symlink("one", "two"),
+        Entry::Symlink("two", "one"),
+    ]);
+    assert_eq!(
+        compile(&cycle, Some(ROOT_PATH)).unwrap_err().kind(),
+        LocalGithubArchiveCompilationFailureKind::Archive
     );
 }
 
 #[test]
-fn local_reusable_compilation_retains_local_source_and_event_authority() {
-    let digest = Sha256Digest::from_bytes([10; 32]);
-    let source = r"on:
-  workflow_call: {}
-jobs:
-  check:
-    runs-on: linux
-    steps:
-      - run: true
-";
-    let parsed = parse(&digest.to_string(), source);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let report =
-        GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_local_workflow_call(
-            parsed.plan().unwrap(),
-            LocalWorkflowSourceEvidence::new(digest),
-        ));
-    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
-    let plan = report.plan().unwrap();
-    assert_eq!(plan.source().provider(), "local");
-    assert_eq!(plan.event().provider(), "local");
-    assert_eq!(plan.event().name(), "workflow_call");
-    assert!(plan.event().delivery_id().is_none());
-    assert!(plan.event().commit_sha().is_none());
-}
-
-#[test]
-fn local_dispatch_inputs_are_bounded_and_never_debug_values() {
+fn canonical_inputs_are_bounded_redacted_and_cancellable() {
     let too_many = (0..=MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS)
         .map(|index| (format!("input_{index}"), String::new()));
     assert_eq!(
-        LocalWorkflowDispatchInputs::try_new(too_many),
-        Err(LocalWorkflowDispatchInputsError::TooManyInputs)
+        GithubWorkflowDispatchInputs::try_new(too_many),
+        Err(GithubWorkflowDispatchInputsError::TooManyInputs)
     );
     assert_eq!(
-        LocalWorkflowDispatchInputs::try_new([(
+        GithubWorkflowDispatchInputs::try_new([(
             "input",
             "x".repeat(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS),
         )]),
-        Err(LocalWorkflowDispatchInputsError::PayloadTooLarge)
+        Err(GithubWorkflowDispatchInputsError::PayloadTooLarge)
     );
     assert_eq!(
-        LocalWorkflowDispatchInputs::try_new([("input", "line\nbreak")]),
-        Err(LocalWorkflowDispatchInputsError::InvalidInputValue)
+        GithubWorkflowDispatchInputs::try_new([("input", "line\nbreak".to_owned())]),
+        Err(GithubWorkflowDispatchInputsError::InvalidInputValue)
     );
-    let redacted = LocalWorkflowDispatchInputs::try_new([("input", "secret-marker")]).unwrap();
-    assert!(!format!("{redacted:?}").contains("secret-marker"));
+    let redacted =
+        GithubWorkflowDispatchInputs::try_new([("input", "private-value".to_owned())]).unwrap();
+    assert!(!format!("{redacted:?}").contains("private-value"));
+
+    let archive = archive(&[Entry::File(ROOT_PATH, DISPATCH.as_bytes())]);
+    let cancelled = compile_local_github_archive(
+        &archive,
+        Some(ROOT_PATH),
+        GithubWorkflowDispatchInputs::try_new([("enabled", true)]).unwrap(),
+        limits(),
+        &|| true,
+    )
+    .unwrap_err();
+    assert_eq!(
+        cancelled.kind(),
+        LocalGithubArchiveCompilationFailureKind::Cancelled
+    );
+}
+
+fn compile(
+    bytes: &[u8],
+    selector: Option<&str>,
+) -> Result<
+    automata_ci_workflow_github::LocalGithubArchiveCompilation,
+    automata_ci_workflow_github::LocalGithubArchiveCompilationFailure,
+> {
+    compile_local_github_archive(
+        bytes,
+        selector,
+        GithubWorkflowDispatchInputs::try_new(Vec::<(String, String)>::new()).unwrap(),
+        limits(),
+        &|| false,
+    )
+}
+
+fn limits() -> RepositoryWorkflowDiscoveryLimits {
+    RepositoryWorkflowDiscoveryLimits::new(
+        1024 * 1024,
+        2 * 1024 * 1024,
+        100,
+        1024 * 1024,
+        4_096,
+        16,
+        64 * 1024,
+    )
+    .unwrap()
+}
+
+enum Entry<'a> {
+    File(&'a str, &'a [u8]),
+    Symlink(&'a str, &'a str),
+}
+
+fn archive(entries: &[Entry<'_>]) -> Vec<u8> {
+    let encoder = GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), Compression::fast());
+    let mut builder = Builder::new(encoder);
+    append_directory(&mut builder, ROOT).unwrap();
+    for entry in entries {
+        match entry {
+            Entry::File(path, bytes) => {
+                let mut header = Header::new_ustar();
+                header.set_entry_type(EntryType::Regular);
+                header.set_mode(0o644);
+                header.set_size(u64::try_from(bytes.len()).unwrap());
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, format!("{ROOT}/{path}"), *bytes)
+                    .unwrap();
+            }
+            Entry::Symlink(path, target) => {
+                let mut header = Header::new_ustar();
+                header.set_entry_type(EntryType::Symlink);
+                header.set_mode(0o777);
+                header.set_size(0);
+                header.set_link_name(target).unwrap();
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, format!("{ROOT}/{path}"), io::empty())
+                    .unwrap();
+            }
+        }
+    }
+    let encoder = builder.into_inner().unwrap();
+    encoder.finish().unwrap()
+}
+
+fn append_directory<W: io::Write>(builder: &mut Builder<W>, path: &str) -> io::Result<()> {
+    let mut header = Header::new_ustar();
+    header.set_entry_type(EntryType::Directory);
+    header.set_mode(0o755);
+    header.set_size(0);
+    header.set_cksum();
+    builder.append_data(&mut header, path, io::empty())
 }
