@@ -10,7 +10,9 @@ use automata_ci_core::{
     ValueTemplateSegment, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
-use automata_ci_github_permissions::GITHUB_WORKFLOW_PERMISSIONS;
+use automata_ci_github_permissions::{
+    GITHUB_WORKFLOW_PERMISSIONS, GithubDefaultWorkflowPermission,
+};
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::WorkflowPermissionPolicy;
 use automata_ci_workflow_github::{
@@ -47,11 +49,8 @@ fn resource_policy() -> JobResourcePolicy {
 }
 
 fn permission_policy() -> WorkflowPermissionPolicy {
-    WorkflowPermissionPolicy::from_provider_default(BTreeMap::from([(
-        "contents".to_owned(),
-        PermissionLevel::Read,
-    )]))
-    .expect("permission policy")
+    WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
+        .expect("permission policy")
 }
 
 const SOURCE: &str = r"name: Synthetic CI
@@ -871,10 +870,10 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-        &JobPermissionRequest::mapping([JobPermissionGrant::new(
-            "contents",
-            PermissionLevel::Read,
-        )]),
+        &JobPermissionRequest::mapping([
+            JobPermissionGrant::new("contents", PermissionLevel::Read),
+            JobPermissionGrant::new("packages", PermissionLevel::Read),
+        ]),
     );
     assert_eq!(default.job().timeout_seconds(), Some(360 * 60));
 

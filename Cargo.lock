@@ -488,6 +488,7 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
+ "automata-ci-github-permissions",
  "automata-ci-scm",
  "axum",
  "bytes",

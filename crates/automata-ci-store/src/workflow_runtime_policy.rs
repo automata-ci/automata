@@ -13,7 +13,9 @@ use automata_ci_core::{
     MAX_JOB_PERMISSION_NAME_BYTES, OperatingSystem, PermissionLevel, RunId, RunnerLabel,
     Sha256Digest, UnixMillis,
 };
-use automata_ci_github_permissions::{GITHUB_WORKFLOW_PERMISSIONS, github_workflow_permission};
+use automata_ci_github_permissions::{
+    GITHUB_WORKFLOW_PERMISSIONS, GithubDefaultWorkflowPermission, github_workflow_permission,
+};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{MapAccess, Visitor},
@@ -77,6 +79,7 @@ impl WorkflowPermissionPolicy {
         validate_permission_map(&write_all)?;
         if read_all != catalog_read_all()
             || write_all != catalog_write_all()
+            || !matches_provider_default(&provider_default)
             || provider_default
                 .iter()
                 .any(|(name, level)| !catalog_allows(name, *level))
@@ -101,6 +104,29 @@ impl WorkflowPermissionPolicy {
         provider_default: BTreeMap<String, PermissionLevel>,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         Self::new(provider_default, catalog_read_all(), catalog_write_all())
+    }
+
+    /// Constructs a policy from one effective default observed through GitHub REST.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the closed catalog can no longer represent
+    /// GitHub's restricted or permissive default.
+    pub fn from_github_default(
+        provider_default: GithubDefaultWorkflowPermission,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
+        Self::from_provider_default(provider_default_permissions(provider_default))
+    }
+
+    /// Returns which closed GitHub default this policy represents.
+    #[must_use]
+    pub fn github_default(&self) -> GithubDefaultWorkflowPermission {
+        if self.provider_default == restricted_provider_default() {
+            GithubDefaultWorkflowPermission::Read
+        } else {
+            debug_assert_eq!(self.provider_default, catalog_write_all());
+            GithubDefaultWorkflowPermission::Write
+        }
     }
 
     /// Resolves one source request to a complete canonical permission map.
@@ -795,6 +821,26 @@ fn catalog_write_all() -> BTreeMap<String, PermissionLevel> {
         .collect()
 }
 
+fn restricted_provider_default() -> BTreeMap<String, PermissionLevel> {
+    BTreeMap::from([
+        ("contents".to_owned(), PermissionLevel::Read),
+        ("packages".to_owned(), PermissionLevel::Read),
+    ])
+}
+
+fn provider_default_permissions(
+    provider_default: GithubDefaultWorkflowPermission,
+) -> BTreeMap<String, PermissionLevel> {
+    match provider_default {
+        GithubDefaultWorkflowPermission::Read => restricted_provider_default(),
+        GithubDefaultWorkflowPermission::Write => catalog_write_all(),
+    }
+}
+
+fn matches_provider_default(provider_default: &BTreeMap<String, PermissionLevel>) -> bool {
+    *provider_default == restricted_provider_default() || *provider_default == catalog_write_all()
+}
+
 fn catalog_allows(name: &str, level: PermissionLevel) -> bool {
     github_workflow_permission(name).is_some_and(|permission| match level {
         PermissionLevel::Read => permission.allows_read(),
@@ -1201,7 +1247,7 @@ mod tests {
         "selector":"Ubuntu-24.04"
       }],
       "permissions":{
-        "provider_default":{"contents":"read"},
+        "provider_default":{"contents":"read","packages":"read"},
         "read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},
         "write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}
       },
@@ -1215,7 +1261,7 @@ mod tests {
       },
       "schema":1
     }"#;
-    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
+    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 
     #[test]
     fn resource_policy_is_canonical_pinned_evidence() {
@@ -1304,11 +1350,11 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "77998494a655c8905d4378272c2376c35e6e5361d73a798d7841aa5af9854e00"
+            "b7fabdda7258224aae1ed1fd4f015b947888ba1a0dc2f13feae11151a6ffebc2"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "c8e2a58f8b6281d8201ca232634acf7d18b6a5d7e37a34949135d361c4e0451d"
+            "6b7d4868b6d58ae27ebfa9606419209faa17eba81542d85929008dcf3a446814"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
@@ -1393,8 +1439,8 @@ mod tests {
             1,
         );
         let duplicate_permission = canonical.replacen(
-            r#""provider_default":{"contents":"read"}"#,
-            r#""provider_default":{"contents":"read","contents":"read"}"#,
+            r#""provider_default":{"contents":"read","packages":"read"}"#,
+            r#""provider_default":{"contents":"read","contents":"read","packages":"read"}"#,
             1,
         );
         for duplicate in [
@@ -1416,10 +1462,10 @@ mod tests {
         let valid = permission_policy();
         assert_eq!(
             valid.resolve(JobPermissionRequest::ProviderDefault),
-            JobPermissionRequest::mapping([JobPermissionGrant::new(
-                "contents",
-                PermissionLevel::Read,
-            )])
+            JobPermissionRequest::mapping([
+                JobPermissionGrant::new("contents", PermissionLevel::Read),
+                JobPermissionGrant::new("packages", PermissionLevel::Read),
+            ])
         );
         for invalid in [
             WorkflowPermissionPolicy::new(
@@ -1445,6 +1491,47 @@ mod tests {
         ] {
             assert_eq!(
                 invalid,
+                Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy)
+            );
+        }
+    }
+
+    #[test]
+    fn github_provider_defaults_are_closed_and_round_trip() {
+        let restricted =
+            WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
+                .expect("restricted GitHub default");
+        assert_eq!(
+            restricted.provider_default(),
+            &BTreeMap::from([
+                ("contents".to_owned(), PermissionLevel::Read),
+                ("packages".to_owned(), PermissionLevel::Read),
+            ])
+        );
+        assert_eq!(
+            restricted.github_default(),
+            GithubDefaultWorkflowPermission::Read
+        );
+
+        let permissive =
+            WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Write)
+                .expect("permissive GitHub default");
+        assert_eq!(permissive.provider_default(), permissive.write_all());
+        assert_eq!(
+            permissive.github_default(),
+            GithubDefaultWorkflowPermission::Write
+        );
+
+        for arbitrary_subset in [
+            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
+            BTreeMap::from([
+                ("contents".to_owned(), PermissionLevel::Read),
+                ("issues".to_owned(), PermissionLevel::Read),
+                ("packages".to_owned(), PermissionLevel::Read),
+            ]),
+        ] {
+            assert_eq!(
+                WorkflowPermissionPolicy::from_provider_default(arbitrary_subset),
                 Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy)
             );
         }
@@ -1571,11 +1658,8 @@ mod tests {
     }
 
     fn permission_policy() -> WorkflowPermissionPolicy {
-        WorkflowPermissionPolicy::from_provider_default(BTreeMap::from([(
-            "contents".to_owned(),
-            PermissionLevel::Read,
-        )]))
-        .expect("permission policy")
+        WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
+            .expect("permission policy")
     }
 
     fn resource_policy() -> JobResourcePolicy {

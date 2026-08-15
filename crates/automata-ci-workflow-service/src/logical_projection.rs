@@ -1228,10 +1228,9 @@ mod permission_ceiling_tests {
 
     #[test]
     fn repository_policy_resolves_all_permission_shorthands_to_exact_mappings() {
-        let policy = WorkflowPermissionPolicy::from_provider_default(BTreeMap::from([(
-            "contents".to_owned(),
-            PermissionLevel::Read,
-        )]))
+        let policy = WorkflowPermissionPolicy::from_github_default(
+            automata_ci_github_permissions::GithubDefaultWorkflowPermission::Read,
+        )
         .expect("permission policy");
         assert_eq!(
             resolved_permission_request(None, &policy, None).expect("provider default"),

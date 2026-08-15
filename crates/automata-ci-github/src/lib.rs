@@ -15,6 +15,7 @@ mod repository_path;
 mod response;
 mod webhook;
 mod webhook_event;
+mod workflow_permissions;
 
 pub use changed_files::{
     GithubCompletePullRequestDiff, GithubCompletePushDiff, GithubPullRequestDiffAuthority,
@@ -65,4 +66,8 @@ pub use webhook_event::{
     GithubWebhookRepository, VerifiedGithubCheckRun, VerifiedGithubCheckSuite,
     VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubRepositoryDispatch,
     VerifiedGithubWebhook,
+};
+pub use workflow_permissions::{
+    GithubDefaultWorkflowPermission, GithubWorkflowPermissionDefaults,
+    GithubWorkflowPermissionDefaultsRequest,
 };

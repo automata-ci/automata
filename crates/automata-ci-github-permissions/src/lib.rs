@@ -13,6 +13,27 @@ pub const GITHUB_WORKFLOW_PERMISSION_CATALOG_REVISION: u64 = 1;
 /// Official source reviewed for the current catalog revision.
 pub const GITHUB_WORKFLOW_PERMISSION_CATALOG_SOURCE: &str = "https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions";
 
+/// Effective repository default returned by GitHub's workflow-permissions API.
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GithubDefaultWorkflowPermission {
+    /// Restricted default: `contents: read` and `packages: read` only.
+    Read,
+    /// Permissive default: read/write for the catalog's writable permissions.
+    Write,
+}
+
+impl GithubDefaultWorkflowPermission {
+    /// Returns GitHub's durable REST spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+        }
+    }
+}
+
 /// One permission name and the non-denied levels accepted by workflow syntax.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
