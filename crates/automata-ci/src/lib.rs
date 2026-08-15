@@ -12,7 +12,9 @@ pub mod app;
 /// Immutable executable version and source-revision metadata.
 pub mod build_info;
 pub mod cli;
+mod internal;
 mod local;
+mod object_store;
 pub mod preview;
 pub mod server;
 /// Cooperative process-shutdown coordination.
@@ -59,10 +61,11 @@ async fn execute(cli: Cli) -> Result<()> {
         Command::Server(args) => Box::pin(server::serve(args)).await,
         Command::Preview(args) => preview::serve(args).await,
         Command::Local(args) => Box::pin(local::execute(args)).await,
+        Command::Internal(args) => Box::pin(internal::execute(args)).await,
         command => {
-            let operator = command
-                .operator()
-                .expect("local and service commands are handled before operator dispatch");
+            let operator = command.operator().expect(
+                "local, internal, and service commands are handled before operator dispatch",
+            );
             cli::execute_control_plane_command(&operator.server_url, operator.output, command).await
         }
     }

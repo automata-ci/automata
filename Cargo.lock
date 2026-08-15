@@ -247,6 +247,7 @@ dependencies = [
  "automata-ci-ui-renderer",
  "automata-ci-workflow-github",
  "automata-ci-workflow-service",
+ "aws-sdk-s3",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -377,9 +378,14 @@ dependencies = [
  "aws-smithy-http-client",
  "base64 0.23.1",
  "bytes",
+ "pem-rfc7468",
+ "rcgen",
+ "rustls",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "url",
+ "x509-parser",
  "zeroize",
 ]
 

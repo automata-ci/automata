@@ -4,7 +4,7 @@ use automata_ci_blob::{
     BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType, PutBlobOutcome,
 };
 use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
+    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials, ensure_bucket,
 };
 use bytes::Bytes;
 use url::Url;
@@ -32,8 +32,11 @@ async fn rustfs_conditional_put_and_verified_read_contract() {
         .expect("test S3 KMS key identity"),
     );
     let client = config
-        .client(StaticS3Credentials::new(access_key, secret_key, None).expect("test credentials"));
-    ensure_bucket(&client, &bucket).await;
+        .client(StaticS3Credentials::new(access_key, secret_key, None).expect("test credentials"))
+        .expect("test S3 SDK client");
+    ensure_bucket(&client, &config)
+        .await
+        .expect("test bucket must be ready");
     let store = S3BlobStore::new(client, &config);
     let payload = BlobPayload::from_bytes(
         BlobKey::new("stable-object").expect("key"),
@@ -72,28 +75,4 @@ async fn rustfs_conditional_put_and_verified_read_contract() {
         .await
         .expect_err("immutable overwrite");
     assert_eq!(error.kind(), BlobStoreErrorKind::Conflict);
-}
-
-async fn ensure_bucket(client: &aws_sdk_s3::Client, bucket: &str) {
-    if client.head_bucket().bucket(bucket).send().await.is_ok() {
-        return;
-    }
-
-    if let Err(error) = client.create_bucket().bucket(bucket).send().await {
-        let status = error
-            .raw_response()
-            .map(|response| response.status().as_u16());
-        assert_eq!(
-            status,
-            Some(409),
-            "test bucket creation must succeed or report an existing bucket"
-        );
-    }
-
-    client
-        .head_bucket()
-        .bucket(bucket)
-        .send()
-        .await
-        .expect("test bucket must be accessible after initialization");
 }

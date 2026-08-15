@@ -215,7 +215,10 @@ impl S3Fixture {
         .expect("fixture S3 config");
         let credentials = StaticS3Credentials::new("test-access", "test-secret", None)
             .expect("fixture credentials");
-        S3BlobStore::new(config.client(credentials), &config)
+        S3BlobStore::new(
+            config.client(credentials).expect("fixture S3 SDK client"),
+            &config,
+        )
     }
 
     fn request_count(&self) -> usize {

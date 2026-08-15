@@ -5,7 +5,7 @@ use automata_ci_action_github::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
 use automata_ci_blob::ImmutableBlobStore;
-use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
+use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, S3TlsTrust, StaticS3Credentials};
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
 use automata_ci_job_executor_github::{
@@ -1124,6 +1124,7 @@ fn build_object_store(
             object_store.bucket(),
             object_store.prefix().map(str::to_owned),
             object_store.force_path_style(),
+            S3TlsTrust::web_pki(),
             object_store.operation_timeout(),
         )
     }?;
@@ -1132,7 +1133,7 @@ fn build_object_store(
         object_store.secret_access_key(),
         object_store.session_token(),
     )?;
-    let client = store_config.client(credentials);
+    let client = store_config.client(credentials)?;
     Ok(Arc::new(S3BlobStore::new(client, &store_config)))
 }
 

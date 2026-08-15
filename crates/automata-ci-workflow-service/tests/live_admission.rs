@@ -46,7 +46,7 @@ async fn authenticated_admission_publishes_exact_evidence_to_rustfs_before_commi
         required_environment("AUTOMATA_TEST_S3_ACCESS_KEY"),
         required_environment("AUTOMATA_TEST_S3_SECRET_KEY"),
         None,
-    )?);
+    )?)?;
     let blobs = Arc::new(S3BlobStore::new(client, &config));
     let repository = Arc::new(RecordingRepository::default());
     let service = WorkflowAdmissionService::with_system_ports(

@@ -59,6 +59,7 @@ use crate::{app::http, build_info::BuildInfo, cli::ServerArgs, shutdown};
 
 use composition::ProductionComponents;
 pub use composition::ServerCompositionError;
+pub(crate) use config::S3ConnectionConfig;
 pub use config::{
     AuthEncryptionConfig, BootstrapConfig, ControlPlaneEncryptionConfig, HumanAuthConfig,
     ManagementConfig, SecretEncryptionConfig, SecretEncryptionLoadError, SecretLoadError,

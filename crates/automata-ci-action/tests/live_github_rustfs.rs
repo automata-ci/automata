@@ -41,7 +41,10 @@ async fn resolves_pinned_checkout_from_github_into_rustfs() {
         None,
     )
     .expect("test S3 credentials");
-    let store = S3BlobStore::new(config.client(credentials), &config);
+    let store = S3BlobStore::new(
+        config.client(credentials).expect("test S3 SDK client"),
+        &config,
+    );
     let github = GithubHttpEndpoint::github_dot_com("automata-live-test/0.1.0").unwrap();
     let repository = RepositoryId::new("actions/checkout").unwrap();
     let revision = RevisionSpec::new(CHECKOUT_COMMIT).unwrap();

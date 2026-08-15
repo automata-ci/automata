@@ -33,6 +33,9 @@ pub enum Command {
     Runner(RunnerArgs),
     /// Inspect control-plane status.
     Admin(AdminArgs),
+    /// Run image-internal service initialization operations.
+    #[command(hide = true)]
+    Internal(InternalArgs),
 }
 
 impl Command {
@@ -46,9 +49,47 @@ impl Command {
             Self::Rerun(args) => Some(&args.operator),
             Self::Runner(args) => Some(&args.operator),
             Self::Admin(args) => Some(&args.operator),
-            Self::Server(_) | Self::Preview(_) | Self::Local(_) => None,
+            Self::Server(_) | Self::Preview(_) | Self::Local(_) | Self::Internal(_) => None,
         }
     }
+}
+
+#[derive(Debug, Args)]
+/// Image-internal service initialization namespace.
+pub struct InternalArgs {
+    /// Internal service boundary to initialize.
+    #[command(subcommand)]
+    pub command: InternalCommand,
+}
+
+#[derive(Debug, Subcommand)]
+/// Closed image-internal service initialization boundaries.
+pub enum InternalCommand {
+    /// Initialize the configured object-store boundary.
+    ObjectStore(InternalObjectStoreArgs),
+}
+
+#[derive(Debug, Args)]
+/// Image-internal object-store initialization operations.
+pub struct InternalObjectStoreArgs {
+    /// Exact object-store initialization operation.
+    #[command(subcommand)]
+    pub command: InternalObjectStoreCommand,
+}
+
+#[derive(Debug, Subcommand)]
+/// Current object-store initialization operations.
+pub enum InternalObjectStoreCommand {
+    /// Ensure the exact configured bucket exists and is accessible.
+    EnsureBucket(InternalEnsureBucketArgs),
+}
+
+#[derive(Debug, Args)]
+/// Exact bucket initialization inputs.
+pub struct InternalEnsureBucketArgs {
+    /// Production S3 connection, trust, deadline, and credential-source inputs.
+    #[command(flatten)]
+    pub s3: S3ConnectionArgs,
 }
 
 #[derive(Debug, Args)]
@@ -242,6 +283,92 @@ pub enum DatabaseTransport {
     VerifyFull,
     /// Disable TLS only for a Unix socket or literal loopback address.
     LoopbackPlaintext,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+/// Exact HTTPS trust policy for the S3 endpoint.
+pub enum S3TlsTrustMode {
+    /// Authenticate through the platform Web PKI root store.
+    #[default]
+    WebPki,
+    /// Authenticate through exactly one deployment-provided private CA.
+    PrivateCa,
+}
+
+#[derive(Debug, Args)]
+/// Shared S3 endpoint, trust, deadline, and credential-source inputs.
+pub struct S3ConnectionArgs {
+    /// Credential-free S3-compatible endpoint origin.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_ENDPOINT",
+        default_value = "https://s3.amazonaws.com/"
+    )]
+    pub s3_endpoint: String,
+
+    /// S3 signing region.
+    #[arg(long, env = "AUTOMATA_S3_REGION", default_value = "us-east-1")]
+    pub s3_region: String,
+
+    /// Exact S3 bucket owned by this Automata installation.
+    #[arg(long, env = "AUTOMATA_S3_BUCKET", default_value = "automata")]
+    pub s3_bucket: String,
+
+    /// Use path-style bucket addressing for the S3 adapter.
+    #[arg(long, env = "AUTOMATA_S3_FORCE_PATH_STYLE")]
+    pub s3_force_path_style: bool,
+
+    /// Exact HTTPS server trust policy.
+    #[arg(long, env = "AUTOMATA_S3_TLS_TRUST", value_enum, default_value_t)]
+    pub s3_tls_trust: S3TlsTrustMode,
+
+    /// Exact private-CA PEM reference, required only with `private-ca` trust.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_PRIVATE_CA_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub s3_private_ca_source: Option<SecretSource>,
+
+    /// Permit plaintext only for a literal-loopback HTTP endpoint.
+    #[arg(long, env = "AUTOMATA_S3_ALLOW_LOOPBACK_HTTP")]
+    pub s3_allow_loopback_http: bool,
+
+    /// Total wall-clock deadline for one object-store operation.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_OPERATION_TIMEOUT_SECONDS",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=300)
+    )]
+    pub s3_operation_timeout_seconds: u64,
+
+    /// S3 access-key reference; secret values are never accepted in argv.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_ACCESS_KEY_SOURCE",
+        default_value = "env:AUTOMATA_S3_ACCESS_KEY",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub s3_access_key_source: SecretSource,
+
+    /// S3 secret-key reference; secret values are never accepted in argv.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_SECRET_KEY_SOURCE",
+        default_value = "env:AUTOMATA_S3_SECRET_KEY",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub s3_secret_key_source: SecretSource,
+
+    /// Optional S3 session-token reference.
+    #[arg(
+        long,
+        env = "AUTOMATA_S3_SESSION_TOKEN_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub s3_session_token_source: Option<SecretSource>,
 }
 
 #[derive(Debug, Args)]
@@ -537,29 +664,13 @@ pub struct ServerArgs {
     #[arg(long, env = "AUTOMATA_DATABASE_TRANSPORT", value_enum, default_value_t)]
     pub database_transport: DatabaseTransport,
 
-    /// Credential-free S3-compatible endpoint origin.
-    #[arg(
-        long,
-        env = "AUTOMATA_S3_ENDPOINT",
-        default_value = "https://s3.amazonaws.com/"
-    )]
-    pub s3_endpoint: String,
-
-    /// S3 signing region.
-    #[arg(long, env = "AUTOMATA_S3_REGION", default_value = "us-east-1")]
-    pub s3_region: String,
-
-    /// S3 bucket containing immutable Automata objects.
-    #[arg(long, env = "AUTOMATA_S3_BUCKET", default_value = "automata")]
-    pub s3_bucket: String,
+    /// S3 endpoint, trust, deadline, and credential-source inputs.
+    #[command(flatten)]
+    pub s3: S3ConnectionArgs,
 
     /// Optional key prefix reserved for this Automata installation.
     #[arg(long, env = "AUTOMATA_S3_PREFIX")]
     pub s3_prefix: Option<String>,
-
-    /// Use path-style bucket addressing for the S3 adapter.
-    #[arg(long, env = "AUTOMATA_S3_FORCE_PATH_STYLE")]
-    pub s3_force_path_style: bool,
 
     /// Exact KMS key identity for S3 server-side encryption.
     ///
@@ -568,45 +679,6 @@ pub struct ServerArgs {
     /// key identity as well as the expected encryption algorithm.
     #[arg(long, env = "AUTOMATA_S3_KMS_KEY_ID", value_name = "KEY_ID")]
     pub s3_kms_key_id: Option<String>,
-
-    /// Permit plain HTTP only when the S3 endpoint is a literal loopback host.
-    #[arg(long, env = "AUTOMATA_S3_ALLOW_LOOPBACK_HTTP")]
-    pub s3_allow_loopback_http: bool,
-
-    /// All-attempt timeout for one immutable object-store operation.
-    #[arg(
-        long,
-        env = "AUTOMATA_S3_OPERATION_TIMEOUT_SECONDS",
-        default_value_t = 30,
-        value_parser = clap::value_parser!(u64).range(1..=300)
-    )]
-    pub s3_operation_timeout_seconds: u64,
-
-    /// S3 access-key reference; secret values are never accepted in argv.
-    #[arg(
-        long,
-        env = "AUTOMATA_S3_ACCESS_KEY_SOURCE",
-        default_value = "env:AUTOMATA_S3_ACCESS_KEY",
-        value_name = "env:NAME|file:PATH"
-    )]
-    pub s3_access_key_source: SecretSource,
-
-    /// S3 secret-key reference; secret values are never accepted in argv.
-    #[arg(
-        long,
-        env = "AUTOMATA_S3_SECRET_KEY_SOURCE",
-        default_value = "env:AUTOMATA_S3_SECRET_KEY",
-        value_name = "env:NAME|file:PATH"
-    )]
-    pub s3_secret_key_source: SecretSource,
-
-    /// Optional S3 session-token reference.
-    #[arg(
-        long,
-        env = "AUTOMATA_S3_SESSION_TOKEN_SOURCE",
-        value_name = "env:NAME|file:PATH"
-    )]
-    pub s3_session_token_source: Option<SecretSource>,
 
     /// PEM certificate for the CA that authenticates runner clients.
     #[arg(

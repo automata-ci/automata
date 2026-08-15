@@ -17,7 +17,9 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use automata_ci_auth::{github::GithubClientId, installation::InstallationTenant};
-use automata_ci_blob_s3::S3AtRestEncryption;
+use automata_ci_blob_s3::{
+    MAX_S3_PRIVATE_CA_PEM_BYTES, S3AtRestEncryption, S3BlobStoreConfig, S3TlsTrust,
+};
 use automata_ci_control::maintenance::{
     LeaseFailureLimit, MaintenanceBatchSize, StaleSessionTimeoutMillis,
 };
@@ -30,7 +32,7 @@ use automata_ci_provisioning::{
 use automata_ci_results_github::ResultsPublicEndpoint;
 use automata_ci_store_postgres::PostgresTransportSecurity;
 
-use crate::cli::{DatabaseTransport, ServerArgs};
+use crate::cli::{DatabaseTransport, S3ConnectionArgs, S3TlsTrustMode, ServerArgs};
 
 use super::{github_oidc::GithubOidcConfig, github_provider_config::GithubProviderConfig};
 
@@ -295,6 +297,9 @@ pub enum SecretLoadError {
         /// Required byte length.
         expected: usize,
     },
+    /// A bounded certificate source was not the required exact X.509 document.
+    #[error("referenced certificate is invalid")]
+    InvalidCertificate,
 }
 
 /// Validated product configuration for one control-plane replica.
@@ -317,17 +322,9 @@ pub struct ServerConfig {
     pub(crate) database_url: SecretSource,
     pub(crate) database_max_connections: u32,
     pub(crate) database_transport_security: PostgresTransportSecurity,
-    pub(crate) s3_endpoint: Url,
-    pub(crate) s3_region: String,
-    pub(crate) s3_bucket: String,
+    pub(crate) s3: S3ConnectionConfig,
     pub(crate) s3_prefix: Option<String>,
-    pub(crate) s3_force_path_style: bool,
     pub(crate) s3_at_rest_encryption: S3AtRestEncryption,
-    pub(crate) s3_allow_loopback_http: bool,
-    pub(crate) s3_operation_timeout: Duration,
-    pub(crate) s3_access_key: SecretSource,
-    pub(crate) s3_secret_key: SecretSource,
-    pub(crate) s3_session_token: Option<SecretSource>,
     pub(crate) runner_client_ca_certificate: SecretSource,
     pub(crate) runner_client_ca_private_key: SecretSource,
     pub(crate) runner_server_ca: SecretSource,
@@ -340,6 +337,123 @@ pub struct ServerConfig {
     pub(crate) maximum_lease_failures: LeaseFailureLimit,
     pub(crate) stale_runner_session_timeout: StaleSessionTimeoutMillis,
     pub(crate) fallback_tenant_id: String,
+}
+
+/// Shared validated S3 connection, trust, deadline, and credential sources.
+#[derive(Clone, Debug)]
+pub(crate) struct S3ConnectionConfig {
+    pub(crate) endpoint: Url,
+    pub(crate) region: String,
+    pub(crate) bucket: String,
+    pub(crate) force_path_style: bool,
+    pub(crate) tls_trust: S3TlsTrustMode,
+    private_ca: Option<SecretSource>,
+    pub(crate) allow_loopback_http: bool,
+    pub(crate) operation_timeout: Duration,
+    access_key: SecretSource,
+    secret_key: SecretSource,
+    session_token: Option<SecretSource>,
+}
+
+impl S3ConnectionConfig {
+    pub(crate) fn from_args(args: &S3ConnectionArgs) -> Result<Self, ServerConfigError> {
+        let sources = [
+            Some(&args.s3_access_key_source),
+            Some(&args.s3_secret_key_source),
+            args.s3_session_token_source.as_ref(),
+            args.s3_private_ca_source.as_ref(),
+        ];
+        if sources
+            .into_iter()
+            .flatten()
+            .any(|source| !source.is_valid_reference())
+        {
+            return Err(ServerConfigError::InvalidSecretSource);
+        }
+        let private_ca = match (args.s3_tls_trust, args.s3_private_ca_source.as_ref()) {
+            (S3TlsTrustMode::WebPki, None) => None,
+            (S3TlsTrustMode::PrivateCa, Some(source)) => Some(source.clone()),
+            (S3TlsTrustMode::WebPki, Some(_)) | (S3TlsTrustMode::PrivateCa, None) => {
+                return Err(ServerConfigError::InvalidS3TlsTrust);
+            }
+        };
+        let endpoint =
+            Url::parse(&args.s3_endpoint).map_err(|_| ServerConfigError::InvalidS3Endpoint)?;
+        match endpoint.scheme() {
+            "https" if args.s3_allow_loopback_http => {
+                return Err(ServerConfigError::InvalidS3Transport);
+            }
+            "https" => {}
+            "http"
+                if args.s3_allow_loopback_http && args.s3_tls_trust == S3TlsTrustMode::WebPki => {}
+            "http" => return Err(ServerConfigError::InvalidS3Transport),
+            _ => return Err(ServerConfigError::InvalidS3Endpoint),
+        }
+        let operation_timeout = positive_seconds(args.s3_operation_timeout_seconds)?;
+        let validation = if args.s3_allow_loopback_http {
+            S3BlobStoreConfig::loopback_development(
+                endpoint.clone(),
+                args.s3_region.clone(),
+                args.s3_bucket.clone(),
+                None,
+                operation_timeout,
+            )
+        } else {
+            S3BlobStoreConfig::new(
+                endpoint.clone(),
+                args.s3_region.clone(),
+                args.s3_bucket.clone(),
+                None,
+                args.s3_force_path_style,
+                S3TlsTrust::web_pki(),
+                operation_timeout,
+            )
+        };
+        validation.map_err(|_| ServerConfigError::InvalidS3Configuration)?;
+        Ok(Self {
+            endpoint,
+            region: args.s3_region.clone(),
+            bucket: args.s3_bucket.clone(),
+            force_path_style: args.s3_force_path_style || args.s3_allow_loopback_http,
+            tls_trust: args.s3_tls_trust,
+            private_ca,
+            allow_loopback_http: args.s3_allow_loopback_http,
+            operation_timeout,
+            access_key: args.s3_access_key_source.clone(),
+            secret_key: args.s3_secret_key_source.clone(),
+            session_token: args.s3_session_token_source.clone(),
+        })
+    }
+
+    pub(crate) fn load_tls_trust(&self) -> Result<S3TlsTrust, SecretLoadError> {
+        match (self.tls_trust, self.private_ca.as_ref()) {
+            (S3TlsTrustMode::PrivateCa, Some(source)) => source
+                .load_bytes(MAX_S3_PRIVATE_CA_PEM_BYTES)
+                .map(|pem| pem.to_vec())
+                .and_then(|pem| {
+                    S3TlsTrust::private_ca(pem).map_err(|_| SecretLoadError::InvalidCertificate)
+                }),
+            (S3TlsTrustMode::WebPki, None) => Ok(S3TlsTrust::web_pki()),
+            (S3TlsTrustMode::WebPki, Some(_)) | (S3TlsTrustMode::PrivateCa, None) => {
+                Err(SecretLoadError::InvalidCertificate)
+            }
+        }
+    }
+
+    pub(crate) fn load_access_key(&self) -> Result<Zeroizing<String>, SecretLoadError> {
+        self.access_key.load_scalar(MAX_S3_CREDENTIAL_BYTES)
+    }
+
+    pub(crate) fn load_secret_key(&self) -> Result<Zeroizing<String>, SecretLoadError> {
+        self.secret_key.load_scalar(MAX_S3_CREDENTIAL_BYTES)
+    }
+
+    pub(crate) fn load_session_token(&self) -> Result<Option<Zeroizing<String>>, SecretLoadError> {
+        self.session_token
+            .as_ref()
+            .map(|source| source.load_scalar(MAX_S3_CREDENTIAL_BYTES))
+            .transpose()
+    }
 }
 
 /// Complete opt-in configuration for the private shard-management listener.
@@ -633,13 +747,11 @@ impl ServerConfig {
         validate_server_secret_sources(args)?;
         validate_local_listeners(args)?;
         validate_fallback_tenant(&args.fallback_tenant_id)?;
-        let s3_endpoint =
-            Url::parse(&args.s3_endpoint).map_err(|_| ServerConfigError::InvalidS3Endpoint)?;
+        let s3 = S3ConnectionConfig::from_args(&args.s3)?;
         let s3_at_rest_encryption = s3_at_rest_encryption(args.s3_kms_key_id.as_deref())?;
         if args.database_max_connections == 0 {
             return Err(ServerConfigError::InvalidDatabaseConnections);
         }
-        let s3_operation_timeout = positive_seconds(args.s3_operation_timeout_seconds)?;
         let readiness_probe_interval = positive_seconds(args.readiness_probe_interval_seconds)?;
         let maintenance_interval = positive_seconds(args.maintenance_interval_seconds)?;
         let maintenance_batch_size = MaintenanceBatchSize::new(args.maintenance_batch_size)
@@ -702,17 +814,9 @@ impl ServerConfig {
                     PostgresTransportSecurity::LoopbackPlaintext
                 }
             },
-            s3_endpoint,
-            s3_region: args.s3_region.clone(),
-            s3_bucket: args.s3_bucket.clone(),
+            s3,
             s3_prefix: args.s3_prefix.clone(),
-            s3_force_path_style: args.s3_force_path_style,
             s3_at_rest_encryption,
-            s3_allow_loopback_http: args.s3_allow_loopback_http,
-            s3_operation_timeout,
-            s3_access_key: args.s3_access_key_source.clone(),
-            s3_secret_key: args.s3_secret_key_source.clone(),
-            s3_session_token: args.s3_session_token_source.clone(),
             runner_client_ca_certificate: args.runner_client_ca_certificate_source.clone(),
             runner_client_ca_private_key: args.runner_client_ca_key_source.clone(),
             runner_server_ca: args.runner_server_ca_source.clone(),
@@ -783,23 +887,6 @@ impl ServerConfig {
 
     pub(crate) fn load_database_url(&self) -> Result<Zeroizing<String>, SecretLoadError> {
         self.database_url.load_scalar(MAX_DATABASE_URL_BYTES)
-    }
-
-    pub(crate) fn load_s3_access_key(&self) -> Result<Zeroizing<String>, SecretLoadError> {
-        self.s3_access_key.load_scalar(MAX_S3_CREDENTIAL_BYTES)
-    }
-
-    pub(crate) fn load_s3_secret_key(&self) -> Result<Zeroizing<String>, SecretLoadError> {
-        self.s3_secret_key.load_scalar(MAX_S3_CREDENTIAL_BYTES)
-    }
-
-    pub(crate) fn load_s3_session_token(
-        &self,
-    ) -> Result<Option<Zeroizing<String>>, SecretLoadError> {
-        self.s3_session_token
-            .as_ref()
-            .map(|source| source.load_scalar(MAX_S3_CREDENTIAL_BYTES))
-            .transpose()
     }
 
     pub(crate) fn load_client_ca_pem(&self) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
@@ -1242,8 +1329,6 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         &args.database_url_source,
         &args.results_signing_key_source,
         &args.control_plane_encryption_key_source,
-        &args.s3_access_key_source,
-        &args.s3_secret_key_source,
         &args.runner_client_ca_certificate_source,
         &args.runner_client_ca_key_source,
         &args.runner_server_ca_source,
@@ -1251,7 +1336,6 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         &args.runner_server_key_source,
     ];
     let optional = [
-        args.s3_session_token_source.as_ref(),
         args.github_provider_config_source.as_ref(),
         args.github_oidc_config_source.as_ref(),
         args.conformance_export_token_source.as_ref(),
@@ -1393,6 +1477,15 @@ pub enum ServerConfigError {
     /// The configured server-side encryption key identity is malformed.
     #[error("S3 server-side encryption configuration is invalid")]
     InvalidS3Encryption,
+    /// The S3 endpoint, namespace, region, addressing, or deadline is invalid.
+    #[error("S3 connection configuration is invalid")]
+    InvalidS3Configuration,
+    /// The explicit S3 HTTPS trust mode and private-CA source are inconsistent.
+    #[error("S3 TLS trust configuration is invalid")]
+    InvalidS3TlsTrust,
+    /// The explicit S3 plaintext-development policy does not match the endpoint.
+    #[error("S3 transport configuration is invalid")]
+    InvalidS3Transport,
     /// The `PostgreSQL` pool size is zero.
     #[error("database maximum connections must be greater than zero")]
     InvalidDatabaseConnections,

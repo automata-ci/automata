@@ -1,6 +1,10 @@
 use std::time::Duration;
 
-use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
+use automata_ci_blob_s3::{
+    MAX_S3_PRIVATE_CA_PEM_BYTES, S3AtRestEncryption, S3BlobStoreConfig, S3BlobStoreConfigError,
+    S3TlsTrust, StaticS3Credentials,
+};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
 use url::Url;
 
 #[test]
@@ -11,6 +15,7 @@ fn production_requires_a_credential_free_https_root_endpoint() {
         "automata-production",
         Some("tenant-a".to_owned()),
         false,
+        S3TlsTrust::web_pki(),
         Duration::from_secs(10),
     );
     assert!(valid.is_ok());
@@ -28,6 +33,7 @@ fn production_requires_a_credential_free_https_root_endpoint() {
                 "automata-production",
                 None,
                 false,
+                S3TlsTrust::web_pki(),
                 Duration::from_secs(10),
             )
             .is_err(),
@@ -80,6 +86,7 @@ fn namespaces_and_credentials_fail_closed() {
                 bucket,
                 None,
                 false,
+                S3TlsTrust::web_pki(),
                 Duration::from_secs(10),
             )
             .is_err(),
@@ -94,6 +101,7 @@ fn namespaces_and_credentials_fail_closed() {
                 "automata-production",
                 Some(prefix.to_owned()),
                 false,
+                S3TlsTrust::web_pki(),
                 Duration::from_secs(10),
             )
             .is_err(),
@@ -131,6 +139,7 @@ fn encryption_at_rest_is_mandatory_and_kms_identity_is_exact() {
         "automata-production",
         None,
         false,
+        S3TlsTrust::web_pki(),
         Duration::from_secs(10),
     )
     .expect("S3 configuration");
@@ -145,4 +154,57 @@ fn encryption_at_rest_is_mandatory_and_kms_identity_is_exact() {
         assert!(S3AtRestEncryption::aws_kms(invalid).is_err());
         assert!(S3AtRestEncryption::aws_kms_dsse(invalid).is_err());
     }
+}
+
+#[test]
+fn private_ca_trust_accepts_exactly_one_valid_ca_and_redacts_it() {
+    let ca_pem = certificate_pem(true);
+    let trust = S3TlsTrust::private_ca(ca_pem.clone()).expect("one exact private CA");
+    assert_eq!(
+        format!("{trust:?}"),
+        "S3TlsTrust::PrivateCa([certificate redacted])"
+    );
+
+    let mut bundle = ca_pem.clone();
+    bundle.extend_from_slice(&certificate_pem(true));
+    for invalid in [
+        Vec::new(),
+        b"not a PEM certificate".to_vec(),
+        certificate_pem(false),
+        bundle,
+        vec![b'x'; MAX_S3_PRIVATE_CA_PEM_BYTES + 1],
+    ] {
+        assert_eq!(
+            S3TlsTrust::private_ca(invalid),
+            Err(S3BlobStoreConfigError::InvalidPrivateCa)
+        );
+    }
+}
+
+#[test]
+fn private_ca_trust_is_incompatible_with_plaintext() {
+    let result = S3BlobStoreConfig::new(
+        Url::parse("http://127.0.0.1:9000/").expect("URL"),
+        "us-east-1",
+        "automata-tests",
+        None,
+        true,
+        S3TlsTrust::private_ca(certificate_pem(true)).expect("private CA"),
+        Duration::from_secs(10),
+    );
+    assert_eq!(result, Err(S3BlobStoreConfigError::PrivateCaRequiresHttps));
+}
+
+fn certificate_pem(is_ca: bool) -> Vec<u8> {
+    let key = KeyPair::generate().expect("certificate key");
+    let mut params = CertificateParams::new(Vec::<String>::new()).expect("certificate params");
+    if is_ca {
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    }
+    params
+        .self_signed(&key)
+        .expect("self-signed certificate")
+        .pem()
+        .into_bytes()
 }

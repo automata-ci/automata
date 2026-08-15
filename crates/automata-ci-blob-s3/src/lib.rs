@@ -7,9 +7,12 @@
 //! as a coordination primitive.
 
 mod adapter;
+mod bucket;
 mod config;
 
 pub use adapter::S3BlobStore;
+pub use bucket::{EnsureBucketError, EnsureBucketOutcome, ensure_bucket};
 pub use config::{
-    S3AtRestEncryption, S3BlobStoreConfig, S3BlobStoreConfigError, StaticS3Credentials,
+    MAX_S3_PRIVATE_CA_PEM_BYTES, S3AtRestEncryption, S3BlobStoreConfig, S3BlobStoreConfigError,
+    S3TlsTrust, StaticS3Credentials,
 };

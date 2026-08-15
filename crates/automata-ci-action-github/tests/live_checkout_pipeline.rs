@@ -45,7 +45,10 @@ async fn resolves_and_decodes_the_exact_checkout_action() {
         None,
     )
     .expect("test S3 credentials");
-    let blobs = S3BlobStore::new(config.client(credentials), &config);
+    let blobs = S3BlobStore::new(
+        config.client(credentials).expect("test S3 SDK client"),
+        &config,
+    );
     let github =
         GithubHttpEndpoint::github_dot_com("automata-live-test/0.1.0").expect("GitHub endpoint");
     let repository = RepositoryId::new("actions/checkout").expect("repository");

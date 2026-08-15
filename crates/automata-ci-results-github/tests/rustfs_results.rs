@@ -61,7 +61,7 @@ async fn finalized_manifest_and_blocks_are_verified_in_rustfs() -> TestResult {
             "AUTOMATA_TEST_S3_KMS_KEY_ID",
         )?)?);
         let objects = Arc::new(S3BlobStore::new(
-            config.client(StaticS3Credentials::new(access_key, secret_key, None)?),
+            config.client(StaticS3Credentials::new(access_key, secret_key, None)?)?,
             &config,
         ));
         let upload_id = UploadId::from_uuid(Uuid::new_v4());

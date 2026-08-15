@@ -2633,6 +2633,7 @@ impl RawObjectStoreProductConfig {
                 self.bucket.clone(),
                 self.prefix.clone(),
                 self.force_path_style,
+                automata_ci_blob_s3::S3TlsTrust::web_pki(),
                 operation_timeout,
             )
         }
