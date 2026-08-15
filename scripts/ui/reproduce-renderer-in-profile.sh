@@ -42,7 +42,7 @@ lock = json.loads(lock_path.read_bytes())
 def fail(message: str) -> None:
     raise SystemExit(f"renderer profile lock validation failed: {message}")
 
-if manifest.get("schema_version") != 1 or lock.get("schema_version") != 1:
+if manifest.get("schema_version") != 2 or lock.get("schema_version") != 2:
     fail("unsupported schema")
 if manifest.get("profile_id") != expected_profile_id:
     fail("unexpected manifest profile ID")

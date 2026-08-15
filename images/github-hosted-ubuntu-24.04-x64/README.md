@@ -19,6 +19,30 @@ shared-kernel containers remain a distinct isolation tier.
 `profile-manifest.json` is canonical checked-in launch provenance. Its SHA-256
 is the environment attestation carried by scheduling and `JobIR`; the OCI image
 digest is independently pinned in `profile-lock.json` after a reviewed build.
+Manifest schema v2 also records a closed software inventory: exact `dpkg`
+versions, absolute executable paths, checksums for standalone archives, and
+tools deliberately absent from the profile. The verifier queries every pinned
+package inside the exact image, requires every recorded executable to be a
+regular executable file, and runs independent version probes for Rust, Cargo,
+and Node. A stale package, missing path, mutable image reference, or malformed
+inventory rejects the candidate.
+
+Runner startup provides a separate product-admission layer. For every
+configured Linux profile, the runner creates and inspects a fresh sandbox from
+the digest-qualified image, attaches only after provider evidence matches, and
+executes the configured Bash, `sh`, optional Python/PowerShell, GNU
+install/tar/SHA, and Node-major probes before advertising inventory. Probe
+profiles cannot use host networking, the host filesystem, or the host identity.
+An administrator-inside-sandbox profile is admitted only when the provider
+advertises both administrator confinement and a user namespace.
+
+The checked-in OCI digest remains a development identity, not a promoted
+PLAT-01 image. Its registry manifest predates the current single-squashed-layer
+contract and therefore fails the current image verifier before software probes.
+The inventory describes that exact immutable identity, but does not manufacture
+a signature, accepted publisher provenance, or reproducible rebuild evidence.
+Those gates require a new candidate from the accepted Automata issuer.
+
 The image carries Node.js 24.19.0 and the exact renderer tools used by CI:
 `wasm-rquickjs-cli` 0.4.1, `cargo-cyclonedx` 0.5.9, and `cargo-deny` 0.20.2.
 Node 24.19.0 is the reviewed patch-level delta from the actions/runner v2.336.0
