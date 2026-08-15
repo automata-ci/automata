@@ -30,6 +30,7 @@ use url::Url;
 use super::files::{
     SecretSource, SecureInputError, read_configuration_file, validate_absolute_path,
 };
+use super::spool_crypto::MAX_DECRYPT_ONLY_CONTENT_KEYS;
 
 /// Current on-disk runner product configuration schema.
 pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 3;
@@ -1472,7 +1473,7 @@ struct RawSpoolDecryptionKeyConfig {
 
 impl RawSpoolProtectionConfig {
     fn validate(self) -> Result<SpoolProtectionConfig, RunnerProductConfigError> {
-        if self.decrypt_only.len() > automata_ci_runner_crypto::MAX_DECRYPT_ONLY_CONTENT_KEYS {
+        if self.decrypt_only.len() > MAX_DECRYPT_ONLY_CONTENT_KEYS {
             return Err(RunnerProductConfigError::InvalidSpoolProtection);
         }
         self.key_hex

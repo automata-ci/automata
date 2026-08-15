@@ -9,6 +9,7 @@ mod managed_secret_delivery;
 mod metrics;
 mod profile_admission;
 mod resource_metrics;
+mod spool_crypto;
 mod state;
 mod tls;
 

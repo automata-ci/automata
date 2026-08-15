@@ -4,17 +4,17 @@ use automata_ci_runner_spool::{
     ContentProtectionError, ContentProtector, DurableContentRef, ProtectionId,
 };
 
-use crate::{Aes256GcmContentProtector, ContentProtectorConfigurationError};
+use super::{aes_gcm::Aes256GcmContentProtector, error::ContentProtectorConfigurationError};
 
 /// Maximum number of old local spool keys retained for online rotation.
-pub const MAX_DECRYPT_ONLY_CONTENT_KEYS: usize = 8;
+pub(in crate::product) const MAX_DECRYPT_ONLY_CONTENT_KEYS: usize = 8;
 
 /// AES-256-GCM spool keyring with one active and bounded decrypt-only keys.
 ///
 /// The active protector is the only protector permitted for new writes.
 /// Existing objects are authenticated with the exact key ID recorded in their
 /// [`DurableContentRef`]. Missing IDs fail closed; no key is tried speculatively.
-pub struct Aes256GcmContentKeyring {
+pub(in crate::product) struct Aes256GcmContentKeyring {
     active: Aes256GcmContentProtector,
     decrypt_only: BTreeMap<ProtectionId, Aes256GcmContentProtector>,
 }
@@ -27,7 +27,7 @@ impl Aes256GcmContentKeyring {
     /// Rejects more than [`MAX_DECRYPT_ONLY_CONTENT_KEYS`] old keys and any
     /// protection ID duplicated within the old set or shared with the active
     /// protector.
-    pub fn new(
+    pub(in crate::product) fn new(
         active: Aes256GcmContentProtector,
         decrypt_only: Vec<Aes256GcmContentProtector>,
     ) -> Result<Self, ContentProtectorConfigurationError> {
@@ -54,7 +54,8 @@ impl Aes256GcmContentKeyring {
     }
 
     /// Returns the non-secret IDs retained for decrypt-only reads.
-    pub fn decrypt_only_ids(&self) -> impl ExactSizeIterator<Item = &ProtectionId> {
+    #[cfg(test)]
+    pub(super) fn decrypt_only_ids(&self) -> impl ExactSizeIterator<Item = &ProtectionId> {
         self.decrypt_only.keys()
     }
 

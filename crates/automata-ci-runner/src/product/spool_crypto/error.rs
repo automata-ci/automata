@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Invalid trusted at-rest protection configuration.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum ContentProtectorConfigurationError {
+pub(in crate::product) enum ContentProtectorConfigurationError {
     /// Protection ID is not a portable bounded identifier.
     #[error("content protection identifier is invalid")]
     InvalidProtectionId,

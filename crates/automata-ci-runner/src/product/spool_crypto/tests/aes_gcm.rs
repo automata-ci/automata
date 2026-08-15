@@ -1,10 +1,11 @@
 use automata_ci_core::Sha256Digest;
-use automata_ci_runner_crypto::{AES_256_GCM_KEY_BYTES, Aes256GcmContentProtector};
 use automata_ci_runner_spool::{
     ContentKind, ContentProtectionError, ContentProtector, DurableContentRef, ProtectionId,
 };
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
+
+use super::super::{AES_256_GCM_KEY_BYTES, Aes256GcmContentProtector};
 
 fn make_protector(id: &str, marker: u8) -> Aes256GcmContentProtector {
     Aes256GcmContentProtector::new(id, Zeroizing::new(vec![marker; AES_256_GCM_KEY_BYTES]))
@@ -48,6 +49,32 @@ fn round_trips_with_fresh_nonces_and_no_plaintext_debug() {
     let debug = format!("{protector:?}");
     assert!(debug.contains("REDACTED"));
     assert!(!debug.contains("424242"));
+}
+
+#[test]
+fn decrypts_fixed_legacy_asp1_ciphertext() {
+    // Models the former standalone adapter's ASP1 output for nonce
+    // 000102030405060708090a0b. The vector was independently generated with
+    // Python cryptography and cross-checked with Node/OpenSSL AES-GCM.
+    const LEGACY_PROTECTED: [u8; 79] = [
+        0x41, 0x53, 0x50, 0x31, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x77, 0xab, 0xff, 0xb3, 0xd4, 0x5e, 0xd2, 0x79, 0xf8, 0x65, 0x2b, 0x65, 0xb4, 0xaf,
+        0x22, 0x1b, 0x42, 0xfc, 0xb7, 0x06, 0xcf, 0x28, 0x86, 0xc9, 0x64, 0xf0, 0x54, 0x4f, 0xba,
+        0x67, 0xd8, 0x91, 0x27, 0xd2, 0xfd, 0xcb, 0x07, 0x55, 0x02, 0x94, 0x8b, 0x01, 0x63, 0x61,
+        0x66, 0xe0, 0xb9, 0xb0, 0x6e, 0x74, 0x03, 0x51, 0x5f, 0x1f, 0xa4, 0x1a, 0x22, 0x11, 0xc7,
+        0x47, 0x95, 0x18, 0xb6,
+    ];
+
+    let plaintext = b"runner recovery payload with sensitive material";
+    let reference = make_reference("key-2026-08", ContentKind::JobIr, plaintext);
+    let protector = make_protector("key-2026-08", 0x42);
+
+    assert_eq!(
+        protector
+            .unprotect(&reference, &LEGACY_PROTECTED)
+            .expect("legacy ciphertext authenticates"),
+        plaintext
+    );
 }
 
 #[test]

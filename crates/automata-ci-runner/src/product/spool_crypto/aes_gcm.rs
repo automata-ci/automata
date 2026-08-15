@@ -11,10 +11,10 @@ use ring::{
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
 
-use crate::ContentProtectorConfigurationError;
+use super::error::ContentProtectorConfigurationError;
 
 /// Exact key length accepted by AES-256-GCM.
-pub const AES_256_GCM_KEY_BYTES: usize = 32;
+pub(in crate::product) const AES_256_GCM_KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
 const HEADER: &[u8; 4] = b"ASP1";
@@ -26,7 +26,7 @@ const AAD_DOMAIN: &[u8] = b"automata.runner.spool.aes256gcm.v1\0";
 /// Each object receives a fresh 96-bit random nonce. The complete durable
 /// content identity is authenticated as associated data, so ciphertext cannot
 /// be substituted across kinds, digests, sizes, cache keys, or key IDs.
-pub struct Aes256GcmContentProtector {
+pub(in crate::product) struct Aes256GcmContentProtector {
     id: ProtectionId,
     key: LessSafeKey,
     random: SystemRandom,
@@ -44,7 +44,7 @@ impl Aes256GcmContentProtector {
     ///
     /// Returns [`ContentProtectorConfigurationError`] for an invalid ID,
     /// non-32-byte key, or cryptographic provider rejection.
-    pub fn new(
+    pub(in crate::product) fn new(
         protection_id: impl Into<String>,
         key_material: Zeroizing<Vec<u8>>,
     ) -> Result<Self, ContentProtectorConfigurationError> {

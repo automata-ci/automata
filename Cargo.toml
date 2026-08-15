@@ -29,7 +29,6 @@ members = [
     "crates/automata-ci-provisioning-grpc",
     "crates/automata-ci-results-github",
     "crates/automata-ci-runner",
-    "crates/automata-ci-runner-crypto",
     "crates/automata-ci-runner-journal",
     "crates/automata-ci-runner-runtime",
     "crates/automata-ci-runner-spool",
@@ -96,7 +95,6 @@ automata-ci-protocol-protobuf = { path = "crates/automata-ci-protocol-protobuf",
 automata-ci-provisioning = { path = "crates/automata-ci-provisioning", version = "0.1.0" }
 automata-ci-provisioning-grpc = { path = "crates/automata-ci-provisioning-grpc", version = "0.1.0" }
 automata-ci-results-github = { path = "crates/automata-ci-results-github", version = "0.1.0" }
-automata-ci-runner-crypto = { path = "crates/automata-ci-runner-crypto", version = "0.1.0" }
 automata-ci-runner-journal = { path = "crates/automata-ci-runner-journal", version = "0.1.0" }
 automata-ci-runner-runtime = { path = "crates/automata-ci-runner-runtime", version = "0.1.0" }
 automata-ci-runner-spool = { path = "crates/automata-ci-runner-spool", version = "0.1.0" }

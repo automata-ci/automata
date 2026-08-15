@@ -1,5 +1,6 @@
-use automata_ci_runner_crypto::{AES_256_GCM_KEY_BYTES, Aes256GcmContentProtector};
 use zeroize::Zeroizing;
+
+use super::super::{AES_256_GCM_KEY_BYTES, Aes256GcmContentProtector};
 
 #[test]
 fn rejects_invalid_key_lengths_and_identifiers() {

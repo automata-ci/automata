@@ -7,8 +7,6 @@ use automata_ci_core::{
 use automata_ci_runner::product::{
     RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
 };
-use automata_ci_runner_crypto::MAX_DECRYPT_ONLY_CONTENT_KEYS;
-
 #[cfg(unix)]
 use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 
@@ -16,10 +14,9 @@ use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 use automata_ci_core::OperationId;
 #[cfg(unix)]
 use automata_ci_runner::product::{RunnerProductError, load_spool_keyring};
-#[cfg(unix)]
-use automata_ci_runner_spool::ContentProtector as _;
 
 const RUNNER_ID: &str = "6e561f8b-9098-418d-b573-d82f5c73006e";
+const MAX_DECRYPT_ONLY_CONTENT_KEYS: usize = 8;
 const PROFILE_ID: &str = "automata.dev/github-hosted-ubuntu-24-04-x64-v1";
 const PROFILE_DIGEST: &str = "d34437d037410cd10564d232df12591a40e132735fbe415420f605faf3f5d648";
 const IMAGE: &str = "ghcr.io/automata-ci/automata-ubuntu-24.04-x64@sha256:e2c20ad25ff71fb61d9609e84daf8384a122b8f26a047836ac50d832c632e194";
@@ -415,17 +412,18 @@ fn spool_keyring_loading_rejects_any_invalid_old_key_file_without_secret_errors(
     let config = parse_value(&value).expect("rotation config");
     let keyring = load_spool_keyring(config.spool()).expect("load exact active and old keys");
     assert_eq!(keyring.protection_id().as_str(), "runner-key-v2");
-    assert_eq!(
-        keyring
-            .decrypt_only_ids()
-            .map(automata_ci_runner_spool::ProtectionId::as_str)
-            .collect::<Vec<_>>(),
-        ["runner-key-v1"]
-    );
+    let old_id = automata_ci_runner_spool::ProtectionId::new("runner-key-v1")
+        .expect("valid old protection ID");
+    assert!(keyring.supports_protection_id(&old_id));
+    let unknown_id = automata_ci_runner_spool::ProtectionId::new("runner-key-unknown")
+        .expect("valid unknown protection ID");
+    assert!(!keyring.supports_protection_id(&unknown_id));
 
     let invalid_sentinel = b"invalid-old-spool-key-secret";
     fs::write(&old_path, invalid_sentinel).expect("replace old key with invalid fixture");
-    let error = load_spool_keyring(config.spool()).expect_err("one invalid old key fails all load");
+    let error = load_spool_keyring(config.spool())
+        .err()
+        .expect("one invalid old key fails all load");
     assert!(matches!(error, RunnerProductError::InvalidSpoolKey));
     assert!(!format!("{error:?}").contains("invalid-old-spool-key-secret"));
 }
