@@ -173,12 +173,37 @@ fn validated_config_preserves_exact_runner_and_profile_inventory() {
         config.inventory().platform().architecture(),
         &Architecture::X86_64
     );
-    assert!(
-        config
-            .inventory()
-            .features()
-            .contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
-    );
+    let runtime_features = config.inventory().features();
+    for required in [
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_POSIX_SHELL,
+        RunnerFeature::BASH_SHELL,
+        RunnerFeature::SH_SHELL,
+        RunnerFeature::PYTHON_SHELL,
+        RunnerFeature::PWSH_SHELL,
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::NODE12_ACTIONS,
+        RunnerFeature::NODE16_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+    ] {
+        assert!(runtime_features.contains(&required), "missing {required}");
+    }
+    for unavailable in [
+        RunnerFeature::DEFAULT_WINDOWS_SHELL,
+        RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+        RunnerFeature::CMD_SHELL,
+    ] {
+        assert!(
+            !runtime_features.contains(&unavailable),
+            "unexpected {unavailable}"
+        );
+    }
     assert!(
         config
             .inventory()

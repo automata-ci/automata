@@ -437,6 +437,33 @@ async fn receipt_routing_capacity_scan_and_claim_are_ordered_and_least_authority
 }
 
 #[tokio::test]
+async fn unavailable_action_runtime_requirements_never_create_a_lease() {
+    let mut fixture = fixture(RunnerSlotAvailability::Available, true);
+    fixture.repository.candidates = vec![runnable(
+        RunId::new(),
+        50,
+        ["trusted"],
+        Some("trusted-group"),
+        RunnerRequirements::default().with_features([
+            RunnerFeature::REPOSITORY_ACTIONS,
+            RunnerFeature::JAVASCRIPT_ACTIONS,
+            RunnerFeature::NODE24_ACTIONS,
+        ]),
+    )];
+
+    let outcome = service(&fixture)
+        .poll(fixture.authenticated, &fixture.request)
+        .await
+        .expect("unsupported runtime is a normal pre-lease no-work result");
+
+    assert_eq!(outcome, LeasePollOutcome::NoWork { replayed: false });
+    assert_eq!(
+        fixture.repository.calls(),
+        ["lookup", "routing", "availability", "scan", "no_work"]
+    );
+}
+
+#[tokio::test]
 async fn ineligible_attempts_never_reach_scheduling_or_claim() {
     let fixture = fixture(RunnerSlotAvailability::Available, true);
     let expected_evaluations = fixture

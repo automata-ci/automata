@@ -28,6 +28,7 @@ mod reusable_runtime;
 mod reusable_workflow;
 mod run_finalization;
 mod runner_policy;
+mod runtime_requirements;
 mod service;
 mod workflow_rerun;
 

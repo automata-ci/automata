@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
-use automata_ci_core::{ShellTemplate, ValueTemplate};
+use automata_ci_core::{RunnerFeature, ShellTemplate, ValueTemplate};
 use automata_ci_execution::{TargetPath, TargetPlatform};
+use thiserror::Error;
 
 use crate::{
     environment::ResolvedEnvironmentValue,
@@ -89,6 +90,48 @@ impl ShellKind {
             Self::Pwsh | Self::PowerShell => ".ps1",
             Self::Cmd => ".cmd",
         }
+    }
+
+    const fn runner_feature(self) -> RunnerFeature {
+        match self {
+            Self::Bash => RunnerFeature::BASH_SHELL,
+            Self::Sh => RunnerFeature::SH_SHELL,
+            Self::Python => RunnerFeature::PYTHON_SHELL,
+            Self::Pwsh => RunnerFeature::PWSH_SHELL,
+            Self::PowerShell => RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+            Self::Cmd => RunnerFeature::CMD_SHELL,
+        }
+    }
+}
+
+/// A literal GitHub shell value cannot be represented by the closed runner contract.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("literal GitHub shell is unsupported")]
+pub struct StaticShellRequirementError;
+
+/// Returns the exact runner capability required by one literal GitHub shell value.
+///
+/// Named shells and safe custom templates use the same parser as executor
+/// admission, preventing the scheduling and execution boundaries from
+/// interpreting the value differently.
+///
+/// # Errors
+///
+/// Rejects unknown named shells and custom templates outside the published
+/// fixed-argument grammar.
+pub fn static_shell_requirement(value: &str) -> Result<RunnerFeature, StaticShellRequirementError> {
+    let resolved = if value.contains("{0}") {
+        command_template(value)
+    } else {
+        named_shell(value)
+    }
+    .map_err(|_| StaticShellRequirementError)?;
+    match resolved {
+        ResolvedShell::Named(shell)
+        | ResolvedShell::CommandTemplate(SafeCommandTemplate { shell, .. }) => {
+            Ok(shell.runner_feature())
+        }
+        ResolvedShell::Default => unreachable!("literal shell parsing never returns default"),
     }
 }
 
