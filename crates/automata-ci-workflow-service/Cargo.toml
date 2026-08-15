@@ -3,6 +3,7 @@ name = "automata-ci-workflow-service"
 description = "Provider-neutral durable workflow admission service for Automata"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -10,6 +11,14 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 publish.workspace = true
+
+[[test]]
+name = "workflow_service"
+path = "tests/workflow_service.rs"
+
+[[test]]
+name = "live_admission"
+path = "tests/live_admission.rs"
 
 [dependencies]
 automata-ci-auth.workspace = true

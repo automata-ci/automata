@@ -2,6 +2,7 @@
 name = "automata-ci-github"
 version.workspace = true
 edition.workspace = true
+autotests = false
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -10,6 +11,14 @@ homepage.workspace = true
 readme = "README.md"
 description = "Hardened GitHub HTTP adapters for Automata"
 publish.workspace = true
+
+[[test]]
+name = "github"
+path = "tests/github.rs"
+
+[[test]]
+name = "live_repository_snapshot"
+path = "tests/live_repository_snapshot.rs"
 
 [dependencies]
 async-trait.workspace = true

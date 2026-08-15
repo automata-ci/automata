@@ -13,12 +13,15 @@ ROOT = Path(__file__).resolve().parents[3]
 # A reviewed entry prevents either implicit targets or an unreviewed aggregate
 # rename from silently changing the workspace test topology.
 AGGREGATES = {
+    "automata-ci-action": "action",
+    "automata-ci-action-github": "action_github",
     "automata-ci-blob-s3": "blob_s3",
     "automata-ci-control": "control",
     "automata-ci-core": "core",
     "automata-ci-credential": "credential",
     "automata-ci-execution": "execution",
     "automata-ci-expression-github": "expression_github",
+    "automata-ci-github": "github",
     "automata-ci-github-delivery": "github_delivery",
     "automata-ci-github-runtime": "github_runtime",
     "automata-ci-key-management": "key_management",
@@ -38,6 +41,24 @@ AGGREGATES = {
     "automata-ci-store": "store_contracts",
     "automata-ci-ui-renderer": "ui_renderer",
     "automata-ci-workflow-github": "workflow_github",
+    "automata-ci-workflow-service": "workflow_service",
+}
+
+# Live service probes retain process and credential isolation while hermetic
+# siblings consolidate into the package aggregate named above.
+LIVE_TARGETS = {
+    "automata-ci-action": "live_github_rustfs",
+    "automata-ci-action-github": "live_checkout_pipeline",
+    "automata-ci-github": "live_repository_snapshot",
+    "automata-ci-workflow-service": "live_admission",
+}
+
+# This immutable fixture is intentionally compiled by both workflow-service
+# targets. Every other reviewed source must have exactly one target owner.
+SHARED_SOURCE_OWNERS = {
+    "automata-ci-workflow-service": {
+        "support/mod.rs": frozenset({"workflow_service", "live_admission"}),
+    },
 }
 
 # These source-level gates are intentional platform contracts. Pinning the
@@ -556,11 +577,18 @@ def main() -> None:
         )
 
     source_count = 0
-    for package, target_name in AGGREGATES.items():
+    target_count = 0
+    for package, aggregate_name in AGGREGATES.items():
         manifest, cargo = manifests[package]
-        target_path = f"tests/{target_name}.rs"
+        target_names = [aggregate_name]
+        live_name = LIVE_TARGETS.get(package)
+        if live_name is not None:
+            target_names.append(live_name)
         targets = cargo.get("test", [])
-        expected = [{"name": target_name, "path": target_path}]
+        expected = [
+            {"name": name, "path": f"tests/{name}.rs"}
+            for name in target_names
+        ]
         actual = targets
         if actual != expected:
             fail(f"{package} integration targets changed: {actual!r} != {expected!r}")
@@ -574,24 +602,45 @@ def main() -> None:
                 f"{package} test tree contains symlinks: "
                 f"{sorted(display(path) for path in symlinks)}"
             )
-        root_path = manifest.parent / target_path
-        root = root_path.resolve()
-        if not root.is_file():
-            fail(f"{package} aggregate root is missing: {display(root_path)}")
-        if not root.is_relative_to(tests_dir.resolve()):
-            fail(f"{package} aggregate root escapes {display(tests_dir)}")
-        owned = owned_sources(root, tests_dir)
+        owners: dict[Path, set[str]] = {}
+        for target_name in target_names:
+            target_path = f"tests/{target_name}.rs"
+            root_path = manifest.parent / target_path
+            root = root_path.resolve()
+            if not root.is_file():
+                fail(f"{package} target root is missing: {display(root_path)}")
+            if not root.is_relative_to(tests_dir.resolve()):
+                fail(f"{package} target root escapes {display(tests_dir)}")
+            for source in owned_sources(root, tests_dir):
+                owners.setdefault(source, set()).add(target_name)
+
         inventory = {source.resolve() for source in tests_dir.rglob("*.rs")}
+        owned = set(owners)
         if owned != inventory:
             fail(
                 f"{package} has unowned test sources: "
-                f"{sorted(display(path) for path in inventory - owned)}"
+                f"{sorted(display(path) for path in inventory - owned)}; "
+                f"non-inventory sources: "
+                f"{sorted(display(path) for path in owned - inventory)}"
+            )
+        tests_root = tests_dir.resolve()
+        actual_shared = {
+            source.relative_to(tests_root).as_posix(): frozenset(source_owners)
+            for source, source_owners in owners.items()
+            if len(source_owners) > 1
+        }
+        expected_shared = SHARED_SOURCE_OWNERS.get(package, {})
+        if actual_shared != expected_shared:
+            fail(
+                f"{package} shared test-source ownership changed: "
+                f"{actual_shared!r} != {expected_shared!r}"
             )
         source_count += len(inventory)
+        target_count += len(target_names)
 
     print(
-        f"verified {len(AGGREGATES)} aggregate integration targets "
-        f"own {source_count} Rust test source files"
+        f"verified {len(AGGREGATES)} aggregate packages own "
+        f"{source_count} Rust test source files across {target_count} targets"
     )
 
 
