@@ -171,10 +171,11 @@ product path.
   scheduling.
 - [ ] Enforce `strategy.max-parallel`; it is evaluated but does not throttle
   leases.
-- [ ] Resolve status-function parser/evaluator inconsistencies:
-  - [ ] accept only GitHub-supported arities;
-  - [ ] or implement any intentionally accepted extension;
-  - [ ] never defer a known-invalid call into a missing extension provider.
+- [x] Resolve status-function parser/evaluator inconsistencies:
+  - [x] accept only pinned-runner arities, including lazy nonzero arguments for
+    job-condition `success`/`failure` and zero arguments in step conditions;
+  - [x] classify the pinned runner's undocumented `case` built-in explicitly;
+  - [x] never defer a known-invalid call into a missing extension provider.
 - [ ] Reject service-container secret expressions during compilation until
   secure runtime transport exists.
 - [ ] Reject untyped event configuration before publication until the event has
@@ -412,30 +413,31 @@ and
 - [ ] Generate the context-availability table from current GitHub
   documentation.
 - [ ] Validate every expression-bearing workflow key against that table.
-- [ ] Match null and empty-string behavior for missing properties.
-- [ ] Match boolean and numeric coercion.
-- [ ] Match NaN behavior.
-- [ ] Match hexadecimal and exponent parsing.
-- [ ] Match negative-zero comparison.
-- [ ] Match case-insensitive string comparison, including non-ASCII cases.
-- [ ] Match identity equality for arrays and objects.
-- [ ] Match wildcard filtering over arrays and objects.
-- [ ] Match short-circuit evaluation.
-- [ ] Test unevaluated invalid properties and functions in short-circuited
+- [x] Match null and empty-string behavior for missing properties.
+- [x] Match boolean and numeric coercion.
+- [x] Match NaN behavior.
+- [x] Match hexadecimal and exponent parsing.
+- [x] Match negative-zero comparison.
+- [x] Match case-insensitive string comparison, including non-ASCII cases.
+- [x] Match identity equality for arrays and objects.
+- [x] Match wildcard filtering over arrays and objects.
+- [x] Match short-circuit evaluation.
+- [x] Test unevaluated invalid properties and functions in short-circuited
   branches.
-- [ ] Test every built-in function's arity.
-- [ ] Match `format` brace escaping.
-- [ ] Match `join` for scalar, null, and array inputs.
-- [ ] Match `fromJSON` failures and limits.
-- [ ] Prevent `toJSON` from exposing secret material.
-- [ ] Remove or clearly classify Automata-only expression helpers such as
-  `case`.
-- [ ] Match implicit `success()` insertion for job and step conditions.
-- [ ] Match explicit `always()`, `cancelled()`, `failure()`, and `success()`.
+- [x] Test every built-in function's arity.
+- [x] Match `format` brace escaping and the empty format specifier.
+- [x] Match `join` for scalar, null, and array inputs.
+- [x] Match `fromJSON` failures and limits.
+- [x] Prevent `toJSON` from exposing secret material and propagate opaque
+  sensitivity through evaluated derivations.
+- [x] Classify `case` as an undocumented built-in in the pinned runner's
+  expression engine, not an Automata extension.
+- [x] Match implicit `success()` insertion for job and step conditions.
+- [x] Match explicit `always()`, `cancelled()`, `failure()`, and `success()`.
 - [ ] Test status functions across transitive dependency graphs.
 - [ ] Test expression templates containing multiple `${{ }}` segments.
-- [ ] Test malformed delimiters, quotes, and escapes.
-- [ ] Fail unsupported expressions at compile time instead of silently
+- [x] Test malformed delimiters, quotes, and escapes.
+- [x] Fail unsupported expressions at compile time instead of silently
   yielding null.
 
 ## 7. Context objects, default variables, and environment semantics

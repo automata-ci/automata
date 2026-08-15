@@ -20,7 +20,7 @@ pub use context::{
 };
 pub use error::{GithubExpressionEvaluationError, GithubExpressionEvaluationErrorKind};
 pub use evaluator::{GithubExpressionEvaluator, GithubExpressionLimits};
-pub use value::{GithubObject, GithubValue, GithubValueError};
+pub use value::{GithubObject, GithubSensitiveValue, GithubValue, GithubValueError};
 
 /// Upstream compatibility baseline used for evaluator behavior.
 pub const GITHUB_EXPRESSION_RUNTIME_BASELINE: &str = "actions/runner@v2.336.0";

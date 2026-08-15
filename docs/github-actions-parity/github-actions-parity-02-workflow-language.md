@@ -134,27 +134,34 @@ are conformance-gate items, not unrecorded implementation assumptions.
 
 Tasks:
 
-- [ ] Make compiler and evaluator arity rules agree, especially zero-argument
+- [x] Make compiler and evaluator arity rules agree, especially zero-argument
   `success()` and `failure()`.
-- [ ] Add table-driven coercion tests for null, empty strings, numeric strings,
+- [x] Add table-driven coercion tests for null, empty strings, numeric strings,
   hexadecimal, exponents, negative zero, and NaN.
-- [ ] Match case-insensitive string equality, array/object identity, missing
+- [x] Match case-insensitive string equality, array/object identity, missing
   properties, and wildcard projection.
-- [ ] Verify short-circuit behavior prevents evaluation of unavailable
+- [x] Verify short-circuit behavior prevents evaluation of unavailable
   contexts and functions.
-- [ ] Verify arity and conversion for `contains`, `startsWith`, `endsWith`,
+- [x] Verify arity and conversion for `contains`, `startsWith`, `endsWith`,
   `format`, `join`, `fromJSON`, `toJSON`, and status functions.
-- [ ] Bound `fromJSON` input and nesting.
-- [ ] Prevent `toJSON` from exposing opaque secret material.
-- [ ] Decide whether `case` is rejected in GitHub mode or documented as an
-  extension.
-- [ ] Fail malformed interpolation and unsupported calls at compile time.
+- [x] Bound `fromJSON` input and nesting.
+- [x] Prevent `toJSON` from exposing opaque secret material.
+- [x] Classify `case` as an undocumented built-in of the pinned runner, not an
+  Automata extension; retain its 3–255 odd-argument and lazy semantics.
+- [x] Fail malformed interpolation and unsupported calls at compile time.
 
 Acceptance:
 
-- [ ] Every expression accepted by the compiler has an evaluator path.
-- [ ] No built-in silently falls through to an unavailable extension.
-- [ ] Deviations from the pinned runner have explicit fixtures and policy.
+- [x] Every expression accepted by the compiler has an evaluator path.
+- [x] No built-in silently falls through to an unavailable extension.
+- [x] Deviations from the pinned runner have explicit fixtures and policy.
+
+Evidence: the compiler/evaluator signature closure table, coercion and ordinal
+edge fixtures, lazy-dispatch counters, identity/missing/wildcard fixtures, and
+escaped/newline sensitive-value canaries live in the workflow-expression,
+expression-runtime, runner-context, and GitHub job-executor test suites. This
+is focused component evidence; production `hashFiles()` and a live GitHub
+differential run remain WF-05 and conformance work respectively.
 
 ### WF-04 — Declarative context and evaluation-phase registry
 

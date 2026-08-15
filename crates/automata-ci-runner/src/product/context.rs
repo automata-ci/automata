@@ -174,7 +174,7 @@ impl StandardGithubContext {
         // exception is GitHub's built-in GITHUB_TOKEN alias, which is backed
         // by the same exact-fence repository authority as `github.token`.
         let secrets = repository.map_or_else(Vec::new, |authority| {
-            vec![string_entry(
+            vec![sensitive_string_entry(
                 "GITHUB_TOKEN",
                 authority.credential().expose_secret(),
             )]
@@ -463,9 +463,9 @@ fn github_value(
         string_entry("repository_owner", repository_owner),
         string_entry("server_url", github.server_url().as_str()),
         string_entry("sha", source.revision()),
-        string_entry(
-            "token",
-            repository.map_or("", |authority| authority.credential().expose_secret()),
+        repository.map_or_else(
+            || string_entry("token", ""),
+            |authority| sensitive_string_entry("token", authority.credential().expose_secret()),
         ),
         string_entry("workflow", execution.workflow_name()),
         string_entry("workflow_ref", workflow_ref),
@@ -706,6 +706,13 @@ fn object(entries: Vec<(String, GithubValue)>) -> Result<GithubValue, PortError>
 
 fn string_entry(name: impl Into<String>, value: impl Into<String>) -> (String, GithubValue) {
     (name.into(), GithubValue::string(value))
+}
+
+fn sensitive_string_entry(
+    name: impl Into<String>,
+    value: impl Into<String>,
+) -> (String, GithubValue) {
+    (name.into(), GithubValue::sensitive_string(value))
 }
 
 fn plain(name: impl Into<String>, value: impl Into<String>) -> ContextEnvironmentVariable {

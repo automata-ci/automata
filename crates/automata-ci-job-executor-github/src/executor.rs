@@ -6244,7 +6244,7 @@ fn action_expression_context<'a>(
     let inputs = github_object(
         inputs
             .iter()
-            .map(|(name, value)| (name.clone(), GithubValue::string(value.expose())))
+            .map(|(name, value)| (name.clone(), value.github_value()))
             .collect(),
     )?;
     let steps = steps
@@ -6318,7 +6318,7 @@ fn expression_environment_value(
         Some(_) | None => Vec::new(),
     };
     for (name, value) in environment {
-        upsert_github_value(&mut values, name, GithubValue::string(value.expose()));
+        upsert_github_value(&mut values, name, value.github_value());
     }
     github_object(values)
 }
