@@ -1644,11 +1644,11 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "10ccdd2216d142bd02b62003cc99eff5111e72edf9dbc39b2a4655f854078db6"
+            "1b1591aafd25b957e5add450f14aaf2404a60ac964d075bae0aaf5bb5ba8826b"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "a1e2ddba7b672d9afd8ddc6ad33979e0400d2c0499b2a743143e594a77468054"
+            "83589132879d5a75c8c7cff2b067080f0fd7f90034171a9e5950d16418fe94ea"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
@@ -1669,11 +1669,11 @@ mod tests {
         );
         assert_eq!(
             legacy.digest().to_string(),
-            "967c02c427c4c09798377cdfdedf9a48d29bf4138b697d13fcf8a011d45b187f"
+            "b7fabdda7258224aae1ed1fd4f015b947888ba1a0dc2f13feae11151a6ffebc2"
         );
         assert_eq!(
             legacy.canonical_digest().to_string(),
-            "53a71408ff50d313265e4739196838c06acf9e1430957a2dfadc65f120e3abf7"
+            "6b7d4868b6d58ae27ebfa9606419209faa17eba81542d85929008dcf3a446814"
         );
         assert!(WorkflowRuntimePolicy::decode_configuration(LEGACY_CANONICAL_POLICY).is_err());
     }

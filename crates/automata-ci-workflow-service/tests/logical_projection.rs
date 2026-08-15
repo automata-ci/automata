@@ -630,6 +630,7 @@ jobs:
                 &permission_policy(),
                 resource_policy(),
             )
+            .with_trust_snapshot(&trusted_snapshot())
             .with_runtime_features([
                 RunnerFeature::JAVASCRIPT_ACTIONS,
                 RunnerFeature::NODE24_ACTIONS,
@@ -709,18 +710,21 @@ jobs:
         runtime_reference(instance),
     );
     let projected = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(84, WorkflowId::from_uuid),
-            fixed_id(85, automata_ci_core::RunId::from_uuid),
-            fixed_id(86, JobId::from_uuid),
-            execution,
-            &profiles,
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(84, WorkflowId::from_uuid),
+                fixed_id(85, automata_ci_core::RunId::from_uuid),
+                fixed_id(86, JobId::from_uuid),
+                execution,
+                &profiles,
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect("Windows projection");
     assert_eq!(
         projected.envelope().job().requirements().features(),
@@ -754,18 +758,21 @@ jobs:
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     let error = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(87, WorkflowId::from_uuid),
-            fixed_id(88, automata_ci_core::RunId::from_uuid),
-            fixed_id(89, JobId::from_uuid),
-            execution(instance),
-            &profiles(),
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(87, WorkflowId::from_uuid),
+                fixed_id(88, automata_ci_core::RunId::from_uuid),
+                fixed_id(89, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect_err("unknown literal shells fail before scheduling");
     assert!(matches!(error, LogicalJobProjectionError::InvalidShell));
 }
@@ -794,6 +801,7 @@ fn unsupported_matrix_resolved_shell_is_rejected_before_scheduling() {
                 &permission_policy(),
                 resource_policy(),
             )
+            .with_trust_snapshot(&trusted_snapshot())
             .with_activation_evaluation(&activation_evaluator, ActivationStatus::Success),
         )
         .expect_err("matrix-resolved unsupported shells fail before scheduling");
@@ -817,18 +825,21 @@ jobs:
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     let error = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(93, WorkflowId::from_uuid),
-            fixed_id(94, automata_ci_core::RunId::from_uuid),
-            fixed_id(95, JobId::from_uuid),
-            execution(instance),
-            &profiles(),
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(93, WorkflowId::from_uuid),
+                fixed_id(94, automata_ci_core::RunId::from_uuid),
+                fixed_id(95, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect_err("mutable action revisions fail before scheduling");
     assert!(matches!(
         error,
