@@ -769,7 +769,7 @@ async fn official_actions_cache_5_0_5_client_completes_cache_v2_offline() {
     let token = fixture.token;
     let process_scratch = scratch.clone();
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("node")
+        isolated_node_command()
             .arg(script)
             .env("ACTIONS_RUNTIME_TOKEN", token)
             .env("ACTIONS_RESULTS_URL", format!("http://{address}/"))
@@ -790,6 +790,28 @@ async fn official_actions_cache_5_0_5_client_completes_cache_v2_offline() {
         "official cache-v2 client exited with {}",
         output.status
     );
+}
+
+fn isolated_node_command() -> std::process::Command {
+    let mut command = std::process::Command::new("node");
+    command.env_clear();
+    for name in [
+        "PATH",
+        "PATHEXT",
+        "SystemRoot",
+        "WINDIR",
+        "ComSpec",
+        "HOME",
+        "USERPROFILE",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
 }
 
 #[tokio::test]

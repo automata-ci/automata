@@ -27,7 +27,7 @@ struct ExactClient {
     release: String,
     commit: String,
     manifest_version: String,
-    action_entry: String,
+    action_entries: Vec<String>,
     action_root_environment: String,
     embedded_package: String,
     embedded_version: String,
@@ -98,7 +98,16 @@ fn exact_client_matrix_is_closed_pinned_and_network_independent() {
         assert!(client.release.starts_with('v'));
         assert!(is_lower_hex_sha(&client.commit));
         assert!(!client.manifest_version.is_empty());
-        assert!(is_safe_relative_path(&client.action_entry));
+        assert!(!client.action_entries.is_empty());
+        let mut action_entries = BTreeSet::new();
+        for action_entry in &client.action_entries {
+            assert!(is_safe_relative_path(action_entry));
+            assert!(
+                action_entries.insert(action_entry),
+                "duplicate action entry for {}",
+                client.id
+            );
+        }
         assert!(is_safe_relative_path(&client.module_entry));
         assert!(client.action_root_environment.starts_with("AUTOMATA_TEST_"));
         assert!(client.module_environment.starts_with("AUTOMATA_TEST_"));
@@ -121,8 +130,9 @@ fn exact_client_matrix_is_closed_pinned_and_network_independent() {
 fn documentation_matrix_is_rendered_from_the_exact_fixture() {
     let matrix = matrix();
     let expected = markdown_matrix(&matrix.clients);
+    let readme = README.replace("\r\n", "\n");
     assert!(
-        README.contains(&expected),
+        readme.contains(&expected),
         "README exact-client table must match tests/fixtures/exact-client-matrix-v1.json"
     );
 }
@@ -200,7 +210,13 @@ fn supplied_action_roots_match_every_immutable_client_pin() {
         assert_eq!(embedded["version"], client.embedded_version);
         assert_eq!(embedded["integrity"], client.embedded_integrity);
 
-        assert!(canonical_child(&root, &client.action_entry).is_file());
+        for action_entry in &client.action_entries {
+            assert!(
+                canonical_child(&root, action_entry).is_file(),
+                "pinned wrapper entry is missing for {}",
+                client.id
+            );
+        }
         let module = canonical_child(&root, &client.module_entry);
         assert!(module.is_file());
         let configured_module = std::env::var_os(&client.module_environment)
