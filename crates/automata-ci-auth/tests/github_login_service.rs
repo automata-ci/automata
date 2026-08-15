@@ -18,7 +18,7 @@ use automata_ci_auth::{
         GithubLoginCompletion, GithubLoginConfigurationError, GithubLoginError,
         GithubLoginProofKey, GithubLoginProofKeyring, GithubLoginService,
         GithubLoginSessionLifetimes, GithubMembershipSnapshot, GithubWebCallback,
-        GithubWebCallbackPurpose, GithubWebLoginStart,
+        GithubWebCallbackPurpose, GithubWebLoginStart, MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS,
     },
     human::{
         AuthenticationFuture, AuthenticationProvider, AuthenticationProviderError, PrincipalId,
@@ -37,7 +37,8 @@ use automata_ci_auth::{
         CreateSession, CreateSessionOutcome, DurableSession, DurableSessionIdentity,
         HumanSessionRepository, ResolveSession, ResolveSessionOutcome, RevokeOwnSession,
         RevokeOwnSessionOutcome, RevokePrincipalSessions, RevokePrincipalSessionsOutcome,
-        SessionKind, SessionRepositoryFuture, TouchSession, TouchSessionOutcome,
+        SessionId, SessionKind, SessionRepositoryFuture, SessionTokenLookup, TouchSession,
+        TouchSessionOutcome,
     },
     session_credential::{
         SessionCredentialKey, SessionCredentialKeyring, SessionCredentialService,
@@ -368,6 +369,8 @@ impl HumanSessionRepository for UnusedSessionRepository {
 #[derive(Debug, Default)]
 struct FinalizerObservations {
     calls: usize,
+    session_ids: Vec<SessionId>,
+    session_lookups: Vec<SessionTokenLookup>,
     kind: Option<SessionKind>,
     provider_subject: Option<String>,
     token_subject: Option<String>,
@@ -403,6 +406,12 @@ impl HumanSignInFinalizer for AdmittingFinalizer {
     fn finalize(&self, request: FinalizeSignIn) -> SignInFinalizerFuture<'_> {
         let mut observations = self.observations.lock().expect("finalizer observations");
         observations.calls += 1;
+        observations
+            .session_ids
+            .push(request.session().session_id().clone());
+        observations
+            .session_lookups
+            .push(request.session().lookup().clone());
         observations.kind = Some(request.session().kind());
         observations.provider_subject = Some(request.identity().provider_subject().as_str().into());
         observations.token_subject = request
@@ -618,9 +627,45 @@ fn push_identity(endpoint: &MockGithubEndpoint, id: u64) {
     endpoint.push_memberships(Ok(GithubMembershipSnapshot::default()));
 }
 
+fn assert_fresh_finalizer_candidates(
+    observations: &FinalizerObservations,
+    sessions: &SessionCredentialService,
+    completion: &GithubLoginCompletion,
+) {
+    let returned_lookup = sessions
+        .derive_lookup_raw(
+            completion.credential().expose_secret(),
+            SessionKind::Browser,
+        )
+        .expect("returned credential lookup");
+    assert_eq!(observations.calls, 3);
+    assert_eq!(observations.session_ids.len(), 3);
+    assert_ne!(observations.session_ids[0], observations.session_ids[1]);
+    assert_ne!(observations.session_ids[0], observations.session_ids[2]);
+    assert_ne!(observations.session_ids[1], observations.session_ids[2]);
+    assert_eq!(observations.session_lookups.len(), 3);
+    assert_ne!(
+        observations.session_lookups[0],
+        observations.session_lookups[1]
+    );
+    assert_ne!(
+        observations.session_lookups[0],
+        observations.session_lookups[2]
+    );
+    assert_ne!(
+        observations.session_lookups[1],
+        observations.session_lookups[2]
+    );
+    assert_eq!(observations.session_lookups.last(), Some(&returned_lookup));
+    assert_eq!(
+        observations.session_ids.last(),
+        Some(completion.session().identity().session_id())
+    );
+}
+
 #[test]
 fn web_sign_in_rotates_proof_keys_retries_safe_collisions_and_rejects_replay() {
-    let fixture = Fixture::new(1);
+    let fixture = Fixture::new(2);
     let issuing_service = fixture.service("login-old", 0x41, &[]);
     let started = block_on(issuing_service.begin_web(tenant("tenant-a"), return_path()))
         .expect("begin web login");
@@ -687,7 +732,7 @@ fn web_sign_in_rotates_proof_keys_retries_safe_collisions_and_rejects_replay() {
         .observations
         .lock()
         .expect("finalizer observations");
-    assert_eq!(finalizer.calls, 2);
+    assert_fresh_finalizer_candidates(&finalizer, fixture.sessions.as_ref(), &completion);
     assert_eq!(finalizer.kind, Some(SessionKind::Browser));
     assert_eq!(finalizer.provider_subject.as_deref(), Some("42"));
     assert_eq!(finalizer.token_subject.as_deref(), Some("42"));
@@ -721,6 +766,44 @@ fn web_sign_in_rotates_proof_keys_retries_safe_collisions_and_rejects_replay() {
     assert_eq!(
         observed.current_user_calls, 1,
         "replay must not re-fetch identity"
+    );
+}
+
+#[test]
+fn web_sign_in_stops_after_exact_session_collision_budget() {
+    let fixture = Fixture::new(MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS);
+    let service = fixture.service("login-v1", 0x43, &[]);
+    let started =
+        block_on(service.begin_web(tenant("tenant-a"), return_path())).expect("begin web login");
+    let state = authorization_state(started.authorization_url());
+    let cookie_raw = started.binding_cookie().expose_secret().to_owned();
+
+    fixture.endpoint.push_web(Ok(token_response()));
+    push_identity(&fixture.endpoint, 42);
+    fixture.clock.set(110);
+    let result = block_on(service.complete_web(
+        tenant("tenant-a"),
+        GithubBrowserBindingCookie::from_raw(&cookie_raw).expect("browser binding cookie"),
+        &authorized_callback(&state),
+    ));
+
+    assert_eq!(
+        result.expect_err("collision budget must be enforced"),
+        GithubLoginError::CollisionLimitExceeded
+    );
+    let finalizer = fixture
+        .finalizer
+        .observations
+        .lock()
+        .expect("finalizer observations");
+    assert_eq!(finalizer.calls, MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS);
+    assert_eq!(
+        finalizer.session_ids.len(),
+        MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS
+    );
+    assert_eq!(
+        finalizer.session_lookups.len(),
+        MAX_GITHUB_LOGIN_COLLISION_ATTEMPTS
     );
 }
 

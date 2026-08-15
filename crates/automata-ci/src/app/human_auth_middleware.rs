@@ -688,7 +688,6 @@ fn credential_service_error(
             false,
         ),
         SessionCredentialServiceError::RandomnessUnavailable
-        | SessionCredentialServiceError::CollisionLimitExceeded
         | SessionCredentialServiceError::InvalidLifetime
         | SessionCredentialServiceError::LifetimeOverflow
         | SessionCredentialServiceError::InternalFailure => request_auth_error_response(

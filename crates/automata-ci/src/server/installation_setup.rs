@@ -546,9 +546,6 @@ fn map_session_error(error: SessionCredentialServiceError) -> InstallationSetupE
         SessionCredentialServiceError::RandomnessUnavailable => {
             InstallationSetupError::RandomnessUnavailable
         }
-        SessionCredentialServiceError::CollisionLimitExceeded => {
-            InstallationSetupError::CollisionLimitExceeded
-        }
         SessionCredentialServiceError::InvalidCredential
         | SessionCredentialServiceError::InvalidLifetime
         | SessionCredentialServiceError::LifetimeOverflow

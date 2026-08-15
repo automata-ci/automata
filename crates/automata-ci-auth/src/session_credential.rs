@@ -1,4 +1,4 @@
-//! Opaque browser and CLI session-credential issuance and derivation.
+//! Opaque browser and CLI session-credential preparation and derivation.
 //!
 //! Raw credentials live only in redacted, non-serializable values. Durable
 //! repositories receive a domain-separated keyed digest and never receive the
@@ -12,14 +12,12 @@ use thiserror::Error;
 use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::{
-    human::{AuthenticatedHuman, TenantId},
     secret::{CsrfToken, SecretBytes, SecretString, SecureRandom},
     session::{
-        ActivateCliSession, ActivateCliSessionOutcome, CreateSession, CreateSessionOutcome,
-        DurableSession, DurableSessionIdentity, HumanSessionRepository, ResolveSession,
-        ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome, SessionId, SessionKind,
-        SessionRepositoryError, SessionTokenDigest, SessionTokenDigestKeyId, SessionTokenLookup,
-        TouchSession, TouchSessionOutcome,
+        ActivateCliSession, ActivateCliSessionOutcome, DurableSession, HumanSessionRepository,
+        ResolveSession, ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome,
+        SessionId, SessionKind, SessionRepositoryError, SessionTokenDigest,
+        SessionTokenDigestKeyId, SessionTokenLookup, TouchSession, TouchSessionOutcome,
     },
     sign_in::PendingSessionCandidate,
     time::{Clock, UnixTimestamp},
@@ -29,8 +27,6 @@ use crate::{
 pub const SESSION_CREDENTIAL_SECRET_BYTES: usize = 32;
 /// Maximum number of active plus verify-only HMAC keys retained in one keyring.
 pub const MAX_SESSION_CREDENTIAL_KEYS: usize = 32;
-/// Maximum repository collision attempts made by one issuance request.
-pub const MAX_SESSION_CREDENTIAL_ISSUE_ATTEMPTS: usize = 8;
 
 const SESSION_CREDENTIAL_VERSION: &str = "v1";
 const SESSION_CREDENTIAL_SEPARATOR: char = '~';
@@ -432,115 +428,11 @@ pub enum SessionCredentialKeyringError {
     TooManyKeys,
 }
 
-/// Validated identity, audience, revision, and lifetimes for one new session.
-#[derive(Debug)]
-pub struct SessionCredentialIssuance<'a> {
-    tenant_id: &'a TenantId,
-    human: &'a AuthenticatedHuman,
-    kind: SessionKind,
-    authorization_revision: u64,
-    idle_lifetime_seconds: u64,
-    absolute_lifetime_seconds: u64,
-}
-
-impl<'a> SessionCredentialIssuance<'a> {
-    /// Creates a validated issuance request.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a zero authorization revision, fractional or zero lifetimes,
-    /// or an idle lifetime longer than the absolute lifetime.
-    pub fn new(
-        tenant_id: &'a TenantId,
-        human: &'a AuthenticatedHuman,
-        kind: SessionKind,
-        authorization_revision: u64,
-        idle_lifetime: Duration,
-        absolute_lifetime: Duration,
-    ) -> Result<Self, SessionCredentialRequestError> {
-        let idle_lifetime_seconds = exact_positive_seconds(idle_lifetime)?;
-        let absolute_lifetime_seconds = exact_positive_seconds(absolute_lifetime)?;
-        if authorization_revision == 0 {
-            return Err(SessionCredentialRequestError::InvalidAuthorizationRevision);
-        }
-        if idle_lifetime_seconds > absolute_lifetime_seconds {
-            return Err(SessionCredentialRequestError::InvalidLifetime);
-        }
-        Ok(Self {
-            tenant_id,
-            human,
-            kind,
-            authorization_revision,
-            idle_lifetime_seconds,
-            absolute_lifetime_seconds,
-        })
-    }
-
-    /// Returns the fixed browser or CLI audience kind.
-    #[must_use]
-    pub const fn kind(&self) -> SessionKind {
-        self.kind
-    }
-
-    /// Returns the current durable authorization revision captured at issuance.
-    #[must_use]
-    pub const fn authorization_revision(&self) -> u64 {
-        self.authorization_revision
-    }
-}
-
-fn exact_positive_seconds(duration: Duration) -> Result<u64, SessionCredentialRequestError> {
+fn exact_positive_seconds(duration: Duration) -> Result<u64, SessionCredentialServiceError> {
     if duration.is_zero() || duration.subsec_nanos() != 0 {
-        return Err(SessionCredentialRequestError::InvalidLifetime);
+        return Err(SessionCredentialServiceError::InvalidLifetime);
     }
     Ok(duration.as_secs())
-}
-
-/// Sanitized validation failure for an issuance or touch lifetime request.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum SessionCredentialRequestError {
-    /// The current authorization revision is always positive.
-    #[error("session authorization revision is invalid")]
-    InvalidAuthorizationRevision,
-    /// Durable session timestamps use positive whole-second lifetimes.
-    #[error("session credential lifetime is invalid")]
-    InvalidLifetime,
-}
-
-/// A newly persisted session and its one-time returned raw bearer credential.
-pub struct IssuedSessionCredential {
-    credential: SessionCredential,
-    session: DurableSession,
-}
-
-impl IssuedSessionCredential {
-    /// Returns the raw credential owner. Explicit exposure is still required.
-    #[must_use]
-    pub const fn credential(&self) -> &SessionCredential {
-        &self.credential
-    }
-
-    /// Returns the safe durable session metadata persisted for this bearer.
-    #[must_use]
-    pub const fn session(&self) -> &DurableSession {
-        &self.session
-    }
-
-    /// Consumes the result into its secret credential and safe metadata.
-    #[must_use]
-    pub fn into_parts(self) -> (SessionCredential, DurableSession) {
-        (self.credential, self.session)
-    }
-}
-
-impl fmt::Debug for IssuedSessionCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("IssuedSessionCredential")
-            .field("credential", &"[REDACTED]")
-            .field("session", &self.session)
-            .finish()
-    }
 }
 
 /// Repository-backed opaque session-credential service.
@@ -584,55 +476,12 @@ impl SessionCredentialService {
         idle_lifetime: Duration,
         absolute_lifetime: Duration,
     ) -> Result<PreparedSessionCredential, SessionCredentialServiceError> {
-        let idle_lifetime_seconds = exact_positive_seconds(idle_lifetime)
-            .map_err(|_| SessionCredentialServiceError::InvalidLifetime)?;
-        let absolute_lifetime_seconds = exact_positive_seconds(absolute_lifetime)
-            .map_err(|_| SessionCredentialServiceError::InvalidLifetime)?;
+        let idle_lifetime_seconds = exact_positive_seconds(idle_lifetime)?;
+        let absolute_lifetime_seconds = exact_positive_seconds(absolute_lifetime)?;
         if idle_lifetime_seconds > absolute_lifetime_seconds {
             return Err(SessionCredentialServiceError::InvalidLifetime);
         }
         self.prepare_seconds(kind, idle_lifetime_seconds, absolute_lifetime_seconds)
-    }
-
-    /// Issues and durably creates a fresh opaque browser or CLI session.
-    ///
-    /// Session-ID and token-digest conflicts cause a complete fresh retry. The
-    /// retry count is fixed and bounded.
-    ///
-    /// # Errors
-    ///
-    /// Fails on timestamp overflow, unavailable randomness or storage, corrupt
-    /// repository behavior, or exhaustion of the collision budget.
-    pub async fn issue(
-        &self,
-        request: SessionCredentialIssuance<'_>,
-    ) -> Result<IssuedSessionCredential, SessionCredentialServiceError> {
-        for _ in 0..MAX_SESSION_CREDENTIAL_ISSUE_ATTEMPTS {
-            let prepared = self.prepare_seconds(
-                request.kind,
-                request.idle_lifetime_seconds,
-                request.absolute_lifetime_seconds,
-            )?;
-            let (credential, candidate) = prepared.into_parts();
-            let session = Self::build_session(&request, &candidate)?;
-            let create = CreateSession::new(candidate.lookup().clone(), session.clone());
-            match self
-                .repository
-                .create(create)
-                .await
-                .map_err(map_repository_error)?
-            {
-                CreateSessionOutcome::Created => {
-                    return Ok(IssuedSessionCredential {
-                        credential,
-                        session,
-                    });
-                }
-                CreateSessionOutcome::SessionIdConflict
-                | CreateSessionOutcome::TokenDigestConflict => {}
-            }
-        }
-        Err(SessionCredentialServiceError::CollisionLimitExceeded)
     }
 
     /// Resolves one raw bearer without passing it across the repository port.
@@ -707,8 +556,7 @@ impl SessionCredentialService {
         expected_kind: SessionKind,
         idle_lifetime: Duration,
     ) -> Result<TouchSessionOutcome, SessionCredentialServiceError> {
-        let idle_seconds = exact_positive_seconds(idle_lifetime)
-            .map_err(|_| SessionCredentialServiceError::InvalidLifetime)?;
+        let idle_seconds = exact_positive_seconds(idle_lifetime)?;
         let lookup = self.derive_lookup_raw(raw, expected_kind)?;
         let now = self.clock.now();
         let idle_expires_at = now
@@ -872,31 +720,6 @@ impl SessionCredentialService {
             candidate,
         })
     }
-
-    fn build_session(
-        request: &SessionCredentialIssuance<'_>,
-        candidate: &PendingSessionCandidate,
-    ) -> Result<DurableSession, SessionCredentialServiceError> {
-        let identity = DurableSessionIdentity::new(
-            candidate.session_id().clone(),
-            request.tenant_id.clone(),
-            request.human.principal_id().clone(),
-            request.human.provider_id().clone(),
-            request.human.provider_subject().clone(),
-            candidate.kind(),
-        )
-        .map_err(|_| SessionCredentialServiceError::InternalFailure)?;
-        DurableSession::new(
-            identity,
-            request.authorization_revision,
-            candidate.issued_at(),
-            candidate.issued_at(),
-            candidate.idle_expires_at(),
-            candidate.expires_at(),
-            None,
-        )
-        .map_err(|_| SessionCredentialServiceError::InternalFailure)
-    }
 }
 
 impl fmt::Debug for SessionCredentialService {
@@ -961,9 +784,6 @@ pub enum SessionCredentialServiceError {
     /// Secure random generation failed.
     #[error("session credential service is temporarily unavailable")]
     RandomnessUnavailable,
-    /// All bounded session-ID or token-digest collision retries were consumed.
-    #[error("session credential service could not allocate a unique session")]
-    CollisionLimitExceeded,
     /// Durable storage is transiently unavailable.
     #[error("session credential storage is temporarily unavailable")]
     RepositoryUnavailable,
