@@ -75,6 +75,9 @@ pub enum ActionPreparationErrorKind {
     Metadata,
     /// The metadata execution kind is not supported by the selected adapter.
     UnsupportedExecution,
+    /// The selected immutable environment profile does not provide the
+    /// metadata-requested action runtime.
+    RuntimeUnavailable,
     /// Action content exceeded an execution boundary.
     ResourceExhausted,
     /// A dependency refused credentials.

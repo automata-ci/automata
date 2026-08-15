@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use automata_ci_action_github::GithubActionMetadataDecoder;
+use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
 use automata_ci_core::ActionReference;
 use automata_ci_execution::TargetPath;
 use automata_ci_job_executor_github::{
@@ -48,6 +48,149 @@ fn preparer() -> CheckedOutLocalActionPreparer {
         Arc::new(GithubActionMetadataDecoder::default()),
         GithubConditionCompiler::default(),
     )
+}
+
+fn prepared_fixture(source: &str) -> automata_ci_job_executor_github::PreparedLocalAction {
+    let reference = ActionReference::Local {
+        path: "./.github/actions/fixture".to_owned(),
+    };
+    preparer()
+        .prepare(LocalActionPreparationRequest::new(
+            &reference,
+            Some(source.as_bytes()),
+            None,
+        ))
+        .expect("real action metadata fixture prepares")
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One cross-action fixture table keeps order and scalar assertions adjacent.
+fn checkout_setup_and_artifact_fixtures_preserve_runner_input_contracts() {
+    let checkout = prepared_fixture(include_str!(
+        "../../automata-ci-action-github/tests/fixtures/checkout-v6.0.2-de0fac2-action.yml"
+    ));
+    let expected_checkout_inputs = [
+        "repository",
+        "ref",
+        "token",
+        "ssh-key",
+        "ssh-known-hosts",
+        "ssh-strict",
+        "ssh-user",
+        "persist-credentials",
+        "path",
+        "clean",
+        "filter",
+        "sparse-checkout",
+        "sparse-checkout-cone-mode",
+        "fetch-depth",
+        "fetch-tags",
+        "show-progress",
+        "lfs",
+        "submodules",
+        "set-safe-directory",
+        "github-server-url",
+    ];
+    assert_eq!(
+        checkout
+            .definition()
+            .inputs()
+            .iter()
+            .map(automata_ci_job_executor_github::PreparedInput::name)
+            .collect::<Vec<_>>(),
+        expected_checkout_inputs
+    );
+    assert_eq!(
+        checkout
+            .definition()
+            .javascript()
+            .expect("checkout JavaScript")
+            .runtime(),
+        JavascriptRuntime::Node24
+    );
+    let checkout_server = checkout
+        .definition()
+        .inputs()
+        .iter()
+        .find(|input| input.name() == "github-server-url")
+        .expect("checkout server input");
+    assert_eq!(checkout_server.required(), Some("false"));
+    assert!(checkout_server.default().is_none());
+    let checkout_filter = checkout
+        .definition()
+        .inputs()
+        .iter()
+        .find(|input| input.name() == "filter")
+        .expect("checkout filter input");
+    assert!(matches!(
+        checkout_filter.default(),
+        Some(PreparedValue::Literal(value)) if value.is_empty()
+    ));
+    let checkout_strict = checkout
+        .definition()
+        .inputs()
+        .iter()
+        .find(|input| input.name() == "ssh-strict")
+        .expect("checkout strict input");
+    assert!(matches!(
+        checkout_strict.default(),
+        Some(PreparedValue::Literal(value)) if value == "true"
+    ));
+
+    let setup = prepared_fixture(include_str!(
+        "../../automata-ci-action-github/tests/fixtures/setup-node-v6-representative.yml"
+    ));
+    let deprecated = setup
+        .definition()
+        .inputs()
+        .iter()
+        .find(|input| input.name() == "package-manager-cache")
+        .expect("setup-node deprecated input");
+    assert_eq!(deprecated.deprecation_message(), Some("Use cache instead"));
+    assert!(matches!(
+        deprecated.default(),
+        Some(PreparedValue::Literal(value)) if value == "true"
+    ));
+
+    let artifact = prepared_fixture(include_str!(
+        "../../automata-ci-action-github/tests/fixtures/upload-artifact-v7-representative.yml"
+    ));
+    let path = artifact
+        .definition()
+        .inputs()
+        .iter()
+        .find(|input| input.name() == "path")
+        .expect("artifact path input");
+    assert_eq!(path.required(), Some("true"));
+    assert!(path.default().is_none());
+    let compression = artifact
+        .definition()
+        .inputs()
+        .iter()
+        .find(|input| input.name() == "compression-level")
+        .expect("artifact compression input");
+    assert!(matches!(
+        compression.default(),
+        Some(PreparedValue::Literal(value)) if value == "6"
+    ));
+    assert_eq!(artifact.definition().outputs().len(), 3);
+}
+
+#[test]
+fn unsafe_deprecation_metadata_fails_preparation_without_becoming_a_log_record() {
+    let reference = ActionReference::Local {
+        path: "./.github/actions/unsafe-message".to_owned(),
+    };
+    let error = preparer()
+        .prepare(LocalActionPreparationRequest::new(
+            &reference,
+            Some(
+                b"inputs:\n  old:\n    deprecationMessage: \"first\\nforged\"\nruns:\n  using: node24\n  main: index.js\n",
+            ),
+            None,
+        ))
+        .expect_err("control-containing diagnostics fail closed");
+    assert_eq!(error.kind(), ActionPreparationErrorKind::Metadata);
 }
 
 #[test]

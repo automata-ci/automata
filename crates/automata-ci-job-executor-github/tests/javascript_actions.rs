@@ -2,19 +2,139 @@ mod support;
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use automata_ci_core::{JobConclusion, LogChannel, ValueSource};
+use automata_ci_action_github::GithubActionMetadataDecoder;
+use automata_ci_core::{ActionReference, JobConclusion, LogChannel, Sha256Digest, ValueSource};
 use automata_ci_execution::{
     EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment,
 };
 use automata_ci_github_runtime::CommandFileKind;
+use automata_ci_job_executor_github::{
+    CheckedOutLocalActionPreparer, LocalActionPreparationRequest, PreparedAction,
+};
 use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionEvents, JobExecutor};
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
+use bytes::Bytes;
+use sha2::{Digest as _, Sha256};
 
 use support::{
     CONTEXT_SECRET, Fixture, PhaseResponse, PostContextCancellationPoint, action_step, envelope,
     envelope_with_environment, environment_map, prepared_node24_action,
     prepared_node24_action_with_post_condition, run_step,
 };
+
+fn prepared_identity_input_action() -> PreparedAction {
+    let source = r"
+inputs:
+  action-name:
+    default: ${{ github.action }}
+  action-path:
+    default: ${{ github.action_path }}
+  action-ref:
+    default: ${{ github.action_ref }}
+  action-repository:
+    default: ${{ github.action_repository }}
+  missing:
+    required: true
+  boolean:
+    default: false
+  numeric:
+    default: 6
+  fetch-depth:
+    deprecationMessage: Use depth instead
+runs:
+  using: node24
+  pre: dist/pre.js
+  pre-if: github.action_ref == '0123456789abcdef0123456789abcdef01234567' && github.action_repository == 'actions/example'
+  main: dist/index.js
+  post: dist/post.js
+  post-if: github.action == 'identity' && github.action_repository == 'actions/example'
+";
+    let reference = ActionReference::Local {
+        path: "./identity".to_owned(),
+    };
+    let local = CheckedOutLocalActionPreparer::new(
+        Arc::new(GithubActionMetadataDecoder::default()),
+        GithubConditionCompiler::default(),
+    )
+    .prepare(LocalActionPreparationRequest::new(
+        &reference,
+        Some(source.as_bytes()),
+        None,
+    ))
+    .expect("identity fixture prepares");
+    let archive = Bytes::copy_from_slice(source.as_bytes());
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+    PreparedAction::with_definition(digest, archive, "", local.definition().clone())
+        .expect("identity action")
+}
+
+#[tokio::test]
+async fn invocation_identity_defaults_missing_required_and_deprecations_match_action_contract() {
+    let fixture = Fixture::new(
+        vec![prepared_identity_input_action()],
+        vec![
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+            PhaseResponse::success(),
+        ],
+    );
+    let job = envelope(vec![action_step("identity", "actions/example")]);
+    let request = fixture.request(job);
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("identity action executes");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let commands = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+        .collect::<Vec<_>>();
+    assert_eq!(commands.len(), 3, "identity-aware pre/main/post all run");
+    for command in commands {
+        let environment = environment_map(command);
+        let action_path = &environment["GITHUB_ACTION_PATH"];
+        assert_eq!(environment["GITHUB_ACTION"], "identity");
+        assert_eq!(environment["GITHUB_ACTION_REPOSITORY"], "actions/example");
+        assert_eq!(
+            environment["GITHUB_ACTION_REF"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert!(action_path.ends_with("/actions/action-0/root"));
+        assert_eq!(environment["INPUT_ACTION-NAME"], "identity");
+        assert_eq!(environment["INPUT_ACTION-PATH"], action_path.as_str());
+        assert_eq!(
+            environment["INPUT_ACTION-REF"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+        assert_eq!(environment["INPUT_ACTION-REPOSITORY"], "actions/example");
+        assert_eq!(environment["INPUT_MISSING"], "");
+        assert_eq!(environment["INPUT_BOOLEAN"], "false");
+        assert_eq!(environment["INPUT_NUMERIC"], "6");
+        assert_eq!(environment["INPUT_FETCH-DEPTH"], "1");
+    }
+    drop(state);
+
+    let diagnostics = fixture
+        .events
+        .logs()
+        .into_iter()
+        .filter(|event| event.channel() == LogChannel::System)
+        .flat_map(|event| event.payload().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        String::from_utf8(diagnostics).expect("UTF-8 diagnostics"),
+        concat!(
+            "Input 'fetch-depth' has been deprecated with message: Use depth instead\n",
+            "Input 'fetch-depth' has been deprecated with message: Use depth instead\n",
+        )
+    );
+}
 
 #[tokio::test]
 async fn sandbox_profile_defaults_are_the_lowest_execution_environment_layer() {

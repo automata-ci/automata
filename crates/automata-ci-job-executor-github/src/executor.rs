@@ -585,6 +585,34 @@ impl GithubJobExecutor {
         if cancellation.is_cancelled() {
             return self.cancelled_job_result(attempt_id, &masker);
         }
+        let prepared_repository_actions = match self
+            .preflight_repository_actions(request.job(), &cancellation)
+            .await
+        {
+            Ok(actions) => actions,
+            Err(ActionLoadError::Preparation(kind)) => {
+                if emit_system_while_active(
+                    &format!("Action preparation failed ({kind:?})"),
+                    &mut masker,
+                    &events,
+                    &cancellation,
+                )?
+                .is_none()
+                {
+                    return self.cancelled_job_result(attempt_id, &masker);
+                }
+                return self.failed_job_result(attempt_id, &masker);
+            }
+            Err(ActionLoadError::Executor(error))
+                if error.kind() == ExecutorAdapterErrorKind::Cancelled =>
+            {
+                return self.cancelled_job_result(attempt_id, &masker);
+            }
+            Err(ActionLoadError::Executor(error)) => return Err(error),
+        };
+        if cancellation.is_cancelled() {
+            return self.cancelled_job_result(attempt_id, &masker);
+        }
         if let Some(acknowledger) = &self.custody_acknowledger {
             acknowledger
                 .acknowledge(cancellation.token())
@@ -743,6 +771,7 @@ impl GithubJobExecutor {
                 &events,
                 &cancellation,
                 job_deadline,
+                prepared_repository_actions,
             )
             .await?;
         let main_suppressed = preloaded_actions.main_suppressed;
@@ -1210,6 +1239,23 @@ impl GithubJobExecutor {
         Ok(result)
     }
 
+    fn failed_job_result(
+        &self,
+        attempt_id: AttemptId,
+        masker: &SecretMasker,
+    ) -> Result<JobResult, ExecutorAdapterError> {
+        let result = JobResult::new(
+            attempt_id,
+            JobConclusion::Failure,
+            masker.job_secret_exposure(),
+            self.ports.clock.now(),
+        );
+        result
+            .validate()
+            .map_err(|error| map_job_result_validation_error(&error))?;
+        Ok(result)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare_action_occurrence<'a>(
         &'a self,
@@ -1344,6 +1390,7 @@ impl GithubJobExecutor {
             planner.materials.insert(key, action.clone());
             action
         };
+        self.require_action_runtimes(action.definition())?;
         let slot = preferred_action_slot
             .map_or_else(|| budget.action_slot(), Ok)
             .map_err(ActionLoadError::Executor)?;
@@ -1361,6 +1408,119 @@ impl GithubJobExecutor {
             definition: action.definition().clone(),
             paths: action_paths,
         })
+    }
+
+    async fn preflight_repository_actions(
+        &self,
+        job: &JobIrEnvelope,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<BTreeMap<String, PreparedAction>, ActionLoadError> {
+        let mut planner = ActionGraphPlanner::default();
+        for step in job.job().steps() {
+            if cancellation.is_cancelled() {
+                return Err(ActionLoadError::Executor(cancelled()));
+            }
+            let SemanticStep::Action { reference, .. } = step.kind() else {
+                continue;
+            };
+            match reference {
+                ActionReference::Repository { .. } => {
+                    self.preflight_repository_action(reference, &mut planner, cancellation)
+                        .await?;
+                }
+                ActionReference::Container { .. } => {
+                    return Err(ActionLoadError::Preparation(
+                        ActionPreparationErrorKind::UnsupportedExecution,
+                    ));
+                }
+                // Local metadata is created by earlier workflow code and can
+                // only be copied from the isolated workspace after provider
+                // creation. Its graph remains bounded and fail-closed by the
+                // same load/runtime checks before any local action phase.
+                ActionReference::Local { .. } => {}
+            }
+        }
+        Ok(planner.materials)
+    }
+
+    fn preflight_repository_action<'a>(
+        &'a self,
+        reference: &'a ActionReference,
+        planner: &'a mut ActionGraphPlanner,
+        cancellation: &'a ExecutionCancellation,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionLoadError>> + Send + 'a>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(ActionLoadError::Executor(cancelled()));
+            }
+            let key = action_reference_key(reference);
+            if !planner.enter(key.clone()) {
+                return Err(ActionLoadError::Preparation(
+                    ActionPreparationErrorKind::Metadata,
+                ));
+            }
+            let result = async {
+                let action = if let Some(action) = planner.materials.get(&key) {
+                    action.clone()
+                } else {
+                    let action = self
+                        .ports
+                        .actions
+                        .prepare(ActionPreparationRequest::new(reference))
+                        .await
+                        .map_err(|error| ActionLoadError::Preparation(error.kind()))?;
+                    if cancellation.is_cancelled() {
+                        return Err(ActionLoadError::Executor(cancelled()));
+                    }
+                    planner.materials.insert(key, action.clone());
+                    action
+                };
+                self.require_action_runtimes(action.definition())?;
+                let children = match action.definition().execution() {
+                    PreparedActionExecution::Javascript(_) => Vec::new(),
+                    PreparedActionExecution::Composite(composite) => composite
+                        .steps()
+                        .iter()
+                        .filter_map(|step| match step {
+                            PreparedCompositeStep::Uses(step) => Some(step.reference().clone()),
+                            PreparedCompositeStep::Run(_) => None,
+                        })
+                        .collect::<Vec<_>>(),
+                };
+                for child in children {
+                    match &child {
+                        ActionReference::Repository { .. } => {
+                            self.preflight_repository_action(&child, planner, cancellation)
+                                .await?;
+                        }
+                        ActionReference::Container { .. } => {
+                            return Err(ActionLoadError::Preparation(
+                                ActionPreparationErrorKind::UnsupportedExecution,
+                            ));
+                        }
+                        ActionReference::Local { .. } => {}
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            planner.leave();
+            result
+        })
+    }
+
+    fn require_action_runtimes(
+        &self,
+        definition: &PreparedActionDefinition,
+    ) -> Result<(), ActionLoadError> {
+        if let PreparedActionExecution::Javascript(javascript) = definition.execution()
+            && self.ports.toolchain.node(javascript.runtime()).is_none()
+        {
+            return Err(ActionLoadError::Preparation(
+                ActionPreparationErrorKind::RuntimeUnavailable,
+            ));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -1382,9 +1542,10 @@ impl GithubJobExecutor {
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
         job_deadline: Option<UnixMillis>,
+        prepared_repository_actions: BTreeMap<String, PreparedAction>,
     ) -> Result<PreloadedJobActions, ExecutorAdapterError> {
         let mut preloaded = BTreeMap::new();
-        let mut planner = ActionGraphPlanner::default();
+        let mut planner = ActionGraphPlanner::with_materials(prepared_repository_actions);
         for (index, step) in request.job().job().steps().iter().enumerate() {
             if cancellation.is_cancelled() {
                 *status = GithubStatus::Cancelled;
@@ -1643,9 +1804,18 @@ impl GithubJobExecutor {
             ),
             cancellation,
         )?;
+        let identity = ActionIdentity::new(
+            step.id().as_str().to_owned(),
+            reference.clone(),
+            action_paths.directory.clone(),
+        );
+        let lifecycle_context = cancellation_dominant(
+            action_lifecycle_context(context.expression(), &identity, &[], status),
+            cancellation,
+        )?;
         if !cancellation_dominant(
             self.expressions
-                .evaluate_condition(javascript.pre_condition(), context.expression())
+                .evaluate_condition(javascript.pre_condition(), &lifecycle_context)
                 .map_err(|_| invalid_job()),
             cancellation,
         )? {
@@ -1668,18 +1838,20 @@ impl GithubJobExecutor {
             cancellation_dominant(budget.charge_derived(value.expose().len()), cancellation)?;
             supplied.insert(name.clone(), value);
         }
-        let inputs = cancellation_dominant(
-            builder.resolve_action_inputs(definition, &supplied, context.expression()),
+        let input_context = cancellation_dominant(
+            action_expression_context(context.expression(), &[], None, &identity, &[], status),
             cancellation,
         )?;
+        let inputs = cancellation_dominant(
+            builder.resolve_action_inputs(definition, &supplied, &input_context),
+            cancellation,
+        )?;
+        if !Self::emit_input_deprecations(&inputs, masker, events, cancellation)? {
+            return Ok(PreJobActionResult::cancelled());
+        }
         for (_, value) in inputs.values() {
             cancellation_dominant(budget.charge_derived(value.expose().len()), cancellation)?;
         }
-        let identity = ActionIdentity::new(
-            step.id().as_str().to_owned(),
-            reference.clone(),
-            action_paths.directory.clone(),
-        );
         let continue_on_error = cancellation_dominant(
             self.resolve_runtime_boolean(step.continue_on_error(), context.expression()),
             cancellation,
@@ -1837,9 +2009,18 @@ impl GithubJobExecutor {
                 let Some(pre) = javascript.pre() else {
                     return Ok(PreJobActionResult::default());
                 };
+                let lifecycle_context = cancellation_dominant(
+                    action_lifecycle_context(
+                        condition_expression,
+                        &identity,
+                        action_environment,
+                        status,
+                    ),
+                    cancellation,
+                )?;
                 if !cancellation_dominant(
                     self.expressions
-                        .evaluate_condition(javascript.pre_condition(), condition_expression)
+                        .evaluate_condition(javascript.pre_condition(), &lifecycle_context)
                         .map_err(|_| invalid_job()),
                     cancellation,
                 )? {
@@ -1857,14 +2038,28 @@ impl GithubJobExecutor {
                     self.ports.secrets.as_ref(),
                     request.environment().default_environment(),
                 );
+                let input_context = cancellation_dominant(
+                    action_expression_context(
+                        condition_expression,
+                        &[],
+                        None,
+                        &identity,
+                        action_environment,
+                        status,
+                    ),
+                    cancellation,
+                )?;
                 let inputs = cancellation_dominant(
                     builder.resolve_action_inputs(
                         &loaded.definition,
                         supplied_inputs,
-                        condition_expression,
+                        &input_context,
                     ),
                     cancellation,
                 )?;
+                if !Self::emit_input_deprecations(&inputs, masker, events, cancellation)? {
+                    return Ok(PreJobActionResult::cancelled());
+                }
                 for (_, value) in inputs.values() {
                     cancellation_dominant(
                         budget.charge_derived(value.expose().len()),
@@ -2006,14 +2201,28 @@ impl GithubJobExecutor {
                     self.ports.secrets.as_ref(),
                     request.environment().default_environment(),
                 );
+                let input_context = cancellation_dominant(
+                    action_expression_context(
+                        condition_expression,
+                        &[],
+                        None,
+                        &identity,
+                        action_environment,
+                        status,
+                    ),
+                    cancellation,
+                )?;
                 let inputs = cancellation_dominant(
                     builder.resolve_action_inputs(
                         &loaded.definition,
                         supplied_inputs,
-                        condition_expression,
+                        &input_context,
                     ),
                     cancellation,
                 )?;
+                if !Self::emit_input_deprecations(&inputs, masker, events, cancellation)? {
+                    return Ok(PreJobActionResult::cancelled());
+                }
                 for (_, value) in inputs.values() {
                     cancellation_dominant(
                         budget.charge_derived(value.expose().len()),
@@ -2423,22 +2632,36 @@ impl GithubJobExecutor {
                     self.ports.secrets.as_ref(),
                     request.environment().default_environment(),
                 );
+                let identity =
+                    ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
+                let input_context = cancellation_dominant(
+                    action_expression_context(
+                        base.expression(),
+                        &[],
+                        None,
+                        &identity,
+                        &action_environment,
+                        status,
+                    ),
+                    cancellation,
+                )?;
                 let inputs = cancellation_dominant(
                     builder.resolve_action_inputs(
                         &loaded.definition,
                         &supplied_inputs,
-                        base.expression(),
+                        &input_context,
                     ),
                     cancellation,
                 )?;
+                if !Self::emit_input_deprecations(&inputs, masker, events, cancellation)? {
+                    return Ok(CommandOutcome::Cancelled);
+                }
                 for (_, value) in inputs.values() {
                     cancellation_dominant(
                         budget.charge_derived(value.expose().len()),
                         cancellation,
                     )?;
                 }
-                let identity =
-                    ActionIdentity::new(runtime_step_id, reference, loaded.paths.directory.clone());
                 posts.record_occurrence(
                     call_path.clone(),
                     PostActionOccurrence {
@@ -2568,6 +2791,7 @@ impl GithubJobExecutor {
                     .prepare(ActionPreparationRequest::new(reference))
                     .await
                     .map_err(|error| ActionLoadError::Preparation(error.kind()))?;
+                self.require_action_runtimes(action.definition())?;
                 let slot = preferred_action_slot
                     .map_or_else(|| budget.action_slot(), Ok)
                     .map_err(ActionLoadError::Executor)?;
@@ -2595,6 +2819,7 @@ impl GithubJobExecutor {
                     budget,
                     cancellation,
                 )?;
+                self.require_action_runtimes(prepared.definition())?;
                 let directory = local_action_directory(&paths.workspace, prepared.path())
                     .map_err(ActionLoadError::Executor)?;
                 Ok(LoadedAction {
@@ -3568,14 +3793,28 @@ impl GithubJobExecutor {
         }];
 
         if call_path.depth() == 1 {
-            if !self.evaluate_registered_post_condition(post, &occurrence, &top_context)? {
+            let lifecycle_context = action_lifecycle_context(
+                &top_context,
+                &occurrence.identity,
+                &top_environment,
+                status,
+            )?;
+            if !self.evaluate_registered_post_condition(post, &occurrence, &lifecycle_context)? {
                 return Ok(ResolvedPostTemplates::Skipped);
             }
             let timeout = self.resolve_registered_post_timeout(top_step, &top_context)?;
             let supplied =
                 Self::resolve_post_source_inputs(&builder, supplied, &top_context, masker, budget)?;
+            let input_context = action_expression_context(
+                &top_context,
+                &[],
+                None,
+                &occurrence.identity,
+                &top_environment,
+                status,
+            )?;
             let inputs =
-                builder.resolve_action_inputs(&occurrence.definition, &supplied, &top_context)?;
+                builder.resolve_action_inputs(&occurrence.definition, &supplied, &input_context)?;
             Self::charge_action_inputs(&inputs, budget)?;
             return Ok(ResolvedPostTemplates::Execute(Box::new(
                 ResolvedPostExecution {
@@ -3591,8 +3830,16 @@ impl GithubJobExecutor {
         let timeout = self.resolve_registered_post_timeout(top_step, &top_context)?;
         let supplied =
             Self::resolve_post_source_inputs(&builder, supplied, &top_context, masker, budget)?;
+        let input_context = action_expression_context(
+            &top_context,
+            &[],
+            None,
+            &occurrence.identity,
+            &top_environment,
+            status,
+        )?;
         let mut inputs =
-            builder.resolve_action_inputs(&occurrence.definition, &supplied, &top_context)?;
+            builder.resolve_action_inputs(&occurrence.definition, &supplied, &input_context)?;
         Self::charge_action_inputs(&inputs, budget)?;
         let mut expression_environment = top_environment;
         let mut action_environment = Vec::new();
@@ -3641,22 +3888,36 @@ impl GithubJobExecutor {
             if &child_occurrence.identity.reference != step.reference() {
                 return Err(invalid_job());
             }
+            let lifecycle_context = action_lifecycle_context(
+                &child_context,
+                &child_occurrence.identity,
+                &expression_environment,
+                status,
+            )?;
             let final_occurrence = depth + 1 == call_path.depth();
             if final_occurrence
                 && !self.evaluate_registered_post_condition(
                     post,
                     &child_occurrence,
-                    &child_context,
+                    &lifecycle_context,
                 )?
             {
                 return Ok(ResolvedPostTemplates::Skipped);
             }
             let supplied =
                 Self::resolve_composite_value_map(&builder, step.inputs(), &child_context, budget)?;
+            let input_context = action_expression_context(
+                &child_context,
+                &[],
+                None,
+                &child_occurrence.identity,
+                &expression_environment,
+                status,
+            )?;
             let child_inputs = builder.resolve_action_inputs(
                 &child_occurrence.definition,
                 &supplied,
-                &child_context,
+                &input_context,
             )?;
             Self::charge_action_inputs(&child_inputs, budget)?;
             if final_occurrence {
@@ -3732,6 +3993,21 @@ impl GithubJobExecutor {
             budget.charge_derived(value.expose().len())?;
         }
         Ok(())
+    }
+
+    fn emit_input_deprecations(
+        inputs: &ResolvedActionInputs,
+        masker: &mut SecretMasker,
+        events: &Arc<dyn ExecutionEvents>,
+        cancellation: &dyn ExecutorCancellation,
+    ) -> Result<bool, ExecutorAdapterError> {
+        for (name, message) in inputs.deprecations() {
+            let diagnostic = format!("Input '{name}' has been deprecated with message: {message}");
+            if emit_system_while_active(&diagnostic, masker, events, cancellation)?.is_none() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn resolve_post_continue_on_error(
@@ -5677,6 +5953,14 @@ struct ActionGraphPlanner {
 }
 
 impl ActionGraphPlanner {
+    fn with_materials(materials: BTreeMap<String, PreparedAction>) -> Self {
+        Self {
+            active: Vec::new(),
+            occurrences: 0,
+            materials,
+        }
+    }
+
     fn enter(&mut self, key: String) -> bool {
         if action_budget_rejection(&self.active, self.occurrences, &key).is_some() {
             return false;
@@ -5793,10 +6077,19 @@ impl ActionIdentity {
                 ResolvedEnvironmentValue::plain(self.action_path.as_str()),
             ),
         ];
-        if let ActionReference::Repository { repository, .. } = &self.reference {
+        if let ActionReference::Repository {
+            repository,
+            revision,
+            ..
+        } = &self.reference
+        {
             values.push((
                 "GITHUB_ACTION_REPOSITORY".to_owned(),
                 ResolvedEnvironmentValue::plain(repository),
+            ));
+            values.push((
+                "GITHUB_ACTION_REF".to_owned(),
+                ResolvedEnvironmentValue::plain(revision),
             ));
         }
         values
@@ -6381,6 +6674,19 @@ fn action_expression_context<'a>(
         ]),
         status,
     })
+}
+
+fn action_lifecycle_context<'a>(
+    base: &'a dyn GithubEvaluationContext,
+    identity: &ActionIdentity,
+    environment: &[(String, ResolvedEnvironmentValue)],
+    status: GithubStatus,
+) -> Result<ActionExpressionContext<'a>, ExecutorAdapterError> {
+    let mut context = action_expression_context(base, &[], None, identity, environment, status)?;
+    if let Some(inputs) = base.named_value("inputs") {
+        context.named.insert("inputs".to_owned(), inputs);
+    }
+    Ok(context)
 }
 
 fn environment_expression_context<'a>(
