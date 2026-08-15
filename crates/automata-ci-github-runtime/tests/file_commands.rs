@@ -59,6 +59,25 @@ fn all_name_value_files_share_the_exact_grammar() {
 }
 
 #[test]
+fn actions_core_empty_heredoc_exports_match_github_runner_grammar() {
+    let parser = GithubCommandFileDecoder::default();
+    let source = b"SCCACHE_PATH<<ghadelimiter_one\n/opt/hostedtoolcache/sccache/0.17.0/x64/sccache\nghadelimiter_one\nACTIONS_CACHE_SERVICE_V2<<ghadelimiter_two\non\nghadelimiter_two\nACTIONS_RESULTS_URL<<ghadelimiter_three\n\nghadelimiter_three\nACTIONS_RUNTIME_TOKEN<<ghadelimiter_four\n\nghadelimiter_four\n";
+
+    let parsed = parser
+        .decode(
+            CommandFileKind::Environment,
+            source,
+            CommandFilePlatform::Unix,
+        )
+        .expect("@actions/core exportVariable payload must decode");
+
+    assert_eq!(
+        render_name_values(&parsed),
+        "SCCACHE_PATH=/opt/hostedtoolcache/sccache/0.17.0/x64/sccache\nACTIONS_CACHE_SERVICE_V2=on\nACTIONS_RESULTS_URL=\nACTIONS_RUNTIME_TOKEN=\n"
+    );
+}
+
+#[test]
 fn heredoc_newlines_follow_the_selected_runner_platform() {
     let parser = GithubCommandFileDecoder::default();
     let source = b"VALUE<<EOF\r\none\r\nEOF\r\n";

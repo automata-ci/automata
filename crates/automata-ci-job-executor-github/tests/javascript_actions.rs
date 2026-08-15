@@ -200,6 +200,32 @@ async fn metadata_driven_node24_actions_run_main_then_posts_in_lifo_order() {
 }
 
 #[tokio::test]
+async fn sccache_action_environment_and_path_exports_survive_main_and_post() {
+    let environment = b"SCCACHE_PATH<<ghadelimiter_one\n/opt/hostedtoolcache/sccache/0.17.0/x64/sccache\nghadelimiter_one\nACTIONS_CACHE_SERVICE_V2<<ghadelimiter_two\non\nghadelimiter_two\nACTIONS_RESULTS_URL<<ghadelimiter_three\nhttps://results.example/\nghadelimiter_three\nACTIONS_RUNTIME_TOKEN<<ghadelimiter_four\nruntime-token\nghadelimiter_four\n";
+    let responses = vec![
+        PhaseResponse::success()
+            .with_file(CommandFileKind::Environment, environment.to_vec())
+            .with_file(
+                CommandFileKind::Path,
+                b"/opt/hostedtoolcache/sccache/0.17.0/x64\n".to_vec(),
+            ),
+        PhaseResponse::success(),
+    ];
+    let fixture = Fixture::new(vec![prepared_node24_action()], responses);
+    let action = action_step("sccache", "mozilla-actions/sccache-action");
+    let request = fixture.request(envelope(vec![action]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("sccache-compatible command files execute");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+}
+
+#[tokio::test]
 async fn registered_post_does_not_start_when_execution_is_cancelled_before_posts() {
     let cancellation = ExecutionCancellation::new();
     let fixture = Fixture::new(
