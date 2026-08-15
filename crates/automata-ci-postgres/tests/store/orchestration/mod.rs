@@ -1,5 +1,6 @@
 //! Current-schema logical-orchestration and read-model tests.
 
+mod event_subject;
 mod logical_activation;
 mod logical_activation_preparation;
 mod logical_instance_result;

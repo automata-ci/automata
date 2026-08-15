@@ -7,6 +7,7 @@ mod github_schedule;
 mod github_service_authority;
 mod github_service_authority_clock;
 mod github_subject_evidence;
+mod github_workflow_permissions;
 mod provider_delivery;
 mod publication;
 mod reusable_workflow_expansion;

@@ -995,7 +995,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
                     ShellTemplate::default_shell(),
                 )),
             )],
-        ),
+        )
+        .with_trust_snapshot(crate::runner_control_support::trusted_snapshot()),
     );
     let mismatched_lease = Lease::new(
         LeaseId::new(),
@@ -1006,7 +1007,7 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
         UnixMillis::new(101),
     )
     .expect("mismatched lease");
-    for repository in [
+    for repository in vec![
         MismatchedPublishedLeaseOffer {
             job: expected_job.clone(),
             lease: lease.clone(),
@@ -1215,7 +1216,8 @@ fn job() -> JobIrEnvelope {
                     ShellTemplate::default_shell(),
                 )),
             )],
-        ),
+        )
+        .with_trust_snapshot(crate::runner_control_support::trusted_snapshot()),
     )
 }
 

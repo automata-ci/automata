@@ -4,7 +4,8 @@ use std::{fmt, sync::Arc};
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{
-    AttemptId, FencingToken, JobAuthorityProfile, JobId, JobIrEnvelope, Lease, RunId, UnixMillis,
+    AttemptId, FencingToken, JobAuthorityProfile, JobId, JobIrEnvelope, Lease, RunId,
+    TrustPermissionAuthority, UnixMillis,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -449,9 +450,10 @@ impl JobRuntimeAuthorities {
     ///
     /// # Errors
     ///
-    /// Standard jobs require at least one authority. Credential-free jobs
-    /// require an empty bundle. Oversized, duplicate, unsorted, or
-    /// execution-mismatched material is rejected in both cases.
+    /// Standard jobs require at least one authority unless their sealed trust
+    /// snapshot denies every provider permission. Credential-free and such
+    /// fail-closed jobs require an empty bundle. Oversized, duplicate, unsorted,
+    /// or execution-mismatched material is rejected in every case.
     pub fn new(
         authorities: Vec<JobRuntimeAuthority>,
         job: &JobIrEnvelope,
@@ -502,8 +504,14 @@ impl JobRuntimeAuthorities {
         if self.authorities.len() > MAX_RUNTIME_AUTHORITIES {
             return Err(RuntimeAuthorityError::InvalidCount);
         }
+        let trust_denies_all = !job.job().trust_snapshot().is_construction_placeholder()
+            && job.job().trust_snapshot().authority().permissions()
+                == TrustPermissionAuthority::DenyAll;
         match job.job().authority_profile() {
-            JobAuthorityProfile::Standard if self.authorities.is_empty() => {
+            JobAuthorityProfile::Standard if self.authorities.is_empty() && !trust_denies_all => {
+                return Err(RuntimeAuthorityError::AuthorityProfileMismatch);
+            }
+            JobAuthorityProfile::Standard if !self.authorities.is_empty() && trust_denies_all => {
                 return Err(RuntimeAuthorityError::AuthorityProfileMismatch);
             }
             JobAuthorityProfile::CredentialFree if !self.authorities.is_empty() => {

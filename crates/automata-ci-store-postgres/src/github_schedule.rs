@@ -9,15 +9,15 @@ use automata_ci_store::{
     AdmitLogicalWorkflowRun, ClaimDueGithubScheduleFire, ClaimGithubScheduleDiscovery,
     ClaimedGithubScheduleFire, CompleteGithubScheduleFire, GITHUB_SCHEDULE_ARCHIVE_MEDIA_TYPE,
     GITHUB_SCHEDULE_ATTEMPTS_EXHAUSTED_FAILURE, GITHUB_SCHEDULE_INVALID_REGISTRY_FAILURE,
-    GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubScheduleArchive,
-    GithubScheduleClaimFence, GithubScheduleDiscoveryClaim, GithubScheduleFireClaim,
-    GithubScheduleFireConclusion, GithubScheduleFireId, GithubScheduleFireReceipt,
-    GithubScheduleRegistryEntry, GithubScheduleRegistryId, GithubScheduleRegistryReceipt,
-    GithubScheduleRepository, GithubScheduleSourceAuthority, GithubScheduleStoreError,
-    GithubScheduleWorkerId, LogicalWorkflowAdmissionStoreError, MAX_GITHUB_SCHEDULE_CLAIM_MILLIS,
-    MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, ObjectKey, ProviderConnectionId,
-    RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject, RepositoryId,
-    RetryGithubScheduleFire, StoreError, TenantScope,
+    GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubProviderManifestRevision,
+    GithubScheduleArchive, GithubScheduleClaimFence, GithubScheduleDiscoveryClaim,
+    GithubScheduleFireClaim, GithubScheduleFireConclusion, GithubScheduleFireId,
+    GithubScheduleFireReceipt, GithubScheduleRegistryEntry, GithubScheduleRegistryId,
+    GithubScheduleRegistryReceipt, GithubScheduleRepository, GithubScheduleSourceAuthority,
+    GithubScheduleStoreError, GithubScheduleWorkerId, LogicalWorkflowAdmissionStoreError,
+    MAX_GITHUB_SCHEDULE_CLAIM_MILLIS, MAX_GITHUB_SCHEDULE_FIRE_ATTEMPTS, ObjectKey,
+    ProviderConnectionId, RegisterGithubScheduleRegistry, RegisterGithubScheduledCheckSubject,
+    RepositoryId, RetryGithubScheduleFire, StoreError, TenantScope,
 };
 
 #[async_trait]
@@ -829,6 +829,41 @@ pub(crate) async fn record_github_scheduled_run_evidence_in_transaction(
     insert_scheduled_run_evidence(transaction, command, claim, subject_id, &source).await
 }
 
+pub(crate) async fn validate_github_schedule_selection_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: GithubScheduleFireClaim,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let source = lock_scheduled_check_source(transaction, claim)
+        .await
+        .map_err(schedule_admission_error)?;
+    let now = database_now(transaction)
+        .await
+        .map_err(schedule_admission_error)?;
+    require_scheduled_command(command, claim, &source, now)?;
+    let check = load_exact_scheduled_check(transaction, claim.fire_id(), &source)
+        .await
+        .map_err(schedule_admission_error)?
+        .ok_or_else(|| StoreError::corrupt_data("scheduled GitHub Check evidence is absent"))?;
+    let exact_projection = matches!(
+        (check.desired(), check.desired_revision()),
+        (automata_ci_store::GithubCheckDesiredProjection::Queued, 1)
+            | (
+                automata_ci_store::GithubCheckDesiredProjection::Terminal(
+                    automata_ci_store::GithubCheckTerminalCause::WorkflowSkipped
+                ),
+                2
+            )
+    );
+    if check.workflow_run_id().is_some() || !exact_projection {
+        return Err(StoreError::corrupt_data(
+            "scheduled GitHub Check is not an exact queued or disabled selection",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub(crate) async fn validate_github_scheduled_run_evidence_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
@@ -1118,11 +1153,6 @@ async fn lock_scheduled_check_source(
             ON seal.registry_id = registry.registry_id
            AND seal.inventory_digest = registry.inventory_digest
            AND seal.schedule_count = registry.schedule_count
-          JOIN github_schedule_registry_current AS current
-            ON current.tenant_id = registry.tenant_id
-           AND current.repository_id = registry.repository_id
-           AND current.provider_connection_id = registry.provider_connection_id
-           AND current.registry_id = registry.registry_id
           JOIN github_provider_manifest_revisions AS manifest
             ON manifest.tenant_id = registry.tenant_id
            AND manifest.repository_id = registry.repository_id
@@ -1130,12 +1160,6 @@ async fn lock_scheduled_check_source(
            AND manifest.manifest_revision = registry.manifest_revision
            AND manifest.manifest_digest = registry.manifest_digest
            AND manifest.git_ref = registry.default_branch_ref
-          JOIN github_provider_manifest_current AS manifest_current
-            ON manifest_current.tenant_id = manifest.tenant_id
-           AND manifest_current.repository_id = manifest.repository_id
-           AND manifest_current.provider_connection_id = manifest.provider_connection_id
-           AND manifest_current.manifest_revision = manifest.manifest_revision
-           AND manifest_current.manifest_digest = manifest.manifest_digest
          WHERE fire.fire_id = $1
            AND fire.state = 'claimed'
            AND fire.claim_owner_id = $2
@@ -1144,7 +1168,7 @@ async fn lock_scheduled_check_source(
            AND fire.claimed_at_ms = $5
            AND fire.claim_expires_at_ms = $6
          FOR UPDATE OF fire
-         FOR SHARE OF registry, entry, seal, current, manifest, manifest_current
+         FOR SHARE OF registry, entry, seal, manifest
         ",
     )
     .bind(claim.fire_id().as_uuid())
@@ -2550,6 +2574,7 @@ async fn load_claimed_fire(
         SELECT fire.tenant_id, fire.repository_id, fire.provider_connection_id,
                fire.registry_id, fire.scheduled_at_ms,
                repository.provider_repository_id, repository.owner, repository.name,
+               registry.manifest_revision, registry.manifest_digest,
                registry.source_revision, registry.default_branch_ref,
                registry.archive_digest, registry.archive_object_key, registry.archive_size_bytes,
                entry.ordinal, entry.workflow_path, entry.workflow_source_digest,
@@ -2587,6 +2612,15 @@ async fn load_claimed_fire(
     let registry_id =
         GithubScheduleRegistryId::from_uuid(row.try_get("registry_id").map_err(corrupt)?)
             .map_err(|_| GithubScheduleStoreError::CorruptData)?;
+    let manifest_revision = GithubProviderManifestRevision::new(
+        u64::try_from(
+            row.try_get::<i64, _>("manifest_revision")
+                .map_err(corrupt)?,
+        )
+        .map_err(|_| GithubScheduleStoreError::CorruptData)?,
+    )
+    .map_err(|_| GithubScheduleStoreError::CorruptData)?;
+    let manifest_digest = digest(&row, "manifest_digest")?;
     let archive = GithubScheduleArchive::new(
         digest(&row, "archive_digest")?,
         ObjectKey::new(
@@ -2625,6 +2659,8 @@ async fn load_claimed_fire(
         row.try_get("name").map_err(corrupt)?,
         connection_id,
         registry_id,
+        manifest_revision,
+        manifest_digest,
         row.try_get("source_revision").map_err(corrupt)?,
         row.try_get("default_branch_ref").map_err(corrupt)?,
         archive,

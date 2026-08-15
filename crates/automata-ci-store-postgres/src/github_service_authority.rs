@@ -68,6 +68,7 @@ const ISSUANCE_COLUMNS: &str = r"
 // Keep the window closed on both sides so a stuck-forward or slow process is
 // rejected before it can mutate durable credential custody.
 const MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS: i64 = 60_000;
+const MAX_GITHUB_SERVICE_AUTHORITIES_PER_REPOSITORY: usize = 256;
 
 async fn pin_read_committed(
     connection: &mut PgConnection,
@@ -196,6 +197,56 @@ impl GithubServerServiceAuthorityRepository for PostgresStore {
         authority_id: GithubServerServiceAuthorityId,
     ) -> Result<GithubServerServiceAuthorityDescriptor, GithubServerServiceStoreError> {
         load_authority_from_pool(&self.pool, tenant, authority_id).await
+    }
+
+    async fn inspect_current_github_server_service_issuance(
+        &self,
+        tenant: &TenantScope,
+        authority_id: GithubServerServiceAuthorityId,
+    ) -> Result<Option<GithubServerServiceIssuanceReceipt>, GithubServerServiceStoreError> {
+        let query = format!(
+            "SELECT {ISSUANCE_COLUMNS} \
+             FROM github_server_service_authority_issuances \
+             WHERE authority_id = $2 AND generation = ( \
+                 SELECT current_issuance_generation \
+                 FROM github_server_service_authorities \
+                 WHERE tenant_id = $1 AND id = $2 \
+             )"
+        );
+        sqlx::query(AssertSqlSafe(query))
+            .bind(tenant.as_str())
+            .bind(authority_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(operation_error)?
+            .map(|row| decode_issuance_receipt(&row))
+            .transpose()
+    }
+
+    async fn list_github_server_service_authorities_for_repository(
+        &self,
+        tenant: &TenantScope,
+        repository_id: RepositoryId,
+        connection_id: ProviderConnectionId,
+    ) -> Result<Vec<GithubServerServiceAuthorityDescriptor>, GithubServerServiceStoreError> {
+        let query = format!(
+            "SELECT {AUTHORITY_COLUMNS} FROM github_server_service_authorities \
+             WHERE tenant_id = $1 AND repository_id = $2 \
+               AND provider_connection_id = $3 \
+               AND state IN ('active', 'retiring') \
+             ORDER BY id LIMIT 257"
+        );
+        let rows = sqlx::query(AssertSqlSafe(query))
+            .bind(tenant.as_str())
+            .bind(repository_id.as_uuid())
+            .bind(connection_id.as_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(operation_error)?;
+        if rows.len() > MAX_GITHUB_SERVICE_AUTHORITIES_PER_REPOSITORY {
+            return Err(GithubServerServiceStoreError::CorruptData);
+        }
+        rows.iter().map(decode_authority).collect()
     }
 
     async fn begin_github_server_service_mint(
@@ -972,7 +1023,8 @@ async fn acquire_handoff(
         UnixMillis::new(database_now),
     )
     .await?;
-    if database_now >= consumer_expires_at.get()
+    if (request.consumer().action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults
+        && database_now >= consumer_expires_at.get())
         || database_now >= request.required_through().get()
         || consumer_expires_at
             .get()
@@ -1051,7 +1103,8 @@ async fn revalidate_handoff_consumer(
                 GithubServerServiceAction::PublishCheckRun => "publish",
                 GithubServerServiceAction::FetchPrivateRepositoryRevision
                 | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
-                | GithubServerServiceAction::DiscoverPrivateRepositorySchedules => {
+                | GithubServerServiceAction::DiscoverPrivateRepositorySchedules
+                | GithubServerServiceAction::ObserveWorkflowPermissionDefaults => {
                     return Err(GithubServerServiceStoreError::HandoffRejected);
                 }
             };
@@ -1154,6 +1207,63 @@ async fn revalidate_handoff_consumer(
             .bind(pg_bigint(identity.installation_id().get()))
             .bind(pg_bigint(identity.github_repository_id().get()))
             .bind(identity.github_repository_name().as_str())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(operation_error)?
+            .map(UnixMillis::new)
+        }
+        GithubServerServiceScope::WorkflowPermissionsRead => {
+            if consumer.action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults {
+                return Err(GithubServerServiceStoreError::HandoffRejected);
+            }
+            sqlx::query_scalar::<_, i64>(
+                r"
+                SELECT candidate.claimed_at_ms
+                  FROM github_workflow_permission_observation_candidates AS candidate
+                 WHERE candidate.tenant_id = $1
+                   AND candidate.observation_id = $2
+                   AND candidate.consumer_owner_id = $3
+                   AND candidate.consumer_claim_fence = $4
+                   AND candidate.consumer_action = $5
+                   AND candidate.consumer_revision = $6
+                   AND candidate.authority_id = $7
+                   AND candidate.authority_identity_digest = $8
+                   AND candidate.repository_id = $9
+                   AND candidate.provider_connection_id = $10
+                   AND candidate.provider_installation_id = $11
+                   AND candidate.github_app_id = $12
+                   AND candidate.github_repository_id = $13
+                   AND candidate.github_repository_name = $14
+                   AND candidate.github_app_client_id = $15
+                   AND candidate.github_app_jwt_issuer_kind = $16
+                   AND candidate.app_key_spki_sha256 = $17
+                   AND candidate.app_configuration_revision = $18
+                   AND candidate.policy_revision = $19
+                   AND candidate.claimed_at_ms <= $20
+                   AND candidate.expires_at_ms > $20
+                 FOR SHARE OF candidate
+                ",
+            )
+            .bind(identity.tenant().as_str())
+            .bind(consumer.consumer_id().as_uuid())
+            .bind(consumer.owner().as_uuid())
+            .bind(pg_bigint(consumer.fence().get()))
+            .bind(consumer.action().as_str())
+            .bind(pg_bigint(consumer.revision().get()))
+            .bind(identity.authority_id().as_uuid())
+            .bind(identity.identity_digest().as_bytes().as_slice())
+            .bind(identity.repository_id().as_uuid())
+            .bind(identity.connection_id().as_uuid())
+            .bind(pg_bigint(identity.installation_id().get()))
+            .bind(pg_bigint(identity.github_app_id().get()))
+            .bind(pg_bigint(identity.github_repository_id().get()))
+            .bind(identity.github_repository_name().as_str())
+            .bind(identity.app_client_id().as_str())
+            .bind(identity.jwt_issuer().as_str())
+            .bind(identity.app_key_spki_sha256().as_bytes().as_slice())
+            .bind(pg_bigint(identity.app_configuration_revision().get()))
+            .bind(pg_bigint(identity.policy_revision().get()))
+            .bind(observed_at.get())
             .fetch_optional(&mut *connection)
             .await
             .map_err(operation_error)?
@@ -1531,6 +1641,7 @@ async fn claim_next_maintenance(
             SELECT authority_id, generation, state, safe_erase_after_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND state IN (
                   'ready', 'indeterminate', 'revoke_pending',
                   'revoke_claimed', 'revoke_retry', 'quarantined'
@@ -1543,6 +1654,7 @@ async fn claim_next_maintenance(
                    LEAST(mint_claim_expires_at_ms, request_deadline_at_ms) AS due_at_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND state IN ('claimed', 'minting')
               AND LEAST(mint_claim_expires_at_ms, request_deadline_at_ms) <= $2
             ORDER BY LEAST(mint_claim_expires_at_ms, request_deadline_at_ms),
@@ -1552,6 +1664,7 @@ async fn claim_next_maintenance(
             SELECT authority_id, generation, request_deadline_at_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'mint_retry'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND request_deadline_at_ms <= $2
             ORDER BY request_deadline_at_ms, authority_id, generation
             LIMIT 64
@@ -1560,6 +1673,7 @@ async fn claim_next_maintenance(
                    request_deadline_at_ms, mint_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'mint_retry'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND next_mint_at_ms <= $2
             ORDER BY next_mint_at_ms, authority_id, generation
             LIMIT 64
@@ -1568,6 +1682,7 @@ async fn claim_next_maintenance(
                    safe_erase_after_ms, revoke_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'revoke_pending'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND state_updated_at_ms <= $2
             ORDER BY state_updated_at_ms, authority_id, generation
             LIMIT 64
@@ -1576,6 +1691,7 @@ async fn claim_next_maintenance(
                    safe_erase_after_ms, revoke_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'revoke_retry'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND next_revoke_at_ms <= $2
             ORDER BY next_revoke_at_ms, authority_id, generation
             LIMIT 64
@@ -1584,6 +1700,7 @@ async fn claim_next_maintenance(
                    safe_erase_after_ms, revoke_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'revoke_claimed'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND revoke_claim_expires_at_ms <= $2
             ORDER BY revoke_claim_expires_at_ms, authority_id, generation
             LIMIT 64
@@ -1593,6 +1710,7 @@ async fn claim_next_maintenance(
                    next_mint_not_before_ms
             FROM github_server_service_authorities
             WHERE tenant_id = $1 AND state = 'active'
+              AND ($4::UUID IS NULL OR id = $4)
               AND current_issuance_generation IS NULL
               AND refresh_issuance_generation IS NULL
               AND state_updated_at_ms <= $2
@@ -1603,6 +1721,7 @@ async fn claim_next_maintenance(
                    (provider_expires_at_ms::NUMERIC - 1680000)::BIGINT AS due_at_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'ready'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND provider_expires_at_ms::NUMERIC - 1680000 <= $2
             ORDER BY provider_expires_at_ms::NUMERIC - 1680000,
                      authority_id, generation
@@ -1726,6 +1845,11 @@ async fn claim_next_maintenance(
     .bind(request.tenant().as_str())
     .bind(selection_now)
     .bind(selection_claim_expires_at)
+    .bind(
+        request
+            .authority()
+            .map(|selector| selector.authority_id().as_uuid()),
+    )
     .fetch_optional(&mut *transaction)
     .await
     .map_err(operation_error)?;
@@ -1744,6 +1868,12 @@ async fn claim_next_maintenance(
             .ok_or(GithubServerServiceStoreError::CorruptData)?;
     let mut descriptor = decode_authority(&authority_row)?;
     let selector = GithubServerServiceAuthoritySelector::from_identity(descriptor.identity());
+    if request
+        .authority()
+        .is_some_and(|expected| expected != &selector)
+    {
+        return Err(GithubServerServiceStoreError::ClaimRejected);
+    }
     let key = GithubServerServiceIssuanceKey::new(authority_id, generation);
     let mut operation_now = database_now_ms(&mut transaction).await?;
     if operation_now < selection_now {
@@ -3104,6 +3234,7 @@ fn decode_github_server_service_scope(value: &str) -> Option<GithubServerService
         "private_repository_source_read" => {
             Some(GithubServerServiceScope::PrivateRepositorySourceRead)
         }
+        "workflow_permissions_read" => Some(GithubServerServiceScope::WorkflowPermissionsRead),
         _ => None,
     }
 }
@@ -3133,6 +3264,9 @@ fn decode_github_server_service_action(value: &str) -> Option<GithubServerServic
         }
         "discover_private_repository_schedules" => {
             Some(GithubServerServiceAction::DiscoverPrivateRepositorySchedules)
+        }
+        "observe_workflow_permission_defaults" => {
+            Some(GithubServerServiceAction::ObserveWorkflowPermissionDefaults)
         }
         _ => None,
     }

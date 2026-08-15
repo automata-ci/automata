@@ -1,4 +1,8 @@
-use automata_ci_core::{OperationId, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey};
+use automata_ci_core::{
+    OperationId, RunId, Sha256Digest, TrustActorEvidence, TrustActorKind, TrustAutomationKind,
+    TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence,
+    TrustSnapshot, TrustTokenRecursion, UnixMillis, WorkflowId, WorkflowJobKey,
+};
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
     LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionValueError, LogicalWorkflowInvocationId,
@@ -70,6 +74,94 @@ fn command(
     .display_title("Synthetic build")
     .commit_subject("Exercise logical admission")
     .build()
+}
+
+fn trust_snapshot(repository_id: &str, git_ref: &str, revision: &str) -> TrustSnapshot {
+    let actor = TrustActorEvidence::new(
+        "provider-actor-17",
+        TrustActorKind::User,
+        TrustAutomationKind::None,
+    )
+    .expect("actor evidence");
+    let repository = TrustRepositoryEvidence::new(repository_id, "provider-owner-23")
+        .expect("repository evidence");
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(actor.clone())
+                .with_triggering_actor(actor)
+                .with_repositories(repository.clone(), repository)
+                .with_refs(git_ref, git_ref, git_ref)
+                .with_revisions(revision, revision, revision)
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("trust snapshot")
+}
+
+#[test]
+fn trust_snapshot_must_bind_the_exact_admitted_execution_origin() {
+    let build = |snapshot: TrustSnapshot| {
+        AdmitLogicalWorkflowRun::builder(
+            TenantScope::from_authenticated_tenant_id("logical-tenant").expect("tenant"),
+            WorkflowAdmissionIdempotency::provider_delivery("delivery-trust").expect("idempotency"),
+            Sha256Digest::from_bytes([42; 32]),
+            AdmissionRepository::new(
+                RepositoryId::from_uuid(Uuid::from_u128(71)),
+                "forge",
+                "repository-7",
+                "sample-owner",
+                "sample-repository",
+            )
+            .expect("repository"),
+            WorkflowId::from_uuid(Uuid::from_u128(72)),
+            ".ci/workflows/build.yml",
+            "Build",
+            "refs/heads/main",
+            WorkflowSnapshotId::from_uuid(Uuid::from_u128(73)),
+            object("trust-source", 1),
+            object("trust-plan", 2),
+            RunId::from_uuid(Uuid::from_u128(74)),
+            1,
+            LogicalWorkflowInvocationId::from_uuid(Uuid::from_u128(75)).expect("root"),
+            "push",
+            object("trust-event", 3),
+            vec![9; 20],
+            vec![job(
+                LogicalWorkflowJobId::from_uuid(Uuid::from_u128(76)).expect("job"),
+                "only",
+                0,
+                LogicalWorkflowJobKind::Steps,
+                Vec::new(),
+            )],
+            UnixMillis::new(1_000),
+        )
+        .trust_snapshot(snapshot)
+        .build()
+    };
+    let revision = "09".repeat(20);
+
+    assert!(build(trust_snapshot("repository-7", "refs/heads/main", &revision)).is_ok());
+    for conflicting in [
+        trust_snapshot("repository-8", "refs/heads/main", &revision),
+        trust_snapshot("repository-7", "refs/heads/other", &revision),
+        trust_snapshot("repository-7", "refs/heads/main", &"08".repeat(20)),
+    ] {
+        assert!(matches!(
+            build(conflicting),
+            Err(LogicalWorkflowAdmissionValueError::InvalidTrustSnapshot)
+        ));
+    }
+    let incomplete = TrustPolicy::current()
+        .evaluate(TrustEvidence::new(
+            TrustOriginKind::ProviderWebhook,
+            TrustEventKind::Push,
+        ))
+        .expect("incomplete evidence is fail-closed, not malformed");
+    assert!(matches!(
+        build(incomplete),
+        Err(LogicalWorkflowAdmissionValueError::InvalidTrustSnapshot)
+    ));
 }
 
 #[test]

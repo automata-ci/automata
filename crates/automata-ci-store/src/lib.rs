@@ -5,6 +5,7 @@ mod admission;
 mod assignment;
 mod conformance;
 mod error;
+mod event_subject;
 mod github_check_rerun;
 mod github_checks;
 mod github_job_runtime_authority;
@@ -15,6 +16,7 @@ mod github_schedule;
 mod github_service_authority;
 mod github_subject_evidence;
 mod live_log_ticket;
+mod github_workflow_permissions;
 mod logical_activation;
 mod logical_activation_preparation;
 mod logical_instance_result;
@@ -42,6 +44,7 @@ mod store_error;
 mod tenant;
 mod value;
 mod web;
+mod workflow_enable_state;
 mod workflow_rerun;
 mod workflow_runtime_policy;
 
@@ -71,6 +74,17 @@ pub use conformance::{
 };
 pub use error::{
     AttemptCommandError, AttemptSnapshotError, AttemptStoreError, RepositoryOperationError,
+};
+pub use event_subject::{
+    EVENT_CONTROL_SUBJECT_SCHEMA, EVENT_SUBJECT_ORIGIN_REGISTRY_VERSION,
+    EVENT_SUBJECT_PROGRESS_SCHEMA, EVENT_SUBJECT_SELECTION_SCHEMA, EventControlSubject,
+    EventControlSubjectId, EventSubjectId, EventSubjectOrigin, EventSubjectOriginKind,
+    EventSubjectOriginRegistration, EventSubjectOriginRegistry, EventSubjectProgress,
+    EventSubjectProgressReceipt, EventSubjectRegistrationReceipt, EventSubjectRepository,
+    EventSubjectSelection, EventSubjectStoreError, EventSubjectTerminalKind,
+    EventSubjectTerminalOutcome, EventSubjectValueError, MAX_EVENT_SUBJECT_EVENT_NAME_BYTES,
+    MAX_EVENT_SUBJECT_REASON_BYTES, MAX_EVENT_SUBJECT_SOURCE_REVISION_BYTES,
+    MAX_EVENT_SUBJECT_WORKFLOW_PATH_BYTES, RegisterEventSubject,
 };
 pub use github_check_rerun::{
     GithubCheckRerunAction, GithubCheckRerunRepository, GithubCheckRerunRequest,
@@ -125,8 +139,8 @@ pub use github_provider_manifest::{
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_PROVIDER_SOURCE_REVISION,
     GITHUB_PROVIDER_WEB_ORIGIN, GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
     GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES, GITHUB_PROVIDER_WEBHOOK_VERIFIER_FINGERPRINT_DOMAIN,
-    GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GithubProviderGitRef, GithubProviderManifest,
-    GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
+    GITHUB_PROVIDER_WORKFLOW_MAX_BYTES, GithubInstallationBindingGeneration, GithubProviderGitRef,
+    GithubProviderManifest, GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
     GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderManifestValueError, GithubProviderOrigins,
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
@@ -194,6 +208,14 @@ pub use live_log_ticket::{
     HumanLiveLogTicketRepository, HumanLiveLogTicketValueError, IssueHumanLiveLogTicket,
     IssueHumanLiveLogTicketOutcome, IssuedHumanLiveLogTicket, MAX_HUMAN_LIVE_LOG_TICKET_LIFETIME,
     RedeemHumanLiveLogTicket, RedeemedHumanLiveLogTicket,
+};
+pub use github_workflow_permissions::{
+    FinalizeGithubWorkflowPermissionObservation, GithubWorkflowPermissionDefaultsObservation,
+    GithubWorkflowPermissionDefaultsObservationError,
+    GithubWorkflowPermissionDefaultsObservationRepository,
+    GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
+    GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
+    ReconcileGithubWorkflowPermissionHandoff,
 };
 pub use logical_activation::{
     ActivatedLogicalInstanceDescriptor, ClaimLogicalJobActivation, ClaimedLogicalJobActivation,
@@ -317,9 +339,10 @@ pub use protected_environment::{
 pub use provider_delivery::{
     AcceptProviderDelivery, ClaimProviderDelivery, ClaimedProviderDelivery,
     CompleteProviderDelivery, MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
-    MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
-    MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES, ProviderConnectionId, ProviderDeliveryClaimFence,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryClaimRenewalRepository,
+    MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES, MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS,
+    MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES,
+    ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope,
     ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryValueError,
@@ -450,6 +473,11 @@ pub use web::{
     HumanWorkflowPage, HumanWorkflowProjectedName, HumanWorkflowReadRepository,
     MAX_HUMAN_LOG_SEGMENT_PAGE_SIZE, MAX_HUMAN_PAGE_SIZE, RepositoryCoordinate,
     forward_human_log_commit_notifications, human_output_publication_safety_schema_is_current,
+};
+pub use workflow_enable_state::{
+    SetWorkflowEnableState, WorkflowEnableState, WorkflowEnableStateReceipt,
+    WorkflowEnableStateRecord, WorkflowEnableStateRepository, WorkflowEnableStateRevision,
+    WorkflowEnableStateStoreError, WorkflowEnableStateValueError,
 };
 pub use workflow_rerun::{
     MAX_WORKFLOW_RERUN_AGE_MILLIS, MAX_WORKFLOW_RERUN_ATTEMPTS, RerunWorkflow, RerunWorkflowByName,

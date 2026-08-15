@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::BlobStoreErrorKind;
 use automata_ci_core::{
-    ContextValue, JobRuntimeContext, Sha256Digest, UnixMillis, WorkflowEventProvenance,
+    ContextValue, JobRuntimeContext, Sha256Digest, TrustPolicy, TrustSnapshot, UnixMillis,
+    WorkflowEventProvenance,
 };
+use automata_ci_github::{GithubTrustDerivation, derive_github_trust_snapshot};
 use automata_ci_scm::{ArchiveFormat, RepositorySource};
 use automata_ci_store::{
     AuthenticatedGithubDeliveryClaim, GITHUB_PROVIDER_API_ORIGIN, GITHUB_PROVIDER_ARCHIVE_ACCEPT,
@@ -720,15 +722,8 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         plan: automata_ci_core::WorkflowPlan,
         base_context: JobRuntimeContext,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
-        let repository = request.event().repository();
         let event_coordinates = request.manifest_pinned_evidence().authenticated_event();
-        let coordinates = AdmissionRepositoryCoordinates::new(
-            GITHUB_PROVIDER,
-            request.identity().repository_id().get().to_string(),
-            repository.owner(),
-            repository.name(),
-        )
-        .map_err(|_| invalid_processor_state("repository_coordinates"))?;
+        let coordinates = admission_coordinates(request)?;
         let idempotency = WorkflowAdmissionIdempotency::provider_delivery(
             request.identity().delivery_id().to_owned(),
         )
@@ -737,6 +732,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             || request.workflow_path().to_owned(),
             |name| name.value().clone(),
         );
+        let trust_snapshot = event_trust_snapshot(request)?;
         let admission = WorkflowAdmissionRequest::builder(
             request.identity().tenant().clone(),
             coordinates,
@@ -747,6 +743,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             base_context,
             idempotency,
         )
+        .trust_snapshot(trust_snapshot)
         .commit_sha(request.repository_source().revision().as_str())
         .git_ref(event_coordinates.git_ref())
         .workflow_name(workflow_name)
@@ -788,10 +785,11 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             current_snapshot.expires_at(),
         )
         .map_err(|_| invalid_processor_state("authenticated_delivery_claim"))?;
-        let admission_result = self
-            .admission
-            .admit_authenticated_github_delivery(admission, current_claim)
-            .await;
+        let admission_result = Box::pin(
+            self.admission
+                .admit_authenticated_github_delivery(admission, current_claim),
+        )
+        .await;
         drop(operation);
         match admission_result {
             Ok(result) => {
@@ -801,6 +799,11 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 }
                 Ok(ProviderDeliveryWorkflowConclusion::Admitted { run_id })
             }
+            Err(WorkflowAdmissionError::Store(
+                LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
+            )) => Ok(ProviderDeliveryWorkflowConclusion::Skipped {
+                reason: failure_kind("github.workflow.disabled"),
+            }),
             Err(WorkflowAdmissionError::Store(
                 LogicalWorkflowAdmissionStoreError::RunNumberExhausted,
             )) => Ok(failed("github.workflow.run_number_exhausted")),
@@ -813,6 +816,38 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             }
         }
     }
+}
+
+fn event_trust_snapshot(
+    request: &GithubDeliveryWorkflowRequest<'_>,
+) -> Result<TrustSnapshot, GithubDeliveryWorkflowProcessorError> {
+    let mut derivation = GithubTrustDerivation::new();
+    if matches!(
+        request.event(),
+        automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_)
+    ) {
+        derivation = derivation
+            .with_repository_dispatch_revision(request.repository_source().revision().as_str());
+    }
+    derive_github_trust_snapshot(
+        request.event_envelope(),
+        &TrustPolicy::current(),
+        &derivation,
+    )
+    .map_err(|_| invalid_processor_state("trust_snapshot"))
+}
+
+fn admission_coordinates(
+    request: &GithubDeliveryWorkflowRequest<'_>,
+) -> Result<AdmissionRepositoryCoordinates, GithubDeliveryWorkflowProcessorError> {
+    let repository = request.event().repository();
+    AdmissionRepositoryCoordinates::new(
+        GITHUB_PROVIDER,
+        request.identity().repository_id().get().to_string(),
+        repository.owner(),
+        repository.name(),
+    )
+    .map_err(|_| invalid_processor_state("repository_coordinates"))
 }
 
 impl fmt::Debug for GithubDeliveryWorkflowAdmissionProcessor {
@@ -1343,8 +1378,10 @@ mod renewal_tests {
     use automata_ci_blob::{BlobKey, BlobPayload, MediaType, MemoryBlobStore};
     use automata_ci_core::{Sha256Digest, UnixMillis};
     use automata_ci_github::{
-        GithubRepositoryVisibility, GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
-        VerifiedGithubPush, VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
+        GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
+        GithubRepositoryVisibility, GithubSealedEventEnvelopeV1, GithubWebhookBodyDigest,
+        StoredAuthenticatedGithubWebhook, VerifiedGithubPush, VerifiedGithubWebhook,
+        rehydrate_stored_authenticated_github_webhook,
     };
     use automata_ci_scm::{
         ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
@@ -1364,12 +1401,12 @@ mod renewal_tests {
         LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
         LogicalWorkflowAdmissionStoreError, ManifestPinnedGithubDeliveryEvidence,
         ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
-        ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
-        ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-        ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowInventory,
-        ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
-        ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-        ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+        ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
+        ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
+        ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
+        ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
+        ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+        ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
         RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
         RejectProviderDelivery, RenewedProviderDeliveryClaim, RepositoryId as StoreRepositoryId,
         RetryProviderDelivery, TenantScope,
@@ -1381,6 +1418,7 @@ mod renewal_tests {
     };
     use bytes::Bytes;
     use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest as _, Sha256};
     use tar::{Builder, EntryType, Header};
     use tokio::{sync::Notify, time::Instant};
     use tokio_util::sync::CancellationToken;
@@ -1931,22 +1969,24 @@ mod renewal_tests {
     struct RenewalFixture {
         claimed: ClaimedProviderDelivery,
         push: VerifiedGithubPush,
+        event_envelope: GithubSealedEventEnvelopeV1,
         evidence: ManifestPinnedGithubDeliveryEvidence,
         source: RepositorySource,
     }
 
     fn fixture() -> RenewalFixture {
         let body = push_body();
+        let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
+        let raw_key = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
         let payload = BlobPayload::from_bytes(
-            BlobKey::new("provider-deliveries/github/event/renewal-race.json").expect("raw key"),
+            BlobKey::new(raw_key.clone()).expect("raw key"),
             MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("raw media type"),
             body.clone(),
         );
         let descriptor = payload.descriptor().clone();
         let raw_event = AdmissionObject::new(
             descriptor.digest(),
-            ObjectKey::new("provider-deliveries/github/event/renewal-race.json")
-                .expect("raw object key"),
+            ObjectKey::new(raw_key).expect("raw object key"),
             descriptor.size(),
             GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
         )
@@ -1967,10 +2007,13 @@ mod renewal_tests {
         );
         let event =
             rehydrate_stored_authenticated_github_webhook(stored).expect("verified webhook");
+        let event_envelope =
+            GithubSealedEventEnvelopeV1::seal(&event, descriptor).expect("sealed event envelope");
+        let durable_event_envelope = provider_event_envelope(&event_envelope);
         let VerifiedGithubWebhook::Push(push) = event else {
             panic!("fixture must rehydrate as a push");
         };
-        let claimed = claimed(raw_event);
+        let claimed = claimed(raw_event, durable_event_envelope);
         let evidence = subject_evidence(&claimed, &push);
         let source = RepositorySource::from_bytes(
             ScmProviderId::new("github").expect("provider"),
@@ -1982,6 +2025,7 @@ mod renewal_tests {
         RenewalFixture {
             claimed,
             push,
+            event_envelope,
             evidence,
             source,
         }
@@ -2059,7 +2103,23 @@ mod renewal_tests {
         .expect("manifest-pinned evidence")
     }
 
-    fn claimed(raw_event: AdmissionObject) -> ClaimedProviderDelivery {
+    fn provider_event_envelope(
+        envelope: &GithubSealedEventEnvelopeV1,
+    ) -> ProviderDeliveryEventEnvelope {
+        ProviderDeliveryEventEnvelope::new(
+            envelope.schema(),
+            envelope.registry_schema(),
+            envelope.digest(),
+            envelope.canonical_bytes().to_vec(),
+            GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+        )
+        .expect("durable event envelope")
+    }
+
+    fn claimed(
+        raw_event: AdmissionObject,
+        event_envelope: ProviderDeliveryEventEnvelope,
+    ) -> ClaimedProviderDelivery {
         let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(1)).expect("delivery ID");
         let receipt = ProviderDeliveryReceipt::from_durable_parts(
             delivery_id,
@@ -2094,6 +2154,7 @@ mod renewal_tests {
             identity,
             Sha256Digest::from_bytes([0x42; 32]),
             raw_event,
+            event_envelope,
             claim,
             UnixMillis::new(100),
             UnixMillis::new(10_000),
@@ -2204,6 +2265,7 @@ mod renewal_tests {
         let lease = GithubDeliveryClaimLease::new(fixture.claimed.clone(), predecessor_deadline);
         let prepared = PreparedGithubDelivery::from_authenticated_event(
             automata_ci_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
+            fixture.event_envelope.clone(),
             fixture.evidence.clone(),
         );
 
@@ -2286,6 +2348,7 @@ mod renewal_tests {
 
         let prepared = PreparedGithubDelivery::from_authenticated_event(
             automata_ci_github::VerifiedGithubWebhook::Push(fixture.push.clone()),
+            fixture.event_envelope.clone(),
             fixture.evidence.clone(),
         );
 

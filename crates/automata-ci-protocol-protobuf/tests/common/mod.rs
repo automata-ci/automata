@@ -14,7 +14,9 @@ use automata_ci_core::{
     RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
     RuntimePositiveInteger, RuntimeTimeoutTemplate, SandboxCapabilities, SandboxFeature,
     SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepAnnotation, StepAnnotationLevel,
-    StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol, UnixMillis, ValueSource,
+    StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, ValueSource,
     ValueTemplate, VolumeMount, WorkflowId,
 };
 use automata_ci_protocol::{
@@ -306,6 +308,29 @@ pub fn rich_job_with_requirements(requirements: RunnerRequirements) -> JobIrEnve
         rich_steps(&step_environment),
     )
     .with_permission_request(JobPermissionRequest::WriteAll)
+    .with_trust_snapshot(
+        TrustPolicy::current()
+            .evaluate(
+                TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                    .with_original_actor(
+                        TrustActorEvidence::new(
+                            "actor-1",
+                            TrustActorKind::User,
+                            TrustAutomationKind::None,
+                        )
+                        .expect("actor evidence"),
+                    )
+                    .with_repositories(
+                        TrustRepositoryEvidence::new("42", "7").expect("source repository"),
+                        TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+                    )
+                    .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                    .with_revisions("source-sha", "target-sha", "execution-sha")
+                    .with_fork(false)
+                    .with_token_recursion(TrustTokenRecursion::Suppressed),
+            )
+            .expect("trusted snapshot"),
+    )
     .with_timeout_seconds(1_800)
     .with_environment(step_environment)
     .with_working_directory(literal_template("source"))

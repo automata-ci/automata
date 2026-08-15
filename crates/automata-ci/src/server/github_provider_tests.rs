@@ -37,9 +37,9 @@ fn runner_policy() -> Value {
             "selector": "Ubuntu-24.04"
         }],
         "permissions": {
-            "provider_default": {"contents": "read"},
-            "read_all": {"contents": "read"},
-            "write_all": {"contents": "write"}
+            "provider_default": {"contents": "read", "packages": "read"},
+            "read_all": {"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},
+            "write_all": {"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}
         },
         "resources": resource_policy(),
         "schema": 1
@@ -74,6 +74,7 @@ fn repository(
         "tenant_id": tenant,
         "connection_id": uuid(connection),
         "installation_id": installation,
+        "installation_binding_generation": 1,
         "repository_id": repository_id,
         "repository_owner_id": owner_id,
         "repository": name,
@@ -87,6 +88,7 @@ fn repository(
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority, 7),
+            "workflow_permissions_read": authority(checks_authority + 0x1000_0000, 7),
             "private_repository_source_read": private_authority
                 .map_or(Value::Null, |id| authority(id, 7))
         }
@@ -107,7 +109,7 @@ fn mixed_document() -> Value {
         None,
     );
     json!({
-        "schema": 2,
+        "schema": 3,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
@@ -287,8 +289,13 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
     let plan = fixed_evidence_plan(&config, 0x70);
 
     assert_eq!(plan.manifests().len(), 2);
-    assert_eq!(plan.authorities().len(), 3);
+    assert_eq!(plan.authorities().len(), 5);
     assert_eq!(plan.connections().len(), 2);
+    assert!(
+        plan.manifests()
+            .iter()
+            .all(|manifest| manifest.installation_binding_generation().get() == 1)
+    );
     assert_eq!(plan.manifests()[1].workflow_path(), ".ci/workflows");
     assert_eq!(plan.manifests()[0].git_ref(), "refs/heads/release/stable");
     assert_eq!(plan.manifests()[1].git_ref(), "refs/heads/refs/release");
@@ -320,8 +327,10 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
         ordered_authorities,
         [
             (101, GithubServerServiceScope::ChecksWrite),
+            (101, GithubServerServiceScope::WorkflowPermissionsRead),
             (101, GithubServerServiceScope::PrivateRepositorySourceRead),
             (202, GithubServerServiceScope::ChecksWrite),
+            (202, GithubServerServiceScope::WorkflowPermissionsRead),
         ]
     );
 
@@ -331,10 +340,14 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
         .iter()
         .filter(|identity| identity.connection_id() == public_connection)
         .collect::<Vec<_>>();
-    assert_eq!(public_authorities.len(), 1);
+    assert_eq!(public_authorities.len(), 2);
     assert_eq!(
         public_authorities[0].scope(),
         GithubServerServiceScope::ChecksWrite
+    );
+    assert_eq!(
+        public_authorities[1].scope(),
+        GithubServerServiceScope::WorkflowPermissionsRead
     );
     assert!(plan.authorities().iter().any(|identity| {
         identity.scope() == GithubServerServiceScope::PrivateRepositorySourceRead
@@ -357,6 +370,27 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
     assert_ne!(checks_fingerprints[0], private_fingerprint);
 }
 
+#[test]
+fn configured_installation_generation_reaches_manifest_and_delivery_connection() {
+    let mut document = mixed_document();
+    document["repositories"][0]["installation_id"] = json!(303);
+    document["repositories"][0]["installation_binding_generation"] = json!(2);
+    document["repositories"][0]["manifest_revision"] = json!(2);
+    let config = load_config("installation-generation.json", &document)
+        .expect("rotated installation configuration");
+    let plan = fixed_evidence_plan(&config, 0x70);
+    let manifest = plan
+        .manifests()
+        .iter()
+        .find(|manifest| manifest.installation_id().get() == 303)
+        .expect("rotated manifest");
+    assert_eq!(manifest.installation_binding_generation().get(), 2);
+    assert!(plan.connections().iter().any(|connection| {
+        connection.installation_id().get() == 303
+            && connection.repository_id() == manifest.github_repository_id()
+    }));
+}
+
 #[tokio::test]
 async fn exact_bootstrap_replays_and_only_then_exposes_the_resolver() {
     let config = load_config("exact-replay.json", &mixed_document()).expect("mixed config");
@@ -371,7 +405,7 @@ async fn exact_bootstrap_replays_and_only_then_exposes_the_resolver() {
     assert_eq!(first.manifest_replay_count(), 0);
     assert_eq!(first.runtime_policy_count(), 2);
     assert_eq!(first.runtime_policy_replay_count(), 0);
-    assert_eq!(first.authority_count(), 3);
+    assert_eq!(first.authority_count(), 5);
     assert_eq!(first.authority_replay_count(), 0);
 
     let replay = plan
@@ -381,9 +415,9 @@ async fn exact_bootstrap_replays_and_only_then_exposes_the_resolver() {
     assert_eq!(replay.manifest_replay_count(), 2);
     assert_eq!(replay.runtime_policy_count(), 2);
     assert_eq!(replay.runtime_policy_replay_count(), 2);
-    assert_eq!(replay.authority_replay_count(), 3);
+    assert_eq!(replay.authority_replay_count(), 5);
     let resolver = replay.credential_request_resolver();
-    assert_eq!(resolver.len(), 3);
+    assert_eq!(resolver.len(), 5);
     for identity in plan.authorities() {
         let resolution = resolver
             .resolve_github_server_service_credential_request(identity)
@@ -407,7 +441,7 @@ async fn runtime_policy_drift_fails_before_manifest_or_authority_writes() {
         "architecture":"x86_64","operating_system":"linux",
         "environment_profile":{"manifest_sha256":"2222222222222222222222222222222222222222222222222222222222222222","id":"automata.example/ubuntu-24-04"},
         "selector":"Ubuntu-24.04"
-      }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+      }],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
     }"#;
 
     let config = load_config("runtime-policy-drift.json", &mixed_document()).expect("mixed config");

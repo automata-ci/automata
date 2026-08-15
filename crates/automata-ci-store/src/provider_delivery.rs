@@ -1,4 +1,5 @@
 use std::{
+    fmt,
     num::{NonZeroU16, NonZeroU64},
     time::Duration,
 };
@@ -22,10 +23,13 @@ pub const MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS: i64 = 60 * 60 * 1_000;
 pub const MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 /// Maximum number of terminal workflow outcomes retained for one delivery.
 pub const MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES: usize = 256;
+/// Maximum canonical size of one sealed provider event envelope.
+pub const MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES: usize = 32_768;
 
 const MAX_PROVIDER_BYTES: usize = 128;
 const MAX_DELIVERY_ID_BYTES: usize = 255;
 const MAX_REPOSITORY_IDENTITY_BYTES: usize = 1_024;
+const MAX_EVENT_ENVELOPE_MEDIA_TYPE_BYTES: usize = 128;
 const MAX_FAILURE_KIND_BYTES: usize = 128;
 const MAX_WORKFLOW_PATH_BYTES: usize = 1_024;
 const COMPLETION_DIGEST_DOMAIN: &[u8] = b"automata.store.provider-delivery-completion.v1\0";
@@ -259,12 +263,113 @@ impl ProviderDeliveryIdentity {
     }
 }
 
-/// Immutable evidence accepted before provider parsing or object reads.
+/// Provider-neutral durable coordinates for one sealed event envelope.
+///
+/// The store owns bounded persistence and exact replay semantics. Provider
+/// adapters own the canonical encoding and domain-separated digest algorithm,
+/// and must verify both again before interpreting the envelope.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProviderDeliveryEventEnvelope {
+    schema: NonZeroU16,
+    registry_schema: NonZeroU16,
+    digest: Sha256Digest,
+    canonical_bytes: Box<[u8]>,
+    media_type: String,
+}
+
+impl ProviderDeliveryEventEnvelope {
+    /// Constructs bounded, sealed provider-event evidence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero or non-SMALLINT schema versions, empty or oversized
+    /// canonical bytes, and malformed media types.
+    pub fn new(
+        schema: u16,
+        registry_schema: u16,
+        digest: Sha256Digest,
+        canonical_bytes: impl Into<Box<[u8]>>,
+        media_type: impl Into<String>,
+    ) -> Result<Self, ProviderDeliveryValueError> {
+        let schema = durable_schema(schema, "provider event envelope schema")?;
+        let registry_schema = durable_schema(registry_schema, "provider event registry schema")?;
+        let canonical_bytes = canonical_bytes.into();
+        if canonical_bytes.is_empty()
+            || canonical_bytes.len() > MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES
+        {
+            return Err(ProviderDeliveryValueError::InvalidEventEnvelopeSize);
+        }
+        let media_type = media_type.into();
+        if media_type.is_empty()
+            || media_type.len() > MAX_EVENT_ENVELOPE_MEDIA_TYPE_BYTES
+            || !media_type.is_ascii()
+            || media_type
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control() || byte == b';')
+            || media_type.split_once('/').is_none()
+        {
+            return Err(ProviderDeliveryValueError::InvalidEventEnvelopeMediaType);
+        }
+        Ok(Self {
+            schema,
+            registry_schema,
+            digest,
+            canonical_bytes,
+            media_type,
+        })
+    }
+
+    #[must_use]
+    pub const fn schema(&self) -> u16 {
+        self.schema.get()
+    }
+
+    #[must_use]
+    pub const fn registry_schema(&self) -> u16 {
+        self.registry_schema.get()
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> Sha256Digest {
+        self.digest
+    }
+
+    #[must_use]
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical_bytes
+    }
+
+    #[must_use]
+    pub fn encoded_size(&self) -> usize {
+        self.canonical_bytes.len()
+    }
+
+    #[must_use]
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+}
+
+impl fmt::Debug for ProviderDeliveryEventEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderDeliveryEventEnvelope")
+            .field("schema", &self.schema)
+            .field("registry_schema", &self.registry_schema)
+            .field("digest", &self.digest)
+            .field("encoded_size", &self.canonical_bytes.len())
+            .field("media_type", &self.media_type)
+            .finish()
+    }
+}
+
+/// Immutable authenticated evidence accepted before deferred provider I/O or object reads.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AcceptProviderDelivery {
     identity: ProviderDeliveryIdentity,
     request_digest: Sha256Digest,
     raw_event: AdmissionObject,
+    event_envelope: ProviderDeliveryEventEnvelope,
     accepted_at: UnixMillis,
 }
 
@@ -283,6 +388,7 @@ impl AcceptProviderDelivery {
         identity: ProviderDeliveryIdentity,
         request_digest: Sha256Digest,
         raw_event: AdmissionObject,
+        event_envelope: ProviderDeliveryEventEnvelope,
         accepted_at: UnixMillis,
     ) -> Result<Self, ProviderDeliveryValueError> {
         validate_timestamp(accepted_at, "provider delivery acceptance time")?;
@@ -290,6 +396,7 @@ impl AcceptProviderDelivery {
             identity,
             request_digest,
             raw_event,
+            event_envelope,
             accepted_at,
         })
     }
@@ -307,6 +414,11 @@ impl AcceptProviderDelivery {
     #[must_use]
     pub const fn raw_event(&self) -> &AdmissionObject {
         &self.raw_event
+    }
+
+    #[must_use]
+    pub const fn event_envelope(&self) -> &ProviderDeliveryEventEnvelope {
+        &self.event_envelope
     }
 
     #[must_use]
@@ -500,6 +612,7 @@ pub struct ClaimedProviderDelivery {
     identity: ProviderDeliveryIdentity,
     request_digest: Sha256Digest,
     raw_event: AdmissionObject,
+    event_envelope: ProviderDeliveryEventEnvelope,
     claim: ProviderDeliveryClaimFence,
     attempt: NonZeroU16,
     claimed_at: UnixMillis,
@@ -522,6 +635,7 @@ impl ClaimedProviderDelivery {
         identity: ProviderDeliveryIdentity,
         request_digest: Sha256Digest,
         raw_event: AdmissionObject,
+        event_envelope: ProviderDeliveryEventEnvelope,
         claim: ProviderDeliveryClaimFence,
         claimed_at: UnixMillis,
         expires_at: UnixMillis,
@@ -547,6 +661,7 @@ impl ClaimedProviderDelivery {
             identity,
             request_digest,
             raw_event,
+            event_envelope,
             claim,
             attempt,
             claimed_at,
@@ -572,6 +687,11 @@ impl ClaimedProviderDelivery {
     #[must_use]
     pub const fn raw_event(&self) -> &AdmissionObject {
         &self.raw_event
+    }
+
+    #[must_use]
+    pub const fn event_envelope(&self) -> &ProviderDeliveryEventEnvelope {
+        &self.event_envelope
     }
 
     #[must_use]
@@ -1409,6 +1529,8 @@ pub enum ProviderDeliveryValueError {
     InvalidMachineIdentifier(&'static str),
     #[error("{0} must be a positive provider ID representable by BIGINT")]
     InvalidNumericId(&'static str),
+    #[error("{0} must be a positive version representable by SMALLINT")]
+    InvalidDurableSchema(&'static str),
     #[error("{0} must not use the nil UUID sentinel")]
     NilUuid(&'static str),
     #[error("{0} must not predate the Unix epoch")]
@@ -1423,6 +1545,10 @@ pub enum ProviderDeliveryValueError {
     InvalidReceiptAttempts,
     #[error("provider delivery claim evidence is inconsistent with its receipt")]
     InvalidClaimReceipt,
+    #[error("provider event envelope bytes are empty or exceed the durable bound")]
+    InvalidEventEnvelopeSize,
+    #[error("provider event envelope media type is invalid")]
+    InvalidEventEnvelopeMediaType,
     #[error("provider delivery retry backoff is invalid or too long")]
     InvalidRetryBackoff,
     #[error("provider delivery workflow path is not a safe relative path")]
@@ -1532,6 +1658,15 @@ pub trait ProviderDeliveryClaimRenewalRepository: Send + Sync {
         &self,
         request: RenewProviderDeliveryClaim,
     ) -> Result<RenewedProviderDeliveryClaim, ProviderDeliveryStoreError>;
+}
+
+fn durable_schema(
+    value: u16,
+    field: &'static str,
+) -> Result<NonZeroU16, ProviderDeliveryValueError> {
+    NonZeroU16::new(value)
+        .filter(|value| i16::try_from(value.get()).is_ok())
+        .ok_or(ProviderDeliveryValueError::InvalidDurableSchema(field))
 }
 
 fn validate_text(

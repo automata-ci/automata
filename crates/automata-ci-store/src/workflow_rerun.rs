@@ -21,10 +21,12 @@ const MAX_WORKFLOW_RERUN_REPOSITORY_SEGMENT_BYTES: usize = 100;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WorkflowRerunLimitRejection {
+    #[allow(dead_code)] // Consumed by the optional adapter SPI and unit-test builds.
     AgeMillis,
     RepositorySegmentBytes,
 }
 
+#[allow(dead_code)] // Consumed by the optional adapter SPI and unit-test builds.
 pub(crate) const fn workflow_rerun_age_rejection(
     observed: i64,
 ) -> Option<WorkflowRerunLimitRejection> {

@@ -3,11 +3,12 @@ use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 use automata_ci_scm::ExactRevision;
 use bytes::Bytes;
 use serde::{
-    Deserialize,
+    Deserialize, Serialize,
     de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+use crate::event::GithubEventActor;
 use crate::webhook::{
     AuthenticatedGithubWebhook, GithubPushRef, GithubPushRefKind, GithubPushRepository,
     GithubWebhookBodyDigest, GithubWebhookError, VerifiedGithubPush, durable_provider_id,
@@ -66,7 +67,8 @@ pub type GithubWebhookRepository = GithubPushRepository;
 pub type GithubWebhookRef = GithubPushRef;
 
 /// A currently documented GitHub `pull_request` webhook activity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum GithubPullRequestAction {
     /// The pull request was assigned.
@@ -147,7 +149,8 @@ impl GithubPullRequestAction {
 }
 
 /// A currently documented GitHub `merge_group` webhook activity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum GithubMergeGroupAction {
     /// GitHub requested checks for a newly created merge group.
@@ -487,6 +490,7 @@ impl fmt::Debug for VerifiedGithubCheckSuite {
 pub struct VerifiedGithubRepositoryDispatch {
     authenticated: AuthenticatedGithubWebhook,
     installation_id: NonZeroU64,
+    actor: Option<GithubEventActor>,
     repository: GithubWebhookRepository,
     event_type: Box<str>,
     branch: Box<str>,
@@ -523,6 +527,12 @@ impl VerifiedGithubRepositoryDispatch {
     #[must_use]
     pub const fn installation_id(&self) -> NonZeroU64 {
         self.installation_id
+    }
+
+    /// Returns the authenticated sender facts when supplied by the webhook.
+    #[must_use]
+    pub const fn actor(&self) -> Option<&GithubEventActor> {
+        self.actor.as_ref()
     }
 
     /// Returns the repository that received the custom dispatch.
@@ -566,6 +576,7 @@ impl fmt::Debug for VerifiedGithubRepositoryDispatch {
             .field("body_len", &self.authenticated.raw_body().len())
             .field("body_sha256", &self.authenticated.body_sha256())
             .field("installation_id", &self.installation_id)
+            .field("actor", &self.actor)
             .field("repository", &self.repository)
             .field("event_type", &"[redacted]")
             .field("branch", &"[redacted]")
@@ -580,6 +591,8 @@ impl fmt::Debug for VerifiedGithubRepositoryDispatch {
 pub struct VerifiedGithubPullRequest {
     authenticated: AuthenticatedGithubWebhook,
     installation_id: NonZeroU64,
+    actor: Option<GithubEventActor>,
+    source_actor: Option<GithubEventActor>,
     repository: GithubWebhookRepository,
     head_repository: GithubWebhookRepository,
     number: NonZeroU64,
@@ -622,6 +635,19 @@ impl VerifiedGithubPullRequest {
     #[must_use]
     pub const fn installation_id(&self) -> NonZeroU64 {
         self.installation_id
+    }
+
+    /// Returns the authenticated event sender facts when supplied by GitHub.
+    #[must_use]
+    pub const fn actor(&self) -> Option<&GithubEventActor> {
+        self.actor.as_ref()
+    }
+
+    /// Returns the pull-request author's authenticated identity facts when
+    /// supplied by GitHub.
+    #[must_use]
+    pub const fn source_actor(&self) -> Option<&GithubEventActor> {
+        self.source_actor.as_ref()
     }
 
     /// Returns the base repository where the pull request occurred.
@@ -705,6 +731,8 @@ impl fmt::Debug for VerifiedGithubPullRequest {
             .field("body_len", &self.authenticated.raw_body().len())
             .field("body_sha256", &self.authenticated.body_sha256())
             .field("installation_id", &self.installation_id)
+            .field("actor", &self.actor)
+            .field("source_actor", &self.source_actor)
             .field("repository", &self.repository)
             .field("head_repository", &self.head_repository)
             .field("number", &self.number)
@@ -725,6 +753,7 @@ impl fmt::Debug for VerifiedGithubPullRequest {
 pub struct VerifiedGithubMergeGroup {
     authenticated: AuthenticatedGithubWebhook,
     installation_id: NonZeroU64,
+    actor: Option<GithubEventActor>,
     repository: GithubWebhookRepository,
     action: GithubMergeGroupAction,
     head_revision: ExactRevision,
@@ -762,6 +791,12 @@ impl VerifiedGithubMergeGroup {
     #[must_use]
     pub const fn installation_id(&self) -> NonZeroU64 {
         self.installation_id
+    }
+
+    /// Returns the authenticated sender facts when supplied by the webhook.
+    #[must_use]
+    pub const fn actor(&self) -> Option<&GithubEventActor> {
+        self.actor.as_ref()
     }
 
     /// Returns the repository whose merge queue created the group.
@@ -811,6 +846,7 @@ impl fmt::Debug for VerifiedGithubMergeGroup {
             .field("body_len", &self.authenticated.raw_body().len())
             .field("body_sha256", &self.authenticated.body_sha256())
             .field("installation_id", &self.installation_id)
+            .field("actor", &self.actor)
             .field("repository", &self.repository)
             .field("action", &self.action)
             .field("head_revision", &"[redacted]")
@@ -828,8 +864,8 @@ struct PullRequestPayload {
     pull_request: PullRequestObjectPayload,
     repository: RepositoryPayload,
     installation: InstallationPayload,
-    #[serde(rename = "sender")]
-    _sender: IgnoredAny,
+    #[serde(default)]
+    sender: Option<SenderPayload>,
 }
 
 #[derive(Deserialize)]
@@ -838,6 +874,8 @@ struct PullRequestObjectPayload {
     merged: bool,
     #[serde(default)]
     merge_commit_sha: PullRequestMergeCommitShaPayload,
+    #[serde(default)]
+    user: Option<SenderPayload>,
     head: PullRequestBranchPayload,
     base: PullRequestBranchPayload,
 }
@@ -866,6 +904,8 @@ struct MergeGroupPayload {
     merge_group: MergeGroupObjectPayload,
     repository: RepositoryPayload,
     installation: InstallationPayload,
+    #[serde(default)]
+    sender: Option<SenderPayload>,
 }
 
 #[derive(Deserialize)]
@@ -885,8 +925,8 @@ struct RepositoryDispatchPayload {
     client_payload: JsonValue,
     repository: RepositoryPayload,
     installation: InstallationPayload,
-    #[serde(rename = "sender")]
-    _sender: IgnoredAny,
+    #[serde(default)]
+    sender: Option<SenderPayload>,
 }
 
 #[derive(Deserialize)]
@@ -992,6 +1032,16 @@ struct AppPayload {
 #[derive(Deserialize)]
 struct SenderPayload {
     id: u64,
+    #[serde(default)]
+    login: Option<String>,
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+}
+
+impl SenderPayload {
+    fn normalize(self) -> Result<GithubEventActor, GithubWebhookError> {
+        GithubEventActor::from_webhook_fields(self.id, self.login, self.kind.as_deref())
+    }
 }
 
 #[derive(Deserialize)]
@@ -1106,10 +1156,18 @@ pub(crate) fn normalize_pull_request(
         format!("refs/pull/{number}/merge")
     }
     .into_boxed_str();
+    let actor = payload.sender.map(SenderPayload::normalize).transpose()?;
+    let source_actor = payload
+        .pull_request
+        .user
+        .map(SenderPayload::normalize)
+        .transpose()?;
 
     Ok(VerifiedGithubPullRequest {
         authenticated,
         installation_id,
+        actor,
+        source_actor,
         repository,
         head_repository,
         number,
@@ -1136,10 +1194,12 @@ pub(crate) fn normalize_merge_group(
     let base_revision = exact_revision(payload.merge_group.base_sha)?;
     let head_ref = full_branch_ref(payload.merge_group.head_ref)?;
     let base_ref = full_branch_ref(payload.merge_group.base_ref)?;
+    let actor = payload.sender.map(SenderPayload::normalize).transpose()?;
 
     Ok(VerifiedGithubMergeGroup {
         authenticated,
         installation_id,
+        actor,
         repository,
         action,
         head_revision,
@@ -1163,10 +1223,12 @@ pub(crate) fn normalize_repository_dispatch(
     }
     let client_payload = normalize_repository_dispatch_client_payload(payload.client_payload)?;
     let git_ref = format!("refs/heads/{branch}").into_boxed_str();
+    let actor = payload.sender.map(SenderPayload::normalize).transpose()?;
 
     Ok(VerifiedGithubRepositoryDispatch {
         authenticated,
         installation_id,
+        actor,
         repository,
         event_type,
         branch,

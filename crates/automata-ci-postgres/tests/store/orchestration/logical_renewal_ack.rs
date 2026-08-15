@@ -2226,6 +2226,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
                 )?,
                 fixture.command.request_digest(),
                 crate::support::authenticated_github_event_object(fixture.command.event())?,
+                crate::support::provider_delivery_event_envelope(0x88),
                 UnixMillis::new(database_now_ms(database).await?),
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(fixture.namespace + 60)?)?,

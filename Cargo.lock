@@ -422,6 +422,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror",
  "uuid",
 ]
@@ -486,6 +487,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-auth",
+ "automata-ci-blob",
+ "automata-ci-core",
+ "automata-ci-github-permissions",
  "automata-ci-scm",
  "axum",
  "bytes",
@@ -493,6 +497,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror",
  "time",
  "tokio",
@@ -527,6 +532,15 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "automata-ci-github-permissions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1061,6 +1075,7 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
+ "automata-ci-github-permissions",
  "automata-ci-key-management",
  "automata-ci-oidc-github",
  "automata-ci-schedule",
@@ -1115,6 +1130,7 @@ name = "automata-ci-workflow-github"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "automata-ci-github-permissions",
  "automata-ci-schedule",
  "flate2",
  "jiff",
@@ -1134,6 +1150,7 @@ dependencies = [
  "automata-ci-blob-s3",
  "automata-ci-core",
  "automata-ci-expression-github",
+ "automata-ci-github-permissions",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-schedule",

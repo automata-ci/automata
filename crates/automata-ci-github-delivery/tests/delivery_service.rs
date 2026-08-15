@@ -14,6 +14,12 @@ use automata_ci_blob::{
     MediaType, PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_github::{
+    GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    GithubRepositoryVisibility as GithubRepositoryVisibilityFact, GithubSealedEventEnvelopeV1,
+    GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
+    rehydrate_stored_authenticated_github_webhook,
+};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
     GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
@@ -46,9 +52,10 @@ use automata_ci_store::{
     MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ManifestPinnedGithubDeliveryEvidence,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
     ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryFailureKind, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope,
+    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
     ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
@@ -920,6 +927,7 @@ struct DeliveryTemplate {
     identity: ProviderDeliveryIdentity,
     request_digest: Sha256Digest,
     raw_event: AdmissionObject,
+    event_envelope: ProviderDeliveryEventEnvelope,
     check_head_sha: GithubCheckHeadSha,
 }
 
@@ -1005,6 +1013,7 @@ impl ProviderDeliveryRepository for RecordingRepository {
                 self.template.identity.clone(),
                 self.template.request_digest,
                 self.template.raw_event.clone(),
+                self.template.event_envelope.clone(),
                 claim,
                 claimed_at,
                 UnixMillis::new(claimed_at.get() + requested_duration),
@@ -1026,6 +1035,7 @@ impl ProviderDeliveryRepository for RecordingRepository {
             self.template.identity.clone(),
             self.template.request_digest,
             self.template.raw_event.clone(),
+            self.template.event_envelope.clone(),
             claim,
             claimed_at,
             UnixMillis::new(claimed_at.get() + requested_duration),
@@ -1815,6 +1825,7 @@ fn delivery_template(
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
+    let event_envelope = provider_event_envelope(&body, &descriptor, stored_visibility);
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(1)).expect("delivery ID");
     let repository = ProviderRepositoryCoordinates::new(
         ProviderRepositoryId::new(REPOSITORY_ID).expect("repository"),
@@ -1837,11 +1848,49 @@ fn delivery_template(
             identity,
             request_digest: Sha256Digest::from_bytes([0x42; 32]),
             raw_event,
+            event_envelope,
             check_head_sha: fixture_check_head_sha(if deleted { BEFORE } else { AFTER }),
         },
         descriptor,
         body,
     )
+}
+
+fn provider_event_envelope(
+    body: &Bytes,
+    descriptor: &BlobDescriptor,
+    visibility: ProviderRepositoryVisibility,
+) -> ProviderDeliveryEventEnvelope {
+    let visibility = match visibility {
+        ProviderRepositoryVisibility::Public => GithubRepositoryVisibilityFact::Public,
+        ProviderRepositoryVisibility::Private => GithubRepositoryVisibilityFact::Private,
+    };
+    let stored = StoredAuthenticatedGithubWebhook::from_durable_coordinates(
+        body.clone(),
+        GithubWebhookBodyDigest::from_bytes(*descriptor.digest().as_bytes()),
+        descriptor.size(),
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+        "push",
+        "delivery-service-1",
+        INSTALLATION_ID,
+        REPOSITORY_ID,
+        REPOSITORY_OWNER_ID,
+        visibility,
+        OWNER,
+        REPOSITORY,
+    );
+    let event =
+        rehydrate_stored_authenticated_github_webhook(stored).expect("verified webhook fixture");
+    let sealed = GithubSealedEventEnvelopeV1::seal(&event, descriptor.clone())
+        .expect("sealed event envelope fixture");
+    ProviderDeliveryEventEnvelope::new(
+        sealed.schema(),
+        sealed.registry_schema(),
+        sealed.digest(),
+        sealed.canonical_bytes().to_vec(),
+        GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    )
+    .expect("durable event envelope fixture")
 }
 
 fn push_body(visibility: ProviderRepositoryVisibility, deleted: bool) -> Bytes {
@@ -2087,7 +2136,7 @@ async fn public_only_service_terminally_rejects_private_delivery_without_credent
 }
 
 #[tokio::test]
-async fn public_only_service_rehydrates_private_identity_before_applying_source_policy() {
+async fn public_only_service_rejects_envelope_visibility_mismatch_before_blob_io() {
     let harness = harness_with_stored_visibility(
         CredentialBehavior::Exact,
         RenewalBehavior::Succeed,
@@ -2107,7 +2156,7 @@ async fn public_only_service_rehydrates_private_identity_before_applying_source_
         outcome,
         GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
     ));
-    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 0);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.repository.transition_count(), 1);
@@ -2119,12 +2168,12 @@ async fn public_only_service_rehydrates_private_identity_before_applying_source_
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
-        "github.raw_event.invalid_event"
+        "github.event_envelope.identity_mismatch"
     );
 }
 
 #[tokio::test]
-async fn public_only_service_rejects_private_payload_before_anonymous_source() {
+async fn public_only_service_rejects_private_envelope_before_anonymous_source() {
     let harness = harness_with_stored_visibility(
         CredentialBehavior::Exact,
         RenewalBehavior::Succeed,
@@ -2144,7 +2193,7 @@ async fn public_only_service_rejects_private_payload_before_anonymous_source() {
         outcome,
         GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
     ));
-    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 0);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.repository.transition_count(), 1);
@@ -2156,7 +2205,7 @@ async fn public_only_service_rejects_private_payload_before_anonymous_source() {
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
-        "github.raw_event.invalid_event"
+        "github.event_envelope.identity_mismatch"
     );
 }
 

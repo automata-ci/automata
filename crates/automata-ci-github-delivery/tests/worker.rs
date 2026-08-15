@@ -13,7 +13,12 @@ use automata_ci_blob::{
     MediaType, PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
-use automata_ci_github::GithubPushRefKind;
+use automata_ci_github::{
+    GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind,
+    GithubRepositoryVisibility as GithubRepositoryVisibilityFact, GithubSealedEventEnvelopeV1,
+    GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
+    rehydrate_stored_authenticated_github_webhook,
+};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
     GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
@@ -41,9 +46,9 @@ use automata_ci_store::{
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
     ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
-    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
-    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
+    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
     ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
@@ -304,6 +309,7 @@ struct WorkflowObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EventWorkflowObservation {
     event_name: String,
+    event_envelope_digest: Sha256Digest,
     git_ref: String,
     revision: String,
     raw_media_type: String,
@@ -403,6 +409,7 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
             .expect("event processor observations lock")
             .push(EventWorkflowObservation {
                 event_name: request.event().event_name().to_owned(),
+                event_envelope_digest: request.event_envelope().digest(),
                 git_ref: event.git_ref().to_owned(),
                 revision: request.repository_source().revision().as_str().to_owned(),
                 raw_media_type: request.raw_event().media_type().to_owned(),
@@ -883,6 +890,62 @@ struct ClaimedFixture {
     check_head_sha: GithubCheckHeadSha,
 }
 
+fn provider_event_envelope(
+    body: &Bytes,
+    descriptor: &BlobDescriptor,
+    event_name: &str,
+    delivery_id: &str,
+    visibility: ProviderRepositoryVisibility,
+) -> ProviderDeliveryEventEnvelope {
+    let visibility = match visibility {
+        ProviderRepositoryVisibility::Public => GithubRepositoryVisibilityFact::Public,
+        ProviderRepositoryVisibility::Private => GithubRepositoryVisibilityFact::Private,
+    };
+    let stored = StoredAuthenticatedGithubWebhook::from_durable_coordinates(
+        body.clone(),
+        GithubWebhookBodyDigest::from_bytes(*descriptor.digest().as_bytes()),
+        descriptor.size(),
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+        event_name,
+        delivery_id,
+        INSTALLATION_ID,
+        REPOSITORY_ID,
+        REPOSITORY_OWNER_ID,
+        visibility,
+        OWNER,
+        REPOSITORY,
+    );
+    let event =
+        rehydrate_stored_authenticated_github_webhook(stored).expect("verified webhook fixture");
+    let sealed = GithubSealedEventEnvelopeV1::seal(&event, descriptor.clone())
+        .expect("sealed event envelope fixture");
+    ProviderDeliveryEventEnvelope::new(
+        sealed.schema(),
+        sealed.registry_schema(),
+        sealed.digest(),
+        sealed.canonical_bytes().to_vec(),
+        GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    )
+    .expect("durable event envelope fixture")
+}
+
+fn claimed_with_event_envelope(
+    claimed: &ClaimedProviderDelivery,
+    event_envelope: ProviderDeliveryEventEnvelope,
+) -> ClaimedProviderDelivery {
+    ClaimedProviderDelivery::from_durable_parts(
+        claimed.receipt(),
+        claimed.identity().clone(),
+        claimed.request_digest(),
+        claimed.raw_event().clone(),
+        event_envelope,
+        claimed.claim(),
+        claimed.claimed_at(),
+        claimed.expires_at(),
+    )
+    .expect("claimed delivery with replacement envelope")
+}
+
 fn claimed_fixture(git_ref: &str, deleted: bool, attempt: u16) -> ClaimedFixture {
     claimed_fixture_with_visibility(
         git_ref,
@@ -901,7 +964,7 @@ fn claimed_fixture_with_visibility(
     let after = if deleted { ZERO } else { AFTER };
     let body = push_body(git_ref, after, deleted, visibility);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
+    let key_text = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
@@ -946,6 +1009,7 @@ fn claimed_fixture_with_visibility(
         identity,
         Sha256Digest::from_bytes([0x42; 32]),
         raw_event,
+        provider_event_envelope(&body, &descriptor, "push", DELIVERY, visibility),
         claim,
         UnixMillis::new(100),
         UnixMillis::new(10_000),
@@ -965,7 +1029,7 @@ fn pull_request_claimed_fixture() -> ClaimedFixture {
         r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{STALE_MERGE}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ));
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
+    let key_text = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
@@ -1010,6 +1074,13 @@ fn pull_request_claimed_fixture() -> ClaimedFixture {
         identity,
         Sha256Digest::from_bytes([0x43; 32]),
         raw_event,
+        provider_event_envelope(
+            &body,
+            &descriptor,
+            "pull_request",
+            DELIVERY,
+            ProviderRepositoryVisibility::Private,
+        ),
         claim,
         UnixMillis::new(100),
         UnixMillis::new(10_000),
@@ -1033,7 +1104,7 @@ fn repository_dispatch_claimed_fixture(visibility: ProviderRepositoryVisibility)
         r#"{{"action":"synthetic_signal","branch":"main","client_payload":{{"sequence":3}},"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility_name}","default_branch":"main","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ));
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
-    let key_text = format!("provider-deliveries/github/event/sha256/{digest}.json");
+    let key_text = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let descriptor = BlobDescriptor::new(
         BlobKey::new(key_text.clone()).expect("blob key"),
         digest,
@@ -1078,6 +1149,13 @@ fn repository_dispatch_claimed_fixture(visibility: ProviderRepositoryVisibility)
         identity,
         Sha256Digest::from_bytes([0x44; 32]),
         raw_event,
+        provider_event_envelope(
+            &body,
+            &descriptor,
+            "repository_dispatch",
+            DELIVERY,
+            visibility,
+        ),
         claim,
         UnixMillis::new(100),
         UnixMillis::new(10_000),
@@ -1464,6 +1542,7 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
 #[tokio::test]
 async fn pull_request_uses_checked_head_when_webhook_merge_revision_is_stale() {
     let fixture = pull_request_claimed_fixture();
+    let expected_event_envelope_digest = fixture.claimed.event_envelope().digest();
     let archive = archive(BTreeMap::from([(
         ".ci/workflows/ci.yml",
         b"on: pull_request\njobs: {}\n".to_vec(),
@@ -1505,6 +1584,10 @@ async fn pull_request_uses_checked_head_when_webhook_merge_revision_is_stale() {
     let observations = processor.event_observations();
     assert_eq!(observations.len(), 1);
     assert_eq!(observations[0].event_name, "pull_request");
+    assert_eq!(
+        observations[0].event_envelope_digest,
+        expected_event_envelope_digest
+    );
     assert_eq!(observations[0].git_ref, "refs/pull/7/merge");
     assert_eq!(observations[0].revision, AFTER);
     assert_eq!(
@@ -2081,6 +2164,108 @@ async fn rehydrated_push_head_must_match_the_pinned_check_before_source_io() {
             .as_str(),
         "github.subject_evidence.mismatch"
     );
+}
+
+#[tokio::test]
+async fn invalid_or_rebound_event_envelopes_reject_before_blob_or_source_io() {
+    for case in ["unsupported", "corrupt", "raw-rebound", "identity-rebound"] {
+        let mut fixture = claimed_fixture("refs/heads/main", false, 1);
+        let durable = fixture.claimed.event_envelope();
+        let event_envelope = match case {
+            "unsupported" => ProviderDeliveryEventEnvelope::new(
+                2,
+                durable.registry_schema(),
+                durable.digest(),
+                durable.canonical_bytes().to_vec(),
+                durable.media_type(),
+            )
+            .expect("store-valid unsupported envelope"),
+            "corrupt" => ProviderDeliveryEventEnvelope::new(
+                durable.schema(),
+                durable.registry_schema(),
+                Sha256Digest::from_bytes([0xEE; 32]),
+                durable.canonical_bytes().to_vec(),
+                durable.media_type(),
+            )
+            .expect("store-valid corrupt envelope"),
+            "raw-rebound" => {
+                let other_body = push_body(
+                    "refs/heads/other",
+                    AFTER,
+                    false,
+                    ProviderRepositoryVisibility::Private,
+                );
+                let other_digest = Sha256Digest::from_bytes(Sha256::digest(&other_body).into());
+                let other_descriptor = BlobDescriptor::new(
+                    BlobKey::new(format!(
+                        "{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{other_digest}.json"
+                    ))
+                    .expect("other raw key"),
+                    other_digest,
+                    u64::try_from(other_body.len()).expect("other raw size"),
+                    MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE)
+                        .expect("other raw media type"),
+                );
+                provider_event_envelope(
+                    &other_body,
+                    &other_descriptor,
+                    "push",
+                    DELIVERY,
+                    ProviderRepositoryVisibility::Private,
+                )
+            }
+            "identity-rebound" => provider_event_envelope(
+                &fixture.body,
+                &fixture.descriptor,
+                "push",
+                "other-delivery",
+                ProviderRepositoryVisibility::Private,
+            ),
+            _ => unreachable!("closed test cases"),
+        };
+        fixture.claimed = claimed_with_event_envelope(&fixture.claimed, event_envelope);
+        let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
+            BTreeMap::new(),
+        ))));
+        let processor = Arc::new(RecordingProcessor::returning(skipped()));
+        let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
+        let (worker, objects) = worker(
+            &fixture,
+            source.clone(),
+            processor.clone(),
+            deliveries.clone(),
+            GithubDeliveryWorkerConfig::default(),
+        );
+
+        let outcome = worker
+            .process_claimed(
+                fixture.claimed,
+                GithubDeliverySourceAuthority::PrivateInstallationContentsRead {
+                    credential: &SecretString::new(CREDENTIAL_MARKER).expect("credential"),
+                    changed_files_credentials: None,
+                },
+            )
+            .await
+            .expect("event envelope failure is durably rejected");
+        assert!(matches!(outcome, GithubDeliveryWorkerOutcome::Rejected(_)));
+        assert_eq!(objects.read_count(), 0, "case {case}");
+        assert!(source.observations().is_empty(), "case {case}");
+        assert!(processor.observations().is_empty(), "case {case}");
+        let expected_kind = match case {
+            "unsupported" => "github.event_envelope.unsupported_schema",
+            "corrupt" => "github.event_envelope.invalid",
+            "raw-rebound" => "github.event_envelope.raw_identity_mismatch",
+            "identity-rebound" => "github.event_envelope.identity_mismatch",
+            _ => unreachable!("closed test cases"),
+        };
+        assert_eq!(
+            deliveries.rejections.lock().expect("rejections lock")[0]
+                .failure_kind()
+                .as_str(),
+            expected_kind,
+            "case {case}",
+        );
+    }
 }
 
 #[tokio::test]

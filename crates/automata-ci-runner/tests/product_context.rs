@@ -7,7 +7,9 @@ use automata_ci_core::{
     JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionGrant,
     JobPermissionRequest, JobRuntimeContext, JobSource, Lease, LeaseId, NeedContext, NeedOutput,
     OutputSensitivity, PermissionLevel, RunId, RunIdAlias, RunnerRequirements, SecretBinding,
-    Sha256Digest, StrategyContext, UnixMillis, WorkflowId,
+    Sha256Digest, StrategyContext, TrustActorEvidence, TrustActorKind, TrustAutomationKind,
+    TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence,
+    TrustSnapshot, UnixMillis, WorkflowId,
 };
 use automata_ci_execution::{
     ContainerHandle, ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork,
@@ -34,6 +36,41 @@ use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase}
 const REPOSITORY_TOKEN: &str = "ghs_exact_job_repository_token";
 const OIDC_REQUEST_TOKEN: &str = "oidc_exact_job_request_token";
 const SECRET_DERIVED_NEED_SENTINEL: &str = "must-not-enter-expression-context";
+
+fn trusted_snapshot() -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::WorkflowDispatch,
+                TrustEventKind::WorkflowDispatch,
+            )
+            .with_original_actor(
+                TrustActorEvidence::new(
+                    "local-bootstrap",
+                    TrustActorKind::User,
+                    TrustAutomationKind::None,
+                )
+                .expect("actor evidence"),
+            )
+            .with_repositories(
+                TrustRepositoryEvidence::new("42", "7").expect("source repository"),
+                TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+            )
+            .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+            .with_revisions("source-sha", "target-sha", "execution-sha")
+            .with_fork(false),
+        )
+        .expect("trusted snapshot")
+}
+
+fn deny_all_snapshot() -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(TrustEvidence::new(
+            TrustOriginKind::WorkflowDispatch,
+            TrustEventKind::WorkflowDispatch,
+        ))
+        .expect("incomplete evidence is a deny-all decision")
+}
 
 #[test]
 fn every_emitted_github_and_runner_default_is_protected_from_workflow_overlays() {
@@ -553,6 +590,61 @@ fn credential_free_context_injects_no_authority_or_results_contract() {
 }
 
 #[test]
+fn deny_all_trust_rejects_stale_authorities_and_secret_runtime_context() {
+    let mut fixture = ContextFixture::new();
+    let denied_job = fixture
+        .job
+        .job()
+        .clone()
+        .with_permission_request(JobPermissionRequest::mapping([]))
+        .with_trust_snapshot(deny_all_snapshot());
+    fixture.job = JobIrEnvelope::new(
+        fixture.job.workflow_id(),
+        fixture.job.source().clone(),
+        fixture.job.execution().clone(),
+        denied_job,
+    );
+
+    assert_eq!(
+        fixture
+            .snapshot()
+            .expect_err("denied trust cannot consume secret runtime context")
+            .kind(),
+        PortErrorKind::InvalidData
+    );
+
+    fixture.runtime_context = JobRuntimeContext::new(
+        fixture.runtime_context.inputs().clone(),
+        fixture.runtime_context.vars().clone(),
+        fixture.runtime_context.matrix().clone(),
+        fixture.runtime_context.strategy(),
+        fixture.runtime_context.needs().clone(),
+        BTreeMap::new(),
+    )
+    .expect("secret-free runtime context");
+    assert_eq!(
+        fixture
+            .snapshot()
+            .expect_err("denied trust cannot consume stale Results authority")
+            .kind(),
+        PortErrorKind::InvalidData
+    );
+
+    fixture.runtime_authorities =
+        JobRuntimeAuthorities::new(Vec::new(), &fixture.job, &fixture.lease)
+            .expect("deny-all authority bundle");
+    let snapshot = fixture
+        .snapshot()
+        .expect("coherent deny-all context remains executable without credentials");
+    assert!(snapshot.environment().iter().all(|value| {
+        !matches!(
+            value.name(),
+            "ACTIONS_RESULTS_URL" | "ACTIONS_CACHE_SERVICE_V2" | "ACTIONS_RUNTIME_TOKEN"
+        )
+    }));
+}
+
+#[test]
 fn oidc_authority_injects_only_the_exact_masked_request_contract() {
     let mut fixture = ContextFixture::new();
     fixture.add_oidc_authority(
@@ -893,9 +985,11 @@ impl ContextFixture {
                 false,
                 Vec::new(),
             )
-            .with_permission_request(JobPermissionRequest::mapping([
-                JobPermissionGrant::new("id-token", PermissionLevel::Write),
-            ])),
+            .with_permission_request(JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "id-token",
+                PermissionLevel::Write,
+            )]))
+            .with_trust_snapshot(trusted_snapshot()),
         );
         let context = StandardGithubContext::new(
             config.runner_id(),

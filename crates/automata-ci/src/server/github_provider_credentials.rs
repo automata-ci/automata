@@ -7,10 +7,11 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
+use automata_ci_auth::github::GithubEndpointError;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::UnixMillis;
 use automata_ci_credential_github::{
@@ -19,6 +20,9 @@ use automata_ci_credential_github::{
     GithubServerServiceHandoffBinding, GithubServerServiceHandoffError,
     GithubServerServiceResolutionError, PendingGithubServerServiceCorruptionCleanup,
     PendingGithubServerServiceHandoffRelease, github_server_service_credential_request,
+};
+use automata_ci_github::{
+    GithubHttpEndpoint, GithubWorkflowPermissionDefaults, GithubWorkflowPermissionDefaultsRequest,
 };
 use automata_ci_github_delivery::{
     GithubChecksCredentialProvider, GithubChecksCredentialProviderError,
@@ -36,8 +40,11 @@ use automata_ci_store::{
     GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
     GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
     GithubServerServiceConsumerClaim, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
-    GithubServerServiceScope, GithubServerServiceStoreError, ProviderDeliveryIdentity,
-    ProviderRepositoryOwnerId,
+    GithubServerServiceScope, GithubServerServiceStoreError,
+    GithubWorkflowPermissionDefaultsObservationRepository,
+    GithubWorkflowPermissionObservationCandidate, ProviderDeliveryIdentity,
+    ProviderRepositoryOwnerId, ReconcileGithubWorkflowPermissionHandoff,
+    ReleaseGithubServerServiceHandoff,
 };
 use thiserror::Error;
 use tokio::{
@@ -65,6 +72,103 @@ pub enum GithubProviderCredentialAdapterConfigurationError {
     /// The exact release retry interval is zero or excessive.
     #[error("the GitHub provider credential release retry interval is invalid")]
     InvalidReleaseRetryInterval,
+}
+
+/// Sanitized workflow-permission observation failure.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum GithubWorkflowPermissionObservationError {
+    /// Provider or credential infrastructure is temporarily unavailable.
+    #[error("the GitHub workflow-permission observation is unavailable")]
+    Unavailable,
+    /// The authority, repository, or provider authorization was rejected.
+    #[error("the GitHub workflow-permission observation was rejected")]
+    Rejected,
+    /// Exact binding or provider response evidence was inconsistent.
+    #[error("the GitHub workflow-permission observation was inconsistent")]
+    Inconsistent,
+}
+
+/// Provider result plus the sole exact release operation retained for atomic finalization.
+pub struct GithubWorkflowPermissionObservationAttempt {
+    defaults: GithubWorkflowPermissionDefaults,
+    provider_observed_at: UnixMillis,
+    handoff_generation: automata_ci_store::GithubServerServiceGeneration,
+    release: Option<PendingGithubServerServiceHandoffRelease>,
+    release_reservation: Option<GithubProviderCredentialReleaseReservation>,
+    releases: Arc<GithubProviderCredentialReleaseSupervisor>,
+    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+    required_through: UnixMillis,
+}
+
+impl fmt::Debug for GithubWorkflowPermissionObservationAttempt {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GithubWorkflowPermissionObservationAttempt")
+            .field("defaults", &self.defaults)
+            .field("provider_observed_at", &self.provider_observed_at)
+            .field("handoff_generation", &self.handoff_generation)
+            .field("release", &"[EXACT RELEASE]")
+            .field("release_reservation", &"[RESERVED]")
+            .field("releases", &"[RELEASE SUPERVISOR]")
+            .field("repository", &"[CREDENTIAL REPOSITORY]")
+            .field("required_through", &self.required_through)
+            .finish()
+    }
+}
+
+impl GithubWorkflowPermissionObservationAttempt {
+    #[must_use]
+    pub const fn defaults(&self) -> &GithubWorkflowPermissionDefaults {
+        &self.defaults
+    }
+
+    #[must_use]
+    pub const fn provider_observed_at(&self) -> UnixMillis {
+        self.provider_observed_at
+    }
+
+    #[must_use]
+    pub const fn handoff_generation(&self) -> automata_ci_store::GithubServerServiceGeneration {
+        self.handoff_generation
+    }
+
+    #[must_use]
+    pub const fn release_request(&self) -> &ReleaseGithubServerServiceHandoff {
+        self.release
+            .as_ref()
+            .expect("an observation attempt remains armed until finalization")
+            .request()
+    }
+
+    /// Disarms exact-release fallback after Store durably finalized the attempt.
+    pub fn confirm_finalized(mut self) {
+        drop(self.release.take());
+        drop(self.release_reservation.take());
+    }
+
+    fn supervise_release(&mut self) {
+        let (Some(release), Some(reservation)) =
+            (self.release.take(), self.release_reservation.take())
+        else {
+            return;
+        };
+        drop(self.releases.supervise(
+            reservation,
+            Box::new(RetainedPendingRelease {
+                pending: Arc::new(CorePendingHandoffRelease {
+                    repository: Arc::clone(&self.repository),
+                    pending: release,
+                }),
+            }),
+            self.required_through,
+        ));
+    }
+}
+
+impl Drop for GithubWorkflowPermissionObservationAttempt {
+    fn drop(&mut self) {
+        self.supervise_release();
+    }
 }
 
 /// Bounded independent custody for live and ambiguously released handoffs.
@@ -186,6 +290,19 @@ impl GithubProviderCredentialReleaseSupervisor {
         self.redrive_retained();
         Arc::clone(&self.permits)
             .try_acquire_owned()
+            .ok()
+            .map(|permit| GithubProviderCredentialReleaseReservation { _permit: permit })
+    }
+
+    async fn reserve_until(
+        &self,
+        deadline: Instant,
+    ) -> Option<GithubProviderCredentialReleaseReservation> {
+        self.redrive_retained();
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        tokio::time::timeout(remaining, Arc::clone(&self.permits).acquire_owned())
+            .await
+            .ok()?
             .ok()
             .map(|permit| GithubProviderCredentialReleaseReservation { _permit: permit })
     }
@@ -382,6 +499,236 @@ fn take_release_custody(
 
 struct GithubProviderCredentialReleaseReservation {
     _permit: OwnedSemaphorePermit,
+}
+
+/// Ambiguity custody for an acquire whose Store commit may outlive its response.
+struct WorkflowPermissionAcquireCustody {
+    observation_repository: Arc<dyn GithubWorkflowPermissionDefaultsObservationRepository>,
+    releases: Arc<GithubProviderCredentialReleaseSupervisor>,
+    reconciliation: Option<ReconcileGithubWorkflowPermissionHandoff>,
+    reservation: Option<GithubProviderCredentialReleaseReservation>,
+    required_through: UnixMillis,
+}
+
+impl WorkflowPermissionAcquireCustody {
+    fn new(
+        observation_repository: Arc<dyn GithubWorkflowPermissionDefaultsObservationRepository>,
+        releases: Arc<GithubProviderCredentialReleaseSupervisor>,
+        reconciliation: ReconcileGithubWorkflowPermissionHandoff,
+        reservation: GithubProviderCredentialReleaseReservation,
+    ) -> Self {
+        let required_through = reconciliation.required_through();
+        Self {
+            observation_repository,
+            releases,
+            reconciliation: Some(reconciliation),
+            reservation: Some(reservation),
+            required_through,
+        }
+    }
+
+    fn confirm_acquired(
+        &mut self,
+    ) -> Result<GithubProviderCredentialReleaseReservation, GithubWorkflowPermissionObservationError>
+    {
+        drop(self.reconciliation.take());
+        self.reservation
+            .take()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)
+    }
+}
+
+impl Drop for WorkflowPermissionAcquireCustody {
+    fn drop(&mut self) {
+        let (Some(reconciliation), Some(reservation)) =
+            (self.reconciliation.take(), self.reservation.take())
+        else {
+            return;
+        };
+        drop(self.releases.supervise(
+            reservation,
+            Box::new(AmbiguousObservationRelease {
+                repository: Arc::clone(&self.observation_repository),
+                reconciliation,
+            }),
+            self.required_through,
+        ));
+    }
+}
+
+impl fmt::Debug for WorkflowPermissionAcquireCustody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowPermissionAcquireCustody")
+            .field("observation_repository", &"[OBSERVATION REPOSITORY]")
+            .field("releases", &self.releases)
+            .field(
+                "reconciliation",
+                &self.reconciliation.as_ref().map(|_| "[EXACT CLOSURE]"),
+            )
+            .field(
+                "reservation",
+                &self.reservation.as_ref().map(|_| "[RESERVED]"),
+            )
+            .field("required_through", &self.required_through)
+            .finish()
+    }
+}
+
+struct AmbiguousObservationRelease {
+    repository: Arc<dyn GithubWorkflowPermissionDefaultsObservationRepository>,
+    reconciliation: ReconcileGithubWorkflowPermissionHandoff,
+}
+
+impl GithubProviderExactHandoffRelease for AmbiguousObservationRelease {
+    fn freeze(&self) -> Arc<dyn GithubProviderPendingHandoffRelease> {
+        Arc::new(PendingAmbiguousObservationRelease {
+            repository: Arc::clone(&self.repository),
+            reconciliation: self.reconciliation.clone(),
+        })
+    }
+}
+
+impl fmt::Debug for AmbiguousObservationRelease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AmbiguousObservationRelease")
+            .field("repository", &"[OBSERVATION REPOSITORY]")
+            .field("reconciliation", &"[EXACT CLOSURE]")
+            .finish()
+    }
+}
+
+struct PendingAmbiguousObservationRelease {
+    repository: Arc<dyn GithubWorkflowPermissionDefaultsObservationRepository>,
+    reconciliation: ReconcileGithubWorkflowPermissionHandoff,
+}
+
+#[async_trait]
+impl GithubProviderPendingHandoffRelease for PendingAmbiguousObservationRelease {
+    async fn replay(&self) -> bool {
+        self.repository
+            .reconcile_github_workflow_permission_handoff(self.reconciliation.clone())
+            .await
+            .is_ok()
+    }
+}
+
+impl fmt::Debug for PendingAmbiguousObservationRelease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PendingAmbiguousObservationRelease")
+            .field("repository", &"[OBSERVATION REPOSITORY]")
+            .field("reconciliation", &"[EXACT CLOSURE]")
+            .finish()
+    }
+}
+
+/// Cancellation-safe custody for one workflow-permission observation handoff.
+///
+/// The binding and a pre-reserved supervisor slot remain live across provider
+/// I/O. Dropping the future at any await point freezes and supervises the exact
+/// release; a successful caller instead converts this guard into the release
+/// request carried by the atomic Store finalization.
+struct WorkflowPermissionHandoffCustody {
+    issuer: Arc<GithubServerServiceCredentialIssuer>,
+    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+    releases: Arc<GithubProviderCredentialReleaseSupervisor>,
+    binding: Option<GithubServerServiceHandoffBinding>,
+    reservation: Option<GithubProviderCredentialReleaseReservation>,
+    required_through: UnixMillis,
+}
+
+impl WorkflowPermissionHandoffCustody {
+    fn new(
+        issuer: Arc<GithubServerServiceCredentialIssuer>,
+        repository: Arc<dyn GithubServerServiceCredentialRepository>,
+        releases: Arc<GithubProviderCredentialReleaseSupervisor>,
+        binding: GithubServerServiceHandoffBinding,
+        reservation: GithubProviderCredentialReleaseReservation,
+        required_through: UnixMillis,
+    ) -> Self {
+        Self {
+            issuer,
+            repository,
+            releases,
+            binding: Some(binding),
+            reservation: Some(reservation),
+            required_through,
+        }
+    }
+
+    fn freeze_at(
+        &mut self,
+        not_before: UnixMillis,
+    ) -> Result<
+        (
+            PendingGithubServerServiceHandoffRelease,
+            GithubProviderCredentialReleaseReservation,
+        ),
+        GithubWorkflowPermissionObservationError,
+    > {
+        let binding = self
+            .binding
+            .as_ref()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let pending = self
+            .issuer
+            .prepare_release_binding_at(binding.clone(), not_before)
+            .map_err(|_| GithubWorkflowPermissionObservationError::Inconsistent)?;
+        drop(self.binding.take());
+        let reservation = self
+            .reservation
+            .take()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        Ok((pending, reservation))
+    }
+
+    fn supervise_pending(&mut self) {
+        let Some(binding) = self.binding.as_ref() else {
+            return;
+        };
+        let Ok(pending) = self.issuer.prepare_release_binding(binding.clone()) else {
+            return;
+        };
+        drop(self.binding.take());
+        let Some(reservation) = self.reservation.take() else {
+            return;
+        };
+        drop(self.releases.supervise(
+            reservation,
+            Box::new(RetainedPendingRelease {
+                pending: Arc::new(CorePendingHandoffRelease {
+                    repository: Arc::clone(&self.repository),
+                    pending,
+                }),
+            }),
+            self.required_through,
+        ));
+    }
+}
+
+impl Drop for WorkflowPermissionHandoffCustody {
+    fn drop(&mut self) {
+        self.supervise_pending();
+    }
+}
+
+impl fmt::Debug for WorkflowPermissionHandoffCustody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowPermissionHandoffCustody")
+            .field("issuer", &self.issuer)
+            .field("repository", &"[AUTHORITY REPOSITORY]")
+            .field("releases", &self.releases)
+            .field("binding", &self.binding.as_ref().map(|_| "[EXACT BINDING]"))
+            .field(
+                "reservation",
+                &self.reservation.as_ref().map(|_| "[RESERVED]"),
+            )
+            .field("required_through", &self.required_through)
+            .finish()
+    }
 }
 
 struct PendingReleaseObservation {
@@ -682,6 +1029,12 @@ fn map_handoff_error(
 /// archive and changed-file reads remain anonymous and never enter this object.
 pub struct GithubProviderCredentialAdapters {
     handoffs: Arc<dyn GithubProviderCredentialHandoffIssuer>,
+    workflow_permission_issuer: Option<Arc<GithubServerServiceCredentialIssuer>>,
+    workflow_permission_repository: Option<Arc<dyn GithubServerServiceCredentialRepository>>,
+    workflow_permission_observations:
+        Option<Arc<dyn GithubWorkflowPermissionDefaultsObservationRepository>>,
+    releases: Option<Arc<GithubProviderCredentialReleaseSupervisor>>,
+    observation_clock: Option<Arc<dyn GithubServerServiceCoordinatorClock>>,
     authorities:
         Arc<BTreeMap<GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity>>,
     durable_authorities: Option<DurableGithubProviderAuthorityResolver>,
@@ -744,20 +1097,28 @@ impl GithubProviderCredentialAdapters {
     /// # Errors
     ///
     /// Rejects an empty, excessive, duplicate, or ambiguously routed authority set.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         issuer: Arc<GithubServerServiceCredentialIssuer>,
         repository: Arc<dyn GithubServerServiceCredentialRepository>,
         authority_repository: Arc<dyn GithubServerServiceAuthorityRepository>,
+        observation_repository: Arc<dyn GithubWorkflowPermissionDefaultsObservationRepository>,
         releases: Arc<GithubProviderCredentialReleaseSupervisor>,
         authorities: &[GithubServerServiceAuthorityIdentity],
         routes: GithubProviderCredentialRequestResolver,
+        observation_clock: Arc<dyn GithubServerServiceCoordinatorClock>,
     ) -> Result<Self, GithubProviderCredentialAdapterConfigurationError> {
         let handoffs = Arc::new(ExactCredentialHandoffIssuer {
-            issuer,
-            repository,
-            releases,
+            issuer: issuer.clone(),
+            repository: repository.clone(),
+            releases: releases.clone(),
         });
         let mut adapters = Self::with_handoffs(handoffs, authorities)?;
+        adapters.workflow_permission_issuer = Some(issuer);
+        adapters.workflow_permission_repository = Some(repository);
+        adapters.workflow_permission_observations = Some(observation_repository);
+        adapters.releases = Some(releases);
+        adapters.observation_clock = Some(observation_clock);
         adapters.durable_authorities = Some(DurableGithubProviderAuthorityResolver {
             repository: Arc::new(StoreGithubProviderAuthorityLookup {
                 repository: authority_repository,
@@ -771,7 +1132,7 @@ impl GithubProviderCredentialAdapters {
         handoffs: Arc<dyn GithubProviderCredentialHandoffIssuer>,
         authorities: &[GithubServerServiceAuthorityIdentity],
     ) -> Result<Self, GithubProviderCredentialAdapterConfigurationError> {
-        let maximum_authorities = 2 * super::MAX_GITHUB_PROVIDER_REPOSITORIES;
+        let maximum_authorities = 3 * super::MAX_GITHUB_PROVIDER_REPOSITORIES;
         if authorities.is_empty() || authorities.len() > maximum_authorities {
             return Err(
                 GithubProviderCredentialAdapterConfigurationError::InvalidAuthorityRegistry,
@@ -798,6 +1159,11 @@ impl GithubProviderCredentialAdapters {
         }
         Ok(Self {
             handoffs,
+            workflow_permission_issuer: None,
+            workflow_permission_repository: None,
+            workflow_permission_observations: None,
+            releases: None,
+            observation_clock: None,
             authorities: Arc::new(exact),
             durable_authorities: None,
         })
@@ -1038,6 +1404,225 @@ impl GithubProviderCredentialAdapters {
             Err(_) => Err(GithubScheduleSourceCredentialProviderError::InvariantViolation),
         }
     }
+
+    /// Borrows exactly `Administration: read` to observe one manifest's
+    /// effective repository workflow-permission defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized observation error when the authority or exact
+    /// credential binding is invalid, provider access fails, or bounded
+    /// release custody is unavailable.
+    #[allow(clippy::too_many_lines)]
+    pub async fn observe_workflow_permission_defaults(
+        &self,
+        endpoint: &GithubHttpEndpoint,
+        manifest: &GithubProviderManifest,
+        candidate: &GithubWorkflowPermissionObservationCandidate,
+        deadline: Instant,
+    ) -> Result<GithubWorkflowPermissionObservationAttempt, GithubWorkflowPermissionObservationError>
+    {
+        let issuer = self
+            .workflow_permission_issuer
+            .as_ref()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let observation_clock = self
+            .observation_clock
+            .as_ref()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let releases = self
+            .releases
+            .as_ref()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let repository = self
+            .workflow_permission_repository
+            .as_ref()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let observation_repository = self
+            .workflow_permission_observations
+            .as_ref()
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let release_reservation = releases
+            .reserve_until(deadline)
+            .await
+            .ok_or(GithubWorkflowPermissionObservationError::Unavailable)?;
+        let selector = candidate.authority_selector();
+        let authority = self
+            .authority(selector, GithubServerServiceScope::WorkflowPermissionsRead)
+            .await
+            .map_err(workflow_permission_handoff_error)?;
+        if !workflow_permission_identity_matches(&authority, manifest) {
+            return Err(GithubWorkflowPermissionObservationError::Rejected);
+        }
+        let consumer = candidate.consumer();
+        let required_through = candidate
+            .claimed_at()
+            .get()
+            .checked_add(consumer.action().provider_tail_millis())
+            .map(UnixMillis::new)
+            .ok_or(GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let request = acquire_request(
+            selector.clone(),
+            consumer,
+            candidate.claimed_at(),
+            required_through,
+        )
+        .map_err(workflow_permission_handoff_error)?;
+        let reconciliation = ReconcileGithubWorkflowPermissionHandoff::new(candidate.clone())
+            .map_err(|_| GithubWorkflowPermissionObservationError::Inconsistent)?;
+        let mut acquisition_custody = WorkflowPermissionAcquireCustody::new(
+            Arc::clone(observation_repository),
+            Arc::clone(releases),
+            reconciliation,
+            release_reservation,
+        );
+        let credential = issuer
+            .acquire(request)
+            .await
+            .map_err(|error| workflow_permission_handoff_error(map_handoff_error(&error)))?;
+        let release_reservation = acquisition_custody.confirm_acquired()?;
+        let binding_evidence = credential.binding().clone();
+        let handoff_generation = binding_evidence.key().generation();
+        let (token, binding) = credential.into_secret_and_binding();
+        let mut custody = WorkflowPermissionHandoffCustody::new(
+            Arc::clone(issuer),
+            Arc::clone(repository),
+            Arc::clone(releases),
+            binding,
+            release_reservation,
+            required_through,
+        );
+        if binding_evidence.selector() != selector
+            || binding_evidence.consumer() != consumer
+            || binding_evidence.required_through() != required_through
+            || binding_evidence.acquired_at() != candidate.claimed_at()
+        {
+            drop(token);
+            return Err(GithubWorkflowPermissionObservationError::Inconsistent);
+        }
+        let Ok(canonical_request) = github_server_service_credential_request(&authority) else {
+            drop(token);
+            return Err(GithubWorkflowPermissionObservationError::Inconsistent);
+        };
+        if canonical_request.repository().repository().as_str()
+            != manifest.github_repository_name().as_str()
+        {
+            drop(token);
+            return Err(GithubWorkflowPermissionObservationError::Inconsistent);
+        }
+        let result = endpoint
+            .workflow_permission_defaults(GithubWorkflowPermissionDefaultsRequest::new(
+                canonical_request.repository().repository(),
+                &token,
+                deadline,
+            ))
+            .await;
+        let provider_observed_at = observation_clock.now().max(candidate.claimed_at());
+        drop(token);
+        let (release, release_reservation) = custody.freeze_at(provider_observed_at)?;
+        match result {
+            Ok(defaults) => Ok(GithubWorkflowPermissionObservationAttempt {
+                defaults,
+                provider_observed_at,
+                handoff_generation,
+                release: Some(release),
+                release_reservation: Some(release_reservation),
+                releases: Arc::clone(releases),
+                repository: Arc::clone(repository),
+                required_through,
+            }),
+            Err(error) => {
+                self.retain_workflow_permission_release(
+                    release,
+                    release_reservation,
+                    required_through,
+                );
+                Err(map_workflow_permission_endpoint_error(error))
+            }
+        }
+    }
+
+    /// Transfers an unfinalized observation release into the bounded exact-release supervisor.
+    pub fn retain_workflow_permission_attempt(
+        &self,
+        mut attempt: GithubWorkflowPermissionObservationAttempt,
+    ) {
+        attempt.supervise_release();
+    }
+
+    fn retain_workflow_permission_release(
+        &self,
+        pending: PendingGithubServerServiceHandoffRelease,
+        reservation: GithubProviderCredentialReleaseReservation,
+        required_through: UnixMillis,
+    ) {
+        let releases = self
+            .releases
+            .as_ref()
+            .expect("observation handoffs are configured only with a release supervisor");
+        let repository = self
+            .workflow_permission_repository
+            .as_ref()
+            .expect("observation handoffs are configured only with a credential repository");
+        drop(releases.supervise(
+            reservation,
+            Box::new(RetainedPendingRelease {
+                pending: Arc::new(CorePendingHandoffRelease {
+                    repository: Arc::clone(repository),
+                    pending,
+                }),
+            }),
+            required_through,
+        ));
+    }
+}
+
+fn workflow_permission_identity_matches(
+    authority: &GithubServerServiceAuthorityIdentity,
+    manifest: &GithubProviderManifest,
+) -> bool {
+    authority.scope() == GithubServerServiceScope::WorkflowPermissionsRead
+        && authority.tenant() == manifest.tenant()
+        && authority.repository_id() == manifest.repository_id()
+        && authority.connection_id() == manifest.connection_id()
+        && authority.installation_id() == manifest.installation_id()
+        && authority.github_app_id() == manifest.github_app_id()
+        && authority.github_repository_id() == manifest.github_repository_id()
+        && authority.github_repository_name() == manifest.github_repository_name()
+        && authority.app_configuration_revision() == manifest.app_configuration_revision()
+        && authority.policy_revision() == manifest.policy_revision()
+}
+
+const fn workflow_permission_handoff_error(
+    error: GithubProviderCredentialHandoffError,
+) -> GithubWorkflowPermissionObservationError {
+    match error {
+        GithubProviderCredentialHandoffError::Unavailable => {
+            GithubWorkflowPermissionObservationError::Unavailable
+        }
+        GithubProviderCredentialHandoffError::Rejected => {
+            GithubWorkflowPermissionObservationError::Rejected
+        }
+        GithubProviderCredentialHandoffError::Inconsistent => {
+            GithubWorkflowPermissionObservationError::Inconsistent
+        }
+    }
+}
+
+const fn map_workflow_permission_endpoint_error(
+    error: GithubEndpointError,
+) -> GithubWorkflowPermissionObservationError {
+    match error {
+        GithubEndpointError::Unauthorized | GithubEndpointError::Forbidden => {
+            GithubWorkflowPermissionObservationError::Rejected
+        }
+        GithubEndpointError::RateLimited { .. } | GithubEndpointError::Unavailable => {
+            GithubWorkflowPermissionObservationError::Unavailable
+        }
+        GithubEndpointError::InvalidResponse => {
+            GithubWorkflowPermissionObservationError::Inconsistent
+        }
+    }
 }
 
 fn map_authority_resolution_store_error(
@@ -1077,6 +1662,20 @@ impl fmt::Debug for GithubProviderCredentialAdapters {
         formatter
             .debug_struct("GithubProviderCredentialAdapters")
             .field("handoffs", &self.handoffs)
+            .field(
+                "workflow_permission_issuer",
+                &self.workflow_permission_issuer.is_some(),
+            )
+            .field(
+                "workflow_permission_repository",
+                &self.workflow_permission_repository.is_some(),
+            )
+            .field(
+                "workflow_permission_observations",
+                &self.workflow_permission_observations.is_some(),
+            )
+            .field("releases", &self.releases.is_some())
+            .field("observation_clock", &self.observation_clock.is_some())
             .field("authority_count", &self.authorities.len())
             .field("durable_authorities", &self.durable_authorities.is_some())
             .finish()

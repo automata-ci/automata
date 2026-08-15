@@ -6,8 +6,8 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::management::ManagementActor;
 use automata_ci_core::{
-    MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, OperationId, RunId, UnixMillis, WorkflowId,
-    WorkflowJobKey, canonical_git_ref,
+    MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, OperationId, RunId, TrustSnapshot, UnixMillis,
+    WorkflowId, WorkflowJobKey, canonical_git_ref,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -177,6 +177,8 @@ pub struct AuthenticatedWorkflowDispatchClaim {
     workflow_id: WorkflowId,
     workflow_path: String,
     git_ref: String,
+    commit_sha: String,
+    source: AdmissionObject,
     operation_id: OperationId,
     event_digest: Sha256Digest,
     base_context_digest: Sha256Digest,
@@ -207,17 +209,21 @@ impl AuthenticatedWorkflowDispatchClaim {
         workflow_id: WorkflowId,
         workflow_path: impl Into<String>,
         git_ref: impl Into<String>,
+        commit_sha: impl Into<String>,
+        source: AdmissionObject,
         operation_id: OperationId,
         event_digest: Sha256Digest,
         base_context_digest: Sha256Digest,
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
         let workflow_path = workflow_path.into();
         let git_ref = git_ref.into();
+        let commit_sha = commit_sha.into();
         validate_text(&workflow_path, "workflow path")?;
         validate_text(&git_ref, "Git ref")?;
         if !canonical_workflow_dispatch_ref(&git_ref) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
         }
+        decode_commit_sha(&commit_sha)?;
         for (value, field) in [
             (repository_id.as_uuid(), "repository ID"),
             (workflow_id.as_uuid(), "workflow ID"),
@@ -233,6 +239,8 @@ impl AuthenticatedWorkflowDispatchClaim {
             workflow_id,
             workflow_path,
             git_ref,
+            commit_sha,
+            source,
             operation_id,
             event_digest,
             base_context_digest,
@@ -267,6 +275,18 @@ impl AuthenticatedWorkflowDispatchClaim {
     #[must_use]
     pub fn git_ref(&self) -> &str {
         &self.git_ref
+    }
+
+    /// Returns the exact lowercase commit SHA proven by signed source history.
+    #[must_use]
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+
+    /// Returns the exact immutable source descriptor proven by signed history.
+    #[must_use]
+    pub const fn source(&self) -> &AdmissionObject {
+        &self.source
     }
 
     /// Returns the caller operation identity used for exact replay.
@@ -379,6 +399,7 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
 #[derive(Clone, Eq, PartialEq)]
 pub struct AuthenticatedWorkflowDispatchSource {
     repository: AdmissionRepository,
+    repository_owner_id: String,
     workflow_id: WorkflowId,
     workflow_path: String,
     git_ref: String,
@@ -404,15 +425,18 @@ impl AuthenticatedWorkflowDispatchSource {
     /// Rejects an invalid workflow identity, path/ref text, or commit SHA shape.
     pub fn new(
         repository: AdmissionRepository,
+        repository_owner_id: impl Into<String>,
         workflow_id: WorkflowId,
         workflow_path: impl Into<String>,
         git_ref: impl Into<String>,
         commit_sha: impl Into<String>,
         source: AdmissionObject,
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
+        let repository_owner_id = repository_owner_id.into();
         let workflow_path = workflow_path.into();
         let git_ref = git_ref.into();
         let commit_sha = commit_sha.into();
+        validate_text(&repository_owner_id, "provider repository owner ID")?;
         validate_text(&workflow_path, "workflow path")?;
         validate_text(&git_ref, "Git ref")?;
         if workflow_id.as_uuid().is_nil() {
@@ -424,6 +448,7 @@ impl AuthenticatedWorkflowDispatchSource {
         decode_commit_sha(&commit_sha)?;
         Ok(Self {
             repository,
+            repository_owner_id,
             workflow_id,
             workflow_path,
             git_ref,
@@ -436,6 +461,12 @@ impl AuthenticatedWorkflowDispatchSource {
     #[must_use]
     pub const fn repository(&self) -> &AdmissionRepository {
         &self.repository
+    }
+
+    /// Returns the stable provider repository-owner identity.
+    #[must_use]
+    pub fn repository_owner_id(&self) -> &str {
+        &self.repository_owner_id
     }
 
     /// Returns the exact durable workflow identity.
@@ -484,6 +515,7 @@ pub struct AdmitLogicalWorkflowRun {
     source: AdmissionObject,
     plan: AdmissionObject,
     base_context: Option<AdmissionObject>,
+    trust_snapshot: TrustSnapshot,
     run_id: RunId,
     run_attempt: u32,
     root_invocation_id: LogicalWorkflowInvocationId,
@@ -544,6 +576,7 @@ impl AdmitLogicalWorkflowRun {
                 source,
                 plan,
                 base_context: None,
+                trust_snapshot: TrustSnapshot::deny_all_unclassified(),
                 run_id,
                 run_attempt,
                 root_invocation_id,
@@ -633,6 +666,12 @@ impl AdmitLogicalWorkflowRun {
         self.base_context.as_ref()
     }
 
+    /// Returns the immutable run-origin trust snapshot.
+    #[must_use]
+    pub const fn trust_snapshot(&self) -> &TrustSnapshot {
+        &self.trust_snapshot
+    }
+
     /// Returns the workflow-run identity.
     #[must_use]
     pub const fn run_id(&self) -> RunId {
@@ -713,6 +752,13 @@ impl AdmitLogicalWorkflowRun {
 }
 
 impl AdmitLogicalWorkflowRunBuilder {
+    /// Binds the immutable trust classification sealed at run origin.
+    #[must_use]
+    pub fn trust_snapshot(mut self, trust_snapshot: TrustSnapshot) -> Self {
+        self.command.trust_snapshot = trust_snapshot;
+        self
+    }
+
     /// Binds the canonical admission-time base runtime-context object.
     #[must_use]
     pub fn base_context(mut self, base_context: AdmissionObject) -> Self {
@@ -800,6 +846,17 @@ impl AdmitLogicalWorkflowRunBuilder {
         }
         if !matches!(command.head_sha.len(), 20 | 32) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidHeadSha);
+        }
+        if !command.trust_snapshot.is_construction_placeholder() {
+            let evidence = command.trust_snapshot.evidence();
+            let execution_revision = lower_hex(&command.head_sha);
+            if evidence.target_repository().is_none_or(|repository| {
+                repository.id() != command.repository.provider_repository_id()
+            }) || evidence.execution_ref() != Some(command.git_ref.as_str())
+                || evidence.execution_revision() != Some(execution_revision.as_str())
+            {
+                return Err(LogicalWorkflowAdmissionValueError::InvalidTrustSnapshot);
+            }
         }
         if command.admitted_at.get() < 0 {
             return Err(LogicalWorkflowAdmissionValueError::InvalidAdmissionTime);
@@ -1023,6 +1080,9 @@ pub enum LogicalWorkflowAdmissionValueError {
     /// The commit digest did not have a supported byte length.
     #[error("head SHA must contain exactly 20 or 32 bytes")]
     InvalidHeadSha,
+    /// The trust snapshot did not name the exact admitted execution source.
+    #[error("workflow trust snapshot disagrees with the admitted repository, ref, or revision")]
+    InvalidTrustSnapshot,
     /// The admission timestamp preceded the Unix epoch.
     #[error("workflow admission time must not precede the Unix epoch")]
     InvalidAdmissionTime,
@@ -1076,6 +1136,9 @@ pub enum LogicalWorkflowAdmissionStoreError {
     /// The generalized pending queue reached its hard safety ceiling.
     #[error("workflow concurrency pending queue reached its safety limit")]
     ConcurrencyQueueFull,
+    /// The exact workflow is durably disabled for new event admission.
+    #[error("workflow is disabled for new event admission")]
+    WorkflowDisabled,
     /// This deployment requires immutable authenticated provider evidence.
     #[error("logical workflow admission source is not supported by current policy")]
     UnsupportedAdmissionSource,
@@ -1095,6 +1158,16 @@ fn validate_text(
         return Err(LogicalWorkflowAdmissionValueError::InvalidText(field));
     }
     Ok(())
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn decode_commit_sha(value: &str) -> Result<Vec<u8>, LogicalWorkflowAdmissionValueError> {

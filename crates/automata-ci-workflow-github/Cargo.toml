@@ -18,6 +18,7 @@ path = "tests/workflow_github.rs"
 
 [dependencies]
 automata-ci-core.workspace = true
+automata-ci-github-permissions.workspace = true
 automata-ci-schedule.workspace = true
 flate2.workspace = true
 jiff.workspace = true

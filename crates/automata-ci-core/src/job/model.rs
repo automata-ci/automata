@@ -11,8 +11,10 @@ use super::{
 };
 
 use crate::{
-    JobId, OutputSensitivity, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, RunIdAlias, RunnerFeature,
-    RunnerRequirements, Sha256Digest, WorkflowId,
+    JobId, OutputSensitivity, PermissionLevel, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
+    RunIdAlias, RunnerFeature, RunnerRequirements, Sha256Digest, TrustOidcAuthority,
+    TrustPermissionAuthority, TrustResultsAuthority, TrustSecretAuthority, TrustSnapshot,
+    WorkflowId,
 };
 
 /// Canonical media type for the exact provider event attached to a job.
@@ -482,6 +484,7 @@ impl JobIrEnvelope {
         self.job.instance.validate()?;
         self.job.permission_request.validate()?;
         validate_authority_profile(&self.job)?;
+        validate_trust_authority(&self.job)?;
 
         validate_values(&self.job.environment, "job.environment")?;
         if let Some(working_directory) = &self.job.working_directory {
@@ -699,6 +702,7 @@ pub struct JobIr {
     continue_on_error: bool,
     authority_profile: JobAuthorityProfile,
     permission_request: JobPermissionRequest,
+    trust_snapshot: TrustSnapshot,
     outputs: Vec<JobOutputDefinition>,
     timeout_seconds: Option<u32>,
     environment: BTreeMap<String, ValueSource>,
@@ -729,6 +733,7 @@ impl JobIr {
             continue_on_error,
             authority_profile: JobAuthorityProfile::Standard,
             permission_request: JobPermissionRequest::ProviderDefault,
+            trust_snapshot: TrustSnapshot::deny_all_unclassified(),
             outputs: Vec::new(),
             timeout_seconds: None,
             environment: BTreeMap::new(),
@@ -785,6 +790,12 @@ impl JobIr {
     #[must_use]
     pub const fn permission_request(&self) -> &JobPermissionRequest {
         &self.permission_request
+    }
+
+    /// Returns the exact immutable trust evidence and authority reduction.
+    #[must_use]
+    pub const fn trust_snapshot(&self) -> &TrustSnapshot {
+        &self.trust_snapshot
     }
 
     /// Returns canonical name-sorted job output definitions.
@@ -847,6 +858,13 @@ impl JobIr {
     #[must_use]
     pub fn with_permission_request(mut self, permission_request: JobPermissionRequest) -> Self {
         self.permission_request = permission_request;
+        self
+    }
+
+    /// Binds the exact run-origin trust snapshot to this executable job.
+    #[must_use]
+    pub fn with_trust_snapshot(mut self, trust_snapshot: TrustSnapshot) -> Self {
+        self.trust_snapshot = trust_snapshot;
         self
     }
 
@@ -1023,6 +1041,102 @@ fn validate_authority_profile(job: &JobIr) -> Result<(), JobValidationError> {
         }
     }
     Ok(())
+}
+
+fn validate_trust_authority(job: &JobIr) -> Result<(), JobValidationError> {
+    let snapshot = &job.trust_snapshot;
+    // The explicit incomplete snapshot is a safe construction-time placeholder.
+    // Every issuance boundary treats it as deny-all, while production projection
+    // must replace it with sealed run-origin evidence.
+    if snapshot.is_construction_placeholder() {
+        return Ok(());
+    }
+    let authority = snapshot.authority();
+    match authority.permissions() {
+        TrustPermissionAuthority::Requested => {}
+        TrustPermissionAuthority::ReadOnly => {
+            if matches!(
+                job.permission_request,
+                JobPermissionRequest::ProviderDefault | JobPermissionRequest::WriteAll
+            ) || job.permission_request.grants().is_some_and(|grants| {
+                grants
+                    .iter()
+                    .any(|grant| grant.level() == PermissionLevel::Write)
+            }) {
+                return Err(JobValidationError::TrustPermissionReduction);
+            }
+        }
+        TrustPermissionAuthority::DenyAll => {
+            if !matches!(&job.permission_request, JobPermissionRequest::Mapping(grants) if grants.is_empty())
+            {
+                return Err(JobValidationError::TrustPermissionReduction);
+            }
+        }
+    }
+    if authority.secrets() == TrustSecretAuthority::Denied && job_requires_secret(job) {
+        return Err(JobValidationError::TrustSecretDependency);
+    }
+    if authority.oidc() == TrustOidcAuthority::Denied
+        && (job
+            .requirements
+            .features()
+            .contains(&RunnerFeature::OIDC_TOKENS)
+            || job.permission_request.requested_level("id-token") == Some(PermissionLevel::Write))
+    {
+        return Err(JobValidationError::TrustOidcDependency);
+    }
+    if authority.results() == TrustResultsAuthority::Denied
+        && job.steps.iter().any(|step| {
+            matches!(step.kind(), SemanticStep::Action { reference, .. } if results_action(reference))
+        })
+    {
+        return Err(JobValidationError::TrustResultsDependency);
+    }
+    Ok(())
+}
+
+fn job_requires_secret(job: &JobIr) -> bool {
+    values_require_secret(&job.environment)
+        || job
+            .working_directory
+            .as_ref()
+            .is_some_and(template_requires_secret)
+        || job.outputs.iter().any(|output| {
+            output.sensitivity() == OutputSensitivity::SecretDerived
+                || template_requires_secret(output.value())
+        })
+        || job
+            .container
+            .as_ref()
+            .is_some_and(container_requires_credential)
+        || job.services.values().any(container_requires_credential)
+        || job.steps.iter().any(step_requires_secret)
+}
+
+fn step_requires_secret(step: &StepIr) -> bool {
+    if template_requires_secret(step.name_template())
+        || step.condition().is_some_and(program_requires_secret)
+        || runtime_boolean_requires_secret(step.continue_on_error())
+        || step.timeout().is_some_and(|timeout| {
+            matches!(
+                timeout.value(),
+                RuntimePositiveInteger::Expression { program } if program_requires_secret(program)
+            )
+        })
+        || values_require_secret(step.environment())
+    {
+        return true;
+    }
+    match step.kind() {
+        SemanticStep::Run { values } => {
+            template_requires_secret(values.command())
+                || values.shell().value().is_some_and(template_requires_secret)
+                || values
+                    .working_directory()
+                    .is_some_and(template_requires_secret)
+        }
+        SemanticStep::Action { inputs, .. } => values_require_secret(inputs),
+    }
 }
 
 fn values_require_secret(values: &BTreeMap<String, ValueSource>) -> bool {

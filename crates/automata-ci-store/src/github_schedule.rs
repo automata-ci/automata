@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::{
     GithubCheckSubjectKey, GithubCheckSubjectReceipt, GithubProviderManifest,
-    GithubServerServiceAuthoritySelector, ObjectKey, ProviderConnectionId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId, StoreError, TenantScope,
+    GithubProviderManifestRevision, GithubServerServiceAuthoritySelector, ObjectKey,
+    ProviderConnectionId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility, RepositoryId,
+    StoreError, TenantScope,
 };
 
 /// Exact media type retained for one immutable gzip repository archive.
@@ -759,6 +760,8 @@ pub struct ClaimedGithubScheduleFire {
     repository_name: String,
     connection_id: ProviderConnectionId,
     registry_id: GithubScheduleRegistryId,
+    manifest_revision: GithubProviderManifestRevision,
+    manifest_digest: Sha256Digest,
     source_revision: String,
     default_branch_ref: String,
     archive: GithubScheduleArchive,
@@ -779,6 +782,8 @@ impl ClaimedGithubScheduleFire {
         repository_name: String,
         connection_id: ProviderConnectionId,
         registry_id: GithubScheduleRegistryId,
+        manifest_revision: GithubProviderManifestRevision,
+        manifest_digest: Sha256Digest,
         source_revision: String,
         default_branch_ref: String,
         archive: GithubScheduleArchive,
@@ -794,6 +799,8 @@ impl ClaimedGithubScheduleFire {
             repository_name,
             connection_id,
             registry_id,
+            manifest_revision,
+            manifest_digest,
             source_revision,
             default_branch_ref,
             archive,
@@ -848,6 +855,18 @@ impl ClaimedGithubScheduleFire {
     #[must_use]
     pub const fn registry_id(&self) -> GithubScheduleRegistryId {
         self.registry_id
+    }
+
+    /// Returns the immutable provider-manifest revision pinned by the registry.
+    #[must_use]
+    pub const fn manifest_revision(&self) -> GithubProviderManifestRevision {
+        self.manifest_revision
+    }
+
+    /// Returns the canonical digest of the provider manifest pinned by the registry.
+    #[must_use]
+    pub const fn manifest_digest(&self) -> Sha256Digest {
+        self.manifest_digest
     }
 
     /// Returns the exact immutable source SHA.

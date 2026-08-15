@@ -6,16 +6,20 @@ use automata_ci_store::{
     CompleteProviderDelivery, MAX_ADMISSION_EVENT_BYTES, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
     MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey, ProviderConnectionId,
     ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryClaimRenewalRepository as _, ProviderDeliveryFailureKind,
-    ProviderDeliveryIdentity, ProviderDeliveryRenewalTiming, ProviderDeliveryRepository as _,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryValueError,
-    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowOutcome, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryVisibility,
-    RejectProviderDelivery, RenewProviderDeliveryClaim, RetryProviderDelivery, TenantScope,
+    ProviderDeliveryClaimRenewalRepository as _, ProviderDeliveryEventEnvelope,
+    ProviderDeliveryFailureKind, ProviderDeliveryIdentity, ProviderDeliveryRenewalTiming,
+    ProviderDeliveryRepository as _, ProviderDeliveryState, ProviderDeliveryStoreError,
+    ProviderDeliveryValueError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryVisibility, RejectProviderDelivery,
+    RenewProviderDeliveryClaim, RetryProviderDelivery, TenantScope,
 };
+use sqlx::Row as _;
 use uuid::Uuid;
 
-use crate::support::{TestClock, TestDatabase, TestResult, run_with_database};
+use crate::support::{
+    TestClock, TestDatabase, TestResult, provider_delivery_event_envelope, run_with_database,
+};
 
 async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
     sqlx::query(
@@ -137,6 +141,27 @@ fn acceptance_with_visibility(
     accepted_at: i64,
     visibility: ProviderRepositoryVisibility,
 ) -> AcceptProviderDelivery {
+    acceptance_with_visibility_and_envelope(
+        tenant,
+        connection_id,
+        delivery_id,
+        digest_byte,
+        accepted_at,
+        visibility,
+        provider_delivery_event_envelope(digest_byte.wrapping_add(2)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn acceptance_with_visibility_and_envelope(
+    tenant: &str,
+    connection_id: ProviderConnectionId,
+    delivery_id: &str,
+    digest_byte: u8,
+    accepted_at: i64,
+    visibility: ProviderRepositoryVisibility,
+    event_envelope: ProviderDeliveryEventEnvelope,
+) -> AcceptProviderDelivery {
     let identity = ProviderDeliveryIdentity::new(
         TenantScope::from_authenticated_tenant_id(tenant).expect("tenant"),
         "synthetic",
@@ -162,6 +187,7 @@ fn acceptance_with_visibility(
         identity,
         Sha256Digest::from_bytes([digest_byte; 32]),
         raw_event,
+        event_envelope,
         UnixMillis::new(accepted_at),
     )
     .expect("acceptance")
@@ -370,6 +396,42 @@ fn assert_database_constraint(error: &sqlx::Error, expected: &str) {
         .as_database_error()
         .and_then(sqlx::error::DatabaseError::constraint);
     assert_eq!(constraint, Some(expected));
+}
+
+async fn assert_legacy_delivery_is_quarantined(
+    database: &TestDatabase,
+    delivery_id: Uuid,
+    claim_owner: ProviderDeliveryClaimOwnerId,
+) -> TestResult {
+    let row = sqlx::query(
+        r"
+        SELECT state, attempt_count, claim_fence, claim_owner_id,
+               last_failure_kind, terminal_claim_owner_id, terminal_claim_fence
+        FROM provider_delivery_inbox
+        WHERE id = $1
+        ",
+    )
+    .bind(delivery_id)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row.try_get::<String, _>("state")?, "rejected");
+    assert_eq!(row.try_get::<i16, _>("attempt_count")?, 1);
+    assert_eq!(row.try_get::<i64, _>("claim_fence")?, 1);
+    assert_eq!(row.try_get::<Option<Uuid>, _>("claim_owner_id")?, None);
+    assert_eq!(
+        row.try_get::<Option<String>, _>("last_failure_kind")?
+            .as_deref(),
+        Some("provider_delivery.legacy_unsealed")
+    );
+    assert_eq!(
+        row.try_get::<Option<Uuid>, _>("terminal_claim_owner_id")?,
+        Some(claim_owner.as_uuid())
+    );
+    assert_eq!(
+        row.try_get::<Option<i64>, _>("terminal_claim_fence")?,
+        Some(1)
+    );
+    Ok(())
 }
 
 fn failure(value: &str) -> ProviderDeliveryFailureKind {
@@ -588,6 +650,7 @@ async fn provider_inbox_accepts_the_exact_event_ceiling_and_rejects_one_more_byt
             identity,
             Sha256Digest::from_bytes([13; 32]),
             raw_event,
+            provider_delivery_event_envelope(14),
             UnixMillis::new(100),
         )?;
         let receipt = database.store().accept_provider_delivery(accepted).await?;
@@ -725,6 +788,176 @@ async fn concurrent_accept_is_exact_and_changed_evidence_conflicts() -> TestResu
                 .await?,
             winner
         );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn changing_only_the_event_envelope_is_a_replay_conflict() -> TestResult {
+    run_with_database(|database| async move {
+        seed_tenant(&database, "delivery-envelope-replay").await?;
+        let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
+        let accepted = acceptance(
+            "delivery-envelope-replay",
+            connection,
+            "delivery-envelope-replay-1",
+            7,
+            100,
+        );
+        database.store().accept_provider_delivery(accepted).await?;
+
+        let changed_envelope = acceptance_with_visibility_and_envelope(
+            "delivery-envelope-replay",
+            connection,
+            "delivery-envelope-replay-1",
+            7,
+            101,
+            ProviderRepositoryVisibility::Private,
+            provider_delivery_event_envelope(99),
+        );
+        assert!(matches!(
+            database
+                .store()
+                .accept_provider_delivery(changed_envelope)
+                .await,
+            Err(ProviderDeliveryStoreError::ReplayConflict)
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn claim_rehydrates_the_exact_persisted_event_envelope() -> TestResult {
+    run_with_database(|database| async move {
+        seed_tenant(&database, "delivery-envelope-claim").await?;
+        let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
+        let accepted = acceptance(
+            "delivery-envelope-claim",
+            connection,
+            "delivery-envelope-1",
+            31,
+            100,
+        );
+        let expected_envelope = accepted.event_envelope().clone();
+        let receipt = database.store().accept_provider_delivery(accepted).await?;
+
+        let durable: (i16, i16, Vec<u8>, Vec<u8>, String) = sqlx::query_as(
+            r"
+            SELECT event_envelope_schema, event_registry_schema,
+                   event_envelope_digest, event_envelope_bytes,
+                   event_envelope_media_type
+            FROM provider_delivery_inbox
+            WHERE id = $1
+            ",
+        )
+        .bind(receipt.id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(durable.0, i16::try_from(expected_envelope.schema())?);
+        assert_eq!(
+            durable.1,
+            i16::try_from(expected_envelope.registry_schema())?
+        );
+        assert_eq!(durable.2, expected_envelope.digest().as_bytes());
+        assert_eq!(durable.3, expected_envelope.canonical_bytes());
+        assert_eq!(durable.4, expected_envelope.media_type());
+
+        let claimed = database
+            .store()
+            .claim_provider_delivery(claim(owner(), 110))
+            .await?
+            .expect("sealed delivery is claimable");
+        assert_eq!(claimed.receipt().id(), receipt.id());
+        assert_eq!(claimed.event_envelope(), &expected_envelope);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn claim_quarantines_legacy_unsealed_rows_without_poisoning_sealed_work() -> TestResult {
+    run_with_database(|database| async move {
+        seed_tenant(&database, "delivery-envelope-legacy").await?;
+        let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
+
+        let partial = sqlx::query(
+            r"
+            INSERT INTO provider_delivery_inbox (
+                id, tenant_id, provider, connection_id, installation_id,
+                provider_repository_id, repository_visibility,
+                repository_identity, delivery_id,
+                request_digest, raw_event_digest, raw_event_object_key,
+                raw_event_size_bytes, raw_event_media_type,
+                event_envelope_schema,
+                accepted_at_ms, state_updated_at_ms
+            )
+            VALUES (
+                $1, 'delivery-envelope-legacy', 'synthetic', $2, 101,
+                202, 'private', 'automata-ci/automata', 'delivery-partial-envelope',
+                $3, $4, 'provider-events/delivery-partial-envelope/1',
+                256, 'application/json', 1, 100, 100
+            )
+            ",
+        )
+        .bind(Uuid::new_v4())
+        .bind(connection.as_uuid())
+        .bind([41_u8; 32].as_slice())
+        .bind([42_u8; 32].as_slice())
+        .execute(database.pool())
+        .await
+        .expect_err("partially populated event envelopes must fail closed");
+        assert_database_constraint(&partial, "provider_delivery_inbox_event_envelope_complete");
+
+        let legacy_id = Uuid::new_v4();
+        sqlx::query(
+            r"
+            INSERT INTO provider_delivery_inbox (
+                id, tenant_id, provider, connection_id, installation_id,
+                provider_repository_id, repository_visibility,
+                repository_identity, delivery_id,
+                request_digest, raw_event_digest, raw_event_object_key,
+                raw_event_size_bytes, raw_event_media_type,
+                accepted_at_ms, state_updated_at_ms
+            )
+            VALUES (
+                $1, 'delivery-envelope-legacy', 'synthetic', $2, 101,
+                202, 'private', 'automata-ci/automata', 'delivery-legacy-unsealed',
+                $3, $4, 'provider-events/delivery-legacy-unsealed/1',
+                256, 'application/json', 100, 100
+            )
+            ",
+        )
+        .bind(legacy_id)
+        .bind(connection.as_uuid())
+        .bind([43_u8; 32].as_slice())
+        .bind([44_u8; 32].as_slice())
+        .execute(database.pool())
+        .await?;
+
+        let sealed = database
+            .store()
+            .accept_provider_delivery(acceptance(
+                "delivery-envelope-legacy",
+                connection,
+                "delivery-sealed",
+                45,
+                101,
+            ))
+            .await?;
+        let claim_owner = owner();
+        let claimed = database
+            .store()
+            .claim_provider_delivery(claim(claim_owner, 110))
+            .await?
+            .expect("sealed work remains claimable");
+        assert_eq!(claimed.receipt().id(), sealed.id());
+
+        assert_legacy_delivery_is_quarantined(&database, legacy_id, claim_owner).await?;
         Ok(())
     })
     .await

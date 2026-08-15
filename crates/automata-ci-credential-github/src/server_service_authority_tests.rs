@@ -213,6 +213,7 @@ struct FakeRepository {
     begin_mode: AtomicU8,
     checks_identity: GithubServerServiceAuthorityIdentity,
     private_identity: GithubServerServiceAuthorityIdentity,
+    workflow_permissions_identity: GithubServerServiceAuthorityIdentity,
     codec: Arc<EnvelopeCodec>,
     corrupt_handoff: AtomicBool,
     begin_calls: AtomicUsize,
@@ -234,6 +235,10 @@ impl FakeRepository {
                 GithubServerServiceScope::PrivateRepositorySourceRead,
                 0x102,
             ),
+            workflow_permissions_identity: identity(
+                GithubServerServiceScope::WorkflowPermissionsRead,
+                0x103,
+            ),
             codec,
             corrupt_handoff: AtomicBool::new(false),
             begin_calls: AtomicUsize::new(0),
@@ -254,6 +259,9 @@ impl FakeRepository {
         match action.required_scope() {
             GithubServerServiceScope::ChecksWrite => &self.checks_identity,
             GithubServerServiceScope::PrivateRepositorySourceRead => &self.private_identity,
+            GithubServerServiceScope::WorkflowPermissionsRead => {
+                &self.workflow_permissions_identity
+            }
         }
     }
 }
@@ -1031,7 +1039,7 @@ async fn unconfirmed_revocation_is_retained_as_a_bounded_retry() {
 }
 
 #[test]
-fn service_core_has_only_authenticated_checks_and_private_source_scopes() {
+fn service_core_has_only_closed_authenticated_repository_scopes() {
     let checks = github_server_service_credential_request(&identity(
         GithubServerServiceScope::ChecksWrite,
         0x201,
@@ -1042,6 +1050,11 @@ fn service_core_has_only_authenticated_checks_and_private_source_scopes() {
         0x202,
     ))
     .expect("private request");
+    let workflow_permissions = github_server_service_credential_request(&identity(
+        GithubServerServiceScope::WorkflowPermissionsRead,
+        0x203,
+    ))
+    .expect("workflow-permissions request");
     assert_eq!(
         checks
             .permissions()
@@ -1058,10 +1071,19 @@ fn service_core_has_only_authenticated_checks_and_private_source_scopes() {
             .collect::<Vec<_>>(),
         vec![("contents", PermissionLevel::Read)]
     );
+    assert_eq!(
+        workflow_permissions
+            .permissions()
+            .iter()
+            .map(|(name, level)| (name.as_str(), level))
+            .collect::<Vec<_>>(),
+        vec![("administration", PermissionLevel::Read)]
+    );
     assert!(
         [
             GithubServerServiceScope::ChecksWrite,
             GithubServerServiceScope::PrivateRepositorySourceRead,
+            GithubServerServiceScope::WorkflowPermissionsRead,
         ]
         .into_iter()
         .all(|scope| !scope.as_str().contains("public"))
@@ -1352,6 +1374,7 @@ fn action_handoff_id(action: GithubServerServiceAction) -> GithubServerServiceHa
         GithubServerServiceAction::FetchPrivateRepositoryRevision => 0x705,
         GithubServerServiceAction::FetchPrivateRepositoryChangedFiles => 0x706,
         GithubServerServiceAction::DiscoverPrivateRepositorySchedules => 0x707,
+        GithubServerServiceAction::ObserveWorkflowPermissionDefaults => 0x708,
     };
     handoff_id(value)
 }

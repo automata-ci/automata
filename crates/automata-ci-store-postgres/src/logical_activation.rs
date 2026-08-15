@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile, RunId,
-    RunIdAlias, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
+    RunIdAlias, Sha256Digest, TRUST_SNAPSHOT_SCHEMA_V1, TRUST_SNAPSHOT_V1_MEDIA_TYPE,
+    TrustSnapshot, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -994,6 +995,12 @@ fn claim_target_query() -> &'static str {
            run.triggering_actor,
            run.public_run_id_alias AS run_id_alias,
            run.run_number, run.run_attempt,
+           trust.snapshot_schema AS trust_snapshot_schema,
+           trust.policy_revision AS trust_policy_revision,
+           trust.policy_digest AS trust_policy_digest,
+           trust.snapshot_digest AS trust_snapshot_digest,
+           trust.snapshot_bytes AS trust_snapshot_bytes,
+           trust.media_type AS trust_media_type,
            invocation.plan_digest, invocation.plan_object_key,
            invocation.plan_size_bytes, invocation.plan_media_type,
            run.event_digest, run.event_object_key, run.event_size_bytes,
@@ -1010,6 +1017,7 @@ fn claim_target_query() -> &'static str {
      AND invocation.id = job.invocation_id
     JOIN logical_workflow_runs AS marker ON marker.run_id = job.run_id
     JOIN workflow_runs AS run ON run.id = marker.run_id
+    JOIN workflow_run_trust_snapshots AS trust ON trust.run_id = run.id
     JOIN repositories AS repository ON repository.id = run.repository_id
     LEFT JOIN logical_workflow_activation_preparations AS preparation
       ON preparation.run_id = job.run_id
@@ -1264,6 +1272,7 @@ async fn decode_claimed(
             .with_triggering_actor(triggering_actor)
             .map_err(|_| StoreError::corrupt_data("invalid durable triggering actor"))?;
     }
+    execution = execution.with_trust_snapshot(decode_trust_snapshot(row)?);
     let plan = decode_admission_object(
         row,
         "plan_digest",
@@ -1843,6 +1852,41 @@ fn decode_digest_bytes(
         .try_into()
         .map_err(|_| StoreError::corrupt_data(format!("{field} is not SHA-256")))?;
     Ok(Sha256Digest::from_bytes(bytes))
+}
+
+fn decode_trust_snapshot(row: &PgRow) -> Result<TrustSnapshot, LogicalActivationStoreError> {
+    let schema: i16 = row
+        .try_get("trust_snapshot_schema")
+        .map_err(operation_error)?;
+    if schema != i16::try_from(TRUST_SNAPSHOT_SCHEMA_V1).unwrap_or(i16::MAX) {
+        return Err(StoreError::corrupt_data("unsupported durable trust snapshot schema").into());
+    }
+    let policy_revision: i64 = row
+        .try_get("trust_policy_revision")
+        .map_err(operation_error)?;
+    let policy_digest = decode_digest(row, "trust_policy_digest")?;
+    let snapshot_digest = decode_digest(row, "trust_snapshot_digest")?;
+    let snapshot_bytes: Vec<u8> = row
+        .try_get("trust_snapshot_bytes")
+        .map_err(operation_error)?;
+    let media_type: String = row.try_get("trust_media_type").map_err(operation_error)?;
+    if media_type != TRUST_SNAPSHOT_V1_MEDIA_TYPE {
+        return Err(
+            StoreError::corrupt_data("unsupported durable trust snapshot media type").into(),
+        );
+    }
+    let snapshot = TrustSnapshot::from_canonical_bytes(&snapshot_bytes, snapshot_digest)
+        .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+    let exact_metadata = i64::try_from(snapshot.policy_revision().get()).ok()
+        == Some(policy_revision)
+        && snapshot.policy_digest() == policy_digest;
+    if !exact_metadata {
+        return Err(StoreError::corrupt_data(
+            "durable trust snapshot metadata disagrees with its canonical bytes",
+        )
+        .into());
+    }
+    Ok(snapshot)
 }
 
 fn parse_authority_profile(

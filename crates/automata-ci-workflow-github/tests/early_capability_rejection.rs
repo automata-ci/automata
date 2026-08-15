@@ -92,3 +92,13 @@ fn decoder_only_provider_event_is_rejected_during_compilation_with_its_name_span
         "issues",
     );
 }
+
+#[test]
+fn unselected_decoder_only_event_still_rejects_publication() {
+    assert_rejected_before_plan_for_event(
+        "on: [push, issues]\njobs:\n  test:\n    runs-on: linux\n    steps: [{run: echo test}]\n",
+        "push",
+        "github.compile.provider_event_unavailable",
+        "issues",
+    );
+}

@@ -94,7 +94,8 @@ fn classify_dispatch_error(error: &GithubWorkflowDispatchError) -> WorkflowDispa
             LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected,
         )) => WorkflowDispatchApiBackendError::Forbidden,
         GithubWorkflowDispatchError::Admission(WorkflowAdmissionError::Store(
-            LogicalWorkflowAdmissionStoreError::IdempotencyConflict,
+            LogicalWorkflowAdmissionStoreError::IdempotencyConflict
+            | LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
         )) => WorkflowDispatchApiBackendError::Conflict,
         GithubWorkflowDispatchError::Admission(WorkflowAdmissionError::Store(
             LogicalWorkflowAdmissionStoreError::Store(StoreError::Operation(_)),
@@ -116,5 +117,21 @@ fn classify_dispatch_error(error: &GithubWorkflowDispatchError) -> WorkflowDispa
         | GithubWorkflowDispatchError::Evidence(_)
         | GithubWorkflowDispatchError::AdmissionRequest(_)
         | GithubWorkflowDispatchError::Admission(_) => WorkflowDispatchApiBackendError::Invariant,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabled_workflow_is_a_dispatch_conflict() {
+        let error = GithubWorkflowDispatchError::Admission(WorkflowAdmissionError::Store(
+            LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
+        ));
+        assert_eq!(
+            classify_dispatch_error(&error),
+            WorkflowDispatchApiBackendError::Conflict
+        );
     }
 }

@@ -188,8 +188,9 @@ product path.
 
 GitHub calculates token permissions from enterprise, organization, and
 repository defaults, then workflow permissions, then job permissions, and
-finally downgrades fork and Dependabot pull requests. Automata does not yet
-reproduce this securely. See
+finally downgrades fork and Dependabot pull requests. Automata now seals the
+authenticated trust classification and applies the fork/automation ceiling;
+AUTH-03 still owns the remaining token-lifecycle compatibility work. See
 [GitHub permission semantics](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
 
 - [ ] Make token issuance support omitted permissions and `ProviderDefault`.
@@ -223,17 +224,17 @@ reproduce this securely. See
 - [ ] Apply workflow-level permissions.
 - [ ] Apply job-level reductions and overrides.
 - [ ] Apply reusable-workflow permission ceilings at every call hop.
-- [ ] Downgrade write permissions for fork pull requests unless the explicit
+- [x] Downgrade write permissions for fork pull requests unless the explicit
   administrator policy permits them.
-- [ ] Treat Dependabot pull requests as fork-equivalent.
-- [ ] Remove normal secrets from Dependabot-triggered jobs.
-- [ ] Give `pull_request_target` a separate trust policy from `pull_request`.
-- [ ] Bind effective permission calculation to authenticated event provenance.
+- [x] Treat Dependabot pull requests as fork-equivalent.
+- [x] Remove normal secrets from Dependabot-triggered jobs.
+- [x] Give `pull_request_target` a separate trust policy from `pull_request`.
+- [x] Bind effective permission calculation to authenticated event provenance.
 - [ ] Test `github.token` and `secrets.GITHUB_TOKEN` aliases for every
   permission mode.
 - [ ] Test masking of issued tokens.
 - [ ] Test token expiry, refresh, revocation, and retry.
-- [ ] Test that a rerun uses the original actor's authority, not the triggering
+- [x] Test that a rerun uses the original actor's authority, not the triggering
   rerun actor's greater authority.
 - [ ] Test real permitted and denied GitHub API operations for every supported
   scope.

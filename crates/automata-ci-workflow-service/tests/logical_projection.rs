@@ -6,10 +6,15 @@ use automata_ci_core::{
     JobIrEnvelope, JobPermissionGrant, JobPermissionRequest, JobResourceAllocation,
     JobResourcePolicy, JobValidationError, OperatingSystem, OutputSensitivity, PermissionLevel,
     ResourceCapacity, RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit, SandboxFeature,
-    SemanticStep, Sha256Digest, ShellTemplate, TransportProtocol, ValueSource,
-    ValueTemplateSegment, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
+    SemanticStep, Sha256Digest, ShellTemplate, TransportProtocol, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, ValueSource, ValueTemplateSegment,
+    WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
+use automata_ci_github_permissions::{
+    GITHUB_WORKFLOW_PERMISSIONS, GithubDefaultWorkflowPermission,
+};
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::WorkflowPermissionPolicy;
 use automata_ci_workflow_github::{
@@ -46,15 +51,48 @@ fn resource_policy() -> JobResourcePolicy {
 }
 
 fn permission_policy() -> WorkflowPermissionPolicy {
-    WorkflowPermissionPolicy::new(
-        BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-        BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-        BTreeMap::from([
-            ("contents".to_owned(), PermissionLevel::Write),
-            ("id-token".to_owned(), PermissionLevel::Write),
-        ]),
-    )
-    .expect("permission policy")
+    WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
+        .expect("permission policy")
+}
+
+fn trusted_snapshot() -> TrustSnapshot {
+    let repository = TrustRepositoryEvidence::new("42", "7").expect("repository evidence");
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::WorkflowDispatch,
+                TrustEventKind::WorkflowDispatch,
+            )
+            .with_original_actor(
+                TrustActorEvidence::new("100", TrustActorKind::User, TrustAutomationKind::None)
+                    .expect("actor evidence"),
+            )
+            .with_repositories(repository.clone(), repository)
+            .with_refs(GIT_REF, GIT_REF, GIT_REF)
+            .with_revisions(REVISION, REVISION, REVISION)
+            .with_fork(false),
+        )
+        .expect("trusted snapshot")
+}
+
+fn untrusted_automation_snapshot() -> TrustSnapshot {
+    let repository = TrustRepositoryEvidence::new("42", "7").expect("repository evidence");
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::WorkflowDispatch,
+                TrustEventKind::WorkflowDispatch,
+            )
+            .with_original_actor(
+                TrustActorEvidence::new("101", TrustActorKind::Bot, TrustAutomationKind::Other)
+                    .expect("actor evidence"),
+            )
+            .with_repositories(repository.clone(), repository)
+            .with_refs(GIT_REF, GIT_REF, GIT_REF)
+            .with_revisions(REVISION, REVISION, REVISION)
+            .with_fork(false),
+        )
+        .expect("untrusted automation snapshot")
 }
 
 const SOURCE: &str = r"name: Synthetic CI
@@ -291,18 +329,21 @@ fn project_envelope_with_profiles_and_workspace(
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(31, WorkflowId::from_uuid),
-            fixed_id(32, automata_ci_core::RunId::from_uuid),
-            fixed_id(33, JobId::from_uuid),
-            execution_with_workspace(instance, workspace),
-            profiles,
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(31, WorkflowId::from_uuid),
+                fixed_id(32, automata_ci_core::RunId::from_uuid),
+                fixed_id(33, JobId::from_uuid),
+                execution_with_workspace(instance, workspace),
+                profiles,
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect("projection")
         .into_parts()
         .0
@@ -564,18 +605,21 @@ jobs:
         .expect("validated job");
 
     let error = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(34, WorkflowId::from_uuid),
-            fixed_id(35, automata_ci_core::RunId::from_uuid),
-            fixed_id(36, JobId::from_uuid),
-            execution(instance),
-            &profiles,
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(34, WorkflowId::from_uuid),
+                fixed_id(35, automata_ci_core::RunId::from_uuid),
+                fixed_id(36, JobId::from_uuid),
+                execution(instance),
+                &profiles,
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect_err("two mapped selectors cannot choose one environment");
     assert!(matches!(
         error,
@@ -600,18 +644,21 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     let projected = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(1, WorkflowId::from_uuid),
-            fixed_id(2, automata_ci_core::RunId::from_uuid),
-            fixed_id(3, JobId::from_uuid),
-            execution(instance),
-            &profiles(),
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(1, WorkflowId::from_uuid),
+                fixed_id(2, automata_ci_core::RunId::from_uuid),
+                fixed_id(3, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect("projection");
 
     let envelope = projected.envelope();
@@ -724,6 +771,7 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn credential_free_projection_is_explicit_deny_all_and_rejects_legacy_or_secretful_jobs() {
     let clean_source = r"on: workflow_dispatch
 permissions: {}
@@ -740,18 +788,21 @@ jobs:
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     let projected = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(41, WorkflowId::from_uuid),
-            fixed_id(42, automata_ci_core::RunId::from_uuid),
-            fixed_id(43, JobId::from_uuid),
-            execution(instance),
-            &profiles(),
-            JobAuthorityProfile::CredentialFree,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(41, WorkflowId::from_uuid),
+                fixed_id(42, automata_ci_core::RunId::from_uuid),
+                fixed_id(43, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::CredentialFree,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect("explicit credential-free projection");
     assert_eq!(
         projected.envelope().job().authority_profile(),
@@ -778,18 +829,21 @@ jobs:
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     let error = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            legacy_job,
-            legacy_instance,
-            fixed_id(44, WorkflowId::from_uuid),
-            fixed_id(45, automata_ci_core::RunId::from_uuid),
-            fixed_id(46, JobId::from_uuid),
-            execution(legacy_instance),
-            &profiles(),
-            JobAuthorityProfile::CredentialFree,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                legacy_job,
+                legacy_instance,
+                fixed_id(44, WorkflowId::from_uuid),
+                fixed_id(45, automata_ci_core::RunId::from_uuid),
+                fixed_id(46, JobId::from_uuid),
+                execution(legacy_instance),
+                &profiles(),
+                JobAuthorityProfile::CredentialFree,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect_err("provider-default permissions are not credential-free");
     assert!(matches!(
         error,
@@ -804,18 +858,21 @@ jobs:
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     let error = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            secret_job,
-            secret_instance,
-            fixed_id(47, WorkflowId::from_uuid),
-            fixed_id(48, automata_ci_core::RunId::from_uuid),
-            fixed_id(49, JobId::from_uuid),
-            execution(secret_instance),
-            &profiles(),
-            JobAuthorityProfile::CredentialFree,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                secret_job,
+                secret_instance,
+                fixed_id(47, WorkflowId::from_uuid),
+                fixed_id(48, automata_ci_core::RunId::from_uuid),
+                fixed_id(49, JobId::from_uuid),
+                execution(secret_instance),
+                &profiles(),
+                JobAuthorityProfile::CredentialFree,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect_err("runtime secret bindings are never credential-free");
     assert!(matches!(
         error,
@@ -846,18 +903,21 @@ fn runtime_context_reference_must_match_exact_canonical_bytes() {
         ),
     );
     let error = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(11, WorkflowId::from_uuid),
-            fixed_id(12, automata_ci_core::RunId::from_uuid),
-            fixed_id(13, JobId::from_uuid),
-            mismatched,
-            &profiles(),
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(11, WorkflowId::from_uuid),
+                fixed_id(12, automata_ci_core::RunId::from_uuid),
+                fixed_id(13, JobId::from_uuid),
+                mismatched,
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect_err("mismatched runtime context");
     assert!(matches!(
         error,
@@ -874,10 +934,10 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-        &JobPermissionRequest::mapping([JobPermissionGrant::new(
-            "contents",
-            PermissionLevel::Read,
-        )]),
+        &JobPermissionRequest::mapping([
+            JobPermissionGrant::new("contents", PermissionLevel::Read),
+            JobPermissionGrant::new("packages", PermissionLevel::Read),
+        ]),
     );
     assert_eq!(default.job().timeout_seconds(), Some(360 * 60));
 
@@ -889,10 +949,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-        &JobPermissionRequest::mapping([JobPermissionGrant::new(
-            "contents",
-            PermissionLevel::Read,
-        )]),
+        &catalog_read_all_request(),
     );
 
     assert_projected_permissions(
@@ -903,10 +960,7 @@ jobs:
     runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
-        &JobPermissionRequest::mapping([
-            JobPermissionGrant::new("contents", PermissionLevel::Write),
-            JobPermissionGrant::new("id-token", PermissionLevel::Write),
-        ]),
+        &catalog_write_all_request(),
     );
 
     let overridden = assert_projected_permissions(
@@ -957,6 +1011,96 @@ jobs:
     );
 }
 
+#[test]
+fn trust_reduction_happens_before_job_ir_and_secret_materialization() {
+    let clean_plan = plan(
+        r"on: workflow_dispatch
+permissions: write-all
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: echo ok}]
+",
+    );
+    let activation = activate_without_secrets(&clean_plan);
+    let instance = &activation.instances()[0];
+    let validated = ValidatedLogicalPlan::new(&clean_plan).expect("validated plan");
+    let job = validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let snapshot = untrusted_automation_snapshot();
+    let projected = GithubLogicalJobProjector::new()
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(51, WorkflowId::from_uuid),
+                fixed_id(52, automata_ci_core::RunId::from_uuid),
+                fixed_id(53, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&snapshot),
+        )
+        .expect("untrusted projection");
+    let job_ir = projected.envelope().job();
+    assert_eq!(job_ir.trust_snapshot(), &snapshot);
+    assert_eq!(
+        job_ir.permission_request().requested_level("contents"),
+        Some(PermissionLevel::Read)
+    );
+    assert_eq!(
+        job_ir.permission_request().requested_level("id-token"),
+        None
+    );
+    assert!(
+        job_ir
+            .permission_request()
+            .grants()
+            .expect("trust reduction is explicit")
+            .iter()
+            .all(|grant| grant.level() != PermissionLevel::Write)
+    );
+    assert!(
+        !job_ir
+            .requirements()
+            .features()
+            .contains(&RunnerFeature::OIDC_TOKENS)
+    );
+
+    let secret_plan = plan(SOURCE);
+    let secret_activation = activate(&secret_plan);
+    let secret_instance = &secret_activation.instances()[0];
+    let secret_validated = ValidatedLogicalPlan::new(&secret_plan).expect("validated plan");
+    let secret_job = secret_validated
+        .job(&WorkflowJobKey::new("build").expect("job key"))
+        .expect("validated job");
+    let error = GithubLogicalJobProjector::new()
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                secret_job,
+                secret_instance,
+                fixed_id(54, WorkflowId::from_uuid),
+                fixed_id(55, automata_ci_core::RunId::from_uuid),
+                fixed_id(56, JobId::from_uuid),
+                execution(secret_instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&snapshot),
+        )
+        .expect_err("untrusted jobs cannot materialize normal secrets");
+    assert!(matches!(
+        error,
+        LogicalJobProjectionError::TrustDeniedRuntimeSecrets
+    ));
+}
+
 fn assert_projected_permissions(source: &str, expected: &JobPermissionRequest) -> JobIrEnvelope {
     let envelope = project_envelope(source);
     assert_eq!(
@@ -965,6 +1109,31 @@ fn assert_projected_permissions(source: &str, expected: &JobPermissionRequest) -
         "projected permission request"
     );
     envelope
+}
+
+fn catalog_read_all_request() -> JobPermissionRequest {
+    JobPermissionRequest::mapping(
+        GITHUB_WORKFLOW_PERMISSIONS
+            .iter()
+            .copied()
+            .filter(|permission| permission.allows_read())
+            .map(|permission| JobPermissionGrant::new(permission.name(), PermissionLevel::Read)),
+    )
+}
+
+fn catalog_write_all_request() -> JobPermissionRequest {
+    JobPermissionRequest::mapping(GITHUB_WORKFLOW_PERMISSIONS.iter().copied().filter_map(
+        |permission| {
+            let level = if permission.allows_write() {
+                PermissionLevel::Write
+            } else if permission.allows_read() {
+                PermissionLevel::Read
+            } else {
+                return None;
+            };
+            Some(JobPermissionGrant::new(permission.name(), level))
+        },
+    ))
 }
 
 #[test]
@@ -1058,18 +1227,21 @@ jobs:
         .job(&WorkflowJobKey::new("build").expect("job key"))
         .expect("validated job");
     let error = GithubLogicalJobProjector::new()
-        .project(ProjectGithubLogicalJobRequest::new(
-            job,
-            instance,
-            fixed_id(21, WorkflowId::from_uuid),
-            fixed_id(22, automata_ci_core::RunId::from_uuid),
-            fixed_id(23, JobId::from_uuid),
-            execution(instance),
-            &profiles(),
-            JobAuthorityProfile::Standard,
-            &permission_policy(),
-            resource_policy(),
-        ))
+        .project(
+            ProjectGithubLogicalJobRequest::new(
+                job,
+                instance,
+                fixed_id(21, WorkflowId::from_uuid),
+                fixed_id(22, automata_ci_core::RunId::from_uuid),
+                fixed_id(23, JobId::from_uuid),
+                execution(instance),
+                &profiles(),
+                JobAuthorityProfile::Standard,
+                &permission_policy(),
+                resource_policy(),
+            )
+            .with_trust_snapshot(&trusted_snapshot()),
+        )
         .expect_err("unsupported semantics");
     assert!(matches!(
         error,

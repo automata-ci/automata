@@ -84,6 +84,9 @@ pub fn github_server_service_credential_request(
         GithubServerServiceScope::PrivateRepositorySourceRead => {
             ("contents", PermissionLevel::Read)
         }
+        GithubServerServiceScope::WorkflowPermissionsRead => {
+            ("administration", PermissionLevel::Read)
+        }
     };
     let permissions = PermissionSet::new([(
         PermissionName::new(permission.0).map_err(|_| GithubServerServiceResolutionValueError)?,
@@ -738,6 +741,36 @@ impl GithubServerServiceCredentialCoordinator {
         self.coordinate_maintenance(outcome).await
     }
 
+    /// Claims and processes at most one due row for one exact authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized repository, resolution, broker, envelope, or
+    /// invariant failure before a closed durable result is available.
+    pub async fn coordinate_authority(
+        &self,
+        authority: GithubServerServiceAuthoritySelector,
+    ) -> Result<GithubServerServiceCoordinationOutcome, GithubServerServiceCoordinatorError> {
+        let observed_at = self.clock.now();
+        let claim_expires_at = checked_add(observed_at, MAX_GITHUB_SERVICE_REVOKE_CLAIM_MILLIS)?;
+        let request = ClaimNextGithubServerServiceMaintenance::for_authority(
+            authority,
+            self.worker,
+            observed_at,
+            claim_expires_at,
+        )
+        .map_err(|_| GithubServerServiceCoordinatorError::Inconsistent)?;
+        let Some(outcome) = self
+            .repository
+            .claim_next_github_server_service_maintenance(request)
+            .await
+            .map_err(|_| GithubServerServiceCoordinatorError::Repository)?
+        else {
+            return Ok(GithubServerServiceCoordinationOutcome::Idle);
+        };
+        self.coordinate_maintenance(outcome).await
+    }
+
     /// Processes one already claimed atomic maintenance result.
     ///
     /// # Errors
@@ -1122,6 +1155,12 @@ pub struct PendingGithubServerServiceHandoffRelease {
 }
 
 impl PendingGithubServerServiceHandoffRelease {
+    /// Returns the immutable release request for an adjacent atomic Store operation.
+    #[must_use]
+    pub const fn request(&self) -> &ReleaseGithubServerServiceHandoff {
+        &self.request
+    }
+
     /// Replays the exact release timestamp and binding.
     ///
     /// # Errors
@@ -1336,7 +1375,25 @@ impl GithubServerServiceCredentialIssuer {
         &self,
         binding: GithubServerServiceHandoffBinding,
     ) -> Result<PendingGithubServerServiceHandoffRelease, GithubServerServiceHandoffError> {
-        let released_at = self.clock.now().max(binding.acquired_at);
+        self.prepare_release_binding_at(binding, UnixMillis::new(0))
+    }
+
+    /// Freezes an exact release request no earlier than authenticated provider work completed.
+    ///
+    /// This is the observation-safe form of [`Self::prepare_release_binding`]:
+    /// the release clock is clamped to the binding acquisition and to the
+    /// caller's trusted completion observation. Replaying the returned value
+    /// never resamples any clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns only when the exact release request cannot be constructed.
+    pub fn prepare_release_binding_at(
+        &self,
+        binding: GithubServerServiceHandoffBinding,
+        not_before: UnixMillis,
+    ) -> Result<PendingGithubServerServiceHandoffRelease, GithubServerServiceHandoffError> {
+        let released_at = self.clock.now().max(binding.acquired_at).max(not_before);
         let request = ReleaseGithubServerServiceHandoff::new(
             binding.selector,
             binding.handoff_id,

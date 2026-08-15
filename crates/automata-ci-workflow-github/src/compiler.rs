@@ -434,6 +434,15 @@ fn compile_event(
         .position(|trigger| event_name(trigger.name().value()) == event.name());
     let mut selected_dispatch_contract = None;
     for (index, trigger) in triggers.events().iter().enumerate() {
+        if let EventName::Other(name) = trigger.name().value() {
+            context.unsupported(
+                "github.compile.provider_event_unavailable",
+                format!(
+                    "GitHub provider ingress does not normalize the `{name}` event; the workflow cannot be published"
+                ),
+                trigger.name().span().clone(),
+            );
+        }
         reject_unsupported_trigger(trigger.configuration(), context);
         let dispatch_contract = trigger::validate_configuration(
             trigger.name().value(),
@@ -449,14 +458,7 @@ fn compile_event(
         return CompiledEvent::NotSelected(WorkflowNotSelectedReason::EventNotConfigured);
     };
     let selected = &triggers.events()[selected_index];
-    if let EventName::Other(name) = selected.name().value() {
-        context.unsupported(
-            "github.compile.provider_event_unavailable",
-            format!(
-                "GitHub provider ingress does not normalize the `{name}` event; the workflow cannot be published"
-            ),
-            selected.name().span().clone(),
-        );
+    if matches!(selected.name().value(), EventName::Other(_)) {
         return CompiledEvent::Rejected;
     }
     let Some(span) = context.span(selected.span()) else {

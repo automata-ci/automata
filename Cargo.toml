@@ -15,6 +15,7 @@ members = [
     "crates/automata-ci-execution",
     "crates/automata-ci-expression-github",
     "crates/automata-ci-github",
+    "crates/automata-ci-github-permissions",
     "crates/automata-ci-github-delivery",
     "crates/automata-ci-github-runtime",
     "crates/automata-ci-job-executor-github",
@@ -87,6 +88,7 @@ automata-ci-credential-github = { path = "crates/automata-ci-credential-github",
 automata-ci-execution = { path = "crates/automata-ci-execution", version = "0.1.0" }
 automata-ci-expression-github = { path = "crates/automata-ci-expression-github", version = "0.1.0" }
 automata-ci-github = { path = "crates/automata-ci-github", version = "0.1.0" }
+automata-ci-github-permissions = { path = "crates/automata-ci-github-permissions", version = "0.1.0" }
 automata-ci-github-delivery = { path = "crates/automata-ci-github-delivery", version = "0.1.0" }
 automata-ci-github-runtime = { path = "crates/automata-ci-github-runtime", version = "0.1.0" }
 automata-ci-job-executor-github = { path = "crates/automata-ci-job-executor-github", version = "0.1.0" }

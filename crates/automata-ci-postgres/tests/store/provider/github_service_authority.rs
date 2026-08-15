@@ -1879,6 +1879,7 @@ async fn seed_signed_check_delivery(
                 identity,
                 Sha256Digest::from_bytes([4; 32]),
                 raw_event,
+                crate::support::provider_delivery_event_envelope(0x8f),
                 UnixMillis::new(accepted_at),
             )?,
             owner,

@@ -23,6 +23,34 @@ pub fn conformance_workflow_result(
     crate::ConformanceWorkflowResult::new(workflow_path, outcome)
 }
 
+/// Rehydrates one exact workflow enable-state transition receipt.
+#[must_use]
+pub const fn workflow_enable_state_receipt(
+    current: crate::WorkflowEnableStateRecord,
+    replay: bool,
+) -> crate::WorkflowEnableStateReceipt {
+    crate::WorkflowEnableStateReceipt::new(current, replay)
+}
+
+/// Rehydrates a selection/control registration receipt after checking its
+/// exact immutable binding.
+pub fn event_subject_registration_receipt(
+    selection: crate::EventSubjectSelection,
+    control: crate::EventControlSubject,
+    replay: bool,
+) -> Result<crate::EventSubjectRegistrationReceipt, crate::EventSubjectValueError> {
+    crate::EventSubjectRegistrationReceipt::new(selection, control, replay)
+}
+
+/// Rehydrates one validated terminal-progress receipt.
+#[must_use]
+pub const fn event_subject_progress_receipt(
+    progress: crate::EventSubjectProgress,
+    replay: bool,
+) -> crate::EventSubjectProgressReceipt {
+    crate::EventSubjectProgressReceipt::new(progress, replay)
+}
+
 /// Rehydrates a complete delivery projection from one coherent durable snapshot.
 #[allow(clippy::too_many_arguments)]
 #[must_use]

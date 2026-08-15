@@ -14,9 +14,12 @@ use automata_ci_core::{
     PermissionSnapshotRequest, PlanSourceOrigin, ResourceAllocationError, ResourceCapacity,
     ResourcePolicyError, RunId, RunValueTemplates, RunnerFeature, RunnerRequirements,
     RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, RuntimeTimeoutUnit,
-    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TemplateValueMap, ValueSource,
-    ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId, WorkflowPermissions,
+    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TemplateValueMap,
+    TrustEnvironmentAuthority, TrustPermissionAuthority, TrustSecretAuthority, TrustSnapshot,
+    ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId,
+    WorkflowPermissions,
 };
+use automata_ci_github_permissions::github_workflow_permission;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{ReusableWorkflowPermissionSnapshot, WorkflowPermissionPolicy};
 use automata_ci_workflow_github::{
@@ -62,6 +65,7 @@ pub struct ProjectGithubLogicalJobRequest<'a> {
     permission_policy: &'a WorkflowPermissionPolicy,
     resource_policy: JobResourcePolicy,
     permission_ceiling: Option<&'a ReusableWorkflowPermissionSnapshot>,
+    trust_snapshot: Option<&'a TrustSnapshot>,
 }
 
 impl fmt::Debug for ProjectGithubLogicalJobRequest<'_> {
@@ -105,6 +109,7 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
             permission_policy,
             resource_policy,
             permission_ceiling: None,
+            trust_snapshot: None,
         }
     }
 
@@ -115,6 +120,13 @@ impl<'a> ProjectGithubLogicalJobRequest<'a> {
         ceiling: &'a ReusableWorkflowPermissionSnapshot,
     ) -> Self {
         self.permission_ceiling = Some(ceiling);
+        self
+    }
+
+    /// Binds the digest-verified run-origin trust decision.
+    #[must_use]
+    pub const fn with_trust_snapshot(mut self, snapshot: &'a TrustSnapshot) -> Self {
+        self.trust_snapshot = Some(snapshot);
         self
     }
 }
@@ -207,6 +219,13 @@ fn project_github_logical_job(
     let LogicalJobKind::Steps(step_job) = request.job.execution() else {
         unreachable!("unsupported reusable jobs were rejected above");
     };
+    let trust_snapshot = request
+        .trust_snapshot
+        .ok_or(LogicalJobProjectionError::MissingTrustSnapshot)?;
+    if trust_snapshot.is_construction_placeholder() {
+        return Err(LogicalJobProjectionError::MissingTrustSnapshot);
+    }
+    validate_trust_runtime_authority(trust_snapshot, request.instance)?;
     let runner = request
         .instance
         .runner()
@@ -218,6 +237,7 @@ fn project_github_logical_job(
             .or_else(|| plan.logical().permissions()),
         request.permission_policy,
         request.permission_ceiling,
+        trust_snapshot.authority().permissions(),
     )?;
     let requirements = runner_requirements(runner, request.profiles)?.with_resource_allocation(
         resource_allocation(
@@ -264,6 +284,7 @@ fn project_github_logical_job(
         request.instance.continue_on_error(),
         steps,
     )
+    .with_trust_snapshot(trust_snapshot.clone())
     .with_authority_profile(request.authority_profile)
     .with_permission_request(permission_request)
     .with_environment(job_environment)
@@ -289,6 +310,23 @@ fn project_github_logical_job(
         runtime_context,
         runtime_context_bytes: Bytes::from(runtime_context_bytes),
     })
+}
+
+fn validate_trust_runtime_authority(
+    trust_snapshot: &TrustSnapshot,
+    instance: &ActivatedJobInstance,
+) -> Result<(), LogicalJobProjectionError> {
+    if trust_snapshot.authority().secrets() == TrustSecretAuthority::Denied
+        && !instance.runtime_context().secrets().is_empty()
+    {
+        return Err(LogicalJobProjectionError::TrustDeniedRuntimeSecrets);
+    }
+    if trust_snapshot.authority().environment() == TrustEnvironmentAuthority::Denied
+        && instance.deployment_environment().is_some()
+    {
+        return Err(LogicalJobProjectionError::TrustDeniedEnvironment);
+    }
+    Ok(())
 }
 
 fn reject_unsupported_semantics(
@@ -319,12 +357,66 @@ fn resolved_permission_request(
     request: Option<&PermissionSnapshotRequest>,
     permission_policy: &WorkflowPermissionPolicy,
     ceiling: Option<&ReusableWorkflowPermissionSnapshot>,
+    trust_authority: TrustPermissionAuthority,
 ) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
-    let request = permission_policy.resolve(source_permission_request(request));
-    let Some(ceiling) = ceiling else {
-        return Ok(request);
+    let mut request = permission_policy.resolve(source_permission_request(request));
+    validate_resolved_permission_request(&request)?;
+    if let Some(ceiling) = ceiling {
+        request = reduce_permission_request(request, ceiling.default_level(), ceiling.grants())?;
+        validate_resolved_permission_request(&request)?;
+    }
+    let request = reduce_permission_request_for_trust(request, trust_authority)?;
+    validate_resolved_permission_request(&request)?;
+    Ok(request)
+}
+
+fn reduce_permission_request_for_trust(
+    request: JobPermissionRequest,
+    authority: TrustPermissionAuthority,
+) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
+    match authority {
+        TrustPermissionAuthority::Requested => Ok(request),
+        TrustPermissionAuthority::DenyAll => Ok(JobPermissionRequest::mapping([])),
+        TrustPermissionAuthority::ReadOnly => {
+            let JobPermissionRequest::Mapping(grants) = request else {
+                return Err(LogicalJobProjectionError::UnrepresentableTrustCeiling);
+            };
+            Ok(JobPermissionRequest::mapping(
+                grants.into_iter().filter_map(|grant| {
+                    let permission = github_workflow_permission(grant.name())?;
+                    match grant.level() {
+                        PermissionLevel::Read => Some(grant),
+                        PermissionLevel::Write if permission.allows_read() => Some(
+                            JobPermissionGrant::new(grant.name().to_owned(), PermissionLevel::Read),
+                        ),
+                        PermissionLevel::None | PermissionLevel::Write => None,
+                    }
+                }),
+            ))
+        }
+    }
+}
+
+fn validate_resolved_permission_request(
+    request: &JobPermissionRequest,
+) -> Result<(), LogicalJobProjectionError> {
+    let JobPermissionRequest::Mapping(grants) = request else {
+        return Err(LogicalJobProjectionError::InvalidPermissionRequest);
     };
-    reduce_permission_request(request, ceiling.default_level(), ceiling.grants())
+    for grant in grants {
+        let Some(permission) = github_workflow_permission(grant.name()) else {
+            return Err(LogicalJobProjectionError::InvalidPermissionRequest);
+        };
+        let allowed = match grant.level() {
+            PermissionLevel::None => true,
+            PermissionLevel::Read => permission.allows_read(),
+            PermissionLevel::Write => permission.allows_write(),
+        };
+        if !allowed {
+            return Err(LogicalJobProjectionError::InvalidPermissionRequest);
+        }
+    }
+    Ok(())
 }
 
 fn reduce_permission_request(
@@ -1039,6 +1131,9 @@ impl fmt::Display for UnsupportedLogicalJobSemantics {
 /// Sanitized fail-closed projection error.
 #[derive(Debug, Error)]
 pub enum LogicalJobProjectionError {
+    /// Projection was attempted without the run-bound authenticated trust decision.
+    #[error("logical job projection requires a run-bound trust snapshot")]
+    MissingTrustSnapshot,
     /// The logical job carries semantics that current `JobIR` cannot preserve.
     #[error("logical job contains unsupported semantics: {0}")]
     Unsupported(UnsupportedLogicalJobSemantics),
@@ -1105,9 +1200,21 @@ pub enum LogicalJobProjectionError {
     /// Credential-free projection retained a managed-secret binding.
     #[error("credential-free projection cannot retain runtime secret bindings")]
     CredentialFreeRuntimeSecrets,
+    /// Run-origin trust denied normal secrets but runtime context retained them.
+    #[error("run-origin trust denies runtime secret bindings")]
+    TrustDeniedRuntimeSecrets,
+    /// Run-origin trust denied protected-environment admission.
+    #[error("run-origin trust denies deployment environments")]
+    TrustDeniedEnvironment,
+    /// The resolved request contains an unknown permission or unsupported level.
+    #[error("resolved GitHub permission request is outside the pinned catalog")]
+    InvalidPermissionRequest,
     /// A reusable permission ceiling cannot be encoded without broadening authority.
     #[error("reusable workflow permission ceiling is not representable")]
     UnrepresentablePermissionCeiling,
+    /// The run-origin trust permission ceiling cannot be represented exactly.
+    #[error("run-origin trust permission ceiling is not representable")]
+    UnrepresentableTrustCeiling,
     /// Canonical runtime-context protobuf encoding failed.
     #[error("canonical runtime-context encoding failed")]
     RuntimeContextEncoding(#[source] automata_ci_protocol_protobuf::EncodeError),
@@ -1199,40 +1306,38 @@ mod permission_ceiling_tests {
 
     #[test]
     fn repository_policy_resolves_all_permission_shorthands_to_exact_mappings() {
-        let policy = WorkflowPermissionPolicy::new(
-            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-            BTreeMap::from([
-                ("contents".to_owned(), PermissionLevel::Write),
-                ("id-token".to_owned(), PermissionLevel::Write),
-            ]),
+        let policy = WorkflowPermissionPolicy::from_github_default(
+            automata_ci_github_permissions::GithubDefaultWorkflowPermission::Read,
         )
         .expect("permission policy");
         assert_eq!(
-            resolved_permission_request(None, &policy, None).expect("provider default"),
-            JobPermissionRequest::mapping([JobPermissionGrant::new(
-                "contents",
-                PermissionLevel::Read,
-            )]),
+            resolved_permission_request(None, &policy, None, TrustPermissionAuthority::Requested,)
+                .expect("provider default"),
+            JobPermissionRequest::mapping([
+                JobPermissionGrant::new("contents", PermissionLevel::Read),
+                JobPermissionGrant::new("packages", PermissionLevel::Read),
+            ]),
+        );
+        let write_all = policy.resolve(JobPermissionRequest::WriteAll);
+        assert_eq!(
+            write_all.requested_level("contents"),
+            Some(PermissionLevel::Write)
         );
         assert_eq!(
-            policy.resolve(JobPermissionRequest::WriteAll),
-            JobPermissionRequest::mapping([
-                JobPermissionGrant::new("contents", PermissionLevel::Write),
-                JobPermissionGrant::new("id-token", PermissionLevel::Write),
-            ]),
+            write_all.requested_level("id-token"),
+            Some(PermissionLevel::Write)
+        );
+        assert_eq!(
+            write_all.requested_level("vulnerability-alerts"),
+            Some(PermissionLevel::Read)
         );
         let ceiling = BTreeMap::from([
             ("contents".to_owned(), PermissionLevel::Read),
             ("id-token".to_owned(), PermissionLevel::None),
         ]);
         assert_eq!(
-            reduce_permission_request(
-                policy.resolve(JobPermissionRequest::WriteAll),
-                PermissionLevel::None,
-                &ceiling,
-            )
-            .expect("resolved shorthand ceiling"),
+            reduce_permission_request(write_all, PermissionLevel::None, &ceiling,)
+                .expect("resolved shorthand ceiling"),
             JobPermissionRequest::mapping([JobPermissionGrant::new(
                 "contents",
                 PermissionLevel::Read,
@@ -1255,5 +1360,34 @@ mod permission_ceiling_tests {
                 PermissionLevel::Read,
             )]),
         );
+    }
+
+    #[test]
+    fn forged_permission_requests_fail_closed_at_projection() {
+        for request in [
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "future-permission",
+                PermissionLevel::Read,
+            )]),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "id-token",
+                PermissionLevel::Read,
+            )]),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "vulnerability-alerts",
+                PermissionLevel::Write,
+            )]),
+        ] {
+            assert!(matches!(
+                validate_resolved_permission_request(&request),
+                Err(LogicalJobProjectionError::InvalidPermissionRequest)
+            ));
+        }
+        validate_resolved_permission_request(&JobPermissionRequest::mapping([
+            JobPermissionGrant::new("contents", PermissionLevel::None),
+            JobPermissionGrant::new("id-token", PermissionLevel::Write),
+            JobPermissionGrant::new("vulnerability-alerts", PermissionLevel::Read),
+        ]))
+        .expect("catalog-valid explicit mapping");
     }
 }

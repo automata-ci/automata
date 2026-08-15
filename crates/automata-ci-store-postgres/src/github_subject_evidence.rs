@@ -5,17 +5,18 @@ use uuid::Uuid;
 
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
-    AdmissionObject, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
-    GithubCheckSubjectKey, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
-    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository,
-    GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
+    AdmissionObject, AuthenticatedGithubDeliveryClaim, EventControlSubjectId, EventSubjectId,
+    EventSubjectOrigin, GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha,
+    GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
+    GithubProviderWorkflowSelection, GithubRepositoryDispatchEvidenceRepository,
+    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
+    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
     ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
@@ -60,6 +61,11 @@ struct DurableAcceptance {
     raw_event_object_key: String,
     raw_event_size_bytes: i64,
     raw_event_media_type: String,
+    event_envelope_schema: i16,
+    event_registry_schema: i16,
+    event_envelope_digest: Sha256Digest,
+    event_envelope_bytes: Vec<u8>,
+    event_envelope_media_type: String,
 }
 
 #[derive(Debug)]
@@ -78,6 +84,11 @@ struct DurablePendingAcceptance {
     raw_event_object_key: String,
     raw_event_size_bytes: i64,
     raw_event_media_type: String,
+    event_envelope_schema: i16,
+    event_registry_schema: i16,
+    event_envelope_digest: Sha256Digest,
+    event_envelope_bytes: Vec<u8>,
+    event_envelope_media_type: String,
 }
 
 #[async_trait]
@@ -248,6 +259,142 @@ impl GithubRepositoryDispatchEvidenceRepository for PostgresStore {
         let evidence = resolved_repository_dispatch_evidence(subject_id, &request)?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(evidence)
+    }
+}
+
+/// Locks and validates the claim, pinned manifest, source inventory, event,
+/// repository, and queued Check before admission policy may terminalize it.
+#[allow(clippy::too_many_lines)] // One exact SQL statement binds the full selection authority.
+pub(crate) async fn validate_github_workflow_selection_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordGithubWorkflowRunSubjectEvidence,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    // All-direct ingress initially owns one aggregate discovery Check. Derive
+    // the exact per-workflow Check inside this transaction before policy may
+    // admit or terminalize that workflow; any failed authority check rolls the
+    // derivation back with the transaction.
+    insert_all_direct_workflow_check_subject(transaction, request).await?;
+    let claim = request.admission_claim();
+    let event_subject_id = EventSubjectId::derive(
+        request.tenant(),
+        request.repository_id(),
+        EventSubjectOrigin::ProviderDelivery(request.delivery_id()),
+        request.workflow_path().as_str(),
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let event_control_id = EventControlSubjectId::derive(event_subject_id);
+    let exact = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT TRUE
+          FROM github_provider_delivery_evidence AS evidence
+          JOIN provider_delivery_inbox AS inbox
+            ON inbox.id = evidence.provider_delivery_id
+           AND inbox.tenant_id = evidence.tenant_id
+          JOIN github_provider_manifest_revisions AS manifest
+            ON manifest.tenant_id = evidence.tenant_id
+           AND manifest.repository_id = evidence.repository_id
+           AND manifest.provider_connection_id = evidence.provider_connection_id
+           AND manifest.manifest_revision = evidence.provider_manifest_revision
+           AND manifest.manifest_digest = evidence.provider_manifest_digest
+           AND manifest.webhook_verifier_fingerprint_sha256 =
+               evidence.authenticated_webhook_verifier_fingerprint_sha256
+           AND manifest.webhook_verifier_revision =
+               evidence.authenticated_webhook_verifier_revision
+          JOIN repositories AS repository
+            ON repository.tenant_id = evidence.tenant_id
+           AND repository.id = evidence.repository_id
+          JOIN provider_delivery_workflow_inventories AS inventory
+            ON inventory.inbox_id = evidence.provider_delivery_id
+           AND inventory.tenant_id = evidence.tenant_id
+           AND inventory.manifest_digest = manifest.manifest_digest
+          JOIN provider_delivery_workflow_inventory_entries AS entry
+            ON entry.inbox_id = inventory.inbox_id
+           AND entry.tenant_id = inventory.tenant_id
+          JOIN github_check_subjects AS subject
+            ON subject.tenant_id = evidence.tenant_id
+           AND subject.repository_id = evidence.repository_id
+           AND subject.provider_delivery_id = evidence.provider_delivery_id
+         WHERE evidence.tenant_id = $1
+           AND evidence.repository_id = $2
+           AND evidence.provider_delivery_id = $3
+           AND repository.scm_provider = 'github'
+           AND repository.provider_repository_id = evidence.github_repository_id::TEXT
+           AND repository.owner = split_part(evidence.github_repository_name, '/', 1)
+           AND repository.name = split_part(evidence.github_repository_name, '/', 2)
+           AND manifest.workflow_selection_kind = 'all_direct'
+           AND inventory.source_revision = encode(evidence.github_check_head_sha, 'hex')
+           AND entry.workflow_path = $4
+           AND entry.source_state = 'ready'
+           AND entry.source_digest = $5
+           AND evidence.github_check_head_sha = $6
+           AND COALESCE(evidence.authenticated_event_name, manifest.event_name) = $7
+           AND inbox.raw_event_digest = $8
+           AND COALESCE(evidence.authenticated_event_git_ref, manifest.git_ref) = $9
+           AND inbox.state = 'claimed'
+           AND inbox.claim_owner_id = $10
+           AND inbox.attempt_count = $11
+           AND inbox.claim_fence = $12
+           AND inbox.claimed_at_ms = $13
+           AND inbox.claim_expires_at_ms = $14
+           AND $15 >= inbox.accepted_at_ms
+           AND $15 >= $13
+           AND $15 < $14
+           AND $16 = inbox.delivery_id
+           AND subject.origin_kind = 'provider_delivery'
+           AND subject.schedule_fire_id IS NULL
+           AND subject.subject_kind = 'workflow'
+           AND subject.subject_key = entry.workflow_path
+           AND subject.provider_connection_id = evidence.provider_connection_id
+           AND subject.provider_installation_id = evidence.provider_installation_id
+           AND subject.github_repository_id = evidence.github_repository_id
+           AND subject.github_repository_name = evidence.github_repository_name
+           AND subject.github_app_id = manifest.github_app_id
+           AND subject.head_sha = evidence.github_check_head_sha
+           AND subject.check_name = manifest.check_name
+           AND subject.created_at_ms = inbox.accepted_at_ms
+           AND subject.workflow_run_id IS NULL
+           AND subject.linked_at_ms IS NULL
+           AND (
+                (subject.event_control_subject_id IS NULL
+                 AND subject.desired_state = 'queued'
+                 AND subject.desired_conclusion IS NULL
+                 AND subject.terminal_cause IS NULL
+                 AND subject.desired_revision = 1
+                 AND subject.desired_updated_at_ms = inbox.accepted_at_ms)
+             OR (subject.event_control_subject_id = $17
+                 AND subject.desired_state = 'completed'
+                 AND subject.desired_conclusion = 'skipped'
+                 AND subject.terminal_cause = 'workflow_skipped'
+                 AND subject.desired_revision = 2
+                 AND subject.desired_updated_at_ms <= $15)
+           )
+        FOR SHARE OF evidence, inbox, manifest, repository, inventory, entry, subject
+        ",
+    )
+    .bind(request.tenant().as_str())
+    .bind(request.repository_id().as_uuid())
+    .bind(request.delivery_id().as_uuid())
+    .bind(request.workflow_path().as_str())
+    .bind(request.source_digest().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.event_name())
+    .bind(request.event_digest().as_bytes().as_slice())
+    .bind(request.git_ref())
+    .bind(claim.claim().owner().as_uuid())
+    .bind(i16::try_from(claim.attempt()).expect("attempt fits SMALLINT"))
+    .bind(pg_bigint(claim.claim().fence()))
+    .bind(claim.claimed_at().get())
+    .bind(claim.expires_at().get())
+    .bind(request.admitted_at().get())
+    .bind(request.provider_delivery_idempotency_key())
+    .bind(event_control_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if exact == Some(true) {
+        Ok(())
+    } else {
+        Err(GithubSubjectEvidenceStoreError::AuthorityRejected)
     }
 }
 
@@ -1119,10 +1266,14 @@ async fn insert_generic_inbox(
             provider_repository_id, repository_visibility,
             repository_identity, delivery_id, request_digest,
             raw_event_digest, raw_event_object_key, raw_event_size_bytes,
-            raw_event_media_type, accepted_at_ms, state_updated_at_ms
+            raw_event_media_type, event_envelope_schema,
+            event_registry_schema, event_envelope_digest,
+            event_envelope_bytes, event_envelope_media_type,
+            accepted_at_ms, state_updated_at_ms
         ) VALUES (
             $1, $2, 'github', $3, $4, $5, $6, $7, $8,
-            $9, $10, $11, $12, $13, $14, $14
+            $9, $10, $11, $12, $13, $14, $15, $16,
+            $17, $18, $19, $19
         )
         ON CONFLICT (provider, connection_id, delivery_id) DO NOTHING
         RETURNING id
@@ -1146,6 +1297,14 @@ async fn insert_generic_inbox(
             .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
     )
     .bind(request.raw_event().media_type())
+    .bind(i16::try_from(request.event_envelope().schema()).expect("validated schema fits"))
+    .bind(
+        i16::try_from(request.event_envelope().registry_schema())
+            .expect("validated registry schema fits"),
+    )
+    .bind(request.event_envelope().digest().as_bytes().as_slice())
+    .bind(request.event_envelope().canonical_bytes())
+    .bind(request.event_envelope().media_type())
     .bind(request.accepted_at().get())
     .fetch_optional(&mut **transaction)
     .await
@@ -1690,6 +1849,19 @@ fn decode_pending_acceptance(
         raw_event_media_type: row
             .try_get("raw_event_media_type")
             .map_err(operation_error)?,
+        event_envelope_schema: row
+            .try_get("event_envelope_schema")
+            .map_err(operation_error)?,
+        event_registry_schema: row
+            .try_get("event_registry_schema")
+            .map_err(operation_error)?,
+        event_envelope_digest: digest_column(row, "event_envelope_digest")?,
+        event_envelope_bytes: row
+            .try_get("event_envelope_bytes")
+            .map_err(operation_error)?,
+        event_envelope_media_type: row
+            .try_get("event_envelope_media_type")
+            .map_err(operation_error)?,
     })
 }
 
@@ -1714,6 +1886,13 @@ fn pending_acceptance_matches(
         && u64::try_from(durable.raw_event_size_bytes).ok()
             == Some(request.delivery().raw_event().encoded_size())
         && durable.raw_event_media_type == request.delivery().raw_event().media_type()
+        && u16::try_from(durable.event_envelope_schema).ok()
+            == Some(request.delivery().event_envelope().schema())
+        && u16::try_from(durable.event_registry_schema).ok()
+            == Some(request.delivery().event_envelope().registry_schema())
+        && durable.event_envelope_digest == request.delivery().event_envelope().digest()
+        && durable.event_envelope_bytes == request.delivery().event_envelope().canonical_bytes()
+        && durable.event_envelope_media_type == request.delivery().event_envelope().media_type()
         && evidence.accepted_at() == request.delivery().accepted_at()
         && evidence.repository_owner_id() == request.repository_owner_id()
         && evidence.event() == request.event()
@@ -1854,6 +2033,19 @@ fn decode_acceptance(row: &PgRow) -> Result<DurableAcceptance, GithubSubjectEvid
         raw_event_media_type: row
             .try_get("raw_event_media_type")
             .map_err(operation_error)?,
+        event_envelope_schema: row
+            .try_get("event_envelope_schema")
+            .map_err(operation_error)?,
+        event_registry_schema: row
+            .try_get("event_registry_schema")
+            .map_err(operation_error)?,
+        event_envelope_digest: digest_column(row, "event_envelope_digest")?,
+        event_envelope_bytes: row
+            .try_get("event_envelope_bytes")
+            .map_err(operation_error)?,
+        event_envelope_media_type: row
+            .try_get("event_envelope_media_type")
+            .map_err(operation_error)?,
     };
     Ok(durable)
 }
@@ -1878,6 +2070,13 @@ fn acceptance_matches(
         && u64::try_from(durable.raw_event_size_bytes).ok()
             == Some(request.delivery().raw_event().encoded_size())
         && durable.raw_event_media_type == request.delivery().raw_event().media_type()
+        && u16::try_from(durable.event_envelope_schema).ok()
+            == Some(request.delivery().event_envelope().schema())
+        && u16::try_from(durable.event_registry_schema).ok()
+            == Some(request.delivery().event_envelope().registry_schema())
+        && durable.event_envelope_digest == request.delivery().event_envelope().digest()
+        && durable.event_envelope_bytes == request.delivery().event_envelope().canonical_bytes()
+        && durable.event_envelope_media_type == request.delivery().event_envelope().media_type()
         && durable.receipt.accepted_at() == request.delivery().accepted_at()
         && durable.receipt.repository_owner_id() == request.repository_owner_id()
         && durable.receipt.evidence().check_head_sha() == request.head_sha()
@@ -2659,7 +2858,10 @@ const PENDING_EVIDENCE_SELECT: &str = r"
         inbox.delivery_id AS inbox_delivery_key,
         inbox.request_digest, inbox.raw_event_digest,
         inbox.raw_event_object_key, inbox.raw_event_size_bytes,
-        inbox.raw_event_media_type, inbox.accepted_at_ms,
+        inbox.raw_event_media_type, inbox.event_envelope_schema,
+        inbox.event_registry_schema, inbox.event_envelope_digest,
+        inbox.event_envelope_bytes, inbox.event_envelope_media_type,
+        inbox.accepted_at_ms,
         pending.github_repository_owner_id,
         pending.authenticated_event_envelope_version,
         pending.authenticated_event_name, pending.authenticated_event_git_ref,
@@ -2781,7 +2983,10 @@ const EVIDENCE_SELECT: &str = r"
         inbox.delivery_id AS inbox_delivery_key,
         inbox.request_digest, inbox.raw_event_digest,
         inbox.raw_event_object_key, inbox.raw_event_size_bytes,
-        inbox.raw_event_media_type, inbox.accepted_at_ms,
+        inbox.raw_event_media_type, inbox.event_envelope_schema,
+        inbox.event_registry_schema, inbox.event_envelope_digest,
+        inbox.event_envelope_bytes, inbox.event_envelope_media_type,
+        inbox.accepted_at_ms,
         evidence.github_repository_owner_id,
         evidence.authenticated_event_envelope_version,
         evidence.authenticated_event_name, evidence.authenticated_event_git_ref,

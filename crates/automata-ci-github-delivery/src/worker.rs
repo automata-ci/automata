@@ -14,9 +14,10 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::{
-    GithubRepositoryVisibility, GithubStoredWebhookError, GithubWebhookBodyDigest,
-    StoredAuthenticatedGithubWebhook, VerifiedGithubPush, VerifiedGithubWebhook,
-    rehydrate_stored_authenticated_github_webhook,
+    GITHUB_EVENT_ENVELOPE_SCHEMA_V1, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    GITHUB_EVENT_REGISTRY_SCHEMA_V1, GithubRepositoryVisibility, GithubSealedEventEnvelopeV1,
+    GithubStoredWebhookError, GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
+    VerifiedGithubPush, VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, ExactRevision, RepositoryId, RepositorySource,
@@ -211,6 +212,7 @@ pub struct GithubDeliveryWorkflowRequest<'a> {
     identity: &'a ProviderDeliveryIdentity,
     request_digest: Sha256Digest,
     raw_event: &'a AdmissionObject,
+    event_envelope: &'a GithubSealedEventEnvelopeV1,
     event: &'a VerifiedGithubWebhook,
     repository_source: &'a RepositorySource,
     workflow_path: &'a str,
@@ -251,6 +253,12 @@ impl GithubDeliveryWorkflowRequest<'_> {
     #[must_use]
     pub const fn raw_event(&self) -> &AdmissionObject {
         self.raw_event
+    }
+
+    /// Returns the verified, facts-only event envelope bound to the raw object.
+    #[must_use]
+    pub const fn event_envelope(&self) -> &GithubSealedEventEnvelopeV1 {
+        self.event_envelope
     }
 
     /// Returns the strictly rehydrated authenticated event.
@@ -784,6 +792,7 @@ impl fmt::Debug for GithubDeliveryClaimLease {
 
 pub(crate) struct PreparedGithubDelivery {
     event: VerifiedGithubWebhook,
+    event_envelope: GithubSealedEventEnvelopeV1,
     evidence: PreparedGithubDeliveryEvidence,
 }
 
@@ -809,26 +818,34 @@ impl DurableRehydrationEvidence {
 impl PreparedGithubDelivery {
     pub(crate) const fn from_authenticated_event(
         event: VerifiedGithubWebhook,
+        event_envelope: GithubSealedEventEnvelopeV1,
         evidence: ManifestPinnedGithubDeliveryEvidence,
     ) -> Self {
         Self {
             event,
+            event_envelope,
             evidence: PreparedGithubDeliveryEvidence::Resolved(evidence),
         }
     }
 
     pub(crate) const fn from_pending_repository_dispatch(
         event: VerifiedGithubWebhook,
+        event_envelope: GithubSealedEventEnvelopeV1,
         evidence: PendingGithubRepositoryDispatchEvidence,
     ) -> Self {
         Self {
             event,
+            event_envelope,
             evidence: PreparedGithubDeliveryEvidence::PendingRepositoryDispatch(evidence),
         }
     }
 
     pub(crate) const fn event(&self) -> &VerifiedGithubWebhook {
         &self.event
+    }
+
+    pub(crate) const fn event_envelope(&self) -> &GithubSealedEventEnvelopeV1 {
+        &self.event_envelope
     }
 
     pub(crate) const fn deleted(&self) -> bool {
@@ -1156,6 +1173,7 @@ impl GithubDeliveryWorker {
         }
         Ok(PreparedGithubDelivery::from_authenticated_event(
             prepared.event().clone(),
+            prepared.event_envelope().clone(),
             evidence,
         ))
     }
@@ -1608,6 +1626,7 @@ impl GithubDeliveryWorker {
                     identity: claimed.identity(),
                     request_digest: claimed.request_digest(),
                     raw_event: claimed.raw_event(),
+                    event_envelope: prepared.event_envelope(),
                     event: prepared.event(),
                     repository_source: source,
                     workflow_path,
@@ -1631,6 +1650,7 @@ impl GithubDeliveryWorker {
         &self,
         claimed: &ClaimedProviderDelivery,
     ) -> Result<PreparedGithubDelivery, ProcessingFailure> {
+        let event_envelope = rehydrate_event_envelope(claimed)?;
         let evidence = match self
             .subject_evidence
             .load_manifest_pinned_github_delivery_evidence(
@@ -1688,12 +1708,24 @@ impl GithubDeliveryWorker {
             ProviderRepositoryVisibility::Private => GithubRepositoryVisibility::Private,
         };
         match evidence {
-            DurableRehydrationEvidence::Resolved(evidence) => {
-                rehydrate_stored_event(claimed, evidence, raw_body, visibility, owner, name)
-            }
+            DurableRehydrationEvidence::Resolved(evidence) => rehydrate_stored_event(
+                claimed,
+                event_envelope,
+                evidence,
+                raw_body,
+                visibility,
+                owner,
+                name,
+            ),
             DurableRehydrationEvidence::PendingRepositoryDispatch(evidence) => {
                 rehydrate_pending_repository_dispatch(
-                    claimed, evidence, raw_body, visibility, owner, name,
+                    claimed,
+                    event_envelope,
+                    evidence,
+                    raw_body,
+                    visibility,
+                    owner,
+                    name,
                 )
             }
         }
@@ -1988,6 +2020,7 @@ fn processor_failure(
 
 fn rehydrate_stored_event(
     claimed: &ClaimedProviderDelivery,
+    event_envelope: GithubSealedEventEnvelopeV1,
     evidence: ManifestPinnedGithubDeliveryEvidence,
     raw_body: bytes::Bytes,
     visibility: GithubRepositoryVisibility,
@@ -2012,6 +2045,7 @@ fn rehydrate_stored_event(
     );
     let event =
         rehydrate_stored_authenticated_github_webhook(stored).map_err(stored_event_failure)?;
+    verify_rehydrated_event_envelope(claimed, &event_envelope, &event)?;
     let coordinates_match = match &event {
         VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
             authenticated_event.kind()
@@ -2036,12 +2070,15 @@ fn rehydrate_stored_event(
         ));
     }
     Ok(PreparedGithubDelivery::from_authenticated_event(
-        event, evidence,
+        event,
+        event_envelope,
+        evidence,
     ))
 }
 
 fn rehydrate_pending_repository_dispatch(
     claimed: &ClaimedProviderDelivery,
+    event_envelope: GithubSealedEventEnvelopeV1,
     evidence: PendingGithubRepositoryDispatchEvidence,
     raw_body: bytes::Bytes,
     visibility: GithubRepositoryVisibility,
@@ -2065,6 +2102,7 @@ fn rehydrate_pending_repository_dispatch(
     );
     let event =
         rehydrate_stored_authenticated_github_webhook(stored).map_err(stored_event_failure)?;
+    verify_rehydrated_event_envelope(claimed, &event_envelope, &event)?;
     let VerifiedGithubWebhook::RepositoryDispatch(dispatch) = &event else {
         return Err(ProcessingFailure::reject(
             "github.repository_dispatch.invalid_event",
@@ -2081,8 +2119,72 @@ fn rehydrate_pending_repository_dispatch(
         ));
     }
     Ok(PreparedGithubDelivery::from_pending_repository_dispatch(
-        event, evidence,
+        event,
+        event_envelope,
+        evidence,
     ))
+}
+
+fn rehydrate_event_envelope(
+    claimed: &ClaimedProviderDelivery,
+) -> Result<GithubSealedEventEnvelopeV1, ProcessingFailure> {
+    let durable = claimed.event_envelope();
+    if durable.schema() != GITHUB_EVENT_ENVELOPE_SCHEMA_V1
+        || durable.registry_schema() != GITHUB_EVENT_REGISTRY_SCHEMA_V1
+        || durable.media_type() != GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE
+    {
+        return Err(ProcessingFailure::reject(
+            "github.event_envelope.unsupported_schema",
+        ));
+    }
+    let envelope = GithubSealedEventEnvelopeV1::from_canonical_bytes(
+        durable.canonical_bytes(),
+        durable.digest(),
+    )
+    .map_err(|_| ProcessingFailure::reject("github.event_envelope.invalid"))?;
+    let expected_raw = raw_blob_descriptor(claimed.raw_event())
+        .map_err(|()| ProcessingFailure::reject("github.raw_event.invalid_descriptor"))?;
+    if envelope.raw_event().descriptor() != &expected_raw {
+        return Err(ProcessingFailure::reject(
+            "github.event_envelope.raw_identity_mismatch",
+        ));
+    }
+    let expected_visibility = match claimed.identity().repository_visibility() {
+        ProviderRepositoryVisibility::Public => GithubRepositoryVisibility::Public,
+        ProviderRepositoryVisibility::Private => GithubRepositoryVisibility::Private,
+    };
+    let target = envelope.event().target_repository();
+    if claimed.identity().provider() != GITHUB_PROVIDER
+        || envelope.delivery_id() != claimed.identity().delivery_id()
+        || envelope.installation_id().get() != claimed.identity().installation_id().get()
+        || target.id().get() != claimed.identity().repository_id().get()
+        || target.visibility() != expected_visibility
+        || target.full_name() != claimed.identity().repository_identity()
+    {
+        return Err(ProcessingFailure::reject(
+            "github.event_envelope.identity_mismatch",
+        ));
+    }
+    Ok(envelope)
+}
+
+fn verify_rehydrated_event_envelope(
+    claimed: &ClaimedProviderDelivery,
+    durable: &GithubSealedEventEnvelopeV1,
+    event: &VerifiedGithubWebhook,
+) -> Result<(), ProcessingFailure> {
+    let raw_event = raw_blob_descriptor(claimed.raw_event())
+        .map_err(|()| ProcessingFailure::reject("github.raw_event.invalid_descriptor"))?;
+    let reconstructed = GithubSealedEventEnvelopeV1::seal(event, raw_event)
+        .map_err(|_| ProcessingFailure::reject("github.event_envelope.event_mismatch"))?;
+    if reconstructed.digest() != durable.digest()
+        || reconstructed.canonical_bytes() != durable.canonical_bytes()
+    {
+        return Err(ProcessingFailure::reject(
+            "github.event_envelope.event_mismatch",
+        ));
+    }
+    Ok(())
 }
 
 fn source_revision(event: &VerifiedGithubWebhook) -> Option<&str> {
@@ -2543,9 +2645,9 @@ fn processor_lease_error(error: GithubDeliveryWorkerError) -> GithubDeliveryWork
 #[cfg(test)]
 mod lease_tests {
     use automata_ci_store::{
-        ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
-        ProviderDeliveryReceipt, ProviderInstallationId, ProviderRepositoryCoordinates,
-        ProviderRepositoryId, TenantScope,
+        ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
+        ProviderDeliveryEventEnvelope, ProviderDeliveryId, ProviderDeliveryReceipt,
+        ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId, TenantScope,
     };
     use uuid::Uuid;
 
@@ -2667,6 +2769,14 @@ mod lease_tests {
             identity,
             Sha256Digest::from_bytes([0x24; 32]),
             raw_event,
+            ProviderDeliveryEventEnvelope::new(
+                1,
+                1,
+                Sha256Digest::from_bytes([0x25; 32]),
+                br#"{"schema":1}"#.to_vec(),
+                GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+            )
+            .expect("event envelope"),
             claim,
             UnixMillis::new(100),
             UnixMillis::new(200),

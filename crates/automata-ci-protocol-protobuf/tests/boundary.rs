@@ -193,6 +193,45 @@ fn job_ir_runner_requirements(
 }
 
 #[test]
+fn job_ir_round_trips_exact_trust_snapshot_and_rejects_tampering() {
+    let original = common::rich_job();
+    let encoded = encode_job_ir(&original, &ProtocolLimits::default()).expect("encode JobIR");
+    let decoded = decode_job_ir(&encoded, &ProtocolLimits::default()).expect("decode JobIR");
+    assert_eq!(
+        decoded.job().trust_snapshot().canonical_bytes(),
+        original.job().trust_snapshot().canonical_bytes()
+    );
+    assert_eq!(
+        decoded.job().trust_snapshot().digest(),
+        original.job().trust_snapshot().digest()
+    );
+
+    let mut tampered = fixture_job_ir();
+    let trust_digest = &mut tampered.job.as_mut().expect("job").trust_snapshot_digest;
+    trust_digest[0] ^= 1;
+    assert!(matches!(
+        decode_job_ir(&encode(&tampered), &ProtocolLimits::default()),
+        Err(DecodeError::InvalidValue {
+            field: "job_ir.trust_snapshot"
+        })
+    ));
+
+    let mut missing_digest = fixture_job_ir();
+    missing_digest
+        .job
+        .as_mut()
+        .expect("job")
+        .trust_snapshot_digest
+        .clear();
+    assert!(matches!(
+        decode_job_ir(&encode(&missing_digest), &ProtocolLimits::default()),
+        Err(DecodeError::InvalidValue {
+            field: "job_ir.trust_snapshot_digest"
+        })
+    ));
+}
+
+#[test]
 fn standalone_job_ir_rejects_schema_and_expression_program_skew() {
     for version in [2, u32::from(JobIrVersion::current().get()) + 1] {
         let mut noncurrent_job = fixture_job_ir();

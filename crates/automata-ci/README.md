@@ -345,10 +345,11 @@ an `env:NAME` or absolute `file:/path` reference accepted by the secret-source
 policy; secret bytes do not belong in the manifest. File sources must be
 owner-only regular files and cannot be symlinks.
 
-The current provider manifest is schema 2. It requires an explicit top-level
+The current provider manifest is schema 3. It requires an explicit top-level
 `dashboard_url`, which is the trusted canonical Automata origin used for Check
-Run links. Migrate schema-1 files by adding that validated URL and changing
-`schema` to `2`; the server deliberately does not guess a dashboard origin.
+Run links, and a distinct `workflow_permissions_read` authority for every
+repository. Schema-1 and schema-2 files are rejected rather than being guessed
+or silently granted broader GitHub App authority.
 
 The required `transport` selects one closed origin policy. Use
 `{"mode":"github_dot_com"}` in production. The integration suite can select
@@ -372,6 +373,19 @@ authority; `standard` selects the credential-bearing, fail-private output
 profile. Unknown fields, aliases, duplicate identities, incoherent visibility,
 and partial authority shapes fail startup.
 
+Repository removal is not a schema-3 rollout operation. Deleting an entry from
+the local file stops that process from serving it, but cannot prove that another
+replica with the same GitHub App no longer owns the durable authorities. Keep
+the entry configured until a future provider-registry desired-set revision can
+seal the complete membership and retire omitted authorities atomically. Current
+startup safely retires superseded authority revisions only for repositories
+that remain explicitly present, and continues maintaining each `retiring`
+authority until provider revocation reaches `retired`. Changing a retained
+repository's GitHub installation, App client identity, or provider transport/
+API origin is likewise not a schema-3 rollout operation: startup rejects it
+before retirement because the historical revocation broker route is not
+durably retained yet.
+
 Every repository `tenant_id` must equal the server's one effective UI tenant.
 With human authentication enabled, that is the tenant in durable installation
 state (or its configured bootstrap tenant while setup is active); without human
@@ -386,9 +400,13 @@ The GitHub App webhook URL is the public Automata origin plus
 `/webhooks/github`. Configure GitHub with the same HMAC secret referenced by the
 manifest, subscribe only to the supported `push`, `pull_request`, `merge_group`,
 and `repository_dispatch` events selected for the installation. The App's
-registration-wide permissions are Checks write, Contents read, Pull requests
-read, and Merge queues read; Automata's private-source authority remains scoped
-separately per repository. Each event must satisfy its exact configured
+registration-wide permissions are Administration read, Checks write, Contents
+read, Pull requests read, and Merge queues read; Automata's private-source
+authority remains scoped separately per repository. Administration read is
+required to authenticate the repository's effective Actions permission defaults.
+A missing permission or provider `403` fails startup, and an expired or invalid
+observation keeps later workflow admission fail-closed. Each event must satisfy
+its exact configured
 source-selection policy; an unconfigured event, source, or revision is rejected
 rather than silently generalized. Rotations advance the relevant configuration,
 verifier, manifest, policy, and authority revisions rather than reusing an old

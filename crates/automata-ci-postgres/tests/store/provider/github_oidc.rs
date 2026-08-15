@@ -492,6 +492,7 @@ async fn admit_signed_oidc_workflow(
                 identity,
                 fixture.command.request_digest(),
                 crate::support::authenticated_github_event_object(fixture.command.event())?,
+                crate::support::provider_delivery_event_envelope(0x8b),
                 delivery_observed_at,
             )?,
             ProviderRepositoryOwnerId::new(404)?,

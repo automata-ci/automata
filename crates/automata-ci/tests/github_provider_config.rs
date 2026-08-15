@@ -29,7 +29,7 @@ const RUNNER_POLICY_CONFIGURATION: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
     "selector":"Ubuntu-24.04"
-  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 fn test_file(name: &str) -> PathBuf {
@@ -89,6 +89,7 @@ fn repository(
         "tenant_id": tenant_id,
         "connection_id": uuid(connection_id),
         "installation_id": installation_id,
+        "installation_binding_generation": 1,
         "repository_id": repository_id,
         "repository_owner_id": repository_owner_id,
         "repository": name,
@@ -102,6 +103,7 @@ fn repository(
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority_id, 7),
+            "workflow_permissions_read": authority(checks_authority_id + 0x1000_0000, 7),
             "private_repository_source_read": private_authority_id
                 .map_or(Value::Null, |id| authority(id, 7))
         }
@@ -141,7 +143,7 @@ fn private_repository() -> Value {
 fn manifest(repositories: Vec<Value>) -> Value {
     let repositories = Value::Array(repositories);
     json!({
-        "schema": 2,
+        "schema": 3,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
@@ -194,11 +196,11 @@ fn runner_policy_preserves_raw_evidence_and_matches_store_codec_golden_values() 
     assert_eq!(repository.runner_policy().runtime_policy(), &expected);
     assert_eq!(
         expected.digest().to_string(),
-        "b24c4885061625287886fcce4a3573e74f5aae7d4c897de8d8212d46f3e2778b"
+        "b7fabdda7258224aae1ed1fd4f015b947888ba1a0dc2f13feae11151a6ffebc2"
     );
     assert_eq!(
         expected.canonical_digest().to_string(),
-        "bf7130335987454ba80f14395298519ec56f6b9bd14d8dff32466541fc4c2e0b"
+        "6b7d4868b6d58ae27ebfa9606419209faa17eba81542d85929008dcf3a446814"
     );
     assert_ne!(expected.digest(), expected.canonical_digest());
 
@@ -360,19 +362,26 @@ fn dashboard_url_is_a_canonical_public_automata_origin() {
 }
 
 #[test]
-fn dashboard_url_uses_an_explicit_schema_two_migration() {
+fn schema_three_requires_dashboard_and_workflow_permission_authority() {
     let explicit = manifest(vec![public_repository()]);
-    let configured = load_value("dashboard-schema-two.json", &explicit)
-        .expect("schema 2 requires and accepts an explicit trusted dashboard origin");
+    let configured = load_value("dashboard-schema-three.json", &explicit)
+        .expect("schema 3 accepts its explicit dashboard and workflow authority");
     assert_eq!(
         configured.dashboard_url().as_str(),
         "https://ci.automata.example/"
     );
 
-    let mut legacy = explicit.clone();
-    legacy["schema"] = json!(1);
+    let mut legacy_two = explicit.clone();
+    legacy_two["schema"] = json!(2);
     assert_eq!(
-        load_value("dashboard-schema-one.json", &legacy),
+        load_value("dashboard-schema-two.json", &legacy_two),
+        Err(GithubProviderConfigError)
+    );
+
+    let mut legacy_one = explicit.clone();
+    legacy_one["schema"] = json!(1);
+    assert_eq!(
+        load_value("dashboard-schema-one.json", &legacy_one),
         Err(GithubProviderConfigError)
     );
 
@@ -579,6 +588,7 @@ fn server_loads_one_sorted_mixed_visibility_registry_without_loading_nested_secr
     let private = &provider.repositories()[0];
     let public = &provider.repositories()[1];
     assert_eq!(private.installation_id().get(), 101);
+    assert_eq!(private.installation_binding_generation().get(), 1);
     assert_eq!(
         private.internal_repository_id().as_bytes(),
         *github_provider_repository_id(private.tenant(), private.repository_id())
@@ -760,6 +770,10 @@ fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
         ("app-revision", vec!["app", "configuration_revision"]),
         ("verifier-revision", vec!["webhook", "verifier_revision"]),
         ("installation", vec!["repositories", "0", "installation_id"]),
+        (
+            "installation-binding-generation",
+            vec!["repositories", "0", "installation_binding_generation"],
+        ),
         ("repository", vec!["repositories", "0", "repository_id"]),
         ("owner", vec!["repositories", "0", "repository_owner_id"]),
         (
@@ -806,6 +820,15 @@ fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
         .expect("repository object")
         .remove("authority_profile");
     cases.push(("missing-authority-profile", missing_authority_profile));
+    let mut missing_installation_generation = manifest(vec![private_repository()]);
+    missing_installation_generation["repositories"][0]
+        .as_object_mut()
+        .expect("repository object")
+        .remove("installation_binding_generation");
+    cases.push((
+        "missing-installation-binding-generation",
+        missing_installation_generation,
+    ));
     let mut invalid_issuer = manifest(vec![private_repository()]);
     invalid_issuer["app"]["jwt_issuer"] = json!("repository_id");
     cases.push(("jwt-issuer", invalid_issuer));
@@ -863,6 +886,30 @@ fn typed_values_and_nested_sources_fail_closed() {
     authority_revision["repositories"][0]["authorities"]["checks_write"]["policy_revision"] =
         json!(8);
     cases.push(("authority-policy", authority_revision));
+    let mut workflow_authority_revision = manifest(vec![private_repository()]);
+    workflow_authority_revision["repositories"][0]["authorities"]
+        ["workflow_permissions_read"]["policy_revision"] = json!(8);
+    cases.push(("workflow-authority-policy", workflow_authority_revision));
+    let mut missing_workflow_authority = manifest(vec![private_repository()]);
+    missing_workflow_authority["repositories"][0]["authorities"]
+        .as_object_mut()
+        .expect("authorities object")
+        .remove("workflow_permissions_read");
+    cases.push(("missing-workflow-authority", missing_workflow_authority));
+    let mut duplicate_checks_authority = manifest(vec![private_repository()]);
+    let checks_authority_id = duplicate_checks_authority["repositories"][0]["authorities"]
+        ["checks_write"]["authority_id"]
+        .clone();
+    duplicate_checks_authority["repositories"][0]["authorities"]
+        ["workflow_permissions_read"]["authority_id"] = checks_authority_id;
+    cases.push(("duplicate-checks-authority", duplicate_checks_authority));
+    let mut duplicate_private_authority = manifest(vec![private_repository()]);
+    let private_authority_id = duplicate_private_authority["repositories"][0]["authorities"]
+        ["private_repository_source_read"]["authority_id"]
+        .clone();
+    duplicate_private_authority["repositories"][0]["authorities"]
+        ["workflow_permissions_read"]["authority_id"] = private_authority_id;
+    cases.push(("duplicate-private-authority", duplicate_private_authority));
 
     for (case, value) in cases {
         assert_eq!(
@@ -876,7 +923,7 @@ fn typed_values_and_nested_sources_fail_closed() {
 #[test]
 fn noncurrent_provider_config_schema_fails_closed() {
     let expected = Err(GithubProviderConfigError);
-    for unsupported in [0, 1, 3, u16::MAX] {
+    for unsupported in [0, 1, 2, u16::MAX] {
         let mut value = manifest(vec![private_repository()]);
         value["schema"] = json!(unsupported);
         assert_eq!(load_value("schema.json", &value), expected);

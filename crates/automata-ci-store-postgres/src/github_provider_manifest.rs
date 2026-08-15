@@ -11,7 +11,8 @@ use super::{
     },
 };
 use automata_ci_store::{
-    AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName, GithubProviderManifest,
+    AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName,
+    GithubInstallationBindingGeneration, GithubProviderManifest,
     GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
     GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderOrigins,
@@ -32,6 +33,7 @@ const CURRENT_MANIFEST_QUERY: &str = r"
         revision.manifest_revision,
         revision.manifest_digest,
         revision.provider_installation_id,
+        revision.installation_binding_generation,
         revision.github_repository_id,
         revision.github_repository_owner_id,
         revision.github_repository_name,
@@ -190,6 +192,7 @@ impl GithubProviderManifestRepository for PostgresStore {
                 revision.manifest_revision,
                 revision.manifest_digest,
                 revision.provider_installation_id,
+                revision.installation_binding_generation,
                 revision.github_repository_id,
                 revision.github_repository_owner_id,
                 revision.github_repository_name,
@@ -262,7 +265,7 @@ impl GithubProviderManifestRepository for PostgresStore {
 }
 
 #[allow(clippy::single_match_else)] // Current and absent pointer states are symmetric.
-async fn bootstrap_locked_manifest(
+pub(super) async fn bootstrap_locked_manifest(
     transaction: &mut Transaction<'_, Postgres>,
     desired: &GithubProviderManifest,
     current: Option<GithubProviderManifestRecord>,
@@ -327,6 +330,8 @@ async fn bootstrap_locked_manifest(
         }
         None => {
             if desired.revision().get() != 1
+                || desired.installation_binding_generation()
+                    != GithubInstallationBindingGeneration::initial()
                 || connection_has_manifest_revisions(transaction, desired.connection_id()).await?
             {
                 return Err(GithubProviderManifestStoreError::ConfigurationDrift);
@@ -365,7 +370,7 @@ fn map_runtime_policy_error(
     }
 }
 
-async fn lock_or_create_tenant(
+pub(super) async fn lock_or_create_tenant(
     connection: &mut PgConnection,
     tenant: &str,
 ) -> Result<(), GithubProviderManifestStoreError> {
@@ -401,7 +406,7 @@ async fn lock_or_create_tenant(
     Ok(())
 }
 
-async fn lock_or_create_repository(
+pub(super) async fn lock_or_create_repository(
     connection: &mut PgConnection,
     manifest: &GithubProviderManifest,
 ) -> Result<(), GithubProviderManifestStoreError> {
@@ -541,7 +546,7 @@ async fn verify_repository_publication_policy(
     Ok(())
 }
 
-async fn lock_current_manifest(
+pub(super) async fn lock_current_manifest(
     connection: &mut PgConnection,
     connection_id: ProviderConnectionId,
 ) -> Result<Option<GithubProviderManifestRecord>, GithubProviderManifestStoreError> {
@@ -630,6 +635,7 @@ async fn insert_manifest_revision(
             runner_policy_digest, runner_policy_object_key,
             runner_policy_size_bytes, runner_policy_media_type,
             runtime_policy_revision, runtime_policy_digest,
+            installation_binding_generation,
             registered_at_ms
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
@@ -637,7 +643,7 @@ async fn insert_manifest_revision(
             $20, $21, $22, $23, $24, $25, $26, $27,
             $28, $29, $30, $31, $32, $33, $34, $35,
             $36, $37, $38, $39, $40, $41, $42, $43, $44, $45,
-            $46, $47, $48, $49, $50, $51, $52, $53
+            $46, $47, $48, $49, $50, $51, $52, $53, $54
         )
         ",
     )
@@ -727,6 +733,7 @@ async fn insert_manifest_revision(
     .bind(manifest.runner_policy().object().media_type())
     .bind(pg_bigint(manifest.runtime_policy_revision().get()))
     .bind(manifest.runtime_policy_digest().as_bytes().as_slice())
+    .bind(pg_bigint(manifest.installation_binding_generation().get()))
     .bind(registered_at.get())
     .execute(connection)
     .await
@@ -817,6 +824,11 @@ fn decode_manifest_record(
     .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
     let installation_id = ProviderInstallationId::new(positive_u64(
         row.try_get("provider_installation_id")
+            .map_err(operation_error)?,
+    )?)
+    .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
+    let installation_binding_generation = GithubInstallationBindingGeneration::new(positive_u64(
+        row.try_get("installation_binding_generation")
             .map_err(operation_error)?,
     )?)
     .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
@@ -1067,7 +1079,8 @@ fn decode_manifest_record(
         GithubProviderOrigins::github_dot_com(),
         limits,
         revision,
-    );
+    )
+    .with_installation_binding_generation(installation_binding_generation);
     if let Some(owner_id) = github_repository_owner_id {
         manifest = manifest.with_repository_owner_id(owner_id);
     }

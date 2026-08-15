@@ -7,10 +7,12 @@ use automata_ci_control::runner_control::{
     RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer as _,
 };
 use automata_ci_core::{
-    AttemptId, FencingToken, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobSource, Lease,
-    LeaseId, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
-    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, UnixMillis,
-    ValueTemplate, WorkflowId,
+    AttemptId, FencingToken, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope,
+    JobPermissionRequest, JobSource, Lease, LeaseId, RunId, RunValueTemplates, RunnerId,
+    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
+    StepId, StepIr, TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind,
+    TrustEvidence, TrustOriginKind, TrustPermissionAuthority, TrustPolicy, TrustRepositoryEvidence,
+    TrustSnapshot, TrustTokenRecursion, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_protocol_protobuf::encode_job_ir;
@@ -51,6 +53,25 @@ fn job() -> JobIrEnvelope {
 }
 
 fn job_for(repository: &str, git_ref: &str, event_name: &str) -> JobIrEnvelope {
+    job_for_snapshot(
+        repository,
+        git_ref,
+        event_name,
+        same_repository_snapshot(repository),
+    )
+}
+
+fn job_for_snapshot(
+    repository: &str,
+    git_ref: &str,
+    event_name: &str,
+    trust_snapshot: TrustSnapshot,
+) -> JobIrEnvelope {
+    let permission_request = match trust_snapshot.authority().permissions() {
+        TrustPermissionAuthority::Requested => JobPermissionRequest::ProviderDefault,
+        TrustPermissionAuthority::ReadOnly => JobPermissionRequest::ReadAll,
+        TrustPermissionAuthority::DenyAll => JobPermissionRequest::mapping([]),
+    };
     JobIrEnvelope::new(
         WorkflowId::new(),
         JobSource::new(
@@ -94,8 +115,62 @@ fn job_for(repository: &str, git_ref: &str, event_name: &str) -> JobIrEnvelope {
                     ShellTemplate::default_shell(),
                 )),
             )],
-        ),
+        )
+        .with_permission_request(permission_request)
+        .with_trust_snapshot(trust_snapshot),
     )
+}
+
+fn same_repository_snapshot(repository: &str) -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(actor("actor-1"))
+                .with_repositories(
+                    TrustRepositoryEvidence::new(repository, "owner-1").expect("source repository"),
+                    TrustRepositoryEvidence::new(repository, "owner-1").expect("target repository"),
+                )
+                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                .with_revisions("source-sha", "target-sha", "execution-sha")
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("same-repository trust")
+}
+
+fn fork_snapshot(repository: &str) -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::ProviderWebhook,
+                TrustEventKind::PullRequest,
+            )
+            .with_original_actor(actor("actor-1"))
+            .with_source_actor(actor("fork-actor"))
+            .with_repositories(
+                TrustRepositoryEvidence::new("fork/repository", "fork-owner")
+                    .expect("source repository"),
+                TrustRepositoryEvidence::new(repository, "owner-1").expect("target repository"),
+            )
+            .with_refs("refs/heads/feature", "refs/heads/main", "refs/pull/1/merge")
+            .with_revisions("source-sha", "target-sha", "execution-sha")
+            .with_fork(true),
+        )
+        .expect("fork trust")
+}
+
+fn deny_all_snapshot() -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(TrustEvidence::new(
+            TrustOriginKind::ProviderWebhook,
+            TrustEventKind::Push,
+        ))
+        .expect("incomplete evidence is a deny-all decision")
+}
+
+fn actor(id: &str) -> TrustActorEvidence {
+    TrustActorEvidence::new(id, TrustActorKind::User, TrustAutomationKind::None)
+        .expect("actor evidence")
 }
 
 fn job_ir_metadata(job: &JobIrEnvelope) -> JobIrMetadata {
@@ -308,6 +383,59 @@ async fn cross_attempt_fence_and_expiry_are_rejected() {
         .expose_secret();
     clock.set(80);
     assert_eq!(authority.verify(token), Err(TokenError::Expired));
+}
+
+#[tokio::test]
+async fn fork_cache_is_read_only_and_incomplete_evidence_mints_no_authority() {
+    let clock = Arc::new(MutableClock::new(25));
+    let authority = authority(clock);
+    let issuer =
+        GithubResultsRuntimeAuthorityIssuer::new(authority.clone(), 60, [cache_repository()])
+            .expect("runtime issuer");
+    let lease = make_lease(
+        AttemptId::new(),
+        FencingToken::new(13).expect("fence"),
+        UnixMillis::new(25_000),
+    );
+
+    let fork = job_for_snapshot(
+        "owner/repository",
+        "refs/pull/1/merge",
+        "pull_request",
+        fork_snapshot("owner/repository"),
+    );
+    let fork_metadata = job_ir_metadata(&fork);
+    let fork_bundle = issuer
+        .issue(authority_request(&fork, &fork_metadata, &lease))
+        .await
+        .expect("fork results authority");
+    let fork_token = fork_bundle
+        .get(GITHUB_RESULTS_RUNTIME_AUTHORITY)
+        .expect("fork results authority remains available")
+        .credential()
+        .expose_secret();
+    let fork_claims = authority.verify(fork_token).expect("fork token verifies");
+    assert!(!fork_claims.cache().scopes().is_empty());
+    assert!(
+        fork_claims
+            .cache()
+            .scopes()
+            .iter()
+            .all(|scope| scope.permission() == CachePermission::Read)
+    );
+
+    let denied = job_for_snapshot(
+        "owner/repository",
+        "refs/heads/main",
+        "push",
+        deny_all_snapshot(),
+    );
+    let denied_metadata = job_ir_metadata(&denied);
+    let denied_bundle = issuer
+        .issue(authority_request(&denied, &denied_metadata, &lease))
+        .await
+        .expect("deny-all has an empty authority bundle");
+    assert!(denied_bundle.as_slice().is_empty());
 }
 
 #[test]

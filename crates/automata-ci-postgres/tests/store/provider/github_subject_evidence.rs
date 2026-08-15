@@ -454,7 +454,7 @@ async fn remove_authenticated_event_schema_guards(database: &TestDatabase) -> Te
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines)] // One forward-schema proof covers every authenticated event reader.
 async fn authenticated_event_readers_reject_forward_envelope_schemas() -> TestResult {
     run_with_database(|database| async move {
         let fixture = bootstrap(
@@ -1816,6 +1816,7 @@ fn repository_dispatch_acceptance(
                 "application/vnd.automata.github-authenticated-event+json",
             )
             .expect("event object"),
+            crate::support::provider_delivery_event_envelope(digest_byte.wrapping_add(2)),
             UnixMillis::new(accepted_at),
         )
         .expect("delivery"),
@@ -1868,6 +1869,7 @@ fn acceptance_for_manifest(
                 "application/vnd.automata.github-authenticated-event+json",
             )
             .expect("event object"),
+            crate::support::provider_delivery_event_envelope(digest_byte.wrapping_add(2)),
             UnixMillis::new(accepted_at),
         )
         .expect("delivery"),

@@ -12,7 +12,7 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{
     JobAuthorityProfile, JobIrVersionRange, JobLifecycle, LogAck, OperationId, Sha256Digest,
-    UnixMillis,
+    TrustSecretAuthority, UnixMillis,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
@@ -1319,14 +1319,24 @@ impl DurableRunnerControlHandler {
         *stage = RunnerLeaseRequestStage::OfferManagedSecretBindingIssue;
         let managed_secret_bindings = match (
             job.job().authority_profile(),
+            job.job().trust_snapshot().authority().secrets(),
             self.ports.managed_secret_bindings.as_ref(),
         ) {
-            (JobAuthorityProfile::Standard, Some(issuer)) => issuer
+            (JobAuthorityProfile::Standard, TrustSecretAuthority::Eligible, Some(issuer)) => issuer
                 .issue(authority_request)
                 .await
                 .map_err(port_application_error)?,
-            (JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard, None)
-            | (JobAuthorityProfile::CredentialFree, Some(_)) => {
+            (
+                JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard,
+                TrustSecretAuthority::Denied,
+                _,
+            )
+            | (
+                JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard,
+                TrustSecretAuthority::Eligible,
+                None,
+            )
+            | (JobAuthorityProfile::CredentialFree, TrustSecretAuthority::Eligible, Some(_)) => {
                 ManagedSecretBindingOverlay::empty(claim.lease())
             }
         };

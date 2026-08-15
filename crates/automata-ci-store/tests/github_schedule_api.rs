@@ -942,6 +942,8 @@ fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
         "neutral-schedules".into(),
         manifest.connection_id(),
         registry_id(112),
+        manifest.revision(),
+        manifest.digest(),
         SOURCE_REVISION.into(),
         "refs/heads/main".into(),
         archive.clone(),
@@ -956,6 +958,8 @@ fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
     assert_eq!(fire.repository_name(), "neutral-schedules");
     assert_eq!(fire.connection_id(), manifest.connection_id());
     assert_eq!(fire.registry_id(), registry_id(112));
+    assert_eq!(fire.manifest_revision(), manifest.revision());
+    assert_eq!(fire.manifest_digest(), manifest.digest());
     assert_eq!(fire.source_revision(), SOURCE_REVISION);
     assert_eq!(fire.default_branch_ref(), "refs/heads/main");
     assert_eq!(fire.archive(), &archive);

@@ -14,8 +14,10 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{
     ContextValue, JobAuthorityProfile, JobConclusion, JobPermissionRequest, JobRuntimeContext,
-    OutputSensitivity, RunId, RunIdAlias, SecretBinding, Sha256Digest, UnixMillis,
-    WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
+    OutputSensitivity, RunId, RunIdAlias, SecretBinding, Sha256Digest, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, UnixMillis, WorkflowEventProvenance,
+    WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
@@ -85,7 +87,7 @@ const RUNTIME_POLICY: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a","id":"github/ubuntu-24-04"},
     "selector":"ubuntu-latest"
-  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 const WORKFLOW_SOURCE: &str = r"name: Autonomous CI
@@ -1542,7 +1544,8 @@ async fn new_harness_with(
             7,
             1,
         )
-        .expect("execution context"),
+        .expect("execution context")
+        .with_trust_snapshot(trusted_workflow_dispatch_snapshot()),
         authority_profile,
         runner_policy,
         runtime_policy,
@@ -1584,6 +1587,27 @@ async fn new_harness_with(
         clock,
         trace,
     }
+}
+
+fn trusted_workflow_dispatch_snapshot() -> TrustSnapshot {
+    let repository =
+        TrustRepositoryEvidence::new("100", "10").expect("stable repository trust evidence");
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::WorkflowDispatch,
+                TrustEventKind::WorkflowDispatch,
+            )
+            .with_original_actor(
+                TrustActorEvidence::new("200", TrustActorKind::User, TrustAutomationKind::None)
+                    .expect("stable actor trust evidence"),
+            )
+            .with_repositories(repository.clone(), repository)
+            .with_refs(GIT_REF, GIT_REF, GIT_REF)
+            .with_revisions(REVISION, REVISION, REVISION)
+            .with_fork(false),
+        )
+        .expect("complete same-repository trust snapshot")
 }
 
 fn assert_executor_debug(executor: &GithubAutonomousWorkflowPhaseExecutor) {

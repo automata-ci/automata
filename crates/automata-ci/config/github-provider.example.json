@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "transport": { "mode": "github_dot_com" },
   "dashboard_url": "https://ci.automata.example/",
   "app": {
@@ -27,6 +27,7 @@
       "tenant_id": "automata-main",
       "connection_id": "11111111-1111-4111-8111-111111111111",
       "installation_id": 23456789,
+      "installation_binding_generation": 1,
       "repository_id": 34567890,
       "repository_owner_id": 45678901,
       "repository": "automata-ci/automata",
@@ -128,6 +129,10 @@
           "authority_id": "22222222-2222-4222-8222-222222222222",
           "policy_revision": 1
         },
+        "workflow_permissions_read": {
+          "authority_id": "66666666-6666-4666-8666-666666666666",
+          "policy_revision": 1
+        },
         "private_repository_source_read": null
       }
     },
@@ -135,6 +140,7 @@
       "tenant_id": "automata-main",
       "connection_id": "33333333-3333-4333-8333-333333333333",
       "installation_id": 23456789,
+      "installation_binding_generation": 1,
       "repository_id": 56789012,
       "repository_owner_id": 45678901,
       "repository": "automata-ci/private-service",
@@ -234,6 +240,10 @@
       "authorities": {
         "checks_write": {
           "authority_id": "44444444-4444-4444-8444-444444444444",
+          "policy_revision": 1
+        },
+        "workflow_permissions_read": {
+          "authority_id": "77777777-7777-4777-8777-777777777777",
           "policy_revision": 1
         },
         "private_repository_source_read": {

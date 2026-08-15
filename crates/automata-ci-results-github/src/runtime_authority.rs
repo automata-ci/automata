@@ -4,12 +4,14 @@ use async_trait::async_trait;
 use automata_ci_control::runner_control::{
     ControlPortError, RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer,
 };
+use automata_ci_core::{TrustCacheAuthority, TrustResultsAuthority};
 use automata_ci_protocol::{
     JobRuntimeAuthorities, JobRuntimeAuthority, RuntimeAuthorityCredential, RuntimeAuthorityName,
 };
 
 use crate::{
-    CacheRepositoryMetadata, ExecutionAuthority, HmacResultsAuthority, derive_cache_authority,
+    CacheAccessScope, CacheAuthority, CachePermission, CacheRepositoryMetadata, ExecutionAuthority,
+    HmacResultsAuthority, derive_cache_authority,
 };
 
 const MAX_CACHE_AUTHORITY_REPOSITORIES: usize = 1_024;
@@ -75,6 +77,16 @@ impl RuntimeAuthorityIssuer for GithubResultsRuntimeAuthorityIssuer {
         &self,
         request: RuntimeAuthorityIssueRequest<'_>,
     ) -> Result<JobRuntimeAuthorities, ControlPortError> {
+        let trust = request.job().job().trust_snapshot().authority();
+        match (trust.results(), trust.cache()) {
+            (TrustResultsAuthority::Denied, TrustCacheAuthority::Denied) => {
+                return JobRuntimeAuthorities::new(Vec::new(), request.job(), request.lease())
+                    .map_err(|_| ControlPortError::Corrupt);
+            }
+            (TrustResultsAuthority::Standard, TrustCacheAuthority::ReadWrite)
+            | (TrustResultsAuthority::Untrusted, TrustCacheAuthority::ReadOnly) => {}
+            _ => return Err(ControlPortError::Corrupt),
+        }
         let issued_at_millis =
             u64::try_from(request.issued_at().get()).map_err(|_| ControlPortError::Corrupt)?;
         let issued_at_seconds = issued_at_millis / 1_000;
@@ -110,6 +122,11 @@ impl RuntimeAuthorityIssuer for GithubResultsRuntimeAuthorityIssuer {
             repository_metadata,
         )
         .map_err(|_| ControlPortError::Corrupt)?;
+        let cache = match trust.cache() {
+            TrustCacheAuthority::ReadWrite => cache,
+            TrustCacheAuthority::ReadOnly => read_only_cache(&cache)?,
+            TrustCacheAuthority::Denied => return Err(ControlPortError::Corrupt),
+        };
         let token = self
             .authority
             .issue_at(execution, &cache, issued_at_seconds, self.valid_for_seconds)
@@ -131,4 +148,15 @@ impl RuntimeAuthorityIssuer for GithubResultsRuntimeAuthorityIssuer {
         JobRuntimeAuthorities::new(vec![authority], job, lease)
             .map_err(|_| ControlPortError::Corrupt)
     }
+}
+
+fn read_only_cache(cache: &CacheAuthority) -> Result<CacheAuthority, ControlPortError> {
+    let scopes = cache
+        .scopes()
+        .iter()
+        .filter(|scope| scope.permission().can_read())
+        .map(|scope| CacheAccessScope::new(scope.scope(), CachePermission::Read))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ControlPortError::Corrupt)?;
+    CacheAuthority::new(cache.repository(), scopes).map_err(|_| ControlPortError::Corrupt)
 }

@@ -8,12 +8,14 @@ mod changed_files;
 mod checks;
 mod config;
 mod endpoint;
+mod event;
 mod pagination;
 mod repository;
 mod repository_path;
 mod response;
 mod webhook;
 mod webhook_event;
+mod workflow_permissions;
 
 pub use changed_files::{
     GithubCompletePullRequestDiff, GithubCompletePushDiff, GithubPullRequestDiffAuthority,
@@ -36,6 +38,18 @@ pub use config::{
     GITHUB_API_VERSION, GithubHttpConfigurationError, GithubHttpLimits, GithubTrustedOrigins,
 };
 pub use endpoint::GithubHttpEndpoint;
+pub use event::{
+    GITHUB_EVENT_ENVELOPE_SCHEMA_V1, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    GITHUB_EVENT_REGISTRY_SCHEMA_V1, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubEventActivityPolicy,
+    GithubEventActor, GithubEventActorKind, GithubEventChangedFilesStrategy,
+    GithubEventEnvelopeError, GithubEventFacts, GithubEventRawBlobIdentity,
+    GithubEventRecursionPolicy, GithubEventRefFacts, GithubEventRefRule, GithubEventRegistryEntry,
+    GithubEventRegistryError, GithubEventRegistryV1, GithubEventRepositoryFacts,
+    GithubEventSourceRule, GithubEventTriggerModel, GithubEventTrustFact,
+    GithubMergeGroupEventFacts, GithubPullRequestEventFacts, GithubPushEventFacts,
+    GithubRepositoryDispatchEventFacts, GithubSealedEventEnvelopeV1, GithubTrustDerivation,
+    GithubWorkflowEventKind, MAX_GITHUB_EVENT_ENVELOPE_BYTES, derive_github_trust_snapshot,
+};
 pub use webhook::{
     AuthenticatedGithubWebhook, GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubPushRef, GithubPushRefKind, GithubPushRepository,
@@ -52,4 +66,8 @@ pub use webhook_event::{
     GithubWebhookRepository, VerifiedGithubCheckRun, VerifiedGithubCheckSuite,
     VerifiedGithubMergeGroup, VerifiedGithubPullRequest, VerifiedGithubRepositoryDispatch,
     VerifiedGithubWebhook,
+};
+pub use workflow_permissions::{
+    GithubDefaultWorkflowPermission, GithubWorkflowPermissionDefaults,
+    GithubWorkflowPermissionDefaultsRequest,
 };

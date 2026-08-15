@@ -6,12 +6,12 @@ use automata_ci_core::JobAuthorityProfile;
 use automata_ci_github_delivery::GithubScheduleServiceConfig;
 use automata_ci_results_github::CacheRepositoryMetadata;
 use automata_ci_store::{
-    GithubCheckName, GithubProviderGitRef, GithubProviderManifestRevision,
-    GithubProviderWorkflowSelection, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, TenantScope, WorkflowRuntimePolicyRevision,
-    github_provider_repository_id,
+    GithubCheckName, GithubInstallationBindingGeneration, GithubProviderGitRef,
+    GithubProviderManifestRevision, GithubProviderWorkflowSelection, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, ProviderInstallationId, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
+    WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
 use serde::Deserialize;
@@ -27,7 +27,7 @@ pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
-const CONFIG_SCHEMA: u16 = 2;
+const CONFIG_SCHEMA: u16 = 3;
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -595,6 +595,7 @@ pub struct GithubProviderRepositoryConfig {
     internal_repository_id: GithubProviderInternalRepositoryId,
     connection_id: GithubProviderConnectionId,
     installation_id: ProviderInstallationId,
+    installation_binding_generation: GithubInstallationBindingGeneration,
     repository_id: ProviderRepositoryId,
     repository_owner_id: ProviderRepositoryOwnerId,
     repository_name: GithubRepositoryName,
@@ -609,6 +610,7 @@ pub struct GithubProviderRepositoryConfig {
     workflow_selection: GithubProviderWorkflowSelection,
     check_name: GithubCheckName,
     checks_write_authority: GithubProviderAuthorityConfig,
+    workflow_permissions_authority: GithubProviderAuthorityConfig,
     private_source_authority: Option<GithubProviderAuthorityConfig>,
 }
 
@@ -619,6 +621,9 @@ impl GithubProviderRepositoryConfig {
         let connection_id = GithubProviderConnectionId::parse(&raw.connection_id)?;
         let installation_id = ProviderInstallationId::new(raw.installation_id)
             .map_err(|_| GithubProviderConfigError)?;
+        let installation_binding_generation =
+            GithubInstallationBindingGeneration::new(raw.installation_binding_generation)
+                .map_err(|_| GithubProviderConfigError)?;
         let repository_id =
             ProviderRepositoryId::new(raw.repository_id).map_err(|_| GithubProviderConfigError)?;
         let internal_repository_id =
@@ -658,9 +663,12 @@ impl GithubProviderRepositoryConfig {
             GithubCheckName::new(raw.check_name).map_err(|_| GithubProviderConfigError)?;
         let RawAuthorities {
             checks_write,
+            workflow_permissions_read,
             private_repository_source_read,
         } = raw.authorities;
         let checks_write_authority = GithubProviderAuthorityConfig::validate(&checks_write)?;
+        let workflow_permissions_authority =
+            GithubProviderAuthorityConfig::validate(&workflow_permissions_read)?;
         let private_source_authority = match (visibility, private_repository_source_read) {
             (ProviderRepositoryVisibility::Public, RawPrivateAuthority::Null(())) => None,
             (ProviderRepositoryVisibility::Private, RawPrivateAuthority::Authority(authority)) => {
@@ -669,6 +677,7 @@ impl GithubProviderRepositoryConfig {
             _ => return Err(GithubProviderConfigError),
         };
         if checks_write_authority.policy_revision != policy_revision
+            || workflow_permissions_authority.policy_revision != policy_revision
             || private_source_authority
                 .as_ref()
                 .is_some_and(|authority| authority.policy_revision != policy_revision)
@@ -680,6 +689,7 @@ impl GithubProviderRepositoryConfig {
             internal_repository_id,
             connection_id,
             installation_id,
+            installation_binding_generation,
             repository_id,
             repository_owner_id,
             repository_name,
@@ -694,6 +704,7 @@ impl GithubProviderRepositoryConfig {
             workflow_selection,
             check_name,
             checks_write_authority,
+            workflow_permissions_authority,
             private_source_authority,
         })
     }
@@ -720,6 +731,12 @@ impl GithubProviderRepositoryConfig {
     #[must_use]
     pub const fn installation_id(&self) -> ProviderInstallationId {
         self.installation_id
+    }
+
+    /// Returns the required positive generation for this installation binding.
+    #[must_use]
+    pub const fn installation_binding_generation(&self) -> GithubInstallationBindingGeneration {
+        self.installation_binding_generation
     }
 
     /// Returns the stable positive GitHub repository identity.
@@ -806,6 +823,12 @@ impl GithubProviderRepositoryConfig {
         &self.checks_write_authority
     }
 
+    /// Returns the mandatory exact workflow-permissions-read authority configuration.
+    #[must_use]
+    pub const fn workflow_permissions_authority(&self) -> &GithubProviderAuthorityConfig {
+        &self.workflow_permissions_authority
+    }
+
     /// Returns the exact private-source authority only for a Private repository.
     #[must_use]
     pub const fn private_source_authority(&self) -> Option<&GithubProviderAuthorityConfig> {
@@ -838,8 +861,12 @@ impl fmt::Debug for GithubProviderRepositoryConfig {
             )
             .field("check_name", &"[redacted]")
             .field("checks_write_authority", &self.checks_write_authority)
+            .field(
+                "workflow_permissions_authority",
+                &self.workflow_permissions_authority,
+            )
             .field("private_source_authority", &self.private_source_authority)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -907,6 +934,7 @@ fn validate_unique_repositories(
             || !repository_names.insert(repository.repository_name.as_str().to_ascii_lowercase())
             || !internal_repository_ids.insert(repository.internal_repository_id)
             || !authority_ids.insert(repository.checks_write_authority.authority_id)
+            || !authority_ids.insert(repository.workflow_permissions_authority.authority_id)
             || repository
                 .private_source_authority
                 .as_ref()
@@ -983,6 +1011,7 @@ struct RawRepository {
     tenant_id: String,
     connection_id: String,
     installation_id: u64,
+    installation_binding_generation: u64,
     repository_id: u64,
     repository_owner_id: u64,
     repository: String,
@@ -1016,6 +1045,7 @@ enum RawAuthorityProfile {
 #[serde(deny_unknown_fields)]
 struct RawAuthorities {
     checks_write: RawAuthority,
+    workflow_permissions_read: RawAuthority,
     private_repository_source_read: RawPrivateAuthority,
 }
 

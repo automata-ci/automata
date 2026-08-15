@@ -22,14 +22,50 @@ use automata_ci_store::{
 use uuid::Uuid;
 
 #[test]
-fn checks_service_policy_is_fixed_and_digest_bound() {
+fn maintenance_can_be_scoped_to_one_exact_authority() {
+    let identity = identity(
+        GithubServerServiceScope::WorkflowPermissionsRead,
+        GithubServerServiceJwtIssuer::AppClientId,
+    );
+    let selector = GithubServerServiceAuthoritySelector::from_identity(&identity);
+    let request = ClaimNextGithubServerServiceMaintenance::for_authority(
+        selector.clone(),
+        worker(),
+        UnixMillis::new(1_000),
+        UnixMillis::new(2_000),
+    )
+    .expect("targeted maintenance request");
+    assert_eq!(request.tenant(), identity.tenant());
+    assert_eq!(request.authority(), Some(&selector));
+
+    let unscoped = ClaimNextGithubServerServiceMaintenance::new(
+        identity.tenant().clone(),
+        worker(),
+        UnixMillis::new(1_000),
+        UnixMillis::new(2_000),
+    )
+    .expect("tenant maintenance request");
+    assert!(unscoped.authority().is_none());
+}
+
+#[test]
+fn server_service_policies_are_fixed_disjoint_and_digest_bound() {
     let checks = GithubServerServiceScope::ChecksWrite;
     let source = GithubServerServiceScope::PrivateRepositorySourceRead;
+    let workflow_permissions = GithubServerServiceScope::WorkflowPermissionsRead;
     assert_eq!(checks.permissions_json(), r#"{"checks":"write"}"#);
     assert!(!checks.permissions_json().contains("contents"));
     assert_eq!(source.permissions_json(), r#"{"contents":"read"}"#);
     assert!(!source.permissions_json().contains("checks"));
+    assert_eq!(
+        workflow_permissions.permissions_json(),
+        r#"{"administration":"read"}"#
+    );
+    assert!(!workflow_permissions.permissions_json().contains("checks"));
+    assert!(!workflow_permissions.permissions_json().contains("contents"));
     assert_ne!(checks.policy_digest(), source.policy_digest());
+    assert_ne!(checks.policy_digest(), workflow_permissions.policy_digest());
+    assert_ne!(source.policy_digest(), workflow_permissions.policy_digest());
 
     for action in [
         GithubServerServiceAction::EnsureCheckSuite,
@@ -42,9 +78,14 @@ fn checks_service_policy_is_fixed_and_digest_bound() {
     for action in [
         GithubServerServiceAction::FetchPrivateRepositoryRevision,
         GithubServerServiceAction::FetchPrivateRepositoryChangedFiles,
+        GithubServerServiceAction::DiscoverPrivateRepositorySchedules,
     ] {
         assert_eq!(action.required_scope(), source);
     }
+    assert_eq!(
+        GithubServerServiceAction::ObserveWorkflowPermissionDefaults.required_scope(),
+        workflow_permissions
+    );
 }
 
 #[test]

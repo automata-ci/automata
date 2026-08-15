@@ -215,6 +215,8 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             .claim_due_github_schedule_fire(claim_request)
             .await?
             .expect("due fire");
+        assert_eq!(claimed.manifest_revision(), manifest.revision());
+        assert_eq!(claimed.manifest_digest(), manifest.digest());
         assert_eq!(claimed.source_revision(), "1111111111111111111111111111111111111111");
         assert_eq!(claimed.entry().cron_expression(), "0/5 * * * *");
         assert_eq!(claimed.entry().timezone(), "UTC");
@@ -423,13 +425,72 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             .admit_scheduled_github_workflow(command.clone(), second.claim())
             .await?;
         assert!(!admitted.is_replay());
+        let promoted_manifest = fixture_private_github_manifest_revision(
+            manifest.tenant().clone(),
+            connection,
+            manifest.github_repository_id().get(),
+            manifest.github_repository_name().as_str(),
+            manifest.github_repository_owner_id(),
+            2,
+            2,
+        );
+        database
+            .store()
+            .bootstrap_github_provider_repository(fixture_github_repository_bootstrap(
+                promoted_manifest.clone(),
+                database_now(database.pool()).await?,
+            ))
+            .await?;
         assert_eq!(
             database
                 .store()
-                .admit_scheduled_github_workflow(command, second.claim())
+                .admit_scheduled_github_workflow(command.clone(), second.claim())
                 .await?
                 .run_id(),
             admitted.run_id()
+        );
+        let generalized: (String, Uuid, String, String, Uuid, Uuid) = sqlx::query_as(
+            r"
+            SELECT selection.origin_kind_name, selection.origin_id,
+                   selection.event_name, selection.workflow_path,
+                   control.control_id, check_subject.event_control_subject_id
+            FROM event_subject_selections AS selection
+            JOIN event_subject_progress AS progress
+              ON progress.tenant_id = selection.tenant_id
+             AND progress.subject_id = selection.subject_id
+             AND progress.selection_digest = selection.selection_digest
+            JOIN event_control_subjects AS control
+              ON control.tenant_id = selection.tenant_id
+             AND control.subject_id = selection.subject_id
+             AND control.selection_digest = selection.selection_digest
+            JOIN github_check_subjects AS check_subject
+              ON check_subject.tenant_id = selection.tenant_id
+             AND check_subject.workflow_run_id = progress.run_id
+             AND check_subject.subject_kind = 'workflow'
+            WHERE progress.run_id = $1 AND progress.outcome_kind = 'admitted'
+            ",
+        )
+        .bind(admitted.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(generalized.0, "schedule_fire");
+        assert_eq!(generalized.1, second.claim().fire_id().as_uuid());
+        assert_eq!(generalized.2, "schedule");
+        assert_eq!(generalized.3, command.workflow_path());
+        assert!(!generalized.4.is_nil());
+        assert_eq!(generalized.5, generalized.4);
+        let control_mutation = sqlx::query(
+            "UPDATE github_check_subjects SET event_control_subject_id = NULL WHERE id = $1",
+        )
+        .bind(check.subject_id().as_uuid())
+        .execute(database.pool())
+        .await
+        .expect_err("a generalized Check control link is immutable");
+        assert_eq!(
+            control_mutation
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("github_check_subjects_event_control_immutable"),
         );
         wait_until_database_at_or_after(database.pool(), reconcile_not_before.get()).await?;
         let reconcile_now = database_now(database.pool()).await?;
@@ -499,14 +560,14 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
         let successor_claim = claim_discovery(
             database.store(),
             GithubScheduleRegistryId::from_uuid(Uuid::from_u128(0x5906))?,
-            manifest.clone(),
+            promoted_manifest.clone(),
             source_authority.clone(),
             discovery_worker,
         )
         .await?;
         let successor_registry = registry(
             successor_claim,
-            manifest.clone(),
+            promoted_manifest,
             source_authority.clone(),
             "2222222222222222222222222222222222222222",
             [23; 32],

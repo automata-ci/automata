@@ -157,7 +157,7 @@ const RUNNER_POLICY_CONFIGURATION: &[u8] = br#"{
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24.04"},
     "selector":"Ubuntu-24.04"
-  }],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
 }"#;
 
 #[derive(Clone, Copy, Debug)]
@@ -1125,6 +1125,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
         "tenant_id": case.tenant,
         "connection_id": uuid(case.connection_id),
         "installation_id": case.installation_id,
+        "installation_binding_generation": 1,
         "repository_id": case.repository_id,
         "repository_owner_id": case.repository_owner_id,
         "repository": case.repository,
@@ -1142,6 +1143,10 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
                 case.checks_authority_id + authority_id_offset,
                 policy_revision,
             ),
+            "workflow_permissions_read": authority(
+                case.checks_authority_id + authority_id_offset + 0x1000_0000,
+                policy_revision,
+            ),
             "private_repository_source_read": case.private_source_authority_id
                 .map_or(Value::Null, |id| {
                     authority(id + authority_id_offset, policy_revision)
@@ -1152,7 +1157,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
 
 fn config_document(manifest_revision: u64, rotated: bool) -> Value {
     json!({
-        "schema": 2,
+        "schema": 3,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
