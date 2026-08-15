@@ -31,6 +31,7 @@ use automata_ci_workflow_service::{
 use bytes::Bytes;
 use thiserror::Error;
 use tokio::sync::OwnedMutexGuard;
+use tracing::warn;
 
 use crate::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryPrivateRepositoryAction,
@@ -44,6 +45,14 @@ use crate::{
 };
 
 const GITHUB_PROVIDER: &str = "github";
+
+fn invalid_processor_state(stage: &'static str) -> GithubDeliveryWorkflowProcessorError {
+    warn!(
+        stage,
+        "GitHub workflow processing rejected inconsistent state"
+    );
+    GithubDeliveryWorkflowProcessorError::InvariantViolation
+}
 
 fn processor_claim_error(error: GithubDeliveryWorkerError) -> GithubDeliveryWorkflowProcessorError {
     match error {
@@ -356,7 +365,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         request: &GithubDeliveryWorkflowRequest<'_>,
     ) -> Result<ProviderDeliveryWorkflowConclusion, GithubDeliveryWorkflowProcessorError> {
         if !valid_authenticated_event_request(request) {
-            return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
+            return Err(invalid_processor_state("authenticated_event_request"));
         }
         let Ok(source) = std::str::from_utf8(request.workflow_source()) else {
             return Ok(failed("github.workflow.invalid_source_encoding"));
@@ -369,7 +378,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             return Ok(failed("github.workflow.frontend_rejected"));
         }
         let Some(source_plan) = parsed.plan() else {
-            return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
+            return Err(invalid_processor_state("accepted_frontend_without_plan"));
         };
         let metadata = match request.event() {
             automata_ci_github::VerifiedGithubWebhook::Push(push) => {
@@ -390,7 +399,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(dispatch) => {
                 GithubEventMetadata::repository_dispatch(dispatch.event_type())
             }
-            _ => return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation),
+            _ => return Err(invalid_processor_state("unsupported_authenticated_event")),
         };
         let report = compile(
             source_plan,
@@ -674,14 +683,14 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                     .cloned()
                     .unwrap_or_else(ContextValue::empty_object);
                 let Some(plan) = report.into_parts().0 else {
-                    return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
+                    return Err(invalid_processor_state("accepted_compilation_without_plan"));
                 };
                 let base_context = JobRuntimeContext::new_base(
                     inputs,
                     ContextValue::empty_object(),
                     BTreeMap::new(),
                 )
-                .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
+                .map_err(|_| invalid_processor_state("base_runtime_context"))?;
                 Box::pin(self.admit_authenticated_event(request, plan, base_context)).await
             }
             CompilationDisposition::NotSelected(reason) => Ok(skipped(reason)),
@@ -719,11 +728,11 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             repository.owner(),
             repository.name(),
         )
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
+        .map_err(|_| invalid_processor_state("repository_coordinates"))?;
         let idempotency = WorkflowAdmissionIdempotency::provider_delivery(
             request.identity().delivery_id().to_owned(),
         )
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
+        .map_err(|_| invalid_processor_state("admission_idempotency"))?;
         let workflow_name = plan.name().map_or_else(
             || request.workflow_path().to_owned(),
             |name| name.value().clone(),
@@ -742,10 +751,13 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         .git_ref(event_coordinates.git_ref())
         .workflow_name(workflow_name)
         .run_attempt(1)
-        .repository_workflow_sources(repository_workflow_sources(
-            request.repository_source(),
-            request.manifest_pinned_evidence(),
-        )?)
+        .repository_workflow_sources(
+            repository_workflow_sources(
+                request.repository_source(),
+                request.manifest_pinned_evidence(),
+            )
+            .map_err(|_| invalid_processor_state("repository_workflow_sources"))?,
+        )
         .build();
         let admission = match admission {
             Ok(admission) => admission,
@@ -753,7 +765,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 WorkflowAdmissionRequestError::InvalidPlan
                 | WorkflowAdmissionRequestError::ProvenanceMismatch
                 | WorkflowAdmissionRequestError::DeliveryMismatch,
-            ) => return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation),
+            ) => return Err(invalid_processor_state("admission_request_provenance")),
             Err(_) => return Ok(failed("github.workflow.admission_request_rejected")),
         };
         let operation = request.lease().lock_operation().await;
@@ -775,7 +787,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             current_snapshot.claimed_at(),
             current_snapshot.expires_at(),
         )
-        .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
+        .map_err(|_| invalid_processor_state("authenticated_delivery_claim"))?;
         let admission_result = self
             .admission
             .admit_authenticated_github_delivery(admission, current_claim)
@@ -785,14 +797,20 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             Ok(result) => {
                 let run_id = result.receipt().run_id();
                 if run_id.as_uuid().is_nil() {
-                    return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
+                    return Err(invalid_processor_state("nil_admission_run_id"));
                 }
                 Ok(ProviderDeliveryWorkflowConclusion::Admitted { run_id })
             }
             Err(WorkflowAdmissionError::Store(
                 LogicalWorkflowAdmissionStoreError::RunNumberExhausted,
             )) => Ok(failed("github.workflow.run_number_exhausted")),
-            Err(error) => Err(admission_error(&error)),
+            Err(error) => {
+                warn!(
+                    stage = admission_error_stage(&error),
+                    "GitHub workflow admission rejected inconsistent state"
+                );
+                Err(admission_error(&error))
+            }
         }
     }
 }
@@ -1288,6 +1306,22 @@ fn admission_error(error: &WorkflowAdmissionError) -> GithubDeliveryWorkflowProc
         | WorkflowAdmissionError::Internal => {
             GithubDeliveryWorkflowProcessorError::InvariantViolation
         }
+    }
+}
+
+fn admission_error_stage(error: &WorkflowAdmissionError) -> &'static str {
+    match error {
+        WorkflowAdmissionError::Verification(_) => "admission_verification",
+        WorkflowAdmissionError::ReusableExpansion(_) => "admission_reusable_expansion",
+        WorkflowAdmissionError::CredentialDiscovery(_) => "admission_credential_discovery",
+        WorkflowAdmissionError::Blob(_) => "admission_blob",
+        WorkflowAdmissionError::Store(_) => "admission_store",
+        WorkflowAdmissionError::AdmissionValue(_) => "admission_value",
+        WorkflowAdmissionError::LogicalValue(_) => "admission_logical_value",
+        WorkflowAdmissionError::ConcurrencyEvaluation => "admission_concurrency_evaluation",
+        WorkflowAdmissionError::WorkflowDispatchEvidence => "admission_dispatch_evidence",
+        WorkflowAdmissionError::Serialization => "admission_serialization",
+        WorkflowAdmissionError::Internal => "admission_internal",
     }
 }
 
