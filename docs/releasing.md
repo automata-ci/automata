@@ -212,11 +212,29 @@ is in the [profile guide](../images/github-hosted-ubuntu-24.04-x64/README.md).
 ## Prepare a service-proxy candidate
 
 `.ci/workflows/service-proxy-image.yml` is disabled for the same issuer
-mismatch. The credential-free path below is the service-proxy portion of the
-ordinary CI [`dist_build` recipe](../.ci/workflows/ci.yml). It requires the
-pinned Rust toolchain, `binutils`, musl tools, Podman, Node.js 24.19.0 with npm
-11.17.0, and `cargo-cyclonedx` 0.5.9; see the
+mismatch. The credential-free path below mirrors the service-proxy artifact and
+policy checks in ordinary CI while retaining the manual and release default:
+Podman plus the required live process probe. It requires the pinned Rust
+toolchain, `binutils`, musl tools, Podman, Node.js 24.19.0 with npm 11.17.0, and
+`cargo-cyclonedx` 0.5.9; see the
 [development prerequisites](development.md#static-linux-distribution).
+
+The ordinary native CI `dist_build` job instead explicitly selects the
+`buildah-chroot` backend and `metadata-only` image verification. Nested Automata
+jobs cannot create the additional namespaces needed by Podman, so that backend
+uses Buildah's chroot isolation and host network. A fail-closed validator admits
+only the reviewed `FROM scratch`, metadata, local `COPY`, user, working-directory,
+and entrypoint instructions; it rejects executable or remote-input instructions
+before Buildah starts. The earlier static-binary check supplies the process
+contract. Buildah still inspects the image metadata, and
+`service-proxy-candidate.py` still validates the exported OCI descriptors,
+configuration, source bindings, and candidate provenance before the subsequent
+`prepare-candidate` policy gate accepts it.
+
+Reproducibility comparisons are backend-local: CI compares two Buildah outputs,
+while the manual and release paths compare Podman outputs. Both backends produce
+OCI candidates accepted by the same validators, but their output bytes are not
+claimed to match each other.
 
 Run it from a clean checkout where the four named `target/` output directories
 do not already exist:

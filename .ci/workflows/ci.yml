@@ -87,7 +87,10 @@ jobs:
           python3 scripts/ci/tests/integration-test-targets.test.py
           python3 scripts/ci/tests/release-handoff.test.py
           python3 scripts/ci/tests/rust-coverage.test.py
+          python3 scripts/ci/tests/service-proxy-buildah-containerfile.test.py
           python3 scripts/ci/tests/service-proxy-candidate.test.py
+          ./scripts/ci/tests/service-proxy-image.test.sh
+          python3 scripts/ci/tests/service-proxy-publication.test.py
 
       - name: Verify Prometheus metrics contract
         run: |
@@ -317,7 +320,8 @@ jobs:
         run: |
           install -d -m 0700 -- "$TMPDIR"
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends binutils musl-tools podman
+          sudo apt-get install --yes --no-install-recommends \
+            binutils buildah musl-tools podman
 
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -368,11 +372,9 @@ jobs:
 
       - name: Prepare digest-bound private service-proxy image candidate
         env:
-          AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman
+          AUTOMATA_SERVICE_PROXY_OCI_BUILDER: buildah-chroot
+          AUTOMATA_SERVICE_PROXY_PROCESS_PROBE: metadata-only
         run: |
-          if [[ -n "${AUTOMATA_ENVIRONMENT_PROFILE_ID:-}" ]]; then
-            export AUTOMATA_SERVICE_PROXY_PROCESS_PROBE=metadata-only
-          fi
           ./scripts/ci/prepare-service-proxy-context.sh \
             target/service-proxy-context \
             "$AUTOMATA_EXPECTED_VERSION" \

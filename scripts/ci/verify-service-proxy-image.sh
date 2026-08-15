@@ -32,8 +32,8 @@ if [[ "$runtime" == auto ]]; then
   fi
 fi
 case "$runtime" in
-  docker | podman) ;;
-  *) die "container runtime must be docker, podman, or auto" ;;
+  buildah | docker | podman) ;;
+  *) die "container runtime must be buildah, docker, podman, or auto" ;;
 esac
 command -v "$runtime" >/dev/null 2>&1 || die "requested runtime is unavailable"
 
@@ -42,7 +42,10 @@ case "$process_probe" in
   required | metadata-only) ;;
   *) die "AUTOMATA_SERVICE_PROXY_PROCESS_PROBE must be required or metadata-only" ;;
 esac
-readonly process_probe
+if [[ "$runtime" == buildah && "$process_probe" != metadata-only ]]; then
+  die "Buildah supports only metadata-only image verification"
+fi
+readonly runtime process_probe
 
 automata_init_target_root "$repository_root"
 automata_set_target_tmpdir \
@@ -54,18 +57,32 @@ cleanup() {
   rm -rf -- "$scratch_directory"
 }
 trap cleanup EXIT
-"$runtime" image inspect "$image" > "$scratch_directory/inspection.json" \
-  || die "candidate image is unavailable"
-python3 - "$scratch_directory/inspection.json" "$version" "$revision" "$created" <<'PY'
+if [[ "$runtime" == buildah ]]; then
+  buildah inspect --type image "$image" > "$scratch_directory/inspection.json" \
+    || die "candidate image is unavailable"
+else
+  "$runtime" image inspect "$image" > "$scratch_directory/inspection.json" \
+    || die "candidate image is unavailable"
+fi
+python3 - \
+  "$scratch_directory/inspection.json" \
+  "$version" \
+  "$revision" \
+  "$created" \
+  "$runtime" <<'PY'
 import json
 import pathlib
 import sys
 
-version, revision, created = sys.argv[2:5]
-documents = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
-if not isinstance(documents, list) or len(documents) != 1:
-    raise SystemExit("service-proxy-image: image inspection was not singular")
-config = documents[0].get("Config")
+version, revision, created, runtime = sys.argv[2:6]
+inspection = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+if runtime == "buildah":
+    oci = inspection.get("OCIv1") if isinstance(inspection, dict) else None
+    config = oci.get("config") if isinstance(oci, dict) else None
+else:
+    if not isinstance(inspection, list) or len(inspection) != 1:
+        raise SystemExit("service-proxy-image: image inspection was not singular")
+    config = inspection[0].get("Config")
 if not isinstance(config, dict):
     raise SystemExit("service-proxy-image: image configuration is missing")
 labels = config.get("Labels")
