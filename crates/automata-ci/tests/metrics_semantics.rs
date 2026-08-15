@@ -81,13 +81,13 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         .filter_map(|line| line.split_once(' ').map(|(sample, _value)| sample))
         .filter(|sample| is_semantic_metric(sample.split('{').next().expect("sample name")))
         .count();
-    assert_eq!(semantic_series, 1_118);
+    assert_eq!(semantic_series, 1_122);
     let all_series = exposition
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .count();
     assert_eq!(
-        all_series, 5_344,
+        all_series, 5_348,
         "the preinitialized series set must match the reviewed cardinality manifest"
     );
     assert_eq!(

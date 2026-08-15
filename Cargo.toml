@@ -189,8 +189,17 @@ must_use_candidate = "allow"
 # debug symbols for the workspace's large dependency graph.
 debug = "line-tables-only"
 
+# Dependency backtraces rarely need source locations. Keeping debug metadata
+# only for workspace crates cuts both compile work and local target size while
+# preserving useful file/line information in Automata code.
+[profile.dev.package."*"]
+debug = false
+
 [profile.test]
 debug = "line-tables-only"
+
+[profile.test.package."*"]
+debug = false
 
 [profile.release]
 codegen-units = 1
