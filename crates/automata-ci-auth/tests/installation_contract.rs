@@ -17,11 +17,10 @@ use automata_ci_auth::{
     login::LoginTransactionId,
     secret::{SecretBytes, SecretString},
     session::{
-        CreateSession, CreateSessionOutcome, DurableSession, DurableSessionIdentity,
-        HumanSessionRepository, ResolveSession, ResolveSessionOutcome, RevokeOwnSession,
-        RevokeOwnSessionOutcome, RevokePrincipalSessions, RevokePrincipalSessionsOutcome,
-        SessionId, SessionKind, SessionRepositoryFuture, SessionTokenDigestKeyId, TouchSession,
-        TouchSessionOutcome,
+        DurableSession, DurableSessionIdentity, HumanSessionRepository, ResolveSession,
+        ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome, RevokePrincipalSessions,
+        RevokePrincipalSessionsOutcome, SessionId, SessionKind, SessionRepositoryFuture,
+        SessionTokenDigestKeyId, TouchSession, TouchSessionOutcome,
     },
     session_credential::{
         SessionCredentialKey, SessionCredentialKeyring, SessionCredentialService,
@@ -40,10 +39,6 @@ use support::{DeterministicRandom, FixedClock};
 struct UnusedSessionRepository;
 
 impl HumanSessionRepository for UnusedSessionRepository {
-    fn create(&self, _request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
-        panic!("preparing an installation session must not persist it")
-    }
-
     fn resolve<'a>(
         &'a self,
         _request: &'a ResolveSession,

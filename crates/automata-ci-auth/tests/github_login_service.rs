@@ -34,11 +34,10 @@ use automata_ci_auth::{
     },
     secret::{SecretBytes, SecretString},
     session::{
-        CreateSession, CreateSessionOutcome, DurableSession, DurableSessionIdentity,
-        HumanSessionRepository, ResolveSession, ResolveSessionOutcome, RevokeOwnSession,
-        RevokeOwnSessionOutcome, RevokePrincipalSessions, RevokePrincipalSessionsOutcome,
-        SessionId, SessionKind, SessionRepositoryFuture, SessionTokenLookup, TouchSession,
-        TouchSessionOutcome,
+        DurableSession, DurableSessionIdentity, HumanSessionRepository, ResolveSession,
+        ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome, RevokePrincipalSessions,
+        RevokePrincipalSessionsOutcome, SessionId, SessionKind, SessionRepositoryFuture,
+        SessionTokenLookup, TouchSession, TouchSessionOutcome,
     },
     session_credential::{
         SessionCredentialKey, SessionCredentialKeyring, SessionCredentialService,
@@ -333,10 +332,6 @@ fn next_version(version: LoginTransactionVersion) -> LoginTransactionVersion {
 struct UnusedSessionRepository;
 
 impl HumanSessionRepository for UnusedSessionRepository {
-    fn create(&self, _request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
-        panic!("coordinator preparation must not create outside the finalizer")
-    }
-
     fn resolve<'a>(
         &'a self,
         _request: &'a ResolveSession,

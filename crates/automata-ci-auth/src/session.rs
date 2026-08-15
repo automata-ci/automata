@@ -525,41 +525,6 @@ pub enum SessionResolutionStatus {
     },
 }
 
-/// Raw-free persistence request for creating one durable session.
-///
-/// The keyed lookup and safe session metadata must be inserted atomically so
-/// neither a token digest nor a session identity can be reused independently.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CreateSession {
-    lookup: SessionTokenLookup,
-    session: DurableSession,
-}
-
-impl CreateSession {
-    /// Binds an opaque-token lookup to its durable safe metadata.
-    #[must_use]
-    pub const fn new(lookup: SessionTokenLookup, session: DurableSession) -> Self {
-        Self { lookup, session }
-    }
-
-    /// Returns the keyed lookup used to authenticate the bearer.
-    #[must_use]
-    pub const fn lookup(&self) -> &SessionTokenLookup {
-        &self.lookup
-    }
-
-    /// Returns the safe durable session metadata to create.
-    #[must_use]
-    pub const fn session(&self) -> &DurableSession {
-        &self.session
-    }
-
-    /// Consumes the request into its keyed lookup and session metadata.
-    pub fn into_parts(self) -> (SessionTokenLookup, DurableSession) {
-        (self.lookup, self.session)
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Raw-free request to resolve one bearer lookup for an exact session kind.
 ///
@@ -788,17 +753,6 @@ impl RevokePrincipalSessions {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-/// Closed result of atomically creating a durable session and token lookup.
-pub enum CreateSessionOutcome {
-    /// Both the session record and token lookup were created.
-    Created,
-    /// The durable session identifier is already assigned.
-    SessionIdConflict,
-    /// The keyed token digest is already assigned to another session.
-    TokenDigestConflict,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Closed result of resolving a durable browser or CLI session.
 pub enum ResolveSessionOutcome {
@@ -929,9 +883,6 @@ pub type SessionRepositoryFuture<'a, T> =
 /// `resolve` and `touch` must compare the session's authorization revision with
 /// the current durable tenant/principal revision in the same database operation.
 pub trait HumanSessionRepository: fmt::Debug + Send + Sync {
-    /// Atomically creates safe session metadata and its keyed token lookup.
-    fn create(&self, request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome>;
-
     /// Resolves one lookup and current tenant authority without exposing the bearer.
     fn resolve<'a>(
         &'a self,

@@ -10,11 +10,11 @@ use automata_ci_auth::{
     human::{AuthenticatedHuman, PrincipalId, ProviderId, ProviderSubject, TenantId},
     secret::{CsrfToken, RandomnessError, SecretBytes, SecureRandom},
     session::{
-        ActivateCliSession, ActivateCliSessionOutcome, CreateSession, CreateSessionOutcome,
-        DurableSession, HumanSessionRepository, ResolveSession, ResolveSessionOutcome,
-        RevokeOwnSession, RevokeOwnSessionOutcome, RevokePrincipalSessions,
-        RevokePrincipalSessionsOutcome, SessionKind, SessionRepositoryError,
-        SessionRepositoryFuture, SessionTokenDigestKeyId, TouchSession, TouchSessionOutcome,
+        ActivateCliSession, ActivateCliSessionOutcome, DurableSession, HumanSessionRepository,
+        ResolveSession, ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome,
+        RevokePrincipalSessions, RevokePrincipalSessionsOutcome, SessionKind,
+        SessionRepositoryError, SessionRepositoryFuture, SessionTokenDigestKeyId, TouchSession,
+        TouchSessionOutcome,
     },
     session_credential::{
         InvalidSessionCredential, MAX_SESSION_CREDENTIAL_KEYS, PreparedSessionCredential,
@@ -47,7 +47,6 @@ struct RepositoryState {
     activation_results: VecDeque<Result<ActivateCliSessionOutcome, SessionRepositoryError>>,
     touch_results: VecDeque<Result<TouchSessionOutcome, SessionRepositoryError>>,
     revoke_results: VecDeque<Result<RevokeOwnSessionOutcome, SessionRepositoryError>>,
-    create_requests: usize,
     resolve_requests: Vec<ResolveSession>,
     activation_requests: Vec<ActivateCliSession>,
     touch_requests: Vec<TouchSession>,
@@ -94,11 +93,6 @@ impl RecordingRepository {
 }
 
 impl HumanSessionRepository for RecordingRepository {
-    fn create(&self, _request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
-        self.state.lock().expect("repository state").create_requests += 1;
-        Box::pin(async { Ok(CreateSessionOutcome::Created) })
-    }
-
     fn resolve<'a>(
         &'a self,
         request: &'a ResolveSession,
@@ -355,15 +349,6 @@ fn nonpersisting_preparation_linearly_binds_raw_credential_to_safe_candidate() {
     let rendered = format!("{prepared:?}");
     assert!(rendered.contains("[REDACTED]"));
     assert!(!rendered.contains(raw));
-    assert_eq!(
-        repository
-            .state
-            .lock()
-            .expect("repository state")
-            .create_requests,
-        0
-    );
-
     let (credential, candidate) = prepared.into_parts();
     let derived_lookup = service
         .derive_lookup_raw(credential.expose_secret(), SessionKind::Browser)
@@ -558,14 +543,6 @@ fn preparation_lifetime_and_overflow_fail_closed_before_storage() {
             .expect_err("preparation overflow"),
         SessionCredentialServiceError::LifetimeOverflow
     );
-    assert_eq!(
-        repository
-            .state
-            .lock()
-            .expect("repository state")
-            .create_requests,
-        0
-    );
     let raw = raw_credential("active", 9);
     assert_eq!(
         block_on(service.touch_raw(&raw, SessionKind::Browser, Duration::from_secs(10),))
@@ -597,14 +574,6 @@ fn randomness_failure_never_reaches_session_storage() {
             )
             .expect_err("random failure"),
         SessionCredentialServiceError::RandomnessUnavailable
-    );
-    assert_eq!(
-        random_repository
-            .state
-            .lock()
-            .expect("repository state")
-            .create_requests,
-        0
     );
 }
 

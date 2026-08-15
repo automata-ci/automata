@@ -4,7 +4,7 @@ use std::{
 };
 
 use automata_ci_auth::{
-    human::{PrincipalId, ProviderId, ProviderSubject, TenantId},
+    human::{PrincipalId, ProviderId, TenantId},
     login::{
         ConsumeLoginTransaction, ConsumeLoginTransactionOutcome, CreateLoginTransactionOutcome,
         LoadLoginTransactionOutcome, LoginBindingDigest, LoginBindingDigestKeyId, LoginTransaction,
@@ -14,8 +14,7 @@ use automata_ci_auth::{
     },
     secret::{SecretBytes as AuthSecretBytes, SecretString},
     session::{
-        ActivateCliSession, ActivateCliSessionOutcome, CreateSession, CreateSessionOutcome,
-        DurableSession, DurableSessionIdentity, HumanSessionRepository, ResolveSession,
+        ActivateCliSession, ActivateCliSessionOutcome, HumanSessionRepository, ResolveSession,
         ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome, RevokePrincipalSessions,
         SessionId, SessionKind, SessionTokenDigest, SessionTokenDigestKeyId, SessionTokenLookup,
         TouchSession, TouchSessionOutcome,
@@ -458,35 +457,70 @@ fn session_lookup(key: &str, byte: u8) -> SessionTokenLookup {
     )
 }
 
-fn durable_session(
-    id: &str,
-    tenant: &str,
+struct SessionSeed<'a> {
+    id: &'a str,
+    tenant: &'a str,
     principal: Uuid,
     kind: SessionKind,
-    revision: u64,
-    idle_expires_at: u64,
-) -> DurableSession {
-    let issued_at = now();
-    DurableSession::new(
-        DurableSessionIdentity::new(
-            SessionId::new(id).expect("session ID"),
-            TenantId::new(tenant).expect("tenant ID"),
-            PrincipalId::new(principal.hyphenated().to_string()).expect("principal ID"),
-            ProviderId::new("github").expect("provider ID"),
-            ProviderSubject::new("42").expect("provider subject"),
-            kind,
-        )
-        .expect("identity"),
-        revision,
-        issued_at,
-        issued_at,
-        issued_at
-            .checked_add(idle_expires_at.checked_sub(100).expect("idle lifetime"))
-            .expect("idle expiry"),
-        issued_at.checked_add(300).expect("absolute expiry"),
-        None,
+    lookup: &'a SessionTokenLookup,
+    authorization_revision: u64,
+    idle_lifetime_seconds: u64,
+}
+
+// These fixtures intentionally seed pre-existing rows without recreating the
+// production session-issuance API.
+async fn seed_session(pool: &PgPool, seed: SessionSeed<'_>) -> TestResult {
+    let database_time_ms: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT * 1000")
+            .fetch_one(pool)
+            .await?;
+    let idle_lifetime_ms = i64::try_from(seed.idle_lifetime_seconds)?
+        .checked_mul(1_000)
+        .expect("idle lifetime milliseconds");
+    let idle_expires_at_ms = database_time_ms
+        .checked_add(idle_lifetime_ms)
+        .expect("idle expiry");
+    let expires_at_ms = database_time_ms
+        .checked_add(300_000)
+        .expect("absolute expiry");
+    let (session_kind, audience, lifecycle_status, activation_deadline_ms) = match seed.kind {
+        SessionKind::Browser => ("browser", "automata.web", "active", None),
+        SessionKind::Cli => (
+            "cli",
+            "automata.cli",
+            "pending_activation",
+            Some(expires_at_ms),
+        ),
+    };
+    sqlx::query(
+        r"
+        INSERT INTO human_sessions (
+            id,tenant_id,principal_id,provider_id,provider_subject,
+            session_kind,audience,token_hash,token_hash_key_id,
+            authorization_revision,predecessor_session_id,issued_at_ms,
+            last_seen_at_ms,idle_expires_at_ms,expires_at_ms,revoked_at_ms,
+            revocation_reason,revision,lifecycle_status,activation_deadline_ms,
+            activated_at_ms
+        ) VALUES ($1,$2,$3,'github','42',$4,$5,$6,$7,$8,NULL,$9,$9,$10,$11,
+                  NULL,NULL,1,$12,$13,NULL)
+        ",
     )
-    .expect("session")
+    .bind(Uuid::parse_str(seed.id)?)
+    .bind(seed.tenant)
+    .bind(seed.principal)
+    .bind(session_kind)
+    .bind(audience)
+    .bind(seed.lookup.digest().as_bytes().as_slice())
+    .bind(seed.lookup.key_id().as_str())
+    .bind(i64::try_from(seed.authorization_revision)?)
+    .bind(database_time_ms)
+    .bind(idle_expires_at_ms)
+    .bind(expires_at_ms)
+    .bind(lifecycle_status)
+    .bind(activation_deadline_ms)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -500,22 +534,19 @@ async fn touch_final_write_cannot_extend_a_session_expired_during_statement_dela
         let repository = PostgresHumanSessionRepository::new(pool.clone());
         let session_id = "abababab-abab-4bab-8bab-abababababab";
         let lookup = session_lookup("touch-delay-hmac-v1", 0x5a);
-        assert_eq!(
-            repository
-                .create(CreateSession::new(
-                    lookup.clone(),
-                    durable_session(
-                        session_id,
-                        "tenant-a",
-                        principal,
-                        SessionKind::Browser,
-                        1,
-                        102,
-                    ),
-                ))
-                .await?,
-            CreateSessionOutcome::Created
-        );
+        seed_session(
+            pool,
+            SessionSeed {
+                id: session_id,
+                tenant: "tenant-a",
+                principal,
+                kind: SessionKind::Browser,
+                lookup: &lookup,
+                authorization_revision: 1,
+                idle_lifetime_seconds: 2,
+            },
+        )
+        .await?;
         let before: (i64, i64) =
             sqlx::query_as("SELECT last_seen_at_ms,revision FROM human_sessions WHERE id=$1")
                 .bind(Uuid::parse_str(session_id)?)
@@ -593,15 +624,19 @@ async fn sessions_enforce_audience_idle_revision_and_tenant_scoped_revocation() 
 
         let first_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
         let first_lookup = session_lookup("session-hmac-v1", 5);
-        assert_eq!(
-            repository
-                .create(CreateSession::new(
-                    first_lookup.clone(),
-                    durable_session(first_id, "tenant-a", principal, SessionKind::Browser, 1, 200),
-                ))
-                .await?,
-            CreateSessionOutcome::Created
-        );
+        seed_session(
+            database.pool(),
+            SessionSeed {
+                id: first_id,
+                tenant: "tenant-a",
+                principal,
+                kind: SessionKind::Browser,
+                lookup: &first_lookup,
+                authorization_revision: 1,
+                idle_lifetime_seconds: 100,
+            },
+        )
+        .await?;
         assert!(matches!(
             repository
                 .resolve(&ResolveSession::new(
@@ -670,12 +705,19 @@ async fn sessions_enforce_audience_idle_revision_and_tenant_scoped_revocation() 
 
         let second_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
         let second_lookup = session_lookup("session-hmac-v1", 6);
-        repository
-            .create(CreateSession::new(
-                second_lookup.clone(),
-                durable_session(second_id, "tenant-a", principal, SessionKind::Browser, 2, 220),
-            ))
-            .await?;
+        seed_session(
+            database.pool(),
+            SessionSeed {
+                id: second_id,
+                tenant: "tenant-a",
+                principal,
+                kind: SessionKind::Browser,
+                lookup: &second_lookup,
+                authorization_revision: 2,
+                idle_lifetime_seconds: 120,
+            },
+        )
+        .await?;
         clock.advance(1_100).await?;
         assert!(matches!(
             repository
@@ -725,12 +767,19 @@ async fn sessions_enforce_audience_idle_revision_and_tenant_scoped_revocation() 
 
         let tenant_b_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
         let tenant_b_lookup = session_lookup("session-hmac-v1", 7);
-        repository
-            .create(CreateSession::new(
-                tenant_b_lookup.clone(),
-                durable_session(tenant_b_id, "tenant-b", principal, SessionKind::Cli, 1, 250),
-            ))
-            .await?;
+        seed_session(
+            database.pool(),
+            SessionSeed {
+                id: tenant_b_id,
+                tenant: "tenant-b",
+                principal,
+                kind: SessionKind::Cli,
+                lookup: &tenant_b_lookup,
+                authorization_revision: 1,
+                idle_lifetime_seconds: 150,
+            },
+        )
+        .await?;
         assert!(matches!(
             repository
                 .resolve(&ResolveSession::new(
@@ -797,19 +846,20 @@ async fn principal_revocation_fails_closed_instead_of_leaving_future_issued_sess
         let principal = seed_human(pool, "tenant-a").await?;
         let repository = PostgresHumanSessionRepository::new(pool.clone());
         let current_id = "12121212-1212-4212-8212-121212121212";
-        repository
-            .create(CreateSession::new(
-                session_lookup("session-hmac-v1", 0x31),
-                durable_session(
-                    current_id,
-                    "tenant-a",
-                    principal,
-                    SessionKind::Browser,
-                    1,
-                    200,
-                ),
-            ))
-            .await?;
+        let current_lookup = session_lookup("session-hmac-v1", 0x31);
+        seed_session(
+            pool,
+            SessionSeed {
+                id: current_id,
+                tenant: "tenant-a",
+                principal,
+                kind: SessionKind::Browser,
+                lookup: &current_lookup,
+                authorization_revision: 1,
+                idle_lifetime_seconds: 100,
+            },
+        )
+        .await?;
         let future_id = Uuid::parse_str("34343434-3434-4434-8434-343434343434")?;
         sqlx::query(
             r"

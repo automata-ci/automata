@@ -14,10 +14,7 @@ use automata_ci_auth::{
         InstallationState,
     },
     login::LoginTransactionId,
-    session::{
-        CreateSession, CreateSessionOutcome, DurableSession, DurableSessionIdentity,
-        SessionRepositoryError,
-    },
+    session::{DurableSession, DurableSessionIdentity, SessionRepositoryError},
     sign_in::PendingSessionConflict,
     vault::{ProviderTokenKey, ProviderTokenVaultError},
 };
@@ -27,7 +24,9 @@ use uuid::Uuid;
 
 use super::{
     PostgresGithubMembershipRepository, PostgresHumanSessionRepository, PostgresProviderTokenVault,
-    session::{database_time_milliseconds, validate_caller_time},
+    session::{
+        CreateSession, CreateSessionOutcome, database_time_milliseconds, validate_caller_time,
+    },
     support::{canonical_uuid, constraint, timestamp_from_milliseconds, timestamp_to_milliseconds},
 };
 
