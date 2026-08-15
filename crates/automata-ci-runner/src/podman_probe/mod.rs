@@ -33,17 +33,6 @@ use elf::load_executable_snapshot;
 use elf::load_running_executable_snapshot;
 use lifecycle::run_lifecycle;
 
-/// Runs the opt-in active Podman/Netavark probe with system adapters.
-pub async fn probe_current_executable() -> CapabilityProbe {
-    probe_current_executable_with_control(
-        Arc::new(SystemCommandExecutor),
-        None,
-        NetworkPolicy::PrivateEgress,
-        &ProbeCancellation::default(),
-    )
-    .await
-}
-
 pub(crate) async fn probe_current_executable_with_cancellation(
     cancellation: &ProbeCancellation,
 ) -> CapabilityProbe {
@@ -203,23 +192,6 @@ fn joined_probe(result: Result<CapabilityProbe, tokio::task::JoinError>) -> Capa
             format!("active Podman probe task failed: {error}"),
         ),
     }
-}
-
-/// Runs an active probe using injected process, HTTP, and executable-inspection adapters.
-pub fn run_active_podman_probe_with(
-    plan: &ActiveProbePlan,
-    commands: &dyn CommandExecutor,
-    readiness: &dyn ReadinessProbe,
-    executable_inspector: &dyn ScratchExecutableInspector,
-) -> CapabilityProbe {
-    run_active_podman_probe_with_control(
-        plan,
-        commands,
-        readiness,
-        executable_inspector,
-        &ProbeCancellation::default(),
-        ActiveProbeLimits::default(),
-    )
 }
 
 /// Runs an active probe with explicit cancellation and aggregate time limits.
