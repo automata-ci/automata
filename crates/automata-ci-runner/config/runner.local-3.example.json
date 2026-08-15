@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "runner_id": "a3e2f8e1-7094-4ca5-a904-82991e0c8df3",
   "control_endpoint": "https://127.0.0.1:9090/",
   "state": {
@@ -110,6 +110,7 @@
     "bucket": "automata-dev",
     "prefix": "automata/v1",
     "loopback_development": true,
+    "tls_trust": { "mode": "web_pki" },
     "operation_timeout_seconds": 30,
     "access_key_id": {
       "kind": "environment",

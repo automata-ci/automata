@@ -1,15 +1,119 @@
 use std::{fmt, net::IpAddr, time::Duration};
 
 use aws_sdk_s3::{Client, config::Region};
+use aws_smithy_http_client::tls::{TlsContext, TrustStore};
+use rustls::{RootCertStore, pki_types::CertificateDer};
 use thiserror::Error;
 use url::{Host, Url};
+use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
+
+use crate::adapter::S3BlobStore;
 
 const MAX_BUCKET_BYTES: usize = 63;
 const MAX_PREFIX_BYTES: usize = 1_024;
 const MAX_REGION_BYTES: usize = 64;
 const MAX_KMS_KEY_ID_BYTES: usize = 2_048;
 const MAX_OPERATION_TIMEOUT: Duration = Duration::from_mins(5);
+
+/// Maximum accepted size of one exact private S3 CA certificate in PEM form.
+pub const MAX_S3_PRIVATE_CA_PEM_BYTES: usize = 1024 * 1024;
+
+/// Closed trust policy for authenticating an HTTPS S3 endpoint.
+#[derive(Clone, Eq, PartialEq)]
+pub struct S3TlsTrust {
+    mode: S3TlsTrustPolicy,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+enum S3TlsTrustPolicy {
+    WebPki,
+    PrivateCa { certificate_pem: Vec<u8> },
+}
+
+impl S3TlsTrust {
+    /// Selects the platform Web PKI root store.
+    #[must_use]
+    pub const fn web_pki() -> Self {
+        Self {
+            mode: S3TlsTrustPolicy::WebPki,
+        }
+    }
+
+    /// Creates an exact single-private-CA trust policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects oversized input, malformed or non-certificate PEM, malformed
+    /// X.509, and certificates that are not marked as certificate authorities.
+    /// The source bytes must be the canonical RFC 7468 encoding: no preamble,
+    /// exactly 64 Base64 characters per non-final line, LF line endings, one
+    /// terminal LF, and no trailing data or second document. When `KeyUsage` is
+    /// present, it must authorize certificate signing.
+    pub fn private_ca(certificate_pem: impl Into<Vec<u8>>) -> Result<Self, S3BlobStoreConfigError> {
+        let certificate_pem = certificate_pem.into();
+        if certificate_pem.is_empty() || certificate_pem.len() > MAX_S3_PRIVATE_CA_PEM_BYTES {
+            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
+        }
+        let (label, certificate_der) = pem_rfc7468::decode_vec(&certificate_pem)
+            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        if label != "CERTIFICATE" {
+            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
+        }
+        let canonical_pem = pem_rfc7468::encode_string(
+            "CERTIFICATE",
+            pem_rfc7468::LineEnding::LF,
+            &certificate_der,
+        )
+        .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        if canonical_pem.as_bytes() != certificate_pem {
+            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
+        }
+        let (remaining, certificate) = parse_x509_certificate(&certificate_der)
+            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        let key_usage = certificate
+            .key_usage()
+            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        if !remaining.is_empty()
+            || !certificate.tbs_certificate.is_ca()
+            || key_usage.is_some_and(|usage| !usage.value.key_cert_sign())
+        {
+            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
+        }
+        RootCertStore::empty()
+            .add(CertificateDer::from(certificate_der))
+            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
+        Ok(Self {
+            mode: S3TlsTrustPolicy::PrivateCa { certificate_pem },
+        })
+    }
+
+    fn tls_context(&self) -> Result<TlsContext, S3BlobStoreConfigError> {
+        let trust_store = match &self.mode {
+            S3TlsTrustPolicy::WebPki => TrustStore::default(),
+            S3TlsTrustPolicy::PrivateCa { certificate_pem } => {
+                TrustStore::empty().with_pem_certificate(certificate_pem.clone())
+            }
+        };
+        TlsContext::builder()
+            .with_trust_store(trust_store)
+            .build()
+            .map_err(|_| S3BlobStoreConfigError::InvalidTlsContext)
+    }
+
+    const fn is_private_ca(&self) -> bool {
+        matches!(&self.mode, S3TlsTrustPolicy::PrivateCa { .. })
+    }
+}
+
+impl fmt::Debug for S3TlsTrust {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match &self.mode {
+            S3TlsTrustPolicy::WebPki => "S3TlsTrust::WebPki",
+            S3TlsTrustPolicy::PrivateCa { .. } => "S3TlsTrust::PrivateCa([certificate redacted])",
+        })
+    }
+}
 
 /// Required server-side encryption policy for every immutable object.
 ///
@@ -165,6 +269,7 @@ pub struct S3BlobStoreConfig {
     bucket: String,
     prefix: Option<String>,
     force_path_style: bool,
+    tls_trust: S3TlsTrust,
     operation_timeout: Duration,
     at_rest_encryption: S3AtRestEncryption,
 }
@@ -175,6 +280,7 @@ struct UnvalidatedS3BlobStoreConfig {
     bucket: String,
     prefix: Option<String>,
     force_path_style: bool,
+    tls_trust: S3TlsTrust,
     operation_timeout: Duration,
     at_rest_encryption: S3AtRestEncryption,
 }
@@ -198,6 +304,7 @@ impl S3BlobStoreConfig {
         bucket: impl Into<String>,
         prefix: Option<String>,
         force_path_style: bool,
+        tls_trust: S3TlsTrust,
         operation_timeout: Duration,
     ) -> Result<Self, S3BlobStoreConfigError> {
         Self::validate(
@@ -207,6 +314,7 @@ impl S3BlobStoreConfig {
                 bucket: bucket.into(),
                 prefix,
                 force_path_style,
+                tls_trust,
                 operation_timeout,
                 at_rest_encryption: S3AtRestEncryption::default(),
             },
@@ -234,6 +342,7 @@ impl S3BlobStoreConfig {
                 bucket: bucket.into(),
                 prefix,
                 force_path_style: true,
+                tls_trust: S3TlsTrust::web_pki(),
                 operation_timeout,
                 at_rest_encryption: S3AtRestEncryption::default(),
             },
@@ -251,9 +360,13 @@ impl S3BlobStoreConfig {
             bucket,
             prefix,
             force_path_style,
+            tls_trust,
             operation_timeout,
             at_rest_encryption,
         } = candidate;
+        if endpoint.scheme() != "https" && tls_trust.is_private_ca() {
+            return Err(S3BlobStoreConfigError::PrivateCaRequiresHttps);
+        }
         let allow_loopback_http = matches!(endpoint_policy, EndpointPolicy::LoopbackDevelopment);
         validate_endpoint(&endpoint, allow_loopback_http)?;
         validate_region(&region)?;
@@ -268,22 +381,27 @@ impl S3BlobStoreConfig {
             bucket,
             prefix,
             force_path_style,
+            tls_trust,
             operation_timeout,
             at_rest_encryption,
         })
     }
 
-    /// Constructs a statically authenticated S3 SDK client.
+    /// Connects this validated policy to one statically authenticated S3 store.
     ///
-    /// The adapter also accepts an externally constructed [`Client`] so a
-    /// deployment may use any SDK credential provider without changing this
-    /// domain configuration.
-    #[must_use]
-    pub fn client(&self, credentials: StaticS3Credentials) -> Client {
+    /// # Errors
+    ///
+    /// Returns a sanitized error if the validated exact TLS trust policy cannot
+    /// be converted into the SDK HTTP client's TLS context.
+    pub fn connect(
+        self,
+        credentials: StaticS3Credentials,
+    ) -> Result<S3BlobStore, S3BlobStoreConfigError> {
         let http_client = aws_smithy_http_client::Builder::new()
             .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
                 aws_smithy_http_client::tls::rustls_provider::CryptoMode::Ring,
             ))
+            .tls_context(self.tls_trust.tls_context()?)
             .build_https();
         let config = aws_sdk_s3::Config::builder()
             .behavior_version_latest()
@@ -293,7 +411,14 @@ impl S3BlobStoreConfig {
             .credentials_provider(credentials.into_sdk())
             .force_path_style(self.force_path_style)
             .build();
-        Client::from_conf(config)
+        Ok(S3BlobStore::from_validated(
+            Client::from_conf(config),
+            &self,
+        ))
+    }
+
+    pub(crate) fn region(&self) -> &str {
+        &self.region
     }
 
     /// Returns the bucket name without credentials.
@@ -319,6 +444,23 @@ impl S3BlobStoreConfig {
     pub fn with_at_rest_encryption(mut self, encryption: S3AtRestEncryption) -> Self {
         self.at_rest_encryption = encryption;
         self
+    }
+
+    /// Rebinds this already-validated target to one exact TLS trust policy.
+    ///
+    /// This preserves the validated endpoint, namespace, addressing, deadline,
+    /// and encryption policy. It exists for products that validate their
+    /// non-secret S3 shape before loading a bounded private-CA source.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a private-CA policy for a plaintext loopback configuration.
+    pub fn with_tls_trust(mut self, tls_trust: S3TlsTrust) -> Result<Self, S3BlobStoreConfigError> {
+        if self.endpoint.scheme() != "https" && tls_trust.is_private_ca() {
+            return Err(S3BlobStoreConfigError::PrivateCaRequiresHttps);
+        }
+        self.tls_trust = tls_trust;
+        Ok(self)
     }
 
     /// Returns the encryption policy verified on every object read.
@@ -355,6 +497,15 @@ pub enum S3BlobStoreConfigError {
     /// The KMS key identifier is empty, oversized, padded, or contains control characters.
     #[error("S3 KMS key identity is invalid")]
     InvalidKmsKeyId,
+    /// The private trust source is not exactly one valid X.509 CA certificate.
+    #[error("S3 private CA source must contain exactly one valid X.509 CA certificate")]
+    InvalidPrivateCa,
+    /// Exact private-CA trust was selected for a plaintext endpoint.
+    #[error("S3 private CA trust requires an HTTPS endpoint")]
+    PrivateCaRequiresHttps,
+    /// The selected exact TLS trust context could not be constructed.
+    #[error("S3 TLS trust context is invalid")]
+    InvalidTlsContext,
 }
 
 fn validate_kms_key_id(value: String) -> Result<String, S3BlobStoreConfigError> {

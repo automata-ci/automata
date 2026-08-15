@@ -2,8 +2,8 @@
 
 Automata supports macOS jobs only through a disposable macOS 15-or-newer ARM64
 virtual machine on an Apple Silicon macOS 15+ host. The former native provider
-has been deleted. Schema v2 has no `macos_native` key, no schema-v1 migration,
-and no host-shared resource mode.
+has been deleted. Current runner product schema v4 has no `macos_native` key,
+no migration from a noncurrent schema, and no host-shared resource mode.
 
 ## Why Virtualization.framework
 
@@ -221,30 +221,12 @@ code requirement, runner identity, endpoints, and credential sources. The
 environment profile manifest digest must exactly equal
 `macos_virtualization.template_manifest_sha256`.
 
-The only accepted boundary is:
-
-```json
-{
-  "schema_version": 3,
-  "state": { "macos_virtualization": "/Volumes/AutomataVM/state" },
-  "macos_virtualization": {
-    "helper_executable": "/Library/Automata/bin/automata-macos-vm-helper",
-    "helper_sha256": "<64 lowercase hex>",
-    "helper_code_requirement": "<strict designated requirement>",
-    "template_manifest": "/Volumes/AutomataVM/templates/macos-15-arm64-v1/manifest.json",
-    "template_manifest_sha256": "<64 lowercase hex>",
-    "storage_volume_uuid": "<uppercase APFS volume UUID>",
-    "storage_quota_bytes": 274877906944,
-    "boot_timeout_seconds": 300,
-    "stop_timeout_seconds": 10
-  },
-  "executor": {
-    "network": "disabled",
-    "root_filesystem": "writable",
-    "privilege": "unprivileged"
-  }
-}
-```
+The linked checked-in example is the sole complete current boundary: runner
+product schema 4. It selects the `macos_virtualization` provider, a writable
+unprivileged executor with networking disabled, and the mandatory closed
+`object_store.tls_trust` policy. Do not reconstruct a product document from a
+partial provider-only excerpt; noncurrent schemas are rejected rather than
+migrated or defaulted.
 
 Run one runner process and one slot per provider root:
 

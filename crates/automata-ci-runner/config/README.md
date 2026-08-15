@@ -21,14 +21,26 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v3 accepts exactly one sandbox provider. Host runners use the
+Product schema v4 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes runners omit
 `state.podman`, `state.windows_hyperv`, and `state.macos_virtualization` and use
 a top-level `kubernetes` object. Windows and macOS runners use their matching
-provider name in both locations. Schema v1, schema v2, `windows_native`, and the
+provider name in both locations. All non-v4 schemas, `windows_native`, and the
 removed macOS native key are rejected, not migrated. The runner loads
 credentials through Kubernetes' standard in-cluster or ambient kubeconfig
 discovery; the JSON remains secret-free.
+
+`object_store.tls_trust` is mandatory and has exactly one of two current
+shapes: `{ "mode": "web_pki" }`, or `{ "mode": "private_ca",
+"certificate_source": { ... } }`. The private-CA source uses the same bounded
+file, environment, or macOS Keychain descriptor contract as other runner
+secure inputs and must contain exactly one canonically encoded RFC 7468 X.509
+CA certificate: 64-column Base64, LF line endings, one terminal LF, no
+preamble/trailing bytes, and `keyCertSign` when KeyUsage is present.
+Private mode installs that certificate into an otherwise empty root store; it
+never merges or retries with platform roots. `loopback_development: true` is
+valid only for a literal-loopback HTTP endpoint with `web_pki` selected; HTTPS
+requires it to be false, and private-CA trust always requires HTTPS.
 
 The Podman BuildKit surface is a separate, default-off opt-in. Configure it
 only with the attempt-scoped Docker API and one locally preloaded, untagged
@@ -419,6 +431,8 @@ Before enrollment, each instance `N` expects:
   `0600`;
 - `AUTOMATA_S3_ACCESS_KEY_ID` and `AUTOMATA_S3_SECRET_ACCESS_KEY` — credentials
   for the configured RustFS bucket;
+- the exact owner-only private-CA file selected by
+  `object_store.tls_trust.certificate_source`, when private trust is enabled;
 - instance-specific durable journal and spool directories owned by the runner
   account;
 - transient Podman state and runtime directories beneath the dedicated tmpfs
@@ -535,7 +549,8 @@ sandbox mounts.
    capability.
 3. Verify the runner-control certificate SAN, trust chain, and configured URL.
 4. Verify the certificate-to-runner database mapping.
-5. Confirm the runner and server use the same S3 bucket and prefix.
+5. Confirm the runner and server use the same S3 endpoint, trust policy,
+   bucket, and prefix.
 6. Audit the Git and Results firewall tables and packet path.
 7. Inspect the runner journal and spool paths under the service account.
 

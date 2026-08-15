@@ -4,9 +4,7 @@ use automata_ci_action::{
     ActionBundleLimits, ActionDefinitionKind, ActionResolver, ActionSubpath,
     ImmutableActionResolver, RepositoryActionRequest,
 };
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_github::GithubHttpEndpoint;
 use automata_ci_scm::{RepositoryId, RevisionSpec};
 use url::Url;
@@ -41,7 +39,7 @@ async fn resolves_pinned_checkout_from_github_into_rustfs() {
         None,
     )
     .expect("test S3 credentials");
-    let store = S3BlobStore::new(config.client(credentials), &config);
+    let store = config.connect(credentials).expect("test S3 store");
     let github = GithubHttpEndpoint::github_dot_com("automata-live-test/0.1.0").unwrap();
     let repository = RepositoryId::new("actions/checkout").unwrap();
     let revision = RevisionSpec::new(CHECKOUT_COMMIT).unwrap();

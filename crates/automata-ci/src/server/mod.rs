@@ -65,6 +65,7 @@ pub use config::{
     SecretSource, ServerConfig, ServerConfigError, VersionedSecretSource,
     VersionedSecretSourceParseError,
 };
+pub(crate) use config::{S3ConnectionConfig, S3Transport};
 pub use github_oidc::{GithubOidcConfig, GithubOidcProductError};
 pub use github_provider::{
     GithubProviderBootstrapError, GithubProviderBootstrapPlan, GithubProviderBootstrapReady,

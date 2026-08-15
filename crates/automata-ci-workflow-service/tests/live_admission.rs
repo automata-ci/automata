@@ -7,9 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_blob::{BlobDescriptor, BlobKey, ImmutableBlobStore as _, MediaType};
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_core::UnixMillis;
 use automata_ci_store::{
     AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, LogicalWorkflowAdmissionReceipt,
@@ -42,12 +40,11 @@ async fn authenticated_admission_publishes_exact_evidence_to_rustfs_before_commi
     .with_at_rest_encryption(S3AtRestEncryption::aws_kms(required_environment(
         "AUTOMATA_TEST_S3_KMS_KEY_ID",
     ))?);
-    let client = config.client(StaticS3Credentials::new(
+    let blobs = Arc::new(config.connect(StaticS3Credentials::new(
         required_environment("AUTOMATA_TEST_S3_ACCESS_KEY"),
         required_environment("AUTOMATA_TEST_S3_SECRET_KEY"),
         None,
-    )?);
-    let blobs = Arc::new(S3BlobStore::new(client, &config));
+    )?)?);
     let repository = Arc::new(RecordingRepository::default());
     let service = WorkflowAdmissionService::with_system_ports(
         blobs.clone(),
