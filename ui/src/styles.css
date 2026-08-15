@@ -9,6 +9,7 @@
 @import "./styles/layout/navigation.css" layer(layout);
 @import "./styles/components/shell.css" layer(components);
 @import "./styles/components/navigation.css" layer(components);
+@import "./styles/components/provider-connection.css" layer(components);
 @import "./styles/components/repository-settings-navigation.css" layer(components);
 @import "./styles/components/controls.css" layer(components);
 @import "./styles/components/surfaces.css" layer(components);

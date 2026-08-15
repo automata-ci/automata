@@ -19,6 +19,8 @@ const expectedExports = [
   "LiveLogController",
   "LiveLogProtocolError",
   "LiveLogRequestError",
+  "ProviderConnectionPanel",
+  "RepositorySelectionList",
   "Shell",
   "THEME_BOOTSTRAP_SCRIPT",
   "ThemeToggle",
