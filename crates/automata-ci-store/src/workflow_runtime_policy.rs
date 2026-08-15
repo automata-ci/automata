@@ -13,6 +13,7 @@ use automata_ci_core::{
     MAX_JOB_PERMISSION_NAME_BYTES, OperatingSystem, PermissionLevel, RunId, RunnerLabel,
     Sha256Digest, UnixMillis,
 };
+use automata_ci_github_permissions::{GITHUB_WORKFLOW_PERMISSIONS, github_workflow_permission};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{MapAccess, Visitor},
@@ -45,8 +46,6 @@ pub const WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT: &str = "/__w";
 
 const POLICY_DIGEST_DOMAIN: &[u8] = b"automata.store.workflow-runtime-policy.v2\0";
 
-const ID_TOKEN_PERMISSION: &str = "id-token";
-
 /// Exact repository-pinned expansions for GitHub permission shorthands.
 ///
 /// Every map is total for its source shorthand: omitted names are denied. The
@@ -76,18 +75,11 @@ impl WorkflowPermissionPolicy {
         validate_permission_map(&provider_default)?;
         validate_permission_map(&read_all)?;
         validate_permission_map(&write_all)?;
-        if read_all
-            .iter()
-            .any(|(name, level)| *level != PermissionLevel::Read || !write_all.contains_key(name))
-            || write_all
+        if read_all != catalog_read_all()
+            || write_all != catalog_write_all()
+            || provider_default
                 .iter()
-                .any(|(name, _)| name != ID_TOKEN_PERMISSION && !read_all.contains_key(name))
-            || provider_default.iter().any(|(name, level)| {
-                !read_all.contains_key(name)
-                    || write_all.get(name).is_none_or(|maximum| {
-                        permission_level_code(*level) > permission_level_code(*maximum)
-                    })
-            })
+                .any(|(name, level)| !catalog_allows(name, *level))
         {
             return Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy);
         }
@@ -96,6 +88,19 @@ impl WorkflowPermissionPolicy {
             read_all,
             write_all,
         })
+    }
+
+    /// Constructs a policy from the exact repository default and the current
+    /// closed GitHub shorthand expansions.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed default or a name/level absent from the current
+    /// GitHub workflow permission catalog.
+    pub fn from_provider_default(
+        provider_default: BTreeMap<String, PermissionLevel>,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
+        Self::new(provider_default, catalog_read_all(), catalog_write_all())
     }
 
     /// Resolves one source request to a complete canonical permission map.
@@ -756,12 +761,46 @@ fn validate_permission_map(
     for (name, level) in permissions {
         if !canonical_permission_name(name)
             || *level == PermissionLevel::None
-            || (name == ID_TOKEN_PERMISSION && *level == PermissionLevel::Read)
+            || !catalog_allows(name, *level)
         {
             return Err(WorkflowRuntimePolicyValueError::InvalidPermissionPolicy);
         }
     }
     Ok(())
+}
+
+fn catalog_read_all() -> BTreeMap<String, PermissionLevel> {
+    GITHUB_WORKFLOW_PERMISSIONS
+        .iter()
+        .copied()
+        .filter(|permission| permission.allows_read())
+        .map(|permission| (permission.name().to_owned(), PermissionLevel::Read))
+        .collect()
+}
+
+fn catalog_write_all() -> BTreeMap<String, PermissionLevel> {
+    GITHUB_WORKFLOW_PERMISSIONS
+        .iter()
+        .copied()
+        .filter_map(|permission| {
+            let level = if permission.allows_write() {
+                PermissionLevel::Write
+            } else if permission.allows_read() {
+                PermissionLevel::Read
+            } else {
+                return None;
+            };
+            Some((permission.name().to_owned(), level))
+        })
+        .collect()
+}
+
+fn catalog_allows(name: &str, level: PermissionLevel) -> bool {
+    github_workflow_permission(name).is_some_and(|permission| match level {
+        PermissionLevel::Read => permission.allows_read(),
+        PermissionLevel::Write => permission.allows_write(),
+        PermissionLevel::None => true,
+    })
 }
 
 fn canonical_permission_name(value: &str) -> bool {
@@ -1163,8 +1202,8 @@ mod tests {
       }],
       "permissions":{
         "provider_default":{"contents":"read"},
-        "read_all":{"contents":"read"},
-        "write_all":{"contents":"write"}
+        "read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},
+        "write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}
       },
       "resources":{
         "maximum_limits":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":17179869184,"cpu_millis":8000},
@@ -1176,7 +1215,7 @@ mod tests {
       },
       "schema":1
     }"#;
-    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"contents":"read"},"write_all":{"contents":"write"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
+    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 
     #[test]
     fn resource_policy_is_canonical_pinned_evidence() {
@@ -1265,11 +1304,11 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "967c02c427c4c09798377cdfdedf9a48d29bf4138b697d13fcf8a011d45b187f"
+            "50cb377906b638e42c7faf825f87f77753c4635331a08a0164a0aefc9fa786d0"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "53a71408ff50d313265e4739196838c06acf9e1430957a2dfadc65f120e3abf7"
+            "1f2eb82b9ee12a4fd364bcb4ec803b8f19b627210a1a4b23b9607657f49be5f9"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
@@ -1394,17 +1433,14 @@ mod tests {
                 BTreeMap::from([("id-token".to_owned(), PermissionLevel::Write)]),
             ),
             WorkflowPermissionPolicy::new(
-                BTreeMap::from([("packages".to_owned(), PermissionLevel::Read)]),
+                BTreeMap::from([("future-scope".to_owned(), PermissionLevel::Read)]),
                 valid.read_all().clone(),
                 valid.write_all().clone(),
             ),
             WorkflowPermissionPolicy::new(
-                BTreeMap::from([("id-token".to_owned(), PermissionLevel::Write)]),
+                BTreeMap::from([("vulnerability-alerts".to_owned(), PermissionLevel::Write)]),
                 valid.read_all().clone(),
-                BTreeMap::from([
-                    ("contents".to_owned(), PermissionLevel::Write),
-                    ("id-token".to_owned(), PermissionLevel::Write),
-                ]),
+                valid.write_all().clone(),
             ),
         ] {
             assert_eq!(
@@ -1535,11 +1571,10 @@ mod tests {
     }
 
     fn permission_policy() -> WorkflowPermissionPolicy {
-        WorkflowPermissionPolicy::new(
-            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-            BTreeMap::from([("contents".to_owned(), PermissionLevel::Write)]),
-        )
+        WorkflowPermissionPolicy::from_provider_default(BTreeMap::from([(
+            "contents".to_owned(),
+            PermissionLevel::Read,
+        )]))
         .expect("permission policy")
     }
 

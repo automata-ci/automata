@@ -17,6 +17,7 @@ use automata_ci_core::{
     SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TemplateValueMap, ValueSource,
     ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId, WorkflowPermissions,
 };
+use automata_ci_github_permissions::github_workflow_permission;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{ReusableWorkflowPermissionSnapshot, WorkflowPermissionPolicy};
 use automata_ci_workflow_github::{
@@ -321,10 +322,35 @@ fn resolved_permission_request(
     ceiling: Option<&ReusableWorkflowPermissionSnapshot>,
 ) -> Result<JobPermissionRequest, LogicalJobProjectionError> {
     let request = permission_policy.resolve(source_permission_request(request));
+    validate_resolved_permission_request(&request)?;
     let Some(ceiling) = ceiling else {
         return Ok(request);
     };
-    reduce_permission_request(request, ceiling.default_level(), ceiling.grants())
+    let request = reduce_permission_request(request, ceiling.default_level(), ceiling.grants())?;
+    validate_resolved_permission_request(&request)?;
+    Ok(request)
+}
+
+fn validate_resolved_permission_request(
+    request: &JobPermissionRequest,
+) -> Result<(), LogicalJobProjectionError> {
+    let JobPermissionRequest::Mapping(grants) = request else {
+        return Err(LogicalJobProjectionError::InvalidPermissionRequest);
+    };
+    for grant in grants {
+        let Some(permission) = github_workflow_permission(grant.name()) else {
+            return Err(LogicalJobProjectionError::InvalidPermissionRequest);
+        };
+        let allowed = match grant.level() {
+            PermissionLevel::None => true,
+            PermissionLevel::Read => permission.allows_read(),
+            PermissionLevel::Write => permission.allows_write(),
+        };
+        if !allowed {
+            return Err(LogicalJobProjectionError::InvalidPermissionRequest);
+        }
+    }
+    Ok(())
 }
 
 fn reduce_permission_request(
@@ -1102,6 +1128,9 @@ pub enum LogicalJobProjectionError {
     /// Credential-free projection retained a managed-secret binding.
     #[error("credential-free projection cannot retain runtime secret bindings")]
     CredentialFreeRuntimeSecrets,
+    /// The resolved request contains an unknown permission or unsupported level.
+    #[error("resolved GitHub permission request is outside the pinned catalog")]
+    InvalidPermissionRequest,
     /// A reusable permission ceiling cannot be encoded without broadening authority.
     #[error("reusable workflow permission ceiling is not representable")]
     UnrepresentablePermissionCeiling,
@@ -1196,14 +1225,10 @@ mod permission_ceiling_tests {
 
     #[test]
     fn repository_policy_resolves_all_permission_shorthands_to_exact_mappings() {
-        let policy = WorkflowPermissionPolicy::new(
-            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-            BTreeMap::from([("contents".to_owned(), PermissionLevel::Read)]),
-            BTreeMap::from([
-                ("contents".to_owned(), PermissionLevel::Write),
-                ("id-token".to_owned(), PermissionLevel::Write),
-            ]),
-        )
+        let policy = WorkflowPermissionPolicy::from_provider_default(BTreeMap::from([(
+            "contents".to_owned(),
+            PermissionLevel::Read,
+        )]))
         .expect("permission policy");
         assert_eq!(
             resolved_permission_request(None, &policy, None).expect("provider default"),
@@ -1212,24 +1237,26 @@ mod permission_ceiling_tests {
                 PermissionLevel::Read,
             )]),
         );
+        let write_all = policy.resolve(JobPermissionRequest::WriteAll);
         assert_eq!(
-            policy.resolve(JobPermissionRequest::WriteAll),
-            JobPermissionRequest::mapping([
-                JobPermissionGrant::new("contents", PermissionLevel::Write),
-                JobPermissionGrant::new("id-token", PermissionLevel::Write),
-            ]),
+            write_all.requested_level("contents"),
+            Some(PermissionLevel::Write)
+        );
+        assert_eq!(
+            write_all.requested_level("id-token"),
+            Some(PermissionLevel::Write)
+        );
+        assert_eq!(
+            write_all.requested_level("vulnerability-alerts"),
+            Some(PermissionLevel::Read)
         );
         let ceiling = BTreeMap::from([
             ("contents".to_owned(), PermissionLevel::Read),
             ("id-token".to_owned(), PermissionLevel::None),
         ]);
         assert_eq!(
-            reduce_permission_request(
-                policy.resolve(JobPermissionRequest::WriteAll),
-                PermissionLevel::None,
-                &ceiling,
-            )
-            .expect("resolved shorthand ceiling"),
+            reduce_permission_request(write_all, PermissionLevel::None, &ceiling,)
+                .expect("resolved shorthand ceiling"),
             JobPermissionRequest::mapping([JobPermissionGrant::new(
                 "contents",
                 PermissionLevel::Read,
@@ -1252,5 +1279,34 @@ mod permission_ceiling_tests {
                 PermissionLevel::Read,
             )]),
         );
+    }
+
+    #[test]
+    fn forged_permission_requests_fail_closed_at_projection() {
+        for request in [
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "future-permission",
+                PermissionLevel::Read,
+            )]),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "id-token",
+                PermissionLevel::Read,
+            )]),
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "vulnerability-alerts",
+                PermissionLevel::Write,
+            )]),
+        ] {
+            assert!(matches!(
+                validate_resolved_permission_request(&request),
+                Err(LogicalJobProjectionError::InvalidPermissionRequest)
+            ));
+        }
+        validate_resolved_permission_request(&JobPermissionRequest::mapping([
+            JobPermissionGrant::new("contents", PermissionLevel::None),
+            JobPermissionGrant::new("id-token", PermissionLevel::Write),
+            JobPermissionGrant::new("vulnerability-alerts", PermissionLevel::Read),
+        ]))
+        .expect("catalog-valid explicit mapping");
     }
 }

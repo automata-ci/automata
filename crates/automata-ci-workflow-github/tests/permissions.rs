@@ -3,6 +3,7 @@ mod support;
 use automata_ci_core::{
     PermissionLevel as PlanPermissionLevel, WorkflowEventProvenance, WorkflowPermissions,
 };
+use automata_ci_github_permissions::GITHUB_WORKFLOW_PERMISSIONS;
 use automata_ci_workflow_github::{
     CompileWorkflowRequest, GithubWorkflowCompiler, PermissionLevel, Permissions,
 };
@@ -73,6 +74,94 @@ fn id_token_write_and_none_survive_current_logical_compilation() {
             .permissions(),
         PlanPermissionLevel::None,
     );
+}
+
+#[test]
+fn every_catalog_permission_accepts_exactly_its_declared_levels() {
+    for permission in GITHUB_WORKFLOW_PERMISSIONS {
+        for (level, allowed) in [
+            ("read", permission.allows_read()),
+            ("write", permission.allows_write()),
+            ("none", true),
+        ] {
+            let source = format!(
+                "on: workflow_dispatch\npermissions:\n  {}: {level}\n{JOB}",
+                permission.name()
+            );
+            let parsed = support::parse(&source);
+            assert_eq!(
+                parsed.is_accepted(),
+                allowed,
+                "{}:{level}: {:#?}",
+                permission.name(),
+                parsed.diagnostics()
+            );
+            if allowed {
+                let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+                    parsed.plan().expect("source plan"),
+                    WorkflowEventProvenance::new("github", "workflow_dispatch"),
+                ));
+                assert!(
+                    compiled.is_accepted(),
+                    "{}:{level}: {:#?}",
+                    permission.name(),
+                    compiled.diagnostics()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_unknown_permission_is_rejected_at_its_exact_key_span() {
+    let source = format!(
+        "on: workflow_dispatch\npermissions:\n  future-scope: read\n  contents: read\n{JOB}"
+    );
+    let parsed = support::parse(&source);
+    assert!(!parsed.is_accepted());
+    let plan = parsed.plan().expect("loss-aware source plan");
+    let diagnostic = parsed
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code() == "github.unknown_permission")
+        .expect("unknown permission diagnostic");
+    assert_eq!(
+        plan.source().slice(diagnostic.primary_span()),
+        Some("future-scope")
+    );
+
+    let Permissions::Mapping { entries, .. } = plan
+        .workflow()
+        .permissions()
+        .expect("retained valid mapping")
+    else {
+        panic!("permissions must remain a mapping");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name().value(), "contents");
+}
+
+#[test]
+fn an_explicit_empty_mapping_is_a_valid_deny_all_request() {
+    let source = format!("on: workflow_dispatch\npermissions: {{}}\n{JOB}");
+    let parsed = support::parse(&source);
+    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
+    let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+        parsed.plan().expect("source plan"),
+        WorkflowEventProvenance::new("github", "workflow_dispatch"),
+    ));
+    assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
+    let WorkflowPermissions::Mapping(grants) = compiled
+        .plan()
+        .expect("logical plan")
+        .logical()
+        .permissions()
+        .expect("permission snapshot")
+        .permissions()
+    else {
+        panic!("permissions must remain an explicit mapping");
+    };
+    assert!(grants.is_empty());
 }
 
 fn assert_permission(permissions: &WorkflowPermissions, expected: PlanPermissionLevel) {

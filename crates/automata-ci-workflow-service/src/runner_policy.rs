@@ -144,8 +144,8 @@ mod tests {
       }],
       "permissions":{
         "provider_default":{"contents":"read"},
-        "read_all":{"contents":"read"},
-        "write_all":{"contents":"write"}
+        "read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},
+        "write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}
       },
       "resources":{
         "defaults":{

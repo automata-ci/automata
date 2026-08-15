@@ -524,6 +524,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "automata-ci-github-permissions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "automata-ci-github-runtime"
 version = "0.1.0"
 dependencies = [
@@ -1073,6 +1082,7 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-blob",
  "automata-ci-core",
+ "automata-ci-github-permissions",
  "automata-ci-key-management",
  "automata-ci-oidc-github",
  "automata-ci-schedule",
@@ -1102,6 +1112,7 @@ name = "automata-ci-workflow-github"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "automata-ci-github-permissions",
  "automata-ci-schedule",
  "flate2",
  "jiff",
@@ -1121,6 +1132,7 @@ dependencies = [
  "automata-ci-blob-s3",
  "automata-ci-core",
  "automata-ci-expression-github",
+ "automata-ci-github-permissions",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-schedule",
