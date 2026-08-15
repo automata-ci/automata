@@ -2412,6 +2412,9 @@ const fn discovery_failure_kind(error: RepositoryWorkflowDiscoveryError) -> &'st
         RepositoryWorkflowDiscoveryError::UnsupportedWorkflowEntry => {
             "github.repository_archive.unsupported_workflow"
         }
+        RepositoryWorkflowDiscoveryError::UnsupportedWorkflowLocation => {
+            "github.repository_archive.unsupported_workflow_location"
+        }
         RepositoryWorkflowDiscoveryError::MissingArchiveRoot => {
             "github.repository_archive.missing_root"
         }
@@ -2542,6 +2545,14 @@ mod lease_tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn github_actions_workflow_authority_has_a_specific_archive_failure() {
+        assert_eq!(
+            discovery_failure_kind(RepositoryWorkflowDiscoveryError::UnsupportedWorkflowLocation),
+            "github.repository_archive.unsupported_workflow_location"
+        );
+    }
 
     #[test]
     fn renewal_apply_reports_only_the_exact_predecessor_expiry_race() {

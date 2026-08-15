@@ -21,9 +21,10 @@ concurrency:
   group: pages-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Automata owns the portable build and screenshot checks. The protected
-# GitHub Pages deployment remains in .github/workflows/pages.yml until
-# Automata supports GitHub deployment environments end to end.
+# Automata owns the portable build and screenshot checks. Protected GitHub
+# Pages deployment is intentionally omitted until Automata supports GitHub
+# deployment environments end to end; this repository must have one workflow
+# authority and therefore cannot also contain .github/workflows.
 jobs:
   build:
     name: Build demo and capture screenshots
