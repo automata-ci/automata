@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-mod support;
+use crate::support;
 
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 

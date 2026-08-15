@@ -37,6 +37,7 @@ AGGREGATES = {
     "automata-ci-runner-spool": "runner_spool",
     "automata-ci-runner-transport": "runner_transport",
     "automata-ci-sandbox-kubernetes": "sandbox_kubernetes",
+    "automata-ci-sandbox-podman": "sandbox_podman",
     "automata-ci-secret": "secret",
     "automata-ci-store": "store_contracts",
     "automata-ci-ui-renderer": "ui_renderer",
@@ -50,12 +51,16 @@ LIVE_TARGETS = {
     "automata-ci-action": "live_github_rustfs",
     "automata-ci-action-github": "live_checkout_pipeline",
     "automata-ci-github": "live_repository_snapshot",
+    "automata-ci-sandbox-podman": "live_rootless",
     "automata-ci-workflow-service": "live_admission",
 }
 
-# This immutable fixture is intentionally compiled by both workflow-service
-# targets. Every other reviewed source must have exactly one target owner.
+# These reviewed support modules are intentionally compiled by both their
+# hermetic and live targets. Every other source must have exactly one owner.
 SHARED_SOURCE_OWNERS = {
+    "automata-ci-sandbox-podman": {
+        "support/mod.rs": frozenset({"sandbox_podman", "live_rootless"}),
+    },
     "automata-ci-workflow-service": {
         "support/mod.rs": frozenset({"workflow_service", "live_admission"}),
     },
@@ -65,6 +70,20 @@ SHARED_SOURCE_OWNERS = {
 # exact file and expression prevents a newly disabled test source from being
 # mistaken for ordinary aggregate ownership.
 INNER_CFG_EXCEPTIONS = {
+    "crates/automata-ci-sandbox-podman/tests/command_executor.rs":
+        '#![cfg(target_os = "linux")]',
+    "crates/automata-ci-sandbox-podman/tests/lifecycle.rs":
+        '#![cfg(target_os = "linux")]',
+    "crates/automata-ci-sandbox-podman/tests/live_rootless.rs":
+        '#![cfg(target_os = "linux")]',
+    "crates/automata-ci-sandbox-podman/tests/observability.rs":
+        '#![cfg(target_os = "linux")]',
+    "crates/automata-ci-sandbox-podman/tests/service_containers.rs":
+        '#![cfg(target_os = "linux")]',
+    "crates/automata-ci-sandbox-podman/tests/state_security.rs":
+        '#![cfg(target_os = "linux")]',
+    "crates/automata-ci-sandbox-podman/tests/support/mod.rs":
+        '#![cfg(target_os = "linux")]',
     "crates/automata-ci-runner/tests/macos_vm_runner_process_e2e.rs":
         '#![cfg(target_os = "macos")]',
     "crates/automata-ci-runner/tests/podman_active_probe.rs":
