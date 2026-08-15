@@ -224,11 +224,13 @@ variants fail rather than falling back to an empty client shell.
 `npm run build` also assembles the private, registry-neutral `@automata/ui`
 package beneath `dist/package`. Its deliberately small public surface contains
 the existing Core page renderer, the shared application shell, the theme
-control and bootstrap script, the page-model types, the resumable live-log
-controller, and a stable compiled stylesheet at `@automata/ui/styles.css`. A
-separate host can render its own page content inside `Shell` and supply its own
-authenticated live-log ticket provider. The package does not contain an
-identity provider, Cloud API knowledge, Cloud-only pages, or a plugin system.
+control and bootstrap script, host-neutral provider connection and repository
+selection components, the page-model types, the resumable live-log controller,
+and a stable compiled stylesheet at `@automata/ui/styles.css`. A separate host
+can render its own page content inside `Shell`, compose provider controls around
+the shared presentation, and supply its own authenticated live-log ticket
+provider. The package does not contain an identity provider, Cloud API
+knowledge, Cloud-only pages, or a plugin system.
 
 `npm run verify:package` renders consumer-owned content through the packaged
 shell, checks the compiled stylesheet, creates the npm archive twice, and
