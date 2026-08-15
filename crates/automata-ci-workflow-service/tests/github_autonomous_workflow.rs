@@ -14,16 +14,18 @@ use automata_ci_blob::{
     MediaType, MemoryBlobStore, PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::{
-    ContextValue, JobAuthorityProfile, JobConclusion, JobPermissionRequest, JobRuntimeContext,
-    OutputSensitivity, RunId, RunIdAlias, RunnerFeature, SecretBinding, Sha256Digest,
-    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
-    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, UnixMillis,
-    WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
+    ActionReference, ContextValue, JobAuthorityProfile, JobConclusion, JobPermissionRequest,
+    JobRuntimeContext, OutputSensitivity, RunId, RunIdAlias, RunnerFeature, SecretBinding,
+    Sha256Digest, TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind,
+    TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot,
+    UnixMillis, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey,
+    WorkflowPlan,
 };
 use automata_ci_job_executor_github::{
     ActionPreparationError, ActionPreparationErrorKind, ActionPreparationPort,
     ActionPreparationRequest, PreparedAction, PreparedActionDefinition, PreparedActionExecution,
-    PreparedJavascriptAction,
+    PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep, PreparedCompositeStepMetadata,
+    PreparedCompositeUsesStep, PreparedJavascriptAction,
 };
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
@@ -115,6 +117,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: synthetic/missing-runtime@0123456789abcdef0123456789abcdef01234567
+";
+
+const WORKFLOW_WITH_CHECKOUT_CREATED_LOCAL_ACTION_SOURCE: &str = r"name: Autonomous CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/checkout-created
 ";
 
 const WORKFLOW_WITH_NEEDS_SOURCE: &str = r"name: Autonomous CI
@@ -3242,9 +3253,133 @@ async fn invalid_repository_metadata_quarantines_before_job_publication_or_lease
     );
 }
 
+#[tokio::test]
+async fn checkout_created_local_metadata_quarantines_before_job_publication_or_runner_lease() {
+    let harness = new_harness_with(
+        WORKFLOW_WITH_CHECKOUT_CREATED_LOCAL_ACTION_SOURCE,
+        JobAuthorityProfile::Standard,
+        Vec::new(),
+    )
+    .await;
+    complete_preparation(&harness).await;
+    harness.blobs.reset_observation();
+
+    assert_eq!(
+        harness
+            .service
+            .run_once(CancellationToken::new())
+            .await
+            .expect("local metadata availability classification"),
+        AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
+    );
+    assert_eq!(harness.blobs.put_outcomes(), (0, 0));
+    assert!(harness.repository.publication_attempts().is_empty());
+    assert_eq!(harness.repository.successful_publications(), 0);
+    assert_eq!(harness.repository.mutation_counts(), (1, 0, 0));
+    assert_eq!(
+        harness.repository.quarantine_kinds().0,
+        vec![LogicalWorkQuarantineKind::PayloadEvidence]
+    );
+}
+
 #[derive(Debug, Default)]
 struct Node20ActionPreparer {
     calls: Mutex<usize>,
+}
+
+#[derive(Debug, Default)]
+struct NestedNode20ActionPreparer {
+    calls: Mutex<Vec<ActionReference>>,
+}
+
+#[async_trait]
+impl ActionPreparationPort for NestedNode20ActionPreparer {
+    async fn prepare(
+        &self,
+        request: ActionPreparationRequest<'_>,
+    ) -> Result<PreparedAction, ActionPreparationError> {
+        self.calls
+            .lock()
+            .expect("action calls")
+            .push(request.reference().clone());
+        let ActionReference::Repository {
+            repository,
+            revision,
+            subpath,
+        } = request.reference()
+        else {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::UnsupportedReference,
+            ));
+        };
+        if repository != "synthetic/missing-runtime" || revision != REVISION {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::Resolution,
+            ));
+        }
+        if subpath.as_deref() == Some("nested") {
+            return Ok(prepared_javascript_action(
+                JavascriptRuntime::Node20,
+                "nested",
+            ));
+        }
+        if subpath.is_some() {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::Resolution,
+            ));
+        }
+        let condition = GithubConditionCompiler::default()
+            .compile_condition(Some("always()"), GithubConditionPhase::Step)
+            .expect("condition");
+        let child = PreparedCompositeUsesStep::new(
+            PreparedCompositeStepMetadata::new(
+                None,
+                None,
+                condition,
+                PreparedBoolean::Literal(false),
+            ),
+            ActionReference::Repository {
+                repository: repository.clone(),
+                revision: revision.clone(),
+                subpath: Some("nested".to_owned()),
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("nested action");
+        let definition = PreparedActionDefinition::new(
+            Vec::new(),
+            Vec::new(),
+            PreparedActionExecution::Composite(
+                PreparedCompositeAction::new(vec![PreparedCompositeStep::Uses(child)])
+                    .expect("composite"),
+            ),
+        )
+        .expect("action definition");
+        let archive = Bytes::from_static(b"root-composite-action-archive");
+        let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+        PreparedAction::with_definition(digest, archive, "", definition)
+            .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Internal))
+    }
+}
+
+fn prepared_javascript_action(runtime: JavascriptRuntime, label: &str) -> PreparedAction {
+    let compiler = GithubConditionCompiler::default();
+    let always = compiler
+        .compile_condition(Some("always()"), GithubConditionPhase::Step)
+        .expect("condition");
+    let javascript =
+        PreparedJavascriptAction::new(runtime, "dist/index.js", None, always.clone(), None, always)
+            .expect("JavaScript action");
+    let definition = PreparedActionDefinition::new(
+        Vec::new(),
+        Vec::new(),
+        PreparedActionExecution::Javascript(Box::new(javascript)),
+    )
+    .expect("action definition");
+    let archive = Bytes::from(format!("{label}-action-archive"));
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+    PreparedAction::with_definition(digest, archive, "", definition).expect("prepared action")
 }
 
 #[async_trait]
@@ -3345,6 +3480,43 @@ async fn globally_unsupported_profile_feature_quarantines_before_job_ir_publicat
         AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
     );
     assert_eq!(*actions.calls.lock().expect("action calls"), 1);
+    assert_eq!(harness.blobs.put_outcomes(), (0, 0));
+    assert!(harness.repository.publication_attempts().is_empty());
+    assert_eq!(harness.repository.successful_publications(), 0);
+    assert_eq!(harness.repository.mutation_counts(), (1, 0, 0));
+    assert_eq!(
+        harness.repository.quarantine_kinds().0,
+        vec![LogicalWorkQuarantineKind::PayloadEvidence]
+    );
+}
+
+#[tokio::test]
+async fn unsupported_nested_repository_runtime_quarantines_before_publication_or_lease() {
+    let actions = Arc::new(NestedNode20ActionPreparer::default());
+    let action_port: Arc<dyn ActionPreparationPort> = actions.clone();
+    let configuration = std::str::from_utf8(RUNTIME_POLICY)
+        .expect("UTF-8 policy")
+        .replace(",\"automata.core/node20-actions@v1\"", "");
+    let harness = new_harness_with_action_preparer_and_policy(
+        WORKFLOW_WITH_REPOSITORY_ACTION_SOURCE,
+        JobAuthorityProfile::Standard,
+        Vec::new(),
+        Some(action_port),
+        configuration.as_bytes(),
+    )
+    .await;
+    complete_preparation(&harness).await;
+    harness.blobs.reset_observation();
+
+    assert_eq!(
+        harness
+            .service
+            .run_once(CancellationToken::new())
+            .await
+            .expect("nested runtime capability admission"),
+        AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
+    );
+    assert_eq!(actions.calls.lock().expect("action calls").len(), 2);
     assert_eq!(harness.blobs.put_outcomes(), (0, 0));
     assert!(harness.repository.publication_attempts().is_empty());
     assert_eq!(harness.repository.successful_publications(), 0);

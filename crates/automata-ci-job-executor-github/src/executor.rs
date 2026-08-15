@@ -1661,7 +1661,16 @@ impl GithubJobExecutor {
                                 ActionPreparationErrorKind::UnsupportedExecution,
                             ));
                         }
-                        ActionReference::Local { .. } => {}
+                        // Repository preparation binds `./...` children to
+                        // the same immutable repository revision. An
+                        // unresolved workspace reference here would otherwise
+                        // cross the provider boundary before its mutable
+                        // metadata is known.
+                        ActionReference::Local { .. } => {
+                            return Err(ActionLoadError::Preparation(
+                                ActionPreparationErrorKind::Metadata,
+                            ));
+                        }
                     }
                 }
                 Ok(())

@@ -49,17 +49,21 @@ Tasks:
     masking but before custody acknowledgement, provider create/attach,
     archive extraction, or user code. Nested containers, cycles, and missing
     runtimes fail closed with zero provider operations.
-  - [x] Check JIT-prepared local action runtimes before their first action
-    phase. Local metadata cannot exist before the preceding checkout/user step
-    and therefore cannot be preflighted before provider creation.
+  - [x] Reject checkout-created local action references during activation,
+    before Job IR publication or runner lease, because preceding workflow code
+    can create or replace metadata that does not exist at activation time. Keep
+    the bounded JIT compiler and exact runtime/shell checks in the executor as
+    defense in depth; that path is not advertised as runnable source support.
   - [x] Carry prepared repository runtime requirements across the scheduling
     boundary for exact-commit public actions. Activation anonymously and
     recursively resolves their metadata and records JavaScript/composite, exact
-    Node generation, literal composite shells, repository/local action,
-    command-file, and summary capabilities in Job IR. Activation-known
-    top-level shells are concretized. Capability matching rejects runners
-    missing any requirement before lease acquisition; the runner repeats
-    repository preflight before custody or provider work as defense in depth.
+    Node generation, literal composite shells, repository-action, command-file,
+    and summary capabilities in Job IR. Repository-composite `./...` children
+    bind to the same exact repository revision and are prepared recursively
+    from that immutable archive. Activation-known top-level shells are
+    concretized. Capability matching rejects runners missing any requirement
+    before lease acquisition; the runner repeats repository preflight before
+    custody or provider work as defense in depth.
   - [x] Bind a schema-versioned supported `RunnerFeature` set to every immutable
     runtime-profile mapping. Activation requires one selected policy profile and
     rejects a source-required feature outside that exact set before runtime or

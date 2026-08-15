@@ -64,10 +64,7 @@ pub(crate) async fn discover_runtime_requirements(
                 )
                 .await?;
             }
-            ActionReference::Local { .. } => {
-                state.features.insert(RunnerFeature::LOCAL_ACTIONS);
-            }
-            ActionReference::Container { .. } => {
+            ActionReference::Local { .. } | ActionReference::Container { .. } => {
                 return Err(RuntimeRequirementDiscoveryError::Invalid);
             }
         }
@@ -154,10 +151,12 @@ fn discover_repository_action<'a>(
                                     )
                                     .await?;
                                 }
-                                ActionReference::Local { .. } => {
-                                    state.features.insert(RunnerFeature::LOCAL_ACTIONS);
-                                }
-                                ActionReference::Container { .. } => {
+                                ActionReference::Local { .. }
+                                | ActionReference::Container { .. } => {
+                                    // Repository preparation must bind local syntax to
+                                    // the same exact repository revision, while nested
+                                    // containers remain unsupported. Neither may cross
+                                    // scheduling as an unresolved prepared child.
                                     return Err(RuntimeRequirementDiscoveryError::Invalid);
                                 }
                             },
@@ -259,10 +258,14 @@ mod tests {
     }
 
     fn repository(repository: &str, revision: &str) -> ActionReference {
+        repository_at(repository, revision, None)
+    }
+
+    fn repository_at(repository: &str, revision: &str, subpath: Option<&str>) -> ActionReference {
         ActionReference::Repository {
             repository: repository.to_owned(),
             revision: revision.to_owned(),
-            subpath: None,
+            subpath: subpath.map(str::to_owned),
         }
     }
 
@@ -315,11 +318,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recursive_repository_graph_carries_exact_node_composite_shell_and_local_features() {
+    async fn recursive_repository_graph_carries_nested_exact_node_and_shell_features() {
         let root = repository("synthetic/root", ROOT_REVISION);
         let child = repository("synthetic/child", CHILD_REVISION);
+        let nested = repository_at("synthetic/root", ROOT_REVISION, Some("nested"));
         let composite = metadata(
-            "runs:\n  using: composite\n  steps:\n    - shell: bash -e {0}\n      run: echo root\n    - uses: synthetic/child@2222222222222222222222222222222222222222\n    - uses: ./nested\n",
+            "runs:\n  using: composite\n  steps:\n    - shell: bash -e {0}\n      run: echo root\n    - uses: synthetic/child@2222222222222222222222222222222222222222\n    - uses: synthetic/root/nested@1111111111111111111111111111111111111111\n",
             "root",
         );
         let actions = Arc::new(FakeActions {
@@ -327,6 +331,10 @@ mod tests {
                 (action_reference_key(&root), composite),
                 (
                     action_reference_key(&child),
+                    javascript(JavascriptRuntime::Node24),
+                ),
+                (
+                    action_reference_key(&nested),
                     javascript(JavascriptRuntime::Node20),
                 ),
             ]),
@@ -353,13 +361,13 @@ mod tests {
                 RunnerFeature::BASH_SHELL,
                 RunnerFeature::JAVASCRIPT_ACTIONS,
                 RunnerFeature::NODE20_ACTIONS,
+                RunnerFeature::NODE24_ACTIONS,
                 RunnerFeature::COMPOSITE_ACTIONS,
                 RunnerFeature::REPOSITORY_ACTIONS,
-                RunnerFeature::LOCAL_ACTIONS,
             ])
         );
-        assert_eq!(actions.calls.lock().expect("calls").len(), 2);
-        assert_eq!(checkpoints, 2);
+        assert_eq!(actions.calls.lock().expect("calls").len(), 3);
+        assert_eq!(checkpoints, 3);
     }
 
     #[tokio::test]
@@ -376,6 +384,10 @@ mod tests {
             (
                 "inputs:\n  shell:\n    default: bash\nruns:\n  using: composite\n  steps:\n    - shell: ${{ inputs.shell }}\n      run: echo dynamic\n",
                 "dynamic-shell",
+            ),
+            (
+                "runs:\n  using: composite\n  steps:\n    - uses: ./unbound-workspace-action\n",
+                "unbound-local",
             ),
         ] {
             let root = repository("synthetic/root", ROOT_REVISION);
@@ -401,7 +413,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_metadata_is_deferred_but_repository_metadata_never_is() {
+    async fn checkout_created_local_metadata_fails_closed_before_scheduling() {
         let local = ActionReference::Local {
             path: "./checked-out".to_owned(),
         };
@@ -413,9 +425,8 @@ mod tests {
                 &CancellationToken::new(),
                 &mut before_prepare,
             )
-            .await
-            .expect("local action remains JIT"),
-            std::collections::BTreeSet::from([RunnerFeature::LOCAL_ACTIONS])
+            .await,
+            Err(RuntimeRequirementDiscoveryError::Invalid)
         );
         let mut before_prepare = || Ok(());
         assert_eq!(
