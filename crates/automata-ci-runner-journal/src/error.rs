@@ -29,14 +29,6 @@ pub enum StateRootError {
 /// A semantic journal mutation would violate a recovery or fencing invariant.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum JournalInvariantError {
-    /// A mutation targeted a journal belonging to a different runner.
-    #[error("journal belongs to runner {expected}; received {received}")]
-    RunnerMismatch {
-        /// Runner identity durably bound to the journal.
-        expected: RunnerId,
-        /// Runner identity supplied by the attempted mutation.
-        received: RunnerId,
-    },
     /// A session-scoped operation was attempted before a session was recorded.
     #[error("no runner session is currently journaled")]
     NoSession,
