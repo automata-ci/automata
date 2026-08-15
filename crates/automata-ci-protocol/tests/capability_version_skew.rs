@@ -1,10 +1,10 @@
 use automata_ci_core::{
-    Architecture, AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken, JobId,
-    JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersionRange, JobSource, Lease, LeaseId,
-    OperatingSystem, OperationId, RequirementMismatch, RunId, RunValueTemplates,
+    Architecture, AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken,
+    IsolationLevel, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersionRange, JobSource,
+    Lease, LeaseId, OperatingSystem, OperationId, RequirementMismatch, RunId, RunValueTemplates,
     RunnerCapabilities, RunnerFeature, RunnerId, RunnerPlatform, RunnerRequirements,
-    RuntimeBoolean, Sha256Digest, ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate,
-    WorkflowId,
+    RuntimeBoolean, SandboxCapabilities, SandboxFeature, Sha256Digest, ShellTemplate, StepId,
+    StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandSequence, JobRuntimeAuthorities, JobRuntimeAuthority, LeaseOffer,
@@ -178,6 +178,45 @@ fn validated_lease_preserves_exact_environment_profile_attestation() {
         mismatches.as_slice(),
         [RequirementMismatch::EnvironmentProfile { required: actual, .. }] if actual == &required
     ));
+}
+
+#[test]
+fn validated_lease_preserves_exact_windows_hyperv_placement() {
+    let message = lease_offer(RunnerRequirements::default().with_windows_hyperv_container());
+    let validated = ValidatedServerToRunner::new(message, &ProtocolLimits::default())
+        .expect("validate Windows Hyper-V lease offer");
+    let ServerToRunner::LeaseOffer(offer) = validated.into_message() else {
+        panic!("validated a different server message")
+    };
+    let requirements = offer.job().job().requirements();
+    assert_eq!(
+        requirements.operating_system(),
+        Some(&OperatingSystem::Windows)
+    );
+    assert_eq!(
+        requirements.minimum_isolation(),
+        IsolationLevel::VirtualMachine
+    );
+    assert!(
+        requirements
+            .sandbox_features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+    );
+
+    let generic_vm = RunnerCapabilities::new(
+        RunnerId::new(),
+        RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
+    )
+    .with_sandbox(SandboxCapabilities::new(IsolationLevel::VirtualMachine, []));
+    let mismatches = generic_vm
+        .satisfies(requirements)
+        .expect_err("generic VM capability cannot accept a Hyper-V-container lease");
+    assert_eq!(
+        mismatches.as_slice(),
+        &[RequirementMismatch::MissingSandboxFeature(
+            SandboxFeature::WINDOWS_HYPERV_CONTAINER,
+        )]
+    );
 }
 
 #[test]

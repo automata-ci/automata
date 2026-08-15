@@ -285,6 +285,9 @@ capability_id_type! {
         PRIVILEGED_USER = "automata.core/privileged-user@v1",
         /// Explicit host paths can be mounted into the sandbox.
         HOST_PATH_MOUNTS = "automata.core/host-path-mounts@v1",
+        /// Jobs launch only through the explicit Hyper-V-isolated Windows
+        /// container mechanism, without process-container or full-VM fallback.
+        WINDOWS_HYPERV_CONTAINER = "automata.core/windows-hyperv-container@v1",
     }
 }
 

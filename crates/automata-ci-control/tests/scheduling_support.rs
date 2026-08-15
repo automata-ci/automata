@@ -7,10 +7,10 @@ use automata_ci_control::scheduling::{
     RunnerEvidence, RunnerSlot, SessionGuard,
 };
 use automata_ci_core::{
-    Architecture, AttemptId, ContainerCapabilities, ContainerFeature, JobId, OperatingSystem,
-    ResourceCapacity, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId, RunnerLabel,
-    RunnerPlatform, RunnerRequirements, RunnerSessionId, SandboxCapabilities, SandboxFeature,
-    UnixMillis,
+    Architecture, AttemptId, ContainerCapabilities, ContainerFeature, IsolationLevel, JobId,
+    OperatingSystem, ResourceCapacity, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId,
+    RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, SandboxCapabilities,
+    SandboxFeature, UnixMillis,
 };
 
 pub fn typed_id<T>(tail: u64) -> T
@@ -82,13 +82,23 @@ pub fn effective_runner(
 ) -> EffectiveRunner {
     let runner_id = runner_id(tail);
     let observed = observed_capabilities(runner_id, 4);
+    authorize_effective_runner(tail, labels, groups, available_ordinals, observed)
+}
+
+fn authorize_effective_runner(
+    tail: u64,
+    labels: &[&str],
+    groups: &[&str],
+    available_ordinals: &[u16],
+    observed: RunnerCapabilities,
+) -> EffectiveRunner {
+    let runner_id = observed.runner_id();
     let evidence = RunnerEvidence::new(
         SessionGuard::new(runner_id, session_id(tail)),
-        observed,
+        observed.clone(),
         UnixMillis::new(1_000),
     )
     .expect("test evidence must be valid");
-    let effective = observed_capabilities(runner_id, 4);
     let routing = AuthorizedRunnerRouting::new(
         labels.iter().map(|value| label(value)),
         groups.iter().map(|value| group(value)),
@@ -96,8 +106,34 @@ pub fn effective_runner(
     let slots = available_ordinals.iter().map(|ordinal| {
         RunnerSlot::new(runner_id, *ordinal).expect("test slot ordinal must be valid")
     });
-    EffectiveRunner::authorize(&evidence, routing, effective, slots)
+    EffectiveRunner::authorize(&evidence, routing, observed, slots)
         .expect("test effective runner must be valid")
+}
+
+pub fn windows_effective_runner(
+    tail: u64,
+    advertises_hyperv_container: bool,
+    available_ordinals: &[u16],
+) -> EffectiveRunner {
+    let runner_id = runner_id(tail);
+    let mut sandbox_features = vec![
+        SandboxFeature::CLEAN_WORKSPACE,
+        SandboxFeature::NETWORK_ISOLATION,
+    ];
+    if advertises_hyperv_container {
+        sandbox_features.push(SandboxFeature::WINDOWS_HYPERV_CONTAINER);
+    }
+    let observed = RunnerCapabilities::new(
+        runner_id,
+        RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
+    )
+    .with_max_parallel_jobs(1)
+    .expect("Windows test runner must advertise one slot")
+    .with_sandbox(SandboxCapabilities::new(
+        IsolationLevel::VirtualMachine,
+        sandbox_features,
+    ));
+    authorize_effective_runner(tail, &["windows"], &[], available_ordinals, observed)
 }
 
 pub fn routing(labels: &[&str]) -> RoutingRequirements {
@@ -116,5 +152,20 @@ pub fn candidate(tail: u64, queued_at: i64, labels: &[&str]) -> RunnableCandidat
         job_id(tail),
         UnixMillis::new(queued_at),
         routing(labels),
+    )
+}
+
+pub fn windows_candidate(tail: u64, queued_at: i64) -> RunnableCandidate {
+    RunnableCandidate::new(
+        attempt_id(tail),
+        job_id(tail),
+        UnixMillis::new(queued_at),
+        RoutingRequirements::new(
+            RunnerRequirements::default()
+                .with_labels([label("windows")])
+                .with_windows_hyperv_container()
+                .with_architecture(Architecture::X86_64),
+        )
+        .expect("Windows Hyper-V routing requirements must be valid"),
     )
 }

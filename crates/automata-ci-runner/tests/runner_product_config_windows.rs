@@ -67,6 +67,7 @@ fn checked_in_windows_configuration_selects_only_hyperv_containers() {
         &BTreeSet::from([
             SandboxFeature::CLEAN_WORKSPACE,
             SandboxFeature::NETWORK_ISOLATION,
+            SandboxFeature::WINDOWS_HYPERV_CONTAINER,
         ])
     );
     for feature in [RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES] {

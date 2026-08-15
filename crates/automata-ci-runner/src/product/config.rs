@@ -1664,7 +1664,19 @@ fn provider_capabilities(
                 ]),
             )
         }
-        ProviderKind::WindowsHyperV | ProviderKind::MacosVirtualization => (
+        ProviderKind::WindowsHyperV => (
+            SandboxCapabilities::new(
+                IsolationLevel::VirtualMachine,
+                [
+                    SandboxFeature::CLEAN_WORKSPACE,
+                    SandboxFeature::NETWORK_ISOLATION,
+                    SandboxFeature::WINDOWS_HYPERV_CONTAINER,
+                ],
+            ),
+            BTreeSet::new(),
+            BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
+        ),
+        ProviderKind::MacosVirtualization => (
             SandboxCapabilities::new(
                 IsolationLevel::VirtualMachine,
                 [

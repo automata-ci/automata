@@ -1,5 +1,6 @@
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
+use automata_ci_core::SandboxFeature;
 use automata_ci_runner::product::{RunnerProductConfig, RunnerProductConfigError};
 
 fn baseline() -> serde_json::Value {
@@ -29,6 +30,18 @@ fn legacy_schema_and_native_provider_are_rejected() {
         .remove("macos_virtualization");
     native["macos_native"] = serde_json::json!({});
     assert!(parse(&native).is_err(), "macos_native must be unknown");
+}
+
+#[test]
+fn macos_vm_does_not_advertise_the_windows_hyperv_container_launch_kind() {
+    let config = parse(&baseline()).expect("checked-in macOS runner configuration");
+    assert!(
+        !config
+            .inventory()
+            .sandbox()
+            .features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+    );
 }
 
 #[test]

@@ -488,7 +488,10 @@ fn runner_requirements(
             .with_container_features(mapping.container_features().iter().cloned());
     }
     if let MergedSelector::Value(value) = operating_system {
-        requirements = requirements.with_operating_system(value);
+        requirements = match value {
+            OperatingSystem::Windows => requirements.with_windows_hyperv_container(),
+            operating_system => requirements.with_operating_system(operating_system),
+        };
     }
     if let MergedSelector::Value(value) = architecture {
         requirements = requirements.with_architecture(value);

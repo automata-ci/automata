@@ -180,6 +180,18 @@ fn fixture_job_ir() -> fixture_wire::JobIrEnvelope {
     fixture_wire::JobIrEnvelope::decode(encoded.as_slice()).expect("decode private test DTO")
 }
 
+fn job_ir_runner_requirements(
+    envelope: &mut fixture_wire::JobIrEnvelope,
+) -> &mut fixture_wire::RunnerRequirements {
+    envelope
+        .job
+        .as_mut()
+        .expect("job")
+        .requirements
+        .as_mut()
+        .expect("runner requirements")
+}
+
 #[test]
 fn standalone_job_ir_rejects_schema_and_expression_program_skew() {
     for version in [2, u32::from(JobIrVersion::current().get()) + 1] {
@@ -212,6 +224,52 @@ fn standalone_job_ir_rejects_schema_and_expression_program_skew() {
         Err(DecodeError::UnsupportedSchema {
             field: "expression_program.schema_version",
             ..
+        })
+    ));
+}
+
+#[test]
+fn windows_hyperv_requirement_wire_shape_fails_closed() {
+    let exact = common::rich_job_with_requirements(
+        automata_ci_core::RunnerRequirements::default().with_windows_hyperv_container(),
+    );
+    let encoded = encode_job_ir(&exact, &ProtocolLimits::default()).expect("encode exact shape");
+    let fixture = fixture_wire::JobIrEnvelope::decode(encoded.as_slice())
+        .expect("decode private exact-shape DTO");
+    decode_job_ir(&encode(&fixture), &ProtocolLimits::default()).expect("decode exact shape");
+
+    let mut missing_launch = fixture.clone();
+    job_ir_runner_requirements(&mut missing_launch)
+        .sandbox_features
+        .clear();
+    assert!(matches!(
+        decode_job_ir(&encode(&missing_launch), &ProtocolLimits::default()),
+        Err(DecodeError::InvalidValue {
+            field: "runner_requirements.sandbox_features"
+        })
+    ));
+
+    let mut weak_isolation = fixture.clone();
+    job_ir_runner_requirements(&mut weak_isolation).minimum_isolation =
+        fixture_wire::IsolationLevel::SharedKernel as i32;
+    assert!(matches!(
+        decode_job_ir(&encode(&weak_isolation), &ProtocolLimits::default()),
+        Err(DecodeError::InvalidValue {
+            field: "runner_requirements.minimum_isolation"
+        })
+    ));
+
+    let mut wrong_platform = fixture;
+    job_ir_runner_requirements(&mut wrong_platform).operating_system =
+        Some(fixture_wire::OperatingSystem {
+            value: Some(fixture_wire::operating_system::Value::Linux(
+                fixture_wire::Unit {},
+            )),
+        });
+    assert!(matches!(
+        decode_job_ir(&encode(&wrong_platform), &ProtocolLimits::default()),
+        Err(DecodeError::InvalidValue {
+            field: "runner_requirements.sandbox_features"
         })
     ));
 }

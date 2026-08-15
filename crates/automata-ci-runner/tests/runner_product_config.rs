@@ -205,6 +205,13 @@ fn validated_config_preserves_exact_runner_and_profile_inventory() {
             .features()
             .contains(&SandboxFeature::READ_ONLY_ROOT)
     );
+    assert!(
+        !config
+            .inventory()
+            .sandbox()
+            .features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+    );
     assert!(config.object_store().force_path_style());
     assert!(
         config
