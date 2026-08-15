@@ -72,7 +72,7 @@ pub struct ProtocolRange {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct JobIrVersionRange {
-    /// Current-only contract: both endpoints MUST equal 5.
+    /// Current-only contract: both endpoints MUST equal 1.
     #[prost(uint32, tag = "1")]
     pub minimum: u32,
     #[prost(uint32, tag = "2")]
@@ -1166,7 +1166,7 @@ pub struct RuntimeAuthorityAck {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JobIrEnvelope {
-    /// MUST equal 5; no earlier or later JobIR wire schema is accepted.
+    /// MUST equal 1; no earlier or later JobIR wire schema is accepted.
     #[prost(uint32, tag = "1")]
     pub schema_version: u32,
     #[prost(bytes = "vec", tag = "2")]

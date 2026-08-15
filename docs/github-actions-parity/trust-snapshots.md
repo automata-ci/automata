@@ -108,7 +108,7 @@ authenticated provider/manual/schedule facts
 ```
 
 No downstream consumer reopens webhook JSON, infers actor authority from a
-login, or independently classifies a fork. JobIR schema 5 carries the exact
+login, or independently classifies a fork. JobIR schema 1 carries the exact
 canonical snapshot bytes and SHA-256 digest. The runner protobuf uses fields 16
 and 17 for those values.
 
