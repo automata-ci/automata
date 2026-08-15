@@ -10,6 +10,7 @@ mod installation;
 mod login;
 /// Transactional human-RBAC management adapter.
 pub mod management;
+mod management_authority;
 mod provider_tokens;
 mod request_auth;
 mod session;
