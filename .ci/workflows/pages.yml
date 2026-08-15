@@ -25,6 +25,7 @@ concurrency:
 # Pages deployment is intentionally omitted until Automata supports GitHub
 # deployment environments end to end; this repository must have one workflow
 # authority and therefore cannot also contain .github/workflows.
+# Live probe: verify the redundant Automata control plane and six-runner fleet.
 jobs:
   build:
     name: Build demo and capture screenshots
