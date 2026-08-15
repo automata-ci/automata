@@ -20,6 +20,7 @@ mod provisioning_workload_auth;
 mod readiness;
 mod secret_cleanup;
 mod secret_custody;
+mod secret_loop_support;
 mod secret_management;
 mod secret_mutation_recovery;
 mod state_metrics;
