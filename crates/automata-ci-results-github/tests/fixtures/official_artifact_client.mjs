@@ -3,14 +3,28 @@ import { mkdir, readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
 const modulePath = process.env.AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE
+const expectedVersion = process.env.AUTOMATA_TEST_ACTIONS_ARTIFACT_VERSION
 const inputPath = process.env.AUTOMATA_TEST_ARTIFACT_INPUT
 const rootDirectory = process.env.AUTOMATA_TEST_ARTIFACT_ROOT
 
-if (!modulePath || !inputPath || !rootDirectory) {
+if (!modulePath || !expectedVersion || !inputPath || !rootDirectory) {
   throw new Error('official artifact-client fixture environment is incomplete')
 }
 
-const { DefaultArtifactClient } = await import(pathToFileURL(modulePath).href)
+const moduleUrl = pathToFileURL(modulePath)
+const packageManifest = JSON.parse(
+  await readFile(new URL('../../package.json', moduleUrl), 'utf8'),
+)
+if (
+  packageManifest.name !== '@actions/artifact' ||
+  packageManifest.version !== expectedVersion
+) {
+  throw new Error(
+    `expected exact @actions/artifact ${expectedVersion}, received ${packageManifest.name}@${packageManifest.version}`,
+  )
+}
+
+const { DefaultArtifactClient } = await import(moduleUrl.href)
 const client = new DefaultArtifactClient()
 const result = await client.uploadArtifact(
   'official-actions-artifact-client',

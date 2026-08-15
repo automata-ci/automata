@@ -750,13 +750,15 @@ async fn official_actions_cache_5_0_5_client_completes_cache_v2_offline() {
             .expect("cache-client fixture server");
     });
 
-    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/agent-scratch/cache-results/action-client-run")
+    let manifest_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_directory
+        .parent()
+        .and_then(|crates| crates.parent())
+        .expect("results crate is nested under the workspace crates directory");
+    let scratch = workspace_root
+        .join("target/agent-scratch/cache-results/action-client-run")
         .join(Uuid::new_v4().simple().to_string());
     std::fs::create_dir_all(&scratch).expect("create repository-local test scratch");
-    let scratch = scratch
-        .canonicalize()
-        .expect("canonical repository-local test scratch");
     let input = scratch.join("cache-input.txt");
     std::fs::write(&input, b"official @actions/cache 5.0.5 integration bytes")
         .expect("write fixture input");
@@ -766,7 +768,7 @@ async fn official_actions_cache_5_0_5_client_completes_cache_v2_offline() {
         .join("tests/fixtures/official_cache_v2_client.mjs");
     let token = fixture.token;
     let process_scratch = scratch.clone();
-    let status = tokio::task::spawn_blocking(move || {
+    let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("node")
             .arg(script)
             .env("ACTIONS_RUNTIME_TOKEN", token)
@@ -776,14 +778,18 @@ async fn official_actions_cache_5_0_5_client_completes_cache_v2_offline() {
             .env("RUNNER_TEMP", runner_temp)
             .env("AUTOMATA_TEST_ACTIONS_CACHE_MODULE", module_path)
             .env("AUTOMATA_TEST_CACHE_INPUT", input)
-            .status()
+            .output()
             .expect("run official cache client")
     })
     .await
     .expect("join Node cache client");
     server.abort();
     std::fs::remove_dir_all(&scratch).expect("remove cache-client fixture scratch");
-    assert!(status.success(), "official cache-v2 client must complete");
+    assert!(
+        output.status.success(),
+        "official cache-v2 client exited with {}",
+        output.status
+    );
 }
 
 #[tokio::test]

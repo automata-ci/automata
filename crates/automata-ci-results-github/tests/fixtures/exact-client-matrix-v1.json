@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "node_major": 24,
+  "network_policy": "loopback-only-no-downloads",
+  "clients": [
+    {
+      "id": "upload-artifact",
+      "repository": "actions/upload-artifact",
+      "release": "v7.0.1",
+      "commit": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "manifest_version": "7.0.1",
+      "action_entry": "dist/upload/index.js",
+      "action_root_environment": "AUTOMATA_TEST_UPLOAD_ARTIFACT_ACTION_ROOT",
+      "embedded_package": "@actions/artifact",
+      "embedded_version": "6.2.0",
+      "embedded_integrity": "sha512-i9kmGy6WfuA6rby4fdD0UMKjT4MicFiKMsB5mUZ+1ggFW7+SzqvFsxLhIXxITkKUhTMVREXQfn/ZAN87EQLQDA==",
+      "module_entry": "node_modules/@actions/artifact/lib/internal/client.js",
+      "module_environment": "AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE",
+      "operations": [
+        "create",
+        "put-block",
+        "put-block-list",
+        "finalize",
+        "list",
+        "signed-download"
+      ],
+      "support_status": "component"
+    },
+    {
+      "id": "download-artifact",
+      "repository": "actions/download-artifact",
+      "release": "v8.0.1",
+      "commit": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+      "manifest_version": "8.0.1",
+      "action_entry": "dist/index.js",
+      "action_root_environment": "AUTOMATA_TEST_DOWNLOAD_ARTIFACT_ACTION_ROOT",
+      "embedded_package": "@actions/artifact",
+      "embedded_version": "6.2.1",
+      "embedded_integrity": "sha512-sJGH0mhEbEjBCw7o6SaLhUU66u27aFW8HTfkIb5Tk2/Wy0caUDc+oYQEgnuFN7a0HCpAbQyK0U6U7XUJDgDWrw==",
+      "module_entry": "node_modules/@actions/artifact/lib/internal/client.js",
+      "module_environment": "AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE",
+      "operations": [
+        "list",
+        "get-by-name",
+        "get-by-id",
+        "signed-download"
+      ],
+      "support_status": "candidate"
+    },
+    {
+      "id": "cache",
+      "repository": "actions/cache",
+      "release": "v5.0.5",
+      "commit": "27d5ce7f107fe9357f9df03efb73ab90386fccae",
+      "manifest_version": "5.0.4",
+      "action_entry": "dist/restore/index.js",
+      "action_root_environment": "AUTOMATA_TEST_CACHE_ACTION_ROOT",
+      "embedded_package": "@actions/cache",
+      "embedded_version": "5.0.5",
+      "embedded_integrity": "sha512-jiQSg0gfd+C2KPgcmdCOq7dCuCIQQWQ4b1YfGIRaaA9w7PJbRwTOcCz4LiFEUnqZGf0ha/8OKL3BeNwetHzYsQ==",
+      "module_entry": "node_modules/@actions/cache/lib/cache.js",
+      "module_environment": "AUTOMATA_TEST_ACTIONS_CACHE_MODULE",
+      "operations": [
+        "reserve",
+        "upload",
+        "finalize",
+        "exact-restore",
+        "restore-prefix",
+        "single-range-download"
+      ],
+      "support_status": "component"
+    }
+  ]
+}
