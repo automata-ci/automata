@@ -48,6 +48,7 @@ mod github_provider_manifest;
 mod github_schedule;
 mod github_service_authority;
 mod github_subject_evidence;
+mod live_log_ticket;
 mod log_notifications;
 mod logical_activation;
 mod logical_activation_preparation;
@@ -77,6 +78,7 @@ mod workflow_runtime_policy;
 pub use github_oidc::{
     PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository,
 };
+pub use live_log_ticket::PostgresLiveLogTicketRepository;
 pub use log_notifications::PostgresLogCommitListener;
 pub use secret_custody::PostgresSecretCustodyRepository;
 pub use secret_management::PostgresSecretManagementRepository;

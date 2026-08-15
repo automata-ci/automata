@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use automata_ci_auth::{
@@ -69,7 +69,8 @@ use automata_ci_runner_transport::{
 use automata_ci_secret::{SecretProvider, SecretProviderRegistry};
 use automata_ci_secret_postgres::PostgresSecretProvider;
 use automata_ci_store::{
-    BuiltinSecretCleanupRepository, ConformanceReadRepository, HumanWorkflowReadRepository,
+    BuiltinSecretCleanupRepository, ConformanceReadRepository, HumanLiveLogBrowserOrigin,
+    HumanLiveLogTicketRepository, HumanLogCommitNotificationHub, HumanWorkflowReadRepository,
     LogicalActivationPreparationStore, LogicalActivationRepository, LogicalActivationWorkerId,
     LogicalInstanceResultRepository, LogicalInstanceResultWorkerId, LogicalJobResultRepository,
     LogicalJobResultWorkerId, LogicalMaterializationRepository, LogicalMaterializationWorkerId,
@@ -82,8 +83,8 @@ use automata_ci_store::{
     WorkflowRerunRepository,
 };
 use automata_ci_store_postgres::{
-    PostgresSecretCustodyRepository, PostgresSecretManagementRepository, PostgresStore,
-    PostgresStoreError,
+    PostgresLiveLogTicketRepository, PostgresLogCommitListener, PostgresSecretCustodyRepository,
+    PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
@@ -124,6 +125,7 @@ use crate::app::{
         setup_router as github_setup_router,
     },
     human_auth_middleware::HumanRequestAuthentication,
+    live_log::{LiveLogService, browser_ticket_router, stream_router as live_log_stream_router},
     management_api::management_api_router,
     protected_environment_review_api::{
         ProtectedEnvironmentReviewApiBackend, protected_environment_review_api_router,
@@ -190,6 +192,9 @@ pub(crate) struct ProductionComponents {
     pub(crate) state_sampler: ControlPlaneStateSampler,
     pub(crate) human_api: Router,
     pub(crate) delegated_actor_api: Option<Router>,
+    pub(crate) live_log_stream_api: Router,
+    pub(crate) log_commit_listener: Option<PostgresLogCommitListener>,
+    pub(crate) log_commit_notifications: Arc<HumanLogCommitNotificationHub>,
     pub(crate) human_request_authentication: Option<HumanRequestAuthentication>,
     pub(crate) rbac_web_data: Option<Arc<dyn RbacWebData>>,
     pub(crate) setup_page_availability: Option<Arc<dyn SetupPageAvailability>>,
@@ -219,6 +224,9 @@ impl fmt::Debug for ProductionComponents {
             .field("state_sampler", &self.state_sampler)
             .field("human_api", &self.human_api)
             .field("delegated_actor_api", &self.delegated_actor_api)
+            .field("live_log_stream_api", &self.live_log_stream_api)
+            .field("log_commit_listener", &self.log_commit_listener)
+            .field("log_commit_notifications", &self.log_commit_notifications)
             .field(
                 "human_request_authentication",
                 &self.human_request_authentication,
@@ -259,26 +267,10 @@ impl ProductionComponents {
         // the migrator on every readiness tick repeatedly acquires migration
         // locks and emits expected duplicate-table diagnostics under SQLx.
         store.migrate().await?;
-        let delegated_actor_api = config
-            .management()
-            .map(|management| -> Result<Router, ServerCompositionError> {
-                let verifier = DelegatedActorVerifier::new(DelegatedActorVerifierConfig {
-                    issuer: management
-                        .authority()
-                        .delegated_actor_issuer()
-                        .as_str()
-                        .to_owned(),
-                    audience: management.authority().shard_id().as_str().to_owned(),
-                    jwks_url: management.delegated_actor_jwks_url().clone(),
-                })
-                .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
-                let resolver: Arc<dyn automata_ci_auth::delegated_actor::DelegatedActorResolver> =
-                    Arc::new(PostgresDelegatedActorResolver::new(
-                        store.postgres_pool().clone(),
-                    ));
-                Ok(delegated_actor_api_router(Arc::new(verifier), resolver))
-            })
-            .transpose()?;
+        let log_commit_notifications = Arc::new(HumanLogCommitNotificationHub::default());
+        let log_commit_listener = PostgresLogCommitListener::connect(store.postgres_pool())
+            .await
+            .map_err(|_| ServerCompositionError::LiveLogStorage)?;
         let management_server =
             build_management_server(config, management_listener, store.as_ref())?;
         let workflow_clock: Arc<dyn AdmissionClock> = Arc::new(SystemAdmissionClock);
@@ -380,6 +372,68 @@ impl ProductionComponents {
                     ));
                 data
             });
+        let live_web_data = LiveWebData::new(Arc::clone(&human_reads), Arc::clone(&blob_store));
+        let live_web_data = if let Some(secrets) = repository_secret_web.as_ref() {
+            live_web_data.with_repository_secrets(Arc::clone(secrets))
+        } else {
+            live_web_data
+        };
+        let web_data: Arc<dyn WebData> = Arc::new(live_web_data);
+        let ticket_repository: Arc<dyn HumanLiveLogTicketRepository> = Arc::new(
+            PostgresLiveLogTicketRepository::new(store.postgres_pool().clone()),
+        );
+        let live_log_service = Arc::new(LiveLogService::new(
+            Arc::clone(&web_data),
+            ticket_repository,
+            Arc::clone(&log_commit_notifications),
+        ));
+        let mut live_log_origins = BTreeSet::new();
+        if let Some(human_auth) = config.human_auth() {
+            let origin = human_auth.external_url().origin().ascii_serialization();
+            HumanLiveLogBrowserOrigin::new(origin.clone())
+                .map_err(|_| ServerCompositionError::InvalidHumanAuthentication)?;
+            live_log_origins.insert(origin);
+        }
+        if let Some(management) = config.management() {
+            let origin = management
+                .authority()
+                .delegated_actor_issuer()
+                .as_str()
+                .to_owned();
+            HumanLiveLogBrowserOrigin::new(origin.clone())
+                .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
+            live_log_origins.insert(origin);
+        }
+        let live_log_stream_api =
+            live_log_stream_router(Arc::clone(&live_log_service), live_log_origins);
+        let delegated_actor_api = config
+            .management()
+            .map(|management| -> Result<Router, ServerCompositionError> {
+                let issuer = management
+                    .authority()
+                    .delegated_actor_issuer()
+                    .as_str()
+                    .to_owned();
+                let verifier = DelegatedActorVerifier::new(DelegatedActorVerifierConfig {
+                    issuer: issuer.clone(),
+                    audience: management.authority().shard_id().as_str().to_owned(),
+                    jwks_url: management.delegated_actor_jwks_url().clone(),
+                })
+                .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
+                let resolver: Arc<dyn automata_ci_auth::delegated_actor::DelegatedActorResolver> =
+                    Arc::new(PostgresDelegatedActorResolver::new(
+                        store.postgres_pool().clone(),
+                    ));
+                let origin = HumanLiveLogBrowserOrigin::new(issuer)
+                    .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
+                Ok(delegated_actor_api_router(
+                    Arc::new(verifier),
+                    resolver,
+                    Arc::clone(&live_log_service),
+                    origin,
+                ))
+            })
+            .transpose()?;
         let mut human = build_human_api(
             config,
             store.clone(),
@@ -389,6 +443,7 @@ impl ProductionComponents {
             repository_secret_web.clone(),
             fallback_tenant,
             capability_readiness,
+            Arc::clone(&live_log_service),
         )
         .await?;
         let github_provider_config = validate_effective_ui_tenant(config, &human.effective_tenant)?;
@@ -435,13 +490,6 @@ impl ProductionComponents {
         )
         .await?;
 
-        let live_web_data = LiveWebData::new(Arc::clone(&human_reads), Arc::clone(&blob_store));
-        let live_web_data = if let Some(secrets) = repository_secret_web.as_ref() {
-            live_web_data.with_repository_secrets(Arc::clone(secrets))
-        } else {
-            live_web_data
-        };
-        let web_data: Arc<dyn WebData> = Arc::new(live_web_data);
         let maintenance_loop = build_maintenance_loop(config, store.clone(), metrics)?;
         let (results_api, results_runtime_authority_issuer) =
             build_results(config, store.as_ref(), blob_store.clone(), metrics)?;
@@ -586,6 +634,9 @@ impl ProductionComponents {
             state_sampler,
             human_api: human.router,
             delegated_actor_api,
+            live_log_stream_api,
+            log_commit_listener: Some(log_commit_listener),
+            log_commit_notifications,
             human_request_authentication: human.request_authentication,
             rbac_web_data: human.rbac_web_data,
             setup_page_availability: human.setup_page_availability,
@@ -1540,6 +1591,7 @@ async fn build_human_api(
     repository_secret_web: Option<Arc<dyn RepositorySecretWebData>>,
     fallback_tenant: TenantId,
     capability_readiness: RunnerCapabilityReadiness,
+    live_log_service: Arc<LiveLogService>,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
     let deployment_token = config.load_conformance_export_token()?;
     let mut router = match deployment_token.as_deref() {
@@ -1593,6 +1645,9 @@ async fn build_human_api(
     };
     let runtime = HumanAuthRuntime::build(config, store.as_ref())
         .map_err(|_| ServerCompositionError::InvalidHumanAuthentication)?;
+    let live_log_origin = HumanLiveLogBrowserOrigin::new(runtime.origin().as_str().to_owned())
+        .map_err(|_| ServerCompositionError::InvalidHumanAuthentication)?;
+    router = router.merge(browser_ticket_router(live_log_service, live_log_origin));
     let installation = runtime
         .installation_repository()
         .load()
@@ -2019,6 +2074,9 @@ pub enum ServerCompositionError {
     /// The private management listener's TLS identity or product wiring was invalid.
     #[error("management listener configuration is invalid")]
     InvalidManagementConfiguration,
+    /// The live-log ticket or notification store could not be initialized.
+    #[error("live-log storage initialization failed")]
+    LiveLogStorage,
     /// The reviewed TLS/transport policy rejected the supplied configuration.
     #[error(transparent)]
     Transport(#[from] TransportConfigurationError),

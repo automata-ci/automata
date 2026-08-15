@@ -22,6 +22,7 @@ use automata_ci_auth::{
     time::Clock,
 };
 use automata_ci_core::{JobId, RunId, UnixMillis, WorkflowId};
+use automata_ci_store::HumanLiveLogScope;
 use bytes::Bytes;
 use futures::Stream;
 use thiserror::Error;
@@ -1139,6 +1140,28 @@ pub(crate) struct JobLogLive {
     pub(crate) more_available: bool,
 }
 
+/// One exact authorized live-log resource returned without a bearer credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuthorizedLiveLog {
+    pub(crate) scope: HumanLiveLogScope,
+}
+
+/// One transport-neutral log record and its post-record durable checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LiveLogRecord {
+    pub(crate) checkpoint: String,
+    pub(crate) line: LogLine,
+}
+
+/// One bounded forward read used by every live-log transport adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LiveLogBatch {
+    pub(crate) records: Vec<LiveLogRecord>,
+    pub(crate) checkpoint: Option<String>,
+    pub(crate) stream_closed: bool,
+    pub(crate) more_available: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JobNavigationItem {
     pub(crate) id: JobId,
@@ -1250,6 +1273,27 @@ pub(crate) trait WebData: fmt::Debug + Send + Sync {
         job_id: JobId,
         request: &JobLogRequest,
     ) -> Result<Option<JobLogPage>, WebDataError>;
+
+    /// Authorizes one exact current attempt stream without issuing credentials.
+    async fn authorize_live_log(
+        &self,
+        _context: &RequestContext,
+        _repository: &RepositoryPath,
+        _run_id: RunId,
+        _job_id: JobId,
+    ) -> Result<Option<AuthorizedLiveLog>, WebDataError> {
+        Ok(None)
+    }
+
+    /// Reads one bounded forward batch from previously authorized exact scope.
+    async fn read_live_log(
+        &self,
+        _scope: &HumanLiveLogScope,
+        _checkpoint: Option<&str>,
+        _replay_checkpoint: bool,
+    ) -> Result<Option<LiveLogBatch>, WebDataError> {
+        Ok(None)
+    }
 
     async fn artifact(
         &self,

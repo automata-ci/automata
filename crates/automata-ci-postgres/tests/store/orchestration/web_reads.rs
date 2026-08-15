@@ -4,17 +4,24 @@ use automata_ci_auth::authorization::{
     repository_read_permissions,
 };
 use automata_ci_auth::human::{PrincipalId, TenantId};
-use automata_ci_core::{JobId, LogSequence, LogStreamId, RunId, RunnerRequirements, WorkflowId};
+use automata_ci_core::{
+    AttemptId, JobId, LogSequence, LogStreamId, RunId, RunnerRequirements, WorkflowId,
+};
 use automata_ci_store::{
     HumanArtifactId, HumanArtifactScope, HumanAuthorizationTarget, HumanGitRef, HumanJobScope,
+    HumanLiveLogBrowserOrigin, HumanLiveLogScope, HumanLiveLogTicketRepository as _,
     HumanLogSegmentPageSize, HumanLogSegmentQuery, HumanPageSize, HumanRepositoryListQuery,
     HumanRunListQuery, HumanRunPageDirection, HumanRunScope, HumanRunStatusFilter,
-    HumanWorkflowListQuery, HumanWorkflowReadRepository as _, RepositoryCoordinate, RepositoryId,
+    HumanWorkflowListQuery, HumanWorkflowReadRepository as _, IssueHumanLiveLogTicket,
+    IssueHumanLiveLogTicketOutcome, RedeemHumanLiveLogTicket, RepositoryCoordinate, RepositoryId,
     StoreError, TenantScope,
 };
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::support::{TestDatabase, TestResult, run_with_database, seed_control_plane};
+
+use automata_ci_postgres::store::PostgresLiveLogTicketRepository;
 
 #[derive(Clone, Copy, Debug)]
 #[allow(clippy::struct_field_names)]
@@ -23,6 +30,69 @@ struct PublicFixture {
     job_id: JobId,
     stream_id: LogStreamId,
     artifact_id: HumanArtifactId,
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn live_log_tickets_are_origin_bound_and_consumed_once_across_replicas() -> TestResult {
+    run_with_database(|database| async move {
+        let seed = seed_control_plane(database.pool(), 1).await?;
+        make_repository_navigation_public(&database, &seed.tenant_id, seed.repository_id).await?;
+        let fixture = seed_public_completed_run(&database, &seed).await?;
+        let attempt_id: Uuid =
+            sqlx::query_scalar("SELECT attempt_id FROM attempt_log_streams WHERE id = $1")
+                .bind(fixture.stream_id.as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        let scope = HumanLiveLogScope::new(
+            TenantScope::from_authenticated_tenant_id(seed.tenant_id.clone())?,
+            RepositoryId::from_uuid(seed.repository_id),
+            fixture.run_id,
+            fixture.job_id,
+            AttemptId::from_uuid(attempt_id),
+            fixture.stream_id,
+        )?;
+        let expected_origin = HumanLiveLogBrowserOrigin::new("https://cloud.automata.example")?;
+        let wrong_origin = HumanLiveLogBrowserOrigin::new("https://other.automata.example")?;
+        let issue = IssueHumanLiveLogTicket::new(
+            [7_u8; 32],
+            scope.clone(),
+            expected_origin.clone(),
+            Duration::from_mins(1),
+        )?;
+        let first = PostgresLiveLogTicketRepository::new(database.pool().clone());
+        let second = PostgresLiveLogTicketRepository::new(database.connect_pool(2).await?);
+        assert!(matches!(
+            first.issue(&issue).await?,
+            IssueHumanLiveLogTicketOutcome::Issued(_)
+        ));
+        assert_eq!(
+            second.issue(&issue).await?,
+            IssueHumanLiveLogTicketOutcome::DigestCollision
+        );
+        assert!(
+            second
+                .redeem(&RedeemHumanLiveLogTicket::new([7_u8; 32], wrong_origin))
+                .await?
+                .is_none()
+        );
+        let redeemed = second
+            .redeem(&RedeemHumanLiveLogTicket::new(
+                [7_u8; 32],
+                expected_origin.clone(),
+            ))
+            .await?
+            .expect("the correctly bound replica consumes the ticket");
+        assert_eq!(redeemed.scope(), &scope);
+        assert!(
+            first
+                .redeem(&RedeemHumanLiveLogTicket::new([7_u8; 32], expected_origin,))
+                .await?
+                .is_none()
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
@@ -1404,7 +1474,7 @@ async fn seed_public_completed_run(
             secret_exposure_class, requested_visibility, effective_visibility,
             publication_safety_reason, publication_safety_schema
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, 1, 'coverage', 1,
+            $1, $2, $3, $4, $5, $6, 1, 'coverage', 7,
             'application/octet-stream', 1000, 'finalized', $7, 3,
             'web/artifacts/manifest', $8, 1, 'application/json', 1, 2,
             'ready', 1, 1, 3, $7, 2, $9,

@@ -27,16 +27,18 @@ mod state_metrics;
 mod workflow_dispatch;
 mod workflow_rerun;
 
-use std::{future::Future, net::SocketAddr, pin::Pin, time::Duration};
+use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result};
 use automata_ci_blob::BlobStoreErrorKind;
 use automata_ci_provisioning_grpc::ManagementGrpcServer;
 use automata_ci_runner_transport::RunnerControlServer;
 use automata_ci_store::{
+    HumanLogCommitNotificationHub, HumanLogCommitNotificationSource,
     LogicalInstanceResultStoreError, LogicalInstanceResultValueError, LogicalJobResultStoreError,
     LogicalJobResultValueError, StoreError,
 };
+use automata_ci_store_postgres::PostgresLogCommitListener;
 use automata_ci_workflow_service::{
     AutonomousWorkflowService, LogicalResultProjectionError, LogicalResultProjectionOutcome,
     LogicalResultProjectionService, LogicalRunFinalizationService, ReusableWorkflowRuntimeService,
@@ -51,7 +53,7 @@ use futures::{StreamExt as _, stream::FuturesUnordered};
 use thiserror::Error;
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{app::http, build_info::BuildInfo, cli::ServerArgs, shutdown};
 
@@ -214,6 +216,9 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
                 )),
                 None => router,
             };
+            // Live transports authenticate only the one-time, origin-bound
+            // ticket and must remain outside browser/CLI session parsing.
+            let router = router.merge(components.live_log_stream_api.clone());
             let router = match config.management() {
                 Some(management) => {
                     let router = router.merge(crate::app::shard_capabilities::router(
@@ -464,7 +469,13 @@ where
     let mut components = components;
     let github_provider = components.github_provider.take();
     let management_server = components.management_server.take();
+    let mut log_commit_listener = components
+        .log_commit_listener
+        .take()
+        .expect("production composition always installs the log notification listener");
+    let log_commit_notifications = Arc::clone(&components.log_commit_notifications);
     let http_cancellation = cancellation.clone();
+    let log_notification_cancellation = cancellation.child_token();
     let runner_cancellation = cancellation.child_token();
     let results_cancellation = cancellation.child_token();
     let monitor_cancellation = cancellation.child_token();
@@ -477,12 +488,31 @@ where
     let github_provider_cancellation = cancellation.child_token();
 
     let http = async move {
-        axum::serve(http_listener, router)
-            .with_graceful_shutdown(async move {
-                http_cancellation.cancelled().await;
-            })
-            .await
-            .map_err(|_| ManagedServiceError::HumanHttp)
+        let server_cancellation = http_cancellation.clone();
+        let server = async move {
+            axum::serve(http_listener, router)
+                .with_graceful_shutdown(async move {
+                    server_cancellation.cancelled().await;
+                })
+                .await
+        };
+        let notifications = run_log_commit_notifications(
+            &mut log_commit_listener,
+            &log_commit_notifications,
+            log_notification_cancellation,
+        );
+        tokio::pin!(server);
+        tokio::pin!(notifications);
+        tokio::select! {
+            result = &mut server => {
+                http_cancellation.cancel();
+                notifications.await;
+                result.map_err(|_| ManagedServiceError::HumanHttp)
+            }
+            () = &mut notifications => {
+                server.await.map_err(|_| ManagedServiceError::HumanHttp)
+            }
+        }
     };
     let runner = run_machine_listeners(
         components.runner_server,
@@ -566,6 +596,34 @@ where
     )
     .await;
     result.context("control-plane service supervision failed")
+}
+
+async fn run_log_commit_notifications(
+    listener: &mut PostgresLogCommitListener,
+    hub: &HumanLogCommitNotificationHub,
+    cancellation: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return,
+            result = listener.receive() => match result {
+                Ok(hint) => {
+                    hub.publish(hint);
+                }
+                Err(error) => {
+                    // Durable readers poll independently, so listener failure
+                    // degrades latency without losing output or correctness.
+                    warn!(%error, "live-log commit notification receive failed; retrying");
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => return,
+                        () = tokio::time::sleep(Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -21,7 +21,7 @@ use automata_ci_results_github::{
 use automata_ci_store::{
     HumanArtifactBlock, HumanArtifactDownload as StoredArtifactDownload, HumanArtifactId,
     HumanArtifactScope, HumanArtifactSummary, HumanAuthorizationTarget, HumanGitRef, HumanJob,
-    HumanJobDetail, HumanJobNavigation, HumanJobScope, HumanLogSegmentCursor,
+    HumanJobDetail, HumanJobNavigation, HumanJobScope, HumanLiveLogScope, HumanLogSegmentCursor,
     HumanLogSegmentPageDirection, HumanLogSegmentPageSize, HumanLogSegmentQuery,
     HumanOutputPublication, HumanPageSize, HumanRawLogDisposition, HumanRepository,
     HumanRepositoryCursor, HumanRepositoryListQuery, HumanRepositoryPage, HumanRun,
@@ -37,12 +37,13 @@ use sha2::{Digest as _, Sha256};
 use super::{
     codec::{LogSegmentExpectation, decode_log_segment},
     data::{
-        ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogLive, JobLogPage,
-        JobLogRequest, JobNavigationItem, JobSummary, LogChannel, LogLine, Repository,
-        RepositoryDirectoryItem, RepositoryDirectoryPage, RepositoryDirectoryRequest,
-        RepositoryPath, RepositorySettingsDestination, RepositorySettingsPage, RequestContext,
-        RunDetailPage, RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status,
-        StatusFilter, VisibleCollection, WebData, WebDataError, Workflow, WorkflowDefinition,
+        ArtifactDownload, ArtifactSummary, AuthorizedLiveLog, CollectionVisibility, JobLogLive,
+        JobLogPage, JobLogRequest, JobNavigationItem, JobSummary, LiveLogBatch, LiveLogRecord,
+        LogChannel, LogLine, Repository, RepositoryDirectoryItem, RepositoryDirectoryPage,
+        RepositoryDirectoryRequest, RepositoryPath, RepositorySettingsDestination,
+        RepositorySettingsPage, RequestContext, RunDetailPage, RunDetailRequest, RunListPage,
+        RunListRequest, RunSummary, Status, StatusFilter, VisibleCollection, WebData, WebDataError,
+        Workflow, WorkflowDefinition,
     },
     text::is_safe_display_text,
 };
@@ -2681,6 +2682,234 @@ impl WebData for LiveWebData {
         .await
     }
 
+    async fn authorize_live_log(
+        &self,
+        context: &RequestContext,
+        repository_path: &RepositoryPath,
+        run_id: RunId,
+        job_id: JobId,
+    ) -> Result<Option<AuthorizedLiveLog>, WebDataError> {
+        let tenant = Self::tenant(context)?;
+        let Some(repository) = self
+            .resolve_repository_exact(&tenant, repository_path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let job_scope = HumanJobScope::new(tenant.clone(), repository.id, run_id, job_id);
+        let Some(detail) = self
+            .reads
+            .get_job(&job_scope)
+            .await
+            .map_err(map_store_error)?
+        else {
+            return Ok(None);
+        };
+        if detail.run.id != run_id || detail.job.id != job_id {
+            return Err(WebDataError::Corrupt);
+        }
+        let Some(stream) = detail.log_stream.as_ref() else {
+            return Ok(None);
+        };
+        let Some(attempt) = detail.job.latest_attempt.as_ref() else {
+            return Err(WebDataError::Corrupt);
+        };
+        if detail.job.log_publication.as_ref() != Some(&stream.publication)
+            || stream.attempt_id != attempt.id
+            || !log_stream_safety_is_valid(stream)
+        {
+            return Err(WebDataError::Corrupt);
+        }
+        if !self
+            .log_access_allowed(context, &tenant, &repository, Some(&stream.publication))
+            .await?
+        {
+            return Ok(None);
+        }
+        let scope =
+            HumanLiveLogScope::new(tenant, repository.id, run_id, job_id, attempt.id, stream.id)
+                .map_err(|_| WebDataError::Corrupt)?;
+        Ok(Some(AuthorizedLiveLog { scope }))
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the bounded tail keeps checkpoint, segment, blob, and record validation contiguous"
+    )]
+    async fn read_live_log(
+        &self,
+        scope: &HumanLiveLogScope,
+        checkpoint: Option<&str>,
+        replay_checkpoint: bool,
+    ) -> Result<Option<LiveLogBatch>, WebDataError> {
+        let decoded_checkpoint = match checkpoint {
+            None => None,
+            Some(checkpoint) => {
+                let Some(decoded) = decode_log_cursor(
+                    checkpoint,
+                    scope.tenant(),
+                    scope.repository_id(),
+                    scope.run_id(),
+                    scope.job_id(),
+                    scope.stream_id(),
+                ) else {
+                    return Ok(None);
+                };
+                if decoded.direction != HumanLogSegmentPageDirection::Newer {
+                    return Ok(None);
+                }
+                Some(decoded)
+            }
+        };
+        let query = HumanLogSegmentQuery {
+            scope: HumanJobScope::new(
+                scope.tenant().clone(),
+                scope.repository_id(),
+                scope.run_id(),
+                scope.job_id(),
+            ),
+            stream_id: scope.stream_id(),
+            cursor: decoded_checkpoint.map(|cursor| HumanLogSegmentCursor {
+                sequence: cursor.sequence,
+                direction: HumanLogSegmentPageDirection::Newer,
+            }),
+            limit: HumanLogSegmentPageSize::new(LOG_SEGMENT_PAGE_SIZE)
+                .map_err(|_| WebDataError::Corrupt)?,
+        };
+        let Some(page) = self
+            .reads
+            .list_log_segments(&query)
+            .await
+            .map_err(map_store_error)?
+        else {
+            return Ok(None);
+        };
+        if page.stream.id != scope.stream_id()
+            || page.stream.attempt_id != scope.attempt_id()
+            || !log_stream_safety_is_valid(&page.stream)
+        {
+            return Err(WebDataError::Corrupt);
+        }
+
+        let mut records = Vec::new();
+        let mut decoded_bytes = 0_usize;
+        let mut checkpoint_cursor = decoded_checkpoint;
+        let mut saw_boundary = decoded_checkpoint.is_none();
+        let mut hit_limit = false;
+        'segments: for segment in &page.segments {
+            let blob = self
+                .objects
+                .get_verified(&segment.descriptor, segment.descriptor.size())
+                .await
+                .map_err(map_blob_error)?;
+            let expectation = LogSegmentExpectation::new(
+                scope.attempt_id(),
+                scope.stream_id(),
+                segment.first_sequence,
+                segment.last_sequence,
+                segment.uncompressed_size,
+                segment.end_of_stream,
+            );
+            let frames =
+                tokio::task::spawn_blocking(move || decode_log_segment(&blob, expectation))
+                    .await
+                    .map_err(|_| WebDataError::Unavailable)?
+                    .map_err(|_| WebDataError::Corrupt)?;
+            for frame in frames {
+                let candidates = render_frame_lines(&frame)?;
+                if candidates.is_empty() {
+                    checkpoint_cursor = Some(DecodedLogCursor {
+                        sequence: frame.sequence(),
+                        line_ordinal: 0,
+                        direction: HumanLogSegmentPageDirection::Newer,
+                    });
+                }
+                if let Some(boundary) = decoded_checkpoint {
+                    if frame.sequence() < boundary.sequence {
+                        continue;
+                    }
+                    if frame.sequence() > boundary.sequence && !saw_boundary {
+                        return Ok(None);
+                    }
+                    if frame.sequence() == boundary.sequence {
+                        saw_boundary = true;
+                        if usize::try_from(boundary.line_ordinal)
+                            .ok()
+                            .is_none_or(|ordinal| ordinal >= candidates.len())
+                            && !(boundary.line_ordinal == 0 && frame.payload().is_empty())
+                        {
+                            return Ok(None);
+                        }
+                    }
+                }
+                for candidate in candidates {
+                    let candidate_position = (candidate.sequence.get(), candidate.ordinal);
+                    if let Some(boundary) = decoded_checkpoint {
+                        let boundary_position = (boundary.sequence.get(), boundary.line_ordinal);
+                        if candidate_position < boundary_position
+                            || (!replay_checkpoint && candidate_position == boundary_position)
+                        {
+                            continue;
+                        }
+                    }
+                    let next_bytes = decoded_bytes
+                        .checked_add(candidate.text.len())
+                        .ok_or(WebDataError::Corrupt)?;
+                    if records.len() == super::data::LOG_PAGE_SIZE
+                        || next_bytes > super::data::LOG_PAGE_DECODED_BYTES
+                    {
+                        hit_limit = true;
+                        break 'segments;
+                    }
+                    decoded_bytes = next_bytes;
+                    let cursor =
+                        rendered_line_cursor(&candidate, HumanLogSegmentPageDirection::Newer);
+                    let checkpoint = encode_log_cursor(
+                        scope.tenant(),
+                        scope.repository_id(),
+                        scope.run_id(),
+                        scope.job_id(),
+                        scope.stream_id(),
+                        cursor,
+                    );
+                    checkpoint_cursor = Some(cursor);
+                    records.push(LiveLogRecord {
+                        checkpoint,
+                        line: visible_log_line(candidate),
+                    });
+                }
+            }
+        }
+        if !cursor_boundary_is_valid(decoded_checkpoint, saw_boundary, &page) {
+            return Ok(None);
+        }
+        let more_available = hit_limit || page.newer_cursor.is_some();
+        let stream_closed = page.stream.closed_at.is_some() && !more_available;
+        if stream_closed
+            && page
+                .segments
+                .last()
+                .is_some_and(|segment| !segment.end_of_stream)
+        {
+            return Err(WebDataError::Corrupt);
+        }
+        Ok(Some(LiveLogBatch {
+            records,
+            checkpoint: checkpoint_cursor.map(|cursor| {
+                encode_log_cursor(
+                    scope.tenant(),
+                    scope.repository_id(),
+                    scope.run_id(),
+                    scope.job_id(),
+                    scope.stream_id(),
+                    cursor,
+                )
+            }),
+            stream_closed,
+            more_available,
+        }))
+    }
+
     async fn artifact(
         &self,
         context: &RequestContext,
@@ -4247,6 +4476,55 @@ mod tests {
         assert_eq!(
             replay.live.and_then(|live| live.checkpoint).as_deref(),
             Some(checkpoint.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn transport_neutral_tail_authorizes_exact_scope_and_controls_replay() {
+        let (data, context, repository, run_id, job_id) = fake_live_data(true).await;
+        let authorized = WebData::authorize_live_log(&data, &context, &repository, run_id, job_id)
+            .await
+            .expect("authorize live log")
+            .expect("authorized exact stream");
+
+        let first = WebData::read_live_log(&data, &authorized.scope, None, true)
+            .await
+            .expect("initial durable tail")
+            .expect("current stream");
+        assert_eq!(first.records.len(), 1);
+        assert_eq!(first.records[0].line.text, "checkout ok");
+        assert!(first.stream_closed);
+        assert!(!first.more_available);
+        let checkpoint = first.records[0].checkpoint.clone();
+
+        let replay = WebData::read_live_log(&data, &authorized.scope, Some(&checkpoint), true)
+            .await
+            .expect("replay durable tail")
+            .expect("same stream");
+        assert_eq!(replay.records.len(), 1);
+        assert_eq!(replay.records[0].checkpoint, checkpoint);
+
+        let advanced = WebData::read_live_log(&data, &authorized.scope, Some(&checkpoint), false)
+            .await
+            .expect("advance durable tail")
+            .expect("same stream");
+        assert!(advanced.records.is_empty());
+        assert_eq!(advanced.checkpoint, first.checkpoint);
+        assert!(advanced.stream_closed);
+
+        let (denied, denied_context, denied_repository, denied_run, denied_job) =
+            fake_live_data(false).await;
+        assert!(
+            WebData::authorize_live_log(
+                &denied,
+                &denied_context,
+                &denied_repository,
+                denied_run,
+                denied_job,
+            )
+            .await
+            .expect("closed authorization decision")
+            .is_none()
         );
     }
 

@@ -15,9 +15,15 @@ const packageApi = await import(
 );
 const expectedExports = [
   "App",
+  "LIVE_LOG_PROTOCOL_VERSION",
+  "LiveLogController",
+  "LiveLogProtocolError",
+  "LiveLogRequestError",
   "Shell",
   "THEME_BOOTSTRAP_SCRIPT",
   "ThemeToggle",
+  "createSameOriginLiveLogAccessProvider",
+  "validateLiveLogAccess",
 ];
 
 if (JSON.stringify(Object.keys(packageApi).sort()) !== JSON.stringify(expectedExports)) {
