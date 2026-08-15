@@ -1,5 +1,16 @@
 use automata_ci_control::{
+    adapter_spi::{
+        BlockedAttemptRepository as _, BlockedConclusion, ConcludeBlockedAttempt,
+        InternalAttemptRepository as _, QueuedAttempt, TransitionAttempt,
+    },
+    cancellation::{
+        CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload,
+        CancellationActor, CancellationReason, CancellationRepository as _, RequestCancellation,
+    },
     lease::{
+        BeginLeaseRequest, ClaimRejection, ClaimedAttempt, LeaseRequestKey, NoWorkLeaseRequest,
+        RunnableAttempt, RunnableScanLimit, RunnableScanPage, RunnableScanRequest, TryClaimAttempt,
+        TryClaimOutcome, TryClaimReceipt,
         repository::{
             RunnableAttemptRepository as _, RunnerClaimRepository as _,
             RunnerLeaseRequestRepository as _,
@@ -21,17 +32,11 @@ use automata_ci_core::{
 };
 use automata_ci_postgres::store::PostgresStore;
 use automata_ci_store::{
-    AcknowledgeRunnerCommands, BeginLeaseRequest, BlockedAttemptRepository as _, BlockedConclusion,
-    CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor,
-    CancellationReason, CancellationRepository as _, ClaimRejection, CloseRunnerSession,
-    CommandCursor, CommandReplayLimit, CommandSequence, ConcludeBlockedAttempt, DocumentSchema,
-    EnqueueRunnerCommand, HeartbeatRunnerSession, InternalAttemptRepository as _, JobDependency,
-    LeaseRequestKey, MAX_COMMAND_REPLAY_BYTES, NoWorkLeaseRequest, OpenRunnerSession,
-    QueuedAttempt, RequestCancellation, ResumeRunnerSession, RunnableScanLimit,
-    RunnableScanRequest, RunnerGeneration, RunnerOperationKind, RunnerOperationRequest,
-    RunnerOperationResponse, RunnerProtocolVersion, StableRunnerSlot, StoreError,
-    TransitionAttempt, TryClaimAttempt, TryClaimOutcome, WORKFLOW_ADMISSION_EPOCH,
-    WorkflowPlanRepository as _,
+    AcknowledgeRunnerCommands, CloseRunnerSession, CommandCursor, CommandReplayLimit,
+    CommandSequence, DocumentSchema, EnqueueRunnerCommand, HeartbeatRunnerSession, JobDependency,
+    MAX_COMMAND_REPLAY_BYTES, OpenRunnerSession, ResumeRunnerSession, RunnerGeneration,
+    RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion,
+    StableRunnerSlot, StoreError, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository as _,
 };
 
 use crate::support::{
@@ -603,7 +608,7 @@ async fn lease_poll_receipts_replay_selection_and_no_work_before_rescheduling() 
             runnable
                 .candidates()
                 .iter()
-                .map(automata_ci_store::RunnableAttempt::attempt_id)
+                .map(RunnableAttempt::attempt_id)
                 .collect::<Vec<_>>(),
             vec![attempt_b],
             "the original selection is no longer a runnable candidate"
@@ -708,7 +713,7 @@ async fn runnable_scan_is_authoritatively_tenant_scoped() -> TestResult {
             first_page
                 .candidates()
                 .iter()
-                .map(automata_ci_store::RunnableAttempt::attempt_id)
+                .map(RunnableAttempt::attempt_id)
                 .collect::<Vec<_>>(),
             vec![first_attempt]
         );
@@ -722,7 +727,7 @@ async fn runnable_scan_is_authoritatively_tenant_scoped() -> TestResult {
             second_page
                 .candidates()
                 .iter()
-                .map(automata_ci_store::RunnableAttempt::attempt_id)
+                .map(RunnableAttempt::attempt_id)
                 .collect::<Vec<_>>(),
             vec![second_attempt]
         );
@@ -759,7 +764,7 @@ async fn bounded_cursor_progresses_past_more_than_one_page_of_incompatible_work(
             first
                 .candidates()
                 .iter()
-                .map(automata_ci_store::RunnableAttempt::attempt_id)
+                .map(RunnableAttempt::attempt_id)
                 .collect::<Vec<_>>(),
             incompatible_attempts[..2]
         );
@@ -775,7 +780,7 @@ async fn bounded_cursor_progresses_past_more_than_one_page_of_incompatible_work(
             second
                 .candidates()
                 .iter()
-                .map(automata_ci_store::RunnableAttempt::attempt_id)
+                .map(RunnableAttempt::attempt_id)
                 .collect::<Vec<_>>(),
             incompatible_attempts[2..]
         );
@@ -1746,7 +1751,7 @@ async fn runnable_scan_and_claim_recheck_run_dag_cancellation_and_concurrency() 
             runnable
                 .candidates()
                 .iter()
-                .map(automata_ci_store::RunnableAttempt::attempt_id)
+                .map(RunnableAttempt::attempt_id)
                 .collect::<Vec<_>>(),
             vec![prerequisite_attempt]
         );
@@ -2528,7 +2533,7 @@ async fn scan(
     database: &TestDatabase,
     fence: automata_ci_store::RunnerSessionFence,
     slot: u16,
-) -> TestResult<automata_ci_store::RunnableScanPage> {
+) -> TestResult<RunnableScanPage> {
     scan_with_limit(database, fence, slot, 10).await
 }
 
@@ -2537,7 +2542,7 @@ async fn scan_with_limit(
     fence: automata_ci_store::RunnerSessionFence,
     slot: u16,
     limit: u16,
-) -> TestResult<automata_ci_store::RunnableScanPage> {
+) -> TestResult<RunnableScanPage> {
     let observed_at = database_now(database).await?;
     Ok(database
         .store()
@@ -2554,8 +2559,8 @@ async fn record_page_no_work(
     database: &TestDatabase,
     fence: automata_ci_store::RunnerSessionFence,
     slot: u16,
-    page: &automata_ci_store::RunnableScanPage,
-) -> TestResult<automata_ci_store::TryClaimReceipt> {
+    page: &RunnableScanPage,
+) -> TestResult<TryClaimReceipt> {
     let request_key =
         LeaseRequestKey::first(fence, OperationId::new(), StableRunnerSlot::new(slot)?);
     begin_isolated_lease_request(database, request_key).await?;
@@ -2586,7 +2591,7 @@ async fn fresh_claim_from_page(
     database: &TestDatabase,
     request_key: LeaseRequestKey,
     attempt_id: AttemptId,
-    page: &automata_ci_store::RunnableScanPage,
+    page: &RunnableScanPage,
 ) -> TestResult<TryClaimAttempt> {
     let observed_at = database_now(database).await?;
     Ok(TryClaimAttempt::new(
@@ -2838,7 +2843,7 @@ async fn insert_job_with_requirements(
 async fn transition_path(
     database: &TestDatabase,
     attempt_id: AttemptId,
-    claimed: &automata_ci_store::ClaimedAttempt,
+    claimed: &ClaimedAttempt,
     path: &[JobLifecycle],
 ) -> TestResult {
     let first_observed_at = database_now(database).await?;
@@ -2860,7 +2865,7 @@ async fn transition_path(
 async fn claim_success(
     database: &TestDatabase,
     request: TryClaimAttempt,
-) -> TestResult<automata_ci_store::ClaimedAttempt> {
+) -> TestResult<ClaimedAttempt> {
     let receipt = database.store().try_claim(request).await?;
     match receipt.outcome() {
         TryClaimOutcome::Claimed(claimed) => Ok(claimed.as_ref().clone()),

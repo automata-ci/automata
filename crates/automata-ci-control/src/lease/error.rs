@@ -1,12 +1,11 @@
+use crate::lease::{ClaimCommandError, LeaseRequestKeyError, RunnableScanError};
 use crate::scheduling::{
     EffectiveRunnerError, RoutingRequirementsError, RunnerCapabilityIntersectionError,
     RunnerEvidenceError, SchedulingInputError,
 };
 use automata_ci_core::{RunnerSessionId, SelectorError};
 use automata_ci_protocol::{MessageValidationError, ProtocolVersion};
-use automata_ci_store::{
-    ClaimCommandError, DurabilityValueError, LeaseRequestKeyError, RunnableScanError, StoreError,
-};
+use automata_ci_store::{DurabilityValueError, StoreError};
 use thiserror::Error;
 
 /// Which durable capability document failed decoding or validation.

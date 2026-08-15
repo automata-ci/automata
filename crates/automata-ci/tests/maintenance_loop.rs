@@ -10,12 +10,13 @@ use automata_ci::build_info::BuildInfo;
 use automata_ci::server::{
     ControlPlaneMaintenanceLoop, ControlPlaneMetrics, MaintenanceClock, MaintenanceLoopConfigError,
 };
-use automata_ci_core::UnixMillis;
-use automata_ci_store::{
+use automata_ci_control::maintenance::{
     ControlPlaneMaintenanceReport, ControlPlaneMaintenanceRepository,
     ControlPlaneMaintenanceRequest, LeaseFailureLimit, MaintenanceBatchSize,
-    StaleSessionTimeoutMillis, StoreError,
+    StaleSessionTimeoutMillis,
 };
+use automata_ci_core::UnixMillis;
+use automata_ci_store::StoreError;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 

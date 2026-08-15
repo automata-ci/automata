@@ -1,11 +1,16 @@
+use automata_ci_control::{
+    adapter_spi::{
+        AcquireLease, ConcludeQueuedAttempt, InternalAttemptRepository, QueuedAttempt,
+        TenantAttemptQuery, TransitionAttempt,
+    },
+    attempt::RenewLease,
+};
 use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, JobId, JobLifecycle, LeaseGuard, LeaseId, RunnerId,
     RunnerSessionId, UnixMillis,
 };
 use automata_ci_store::{
-    AcquireLease, AttemptCommandError, ConcludeQueuedAttempt, InternalAttemptRepository,
-    QueuedAttempt, RenewLease, RunnerGeneration, RunnerSessionFence, SessionEpoch,
-    StableRunnerSlot, TenantAttemptQuery, TransitionAttempt,
+    AttemptCommandError, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
 };
 
 fn session(runner_id: RunnerId) -> RunnerSessionFence {

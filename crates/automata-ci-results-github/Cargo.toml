@@ -35,6 +35,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 automata-ci-blob-s3.workspace = true
+automata-ci-control = { workspace = true, features = ["adapter-spi"] }
 automata-ci-postgres = { workspace = true, features = ["test-support"] }
 automata-ci-protocol-protobuf.workspace = true
 automata-ci-store.workspace = true

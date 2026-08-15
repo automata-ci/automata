@@ -12,6 +12,10 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 
+[features]
+default = []
+adapter-spi = []
+
 [[test]]
 name = "control"
 path = "tests/control.rs"

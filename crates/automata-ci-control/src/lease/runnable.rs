@@ -1,12 +1,13 @@
+//! Runnable-queue scan values and opaque cursor proofs.
+
 use std::num::NonZeroU16;
 
 use automata_ci_core::{AttemptId, JobId, RunId, RunnerRequirements, Sha256Digest, UnixMillis};
+use automata_ci_store::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot};
 use thiserror::Error;
 
-use crate::{JobIrMetadata, RunnerSessionFence, StableRunnerSlot};
-
 /// Maximum records returned by one scheduler queue scan.
-pub const MAX_RUNNABLE_SCAN_LIMIT: u16 = 1000;
+const MAX_RUNNABLE_SCAN_LIMIT: u16 = 1000;
 
 /// Bounded scheduler scan size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +28,7 @@ impl RunnableScanLimit {
             .ok_or(RunnableScanError::InvalidLimit)
     }
 
+    /// Returns the validated scan size.
     #[must_use]
     pub const fn get(self) -> u16 {
         self.0.get()
@@ -47,6 +49,7 @@ pub struct RunnableScanRequest {
 }
 
 impl RunnableScanRequest {
+    /// Creates a bounded authoritative scan request.
     #[must_use]
     pub const fn new(
         session: RunnerSessionFence,
@@ -62,21 +65,25 @@ impl RunnableScanRequest {
         }
     }
 
+    /// Returns the authenticated runner-session fence.
     #[must_use]
     pub const fn session(self) -> RunnerSessionFence {
         self.session
     }
 
+    /// Returns the stable runner slot requesting work.
     #[must_use]
     pub const fn slot(self) -> StableRunnerSlot {
         self.slot
     }
 
+    /// Returns the maximum queue records to scan.
     #[must_use]
     pub const fn limit(self) -> RunnableScanLimit {
         self.limit
     }
 
+    /// Returns the trusted scan observation time.
     #[must_use]
     pub const fn observed_at(self) -> UnixMillis {
         self.observed_at
@@ -91,6 +98,7 @@ pub struct RunnableQueueKey {
 }
 
 impl RunnableQueueKey {
+    /// Creates a stable FIFO keyset position.
     #[must_use]
     pub const fn new(queued_at: UnixMillis, attempt_id: AttemptId) -> Self {
         Self {
@@ -99,11 +107,13 @@ impl RunnableQueueKey {
         }
     }
 
+    /// Returns the queue time component.
     #[must_use]
     pub const fn queued_at(self) -> UnixMillis {
         self.queued_at
     }
 
+    /// Returns the attempt identity component.
     #[must_use]
     pub const fn attempt_id(self) -> AttemptId {
         self.attempt_id
@@ -126,28 +136,40 @@ pub struct RunnableCursorAdvance {
 }
 
 impl RunnableCursorAdvance {
+    /// Returns the exact session fence.
+    #[must_use]
     pub(crate) const fn session(self) -> RunnerSessionFence {
         self.session
     }
 
+    /// Returns the stable runner slot.
+    #[must_use]
     pub(crate) const fn slot(self) -> StableRunnerSlot {
         self.slot
     }
 
+    /// Returns the server-derived routing proof root.
+    #[must_use]
     #[cfg(feature = "adapter-spi")]
     pub(crate) const fn routing_fingerprint(self) -> Sha256Digest {
         self.routing_fingerprint
     }
 
+    /// Returns the compare-and-swap cursor version.
+    #[must_use]
     #[cfg(feature = "adapter-spi")]
     pub(crate) const fn expected_version(self) -> u64 {
         self.expected_version
     }
 
+    /// Returns the inclusive queue position scanned through.
+    #[must_use]
     pub(crate) const fn through(self) -> Option<RunnableQueueKey> {
         self.through
     }
 
+    /// Returns the finite scan-cycle upper bound, if established.
+    #[must_use]
     #[cfg(feature = "adapter-spi")]
     pub(crate) const fn cycle_upper(self) -> Option<RunnableQueueKey> {
         self.cycle_upper
@@ -196,36 +218,43 @@ impl RunnableAttempt {
         })
     }
 
+    /// Returns the runnable attempt identity.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
     }
 
+    /// Returns the owning job identity.
     #[must_use]
     pub const fn job_id(&self) -> JobId {
         self.job_id
     }
 
+    /// Returns the owning workflow-run identity.
     #[must_use]
     pub const fn run_id(&self) -> RunId {
         self.run_id
     }
 
+    /// Returns the durable queue time.
     #[must_use]
     pub const fn queued_at(&self) -> UnixMillis {
         self.queued_at
     }
 
+    /// Returns the stable FIFO keyset position.
     #[must_use]
     pub const fn queue_key(&self) -> RunnableQueueKey {
         RunnableQueueKey::new(self.queued_at, self.attempt_id)
     }
 
+    /// Returns the runner requirements used for routing.
     #[must_use]
     pub const fn requirements(&self) -> &RunnerRequirements {
         &self.requirements
     }
 
+    /// Returns the selected job intermediate-representation metadata.
     #[must_use]
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.ir_metadata
@@ -286,11 +315,13 @@ impl RunnableScanPage {
         })
     }
 
+    /// Returns the strictly ordered runnable candidates.
     #[must_use]
     pub fn candidates(&self) -> &[RunnableAttempt] {
         &self.candidates
     }
 
+    /// Returns the cursor version expected by the page.
     #[must_use]
     pub const fn expected_cursor_version(&self) -> u64 {
         self.cursor.expected_version
@@ -324,24 +355,33 @@ impl RunnableScanPage {
     }
 }
 
+/// Invalid runnable scan request, page, or cursor advancement.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RunnableScanError {
+    /// The requested scan limit is zero or exceeds the maximum.
     #[error("runnable scan limit must be in 1..=1000")]
     InvalidLimit,
+    /// The cursor version exceeds the signed durable-storage range.
     #[error("runnable cursor version exceeds durable range")]
     InvalidCursorVersion,
+    /// Page candidates are not strictly FIFO ordered.
     #[error("runnable page candidates are not strictly queue ordered")]
     CandidatesNotOrdered,
+    /// A page candidate exceeds the finite scan-cycle upper bound.
     #[error("runnable page candidate exceeds its cycle high-water mark")]
     CandidateOutsideCycle,
+    /// The selected attempt is absent from the authoritative page.
     #[error("selected attempt is not in the scanned runnable page")]
     CandidateNotInPage,
 }
 
+/// Inconsistent identity in a runnable attempt projection.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum RunnableAttemptError {
+    /// The candidate and job metadata identify different jobs.
     #[error("runnable attempt and JobIR metadata identify different jobs")]
     JobMetadataMismatch,
+    /// The candidate and job metadata identify different workflow runs.
     #[error("runnable attempt and JobIR metadata identify different runs")]
     RunMetadataMismatch,
 }

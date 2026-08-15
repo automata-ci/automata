@@ -14,8 +14,10 @@ use automata_ci_blob::{
     BlobDescriptor, BlobPayload, BlobStoreError, ImmutableBlobStore, MemoryBlobStore,
     PutBlobOutcome, VerifiedBlob,
 };
+use automata_ci_control::attempt::RenewLease;
 use automata_ci_control::lease::{
-    AuthenticatedRunnerSession, LeaseClock, LeasePollError, LeasePollOutcome,
+    AuthenticatedRunnerSession, BeginLeaseRequest, BegunLeaseRequest, CompleteLeaseRequest,
+    LeaseClock, LeasePollError, LeasePollOutcome, LeaseRequestCompletion,
     repository::RunnerLeaseRequestRepository,
 };
 use automata_ci_control::runner_control::{
@@ -39,13 +41,11 @@ use automata_ci_protocol::{
     CommandSequence as ProtocolCommandSequence, JobRuntimeAuthorities, LeaseRequest,
 };
 use automata_ci_store::{
-    AcknowledgeRunnerCommands, BeginLeaseRequest, BegunLeaseRequest, CommandCursor,
-    CommandReplayDisposition, CommandReplayLimit, CommandReplayPage, CommandSequence,
-    CompleteLeaseRequest, DurableRunnerCommand, EnqueueRunnerCommand, HeartbeatRunnerSession,
-    JobIrMetadata, LeaseOfferCommandIdentity, LeaseRequestCompletion, OpenRunnerSession,
-    RenewLease, ResumeRunnerSession, RunnerOperationReceipt, RunnerOperationRequest,
-    RunnerOperationResponse, RunnerSessionFence, RunnerSessionSnapshot, StableRunnerSlot,
-    StoreError,
+    AcknowledgeRunnerCommands, CommandCursor, CommandReplayDisposition, CommandReplayLimit,
+    CommandReplayPage, CommandSequence, DurableRunnerCommand, EnqueueRunnerCommand,
+    HeartbeatRunnerSession, JobIrMetadata, LeaseOfferCommandIdentity, OpenRunnerSession,
+    ResumeRunnerSession, RunnerOperationReceipt, RunnerOperationRequest, RunnerOperationResponse,
+    RunnerSessionFence, RunnerSessionSnapshot, StableRunnerSlot, StoreError,
 };
 
 #[derive(Debug, Default)]

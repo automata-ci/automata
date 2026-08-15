@@ -8,9 +8,20 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_control::{
-    lease::repository::{
-        RunnableAttemptRepository as _, RunnerClaimRepository as _,
-        RunnerLeaseRequestRepository as _,
+    adapter_spi::{AcquireLease, InternalAttemptRepository as _, QueuedAttempt},
+    attempt::RenewLease,
+    lease::{
+        BeginLeaseRequest, CompleteLeaseRequest, LeaseRequestCompletion, LeaseRequestKey,
+        RevokedLeaseOfferFallback, RunnableCursorAdvance, RunnableScanLimit, RunnableScanRequest,
+        TryClaimAttempt, TryClaimOutcome,
+        repository::{
+            RunnableAttemptRepository as _, RunnerClaimRepository as _,
+            RunnerLeaseRequestRepository as _,
+        },
+    },
+    maintenance::{
+        ControlPlaneMaintenanceRepository as _, ControlPlaneMaintenanceRequest, LeaseFailureLimit,
+        MaintenanceBatchSize, StaleSessionTimeoutMillis,
     },
     runner_control::{
         durable::{
@@ -30,16 +41,12 @@ use automata_ci_key_management::{
 };
 use automata_ci_postgres::store::PostgresStore;
 use automata_ci_store::{
-    AcquireLease, AttemptStoreError, BeginLeaseRequest, CommandCursor, CommandReplayDisposition,
-    CommandReplayLimit, CommandSequence, CompleteLeaseRequest,
-    ControlPlaneMaintenanceRepository as _, ControlPlaneMaintenanceRequest, DocumentSchema,
-    EnqueueRunnerCommand, GITHUB_AUTHORITY_PROVIDER_CLOCK_SKEW_MILLIS, HeartbeatRunnerSession,
-    InternalAttemptRepository as _, JobIrMetadata, LeaseFailureLimit, LeaseOfferCommandIdentity,
-    LeaseRequestCompletion, LeaseRequestKey, MaintenanceBatchSize, OpenRunnerSession,
-    QueuedAttempt, RenewLease, ResumeRunnerSession, RevokedLeaseOfferFallback, RunnableScanLimit,
-    RunnableScanRequest, RunnerCommandPayload, RunnerOperationKind, RunnerOperationRequest,
-    RunnerOperationResponse, RunnerProtocolVersion, StableRunnerSlot, StaleSessionTimeoutMillis,
-    StoreError, TryClaimAttempt, TryClaimOutcome,
+    AttemptStoreError, CommandCursor, CommandReplayDisposition, CommandReplayLimit,
+    CommandSequence, DocumentSchema, EnqueueRunnerCommand,
+    GITHUB_AUTHORITY_PROVIDER_CLOCK_SKEW_MILLIS, HeartbeatRunnerSession, JobIrMetadata,
+    LeaseOfferCommandIdentity, OpenRunnerSession, ResumeRunnerSession, RunnerCommandPayload,
+    RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion,
+    StableRunnerSlot, StoreError,
 };
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
@@ -2371,7 +2378,7 @@ async fn stale_session_close_rereads_a_heartbeat_after_waiting_for_its_lock() ->
 struct PreparedClaim {
     attempt_id: AttemptId,
     request_key: LeaseRequestKey,
-    cursor: automata_ci_store::RunnableCursorAdvance,
+    cursor: RunnableCursorAdvance,
     duration_millis: i64,
 }
 

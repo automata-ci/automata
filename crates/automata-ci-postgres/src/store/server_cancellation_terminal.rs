@@ -1,8 +1,9 @@
 use sqlx::{Postgres, Row as _, Transaction};
 
+use automata_ci_control::cancellation::{CancellationReason, RequestCancellation};
 use automata_ci_core::AttemptId;
 
-use automata_ci_store::{RequestCancellation, StoreError};
+use automata_ci_store::StoreError;
 
 pub(super) async fn server_cancellation_terminal_exists(
     transaction: &mut Transaction<'_, Postgres>,
@@ -59,11 +60,7 @@ pub(super) async fn insert_queued_server_cancellation_terminal(
     .bind(request.attempt_id().as_uuid())
     .bind(request.operation_id().as_uuid())
     .bind(request.actor().as_str())
-    .bind(
-        request
-            .reason()
-            .map(automata_ci_store::CancellationReason::as_str),
-    )
+    .bind(request.reason().map(CancellationReason::as_str))
     .bind(request.requested_at().get())
     .execute(&mut **transaction)
     .await
@@ -117,11 +114,7 @@ pub(super) async fn verify_queued_server_cancellation_terminal(
     .bind(request.attempt_id().as_uuid())
     .bind(request.operation_id().as_uuid())
     .bind(request.actor().as_str())
-    .bind(
-        request
-            .reason()
-            .map(automata_ci_store::CancellationReason::as_str),
-    )
+    .bind(request.reason().map(CancellationReason::as_str))
     .bind(request.requested_at().get())
     .fetch_optional(&mut **transaction)
     .await

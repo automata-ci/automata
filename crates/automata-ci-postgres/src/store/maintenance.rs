@@ -1,15 +1,18 @@
 use async_trait::async_trait;
+use automata_ci_control::{
+    adapter_spi::{BlockedAttemptRepository, BlockedConclusion, ConcludeBlockedAttempt},
+    lease::RunnableScanLimit,
+    maintenance::{
+        ControlPlaneMaintenanceReport, ControlPlaneMaintenanceRepository,
+        ControlPlaneMaintenanceRequest, ExpiredAttemptDisposition, ExpiredAttemptMaintenance,
+    },
+};
 use automata_ci_core::{AttemptId, JobLifecycle, RunId};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use super::{PostgresStore, parse_lifecycle};
-use automata_ci_store::{
-    BlockedAttemptRepository, BlockedConclusion, ConcludeBlockedAttempt,
-    ControlPlaneMaintenanceReport, ControlPlaneMaintenanceRepository,
-    ControlPlaneMaintenanceRequest, ExpiredAttemptDisposition, ExpiredAttemptMaintenance,
-    RunnableScanLimit, RunnerPayloadTombstoneReason, StoreError,
-};
+use automata_ci_store::{RunnerPayloadTombstoneReason, StoreError};
 
 #[async_trait]
 impl ControlPlaneMaintenanceRepository for PostgresStore {
@@ -38,7 +41,7 @@ impl ControlPlaneMaintenanceRepository for PostgresStore {
         }
 
         Ok(
-            automata_ci_store::adapter_spi::control_plane_maintenance_report(
+            automata_ci_control::adapter_spi::control_plane_maintenance_report(
                 expired_attempts,
                 skipped_blocked_attempts,
                 closed_stale_sessions,
@@ -144,7 +147,7 @@ async fn reap_expired_attempt(
     .await?;
     transaction.commit().await.map_err(StoreError::operation)?;
     Ok(Some(
-        automata_ci_store::adapter_spi::expired_attempt_maintenance(
+        automata_ci_control::adapter_spi::expired_attempt_maintenance(
             attempt_id,
             mutation.disposition,
             reconciliation,

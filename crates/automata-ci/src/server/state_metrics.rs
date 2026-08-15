@@ -5,6 +5,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use automata_ci_control::observability::{
+    ArtifactReservationKind, ArtifactState, BuiltinSecretCleanupStatus, ControlPlaneCapacityRunner,
+    ControlPlaneStateRepository, ControlPlaneStateSnapshot, ControlPlaneStateSnapshotRequest,
+    DatabasePoolSnapshot, JobAttemptCounts, LEASE_NEAR_EXPIRY_WINDOW, LeaseCounts, LeaseState,
+    LogicalActivationState, LogicalJobState, LogicalWorkflowRunState, RunnerCounts,
+    RunnerDesiredState, RunnerObservedState, RunnerSessionCounts, RunnerSessionState,
+    WorkflowRunCounts,
+};
 use automata_ci_control::scheduling::{
     AuthorizedRunnerRouting, CandidateCapacity, EffectiveRunner, RoutingRequirements,
     RunnableCandidate, RunnerEvidence, RunnerSlot, SessionGuard, classify_candidate_capacity,
@@ -14,13 +22,7 @@ use automata_ci_core::{JobLifecycle, RunnerGroup, RunnerLabel, UnixMillis};
 use automata_ci_metrics::{
     Counter, Family, Gauge, Histogram, Registry, Unit, classic_and_native_histogram,
 };
-use automata_ci_store::{
-    ArtifactReservationKind, ArtifactState, BuiltinSecretCleanupStatus,
-    ControlPlaneStateRepository, ControlPlaneStateSnapshot, ControlPlaneStateSnapshotRequest,
-    DatabasePoolSnapshot, JobAttemptCounts, LEASE_NEAR_EXPIRY_WINDOW, LeaseState,
-    LogicalActivationState, LogicalJobState, LogicalWorkflowRunState, RunnerDesiredState,
-    RunnerObservedState, RunnerSessionState, WorkflowRunCounts, WorkflowRunStatus,
-};
+use automata_ci_store::WorkflowRunStatus;
 use prometheus_client::{
     collector::Collector,
     encoding::{
@@ -431,7 +433,7 @@ fn compatible_capacity_snapshot(
 }
 
 fn effective_capacity_runner(
-    durable: &automata_ci_store::ControlPlaneCapacityRunner,
+    durable: &ControlPlaneCapacityRunner,
     observed_at: UnixMillis,
 ) -> Option<EffectiveRunner> {
     let machine_capabilities = intersect_runner_capabilities(
@@ -597,7 +599,7 @@ fn encode_job_attempts(
 
 fn encode_runners(
     encoder: &mut DescriptorEncoder<'_>,
-    counts: automata_ci_store::RunnerCounts,
+    counts: RunnerCounts,
 ) -> Result<(), fmt::Error> {
     let family = Family::<RunnerStateLabels, UnsignedGauge>::default();
     for observed in RunnerObservedState::ALL {
@@ -621,7 +623,7 @@ fn encode_runners(
 
 fn encode_runner_sessions(
     encoder: &mut DescriptorEncoder<'_>,
-    counts: automata_ci_store::RunnerSessionCounts,
+    counts: RunnerSessionCounts,
 ) -> Result<(), fmt::Error> {
     let family = Family::<StateLabels, UnsignedGauge>::default();
     for state in RunnerSessionState::ALL {
@@ -713,7 +715,7 @@ fn encode_compatible_capacity(
 
 fn encode_leases(
     encoder: &mut DescriptorEncoder<'_>,
-    counts: automata_ci_store::LeaseCounts,
+    counts: LeaseCounts,
 ) -> Result<(), fmt::Error> {
     let family = Family::<StateLabels, UnsignedGauge>::default();
     for state in LeaseState::ALL {
@@ -1041,17 +1043,20 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use automata_ci_control::observability::{
+        ArtifactCounts, ArtifactReservations, BuiltinSecretCleanupCounts,
+        ControlPlaneCapacityCandidate, ControlPlaneCapacityRunner, ControlPlaneStateValueError,
+        JobAttemptCounts, LeaseCounts, LogicalActivationCounts, LogicalJobCounts,
+        LogicalWorkflowRunCounts, RunnerCounts, RunnerSessionCounts,
+    };
     use automata_ci_core::{
         Architecture, AttemptId, JobId, OperatingSystem, RunnerCapabilities, RunnerId,
         RunnerPlatform, RunnerRequirements, RunnerSessionId,
     };
     use automata_ci_metrics::{BuildInfo, ExporterLimits, Metrics, MetricsBuilder, ProcessRole};
     use automata_ci_store::{
-        ArtifactCounts, ArtifactReservations, BuiltinSecretCleanupCounts,
-        ControlPlaneCapacityCandidate, ControlPlaneCapacityRunner, ControlPlaneStateValueError,
-        JobAttemptCounts, LeaseCounts, LogicalActivationCounts, LogicalJobCounts,
-        LogicalWorkflowRunCounts, RoutingLabel, RunnerCounts, RunnerGeneration,
-        RunnerSessionCounts, RunnerSessionFence, RunnerSlotCount, SessionEpoch, StableRunnerSlot,
+        RoutingLabel, RunnerGeneration, RunnerSessionFence, RunnerSlotCount, SessionEpoch,
+        StableRunnerSlot,
     };
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;

@@ -1,9 +1,25 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! Scheduling, lease orchestration, and authenticated runner control for Automata.
+//! Scheduling, execution durability, maintenance, observability, and
+//! authenticated runner control for Automata.
 
+pub mod attempt;
+pub mod cancellation;
 pub mod github_oidc;
 pub mod lease;
+pub mod maintenance;
+pub mod observability;
 pub mod runner_auth;
 pub mod runner_control;
 pub mod scheduling;
+
+/// Unstable construction and inspection hooks for Automata's first-party
+/// durable adapters.
+///
+/// This module is not a supported public API. It is feature-gated so ordinary
+/// Control consumers cannot accidentally depend on repository trust-boundary
+/// operations, and it may change without notice alongside first-party
+/// adapters.
+#[cfg(feature = "adapter-spi")]
+#[doc(hidden)]
+pub mod adapter_spi;

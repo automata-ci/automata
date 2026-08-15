@@ -1,9 +1,8 @@
-use automata_ci_core::UnixMillis;
-use automata_ci_store::{
+use automata_ci_control::maintenance::{
     ControlPlaneMaintenanceRepository, ControlPlaneMaintenanceRequest, LeaseFailureLimit,
-    MAX_MAINTENANCE_BATCH_SIZE, MaintenanceBatchSize, MaintenanceValueError,
-    StaleSessionTimeoutMillis,
+    MaintenanceBatchSize, MaintenanceValueError, StaleSessionTimeoutMillis,
 };
+use automata_ci_core::UnixMillis;
 
 fn require_send_sync<T: ?Sized + Send + Sync>() {}
 
@@ -18,8 +17,8 @@ fn maintenance_policy_values_are_positive_bounded_and_exact() {
         MaintenanceBatchSize::new(0),
         Err(MaintenanceValueError::InvalidBatchSize)
     ));
-    assert!(MaintenanceBatchSize::new(MAX_MAINTENANCE_BATCH_SIZE).is_ok());
-    assert!(MaintenanceBatchSize::new(MAX_MAINTENANCE_BATCH_SIZE + 1).is_err());
+    assert!(MaintenanceBatchSize::new(1_000).is_ok());
+    assert!(MaintenanceBatchSize::new(1_001).is_err());
     assert!(LeaseFailureLimit::new(0).is_err());
     assert!(LeaseFailureLimit::new(i32::MAX as u32).is_ok());
     assert!(LeaseFailureLimit::new(i32::MAX as u32 + 1).is_err());

@@ -3,7 +3,20 @@ use std::collections::BTreeSet;
 use async_trait::async_trait;
 use automata_ci_auth::{authorization::SecretExposureClass, human::TenantId};
 use automata_ci_control::{
+    adapter_spi::{
+        BlockedAttempt, BlockedAttemptRepository, BlockedConclusion, ConcludeBlockedAttempt,
+    },
+    attempt::RenewLease,
+    cancellation::{
+        CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload,
+        CancellationActor, CancellationIntent, CancellationReason, CancellationRepository,
+        DEFAULT_CANCELLATION_REASON, RequestCancellation,
+    },
     lease::{
+        BeginLeaseRequest, BegunLeaseRequest, ClaimRejection, ClaimedAttempt, CompleteLeaseRequest,
+        LeaseRequestCompletion, LeaseRequestKey, NoWorkLeaseRequest, RevokedLeaseOfferFallback,
+        RunnableAttempt, RunnableQueueKey, RunnableScanLimit, RunnableScanPage,
+        RunnableScanRequest, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
         repository::{
             RunnableAttemptRepository, RunnerClaimRepository, RunnerLeaseRequestRepository,
         },
@@ -42,23 +55,16 @@ use uuid::Uuid;
 
 use super::{PostgresStore, RunnerPayloadEncryption, lifecycle_name, parse_lifecycle};
 use automata_ci_store::{
-    AcknowledgeRunnerCommands, AttemptAssignment, AttemptStoreError, BeginLeaseRequest,
-    BegunLeaseRequest, BlockedAttempt, BlockedAttemptRepository, BlockedConclusion,
-    CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor,
-    CancellationIntent, CancellationReason, CancellationRepository, ClaimRejection, ClaimedAttempt,
-    CloseRunnerSession, CommandCursor, CommandReplayDisposition, CommandReplayLimit,
-    CommandReplayPage, CommandSequence, CompleteLeaseRequest, ConcludeBlockedAttempt,
-    DEFAULT_CANCELLATION_REASON, DocumentSchema, DurableRunnerCommand, EnqueueRunnerCommand,
+    AcknowledgeRunnerCommands, AttemptAssignment, AttemptStoreError, CloseRunnerSession,
+    CommandCursor, CommandReplayDisposition, CommandReplayLimit, CommandReplayPage,
+    CommandSequence, DocumentSchema, DurableRunnerCommand, EnqueueRunnerCommand,
     HeartbeatRunnerSession, JobDependency, JobIrMetadata, LeaseOfferCommandIdentity,
-    LeaseRequestCompletion, LeaseRequestKey, MAX_COMMAND_REPLAY_BYTES, MAX_COMMAND_REPLAY_LIMIT,
-    NoWorkLeaseRequest, ObjectKey, OpenRunnerSession, RequestCancellation, ResumeRunnerSession,
-    RevokedLeaseOfferFallback, RoutingDocument, RoutingLabel, RunnableAttempt, RunnableQueueKey,
-    RunnableScanLimit, RunnableScanPage, RunnableScanRequest, RunnerCommandPayload,
-    RunnerGeneration, RunnerOperationKind, RunnerOperationReceipt, RunnerOperationRequest,
-    RunnerOperationResponse, RunnerPayloadTombstone, RunnerPayloadTombstoneReason,
-    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot, RunnerSlotCount,
-    SessionEpoch, StableRunnerSlot, StoreError, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
-    WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
+    MAX_COMMAND_REPLAY_BYTES, MAX_COMMAND_REPLAY_LIMIT, ObjectKey, OpenRunnerSession,
+    ResumeRunnerSession, RoutingDocument, RoutingLabel, RunnerCommandPayload, RunnerGeneration,
+    RunnerOperationKind, RunnerOperationReceipt, RunnerOperationRequest, RunnerOperationResponse,
+    RunnerPayloadTombstone, RunnerPayloadTombstoneReason, RunnerProtocolVersion,
+    RunnerSessionFence, RunnerSessionSnapshot, RunnerSlotCount, SessionEpoch, StableRunnerSlot,
+    StoreError, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
 };
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
@@ -1802,9 +1808,9 @@ impl RunnerControlTransactionRepository for PostgresStore {
 
     async fn authorize_lease_renewal(
         &self,
-        request: automata_ci_store::RenewLease,
+        request: RenewLease,
         reported_lifecycle: JobLifecycle,
-    ) -> Result<automata_ci_store::RenewLease, StoreError> {
+    ) -> Result<RenewLease, StoreError> {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
         let authorized = super::authorize_lease_renewal_in_transaction(
@@ -2320,7 +2326,7 @@ async fn apply_lease_response(
 
 async fn require_live_renewal_attempt(
     transaction: &mut Transaction<'_, Postgres>,
-    renewal: automata_ci_store::RenewLease,
+    renewal: RenewLease,
 ) -> Result<UnixMillis, StoreError> {
     let session = renewal.session();
     let row = sqlx::query(
@@ -2371,7 +2377,7 @@ async fn require_live_renewal_attempt(
 
 async fn commit_reported_lifecycle(
     transaction: &mut Transaction<'_, Postgres>,
-    renewal: automata_ci_store::RenewLease,
+    renewal: RenewLease,
     reported: JobLifecycle,
     decision_now: UnixMillis,
 ) -> Result<(), StoreError> {
@@ -4432,7 +4438,7 @@ fn decode_receipt_lease_offer_completion(
             Some(fallback_schema),
             Some(fallback_digest),
         ) => {
-            let fallback = automata_ci_store::adapter_spi::revoked_lease_offer_fallback(
+            let fallback = automata_ci_control::adapter_spi::revoked_lease_offer_fallback(
                 u16::try_from(fallback_version).map_err(|_| {
                     StoreError::corrupt_data(
                         "runner RPC receipt fallback version is outside the durable range",
@@ -5697,7 +5703,7 @@ impl RunnerClaimRepository for PostgresStore {
 
     async fn try_claim(&self, mut request: TryClaimAttempt) -> Result<TryClaimReceipt, StoreError> {
         let caller_observed_at = request.observed_at();
-        let cursor = automata_ci_store::adapter_spi::try_claim_attempt_cursor(&request);
+        let cursor = automata_ci_control::adapter_spi::try_claim_attempt_cursor(&request);
         let requested_duration =
             super::runner_attempt_requested_duration(request.observed_at(), request.expires_at())?;
         let digest = request.request_digest();
@@ -5783,7 +5789,7 @@ impl RunnerClaimRepository for PostgresStore {
         request: NoWorkLeaseRequest,
     ) -> Result<TryClaimReceipt, StoreError> {
         let request_key = request.request_key();
-        let cursor = automata_ci_store::adapter_spi::no_work_lease_request_cursor(&request);
+        let cursor = automata_ci_control::adapter_spi::no_work_lease_request_cursor(&request);
         let digest = request_key.request_digest();
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
@@ -7352,7 +7358,7 @@ async fn cleanup_disconnected_runner_lease_request_state(
 
 async fn advance_scan_cursor(
     transaction: &mut Transaction<'_, Postgres>,
-    cursor: automata_ci_store::adapter_spi::RunnableCursorView,
+    cursor: automata_ci_control::adapter_spi::RunnableCursorView,
     routing: &LockedRouting,
     observed_at: UnixMillis,
 ) -> Result<Option<u64>, StoreError> {
@@ -7440,7 +7446,7 @@ fn rebase_claim_request(
 ) -> Result<(), StoreError> {
     let database_expires_at =
         super::runner_attempt_database_expiry(database_now, requested_duration)?;
-    *request = automata_ci_store::adapter_spi::rebase_try_claim_attempt(
+    *request = automata_ci_control::adapter_spi::rebase_try_claim_attempt(
         request,
         database_now,
         database_expires_at,

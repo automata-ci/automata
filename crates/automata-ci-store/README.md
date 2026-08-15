@@ -1,10 +1,12 @@
 # automata-ci-store
 
 `automata-ci-store` defines backend-neutral durable values and repository ports
-for workflow admission, scheduling, leases, runner sessions, receipts,
-outboxes, reconciliation, publication, and managed-secret metadata. Domain
-invariants and validated request/receipt types remain here; database drivers,
-schema migrations, and concrete repositories live in `automata-ci-postgres`.
+for workflow admission and planning, runner sessions, receipts, outboxes,
+reconciliation, publication, and managed-secret metadata. Execution-control
+contracts for attempts, lease polling and runnable queues, cancellation,
+maintenance, and identifier-free state snapshots live in
+`automata-ci-control`. Database drivers, schema migrations, and concrete
+repositories live in `automata-ci-postgres`.
 
 ## Tests
 

@@ -1,10 +1,6 @@
 use std::time::Duration;
 
-use automata_ci_core::{
-    Architecture, AttemptId, JobId, JobLifecycle, OperatingSystem, RunnerCapabilities, RunnerId,
-    RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
-};
-use automata_ci_store::{
+use automata_ci_control::observability::{
     ArtifactCounts, ArtifactReservationKind, ArtifactReservations, ArtifactState,
     BuiltinSecretCleanupCounts, BuiltinSecretCleanupStatus, ControlPlaneCapacityCandidate,
     ControlPlaneCapacityRunner, ControlPlaneCapacitySnapshot, ControlPlaneStateSnapshot,
@@ -13,8 +9,14 @@ use automata_ci_store::{
     LogicalJobCounts, LogicalJobState, LogicalWorkflowRunCounts, LogicalWorkflowRunState,
     MAX_CONTROL_PLANE_CAPACITY_CANDIDATES, MAX_CONTROL_PLANE_CAPACITY_RUNNERS,
     MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RunnerCounts, RunnerDesiredState,
-    RunnerGeneration, RunnerObservedState, RunnerSessionCounts, RunnerSessionFence,
-    RunnerSessionState, RunnerSlotCount, SessionEpoch, WorkflowRunCounts, WorkflowRunStatus,
+    RunnerObservedState, RunnerSessionCounts, RunnerSessionState, WorkflowRunCounts,
+};
+use automata_ci_core::{
+    Architecture, AttemptId, JobId, JobLifecycle, OperatingSystem, RunnerCapabilities, RunnerId,
+    RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
+};
+use automata_ci_store::{
+    RunnerGeneration, RunnerSessionFence, RunnerSlotCount, SessionEpoch, WorkflowRunStatus,
 };
 
 #[test]

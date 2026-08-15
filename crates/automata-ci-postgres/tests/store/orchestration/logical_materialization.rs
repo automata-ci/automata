@@ -3,7 +3,8 @@ use crate::github_manifest_fixture;
 use std::{collections::BTreeMap, time::Duration};
 
 use automata_ci_control::{
-    lease::repository::RunnableAttemptRepository as _,
+    adapter_spi::{InternalAttemptRepository as _, QueuedAttempt},
+    lease::{RunnableScanLimit, RunnableScanRequest, repository::RunnableAttemptRepository as _},
     runner_control::repository::RunnerSessionRepository as _,
 };
 use automata_ci_core::{
@@ -38,7 +39,7 @@ use automata_ci_store::{
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    InternalAttemptRepository as _, JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind,
+    JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind,
     LOGICAL_JOB_RESULT_PLAN_MEDIA_TYPE, LogicalActivationObject,
     LogicalActivationPreparationStore as _, LogicalActivationRepository as _,
     LogicalActivationWorkerId, LogicalInstanceMaterializationSelectionOutcome,
@@ -56,14 +57,14 @@ use automata_ci_store::{
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
     ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
     ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, PublishReusableWorkflowCall, QueuedAttempt,
+    PublishLogicalJobActivation, PublishReusableWorkflowCall,
     RegisterProviderDeliveryWorkflowInventory, ReusableCallOutputMapping, ReusableSecretPermission,
     ReusableWorkflowOperationId, ReusableWorkflowRuntimeRepository as _,
     ReusableWorkflowRuntimeStoreError, RoutingDocument, RunReconciliationRepository as _,
-    RunnableScanLimit, RunnableScanRequest, RunnerGeneration, RunnerProtocolVersion,
-    RunnerSessionFence, StableRunnerSlot, StoreError, TenantScope, WorkflowAdmissionIdempotency,
-    WorkflowAdmissionRepository as _, WorkflowConcurrency, WorkflowPlanRepository as _,
-    WorkflowRunStatus, WorkflowRuntimePolicyPin, WorkflowSnapshotId,
+    RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, StableRunnerSlot, StoreError,
+    TenantScope, WorkflowAdmissionIdempotency, WorkflowAdmissionRepository as _,
+    WorkflowConcurrency, WorkflowPlanRepository as _, WorkflowRunStatus, WorkflowRuntimePolicyPin,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;

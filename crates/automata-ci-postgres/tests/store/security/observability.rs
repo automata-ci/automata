@@ -2,7 +2,15 @@ use crate::github_manifest_fixture;
 
 use std::time::Duration;
 
-use automata_ci_control::runner_control::repository::RunnerCommandOutbox as _;
+use automata_ci_control::{
+    observability::{
+        ArtifactReservationKind, ArtifactState, BuiltinSecretCleanupStatus,
+        ControlPlaneStateRepository as _, ControlPlaneStateSnapshot,
+        ControlPlaneStateSnapshotRequest, LeaseState, LogicalActivationState, LogicalJobState,
+        LogicalWorkflowRunState, RunnerDesiredState, RunnerObservedState, RunnerSessionState,
+    },
+    runner_control::repository::RunnerCommandOutbox as _,
+};
 use automata_ci_core::{
     Architecture, JobAuthorityProfile, JobId, JobIrVersion, JobLifecycle, OperatingSystem,
     OperationId, RunId, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
@@ -11,19 +19,17 @@ use automata_ci_core::{
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AcknowledgeRunnerCommands,
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
-    ArtifactReservationKind, ArtifactState, AuthenticatedGithubDeliveryClaim,
-    BindLogicalActivationPreparation, BuiltinSecretCleanupStatus, ClaimNextLogicalJobOrchestration,
-    ClaimProviderDelivery, CommandCursor, ConsumeSelectedLogicalJobOrchestration,
-    ConsumedLogicalJobOrchestrationAuthority, ControlPlaneStateRepository as _,
-    ControlPlaneStateSnapshot, ControlPlaneStateSnapshotRequest, DocumentSchema,
-    EnqueueRunnerCommand, EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderOrigins,
+    AuthenticatedGithubDeliveryClaim, BindLogicalActivationPreparation,
+    ClaimNextLogicalJobOrchestration, ClaimProviderDelivery, CommandCursor,
+    ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
+    DocumentSchema, EnqueueRunnerCommand, EnsureGithubServerServiceAuthority, GithubCheckHeadSha,
+    GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
     GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository as _,
-    LeaseState, LogicalActivationPreparationStore as _, LogicalActivationWorkerId,
+    LogicalActivationPreparationStore as _, LogicalActivationWorkerId,
     LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionId,
     LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
@@ -32,9 +38,8 @@ use automata_ci_store::{
     ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RegisterProviderDeliveryWorkflowInventory, RunnerCommandPayload, RunnerDesiredState,
-    RunnerGeneration, RunnerObservedState, RunnerOperationKind, RunnerSessionFence,
-    RunnerSessionState, SessionEpoch, TenantScope, WORKFLOW_ADMISSION_EPOCH,
+    RegisterProviderDeliveryWorkflowInventory, RunnerCommandPayload, RunnerGeneration,
+    RunnerOperationKind, RunnerSessionFence, SessionEpoch, TenantScope, WORKFLOW_ADMISSION_EPOCH,
     WorkflowAdmissionIdempotency, WorkflowRunStatus, WorkflowSnapshotId,
 };
 use uuid::Uuid;
@@ -201,37 +206,27 @@ fn assert_logical_snapshot(
     assert_eq!(
         snapshot
             .logical_workflow_runs()
-            .get(automata_ci_store::LogicalWorkflowRunState::Active),
+            .get(LogicalWorkflowRunState::Active),
         1
     );
-    assert_eq!(
-        snapshot
-            .logical_jobs()
-            .get(automata_ci_store::LogicalJobState::Pending),
-        1
-    );
-    assert_eq!(
-        snapshot
-            .logical_jobs()
-            .get(automata_ci_store::LogicalJobState::Activating),
-        2
-    );
+    assert_eq!(snapshot.logical_jobs().get(LogicalJobState::Pending), 1);
+    assert_eq!(snapshot.logical_jobs().get(LogicalJobState::Activating), 2);
     assert_eq!(
         snapshot
             .logical_activations()
-            .oldest_at(automata_ci_store::LogicalActivationState::Pending),
+            .oldest_at(LogicalActivationState::Pending),
         Some(logical.pending_since)
     );
     assert_eq!(
         snapshot
             .logical_activations()
-            .get(automata_ci_store::LogicalActivationState::Expired),
+            .get(LogicalActivationState::Expired),
         1
     );
     assert_eq!(
         snapshot
             .logical_activations()
-            .oldest_at(automata_ci_store::LogicalActivationState::Expired),
+            .oldest_at(LogicalActivationState::Expired),
         Some(logical.expired_since)
     );
     assert_eq!(snapshot.activation_publications(), 0);

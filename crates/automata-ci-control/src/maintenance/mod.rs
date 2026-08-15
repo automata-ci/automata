@@ -1,13 +1,18 @@
+//! Replica-safe control-plane maintenance values and repository ports.
+
+#[cfg(feature = "adapter-spi")]
+pub(crate) mod blocked;
+
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 use async_trait::async_trait;
 use automata_ci_core::{AttemptId, RunId, UnixMillis};
 use thiserror::Error;
 
-use crate::{RunReconciliation, StoreError};
+use automata_ci_store::{RunReconciliation, StoreError};
 
 /// Largest number of records handled per work category in one maintenance pass.
-pub const MAX_MAINTENANCE_BATCH_SIZE: u16 = 1_000;
+const MAX_MAINTENANCE_BATCH_SIZE: u16 = 1_000;
 
 /// Positive, defensively bounded maintenance work limit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -28,6 +33,7 @@ impl MaintenanceBatchSize {
             .ok_or(MaintenanceValueError::InvalidBatchSize)
     }
 
+    /// Returns the bounded batch size.
     #[must_use]
     pub const fn get(self) -> u16 {
         self.0.get()
@@ -53,6 +59,7 @@ impl LeaseFailureLimit {
             .ok_or(MaintenanceValueError::InvalidLeaseFailureLimit)
     }
 
+    /// Returns the durable lease-failure limit.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0.get()
@@ -78,6 +85,7 @@ impl StaleSessionTimeoutMillis {
             .ok_or(MaintenanceValueError::InvalidStaleSessionTimeout)
     }
 
+    /// Returns the stale-session timeout in milliseconds.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0.get()
@@ -124,21 +132,25 @@ impl ControlPlaneMaintenanceRequest {
         })
     }
 
+    /// Returns the trusted observation time for this pass.
     #[must_use]
     pub const fn observed_at(self) -> UnixMillis {
         self.observed_at
     }
 
+    /// Returns the lease-failure budget applied by this pass.
     #[must_use]
     pub const fn maximum_lease_failures(self) -> LeaseFailureLimit {
         self.maximum_lease_failures
     }
 
+    /// Returns the per-category maintenance batch size.
     #[must_use]
     pub const fn batch_size(self) -> MaintenanceBatchSize {
         self.batch_size
     }
 
+    /// Returns the oldest session heartbeat still considered live.
     #[must_use]
     pub const fn stale_session_cutoff(self) -> UnixMillis {
         self.stale_session_cutoff
@@ -176,21 +188,25 @@ impl ExpiredAttemptMaintenance {
         }
     }
 
+    /// Returns the changed attempt identity.
     #[must_use]
     pub const fn attempt_id(self) -> AttemptId {
         self.attempt_id
     }
 
+    /// Returns the atomically reconciled run identity.
     #[must_use]
     pub const fn run_id(self) -> RunId {
         self.reconciliation.run_id()
     }
 
+    /// Returns the durable disposition selected for the attempt.
     #[must_use]
     pub const fn disposition(self) -> ExpiredAttemptDisposition {
         self.disposition
     }
 
+    /// Returns the aggregate run reconciliation committed with the attempt.
     #[must_use]
     pub const fn reconciliation(self) -> RunReconciliation {
         self.reconciliation
@@ -225,16 +241,19 @@ impl ControlPlaneMaintenanceReport {
         &self.expired_attempts
     }
 
+    /// Returns the number of stale sessions closed by this pass.
     #[must_use]
     pub const fn closed_stale_sessions(&self) -> u16 {
         self.closed_stale_sessions
     }
 
+    /// Returns the number of dependency-blocked attempts skipped by this pass.
     #[must_use]
     pub const fn skipped_blocked_attempts(&self) -> u16 {
         self.skipped_blocked_attempts
     }
 
+    /// Returns whether the pass committed no maintenance changes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.expired_attempts.is_empty()

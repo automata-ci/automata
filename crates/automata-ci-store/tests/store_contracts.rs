@@ -3,10 +3,6 @@
 #[path = "github_manifest_fixture.rs"]
 mod github_manifest_fixture;
 
-#[path = "adapter_port.rs"]
-mod adapter_port;
-#[path = "attempt_api.rs"]
-mod attempt_api;
 #[path = "g1_api.rs"]
 mod g1_api;
 #[path = "github_authenticated_event.rs"]
@@ -41,12 +37,8 @@ mod logical_orchestration_api;
 mod logical_run_finalization_api;
 #[path = "logical_work_selection_api.rs"]
 mod logical_work_selection_api;
-#[path = "maintenance_api.rs"]
-mod maintenance_api;
 #[path = "managed_secret_authority_api.rs"]
 mod managed_secret_authority_api;
-#[path = "observability_api.rs"]
-mod observability_api;
 #[path = "provider_delivery_api.rs"]
 mod provider_delivery_api;
 #[path = "provider_delivery_receipt.rs"]
@@ -61,8 +53,6 @@ mod runtime_authority_api;
 mod secret_custody_api;
 #[path = "secret_management_api.rs"]
 mod secret_management_api;
-#[path = "snapshot_api.rs"]
-mod snapshot_api;
 #[path = "tenant_scope.rs"]
 mod tenant_scope;
 #[path = "workflow_admission.rs"]

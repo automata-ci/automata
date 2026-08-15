@@ -1,3 +1,4 @@
+use crate::attempt::RenewLease;
 use async_trait::async_trait;
 use automata_ci_auth::{authorization::SecretExposureClass, human::TenantId};
 use automata_ci_core::{
@@ -7,7 +8,7 @@ use automata_ci_core::{
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CommandCursor, DocumentSchema, DurableRunnerCommand,
     EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, MAX_LOG_SEGMENT_BYTES,
-    MAX_TERMINAL_RESULT_BYTES, ObjectKey, RenewLease, RunnerGeneration, RunnerOperationReceipt,
+    MAX_TERMINAL_RESULT_BYTES, ObjectKey, RunnerGeneration, RunnerOperationReceipt,
     RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
     StableRunnerSlot, StoreError,
 };

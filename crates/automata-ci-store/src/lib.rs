@@ -3,9 +3,6 @@
 
 mod admission;
 mod assignment;
-mod attempt;
-mod blocked;
-mod cancellation;
 mod conformance;
 mod error;
 mod github_check_rerun;
@@ -25,10 +22,7 @@ mod logical_materialization;
 mod logical_orchestration;
 mod logical_run_finalization;
 mod logical_work_selection;
-mod maintenance;
 mod managed_secret_authority;
-mod observability;
-mod operation;
 mod outbox;
 mod plan;
 mod protected_environment;
@@ -38,13 +32,11 @@ mod receipt;
 mod reconciliation;
 mod reusable_workflow_admission;
 mod reusable_workflow_runtime;
-mod runnable;
 mod runner_payload;
 mod runtime_authority;
 mod secret_custody;
 mod secret_management;
 mod session;
-mod snapshot;
 mod store_error;
 mod tenant;
 mod value;
@@ -70,19 +62,7 @@ pub use admission::{
     WorkflowAdmissionValueError, WorkflowConcurrency, WorkflowSnapshotId,
 };
 pub use assignment::{AttemptAssignment, AttemptAssignmentError};
-pub use attempt::{
-    AcquireLease, ConcludeQueuedAttempt, InternalAttemptRepository, QueuedAttempt, RenewLease,
-    TenantAttemptQuery, TransitionAttempt,
-};
 pub use automata_ci_core::Sha256Digest;
-pub use blocked::{
-    BlockedAttempt, BlockedAttemptRepository, BlockedConclusion, ConcludeBlockedAttempt,
-};
-pub use cancellation::{
-    CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload, CancellationActor,
-    CancellationIntent, CancellationIntentError, CancellationReason, CancellationRepository,
-    CancellationValueError, DEFAULT_CANCELLATION_REASON, RequestCancellation,
-};
 pub use conformance::{
     ConformanceDelivery, ConformanceDeliveryQuery, ConformanceDeliveryState,
     ConformanceReadRepository, ConformanceReadValueError, ConformanceWorkflowOutcome,
@@ -303,12 +283,6 @@ pub use logical_work_selection::{
     QuarantineLogicalInstanceMaterialization, QuarantineLogicalJobOrchestration,
     SelectedLogicalInstanceMaterialization, SelectedLogicalJobOrchestration,
 };
-pub use maintenance::{
-    ControlPlaneMaintenanceReport, ControlPlaneMaintenanceRepository,
-    ControlPlaneMaintenanceRequest, ExpiredAttemptDisposition, ExpiredAttemptMaintenance,
-    LeaseFailureLimit, MAX_MAINTENANCE_BATCH_SIZE, MaintenanceBatchSize, MaintenanceValueError,
-    StaleSessionTimeoutMillis,
-};
 pub use managed_secret_authority::{
     AcknowledgeManagedSecretDelivery, MANAGED_SECRET_AUTHORITY_SCHEMA, MAX_MANAGED_SECRET_BINDINGS,
     ManagedSecretAuthorityBinding, ManagedSecretAuthorityReceipt, ManagedSecretAuthorityRepository,
@@ -317,24 +291,6 @@ pub use managed_secret_authority::{
     ManagedSecretDeliveryOperationId, ManagedSecretDeliveryProposal, ManagedSecretExecutionScope,
     ManagedSecretGrantMode, ManagedSecretScope, ResolveManagedSecretAuthority,
     ResolveManagedSecretDeliverySession, ResolveManagedSecretExecutionScope, SecretWorkloadGrantId,
-};
-pub use observability::{
-    ArtifactCounts, ArtifactReservationKind, ArtifactReservations, ArtifactState,
-    BuiltinSecretCleanupCounts, BuiltinSecretCleanupStatus, ControlPlaneCapacityCandidate,
-    ControlPlaneCapacityRunner, ControlPlaneCapacitySnapshot, ControlPlaneStateRepository,
-    ControlPlaneStateSnapshot, ControlPlaneStateSnapshotRequest, ControlPlaneStateValueError,
-    DatabasePoolSnapshot, JobAttemptCounts, LEASE_NEAR_EXPIRY_WINDOW, LeaseCounts, LeaseState,
-    LogicalActivationCounts, LogicalActivationState, LogicalJobCounts, LogicalJobState,
-    LogicalWorkflowRunCounts, LogicalWorkflowRunState, MAX_CONTROL_PLANE_CAPACITY_CANDIDATES,
-    MAX_CONTROL_PLANE_CAPACITY_RUNNERS, MAX_CONTROL_PLANE_CAPACITY_SLOTS_PER_RUNNER, RunnerCounts,
-    RunnerDesiredState, RunnerObservedState, RunnerSessionCounts, RunnerSessionState,
-    WorkflowRunCounts,
-};
-pub use operation::{
-    BeginLeaseRequest, BegunLeaseRequest, ClaimCommandError, ClaimRejection, ClaimedAttempt,
-    CompleteLeaseRequest, LeaseOfferCompletionError, LeaseRequestCompletion, LeaseRequestKey,
-    LeaseRequestKeyError, NoWorkLeaseRequest, REVOKED_LEASE_OFFER_FALLBACK_VERSION,
-    RevokedLeaseOfferFallback, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
 };
 pub use outbox::{
     AcknowledgeRunnerCommands, CommandCursor, CommandReplayDisposition, CommandReplayLimit,
@@ -396,10 +352,6 @@ pub use reusable_workflow_runtime::{
     ReusableWorkflowResultOutput, ReusableWorkflowRuntimeRepository,
     ReusableWorkflowRuntimeStoreError, ReusableWorkflowRuntimeValueError,
     ReusableWorkflowSecretBindingEvidence,
-};
-pub use runnable::{
-    MAX_RUNNABLE_SCAN_LIMIT, RunnableAttempt, RunnableAttemptError, RunnableCursorAdvance,
-    RunnableQueueKey, RunnableScanError, RunnableScanLimit, RunnableScanPage, RunnableScanRequest,
 };
 pub use runner_payload::{RunnerPayloadTombstone, RunnerPayloadTombstoneReason};
 pub use runtime_authority::{
@@ -470,7 +422,6 @@ pub use session::{
     CloseRunnerSession, HeartbeatRunnerSession, OpenRunnerSession, ResumeRunnerSession,
     RunnerSessionFence, RunnerSessionSnapshot, RunnerSessionSnapshotError,
 };
-pub use snapshot::{AttemptSnapshot, AttemptSnapshotBuilder};
 pub use store_error::StoreError;
 pub use tenant::{TenantScope, TenantScopeError};
 pub use value::{

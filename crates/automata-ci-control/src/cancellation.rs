@@ -1,12 +1,12 @@
+//! Durable cancellation intent values, runner commands, and repository port.
+
 use async_trait::async_trait;
 use automata_ci_core::{AttemptId, LeaseGuard, OperationId, UnixMillis};
+use automata_ci_store::{
+    DurableRunnerCommand, EnqueueRunnerCommand, RunnerProtocolVersion, StoreError,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use crate::{
-    DurableRunnerCommand, EnqueueRunnerCommand, RunnerProtocolVersion, StoreError,
-    value::validate_text,
-};
 
 const MAX_CANCELLATION_ACTOR_BYTES: usize = 255;
 const MAX_CANCELLATION_REASON_BYTES: usize = 1024;
@@ -86,26 +86,31 @@ impl CancelJobCommandPayload {
         serde_json::to_vec(self).map_err(|_| CancellationValueError::InvalidCommand)
     }
 
+    /// Returns the target attempt identity.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
     }
 
+    /// Returns the active lease guard.
     #[must_use]
     pub const fn guard(&self) -> LeaseGuard {
         self.guard
     }
 
+    /// Returns the selected runner protocol version.
     #[must_use]
     pub const fn protocol_version(&self) -> u16 {
         self.protocol_version
     }
 
+    /// Returns the wire-visible cancellation reason.
     #[must_use]
     pub fn reason(&self) -> &str {
         &self.reason
     }
 
+    /// Returns the trusted cancellation-request time.
     #[must_use]
     pub const fn requested_at(&self) -> UnixMillis {
         self.requested_at
@@ -124,11 +129,13 @@ impl CancellationActor {
     /// Rejects empty, oversized, or control-bearing values.
     pub fn new(value: impl Into<String>) -> Result<Self, CancellationValueError> {
         let value = value.into();
-        validate_text(&value, MAX_CANCELLATION_ACTOR_BYTES, "cancellation actor")
-            .map_err(|_| CancellationValueError::InvalidActor)?;
+        if !is_valid_text(&value, MAX_CANCELLATION_ACTOR_BYTES) {
+            return Err(CancellationValueError::InvalidActor);
+        }
         Ok(Self(value))
     }
 
+    /// Returns the validated actor identifier.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -147,23 +154,33 @@ impl CancellationReason {
     /// Rejects empty, oversized, or control-bearing values.
     pub fn new(value: impl Into<String>) -> Result<Self, CancellationValueError> {
         let value = value.into();
-        validate_text(&value, MAX_CANCELLATION_REASON_BYTES, "cancellation reason")
-            .map_err(|_| CancellationValueError::InvalidReason)?;
+        if !is_valid_text(&value, MAX_CANCELLATION_REASON_BYTES) {
+            return Err(CancellationValueError::InvalidReason);
+        }
         Ok(Self(value))
     }
 
+    /// Returns the validated human-facing reason.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+fn is_valid_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && !value.chars().any(char::is_control)
+}
+
+/// Invalid cancellation actor, reason, or durable command payload.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum CancellationValueError {
+    /// The cancellation actor is empty, oversized, or control-bearing.
     #[error("cancellation actor is invalid")]
     InvalidActor,
+    /// The cancellation reason is empty, oversized, or control-bearing.
     #[error("cancellation reason is invalid")]
     InvalidReason,
+    /// The durable runner command is malformed or uses an unsupported schema.
     #[error("durable cancellation command is invalid")]
     InvalidCommand,
 }
@@ -180,6 +197,7 @@ pub struct RequestCancellation {
 }
 
 impl RequestCancellation {
+    /// Creates a cancellation request without runner delivery metadata.
     #[must_use]
     pub const fn new(
         operation_id: OperationId,
@@ -206,31 +224,37 @@ impl RequestCancellation {
         self
     }
 
+    /// Returns the idempotent cancellation operation identity.
     #[must_use]
     pub const fn operation_id(&self) -> OperationId {
         self.operation_id
     }
 
+    /// Returns the target attempt identity.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
     }
 
+    /// Returns the principal or subsystem requesting cancellation.
     #[must_use]
     pub const fn actor(&self) -> &CancellationActor {
         &self.actor
     }
 
+    /// Returns the optional human-facing cancellation reason.
     #[must_use]
     pub const fn reason(&self) -> Option<&CancellationReason> {
         self.reason.as_ref()
     }
 
+    /// Returns the trusted request time.
     #[must_use]
     pub const fn requested_at(&self) -> UnixMillis {
         self.requested_at
     }
 
+    /// Returns the runner command to enqueue atomically, if any.
     #[must_use]
     pub const fn delivery(&self) -> Option<&EnqueueRunnerCommand> {
         self.delivery.as_ref()
@@ -269,29 +293,35 @@ impl CancellationIntent {
         })
     }
 
+    /// Returns the immutable first cancellation request.
     #[must_use]
     pub const fn request(&self) -> &RequestCancellation {
         &self.request
     }
 
+    /// Returns the runner acknowledgement time, if acknowledged.
     #[must_use]
     pub const fn acknowledged_at(&self) -> Option<UnixMillis> {
         self.acknowledged_at
     }
 
+    /// Reports whether the repository replayed a prior intent.
     #[must_use]
     pub const fn was_replayed(&self) -> bool {
         self.replayed
     }
 
+    /// Returns the durable runner command associated with the intent, if any.
     #[must_use]
     pub const fn delivery(&self) -> Option<&DurableRunnerCommand> {
         self.delivery.as_ref()
     }
 }
 
+/// Invalid timing in a decoded cancellation intent.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum CancellationIntentError {
+    /// The acknowledgement time precedes the original request.
     #[error("cancellation acknowledgement precedes its durable request")]
     AcknowledgedBeforeRequest,
 }
@@ -306,6 +336,7 @@ pub trait CancellationRepository: Send + Sync {
         request: RequestCancellation,
     ) -> Result<CancellationIntent, StoreError>;
 
+    /// Fetches the immutable cancellation intent for an attempt, if present.
     async fn cancellation_for_attempt(
         &self,
         attempt_id: AttemptId,

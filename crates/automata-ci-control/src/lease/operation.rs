@@ -1,11 +1,15 @@
+//! Idempotent lease-poll operation values and durable claim outcomes.
+
 use automata_ci_core::{AttemptId, JobLifecycle, Lease, LeaseId, OperationId, UnixMillis};
+use automata_ci_store::{
+    AttemptAssignment, AttemptAssignmentError, DocumentSchema, JobIrMetadata,
+    LeaseOfferCommandIdentity, RunnerOperationResponse, RunnerSessionFence, Sha256Digest,
+    StableRunnerSlot,
+};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-use crate::{
-    AttemptAssignment, JobIrMetadata, LeaseOfferCommandIdentity, RunnableCursorAdvance,
-    RunnerOperationResponse, RunnerSessionFence, Sha256Digest, StableRunnerSlot,
-};
+use super::runnable::RunnableCursorAdvance;
 
 const LEASE_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.store.lease-request.v2\0";
 
@@ -56,21 +60,25 @@ impl LeaseRequestKey {
         })
     }
 
+    /// Returns the authenticated runner-session fence.
     #[must_use]
     pub const fn session(self) -> RunnerSessionFence {
         self.session
     }
 
+    /// Returns this request's idempotency identity.
     #[must_use]
     pub const fn operation_id(self) -> OperationId {
         self.operation_id
     }
 
+    /// Returns the stable runner slot being polled.
     #[must_use]
     pub const fn slot(self) -> StableRunnerSlot {
         self.slot
     }
 
+    /// Returns the preceding operation acknowledged by this request, if any.
     #[must_use]
     pub const fn acknowledges_operation_id(self) -> Option<OperationId> {
         self.acknowledges_operation_id
@@ -100,8 +108,10 @@ impl LeaseRequestKey {
     }
 }
 
+/// Invalid lease-request chain identity.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum LeaseRequestKeyError {
+    /// The request acknowledges its own operation identity.
     #[error("a lease request cannot acknowledge its own operation identity")]
     SelfAcknowledgement,
 }
@@ -114,6 +124,7 @@ pub struct BeginLeaseRequest {
 }
 
 impl BeginLeaseRequest {
+    /// Creates an admitted request from its canonical key and digest.
     #[must_use]
     pub const fn new(request_key: LeaseRequestKey, request_digest: Sha256Digest) -> Self {
         Self {
@@ -122,11 +133,13 @@ impl BeginLeaseRequest {
         }
     }
 
+    /// Returns the canonical request key.
     #[must_use]
     pub const fn request_key(self) -> LeaseRequestKey {
         self.request_key
     }
 
+    /// Returns the request digest admitted at the durable head.
     #[must_use]
     pub const fn request_digest(self) -> Sha256Digest {
         self.request_digest
@@ -141,6 +154,7 @@ pub struct BegunLeaseRequest {
 }
 
 impl BegunLeaseRequest {
+    /// Builds an admission result from a legacy response-only completion.
     #[must_use]
     pub fn new(
         request: BeginLeaseRequest,
@@ -177,11 +191,13 @@ impl BegunLeaseRequest {
         )
     }
 
+    /// Returns the request that was admitted.
     #[must_use]
     pub const fn request(&self) -> BeginLeaseRequest {
         self.request
     }
 
+    /// Returns a previously completed replayable response, if present.
     #[must_use]
     pub const fn completed_response(&self) -> Option<&RunnerOperationResponse> {
         match &self.completion {
@@ -212,7 +228,7 @@ impl BegunLeaseRequest {
 }
 
 /// Version of the canonical structured fallback retained for a revoked lease offer.
-pub const REVOKED_LEASE_OFFER_FALLBACK_VERSION: u16 = 1;
+const REVOKED_LEASE_OFFER_FALLBACK_VERSION: u16 = 1;
 
 /// Minimal durable data needed to rebuild one canonical revoked-offer `NoWork` response.
 ///
@@ -224,7 +240,7 @@ pub struct RevokedLeaseOfferFallback {
     representation_version: u16,
     response_operation_id: OperationId,
     retry_after_millis: u32,
-    response_schema: crate::DocumentSchema,
+    response_schema: DocumentSchema,
     response_digest: Sha256Digest,
 }
 
@@ -237,7 +253,7 @@ impl RevokedLeaseOfferFallback {
     pub fn new(
         response_operation_id: OperationId,
         retry_after_millis: u32,
-        response_schema: crate::DocumentSchema,
+        response_schema: DocumentSchema,
         response_digest: Sha256Digest,
     ) -> Result<Self, LeaseOfferCompletionError> {
         Self::from_persisted(
@@ -249,11 +265,17 @@ impl RevokedLeaseOfferFallback {
         )
     }
 
+    /// Rehydrates and validates a versioned durable fallback representation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unsupported representation, nil operation identity, or zero
+    /// retry delay.
     pub(crate) fn from_persisted(
         representation_version: u16,
         response_operation_id: OperationId,
         retry_after_millis: u32,
-        response_schema: crate::DocumentSchema,
+        response_schema: DocumentSchema,
         response_digest: Sha256Digest,
     ) -> Result<Self, LeaseOfferCompletionError> {
         if representation_version != REVOKED_LEASE_OFFER_FALLBACK_VERSION {
@@ -274,26 +296,31 @@ impl RevokedLeaseOfferFallback {
         })
     }
 
+    /// Returns the durable representation version.
     #[must_use]
     pub const fn representation_version(self) -> u16 {
         self.representation_version
     }
 
+    /// Returns the operation identity used for the rebuilt response.
     #[must_use]
     pub const fn response_operation_id(self) -> OperationId {
         self.response_operation_id
     }
 
+    /// Returns the retry delay carried by the rebuilt response.
     #[must_use]
     pub const fn retry_after_millis(self) -> u32 {
         self.retry_after_millis
     }
 
+    /// Returns the expected canonical response schema.
     #[must_use]
-    pub const fn response_schema(self) -> crate::DocumentSchema {
+    pub const fn response_schema(self) -> DocumentSchema {
         self.response_schema
     }
 
+    /// Returns the expected canonical response digest.
     #[must_use]
     pub const fn response_digest(self) -> Sha256Digest {
         self.response_digest
@@ -307,17 +334,22 @@ pub enum LeaseRequestCompletion {
     Response(RunnerOperationResponse),
     /// A still-live lease offer plus the already-persisted fallback needed if it later revokes.
     LiveLeaseOffer {
+        /// The replayable live-offer response.
         response: RunnerOperationResponse,
+        /// The canonical fallback retained for later revocation.
         fallback: RevokedLeaseOfferFallback,
     },
     /// A lease offer whose bearer response is no longer eligible for replay.
     RevokedLeaseOffer {
+        /// The operation identity of the revoked offer.
         offer_operation_id: OperationId,
+        /// The canonical replacement response projection.
         fallback: RevokedLeaseOfferFallback,
     },
 }
 
 impl LeaseRequestCompletion {
+    /// Returns the replayable response when this completion still has one.
     #[must_use]
     pub const fn response(&self) -> Option<&RunnerOperationResponse> {
         match self {
@@ -326,6 +358,7 @@ impl LeaseRequestCompletion {
         }
     }
 
+    /// Returns the retained revoked-offer fallback, if any.
     #[must_use]
     pub const fn revoked_offer_fallback(&self) -> Option<RevokedLeaseOfferFallback> {
         match self {
@@ -352,14 +385,19 @@ impl PartialEq<LeaseRequestCompletion> for RunnerOperationResponse {
 /// Invalid typed composition of a lease offer and its canonical revocation fallback.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum LeaseOfferCompletionError {
+    /// The offer command belongs to another durable session.
     #[error("lease-offer completion crosses durable sessions")]
     SessionMismatch,
+    /// The persisted fallback representation version is unsupported.
     #[error("lease-offer fallback representation version is unsupported")]
     UnsupportedFallbackVersion,
+    /// The fallback response operation identity is nil.
     #[error("lease-offer fallback response operation identity is nil")]
     NilFallbackOperationId,
+    /// The fallback retry delay is zero.
     #[error("lease-offer fallback retry delay is zero")]
     ZeroFallbackRetry,
+    /// The fallback projection disagrees with the canonical response.
     #[error("lease-offer fallback response metadata does not match its canonical bytes")]
     FallbackResponseMismatch,
 }
@@ -430,16 +468,19 @@ impl CompleteLeaseRequest {
         })
     }
 
+    /// Returns the admitted request being completed.
     #[must_use]
     pub const fn request(&self) -> BeginLeaseRequest {
         self.request
     }
 
+    /// Returns the canonical response being committed.
     #[must_use]
     pub const fn response(&self) -> &RunnerOperationResponse {
         &self.response
     }
 
+    /// Returns the trusted completion time.
     #[must_use]
     pub const fn completed_at(&self) -> UnixMillis {
         self.completed_at
@@ -523,41 +564,49 @@ impl TryClaimAttempt {
         })
     }
 
+    /// Returns the claim operation identity.
     #[must_use]
     pub const fn operation_id(&self) -> OperationId {
         self.request_key.operation_id()
     }
 
+    /// Returns the target attempt identity.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
     }
 
+    /// Returns the authenticated runner-session fence.
     #[must_use]
     pub const fn session(&self) -> RunnerSessionFence {
         self.request_key.session()
     }
 
+    /// Returns the stable runner slot receiving the claim.
     #[must_use]
     pub const fn slot(&self) -> StableRunnerSlot {
         self.request_key.slot()
     }
 
+    /// Returns the proposed lease identity.
     #[must_use]
     pub const fn lease_id(&self) -> LeaseId {
         self.lease_id
     }
 
+    /// Returns the trusted observation time.
     #[must_use]
     pub const fn observed_at(&self) -> UnixMillis {
         self.observed_at
     }
 
+    /// Returns the proposed lease expiration.
     #[must_use]
     pub const fn expires_at(&self) -> UnixMillis {
         self.expires_at
     }
 
+    /// Returns the canonical lease-request key.
     #[must_use]
     pub const fn request_key(&self) -> LeaseRequestKey {
         self.request_key
@@ -569,7 +618,9 @@ impl TryClaimAttempt {
         self.request_key.request_digest()
     }
 
+    /// Returns the opaque authoritative scan cursor used by an adapter.
     #[cfg(feature = "adapter-spi")]
+    #[must_use]
     pub(crate) const fn cursor(&self) -> RunnableCursorAdvance {
         self.cursor
     }
@@ -604,26 +655,33 @@ impl NoWorkLeaseRequest {
         })
     }
 
+    /// Returns the canonical lease-request key.
     #[must_use]
     pub const fn request_key(&self) -> LeaseRequestKey {
         self.request_key
     }
 
+    /// Returns the trusted no-work observation time.
     #[must_use]
     pub const fn observed_at(&self) -> UnixMillis {
         self.observed_at
     }
 
+    /// Returns the opaque authoritative scan cursor used by an adapter.
     #[cfg(feature = "adapter-spi")]
+    #[must_use]
     pub(crate) const fn cursor(&self) -> RunnableCursorAdvance {
         self.cursor
     }
 }
 
+/// Invalid composition of a durable attempt-claim command.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum ClaimCommandError {
+    /// The proposed lease does not extend past trusted observation time.
     #[error("lease expiration must be strictly later than trusted observation time")]
     InvalidLeaseInterval,
+    /// The cursor proof belongs to another request, slot, or attempt.
     #[error("queue cursor proof does not match the lease request")]
     CursorMismatch,
 }
@@ -646,7 +704,7 @@ impl ClaimedAttempt {
         lease: Lease,
         assignment: AttemptAssignment,
         job_ir: JobIrMetadata,
-    ) -> Result<Self, crate::AttemptAssignmentError> {
+    ) -> Result<Self, AttemptAssignmentError> {
         assignment.validate_lease(&lease)?;
         Ok(Self {
             lease,
@@ -655,16 +713,19 @@ impl ClaimedAttempt {
         })
     }
 
+    /// Returns the acquired lease.
     #[must_use]
     pub const fn lease(&self) -> &Lease {
         &self.lease
     }
 
+    /// Returns the stable runner-session assignment.
     #[must_use]
     pub const fn assignment(&self) -> AttemptAssignment {
         self.assignment
     }
 
+    /// Returns the selected job intermediate-representation metadata.
     #[must_use]
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.job_ir
@@ -674,12 +735,19 @@ impl ClaimedAttempt {
 /// Durable negative claim decision. Retrying the same operation replays it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimRejection {
+    /// The selected attempt no longer exists.
     AttemptNotFound,
+    /// The selected attempt is no longer queued.
     AttemptNotQueued(JobLifecycle),
+    /// Durable execution gates no longer consider the attempt runnable.
     NoLongerRunnable,
+    /// The attempt no longer routes to this runner.
     NotRoutable,
+    /// The requested stable slot is outside the registered capacity.
     SlotOutOfRange,
+    /// The requested stable slot already owns another attempt.
     SlotOccupied {
+        /// The attempt currently occupying the stable slot.
         attempt_id: AttemptId,
     },
     /// Another operation advanced this slot's cursor after the page was read.
@@ -689,12 +757,16 @@ pub enum ClaimRejection {
 /// Exact durable outcome of a claim operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TryClaimOutcome {
+    /// The attempt was claimed and fenced successfully.
     Claimed(Box<ClaimedAttempt>),
+    /// The durable claim was rejected without a repository failure.
     Rejected(ClaimRejection),
+    /// The authoritative scan produced no claimable work.
     NoWork,
 }
 
 impl TryClaimOutcome {
+    /// Returns selected job metadata for a successful claim.
     #[must_use]
     pub const fn claimed_job_ir(&self) -> Option<&JobIrMetadata> {
         match self {
@@ -713,6 +785,7 @@ pub struct TryClaimReceipt {
 }
 
 impl TryClaimReceipt {
+    /// Creates a durable claim receipt.
     #[must_use]
     pub const fn new(
         request_key: LeaseRequestKey,
@@ -726,31 +799,37 @@ impl TryClaimReceipt {
         }
     }
 
+    /// Returns the runner-session identity owning the request.
     #[must_use]
     pub const fn session_id(&self) -> automata_ci_core::RunnerSessionId {
         self.request_key.session().session_id()
     }
 
+    /// Returns the claim operation identity.
     #[must_use]
     pub const fn operation_id(&self) -> OperationId {
         self.request_key.operation_id()
     }
 
+    /// Returns the canonical lease-request digest.
     #[must_use]
     pub fn request_digest(&self) -> Sha256Digest {
         self.request_key.request_digest()
     }
 
+    /// Returns the canonical lease-request key.
     #[must_use]
     pub const fn request_key(&self) -> LeaseRequestKey {
         self.request_key
     }
 
+    /// Returns the durable claim outcome.
     #[must_use]
     pub const fn outcome(&self) -> &TryClaimOutcome {
         &self.outcome
     }
 
+    /// Reports whether this receipt came from an exact retry.
     #[must_use]
     pub const fn was_replayed(&self) -> bool {
         self.replayed

@@ -3,6 +3,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::lease::{
+    ClaimRejection, LeaseRequestKey, NoWorkLeaseRequest, RunnableAttempt, RunnableScanPage,
+    RunnableScanRequest, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
+};
 use crate::scheduling::{
     AuthorizedRunnerRouting, EffectiveRunner, Placement, PlacementDecision, RoutingRequirements,
     RunnableCandidate, RunnerEvidence, RunnerSlot, SchedulerPolicy, SchedulingInput, SessionGuard,
@@ -12,11 +16,7 @@ use automata_ci_core::{
     JobIrVersion, Lease, RunnerCapabilities, RunnerGroup, RunnerLabel, UnixMillis,
 };
 use automata_ci_protocol::{LeaseRequest, ProtocolVersion, RunnerSlotOrdinal};
-use automata_ci_store::{
-    ClaimRejection, JobIrMetadata, LeaseRequestKey, NoWorkLeaseRequest, RoutingDocument,
-    RunnableAttempt, RunnableScanPage, RunnableScanRequest, RunnerSessionFence, StableRunnerSlot,
-    TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
-};
+use automata_ci_store::{JobIrMetadata, RoutingDocument, RunnerSessionFence, StableRunnerSlot};
 
 use super::{
     CapabilityDocument, LeaseClock, LeaseIdGenerator, LeasePollConfig, LeasePollError,

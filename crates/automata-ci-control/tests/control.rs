@@ -4,8 +4,17 @@ mod runner_auth_support;
 mod runner_control_support;
 mod scheduling_support;
 
+#[cfg(feature = "adapter-spi")]
+mod attempt_adapter_port;
+#[cfg(feature = "adapter-spi")]
+mod attempt_api;
+#[cfg(feature = "adapter-spi")]
+mod attempt_snapshot_api;
+mod durability_values;
 mod github_oidc_runtime_authority;
 mod lease_poll;
+mod maintenance_api;
+mod observability_api;
 mod runner_auth_authentication;
 mod runner_auth_authorization;
 mod runner_auth_contracts;
