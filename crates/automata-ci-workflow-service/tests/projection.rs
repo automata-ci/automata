@@ -36,6 +36,129 @@ use bytes::Bytes;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn run_name_is_evaluated_once_and_is_identical_on_replay() {
+    let request = run_name_request(
+        "run-name-replay",
+        Some("Deploy ${{ inputs.target }} by @${{ github.actor }}"),
+        Some("provider fallback"),
+        Some("commit fallback"),
+        "production",
+    );
+    let repository = Arc::new(ControllableRepository::default());
+    let service = service(repository.clone());
+
+    let first = service.admit(request.clone()).await.expect("new admission");
+    let first_command = repository.take_command();
+    assert!(!first.receipt().is_replay());
+    assert_eq!(
+        first_command.display_title(),
+        Some("Deploy production by @synthetic-actor")
+    );
+
+    repository.mode.store(1, Ordering::SeqCst);
+    let replay = service.admit(request).await.expect("exact replay");
+    let replay_command = repository.take_command();
+    assert!(replay.receipt().is_replay());
+    assert_eq!(
+        replay_command.display_title(),
+        first_command.display_title()
+    );
+    assert_eq!(
+        replay_command.request_digest(),
+        first_command.request_digest()
+    );
+}
+
+#[tokio::test]
+async fn run_name_fallback_precedence_is_explicit_then_provider_then_commit() {
+    let cases = [
+        (
+            "run-name-explicit",
+            Some("explicit title"),
+            Some("provider title"),
+            Some("commit title"),
+            Some("explicit title"),
+        ),
+        (
+            "run-name-whitespace",
+            Some("'   '"),
+            Some("provider title"),
+            Some("commit title"),
+            Some("provider title"),
+        ),
+        (
+            "run-name-commit",
+            None,
+            Some("   "),
+            Some("commit title"),
+            Some("commit title"),
+        ),
+        ("run-name-none", None, None, None, None),
+    ];
+    for (tenant, run_name, provider, commit, expected) in cases {
+        let repository = Arc::new(ControllableRepository::default());
+        service(repository.clone())
+            .admit(run_name_request(
+                tenant,
+                run_name,
+                provider,
+                commit,
+                "production",
+            ))
+            .await
+            .expect("admission");
+        assert_eq!(repository.take_command().display_title(), expected);
+    }
+}
+
+#[tokio::test]
+async fn run_name_has_exact_durable_byte_and_control_boundaries() {
+    for (length, accepted) in [(1_023, true), (1_024, true), (1_025, false)] {
+        let repository = Arc::new(ControllableRepository::default());
+        let result = service(repository.clone())
+            .admit(run_name_request(
+                &format!("run-name-{length}"),
+                Some(&"a".repeat(length)),
+                None,
+                None,
+                "production",
+            ))
+            .await;
+        if accepted {
+            result.expect("bounded run-name");
+            assert_eq!(
+                repository
+                    .take_command()
+                    .display_title()
+                    .expect("display title")
+                    .len(),
+                length
+            );
+        } else {
+            assert!(matches!(
+                result.expect_err("oversized run-name"),
+                WorkflowAdmissionError::RunNameEvaluation
+            ));
+            assert!(repository.command.lock().expect("command lock").is_none());
+        }
+    }
+
+    let repository = Arc::new(ControllableRepository::default());
+    let error = service(repository.clone())
+        .admit(run_name_request(
+            "run-name-control",
+            Some("\"bad\\nname\""),
+            None,
+            None,
+            "production",
+        ))
+        .await
+        .expect_err("control characters are not durable titles");
+    assert!(matches!(error, WorkflowAdmissionError::RunNameEvaluation));
+    assert!(repository.command.lock().expect("command lock").is_none());
+}
+
+#[tokio::test]
 async fn human_projection_is_bound_into_the_logical_admission() {
     let original = support::ci_request(
         "logical-projection",
@@ -436,6 +559,75 @@ jobs:
     .run_attempt(1)
     .build()
     .expect("admission request")
+}
+
+fn run_name_request(
+    tenant: &str,
+    run_name: Option<&str>,
+    display_title: Option<&str>,
+    commit_subject: Option<&str>,
+    target: &str,
+) -> WorkflowAdmissionRequest {
+    let run_name = run_name.map_or_else(String::new, |value| format!("run-name: {value}\n"));
+    let source = format!(
+        "{run_name}name: Run-name contract\non: push\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo synthetic\n"
+    );
+    let provenance = SourceProvenance::new(
+        SourceId::new(".ci/workflows/run-name.yml"),
+        SourceOrigin::Repository {
+            repository: Arc::from(support::REPOSITORY),
+            revision: Arc::from(support::REVISION),
+            path: Arc::from(".ci/workflows/run-name.yml"),
+        },
+    );
+    let parsed =
+        GithubWorkflowFrontend::default().parse(ParseWorkflowRequest::new(provenance, &source));
+    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
+    let compiled = GithubWorkflowCompiler::new().compile(
+        CompileWorkflowRequest::new(
+            parsed.plan().expect("parsed plan"),
+            WorkflowEventProvenance::new("github", "push")
+                .with_delivery_id(support::DELIVERY)
+                .with_commit_sha(support::REVISION)
+                .with_git_ref(support::GIT_REF),
+        )
+        .with_event_metadata(GithubEventMetadata::push(false)),
+    );
+    assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
+    let base_context = JobRuntimeContext::new_base(
+        context_object([("target", ContextValue::string(target))]),
+        ContextValue::empty_object(),
+        BTreeMap::new(),
+    )
+    .expect("base context");
+    let mut builder = WorkflowAdmissionRequest::builder(
+        automata_ci_store::TenantScope::from_authenticated_tenant_id(tenant).expect("tenant"),
+        automata_ci_workflow_service::AdmissionRepositoryCoordinates::new(
+            "github",
+            "repository-run-name",
+            "automata-ci",
+            "automata",
+        )
+        .expect("repository"),
+        ".ci/workflows/run-name.yml",
+        Bytes::from(source),
+        Bytes::from_static(b"{\"deleted\":false}"),
+        compiled.into_parts().0.expect("compiled plan"),
+        base_context,
+        WorkflowAdmissionIdempotency::operation(automata_ci_core::OperationId::new()),
+    )
+    .commit_sha(support::REVISION)
+    .git_ref(support::GIT_REF)
+    .workflow_name("Run-name contract")
+    .actor("synthetic-actor")
+    .run_attempt(1);
+    if let Some(display_title) = display_title {
+        builder = builder.display_title(display_title);
+    }
+    if let Some(commit_subject) = commit_subject {
+        builder = builder.commit_subject(commit_subject);
+    }
+    builder.build().expect("admission request")
 }
 
 fn context_object(entries: impl IntoIterator<Item = (&'static str, ContextValue)>) -> ContextValue {

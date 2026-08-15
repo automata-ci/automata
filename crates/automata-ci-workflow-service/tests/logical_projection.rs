@@ -294,6 +294,122 @@ fn project_envelope_with_profiles(
 }
 
 #[test]
+fn env_shell_and_working_directory_follow_workflow_job_step_precedence() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+env:
+  SHARED: workflow
+  WORKFLOW_ONLY: workflow-only
+defaults:
+  run:
+    shell: bash
+    working-directory: workflow-dir
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SHARED: job
+      JOB_ONLY: job-only
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: job-dir
+    steps:
+      - run: echo inherited
+        env:
+          SHARED: step
+          STEP_ONLY: step-only
+      - run: echo explicit
+        shell: python {0}
+        working-directory: step-dir
+";
+    let envelope = project_envelope(source);
+    let job = envelope.job();
+    assert_literal_source(job.environment().get("SHARED"), "job");
+    assert_literal_source(job.environment().get("WORKFLOW_ONLY"), "workflow-only");
+    assert_literal_source(job.environment().get("JOB_ONLY"), "job-only");
+    assert_eq!(
+        literal_template(
+            job.working_directory_template()
+                .expect("job working-directory")
+        ),
+        "job-dir"
+    );
+
+    let [inherited, explicit] = job.steps() else {
+        panic!("two projected steps expected")
+    };
+    assert_literal_source(inherited.environment().get("SHARED"), "step");
+    assert_literal_source(inherited.environment().get("STEP_ONLY"), "step-only");
+    assert!(inherited.environment().get("WORKFLOW_ONLY").is_none());
+    let SemanticStep::Run { values } = inherited.kind() else {
+        panic!("inherited run step")
+    };
+    assert!(
+        matches!(values.shell(), ShellTemplate::Named { value } if literal_template(value) == "pwsh")
+    );
+    assert!(values.working_directory().is_none());
+
+    let SemanticStep::Run { values } = explicit.kind() else {
+        panic!("explicit run step")
+    };
+    assert!(
+        matches!(values.shell(), ShellTemplate::CommandTemplate { value } if literal_template(value) == "python {0}")
+    );
+    assert_eq!(
+        literal_template(
+            values
+                .working_directory()
+                .expect("step working-directory override")
+        ),
+        "step-dir"
+    );
+}
+
+#[test]
+fn workflow_run_defaults_apply_when_the_job_has_no_override() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+defaults:
+  run:
+    shell: bash
+    working-directory: workflow-dir
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inherited
+";
+    let envelope = project_envelope(source);
+    assert_eq!(
+        literal_template(
+            envelope
+                .job()
+                .working_directory_template()
+                .expect("workflow working-directory")
+        ),
+        "workflow-dir"
+    );
+    let SemanticStep::Run { values } = envelope.job().steps()[0].kind() else {
+        panic!("run step")
+    };
+    assert!(
+        matches!(values.shell(), ShellTemplate::Named { value } if literal_template(value) == "bash")
+    );
+}
+
+fn assert_literal_source(source: Option<&ValueSource>, expected: &str) {
+    assert!(matches!(source, Some(ValueSource::Literal(value)) if value == expected));
+}
+
+fn literal_template(template: &automata_ci_core::ValueTemplate) -> &str {
+    let [segment] = template.segments() else {
+        panic!("one literal segment expected")
+    };
+    segment.literal_value().expect("literal template")
+}
+
+#[test]
 fn mapped_profile_preserves_multi_label_and_group_routing() {
     let source = r"name: Synthetic CI
 on: workflow_dispatch

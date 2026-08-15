@@ -72,22 +72,58 @@ only if file ownership is partitioned.
 
 Tasks:
 
-- [ ] Change the default workflow source limit from 2 MiB to 500 KB at the
+- [x] Change the default workflow source limit from 2 MiB to 500 KB at the
   verified pre/post-normalization phase.
-- [ ] Test exact size boundaries, UTF-8 BOM, CRLF/LF, empty input, trailing
+- [x] Test exact size boundaries, UTF-8 BOM, CRLF/LF, empty input, trailing
   documents, quoted/unquoted `on`, and YAML 1.2 scalars.
-- [ ] Distinguish duplicate, unknown, unsupported, and type-invalid fields.
-- [ ] Verify `.yml` and `.yaml` discovery.
-- [ ] Complete `run-name`, workflow/job/step `env`, and `defaults.run`
+- [x] Distinguish duplicate, unknown, unsupported, and type-invalid fields.
+- [x] Verify `.yml` and `.yaml` discovery.
+- [x] Complete `run-name`, workflow/job/step `env`, and `defaults.run`
   precedence tests.
-- [ ] Reject decoded-but-unexecutable fields using FND-01 diagnostics.
-- [ ] Document any stricter depth, scalar, collection, and expansion bounds.
+- [x] Reject decoded-but-unexecutable fields using FND-01 diagnostics.
+- [x] Document any stricter depth, scalar, collection, and expansion bounds.
 
 Acceptance:
 
-- [ ] All boundary tests are deterministic.
-- [ ] No field is accepted merely because an unknown-field map retains it.
-- [ ] Diagnostic classes and spans are stable.
+- [x] All boundary tests are deterministic.
+- [x] No field is accepted merely because an unknown-field map retains it.
+- [x] Diagnostic classes and spans are stable.
+
+Component implementation is complete. GitHub's
+[workflow syntax reference](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax)
+requires the exact lowercase `.yml` or `.yaml` extensions, specifies YAML, and
+limits `run-name` expressions to `github` and `inputs`. The same reference says
+an omitted or whitespace-only `run-name` falls back to event-specific data;
+Automata consumes the trusted provider projection in this order: evaluated
+`run-name`, provider display title, commit subject, then no stored display title
+(so presentation falls back to the workflow name). The evaluated title is
+stored in the admission command and bound into the versioned request digest,
+making replay use the identical value. The
+[defaults reference](https://docs.github.com/en/actions/using-jobs/setting-default-values-for-jobs)
+defines the most-specific workflow/job/step precedence now covered from source
+through current `JobIR` projection.
+
+The public GitHub documentation does not publish exact workflow byte accounting
+or a maximum run-title length. Automata therefore makes these explicit pinned
+compatibility policies rather than silently guessing:
+
+- `500 KB` is interpreted as 500 KiB (`512,000` raw UTF-8 bytes), inclusive.
+  Archive discovery and the frontend apply the same limit before parsing. BOM
+  and CRLF bytes count; the original document remains immutable evidence. The
+  parser may ignore one leading UTF-8 BOM semantically, but performs no newline
+  or content normalization, so the post-normalization size is identical.
+- Durable run display titles are at most 1,024 UTF-8 bytes and contain no
+  control characters. This is an Automata storage/UI safety bound pending live
+  differential evidence.
+- The retained syntax tree is bounded to depth 64, 100,000 nodes, and 1,024
+  alias uses. Alias expansion independently allows depth 64, 100,000 expanded
+  nodes, 8 MiB of expanded scalar bytes, and 1,000,000 aggregate work units.
+  Semantic decode has a separate 16 MiB derived-text/diagnostic budget.
+
+Live differential evidence is still required for GitHub's unpublished decimal
+versus binary byte accounting, BOM accounting at the boundary, exhaustive
+event-specific fallback titles, and any provider-side title truncation. Those
+are conformance-gate items, not unrecorded implementation assumptions.
 
 ### WF-03 — Expression semantic closure
 

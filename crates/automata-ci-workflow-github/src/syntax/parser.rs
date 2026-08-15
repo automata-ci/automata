@@ -13,6 +13,14 @@ use crate::{
     },
 };
 
+/// Automata's pinned maximum raw UTF-8 byte length for one GitHub workflow.
+///
+/// GitHub documents the accepted workflow extensions but does not publish an
+/// exact byte-accounting contract. Automata therefore interprets the parity
+/// plan's 500 KB ceiling as 500 KiB and applies it to the original bytes,
+/// before YAML parsing or newline/BOM normalization.
+pub const MAX_GITHUB_WORKFLOW_SOURCE_BYTES: usize = 500 * 1_024;
+
 /// Independent bounds applied while parsing loss-aware YAML syntax.
 ///
 /// These limits bound retained input, nesting, node allocation, alias uses,
@@ -35,7 +43,7 @@ pub struct ParseLimits {
 impl Default for ParseLimits {
     fn default() -> Self {
         Self {
-            max_source_bytes: 2 * 1024 * 1024,
+            max_source_bytes: MAX_GITHUB_WORKFLOW_SOURCE_BYTES,
             max_depth: 64,
             max_nodes: 100_000,
             max_aliases: 1_024,
@@ -193,8 +201,12 @@ pub(crate) fn parse_yaml(source: &SourceFile, limits: ParseLimits) -> SyntaxRepo
         };
     }
 
-    let mut receiver = AstReceiver::new(source, limits);
-    let result = Parser::new_from_str(source.text()).load(&mut receiver, true);
+    let (parser_source, ignored_leading_characters) = source
+        .text()
+        .strip_prefix('\u{feff}')
+        .map_or((source.text(), 0), |without_bom| (without_bom, 1));
+    let mut receiver = AstReceiver::new(source, limits, ignored_leading_characters);
+    let result = Parser::new_from_str(parser_source).load(&mut receiver, true);
     if let Err(error) = result {
         let marker = *error.marker();
         let marker_offset = receiver.coordinates.byte_offset(marker.index());
@@ -259,10 +271,14 @@ struct AstReceiver<'source> {
 }
 
 impl<'source> AstReceiver<'source> {
-    fn new(source: &'source SourceFile, limits: ParseLimits) -> Self {
+    fn new(
+        source: &'source SourceFile,
+        limits: ParseLimits,
+        ignored_leading_characters: usize,
+    ) -> Self {
         Self {
             source,
-            coordinates: SourceCoordinates::new(source.text()),
+            coordinates: SourceCoordinates::new(source.text(), ignored_leading_characters),
             limits,
             documents: Vec::new(),
             document: None,
@@ -658,10 +674,11 @@ struct SourceCoordinates {
 }
 
 impl SourceCoordinates {
-    fn new(source: &str) -> Self {
+    fn new(source: &str, ignored_leading_characters: usize) -> Self {
         let mut character_to_byte = source
             .char_indices()
             .map(|(byte_offset, _)| byte_offset)
+            .skip(ignored_leading_characters)
             .collect::<Vec<_>>();
         character_to_byte.push(source.len());
         Self { character_to_byte }

@@ -1301,6 +1301,7 @@ fn admission_error(error: &WorkflowAdmissionError) -> GithubDeliveryWorkflowProc
         | WorkflowAdmissionError::AdmissionValue(_)
         | WorkflowAdmissionError::LogicalValue(_)
         | WorkflowAdmissionError::ConcurrencyEvaluation
+        | WorkflowAdmissionError::RunNameEvaluation
         | WorkflowAdmissionError::WorkflowDispatchEvidence
         | WorkflowAdmissionError::Serialization
         | WorkflowAdmissionError::Internal => {
@@ -1319,6 +1320,7 @@ fn admission_error_stage(error: &WorkflowAdmissionError) -> &'static str {
         WorkflowAdmissionError::AdmissionValue(_) => "admission_value",
         WorkflowAdmissionError::LogicalValue(_) => "admission_logical_value",
         WorkflowAdmissionError::ConcurrencyEvaluation => "admission_concurrency_evaluation",
+        WorkflowAdmissionError::RunNameEvaluation => "admission_run_name_evaluation",
         WorkflowAdmissionError::WorkflowDispatchEvidence => "admission_dispatch_evidence",
         WorkflowAdmissionError::Serialization => "admission_serialization",
         WorkflowAdmissionError::Internal => "admission_internal",
@@ -1387,7 +1389,7 @@ mod renewal_tests {
     use super::{
         GithubDeliveryWorkflowAdmissionProcessor, GithubPushChangedFilesAuthority,
         GithubPushChangedFilesError, GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
-        admission_error,
+        admission_error, admission_error_stage,
     };
     use crate::{
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
@@ -1416,6 +1418,14 @@ mod renewal_tests {
         assert_eq!(
             admission_error(&WorkflowAdmissionError::WorkflowDispatchEvidence),
             crate::GithubDeliveryWorkflowProcessorError::InvariantViolation
+        );
+    }
+
+    #[test]
+    fn run_name_evaluation_has_a_stable_sanitized_admission_stage() {
+        assert_eq!(
+            admission_error_stage(&WorkflowAdmissionError::RunNameEvaluation),
+            "admission_run_name_evaluation"
         );
     }
 

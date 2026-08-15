@@ -66,8 +66,8 @@ pub use source::{
     SourceFile, SourceId, SourceLocation, SourceModelError, SourceOrigin, SourceProvenance,
     SourceSpan, Spanned,
 };
-pub use syntax::ParseLimits as WorkflowParseLimits;
 pub use syntax::{
     AnchorId, ScalarResolution, ScalarStyle, YamlAlias, YamlAliasExpansion, YamlDocument,
     YamlMappingEntry, YamlNode, YamlNodeKind, YamlScalar, YamlTag,
 };
+pub use syntax::{MAX_GITHUB_WORKFLOW_SOURCE_BYTES, ParseLimits as WorkflowParseLimits};

@@ -2,6 +2,80 @@ use crate::support;
 
 use automata_ci_workflow_github::{ScalarResolution, YamlNode};
 
+const WORKFLOW_LF: &str =
+    "on: push\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo test\n";
+
+#[test]
+fn bom_and_newline_style_are_retained_but_do_not_change_semantics() {
+    let bom = format!("\u{feff}{WORKFLOW_LF}");
+    let crlf = WORKFLOW_LF.replace('\n', "\r\n");
+    let plain = support::parse(WORKFLOW_LF);
+    let with_bom = support::parse(&bom);
+    let with_crlf = support::parse(&crlf);
+    for report in [&plain, &with_bom, &with_crlf] {
+        assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    }
+    assert_eq!(with_bom.plan().expect("BOM plan").source().text(), bom);
+    assert_eq!(with_crlf.plan().expect("CRLF plan").source().text(), crlf);
+    assert_eq!(workflow_shape(&plain), workflow_shape(&with_bom));
+    assert_eq!(workflow_shape(&plain), workflow_shape(&with_crlf));
+    let bom_root = with_bom
+        .plan()
+        .expect("BOM plan")
+        .document()
+        .root()
+        .as_mapping()
+        .expect("root mapping");
+    assert_eq!(bom_root[0].key().span().start().byte_offset(), 3);
+    assert_eq!(
+        with_bom
+            .plan()
+            .expect("BOM plan")
+            .source()
+            .slice(bom_root[0].key().span()),
+        Some("on")
+    );
+}
+
+#[test]
+fn empty_and_trailing_documents_are_rejected_as_document_count_errors() {
+    let empty = support::parse("");
+    assert!(empty.plan().is_none());
+    assert!(
+        empty
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == "github.document_count")
+    );
+
+    let explicit_empty = support::parse("---\n");
+    assert!(explicit_empty.plan().is_none());
+    assert!(
+        explicit_empty
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == "github.expected_mapping")
+    );
+
+    let trailing = support::parse("on: push\njobs: {}\n---\n");
+    assert!(trailing.plan().is_none());
+    assert!(
+        trailing
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == "github.document_count")
+    );
+}
+
+#[test]
+fn quoted_and_unquoted_on_keys_decode_identically() {
+    let unquoted = support::parse(WORKFLOW_LF);
+    let quoted = support::parse(&WORKFLOW_LF.replacen("on:", "'on':", 1));
+    assert!(unquoted.is_accepted(), "{:#?}", unquoted.diagnostics());
+    assert!(quoted.is_accepted(), "{:#?}", quoted.diagnostics());
+    assert_eq!(workflow_shape(&unquoted), workflow_shape(&quoted));
+}
+
 #[test]
 fn yaml_1_2_does_not_resolve_on_off_yes_or_no_as_booleans() {
     let source = "on: push\nenv:\n  ON_VALUE: on\n  OFF_VALUE: off\n  YES_VALUE: yes\n  NO_VALUE: no\n  TRUE_VALUE: true\n  QUOTED_TRUE: 'true'\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo test\n";
@@ -112,4 +186,23 @@ fn mapping_value<'node>(node: &'node YamlNode, key: &str) -> &'node YamlNode {
         })
         .expect("key")
         .value()
+}
+
+fn workflow_shape(
+    report: &automata_ci_workflow_github::GithubFrontendReport,
+) -> (Vec<String>, Vec<String>) {
+    let workflow = report.plan().expect("plan").workflow();
+    let events = workflow
+        .triggers()
+        .expect("triggers")
+        .events()
+        .iter()
+        .map(|event| format!("{:?}", event.name().value()))
+        .collect();
+    let jobs = workflow
+        .jobs()
+        .iter()
+        .map(|job| job.id().as_str().to_owned())
+        .collect();
+    (events, jobs)
 }

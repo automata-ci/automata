@@ -126,3 +126,75 @@ fn semantic_step_errors_are_distinct_from_unsupported_fields() {
             .all(|diagnostic| diagnostic.kind() == DiagnosticKind::Semantic)
     );
 }
+
+#[test]
+fn duplicate_keys_have_one_taxonomy_at_every_mapping_level() {
+    let sources = [
+        "on: push\non: pull_request\njobs: {}\n",
+        "on:\n  push:\n    branches: [main]\n    branches: [release]\njobs: {}\n",
+        "on: push\ndefaults:\n  run:\n    shell: bash\n    shell: pwsh\njobs: {}\n",
+        "on: push\njobs:\n  build:\n    runs-on: linux\n    runs-on: windows\n    steps: []\n",
+        "on: push\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo one\n        run: echo two\n",
+    ];
+    for source in sources {
+        let report = support::parse(source);
+        let duplicate = report
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code() == "github.duplicate_mapping_key")
+            .unwrap_or_else(|| panic!("missing duplicate diagnostic: {:#?}", report.diagnostics()));
+        assert_eq!(duplicate.kind(), DiagnosticKind::Semantic);
+        assert_eq!(duplicate.related().len(), 1);
+    }
+}
+
+#[test]
+fn unknown_fields_are_unsupported_at_nested_mapping_levels() {
+    let source = "on:\n  push:\n    event-mystery: true\ndefaults:\n  defaults-mystery: true\n  run:\n    run-mystery: true\njobs:\n  build:\n    runs-on: linux\n    strategy:\n      strategy-mystery: true\n    steps:\n      - run: echo ok\n        step-mystery: true\n";
+    let report = support::parse(source);
+    let messages = report
+        .diagnostics_of_kind(DiagnosticKind::Unsupported)
+        .filter(|diagnostic| diagnostic.code() == "github.unsupported_field")
+        .map(automata_ci_workflow_github::Diagnostic::message)
+        .collect::<Vec<_>>();
+    for path in [
+        "on.push.event-mystery",
+        "defaults.defaults-mystery",
+        "defaults.run.run-mystery",
+        "jobs.build.strategy.strategy-mystery",
+        "jobs.build.steps[0].step-mystery",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(path)),
+            "missing {path}: {messages:#?}"
+        );
+    }
+}
+
+#[test]
+fn type_errors_remain_semantic_and_field_specific_across_mapping_levels() {
+    let cases = [
+        ("[]", "github.expected_mapping"),
+        (
+            "on: push\ndefaults: []\njobs: {}\n",
+            "github.expected_mapping",
+        ),
+        (
+            "on: push\njobs:\n  build: invalid\n",
+            "github.expected_mapping",
+        ),
+        (
+            "on: push\njobs:\n  build:\n    runs-on: linux\n    steps: invalid\n",
+            "github.expected_sequence",
+        ),
+    ];
+    for (source, code) in cases {
+        let report = support::parse(source);
+        let diagnostic = report
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code() == code)
+            .unwrap_or_else(|| panic!("missing {code}: {:#?}", report.diagnostics()));
+        assert_eq!(diagnostic.kind(), DiagnosticKind::Semantic);
+    }
+}

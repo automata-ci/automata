@@ -78,6 +78,51 @@ fn compiler_rejects_duplicate_keys_retained_by_the_loss_aware_frontend() {
 }
 
 #[test]
+fn compiler_defensively_rejects_complex_mapping_keys_that_decoding_skipped() {
+    let source = "on: workflow_dispatch\nenv:\n  ? [lossy, key]\n  : value\njobs:\n  build:\n    runs-on: linux\n    steps: [{run: echo ok}]\n";
+    let report = compile(source, "workflow_dispatch");
+    assert!(report.plan().is_none());
+    let diagnostic = report
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code() == "github.compile.yaml_complex_mapping_key")
+        .expect("complex-key compiler diagnostic");
+    assert_eq!(diagnostic.kind(), DiagnosticKind::Unsupported);
+    assert_eq!(
+        source.get(
+            diagnostic.primary_span().start().byte_offset()
+                ..diagnostic.primary_span().end().byte_offset()
+        ),
+        Some("[lossy, key]")
+    );
+}
+
+#[test]
+fn compiler_rejects_unknown_event_filter_fields_retained_by_decoding() {
+    for (source, event_name) in [
+        (
+            "on:\n  push:\n    mystery: true\njobs:\n  build:\n    runs-on: linux\n    steps: [{run: echo ok}]\n",
+            "push",
+        ),
+        (
+            "on:\n  merge_group:\n    mystery: true\njobs:\n  build:\n    runs-on: linux\n    steps: [{run: echo ok}]\n",
+            "merge_group",
+        ),
+        (
+            "on:\n  repository_dispatch:\n    mystery: true\njobs:\n  build:\n    runs-on: linux\n    steps: [{run: echo ok}]\n",
+            "repository_dispatch",
+        ),
+    ] {
+        let report = compile(source, event_name);
+        assert!(report.plan().is_none(), "{:#?}", report.diagnostics());
+        assert!(report.diagnostics().iter().any(|diagnostic| {
+            diagnostic.kind() == DiagnosticKind::Unsupported
+                && diagnostic.code() == "github.compile.unsupported_field"
+        }));
+    }
+}
+
+#[test]
 fn compiler_rejects_invalid_event_filters() {
     let cases = [
         (

@@ -1,7 +1,48 @@
 use automata_ci_workflow_github::{
-    DiagnosticKind, GithubFrontendReport, GithubWorkflowFrontend, ParseWorkflowRequest,
-    SourceProvenance, WorkflowFrontend, WorkflowParseLimits,
+    DiagnosticKind, GithubFrontendReport, GithubWorkflowFrontend, MAX_GITHUB_WORKFLOW_SOURCE_BYTES,
+    ParseWorkflowRequest, SourceProvenance, WorkflowFrontend, WorkflowParseLimits,
 };
+
+#[test]
+fn default_source_ceiling_has_exact_raw_byte_boundaries() {
+    for size in [
+        MAX_GITHUB_WORKFLOW_SOURCE_BYTES - 1,
+        MAX_GITHUB_WORKFLOW_SOURCE_BYTES,
+    ] {
+        let source = workflow_with_exact_bytes(size);
+        let report = GithubWorkflowFrontend::default().parse(request(&source));
+        assert!(
+            report.plan().is_some(),
+            "size {size}: {:#?}",
+            report.diagnostics()
+        );
+        assert!(
+            !report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code() == "yaml.source_too_large")
+        );
+    }
+
+    let source = workflow_with_exact_bytes(MAX_GITHUB_WORKFLOW_SOURCE_BYTES + 1);
+    let report = GithubWorkflowFrontend::default().parse(request(&source));
+    assert!(report.plan().is_none());
+    assert_eq!(report.diagnostics().len(), 1);
+    assert_eq!(report.diagnostics()[0].code(), "yaml.source_too_large");
+
+    for prefix in [
+        "\u{feff}on: push\njobs: {}\n#",
+        "on: push\r\njobs: {}\r\n#",
+    ] {
+        let source = workflow_variant_with_exact_bytes(prefix, MAX_GITHUB_WORKFLOW_SOURCE_BYTES);
+        let report = GithubWorkflowFrontend::default().parse(request(&source));
+        assert!(
+            report.plan().is_some(),
+            "raw-byte variant: {:#?}",
+            report.diagnostics()
+        );
+    }
+}
 
 #[test]
 fn source_size_is_checked_before_yaml_construction() {
@@ -142,4 +183,18 @@ fn assert_report_has_one_derived_text_limit(report: &GithubFrontendReport) {
 
 fn request(source: &str) -> ParseWorkflowRequest<'_> {
     ParseWorkflowRequest::new(SourceProvenance::memory("limits.yml"), source)
+}
+
+fn workflow_with_exact_bytes(size: usize) -> String {
+    const PREFIX: &str = "on: push\njobs: {}\n#";
+    workflow_variant_with_exact_bytes(PREFIX, size)
+}
+
+fn workflow_variant_with_exact_bytes(prefix: &str, size: usize) -> String {
+    assert!(size >= prefix.len());
+    let mut source = String::with_capacity(size);
+    source.push_str(prefix);
+    source.extend(std::iter::repeat_n('x', size - prefix.len()));
+    assert_eq!(source.len(), size);
+    source
 }

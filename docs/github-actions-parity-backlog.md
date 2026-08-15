@@ -372,20 +372,20 @@ bounded derived tree while retaining the original source AST. See
 - [x] Match GitHub's handling of duplicate anchors.
 - [x] Continue rejecting YAML merge keys if matching current GitHub behavior.
 - [x] Distinguish aliases from unsupported merge-key syntax in diagnostics.
-- [ ] Differential-test YAML 1.2 boolean behavior.
-- [ ] Test `.yml` and `.yaml`.
-- [ ] Test BOM and newline variants.
-- [ ] Test quoted and unquoted `on`.
-- [ ] Test null, empty, and duplicate values.
-- [ ] Test unknown keys at every workflow level.
-- [ ] Reject unsupported keys rather than preserving them as apparent support.
-- [ ] Enforce the current 500 KB workflow-file limit.
-- [ ] Document Automata's depth, scalar, collection, and expansion limits when
+- [x] Differential-test YAML 1.2 boolean behavior.
+- [x] Test `.yml` and `.yaml`.
+- [x] Test BOM and newline variants.
+- [x] Test quoted and unquoted `on`.
+- [x] Test null, empty, and duplicate values.
+- [x] Test unknown keys at every workflow level.
+- [x] Reject unsupported keys rather than preserving them as apparent support.
+- [x] Enforce the current 500 KB workflow-file limit.
+- [x] Document Automata's depth, scalar, collection, and expansion limits when
   stricter than GitHub.
-- [ ] Preserve accurate source spans through anchor expansion.
-- [ ] Test `run-name` evaluation and display.
-- [ ] Test workflow, job, and step `env` precedence.
-- [ ] Test workflow and job `defaults.run` precedence.
+- [x] Preserve accurate source spans through anchor expansion.
+- [x] Test `run-name` evaluation and display.
+- [x] Test workflow, job, and step `env` precedence.
+- [x] Test workflow and job `defaults.run` precedence.
 - [ ] Test every accepted job field through runtime, not merely
   deserialization.
 - [ ] Test every accepted step field through runtime.
