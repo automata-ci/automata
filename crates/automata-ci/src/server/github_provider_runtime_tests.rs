@@ -111,14 +111,16 @@ fn repository(
             "checks_write": authority(checks_authority),
             "workflow_permissions_read": authority(checks_authority + 0x1000_0000),
             "private_repository_source_read": private_authority
-                .map_or(Value::Null, authority)
+                .map_or(Value::Null, authority),
+            "private_pull_request_files_read": private_authority
+                .map_or(Value::Null, |id| authority(id + 0x10_0000))
         }
     })
 }
 
 fn document(repositories: &[Value]) -> Value {
     json!({
-        "schema": 3,
+        "schema": 4,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {

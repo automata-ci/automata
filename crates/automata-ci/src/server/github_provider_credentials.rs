@@ -1287,15 +1287,13 @@ impl GithubProviderCredentialAdapters {
         &self,
         context: PrivateSourceCredentialContext,
     ) -> Result<GithubDeliverySourceCredential, GithubDeliverySourceCredentialProviderError> {
+        let action = private_action(context.action);
         let authority = self
-            .authority(
-                &context.selector,
-                GithubServerServiceScope::PrivateRepositorySourceRead,
-            )
+            .authority(&context.selector, action.required_scope())
             .await
             .map_err(source_handoff_error)?;
         if !private_identity_matches(&authority, &context.identity)
-            || context.consumer.action() != private_action(context.action)
+            || context.consumer.action() != action
         {
             return Err(GithubDeliverySourceCredentialProviderError::Rejected);
         }
@@ -1873,6 +1871,9 @@ const fn private_action(
         }
         GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
             GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+        }
+        GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
+            GithubServerServiceAction::FetchPrivatePullRequestFiles
         }
     }
 }

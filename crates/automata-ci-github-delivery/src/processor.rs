@@ -84,12 +84,15 @@ pub enum GithubPushChangedFilesAuthority<'credential> {
 
 /// Exact repository authority supplied to a pull-request changed-files call.
 ///
-/// Private authority is intentionally absent until the manifest can pin a
-/// distinct `pull requests: read` selector. A `contents: read` token therefore
-/// cannot be passed to this port by construction.
-pub enum GithubPullRequestChangedFilesAuthority {
+/// Private calls carry only the credential acquired from the manifest-pinned
+/// `pull requests: read` selector. They use a variant distinct from private
+/// push Compare's `contents: read` authority.
+pub enum GithubPullRequestChangedFilesAuthority<'credential> {
     /// Query public pull-request file evidence anonymously.
     PublicAnonymous,
+    /// Query private pull-request file evidence with exact installation
+    /// `pull_requests: read` authority.
+    PrivateInstallationPullRequestsRead(&'credential SecretString),
 }
 
 #[cfg(test)]
@@ -106,10 +109,13 @@ impl fmt::Debug for GithubPushChangedFilesAuthority<'_> {
     }
 }
 
-impl fmt::Debug for GithubPullRequestChangedFilesAuthority {
+impl fmt::Debug for GithubPullRequestChangedFilesAuthority<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PublicAnonymous => formatter.write_str("PublicAnonymous"),
+            Self::PrivateInstallationPullRequestsRead(_) => {
+                formatter.write_str("PrivateInstallationPullRequestsRead([redacted])")
+            }
         }
     }
 }
@@ -138,7 +144,7 @@ pub struct GithubPullRequestChangedFilesRequest<'a> {
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
     required_through: UnixMillis,
-    authority: GithubPullRequestChangedFilesAuthority,
+    authority: GithubPullRequestChangedFilesAuthority<'a>,
 }
 
 impl GithubPullRequestChangedFilesRequest<'_> {
@@ -180,14 +186,19 @@ impl GithubPullRequestChangedFilesRequest<'_> {
 
     /// Returns the exact anonymous or request-scoped private authority.
     #[must_use]
-    pub const fn authority(&self) -> &GithubPullRequestChangedFilesAuthority {
+    pub const fn authority(&self) -> &GithubPullRequestChangedFilesAuthority<'_> {
         &self.authority
     }
 
     /// Returns the disjoint server-service action for a private request.
     #[must_use]
     pub const fn private_action(&self) -> Option<GithubDeliveryPrivateRepositoryAction> {
-        None
+        match self.authority {
+            GithubPullRequestChangedFilesAuthority::PublicAnonymous => None,
+            GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(_) => {
+                Some(GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles)
+            }
+        }
     }
 }
 
@@ -329,6 +340,15 @@ pub trait GithubPushChangedFilesProvider: fmt::Debug + Send + Sync {
 enum ChangedFilesEvent<'event> {
     Push(&'event automata_ci_github::VerifiedGithubPush),
     PullRequest(&'event automata_ci_github::VerifiedGithubPullRequest),
+}
+
+impl ChangedFilesEvent<'_> {
+    const fn repository_owner_id(self) -> u64 {
+        match self {
+            Self::Push(push) => push.repository().owner_id().get(),
+            Self::PullRequest(pull_request) => pull_request.repository().owner_id().get(),
+        }
+    }
 }
 
 /// Product-composed GitHub delivery processor backed by logical admission.
@@ -475,13 +495,6 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         request: &GithubDeliveryWorkflowRequest<'_>,
         event: ChangedFilesEvent<'_>,
     ) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
-        if request.identity().repository_visibility() == ProviderRepositoryVisibility::Private
-            && matches!(event, ChangedFilesEvent::PullRequest(_))
-        {
-            return Err(GithubDeliveryWorkflowProcessorError::Prerequisite(
-                GithubDeliveryWorkerPrerequisite::PrivatePullRequestFilesAuthority,
-            ));
-        }
         if let ChangedFilesEvent::Push(push) = event {
             let path_filter_commit_limit = request
                 .manifest_pinned_evidence()
@@ -606,10 +619,8 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         event: ChangedFilesEvent<'_>,
         provider: &dyn GithubPushChangedFilesProvider,
     ) -> Result<Option<GithubChangedFiles>, GithubDeliveryWorkflowProcessorError> {
-        let ChangedFilesEvent::Push(push) = event else {
-            return Err(GithubDeliveryWorkflowProcessorError::InvariantViolation);
-        };
-        let (authority_selector, credentials) = private_changed_files_context(request)?;
+        let (authority_selector, action, credentials) =
+            private_changed_files_context(request, event)?;
         let observed_at = request.clock().now();
         let (requested_snapshot, observed_at) = request
             .lease()
@@ -620,8 +631,9 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
         }
         let credential_request = private_changed_files_credential_request(
             request.identity(),
-            push.repository().owner_id().get(),
+            event.repository_owner_id(),
             authority_selector,
+            action,
             requested_snapshot,
             observed_at,
         )?;
@@ -639,7 +651,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 request_private_changed_files(
                     provider,
                     request,
-                    push,
+                    event,
                     requested_snapshot,
                     provider_observed_at,
                     credential_request.required_through(),
@@ -981,6 +993,7 @@ fn private_changed_files_credential_request<'a>(
     identity: &'a ProviderDeliveryIdentity,
     repository_owner_id: u64,
     authority_selector: &'a GithubServerServiceAuthoritySelector,
+    action: GithubDeliveryPrivateRepositoryAction,
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
 ) -> Result<GithubDeliverySourceCredentialRequest<'a>, GithubDeliveryWorkflowProcessorError> {
@@ -991,7 +1004,7 @@ fn private_changed_files_credential_request<'a>(
         repository_owner_id,
         authority_selector,
         snapshot,
-        GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+        action,
         observed_at,
     )
     .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)
@@ -999,24 +1012,40 @@ fn private_changed_files_credential_request<'a>(
 
 fn private_changed_files_context<'a>(
     request: &'a GithubDeliveryWorkflowRequest<'_>,
+    event: ChangedFilesEvent<'_>,
 ) -> Result<
     (
         &'a GithubServerServiceAuthoritySelector,
+        GithubDeliveryPrivateRepositoryAction,
         &'a dyn GithubDeliverySourceCredentialProvider,
     ),
     GithubDeliveryWorkflowProcessorError,
 > {
-    let authority_selector = request
-        .manifest_pinned_evidence()
-        .private_source_authority()
-        .ok_or(GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
+    let (authority_selector, action) = match event {
+        ChangedFilesEvent::Push(_) => (
+            request
+                .manifest_pinned_evidence()
+                .private_source_authority()
+                .ok_or(GithubDeliveryWorkflowProcessorError::InvariantViolation)?,
+            GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+        ),
+        ChangedFilesEvent::PullRequest(_) => (
+            request
+                .manifest_pinned_evidence()
+                .private_pull_request_files_authority()
+                .ok_or(GithubDeliveryWorkflowProcessorError::Prerequisite(
+                    GithubDeliveryWorkerPrerequisite::PrivatePullRequestFilesAuthority,
+                ))?,
+            GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles,
+        ),
+    };
     let credentials =
         request
             .private_credentials()
             .ok_or(GithubDeliveryWorkflowProcessorError::Prerequisite(
                 GithubDeliveryWorkerPrerequisite::ProviderChangedFiles,
             ))?;
-    Ok((authority_selector, credentials))
+    Ok((authority_selector, action, credentials))
 }
 
 async fn acquire_private_changed_files_credential(
@@ -1107,23 +1136,45 @@ fn provider_tail() -> std::time::Duration {
 async fn request_private_changed_files(
     provider: &dyn GithubPushChangedFilesProvider,
     request: &GithubDeliveryWorkflowRequest<'_>,
-    push: &automata_ci_github::VerifiedGithubPush,
+    event: ChangedFilesEvent<'_>,
     snapshot: GithubDeliveryClaimSnapshot,
     observed_at: UnixMillis,
     required_through: UnixMillis,
     token: &SecretString,
 ) -> GithubChangedFilesDisposition {
-    provider
-        .changed_files(GithubPushChangedFilesRequest {
-            identity: request.identity(),
-            request_digest: request.request_digest(),
-            push,
-            snapshot,
-            observed_at,
-            required_through,
-            authority: GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(token),
-        })
-        .await
+    match event {
+        ChangedFilesEvent::Push(push) => {
+            provider
+                .changed_files(GithubPushChangedFilesRequest {
+                    identity: request.identity(),
+                    request_digest: request.request_digest(),
+                    push,
+                    snapshot,
+                    observed_at,
+                    required_through,
+                    authority: GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(
+                        token,
+                    ),
+                })
+                .await
+        }
+        ChangedFilesEvent::PullRequest(pull_request) => {
+            provider
+                .pull_request_changed_files(GithubPullRequestChangedFilesRequest {
+                    identity: request.identity(),
+                    request_digest: request.request_digest(),
+                    pull_request,
+                    snapshot,
+                    observed_at,
+                    required_through,
+                    authority:
+                        GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(
+                            token,
+                        ),
+                })
+                .await
+        }
+    }
 }
 
 fn authenticated_event_source_provenance(
@@ -1946,6 +1997,9 @@ mod renewal_tests {
                 }
                 GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
                     GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+                }
+                GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
+                    GithubServerServiceAction::FetchPrivatePullRequestFiles
                 }
             },
             requested_consumer.revision(),

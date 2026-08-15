@@ -712,7 +712,20 @@ impl FixtureSubjectEvidence {
     ) -> Self {
         let base = Self::from_claimed(claimed, check_head_sha).0;
         let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
-        let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+        let private_pull_request_files_authority = (base.repository_visibility()
+            == ProviderRepositoryVisibility::Private
+            && kind == GithubAuthenticatedEventKind::PullRequest)
+            .then(|| {
+                GithubServerServiceAuthoritySelector::from_durable_parts(
+                    base.tenant().clone(),
+                    GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x7_5ff))
+                        .expect("private pull-request-files selector"),
+                    Sha256Digest::from_bytes([0x64; 32]),
+                    base.checks_authority().app_configuration_revision(),
+                    base.checks_authority().policy_revision(),
+                )
+            });
+        let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
             base.delivery_id(),
             base.repository_owner_id(),
             base.manifest().clone(),
@@ -720,6 +733,7 @@ impl FixtureSubjectEvidence {
             base.authenticated_webhook_verifier_revision(),
             base.checks_authority().clone(),
             base.private_source_authority().cloned(),
+            private_pull_request_files_authority,
             base.check_subject_id(),
             base.check_head_sha(),
             event,

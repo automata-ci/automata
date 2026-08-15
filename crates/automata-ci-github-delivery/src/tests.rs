@@ -253,20 +253,35 @@ fn fixture_manifest_receipt(
     );
     let check_subject_id =
         GithubCheckSubjectId::from_uuid(Uuid::from_u128(200 + ordinal)).expect("check subject");
-    let evidence = ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
-        delivery_id,
-        request.repository_owner_id(),
-        manifest,
-        request.authenticated_webhook_verifier_fingerprint(),
-        request.authenticated_webhook_verifier_revision(),
-        checks_authority,
-        private_source_authority,
-        check_subject_id,
-        request.head_sha(),
-        request.authenticated_event().clone(),
-        delivery.accepted_at(),
-    )
-    .expect("manifest evidence");
+    let private_pull_request_files_authority = (identity.repository_visibility()
+        == ProviderRepositoryVisibility::Private
+        && request.authenticated_event().kind() == GithubAuthenticatedEventKind::PullRequest)
+        .then(|| {
+            GithubServerServiceAuthoritySelector::from_durable_parts(
+                identity.tenant().clone(),
+                GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(500 + ordinal))
+                    .expect("private pull-request-files authority"),
+                Sha256Digest::from_bytes([0x63; 32]),
+                checks_authority.app_configuration_revision(),
+                checks_authority.policy_revision(),
+            )
+        });
+    let evidence =
+        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
+            delivery_id,
+            request.repository_owner_id(),
+            manifest,
+            request.authenticated_webhook_verifier_fingerprint(),
+            request.authenticated_webhook_verifier_revision(),
+            checks_authority,
+            private_source_authority,
+            private_pull_request_files_authority,
+            check_subject_id,
+            request.head_sha(),
+            request.authenticated_event().clone(),
+            delivery.accepted_at(),
+        )
+        .expect("manifest evidence");
     ManifestPinnedGithubDeliveryReceipt::from_durable_parts(evidence)
 }
 

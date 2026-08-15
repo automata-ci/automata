@@ -434,7 +434,7 @@ async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
     let initial_plan =
         GithubProviderBootstrapPlan::new(&initial_config, &broker, &initial_verifier)?;
     assert_eq!(initial_plan.manifests().len(), MATRIX.len());
-    assert_eq!(initial_plan.authorities().len(), 6);
+    assert_eq!(initial_plan.authorities().len(), 8);
     for policy in initial_plan.runner_policies() {
         blobs.put_if_absent(policy.clone()).await?;
     }
@@ -448,7 +448,7 @@ async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
     eprintln!("matrix stage: initial-bootstrap");
     let ready = initial_plan.bootstrap(store.as_ref(), wall_now()).await?;
     assert_eq!(ready.manifest_count(), MATRIX.len());
-    assert_eq!(ready.authority_count(), 6);
+    assert_eq!(ready.authority_count(), 8);
 
     let delivery_clock = Arc::new(SystemDeliveryClock);
     let ingress = automata_ci_github_delivery::GithubDeliveryIngress::new(
@@ -535,10 +535,11 @@ async fn execute_matrix(database: Arc<TestDatabase>) -> TestResult {
     let rotated_verifier = GithubWebhookVerifier::new(WEBHOOK_SECRET)?;
     let rotated_plan =
         GithubProviderBootstrapPlan::new(&rotated_config, &broker, &rotated_verifier)?;
-    assert_eq!(rotated_plan.authorities().len(), 6);
+    assert_eq!(rotated_plan.authorities().len(), 8);
     for case in MATRIX {
-        for authority_id in
-            std::iter::once(case.checks_authority_id).chain(case.private_source_authority_id)
+        for authority_id in std::iter::once(case.checks_authority_id)
+            .chain(case.private_source_authority_id)
+            .chain(case.private_source_authority_id.map(|id| id + 0x10_0000))
         {
             assert!(rotated_plan.authorities().iter().any(|authority| {
                 authority.authority_id().as_uuid() == Uuid::from_u128(authority_id + 0x1_000)
@@ -1150,6 +1151,10 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
             "private_repository_source_read": case.private_source_authority_id
                 .map_or(Value::Null, |id| {
                     authority(id + authority_id_offset, policy_revision)
+                }),
+            "private_pull_request_files_read": case.private_source_authority_id
+                .map_or(Value::Null, |id| {
+                    authority(id + 0x10_0000 + authority_id_offset, policy_revision)
                 })
         }
     })
@@ -1157,7 +1162,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
 
 fn config_document(manifest_revision: u64, rotated: bool) -> Value {
     json!({
-        "schema": 3,
+        "schema": 4,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {

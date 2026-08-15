@@ -1273,6 +1273,62 @@ async fn private_revision_and_changed_files_use_distinct_exact_consumers() {
 }
 
 #[tokio::test]
+async fn private_pull_request_files_uses_only_its_pull_requests_read_selector() {
+    let source = authority(GithubServerServiceScope::PrivateRepositorySourceRead, 0x621);
+    let pull_request_files =
+        authority(GithubServerServiceScope::PrivatePullRequestFilesRead, 0x622);
+    let fake = Arc::new(FakeHandoffs::new(FakeHandoffMode::Rejected));
+    let adapters = adapters(
+        Arc::clone(&fake),
+        &[source.clone(), pull_request_files.clone()],
+    );
+
+    let error = adapters
+        .acquire_private_source(private_context(
+            &pull_request_files,
+            PrivateIdentityDrift::Exact,
+            GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles,
+        ))
+        .await
+        .expect_err("fake rejects after recording exact PR-files request");
+    assert_eq!(error, GithubDeliverySourceCredentialProviderError::Rejected);
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].selector().authority_id(),
+        pull_request_files.authority_id()
+    );
+    assert_eq!(
+        requests[0].consumer().action(),
+        GithubServerServiceAction::FetchPrivatePullRequestFiles
+    );
+
+    assert_eq!(
+        adapters
+            .acquire_private_source(private_context(
+                &source,
+                PrivateIdentityDrift::Exact,
+                GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles,
+            ))
+            .await
+            .expect_err("contents selector cannot authorize pull-request files"),
+        GithubDeliverySourceCredentialProviderError::Rejected
+    );
+    assert_eq!(
+        adapters
+            .acquire_private_source(private_context(
+                &pull_request_files,
+                PrivateIdentityDrift::Exact,
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles,
+            ))
+            .await
+            .expect_err("pull-requests selector cannot authorize Compare"),
+        GithubDeliverySourceCredentialProviderError::Rejected
+    );
+    assert_eq!(fake.requests().len(), 1);
+}
+
+#[tokio::test]
 async fn inconsistent_returned_binding_is_released_and_never_delivered() {
     let checks = authority(GithubServerServiceScope::ChecksWrite, 0x60);
     for mode in [

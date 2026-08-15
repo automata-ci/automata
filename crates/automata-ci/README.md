@@ -345,11 +345,13 @@ an `env:NAME` or absolute `file:/path` reference accepted by the secret-source
 policy; secret bytes do not belong in the manifest. File sources must be
 owner-only regular files and cannot be symlinks.
 
-The current provider manifest is schema 3. It requires an explicit top-level
+The current provider manifest is schema 4. It requires an explicit top-level
 `dashboard_url`, which is the trusted canonical Automata origin used for Check
 Run links, and a distinct `workflow_permissions_read` authority for every
-repository. Schema-1 and schema-2 files are rejected rather than being guessed
-or silently granted broader GitHub App authority.
+repository, plus a separate `private_pull_request_files_read` authority
+(`null` for public repositories and exact authority for private repositories).
+Schema-1 through schema-3 files are rejected rather than being guessed or
+silently granted broader GitHub App authority.
 
 The required `transport` selects one closed origin policy. Use
 `{"mode":"github_dot_com"}` in production. The integration suite can select
@@ -365,9 +367,12 @@ installation, repository, and owner IDs, an exact `owner/name`, its canonical
 is server-owned cache metadata and is never taken from a job or action request.
 Revisions are positive and non-regressing. The entry's
 `policy_revision` must equal every nested authority revision, and authority
-UUIDs are globally unique. A `public` repository must set
-`private_repository_source_read` to `null`; a `private` repository must provide
-that exact authority. `checks_write` is mandatory for both. Use
+UUIDs are globally unique. A `public` repository must set both
+`private_repository_source_read` and `private_pull_request_files_read` to
+`null`; a `private` repository must provide both exact, distinct authorities.
+The former grants only `contents: read`; the latter grants only
+`pull requests: read` and is used solely for private pull-request file pages.
+`checks_write` is mandatory for both. Use
 `credential_free` only for jobs intentionally barred from credential-bearing
 authority; `standard` selects the credential-bearing, fail-private output
 profile. Unknown fields, aliases, duplicate identities, incoherent visibility,

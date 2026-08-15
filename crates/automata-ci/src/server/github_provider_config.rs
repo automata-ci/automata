@@ -27,7 +27,7 @@ pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
-const CONFIG_SCHEMA: u16 = 3;
+const CONFIG_SCHEMA: u16 = 4;
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -612,6 +612,7 @@ pub struct GithubProviderRepositoryConfig {
     checks_write_authority: GithubProviderAuthorityConfig,
     workflow_permissions_authority: GithubProviderAuthorityConfig,
     private_source_authority: Option<GithubProviderAuthorityConfig>,
+    private_pull_request_files_authority: Option<GithubProviderAuthorityConfig>,
 }
 
 impl GithubProviderRepositoryConfig {
@@ -665,20 +666,21 @@ impl GithubProviderRepositoryConfig {
             checks_write,
             workflow_permissions_read,
             private_repository_source_read,
+            private_pull_request_files_read,
         } = raw.authorities;
         let checks_write_authority = GithubProviderAuthorityConfig::validate(&checks_write)?;
         let workflow_permissions_authority =
             GithubProviderAuthorityConfig::validate(&workflow_permissions_read)?;
-        let private_source_authority = match (visibility, private_repository_source_read) {
-            (ProviderRepositoryVisibility::Public, RawPrivateAuthority::Null(())) => None,
-            (ProviderRepositoryVisibility::Private, RawPrivateAuthority::Authority(authority)) => {
-                Some(GithubProviderAuthorityConfig::validate(&authority)?)
-            }
-            _ => return Err(GithubProviderConfigError),
-        };
+        let private_source_authority =
+            validate_private_authority(visibility, private_repository_source_read)?;
+        let private_pull_request_files_authority =
+            validate_private_authority(visibility, private_pull_request_files_read)?;
         if checks_write_authority.policy_revision != policy_revision
             || workflow_permissions_authority.policy_revision != policy_revision
             || private_source_authority
+                .as_ref()
+                .is_some_and(|authority| authority.policy_revision != policy_revision)
+            || private_pull_request_files_authority
                 .as_ref()
                 .is_some_and(|authority| authority.policy_revision != policy_revision)
         {
@@ -706,6 +708,7 @@ impl GithubProviderRepositoryConfig {
             checks_write_authority,
             workflow_permissions_authority,
             private_source_authority,
+            private_pull_request_files_authority,
         })
     }
 
@@ -834,6 +837,30 @@ impl GithubProviderRepositoryConfig {
     pub const fn private_source_authority(&self) -> Option<&GithubProviderAuthorityConfig> {
         self.private_source_authority.as_ref()
     }
+
+    /// Returns the exact private pull-request-files authority only for a Private repository.
+    #[must_use]
+    pub const fn private_pull_request_files_authority(
+        &self,
+    ) -> Option<&GithubProviderAuthorityConfig> {
+        self.private_pull_request_files_authority.as_ref()
+    }
+}
+
+fn validate_private_authority(
+    visibility: ProviderRepositoryVisibility,
+    raw: RawPrivateAuthority,
+) -> Result<Option<GithubProviderAuthorityConfig>, GithubProviderConfigError> {
+    match (visibility, raw) {
+        (ProviderRepositoryVisibility::Public, RawPrivateAuthority::Null(())) => Ok(None),
+        (ProviderRepositoryVisibility::Private, RawPrivateAuthority::Authority(authority)) => {
+            GithubProviderAuthorityConfig::validate(&authority).map(Some)
+        }
+        (ProviderRepositoryVisibility::Public, RawPrivateAuthority::Authority(_))
+        | (ProviderRepositoryVisibility::Private, RawPrivateAuthority::Null(())) => {
+            Err(GithubProviderConfigError)
+        }
+    }
 }
 
 impl fmt::Debug for GithubProviderRepositoryConfig {
@@ -866,6 +893,10 @@ impl fmt::Debug for GithubProviderRepositoryConfig {
                 &self.workflow_permissions_authority,
             )
             .field("private_source_authority", &self.private_source_authority)
+            .field(
+                "private_pull_request_files_authority",
+                &self.private_pull_request_files_authority,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -937,6 +968,10 @@ fn validate_unique_repositories(
             || !authority_ids.insert(repository.workflow_permissions_authority.authority_id)
             || repository
                 .private_source_authority
+                .as_ref()
+                .is_some_and(|authority| !authority_ids.insert(authority.authority_id))
+            || repository
+                .private_pull_request_files_authority
                 .as_ref()
                 .is_some_and(|authority| !authority_ids.insert(authority.authority_id))
         {
@@ -1047,6 +1082,7 @@ struct RawAuthorities {
     checks_write: RawAuthority,
     workflow_permissions_read: RawAuthority,
     private_repository_source_read: RawPrivateAuthority,
+    private_pull_request_files_read: RawPrivateAuthority,
 }
 
 #[derive(Deserialize)]

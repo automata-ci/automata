@@ -165,6 +165,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0040_provider_delivery_event_envelope.sql",
         "939ba465bb389fbe4c3ed2066e4e86cd46102664e35451ea182af3f49d10e142fcdc046c1f957c28d9eb1747309793e0",
     ),
+    (
+        "0041_private_pull_request_files_authority.sql",
+        "ffe09b28f1cd13879c582df018b5fc663aa4bd0f8390466ed8bfc2a82fa5db74da721978c460c21607130e027ad2d848",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

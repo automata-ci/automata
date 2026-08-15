@@ -87,6 +87,9 @@ pub fn github_server_service_credential_request(
         GithubServerServiceScope::WorkflowPermissionsRead => {
             ("administration", PermissionLevel::Read)
         }
+        GithubServerServiceScope::PrivatePullRequestFilesRead => {
+            ("pull_requests", PermissionLevel::Read)
+        }
     };
     let permissions = PermissionSet::new([(
         PermissionName::new(permission.0).map_err(|_| GithubServerServiceResolutionValueError)?,

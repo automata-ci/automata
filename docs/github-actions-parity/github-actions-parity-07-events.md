@@ -29,8 +29,8 @@ definition of done.
 
 Tasks:
 
-- [ ] Add authenticated, paginated pull-request file retrieval.
-- [ ] Select least authority for public, private, same-repository, and fork
+- [x] Add authenticated, paginated pull-request file retrieval.
+- [x] Select least authority for public, private, same-repository, and fork
   pull requests.
 - [ ] Match two-dot, three-dot, new-branch, forced/diverged, rename, deletion,
   300-file, and 1,000-commit behavior.
@@ -50,7 +50,7 @@ Acceptance:
 - [x] Missing evidence never silently skips a workflow.
 - [x] Restart after any page is deterministic.
 
-Current portable boundary:
+Current implementation boundary:
 
 - Public same-repository and fork pull requests use anonymous, paginated
   `pulls/{number}/files` reads. Exact pre/post pull-request snapshots bind the
@@ -66,12 +66,13 @@ Current portable boundary:
   deterministic. Once a workflow is admitted, the selection digest is part of
   immutable workflow-plan provenance and therefore its plan/admission digest;
   a terminal path miss is retained by durable per-workflow delivery progress.
-- Private pull-request file reads remain blocked before credential acquisition
-  or provider I/O. The current manifest-pinned private source authority is
-  `contents: read`, while this endpoint requires a separately reviewed and
-  pinned `pull requests: read` selector. Completing that AUTH-02 integration
-  is required before the first two tasks or the Wave 1 runnable-private exit
-  criterion can be checked.
+- Private pull-request delivery evidence pins a distinct
+  `private_pull_request_files_read` selector whose exact policy is only
+  `pull requests: read`. The selector, App/config/policy revisions, delivery
+  claim fence, action, and provider-use horizon are revalidated before a
+  credential handoff. Acquisition happens only after the compiler demands
+  path evidence, and the existing `contents: read` source selector cannot be
+  substituted at the typed, adapter, or database boundary.
 - New-branch and forced/diverged push comparisons and rename parity remain
   fail-closed. Commit-message skip directives and live GitHub differential
   evidence also remain open; this component coverage is not a production

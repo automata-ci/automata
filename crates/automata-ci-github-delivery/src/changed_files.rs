@@ -83,6 +83,9 @@ impl GithubRestPushChangedFilesProvider {
             GithubPullRequestChangedFilesAuthority::PublicAnonymous => {
                 GithubPullRequestDiffAuthority::PublicAnonymous
             }
+            GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(token) => {
+                GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(token)
+            }
         };
         let Some(deadline) =
             Instant::now().checked_add(self.endpoint.trusted_origins().limits().request_timeout())
@@ -180,7 +183,7 @@ fn validate_pull_request_delivery_binding(
 fn validate_common_delivery_binding(
     identity: &automata_ci_store::ProviderDeliveryIdentity,
     pull_request: &VerifiedGithubPullRequest,
-    authority: &GithubPullRequestChangedFilesAuthority,
+    authority: &GithubPullRequestChangedFilesAuthority<'_>,
     observed_at: automata_ci_core::UnixMillis,
     required_through: automata_ci_core::UnixMillis,
 ) -> bool {
@@ -197,6 +200,10 @@ fn validate_common_delivery_binding(
             ProviderRepositoryVisibility::Public,
             GithubRepositoryVisibility::Public,
             GithubPullRequestChangedFilesAuthority::PublicAnonymous,
+        ) | (
+            ProviderRepositoryVisibility::Private,
+            GithubRepositoryVisibility::Private,
+            GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(_),
         )
     );
     if !visibility_matches

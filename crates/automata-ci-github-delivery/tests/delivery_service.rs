@@ -739,6 +739,9 @@ impl RecordingCredentialProvider {
                 GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
                     GithubServerServiceAction::FetchPrivateRepositoryRevision
                 }
+                GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
+                    GithubServerServiceAction::FetchPrivateRepositoryRevision
+                }
             }
         } else {
             requested.action()
