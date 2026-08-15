@@ -1723,7 +1723,7 @@ fn provider_capabilities(
                 ],
             ),
             BTreeSet::new(),
-            BTreeSet::from([RunnerFeature::SHELL_STEPS, RunnerFeature::COMMAND_FILES]),
+            runner_features,
         ),
         ProviderKind::MacosVirtualization => (
             SandboxCapabilities::new(

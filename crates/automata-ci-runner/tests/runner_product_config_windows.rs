@@ -70,6 +70,9 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
             SandboxFeature::WINDOWS_HYPERV_CONTAINER,
         ])
     );
+    assert!(config.executor().toolchain().pwsh().is_some());
+    assert!(config.executor().toolchain().powershell().is_some());
+    assert!(config.executor().toolchain().cmd().is_some());
     for feature in [
         RunnerFeature::SHELL_STEPS,
         RunnerFeature::DEFAULT_WINDOWS_SHELL,
@@ -79,7 +82,11 @@ fn internal_windows_fixture_selects_only_hyperv_containers() {
         RunnerFeature::COMMAND_FILES,
         RunnerFeature::JOB_SUMMARIES,
     ] {
-        assert!(config.inventory().features().contains(&feature));
+        assert!(
+            config.inventory().features().contains(&feature),
+            "missing expected Windows runner feature {feature}; actual: {:?}",
+            config.inventory().features()
+        );
     }
     for feature in [
         RunnerFeature::DEFAULT_POSIX_SHELL,
