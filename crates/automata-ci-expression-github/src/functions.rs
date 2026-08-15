@@ -11,18 +11,19 @@ pub(crate) fn contains(
     arguments: &[GithubValue],
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     exact_arity(arguments, 2)?;
-    let found = match &arguments[0] {
+    let found = match arguments[0].without_sensitivity() {
         GithubValue::Array(values) => values
             .iter()
             .any(|value| coercion::abstract_equal(&arguments[1], value)),
         value if value.is_primitive() && arguments[1].is_primitive() => {
-            let left = coercion::to_string(value).to_lowercase();
-            let right = coercion::to_string(&arguments[1]).to_lowercase();
+            let left = coercion::ordinal_key(&coercion::to_string(value));
+            let right = coercion::ordinal_key(&coercion::to_string(&arguments[1]));
             left.contains(&right)
         }
         _ => false,
     };
-    Ok(GithubValue::Boolean(found))
+    Ok(GithubValue::Boolean(found)
+        .inherit_sensitivity(arguments.iter().any(GithubValue::is_sensitive)))
 }
 
 pub(crate) fn starts_with(
@@ -43,13 +44,14 @@ fn string_predicate(
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     exact_arity(arguments, 2)?;
     let value = if arguments[0].is_primitive() && arguments[1].is_primitive() {
-        let left = coercion::to_string(&arguments[0]).to_lowercase();
-        let right = coercion::to_string(&arguments[1]).to_lowercase();
+        let left = coercion::ordinal_key(&coercion::to_string(&arguments[0]));
+        let right = coercion::ordinal_key(&coercion::to_string(&arguments[1]));
         predicate(&left, &right)
     } else {
         false
     };
-    Ok(GithubValue::Boolean(value))
+    Ok(GithubValue::Boolean(value)
+        .inherit_sensitivity(arguments.iter().any(GithubValue::is_sensitive)))
 }
 
 pub(crate) fn join(
@@ -57,7 +59,7 @@ pub(crate) fn join(
     maximum_bytes: usize,
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     arity_range(arguments, 1, 2)?;
-    let result = match &arguments[0] {
+    let result = match arguments[0].without_sensitivity() {
         GithubValue::Array(values) => {
             let separator = arguments
                 .get(1)
@@ -82,17 +84,20 @@ pub(crate) fn join(
         }
         _ => String::new(),
     };
-    Ok(GithubValue::string(result))
+    Ok(GithubValue::string(result)
+        .inherit_sensitivity(arguments.iter().any(GithubValue::is_sensitive)))
 }
 
 pub(crate) fn format_template(
     template: &str,
+    template_sensitive: bool,
     argument_count: usize,
     maximum_bytes: usize,
-    mut argument: impl FnMut(usize) -> Result<String, GithubExpressionEvaluationError>,
+    mut argument: impl FnMut(usize) -> Result<GithubValue, GithubExpressionEvaluationError>,
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     let mut output = String::with_capacity(template.len().min(maximum_bytes));
-    let mut arguments = vec![None; argument_count];
+    let mut arguments: Vec<Option<(String, bool)>> = vec![None; argument_count];
+    let mut sensitive = template_sensitive;
     let mut cursor = 0;
     let bytes = template.as_bytes();
     while cursor < bytes.len() {
@@ -111,7 +116,8 @@ pub(crate) fn format_template(
                     .map(|offset| cursor + 1 + offset)
                     .ok_or_else(invalid_operation)?;
                 let placeholder = &template[cursor + 1..end];
-                if placeholder.contains(':') || placeholder.is_empty() {
+                let placeholder = placeholder.strip_suffix(':').unwrap_or(placeholder);
+                if placeholder.is_empty() || placeholder.contains(':') {
                     return Err(invalid_operation());
                 }
                 let index = placeholder.parse::<u8>().map_err(|_| invalid_operation())?;
@@ -120,11 +126,13 @@ pub(crate) fn format_template(
                     return Err(invalid_operation());
                 }
                 if arguments[index].is_none() {
-                    arguments[index] = Some(argument(index)?);
+                    let value = argument(index)?;
+                    arguments[index] = Some((coercion::to_string(&value), value.is_sensitive()));
                 }
-                let Some(value) = arguments[index].as_deref() else {
+                let Some((value, value_sensitive)) = arguments[index].as_ref() else {
                     return Err(invalid_operation());
                 };
+                sensitive |= *value_sensitive;
                 append_bounded(&mut output, value, maximum_bytes)?;
                 cursor = end + 1;
             }
@@ -144,7 +152,7 @@ pub(crate) fn format_template(
             }
         }
     }
-    Ok(GithubValue::string(output))
+    Ok(GithubValue::string(output).inherit_sensitivity(sensitive))
 }
 
 fn append_bounded(
@@ -168,6 +176,7 @@ pub(crate) fn from_json(
     limits: GithubExpressionLimits,
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     exact_arity(arguments, 1)?;
+    let sensitive = arguments[0].is_sensitive();
     let source = coercion::to_string(&arguments[0]);
     let mut deserializer = serde_json::Deserializer::from_str(&source);
     let budget = JsonBudget::new(limits.collection_items(), limits.value_depth());
@@ -184,7 +193,7 @@ pub(crate) fn from_json(
         }
     })?;
     deserializer.end().map_err(|_| invalid_operation())?;
-    Ok(value)
+    Ok(value.inherit_sensitivity(sensitive))
 }
 
 pub(crate) fn to_json(
@@ -192,6 +201,9 @@ pub(crate) fn to_json(
     limits: GithubExpressionLimits,
 ) -> Result<GithubValue, GithubExpressionEvaluationError> {
     exact_arity(arguments, 1)?;
+    if arguments[0].is_sensitive() {
+        return Err(invalid_operation());
+    }
     let mut output = BoundedJsonWriter::new(limits.result_bytes());
     write_json(&arguments[0], 0, limits.value_depth(), &mut output)?;
     String::from_utf8(output.into_bytes())
@@ -208,7 +220,7 @@ fn write_json(
     if depth >= maximum_depth {
         return Err(resource_limit());
     }
-    match value {
+    match value.without_sensitivity() {
         GithubValue::Null => output.append("null")?,
         GithubValue::Boolean(value) => output.append(if *value { "true" } else { "false" })?,
         GithubValue::Number(bits) => {
@@ -255,6 +267,7 @@ fn write_json(
                 output.append("}")?;
             }
         }
+        GithubValue::Sensitive(_) => unreachable!("sensitivity wrappers are removed recursively"),
     }
     Ok(())
 }

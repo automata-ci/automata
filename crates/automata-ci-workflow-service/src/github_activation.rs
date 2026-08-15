@@ -40,6 +40,9 @@ impl GithubActivationContext {
         let GithubValue::Object(object) = &value else {
             return Err(GithubActivationEvaluationError::GithubContextMustBeObject);
         };
+        if value.is_sensitive() {
+            return Err(GithubActivationEvaluationError::SensitiveValue);
+        }
         if object
             .entries()
             .iter()
@@ -261,7 +264,7 @@ impl LogicalActivationSession for GithubActivationSession {
         let value = self
             .evaluator
             .evaluate(Self::program(expression)?, &self.context(context)?)?;
-        Ok(activation_value(&value))
+        activation_value(&value)
     }
 
     fn evaluate_string(
@@ -279,12 +282,11 @@ impl LogicalActivationSession for GithubActivationSession {
                     let program = programs
                         .next()
                         .ok_or(GithubActivationEvaluationError::TemplateProgramCountMismatch)?;
-                    rendered.push_str(
-                        &self
-                            .evaluator
-                            .evaluate(program, &evaluation_context)?
-                            .coerce_to_string(),
-                    );
+                    let value = self.evaluator.evaluate(program, &evaluation_context)?;
+                    if value.is_sensitive() {
+                        return Err(GithubActivationEvaluationError::SensitiveValue);
+                    }
+                    rendered.push_str(&value.coerce_to_string());
                 }
             }
             if rendered.len() > MAX_LOGICAL_FIELD_BYTES {
@@ -517,23 +519,31 @@ fn object(
         .map_err(GithubActivationEvaluationError::Value)
 }
 
-fn activation_value(value: &GithubValue) -> ActivationValue {
-    match value {
+fn activation_value(
+    value: &GithubValue,
+) -> Result<ActivationValue, GithubActivationEvaluationError> {
+    Ok(match value {
         GithubValue::Null => ActivationValue::Null,
         GithubValue::Boolean(value) => ActivationValue::Boolean(*value),
         GithubValue::Number(bits) => ActivationValue::Number(*bits),
         GithubValue::String(value) => ActivationValue::String(value.to_string()),
-        GithubValue::Array(values) => {
-            ActivationValue::Array(values.iter().map(activation_value).collect())
-        }
+        GithubValue::Array(values) => ActivationValue::Array(
+            values
+                .iter()
+                .map(activation_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         GithubValue::Object(value) => ActivationValue::Object(
             value
                 .entries()
                 .iter()
-                .map(|(key, value)| (key.clone(), activation_value(value)))
-                .collect(),
+                .map(|(key, value)| activation_value(value).map(|value| (key.clone(), value)))
+                .collect::<Result<Vec<_>, _>>()?,
         ),
-    }
+        GithubValue::Sensitive(_) => {
+            return Err(GithubActivationEvaluationError::SensitiveValue);
+        }
+    })
 }
 
 /// Sanitized GitHub activation-evaluation failure.
@@ -569,6 +579,9 @@ pub enum GithubActivationEvaluationError {
     /// Evaluation of a valid compiled expression failed.
     #[error("GitHub activation expression evaluation failed")]
     Evaluation(#[from] GithubExpressionEvaluationError),
+    /// A sensitive expression result reached a durable activation field.
+    #[error("sensitive GitHub expression value cannot enter durable activation state")]
+    SensitiveValue,
     /// An integer-valued activation setting was non-numeric, non-positive, or out of range.
     #[error("activation value must evaluate to a positive integer")]
     ExpectedPositiveInteger,

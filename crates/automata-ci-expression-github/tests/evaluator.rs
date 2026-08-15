@@ -6,10 +6,11 @@ use std::{
     },
 };
 
+use automata_ci_core::{ExpressionDialect, ExpressionInstruction, ExpressionProgram};
 use automata_ci_expression_github::{
-    ExtensionFunctionResult, GithubExpressionEvaluationErrorKind, GithubExpressionEvaluator,
-    GithubExpressionFunctionProvider, GithubExpressionLimits, GithubObject, GithubStatus,
-    GithubValue, MapContext,
+    ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluationErrorKind,
+    GithubExpressionEvaluator, GithubExpressionFunctionProvider, GithubExpressionLimits,
+    GithubObject, GithubStatus, GithubValue, MapContext,
 };
 use automata_ci_workflow_github::{
     GITHUB_EXPRESSION_DIALECT, GITHUB_EXPRESSION_DIALECT_VERSION, GithubConditionCompiler,
@@ -20,6 +21,51 @@ fn compile(source: &str) -> automata_ci_core::ExpressionProgram {
     GithubConditionCompiler::default()
         .compile_condition(Some(source), GithubConditionPhase::Step)
         .expect("test expression compiles")
+}
+
+fn compile_value(source: &str) -> ExpressionProgram {
+    GithubConditionCompiler::default()
+        .compile_value_expression(source, GithubConditionPhase::Step)
+        .expect("test value expression compiles")
+}
+
+fn manual_call(name: &str, argument_names: &[&str]) -> ExpressionProgram {
+    let mut instructions = argument_names
+        .iter()
+        .map(|name| ExpressionInstruction::Call {
+            name: (*name).to_owned(),
+            argument_count: 0,
+        })
+        .collect::<Vec<_>>();
+    instructions.push(ExpressionInstruction::Call {
+        name: name.to_owned(),
+        argument_count: u16::try_from(argument_names.len()).expect("bounded test arguments"),
+    });
+    ExpressionProgram::new(
+        ExpressionDialect::new(GITHUB_EXPRESSION_DIALECT, GITHUB_EXPRESSION_DIALECT_VERSION)
+            .expect("test dialect"),
+        format!("manual {name}/{}", argument_names.len()),
+        instructions,
+    )
+    .expect("structurally valid test program")
+}
+
+fn manual_named_call(name: &str, named: &str) -> ExpressionProgram {
+    ExpressionProgram::new(
+        ExpressionDialect::new(GITHUB_EXPRESSION_DIALECT, GITHUB_EXPRESSION_DIALECT_VERSION)
+            .expect("test dialect"),
+        format!("manual {name}({named})"),
+        vec![
+            ExpressionInstruction::NamedValue {
+                name: named.to_owned(),
+            },
+            ExpressionInstruction::Call {
+                name: name.to_owned(),
+                argument_count: 1,
+            },
+        ],
+    )
+    .expect("structurally valid test program")
 }
 
 fn object(entries: impl IntoIterator<Item = (&'static str, GithubValue)>) -> GithubValue {
@@ -124,9 +170,16 @@ fn matches_github_loose_primitive_coercion() {
         "${{ '0' == false }}",
         "${{ null == false }}",
         "${{ '' == 0 }}",
+        "${{ ' \t' == 0 }}",
+        "${{ '1e2' == 100 }}",
+        "${{ '+1.5e+2' == 150 }}",
         "${{ '0x10' == 16 }}",
         "${{ '0xFFFFFFFF' == -1 }}",
         "${{ '0o10' == 8 }}",
+        "${{ '0o37777777777' == -1 }}",
+        "${{ '-0' == 0 }}",
+        "${{ 'Infinity' > 1e308 }}",
+        "${{ '-Infinity' < -1e308 }}",
         "${{ true > false }}",
         "${{ 'Zulu' > 'alpha' }}",
     ] {
@@ -137,11 +190,75 @@ fn matches_github_loose_primitive_coercion() {
             "{expression}"
         );
     }
-    assert!(
-        !evaluator
-            .evaluate_condition(&compile("${{ 'not-a-number' > 0 }}"), &empty_context)
-            .expect("NaN comparison evaluates")
-    );
+    for expression in [
+        "${{ 'not-a-number' > 0 }}",
+        "${{ 'NaN' == 0 }}",
+        "${{ 'NaN' > 0 }}",
+        "${{ '0X10' == 16 }}",
+        "${{ '0o40000000000' == 0 }}",
+        "${{ '1e9999' == 0 }}",
+    ] {
+        assert!(
+            !evaluator
+                .evaluate_condition(&compile(expression), &empty_context)
+                .expect("numeric edge evaluates"),
+            "{expression}"
+        );
+    }
+
+    assert!(!GithubValue::number(f64::NAN).is_truthy());
+    assert!(!GithubValue::number(f64::NAN).loosely_equals(&GithubValue::number(f64::NAN)));
+    assert!(!GithubValue::number(-0.0).is_truthy());
+    assert_eq!(GithubValue::number(-0.0).coerce_to_string(), "0");
+}
+
+#[test]
+fn non_ascii_comparisons_follow_dotnet_ordinal_ignore_case() {
+    let evaluator = GithubExpressionEvaluator::default();
+    let empty_context = context([]);
+    for expression in [
+        "${{ 'É' == 'é' }}",
+        "${{ 'Σ' == 'ς' }}",
+        "${{ '𐐀' == '𐐨' }}",
+        "${{ contains('CAFÉ', 'fé') }}",
+        "${{ startsWith('Σigma', 'ςI') }}",
+        "${{ endsWith('𐐀x𐐀', '𐐨') }}",
+        "${{ '😀' < '\u{e000}' }}",
+    ] {
+        assert!(
+            evaluator
+                .evaluate_condition(&compile(expression), &empty_context)
+                .expect("ordinal expression evaluates"),
+            "{expression}"
+        );
+    }
+
+    for expression in [
+        "${{ 'ß' == 'ẞ' }}",
+        "${{ 'İ' == 'i' }}",
+        "${{ 'ı' == 'I' }}",
+        "${{ '\u{212a}' == 'k' }}",
+        "${{ 'ſ' == 's' }}",
+        "${{ 'ﬀ' == 'FF' }}",
+    ] {
+        assert!(
+            !evaluator
+                .evaluate_condition(&compile(expression), &empty_context)
+                .expect("ordinal edge evaluates"),
+            "{expression}"
+        );
+    }
+
+    GithubObject::new(vec![
+        ("Σ".to_owned(), GithubValue::Null),
+        ("ς".to_owned(), GithubValue::Null),
+    ])
+    .expect_err("ordinal-equivalent object keys collide");
+    GithubObject::new(vec![
+        ("\u{212a}".to_owned(), GithubValue::Null),
+        ("k".to_owned(), GithubValue::Null),
+    ])
+    .expect("ordinal-distinct object keys coexist");
 }
 
 #[test]
@@ -169,8 +286,82 @@ struct CountingFunctions {
 impl GithubExpressionFunctionProvider for CountingFunctions {
     fn call(&self, name: &str, _arguments: &[GithubValue]) -> ExtensionFunctionResult {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        (name == "hashfiles").then(|| Ok(GithubValue::string("digest")))
+        match name {
+            "hashfiles" => Some(Ok(GithubValue::string("digest"))),
+            "echo" | "explode" => Some(Ok(GithubValue::string("extension"))),
+            _ => None,
+        }
     }
+}
+
+#[test]
+fn evaluator_signature_dispatch_is_closed_and_preflight_is_lazy() {
+    let functions = Arc::new(CountingFunctions {
+        calls: AtomicUsize::new(0),
+    });
+    let successful = MapContext::new(BTreeMap::new(), GithubStatus::Success, functions.clone())
+        .expect("valid context");
+    let failed = MapContext::new(BTreeMap::new(), GithubStatus::Failure, functions.clone())
+        .expect("valid context");
+    let evaluator = GithubExpressionEvaluator::default();
+
+    for (name, context, expected) in [
+        ("success", &successful, true),
+        ("success", &failed, false),
+        ("failure", &successful, false),
+        ("failure", &failed, true),
+    ] {
+        let value = evaluator
+            .evaluate(&manual_call(name, &["explode", "explode"]), context)
+            .expect("job-status call ignores arguments");
+        assert_eq!(value.as_bool(), Some(expected));
+    }
+    assert_eq!(functions.calls.load(Ordering::SeqCst), 0);
+
+    let invalid_signatures = [
+        ("always", 1_usize),
+        ("cancelled", 1),
+        ("case", 2),
+        ("case", 4),
+        ("case", 256),
+        ("contains", 1),
+        ("contains", 3),
+        ("startswith", 1),
+        ("startswith", 3),
+        ("endswith", 1),
+        ("endswith", 3),
+        ("format", 0),
+        ("format", 256),
+        ("join", 0),
+        ("join", 3),
+        ("fromjson", 0),
+        ("fromjson", 2),
+        ("tojson", 0),
+        ("tojson", 2),
+        ("hashfiles", 0),
+        ("hashfiles", 256),
+    ];
+    for (name, count) in invalid_signatures {
+        let arguments = vec!["explode"; count];
+        let error = evaluator
+            .evaluate(&manual_call(name, &arguments), &successful)
+            .expect_err("known invalid arity fails before evaluating arguments");
+        assert_eq!(
+            error.kind(),
+            GithubExpressionEvaluationErrorKind::InvalidOperation,
+            "{name}/{count}"
+        );
+        assert_eq!(functions.calls.load(Ordering::SeqCst), 0, "{name}/{count}");
+    }
+
+    let error = evaluator
+        .evaluate(&manual_call("unsupported", &[]), &successful)
+        .expect_err("unsupported durable call fails closed");
+    assert_eq!(
+        error.kind(),
+        GithubExpressionEvaluationErrorKind::UnavailableContext
+    );
+    assert_eq!(functions.calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -230,6 +421,13 @@ fn supports_format_join_and_json_functions() {
         )
         .expect("functions evaluate");
     assert_eq!(formatted.as_str(), Some("{key}:1|true|"));
+    let empty_format_specifier = evaluator
+        .evaluate(
+            &compile_value("${{ format('{0:}', 'value') }}"),
+            &empty_context,
+        )
+        .expect("empty runner format specifier evaluates");
+    assert_eq!(empty_format_specifier.as_str(), Some("value"));
 
     let data = object([
         ("z", GithubValue::Boolean(true)),
@@ -355,12 +553,18 @@ fn json_functions_enforce_active_limits_during_construction() {
 fn object_and_array_equality_is_by_identity() {
     let shared = object([("value", GithubValue::string("same"))]);
     let independent = object([("value", GithubValue::string("same"))]);
+    let shared_array = GithubValue::array(vec![GithubValue::string("same")]).expect("valid array");
+    let independent_array =
+        GithubValue::array(vec![GithubValue::string("same")]).expect("valid array");
     let context = context([(
         "github",
         object([
             ("left", shared.clone()),
             ("same", shared),
             ("other", independent),
+            ("left_array", shared_array.clone()),
+            ("same_array", shared_array),
+            ("other_array", independent_array),
         ]),
     )]);
     let evaluator = GithubExpressionEvaluator::default();
@@ -375,6 +579,196 @@ fn object_and_array_equality_is_by_identity() {
             .evaluate_condition(&compile("${{ github.left == github.other }}"), &context)
             .expect("identity evaluates")
     );
+    assert!(
+        evaluator
+            .evaluate_condition(
+                &compile("${{ github.left_array == github.same_array }}"),
+                &context,
+            )
+            .expect("array identity evaluates")
+    );
+    assert!(
+        !evaluator
+            .evaluate_condition(
+                &compile("${{ github.left_array == github.other_array }}"),
+                &context,
+            )
+            .expect("array identity evaluates")
+    );
+}
+
+#[test]
+fn missing_properties_and_filtered_wildcards_match_runner_behavior() {
+    let rows = GithubValue::array(vec![
+        object([
+            ("name", GithubValue::string("one")),
+            (
+                "nested",
+                GithubValue::array(vec![GithubValue::string("a"), GithubValue::string("b")])
+                    .expect("valid array"),
+            ),
+        ]),
+        object([("other", GithubValue::string("omitted"))]),
+        object([
+            ("name", GithubValue::string("three")),
+            (
+                "nested",
+                GithubValue::array(vec![GithubValue::string("c")]).expect("valid array"),
+            ),
+        ]),
+    ])
+    .expect("valid array");
+    let context = context([(
+        "github",
+        object([("rows", rows), ("scalar", GithubValue::string("value"))]),
+    )]);
+    let evaluator = GithubExpressionEvaluator::default();
+
+    for expression in [
+        "${{ github.missing == null }}",
+        "${{ github.missing.child == null }}",
+        "${{ github.rows[99] == null }}",
+        "${{ github.scalar.missing == null }}",
+    ] {
+        assert!(
+            evaluator
+                .evaluate_condition(&compile(expression), &context)
+                .expect("missing property evaluates"),
+            "{expression}"
+        );
+    }
+
+    let names = evaluator
+        .evaluate(&compile_value("${{ github.rows.*.name }}"), &context)
+        .expect("wildcard projection evaluates");
+    let GithubValue::Array(names) = names else {
+        panic!("wildcard result is an array");
+    };
+    assert_eq!(
+        names
+            .iter()
+            .filter_map(GithubValue::as_str)
+            .collect::<Vec<_>>(),
+        ["one", "three"]
+    );
+
+    let flattened = evaluator
+        .evaluate(&compile_value("${{ github.rows.*.nested.* }}"), &context)
+        .expect("nested wildcard evaluates");
+    let GithubValue::Array(flattened) = flattened else {
+        panic!("nested wildcard result is an array");
+    };
+    assert_eq!(
+        flattened
+            .iter()
+            .filter_map(GithubValue::as_str)
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+}
+
+#[test]
+fn sensitive_values_propagate_without_serialization_or_diagnostic_leaks() {
+    let canary = "wf03-canary-\"}\\escaped\n::error::must-not-leak";
+    let sensitive = GithubValue::sensitive_string(canary);
+    let context = context([
+        (
+            "github",
+            object([
+                ("token", sensitive.clone()),
+                (
+                    "values",
+                    GithubValue::array(vec![GithubValue::string("public"), sensitive.clone()])
+                        .expect("valid array"),
+                ),
+                (
+                    "secret_rows",
+                    GithubValue::array(vec![object([(
+                        "name",
+                        GithubValue::string("secret projection"),
+                    )])])
+                    .expect("valid array")
+                    .mark_sensitive(),
+                ),
+                ("event", object([("public", GithubValue::string("safe"))])),
+                (
+                    "secret_json",
+                    GithubValue::sensitive_string("{\"token\":\"value\"}"),
+                ),
+            ]),
+        ),
+        ("secret", sensitive.clone()),
+        (
+            "secrets",
+            object([("API_KEY", GithubValue::sensitive_string(canary))]),
+        ),
+    ]);
+    let evaluator = GithubExpressionEvaluator::default();
+
+    let direct = evaluator
+        .evaluate(&compile_value("${{ github.token }}"), &context)
+        .expect("direct sensitive value evaluates");
+    assert!(direct.is_sensitive());
+    assert_eq!(direct.as_str(), None);
+    assert_eq!(direct.coerce_to_string(), canary);
+
+    for expression in [
+        "${{ format('prefix-{0}-suffix', github.token) }}",
+        "${{ join(github.values.*, '|') }}",
+        "${{ github.values.* }}",
+        "${{ github.secret_rows.*.name }}",
+        "${{ github.token == 'nope' }}",
+        "${{ case(github.token == 'nope', 'never', 'selected') }}",
+        "${{ fromJSON(github.secret_json).token }}",
+    ] {
+        let value = evaluator
+            .evaluate(&compile_value(expression), &context)
+            .expect("sensitive derivation evaluates");
+        assert!(value.is_sensitive(), "lost sensitivity: {expression}");
+        assert!(!format!("{value:?}").contains(canary));
+    }
+
+    let json = evaluator
+        .evaluate(&compile_value("${{ toJSON(github.event) }}"), &context)
+        .expect("public subtree remains serializable");
+    assert_eq!(json.as_str(), Some("{\n  \"public\": \"safe\"\n}"));
+
+    for expression in ["${{ toJSON(github) }}", "${{ format(github.token) }}"] {
+        let error = evaluator
+            .evaluate(&compile_value(expression), &context)
+            .expect_err("sensitive serialization or malformed template fails closed");
+        assert_eq!(
+            error.kind(),
+            GithubExpressionEvaluationErrorKind::InvalidOperation
+        );
+        assert!(!format!("{error:?}").contains(canary));
+        assert!(!error.to_string().contains(canary));
+    }
+
+    let extension_context = MapContext::new(
+        BTreeMap::from([("secret".to_owned(), sensitive)]),
+        GithubStatus::Success,
+        Arc::new(CountingFunctions {
+            calls: AtomicUsize::new(0),
+        }),
+    )
+    .expect("valid extension context");
+    let extension = evaluator
+        .evaluate(&manual_named_call("echo", "secret"), &extension_context)
+        .expect("extension call evaluates");
+    assert!(extension.is_sensitive());
+    assert_eq!(extension.as_str(), None);
+    assert_eq!(extension.coerce_to_string(), "extension");
+
+    let Some(GithubValue::Object(secrets)) = context.named_value("secrets") else {
+        panic!("secrets context is an object");
+    };
+    assert!(
+        secrets
+            .get("api_key")
+            .is_some_and(GithubValue::is_sensitive)
+    );
+    assert!(!format!("{context:?}").contains(canary));
 }
 
 #[test]

@@ -107,6 +107,18 @@ impl ResolvedEnvironmentValue {
             Self::SharedSecret(_) => true,
         }
     }
+
+    pub(crate) fn github_value(&self) -> GithubValue {
+        if self.is_secret() {
+            GithubValue::sensitive_string(self.expose())
+        } else {
+            GithubValue::string(self.expose())
+        }
+    }
+
+    fn from_github_value(value: &GithubValue) -> Self {
+        Self::from_parts(value.coerce_to_string(), value.is_sensitive())
+    }
 }
 
 pub(crate) struct EnvironmentBuilder<'a> {
@@ -472,7 +484,7 @@ impl<'a> EnvironmentEvaluationContext<'a> {
         let environment = GithubObject::new(
             values
                 .iter()
-                .map(|(name, value)| (name.clone(), GithubValue::string(value.expose())))
+                .map(|(name, value)| (name.clone(), value.github_value()))
                 .collect(),
         )
         .map(GithubValue::object)
@@ -524,7 +536,7 @@ fn expression_environment(
         insert_expression_environment(
             &mut environment,
             name.clone(),
-            ResolvedEnvironmentValue::plain(value.coerce_to_string()),
+            ResolvedEnvironmentValue::from_github_value(value),
         );
     }
     Ok(environment)
@@ -702,6 +714,47 @@ mod tests {
     use crate::{ContextEnvironmentVariable, PortError};
 
     assert_not_impl_any!(ResolvedEnvironmentValue: std::fmt::Debug, std::fmt::Display);
+
+    #[test]
+    fn executor_values_preserve_expression_sensitivity_until_process_exposure() {
+        let canary = "wf03-executor-canary-\"}\\escaped\n::error::must-not-leak";
+        let secret = ResolvedEnvironmentValue::secret(canary);
+        let plain = ResolvedEnvironmentValue::plain("public");
+
+        let secret_value = secret.github_value();
+        assert!(secret_value.is_sensitive());
+        assert_eq!(secret_value.as_str(), None);
+        assert_eq!(secret_value.coerce_to_string(), canary);
+        assert!(!format!("{secret_value:?}").contains(canary));
+        assert!(!plain.github_value().is_sensitive());
+
+        let derived = ResolvedEnvironmentValue::from_github_value(
+            &GithubValue::Boolean(true).mark_sensitive(),
+        );
+        assert!(derived.is_secret());
+        assert_eq!(derived.expose(), "true");
+
+        let base = MapContext::without_extensions(BTreeMap::new(), GithubStatus::Success)
+            .expect("expression context");
+        let values = BTreeMap::from([("TOKEN".to_owned(), secret), ("PUBLIC".to_owned(), plain)]);
+        let context = EnvironmentEvaluationContext::new(&base, &values)
+            .expect("environment expression context");
+        let GithubValue::Object(environment) = context.named_value("env").expect("env context")
+        else {
+            panic!("env context is an object");
+        };
+        assert!(
+            environment
+                .get("token")
+                .is_some_and(GithubValue::is_sensitive)
+        );
+        assert!(
+            environment
+                .get("public")
+                .is_some_and(|value| !value.is_sensitive())
+        );
+        assert!(!format!("{context:?}").contains(canary));
+    }
 
     #[derive(Debug)]
     struct TestSecrets;

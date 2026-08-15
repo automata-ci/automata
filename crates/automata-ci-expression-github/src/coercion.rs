@@ -3,17 +3,18 @@ use std::cmp::Ordering;
 use crate::GithubValue;
 
 pub(crate) fn to_number(value: &GithubValue) -> f64 {
-    match value {
+    match value.without_sensitivity() {
         GithubValue::Null => 0.0,
         GithubValue::Boolean(value) => u8::from(*value).into(),
         GithubValue::Number(bits) => f64::from_bits(*bits),
         GithubValue::String(value) => parse_number(value),
         GithubValue::Array(_) | GithubValue::Object(_) => f64::NAN,
+        GithubValue::Sensitive(_) => unreachable!("sensitivity wrappers are removed recursively"),
     }
 }
 
 pub(crate) fn to_string(value: &GithubValue) -> String {
-    match value {
+    match value.without_sensitivity() {
         GithubValue::Null => String::new(),
         GithubValue::Boolean(true) => "true".to_owned(),
         GithubValue::Boolean(false) => "false".to_owned(),
@@ -21,10 +22,13 @@ pub(crate) fn to_string(value: &GithubValue) -> String {
         GithubValue::String(value) => value.to_string(),
         GithubValue::Array(_) => "Array".to_owned(),
         GithubValue::Object(_) => "Object".to_owned(),
+        GithubValue::Sensitive(_) => unreachable!("sensitivity wrappers are removed recursively"),
     }
 }
 
 pub(crate) fn abstract_equal(left: &GithubValue, right: &GithubValue) -> bool {
+    let left = left.without_sensitivity();
+    let right = right.without_sensitivity();
     match (left, right) {
         (GithubValue::Null, GithubValue::Null) => true,
         (GithubValue::Boolean(left), GithubValue::Boolean(right)) => left == right,
@@ -51,9 +55,11 @@ pub(crate) fn abstract_equal(left: &GithubValue, right: &GithubValue) -> bool {
 }
 
 pub(crate) fn abstract_compare(left: &GithubValue, right: &GithubValue) -> Option<Ordering> {
+    let left = left.without_sensitivity();
+    let right = right.without_sensitivity();
     match (left, right) {
         (GithubValue::String(left), GithubValue::String(right)) => {
-            Some(ordinal_key(left).cmp(&ordinal_key(right)))
+            Some(ordinal_compare(left, right))
         }
         (GithubValue::Boolean(left), GithubValue::Boolean(right)) => Some(left.cmp(right)),
         (GithubValue::Number(left), GithubValue::Number(right)) => {
@@ -70,12 +76,35 @@ pub(crate) fn abstract_compare(left: &GithubValue, right: &GithubValue) -> Optio
 }
 
 pub(crate) fn ordinal_ignore_case(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
-        || (!left.is_ascii() && !right.is_ascii() && ordinal_key(left) == ordinal_key(right))
+    left.eq_ignore_ascii_case(right) || ordinal_key(left) == ordinal_key(right)
 }
 
 pub(crate) fn ordinal_key(value: &str) -> String {
-    value.chars().flat_map(char::to_lowercase).collect()
+    value.chars().map(ordinal_fold_character).collect()
+}
+
+fn ordinal_compare(left: &str, right: &str) -> Ordering {
+    ordinal_key(left)
+        .encode_utf16()
+        .cmp(ordinal_key(right).encode_utf16())
+}
+
+fn ordinal_fold_character(character: char) -> char {
+    // .NET's ordinal-ignore-case comparison applies one-to-one invariant
+    // casing and never expands a scalar into multiple characters. The two
+    // compatibility characters below deliberately remain distinct in the
+    // pinned runtime's ordinal table even though Unicode full-uppercase maps
+    // them to ASCII letters.
+    if matches!(character, '\u{0131}' | '\u{017f}') {
+        return character;
+    }
+    let mut uppercase = character.to_uppercase();
+    let first = uppercase.next().unwrap_or(character);
+    if uppercase.next().is_none() {
+        first
+    } else {
+        character
+    }
 }
 
 fn parse_number(value: &str) -> f64 {
@@ -105,7 +134,9 @@ fn parse_radix_i32(value: &str, radix: u32) -> f64 {
     if value.is_empty() || !value.chars().all(|character| character.is_digit(radix)) {
         return f64::NAN;
     }
-    i32::from_str_radix(value, radix).map_or(f64::NAN, f64::from)
+    u32::from_str_radix(value, radix).map_or(f64::NAN, |value| {
+        f64::from(i32::from_be_bytes(value.to_be_bytes()))
+    })
 }
 
 fn parse_hex_i32(value: &str) -> f64 {

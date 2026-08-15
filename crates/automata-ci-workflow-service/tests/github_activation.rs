@@ -489,6 +489,32 @@ fn activation_snapshot_rejects_runtime_credentials_without_retaining_them() {
 }
 
 #[test]
+fn activation_snapshot_rejects_sensitive_payloads_inside_safe_properties() {
+    let sentinel = "wf03-activation-canary-\"}\\escaped\nsecond-line";
+    let raw = GithubValue::object(
+        GithubObject::new(vec![(
+            "event".to_owned(),
+            GithubValue::object(
+                GithubObject::new(vec![(
+                    "payload".to_owned(),
+                    GithubValue::sensitive_string(sentinel),
+                )])
+                .expect("event"),
+            ),
+        )])
+        .expect("raw github context"),
+    );
+    let error = GithubActivationContext::new(raw).expect_err("sensitive event must be rejected");
+    assert!(matches!(
+        error,
+        GithubActivationEvaluationError::SensitiveValue
+    ));
+    let diagnostics = format!("{error:?} {error}");
+    assert!(!diagnostics.contains(sentinel));
+    assert!(!diagnostics.contains("second-line"));
+}
+
+#[test]
 fn documented_prerunner_github_properties_remain_available_but_token_is_null() {
     let properties = [
         "actor",

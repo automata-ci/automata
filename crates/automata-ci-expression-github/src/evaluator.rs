@@ -261,11 +261,15 @@ impl Tree {
             Node::Wildcard => Err(internal()),
             Node::Index { target, index } => {
                 let target = self.evaluate(*target, context, limits)?;
-                self.evaluate_index(target, *index, context, limits)
+                self.evaluate_index(&target, *index, context, limits)
             }
-            Node::Not { operand } => Ok(Evaluated::plain(GithubValue::Boolean(
-                !self.evaluate(*operand, context, limits)?.value.is_truthy(),
-            ))),
+            Node::Not { operand } => {
+                let operand = self.evaluate(*operand, context, limits)?.value;
+                let sensitive = operand.is_sensitive();
+                Ok(Evaluated::plain(
+                    GithubValue::Boolean(!operand.is_truthy()).inherit_sensitivity(sensitive),
+                ))
+            }
             Node::Compare {
                 operator,
                 left,
@@ -273,6 +277,7 @@ impl Tree {
             } => {
                 let left = self.evaluate(*left, context, limits)?;
                 let right = self.evaluate(*right, context, limits)?;
+                let sensitive = left.value.is_sensitive() || right.value.is_sensitive();
                 let result = match operator {
                     ExpressionComparison::Equal => {
                         coercion::abstract_equal(&left.value, &right.value)
@@ -299,7 +304,9 @@ impl Tree {
                                 == Some(Ordering::Less)
                     }
                 };
-                Ok(Evaluated::plain(GithubValue::Boolean(result)))
+                Ok(Evaluated::plain(
+                    GithubValue::Boolean(result).inherit_sensitivity(sensitive),
+                ))
             }
             Node::Logical { operator, operands } => {
                 self.evaluate_logical(*operator, operands, context, limits)
@@ -316,8 +323,10 @@ impl Tree {
         limits: GithubExpressionLimits,
     ) -> Result<Evaluated, GithubExpressionEvaluationError> {
         let mut last = Evaluated::plain(GithubValue::Null);
+        let mut sensitive = false;
         for operand in operands {
             last = self.evaluate(*operand, context, limits)?;
+            sensitive |= last.value.is_sensitive();
             let stop = match operator {
                 ExpressionLogical::And => !last.value.is_truthy(),
                 ExpressionLogical::Or => last.value.is_truthy(),
@@ -326,6 +335,7 @@ impl Tree {
                 break;
             }
         }
+        last.value = last.value.inherit_sensitivity(sensitive);
         Ok(last)
     }
 
@@ -337,6 +347,27 @@ impl Tree {
         limits: GithubExpressionLimits,
     ) -> Result<Evaluated, GithubExpressionEvaluationError> {
         let name = name.to_ascii_lowercase();
+        if name == "success" || name == "failure" {
+            // The pinned workflow schema deliberately registers job-level
+            // success/failure with (0, MAX). Their implementations inspect
+            // status only, so arguments are not evaluated. Step compilation
+            // remains strict (0, 0).
+            let expected = if name == "success" {
+                GithubStatus::Success
+            } else {
+                GithubStatus::Failure
+            };
+            return Ok(Evaluated::plain(GithubValue::Boolean(
+                context.status() == expected,
+            )));
+        }
+        if name == "always" || name == "cancelled" {
+            if !arguments.is_empty() {
+                return Err(functions::invalid_operation());
+            }
+            let value = name == "always" || context.status() == GithubStatus::Cancelled;
+            return Ok(Evaluated::plain(GithubValue::Boolean(value)));
+        }
         if name == "case" {
             return self.evaluate_case(arguments, context, limits);
         }
@@ -349,6 +380,15 @@ impl Tree {
         if name == "join" {
             return self.evaluate_join(arguments, context, limits);
         }
+        match name.as_str() {
+            "fromjson" | "tojson" if arguments.len() != 1 => {
+                return Err(functions::invalid_operation());
+            }
+            "hashfiles" if !(1..=255).contains(&arguments.len()) => {
+                return Err(functions::invalid_operation());
+            }
+            _ => {}
+        }
         let arguments = arguments
             .iter()
             .map(|argument| {
@@ -356,17 +396,8 @@ impl Tree {
                     .map(|value| value.value)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let sensitive = arguments.iter().any(GithubValue::is_sensitive);
         let value = match name.as_str() {
-            "always" if arguments.is_empty() => GithubValue::Boolean(true),
-            "success" if arguments.is_empty() => {
-                GithubValue::Boolean(context.status() == GithubStatus::Success)
-            }
-            "failure" if arguments.is_empty() => {
-                GithubValue::Boolean(context.status() == GithubStatus::Failure)
-            }
-            "cancelled" if arguments.is_empty() => {
-                GithubValue::Boolean(context.status() == GithubStatus::Cancelled)
-            }
             "fromjson" => functions::from_json(&arguments, limits)?,
             "tojson" => functions::to_json(&arguments, limits)?,
             _ => context
@@ -374,6 +405,7 @@ impl Tree {
                 .call(&name, &arguments)
                 .ok_or_else(unavailable)??,
         };
+        let value = value.inherit_sensitivity(sensitive);
         enforce_value_limits(&value, limits)?;
         Ok(Evaluated::plain(value))
     }
@@ -389,12 +421,15 @@ impl Tree {
             return Err(functions::invalid_operation());
         }
         let left = self.evaluate(arguments[0], context, limits)?.value;
-        let should_evaluate_right = match (&left, name) {
+        let should_evaluate_right = match (left.without_sensitivity(), name) {
             (GithubValue::Array(values), "contains") => !values.is_empty(),
             (value, _) => value.is_primitive(),
         };
         if !should_evaluate_right {
-            return Ok(Evaluated::plain(GithubValue::Boolean(false)));
+            let sensitive = left.is_sensitive();
+            return Ok(Evaluated::plain(
+                GithubValue::Boolean(false).inherit_sensitivity(sensitive),
+            ));
         }
         let right = self.evaluate(arguments[1], context, limits)?.value;
         let value = match name {
@@ -416,7 +451,8 @@ impl Tree {
             return Err(functions::invalid_operation());
         }
         let items = self.evaluate(arguments[0], context, limits)?.value;
-        let needs_separator = matches!(&items, GithubValue::Array(values) if values.len() > 1);
+        let needs_separator =
+            matches!(items.without_sensitivity(), GithubValue::Array(values) if values.len() > 1);
         let mut values = vec![items];
         if needs_separator && arguments.len() == 2 {
             values.push(self.evaluate(arguments[1], context, limits)?.value);
@@ -433,19 +469,21 @@ impl Tree {
         context: &dyn GithubEvaluationContext,
         limits: GithubExpressionLimits,
     ) -> Result<Evaluated, GithubExpressionEvaluationError> {
-        if arguments.is_empty() || arguments.len() > 256 {
+        if arguments.is_empty() || arguments.len() > 255 {
             return Err(functions::invalid_operation());
         }
-        let template = coercion::to_string(&self.evaluate(arguments[0], context, limits)?.value);
+        let template = self.evaluate(arguments[0], context, limits)?.value;
+        let template_sensitive = template.is_sensitive();
+        let template = coercion::to_string(&template);
         let value_nodes = &arguments[1..];
         let value = functions::format_template(
             &template,
+            template_sensitive,
             value_nodes.len(),
             limits.result_bytes(),
             |index| {
-                Ok(coercion::to_string(
-                    &self.evaluate(value_nodes[index], context, limits)?.value,
-                ))
+                self.evaluate(value_nodes[index], context, limits)
+                    .map(|value| value.value)
             },
         )?;
         enforce_value_limits(&value, limits)?;
@@ -458,70 +496,95 @@ impl Tree {
         context: &dyn GithubEvaluationContext,
         limits: GithubExpressionLimits,
     ) -> Result<Evaluated, GithubExpressionEvaluationError> {
-        if arguments.len() < 3 || arguments.len().is_multiple_of(2) {
+        if arguments.len() < 3 || arguments.len() > 255 || arguments.len().is_multiple_of(2) {
             return Err(functions::invalid_operation());
         }
+        let mut sensitive = false;
         for pair in arguments[..arguments.len() - 1].chunks_exact(2) {
             let predicate = self.evaluate(pair[0], context, limits)?;
+            sensitive |= predicate.value.is_sensitive();
             if predicate
                 .value
+                .without_sensitivity()
                 .as_bool()
                 .ok_or_else(functions::invalid_operation)?
             {
-                return self.evaluate(pair[1], context, limits);
+                let mut selected = self.evaluate(pair[1], context, limits)?;
+                selected.value = selected.value.inherit_sensitivity(sensitive);
+                return Ok(selected);
             }
         }
-        self.evaluate(*arguments.last().ok_or_else(internal)?, context, limits)
+        let mut selected =
+            self.evaluate(*arguments.last().ok_or_else(internal)?, context, limits)?;
+        selected.value = selected.value.inherit_sensitivity(sensitive);
+        Ok(selected)
     }
 
     fn evaluate_index(
         &self,
-        target: Evaluated,
+        target: &Evaluated,
         index_node: usize,
         context: &dyn GithubEvaluationContext,
         limits: GithubExpressionLimits,
     ) -> Result<Evaluated, GithubExpressionEvaluationError> {
         let wildcard = matches!(self.nodes.get(index_node), Some(Node::Wildcard));
-        let index = if wildcard {
-            None
+        let (index, index_sensitive) = if wildcard {
+            (None, false)
         } else {
-            Some(self.evaluate(index_node, context, limits)?.value)
+            let index = self.evaluate(index_node, context, limits)?.value;
+            let sensitive = index.is_sensitive();
+            (Some(index), sensitive)
         };
-        if target.filtered {
-            return Self::index_filtered(target.value, index.as_ref(), wildcard, limits);
-        }
-        index_one(&target.value, index.as_ref(), wildcard, limits)
+        let mut result = if target.filtered {
+            Self::index_filtered(&target.value, index.as_ref(), wildcard, limits)?
+        } else {
+            index_one(&target.value, index.as_ref(), wildcard, limits)?
+        };
+        result.value = result.value.inherit_sensitivity(index_sensitive);
+        Ok(result)
     }
 
     fn index_filtered(
-        target: GithubValue,
+        target: &GithubValue,
         index: Option<&GithubValue>,
         wildcard: bool,
         limits: GithubExpressionLimits,
     ) -> Result<Evaluated, GithubExpressionEvaluationError> {
-        let GithubValue::Array(values) = target else {
+        let inherited_sensitive = target.is_explicitly_sensitive();
+        let GithubValue::Array(values) = target.without_sensitivity() else {
             return Err(internal());
         };
         let mut result = Vec::new();
         for value in values.iter() {
-            match value {
+            let element_sensitive = value.is_explicitly_sensitive();
+            match value.without_sensitivity() {
                 GithubValue::Object(object) => {
                     if wildcard {
-                        result.extend(object.entries().iter().map(|(_, value)| value.clone()));
+                        result.extend(object.entries().iter().map(|(_, value)| {
+                            value.clone().inherit_sensitivity(element_sensitive)
+                        }));
                     } else if let Some(key) = index.and_then(primitive_index_string)
                         && let Some(value) = object.get(&key)
                     {
-                        result.push(value.clone());
+                        result.push(value.clone().inherit_sensitivity(element_sensitive));
                     }
                 }
                 GithubValue::Array(values) => {
                     if wildcard {
-                        result.extend(values.iter().cloned());
+                        result.extend(
+                            values
+                                .iter()
+                                .cloned()
+                                .map(|value| value.inherit_sensitivity(element_sensitive)),
+                        );
                     } else if let Some(position) = index.and_then(array_index)
                         && let Some(value) = values.get(position)
                     {
-                        result.push(value.clone());
+                        result.push(value.clone().inherit_sensitivity(element_sensitive));
                     }
+                }
+                GithubValue::Sensitive(_) => {
+                    unreachable!("sensitivity wrappers are removed recursively")
                 }
                 _ => {}
             }
@@ -529,7 +592,9 @@ impl Tree {
                 return Err(functions::resource_limit());
             }
         }
-        let value = GithubValue::array(result).map_err(|_| functions::resource_limit())?;
+        let value = GithubValue::array(result)
+            .map_err(|_| functions::resource_limit())?
+            .inherit_sensitivity(inherited_sensitive);
         Ok(Evaluated {
             value,
             filtered: true,
@@ -558,7 +623,8 @@ fn index_one(
     wildcard: bool,
     limits: GithubExpressionLimits,
 ) -> Result<Evaluated, GithubExpressionEvaluationError> {
-    match target {
+    let inherited_sensitive = target.is_explicitly_sensitive();
+    let mut result = match target.without_sensitivity() {
         GithubValue::Object(object) if wildcard => filtered_array(
             object
                 .entries()
@@ -581,8 +647,11 @@ fn index_one(
                 .unwrap_or(GithubValue::Null),
         )),
         _ if wildcard => filtered_array(Vec::new(), limits),
+        GithubValue::Sensitive(_) => unreachable!("sensitivity wrappers are removed recursively"),
         _ => Ok(Evaluated::plain(GithubValue::Null)),
-    }
+    }?;
+    result.value = result.value.inherit_sensitivity(inherited_sensitive);
+    Ok(result)
 }
 
 fn filtered_array(
@@ -635,7 +704,7 @@ fn enforce_value_limits(
         if items > limits.collection_items() {
             return Err(functions::resource_limit());
         }
-        match value {
+        match value.without_sensitivity() {
             GithubValue::String(value) => {
                 aggregate = aggregate
                     .checked_add(value.len())
@@ -653,6 +722,9 @@ fn enforce_value_limits(
                 }
             }
             GithubValue::Null | GithubValue::Boolean(_) | GithubValue::Number(_) => {}
+            GithubValue::Sensitive(_) => {
+                unreachable!("sensitivity wrappers are removed recursively")
+            }
         }
         if aggregate > limits.result_bytes() {
             return Err(functions::resource_limit());

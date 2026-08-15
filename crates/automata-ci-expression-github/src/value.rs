@@ -105,6 +105,31 @@ impl fmt::Debug for GithubObject {
     }
 }
 
+/// Opaque custody wrapper for a sensitive expression payload.
+///
+/// The payload is intentionally inaccessible outside this crate. Consumers
+/// can inspect sensitivity through [`GithubValue::is_sensitive`] and cross an
+/// explicit string exposure boundary through [`GithubValue::coerce_to_string`],
+/// but cannot destructure this wrapper to bypass those APIs.
+#[derive(Clone)]
+pub struct GithubSensitiveValue(Arc<GithubValue>);
+
+impl GithubSensitiveValue {
+    fn new(value: GithubValue) -> Self {
+        Self(Arc::new(value))
+    }
+
+    fn payload(&self) -> &GithubValue {
+        &self.0
+    }
+}
+
+impl fmt::Debug for GithubSensitiveValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GithubSensitiveValue([REDACTED])")
+    }
+}
+
 /// Canonical value kinds supported by GitHub Actions expressions.
 #[derive(Clone)]
 pub enum GithubValue {
@@ -120,6 +145,13 @@ pub enum GithubValue {
     Array(Arc<[GithubValue]>),
     /// Identity-bearing object value.
     Object(GithubObject),
+    /// Opaque expression value whose payload may only cross an explicit
+    /// executor exposure boundary.
+    ///
+    /// Evaluator operations preserve this marker. In particular, collection
+    /// projection keeps sensitive leaves opaque and string-producing
+    /// functions taint their derived result.
+    Sensitive(GithubSensitiveValue),
 }
 
 impl GithubValue {
@@ -137,6 +169,42 @@ impl GithubValue {
     #[must_use]
     pub fn string(value: impl Into<String>) -> Self {
         Self::String(Arc::from(value.into()))
+    }
+
+    /// Creates an opaque string backed by sensitive material.
+    ///
+    /// The payload remains usable by expression semantics, but debug output
+    /// and ordinary JSON serialization never expose it. Callers that finally
+    /// hand the value to a process must cross [`Self::coerce_to_string`]
+    /// deliberately and retain their existing masking/custody controls.
+    #[must_use]
+    pub fn sensitive_string(value: impl Into<String>) -> Self {
+        Self::string(value).mark_sensitive()
+    }
+
+    /// Marks a value and all values derived from it as sensitive.
+    #[must_use]
+    pub fn mark_sensitive(self) -> Self {
+        if self.is_explicitly_sensitive() {
+            self
+        } else {
+            Self::Sensitive(GithubSensitiveValue::new(self))
+        }
+    }
+
+    /// Reports whether this value, or any value nested below it, contains
+    /// opaque material.
+    #[must_use]
+    pub fn is_sensitive(&self) -> bool {
+        match self {
+            Self::Sensitive(_) => true,
+            Self::Array(values) => values.iter().any(Self::is_sensitive),
+            Self::Object(object) => object
+                .entries()
+                .iter()
+                .any(|(_, value)| value.is_sensitive()),
+            Self::Null | Self::Boolean(_) | Self::Number(_) | Self::String(_) => false,
+        }
     }
 
     /// Creates a bounded array.
@@ -196,6 +264,7 @@ impl GithubValue {
             }
             Self::String(value) => !value.is_empty(),
             Self::Array(_) | Self::Object(_) => true,
+            Self::Sensitive(value) => value.payload().is_truthy(),
         }
     }
 
@@ -219,7 +288,30 @@ impl GithubValue {
     }
 
     pub(crate) fn is_primitive(&self) -> bool {
-        !matches!(self, Self::Array(_) | Self::Object(_))
+        match self.without_sensitivity() {
+            Self::Array(_) | Self::Object(_) => false,
+            Self::Null | Self::Boolean(_) | Self::Number(_) | Self::String(_) => true,
+            Self::Sensitive(_) => unreachable!("sensitivity wrappers are removed recursively"),
+        }
+    }
+
+    pub(crate) fn without_sensitivity(&self) -> &Self {
+        match self {
+            Self::Sensitive(value) => value.payload().without_sensitivity(),
+            value => value,
+        }
+    }
+
+    pub(crate) const fn is_explicitly_sensitive(&self) -> bool {
+        matches!(self, Self::Sensitive(_))
+    }
+
+    pub(crate) fn inherit_sensitivity(self, sensitive: bool) -> Self {
+        if sensitive {
+            self.mark_sensitive()
+        } else {
+            self
+        }
     }
 }
 
@@ -238,6 +330,7 @@ impl fmt::Debug for GithubValue {
                 .field(&format_args!("{} items [REDACTED]", values.len()))
                 .finish(),
             Self::Object(value) => value.fmt(formatter),
+            Self::Sensitive(_) => formatter.write_str("GithubValue::Sensitive([REDACTED])"),
         }
     }
 }

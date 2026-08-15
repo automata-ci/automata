@@ -356,6 +356,11 @@ fn github_token_is_unavailable_without_job_bound_authority() {
     };
 
     assert_eq!(github.get("token").and_then(GithubValue::as_str), Some(""));
+    assert!(
+        github
+            .get("token")
+            .is_some_and(|value| !value.is_sensitive())
+    );
     assert!(secrets.get("GITHUB_TOKEN").is_none());
     assert!(snapshot.secret_masks().is_empty());
     assert!(
@@ -378,10 +383,10 @@ fn repository_token_aliases_receive_only_the_masked_repository_authority() {
     let GithubValue::Object(github) = github else {
         panic!("github context must be an object");
     };
-    assert_eq!(
-        github.get("token").and_then(GithubValue::as_str),
-        Some(REPOSITORY_TOKEN)
-    );
+    let github_token = github.get("token").expect("github token");
+    assert_eq!(github_token.as_str(), None);
+    assert_eq!(github_token.coerce_to_string(), REPOSITORY_TOKEN);
+    assert!(github_token.is_sensitive());
     let GithubValue::Object(secrets) = snapshot
         .expression()
         .named_value("secrets")
@@ -389,10 +394,10 @@ fn repository_token_aliases_receive_only_the_masked_repository_authority() {
     else {
         panic!("secrets context must be an object");
     };
-    assert_eq!(
-        secrets.get("GITHUB_TOKEN").and_then(GithubValue::as_str),
-        Some(REPOSITORY_TOKEN)
-    );
+    let secret_token = secrets.get("GITHUB_TOKEN").expect("GITHUB_TOKEN secret");
+    assert_eq!(secret_token.as_str(), None);
+    assert_eq!(secret_token.coerce_to_string(), REPOSITORY_TOKEN);
+    assert!(secret_token.is_sensitive());
     assert_eq!(snapshot.secret_masks().len(), 1);
     assert_eq!(snapshot.secret_masks()[0].expose_secret(), REPOSITORY_TOKEN);
     assert!(
@@ -408,7 +413,9 @@ fn repository_token_aliases_receive_only_the_masked_repository_authority() {
     let evaluated = GithubExpressionEvaluator::default()
         .evaluate(&checkout_default, snapshot.expression())
         .expect("evaluate checkout token default");
-    assert_eq!(evaluated.as_str(), Some(REPOSITORY_TOKEN));
+    assert_eq!(evaluated.as_str(), None);
+    assert_eq!(evaluated.coerce_to_string(), REPOSITORY_TOKEN);
+    assert!(evaluated.is_sensitive());
     let rendered = format!("{snapshot:?} {github:?} {secrets:?} {evaluated:?}");
     assert!(!rendered.contains(REPOSITORY_TOKEN));
 }
@@ -451,10 +458,9 @@ fn mapped_repository_authority_requires_the_exact_emulator_origin_and_trust_clas
     else {
         panic!("github context must be an object");
     };
-    assert_eq!(
-        github.get("token").and_then(GithubValue::as_str),
-        Some(REPOSITORY_TOKEN)
-    );
+    let token = github.get("token").expect("github token");
+    assert_eq!(token.as_str(), None);
+    assert_eq!(token.coerce_to_string(), REPOSITORY_TOKEN);
 
     let mut wrong_trust = ContextFixture::with_config(&config);
     wrong_trust.add_repository_authority_endpoint(
@@ -657,10 +663,15 @@ fn authority_context_custody_shares_original_secret_allocations() {
     };
     let github_token = github
         .get("token")
-        .and_then(GithubValue::as_str)
+        .inspect(|value| assert!(value.is_sensitive()))
         .expect("github token");
-    assert_eq!(github_token, REPOSITORY_TOKEN);
-    assert_ne!(github_token.as_ptr(), repository.expose_secret().as_ptr());
+    assert_eq!(github_token.as_str(), None);
+    let exposed_github_token = github_token.coerce_to_string();
+    assert_eq!(exposed_github_token, REPOSITORY_TOKEN);
+    assert_ne!(
+        exposed_github_token.as_ptr(),
+        repository.expose_secret().as_ptr()
+    );
 
     drop(snapshot);
     assert_eq!(Arc::strong_count(&results), results_count);

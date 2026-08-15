@@ -130,6 +130,161 @@ fn function_availability_and_arity_match_the_condition_phase() {
     compile("failure('build')", GithubConditionPhase::Job);
 }
 
+fn function_call(name: &str, argument_count: usize) -> String {
+    format!(
+        "{name}({})",
+        std::iter::repeat_n("null", argument_count)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+struct Signature {
+    name: &'static str,
+    minimum: usize,
+    maximum: usize,
+    odd_only: bool,
+}
+
+fn assert_compile_arity_error(
+    name: &str,
+    argument_count: usize,
+    phase: GithubConditionPhase,
+    expected_code: &str,
+) {
+    let error = GithubConditionCompiler::default()
+        .compile_condition(Some(&function_call(name, argument_count)), phase)
+        .expect_err("arity must be closed");
+    assert_eq!(error.code(), expected_code, "{name}/{argument_count:?}");
+}
+
+fn assert_shared_signatures(phase: GithubConditionPhase) {
+    let signatures = [
+        Signature {
+            name: "case",
+            minimum: 3,
+            maximum: 255,
+            odd_only: true,
+        },
+        Signature {
+            name: "contains",
+            minimum: 2,
+            maximum: 2,
+            odd_only: false,
+        },
+        Signature {
+            name: "startsWith",
+            minimum: 2,
+            maximum: 2,
+            odd_only: false,
+        },
+        Signature {
+            name: "endsWith",
+            minimum: 2,
+            maximum: 2,
+            odd_only: false,
+        },
+        Signature {
+            name: "format",
+            minimum: 1,
+            maximum: 255,
+            odd_only: false,
+        },
+        Signature {
+            name: "join",
+            minimum: 1,
+            maximum: 2,
+            odd_only: false,
+        },
+        Signature {
+            name: "fromJSON",
+            minimum: 1,
+            maximum: 1,
+            odd_only: false,
+        },
+        Signature {
+            name: "toJSON",
+            minimum: 1,
+            maximum: 1,
+            odd_only: false,
+        },
+    ];
+
+    for signature in signatures {
+        compile(&function_call(signature.name, signature.minimum), phase);
+        compile(&function_call(signature.name, signature.maximum), phase);
+        assert_compile_arity_error(
+            signature.name,
+            signature.minimum - 1,
+            phase,
+            "github.expression.too_few_arguments",
+        );
+        assert_compile_arity_error(
+            signature.name,
+            signature.maximum + 1,
+            phase,
+            "github.expression.too_many_arguments",
+        );
+        if signature.odd_only {
+            assert_compile_arity_error(
+                signature.name,
+                4,
+                phase,
+                "github.expression.even_case_arguments",
+            );
+        }
+    }
+}
+
+fn assert_status_signatures() {
+    for phase in [GithubConditionPhase::Job, GithubConditionPhase::Step] {
+        for name in ["always", "cancelled"] {
+            compile(&function_call(name, 0), phase);
+            assert_compile_arity_error(name, 1, phase, "github.expression.too_many_arguments");
+        }
+    }
+
+    for name in ["success", "failure"] {
+        compile(&function_call(name, 0), GithubConditionPhase::Step);
+        assert_compile_arity_error(
+            name,
+            1,
+            GithubConditionPhase::Step,
+            "github.expression.too_many_arguments",
+        );
+
+        compile(&function_call(name, 0), GithubConditionPhase::Job);
+        compile(&function_call(name, 1), GithubConditionPhase::Job);
+        compile(&function_call(name, 256), GithubConditionPhase::Job);
+    }
+}
+
+fn assert_hash_files_and_unsupported_signatures() {
+    compile("hashFiles('one')", GithubConditionPhase::Step);
+    compile(&function_call("hashFiles", 255), GithubConditionPhase::Step);
+    for (count, expected) in [
+        (0, "github.expression.too_few_arguments"),
+        (256, "github.expression.too_many_arguments"),
+    ] {
+        assert_compile_arity_error("hashFiles", count, GithubConditionPhase::Step, expected);
+    }
+
+    for phase in [GithubConditionPhase::Job, GithubConditionPhase::Step] {
+        let error = GithubConditionCompiler::default()
+            .compile_condition(Some("unsupportedFunction()"), phase)
+            .expect_err("the compiler does not admit unknown functions");
+        assert_eq!(error.code(), "github.expression.unrecognized_function");
+    }
+}
+
+#[test]
+fn function_signature_table_is_closed_for_every_condition_phase() {
+    assert_shared_signatures(GithubConditionPhase::Job);
+    assert_shared_signatures(GithubConditionPhase::Step);
+    assert_status_signatures();
+    assert_hash_files_and_unsupported_signatures();
+}
+
 #[test]
 fn case_literals_indices_and_comparison_syntax_compile_canonically() {
     let program = compile(
@@ -234,7 +389,14 @@ fn invalid_syntax_reports_exact_offsets_in_preserved_source() {
         "github.ref ==",
         "(github.ref == 'x'",
         "github..ref",
+        "contains(,)",
+        "contains('x',)",
+        "contains(,'x')",
+        "contains('x' 'x')",
         "${{ github.ref }} trailing",
+        "prefix ${{ github.ref",
+        "${{ github.ref }",
+        "${{ github.ref }} ${{",
         "${{ }}",
         "'literal'.property",
         "true[0]",
