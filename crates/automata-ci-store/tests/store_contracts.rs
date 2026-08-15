@@ -65,3 +65,5 @@ mod secret_management_api;
 mod snapshot_api;
 #[path = "tenant_scope.rs"]
 mod tenant_scope;
+#[path = "workflow_admission.rs"]
+mod workflow_admission;

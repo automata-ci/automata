@@ -129,19 +129,19 @@ Acceptance:
 
 Tasks:
 
-- [ ] Reclassify `queue: max` as current GitHub syntax.
-- [ ] Change compatible pending capacity from 4,096 to 100.
-- [ ] Reject `queue: max` with `cancel-in-progress: true` before admission.
-- [ ] Verify repository scope, case-insensitive group normalization, FIFO by
+- [x] Reclassify `queue: max` as current GitHub syntax.
+- [x] Change compatible pending capacity from 4,096 to 100.
+- [x] Reject `queue: max` with `cancel-in-progress: true` before admission.
+- [x] Verify repository scope, case-insensitive group normalization, FIFO by
   wait start, and one replacement pending run under standard mode.
-- [ ] Test expression-valued cancellation, reruns, duplicate admission,
+- [x] Test expression-valued cancellation, reruns, duplicate admission,
   restart, and multi-replica races.
 
 Acceptance:
 
-- [ ] Invalid combinations create no run.
-- [ ] Concurrent admission cannot exceed capacity or reorder durable FIFO.
-- [ ] Compatibility documentation is corrected.
+- [x] Invalid combinations create no run.
+- [x] Concurrent admission cannot exceed capacity or reorder durable FIFO.
+- [x] Compatibility documentation is corrected.
 
 ### SCH-02 — Job-level concurrency
 

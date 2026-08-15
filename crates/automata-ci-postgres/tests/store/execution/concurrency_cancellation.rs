@@ -16,6 +16,7 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, LeaseGuard, LeaseId, OperationId, QueuePolicy,
     RunId, RunnerRequirements, Sha256Digest, UnixMillis, WorkflowId,
 };
+use automata_ci_postgres::store::PostgresStore;
 use automata_ci_store::{
     AcknowledgeRunnerCommands, AdmissionObject, AdmissionRepository, AdmitWorkflowRun,
     AdmittedWorkflowJob, BeginLeaseRequest, CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA,
@@ -25,7 +26,7 @@ use automata_ci_store::{
     RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
     RunnerProtocolVersion, StableRunnerSlot, StoreError, TenantScope, TryClaimAttempt,
     TryClaimOutcome, WorkflowAdmissionIdempotency, WorkflowAdmissionRepository as _,
-    WorkflowConcurrency, WorkflowSnapshotId,
+    WorkflowAdmissionStoreError, WorkflowConcurrency, WorkflowSnapshotId,
 };
 
 const GROUP: &str = "deploy-main";
@@ -224,6 +225,169 @@ async fn max_queue_retains_fifo_order_and_recovers_a_stale_running_slot() -> Tes
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates an isolated PostgreSQL schema"]
+async fn max_queue_accepts_exactly_one_hundred_waiters_and_rejects_the_next_atomically()
+-> TestResult {
+    run_with_database(|database| async move {
+        let seed = seed_control_plane(database.pool(), 1).await?;
+        seed_run_number_counter(&database, &seed).await?;
+        let snapshot_id = WorkflowSnapshotId::from_uuid(uuid::Uuid::new_v4());
+        let active =
+            admission_case_with_concurrency(&seed, snapshot_id, 1, 1, false, QueuePolicy::Max)?;
+        database
+            .store()
+            .admit_workflow(active.command.clone())
+            .await?;
+
+        let mut expected_prefix = Vec::with_capacity(99);
+        for offset in 0_u8..99 {
+            let tag = offset.checked_add(2).ok_or("pending tag overflowed")?;
+            let pending = admission_case_with_concurrency(
+                &seed,
+                snapshot_id,
+                tag,
+                i64::from(offset) + 2,
+                false,
+                QueuePolicy::Max,
+            )?;
+            database
+                .store()
+                .admit_workflow(pending.command.clone())
+                .await?;
+            expected_prefix.push(pending.run_id);
+        }
+
+        assert_eq!(pending_runs(&database, &seed).await?, expected_prefix);
+        let left =
+            admission_case_with_concurrency(&seed, snapshot_id, 101, 101, false, QueuePolicy::Max)?;
+        let right =
+            admission_case_with_concurrency(&seed, snapshot_id, 102, 102, false, QueuePolicy::Max)?;
+        let replica = PostgresStore::from_postgres_pool(database.pool().clone());
+        let (left_result, right_result) = tokio::join!(
+            database.store().admit_workflow(left.command.clone()),
+            replica.admit_workflow(right.command.clone()),
+        );
+        let (accepted, rejected) = match (left_result, right_result) {
+            (Ok(_), Err(WorkflowAdmissionStoreError::ConcurrencyQueueFull)) => (&left, &right),
+            (Err(WorkflowAdmissionStoreError::ConcurrencyQueueFull), Ok(_)) => (&right, &left),
+            outcomes => {
+                return Err(format!("unexpected capacity race outcomes: {outcomes:?}").into());
+            }
+        };
+        assert_eq!(run_count(&database, accepted.run_id).await?, 1);
+        assert_eq!(run_count(&database, rejected.run_id).await?, 0);
+
+        let mut expected = expected_prefix;
+        expected.push(accepted.run_id);
+        assert_eq!(running_run(&database, &seed).await?, active.run_id);
+        assert_eq!(pending_runs(&database, &seed).await?, expected);
+
+        let restarted = PostgresStore::from_postgres_pool(database.pool().clone());
+        let overflow =
+            admission_case_with_concurrency(&seed, snapshot_id, 103, 103, false, QueuePolicy::Max)?;
+        assert!(matches!(
+            restarted.admit_workflow(overflow.command).await,
+            Err(WorkflowAdmissionStoreError::ConcurrencyQueueFull)
+        ));
+        assert_eq!(run_count(&database, overflow.run_id).await?, 0);
+        assert_eq!(pending_runs(&database, &seed).await?, expected);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates an isolated PostgreSQL schema"]
+async fn concurrency_groups_are_repository_scoped_case_insensitive_and_single_replacement()
+-> TestResult {
+    run_with_database(|database| async move {
+        let first_repository = seed_control_plane(database.pool(), 1).await?;
+        let second_repository = seed_control_plane(database.pool(), 1).await?;
+        seed_run_number_counter(&database, &first_repository).await?;
+        seed_run_number_counter(&database, &second_repository).await?;
+        let snapshot_id = WorkflowSnapshotId::from_uuid(uuid::Uuid::new_v4());
+
+        let first_active = admission_case_with_group(
+            &first_repository,
+            snapshot_id,
+            111,
+            10,
+            "Deploy-Main",
+            false,
+            QueuePolicy::Single,
+        )?;
+        let second_active = admission_case_with_group(
+            &second_repository,
+            snapshot_id,
+            112,
+            10,
+            "DEPLOY-MAIN",
+            false,
+            QueuePolicy::Single,
+        )?;
+        for case in [&first_active, &second_active] {
+            database
+                .store()
+                .admit_workflow(case.command.clone())
+                .await?;
+        }
+        assert_eq!(
+            running_run(&database, &first_repository).await?,
+            first_active.run_id
+        );
+        assert_eq!(
+            running_run(&database, &second_repository).await?,
+            second_active.run_id
+        );
+
+        let replaced = admission_case_with_group(
+            &first_repository,
+            snapshot_id,
+            113,
+            20,
+            "deploy-main",
+            false,
+            QueuePolicy::Single,
+        )?;
+        let replacement = admission_case_with_group(
+            &first_repository,
+            snapshot_id,
+            114,
+            30,
+            "DePlOy-MaIn",
+            false,
+            QueuePolicy::Single,
+        )?;
+        database
+            .store()
+            .admit_workflow(replaced.command.clone())
+            .await?;
+        database
+            .store()
+            .admit_workflow(replacement.command.clone())
+            .await?;
+
+        assert_eq!(run_status(&database, replaced.run_id).await?, "cancelled");
+        assert_eq!(run_status(&database, replacement.run_id).await?, "queued");
+        assert_eq!(
+            pending_runs(&database, &first_repository).await?,
+            [replacement.run_id]
+        );
+        assert!(
+            pending_runs(&database, &second_repository)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            running_run(&database, &second_repository).await?,
+            second_active.run_id
+        );
+        Ok(())
+    })
+    .await
+}
+
 async fn seed_run_number_counter(database: &TestDatabase, seed: &SeedData) -> TestResult {
     sqlx::query(
         r"
@@ -259,6 +423,26 @@ fn admission_case_with_concurrency(
     snapshot_id: WorkflowSnapshotId,
     tag: u8,
     admitted_at: i64,
+    cancel_in_progress: bool,
+    queue_policy: QueuePolicy,
+) -> TestResult<AdmissionCase> {
+    admission_case_with_group(
+        seed,
+        snapshot_id,
+        tag,
+        admitted_at,
+        GROUP,
+        cancel_in_progress,
+        queue_policy,
+    )
+}
+
+fn admission_case_with_group(
+    seed: &SeedData,
+    snapshot_id: WorkflowSnapshotId,
+    tag: u8,
+    admitted_at: i64,
+    group: &str,
     cancel_in_progress: bool,
     queue_policy: QueuePolicy,
 ) -> TestResult<AdmissionCase> {
@@ -309,7 +493,7 @@ fn admission_case_with_concurrency(
         UnixMillis::new(admitted_at),
     )
     .concurrency(Some(
-        WorkflowConcurrency::new(GROUP, cancel_in_progress)?.with_queue_policy(queue_policy),
+        WorkflowConcurrency::new(group, cancel_in_progress)?.with_queue_policy(queue_policy)?,
     ))
     .build()?;
     Ok(AdmissionCase {

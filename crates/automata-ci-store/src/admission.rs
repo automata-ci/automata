@@ -292,10 +292,22 @@ impl WorkflowConcurrency {
     }
 
     /// Selects the pending-run retention policy for this group.
-    #[must_use]
-    pub const fn with_queue_policy(mut self, queue_policy: QueuePolicy) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Rejects GitHub's invalid `queue: max` plus
+    /// `cancel-in-progress: true` combination. This validation is repeated
+    /// after deferred expressions have been evaluated, so callers cannot
+    /// construct a durable policy that the source decoder would reject.
+    pub fn with_queue_policy(
+        mut self,
+        queue_policy: QueuePolicy,
+    ) -> Result<Self, WorkflowAdmissionValueError> {
+        if queue_policy == QueuePolicy::Max && self.cancel_in_progress {
+            return Err(WorkflowAdmissionValueError::InvalidConcurrencyPolicy);
+        }
         self.queue_policy = queue_policy;
-        self
+        Ok(self)
     }
 
     #[must_use]
@@ -787,6 +799,8 @@ pub enum WorkflowAdmissionValueError {
     SelfDependency,
     #[error("workflow admission contains a dependency outside its run")]
     UnknownDependency,
+    #[error("queue: max cannot be combined with cancel-in-progress: true")]
+    InvalidConcurrencyPolicy,
 }
 
 /// Durable admission failure.
