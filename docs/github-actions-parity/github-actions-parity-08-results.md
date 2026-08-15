@@ -127,6 +127,15 @@ and links directly to that job in the Automata dashboard. Initial attempts and
 later retries use the same transactional insertion path. Automata does not
 pretend these are native GitHub Actions run records.
 
+The Wave 1 contract slice is component-complete: claims freeze exact identity,
+lifecycle timestamps, authority, presentation evidence, and annotation
+progress; provider mutations use bounded reconciliation and durable issue
+cutoffs; and requested actions map to the existing reauthorized, idempotent
+rerun selections. This does not complete `CHECK-01` product acceptance. The
+remaining package work still depends on the complete `RES-02` result surface,
+the final `AUTH-03` credential path, broader workflow fixtures, and retained
+live-GitHub evidence.
+
 Tasks:
 
 - [x] Preserve one fenced aggregate Check subject and durable outbox lifecycle
@@ -135,21 +144,21 @@ Tasks:
   distinct workflow subject for each physical rerun.
 - [x] Project queued, in-progress, completed, skipped, cancelled, failed, and
   timed-out states and conclusions from the durable attempt lifecycle.
-- [ ] Publish accurate start and completion timestamps.
+- [x] Publish accurate start and completion timestamps.
 - [x] Publish a bounded job name and an exact HTTPS dashboard `details_url`.
-- [ ] Publish bounded title, summary, text, and annotations.
-- [ ] Batch annotations within GitHub API limits and preserve deterministic
+- [x] Publish bounded title, summary, text, and annotations.
+- [x] Batch annotations within GitHub API limits and preserve deterministic
   ordering.
-- [ ] Add requested-action support only after its authority and idempotency
+- [x] Add requested-action support only after its authority and idempotency
   model is explicit; otherwise omit the field.
 - [ ] Publish status badges from durable workflow/ref state with bounded cache
   behavior and no credential-bearing redirect.
-- [ ] Decide whether optional commit-status projection is needed alongside
+- [x] Decide whether optional commit-status projection is needed alongside
   Checks; implement an idempotent projector or record an explicit divergence.
 - [ ] Extend reconciliation across delivery retries, out-of-order updates,
   force-push replacement, per-job attempts, and deleted refs without collapsing
   the existing rerun-specific workflow subjects.
-- [ ] Bound API retries and handle rate limiting without blocking scheduler
+- [x] Bound API retries and handle rate limiting without blocking scheduler
   progress.
 - [ ] Add product fixtures for multi-job, matrix, reusable, cancelled, and
   partially failed workflows.

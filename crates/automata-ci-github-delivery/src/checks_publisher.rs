@@ -1564,7 +1564,7 @@ fn requested_actions(
         actions.push(
             GithubCheckRequestedAction::new(
                 "Re-run this job",
-                "Run this job and its dependencies",
+                "Run this job and its dependents",
                 "rerun_job",
             )
             .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
@@ -1573,7 +1573,7 @@ fn requested_actions(
     actions.push(
         GithubCheckRequestedAction::new(
             "Re-run failed jobs",
-            "Run failed jobs and dependencies",
+            "Run failed jobs and their dependents",
             "rerun_failed",
         )
         .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,

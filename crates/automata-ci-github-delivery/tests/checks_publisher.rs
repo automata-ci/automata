@@ -1286,6 +1286,21 @@ async fn create_cutoff_and_state_publication_follow_exact_durable_actions() {
     assert!(requests[3].raw.contains(r#""status":"in_progress""#));
     assert!(requests[5].raw.contains(r#""status":"completed""#));
     assert!(requests[5].raw.contains(r#""conclusion":"success""#));
+    assert_eq!(
+        request_json(&requests[5])["actions"],
+        serde_json::json!([
+            {
+                "label": "Re-run failed jobs",
+                "description": "Run failed jobs and their dependents",
+                "identifier": "rerun_failed"
+            },
+            {
+                "label": "Re-run all jobs",
+                "description": "Run every job in this workflow",
+                "identifier": "rerun_all"
+            }
+        ])
+    );
     let events = harness.events();
     assert!(
         position(&events, "store:begin_run_create")
@@ -1417,6 +1432,26 @@ async fn terminal_job_publishes_verified_step_markdown_and_exact_details_link() 
     assert!(text.contains("| `checkout` | passed | passed | 0s |"));
     assert!(text.contains("| `test` | failed | failed | 0s |"));
     assert!(text.contains("The failing assertion was safely masked."));
+    assert_eq!(
+        body["actions"],
+        serde_json::json!([
+            {
+                "label": "Re-run this job",
+                "description": "Run this job and its dependents",
+                "identifier": "rerun_job"
+            },
+            {
+                "label": "Re-run failed jobs",
+                "description": "Run failed jobs and their dependents",
+                "identifier": "rerun_failed"
+            },
+            {
+                "label": "Re-run all jobs",
+                "description": "Run every job in this workflow",
+                "identifier": "rerun_all"
+            }
+        ])
+    );
 }
 
 #[tokio::test]
