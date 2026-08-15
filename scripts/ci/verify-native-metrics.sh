@@ -18,8 +18,19 @@ automata_set_target_tmpdir \
   "$automata_repo_root/target/task-tmp/native-metrics-contract"
 
 automata_container_runtime="${AUTOMATA_METRICS_CONTAINER_RUNTIME:-}"
+automata_promtool="${AUTOMATA_PROMTOOL:-}"
+automata_prometheus="${AUTOMATA_PROMETHEUS:-}"
+if [[ -z "$automata_promtool" ]] && command -v promtool >/dev/null 2>&1; then
+  automata_promtool="$(command -v promtool)"
+fi
+if [[ -z "$automata_prometheus" ]] && command -v prometheus >/dev/null 2>&1; then
+  automata_prometheus="$(command -v prometheus)"
+fi
+automata_native_runtime='false'
 if [[ -z "$automata_container_runtime" ]]; then
-  if command -v podman >/dev/null 2>&1; then
+  if [[ -n "$automata_promtool" && -n "$automata_prometheus" ]]; then
+    automata_native_runtime='true'
+  elif command -v podman >/dev/null 2>&1; then
     automata_container_runtime='podman'
   elif command -v docker >/dev/null 2>&1; then
     automata_container_runtime='docker'
@@ -28,30 +39,43 @@ if [[ -z "$automata_container_runtime" ]]; then
     exit 1
   fi
 fi
-case "$automata_container_runtime" in
-  docker | podman)
-    if ! command -v "$automata_container_runtime" >/dev/null 2>&1; then
-      printf 'configured container runtime is unavailable: %s\n' \
-        "$automata_container_runtime" >&2
-      exit 1
-    fi
-    ;;
-  *)
-    printf '%s\n' 'AUTOMATA_METRICS_CONTAINER_RUNTIME must be docker or podman' >&2
+if [[ "$automata_native_runtime" == true ]]; then
+  [[ -x "$automata_promtool" && -x "$automata_prometheus" ]] || {
+    printf '%s\n' 'AUTOMATA_PROMTOOL and AUTOMATA_PROMETHEUS must name executable files' >&2
     exit 1
-    ;;
-esac
+  }
+else
+  case "$automata_container_runtime" in
+    docker | podman)
+      if ! command -v "$automata_container_runtime" >/dev/null 2>&1; then
+        printf 'configured container runtime is unavailable: %s\n' \
+          "$automata_container_runtime" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      printf '%s\n' 'AUTOMATA_METRICS_CONTAINER_RUNTIME must be docker or podman' >&2
+      exit 1
+      ;;
+  esac
+fi
 
 automata_scratch="$(mktemp -d "$TMPDIR/automata-native-metrics.XXXXXXXX")"
 readonly automata_scratch
 chmod 0755 "$automata_scratch"
 automata_fixture_pid=''
+automata_prometheus_pid=''
 automata_prometheus_container="automata-native-metrics-contract-$$"
 readonly automata_prometheus_container
 
 cleanup_native_metrics_contract() {
-  "$automata_container_runtime" rm --force \
-    "$automata_prometheus_container" >/dev/null 2>&1 || true
+  if [[ -n "$automata_prometheus_pid" ]]; then
+    kill "$automata_prometheus_pid" >/dev/null 2>&1 || true
+    wait "$automata_prometheus_pid" >/dev/null 2>&1 || true
+  elif [[ -n "$automata_container_runtime" ]]; then
+    "$automata_container_runtime" rm --force \
+      "$automata_prometheus_container" >/dev/null 2>&1 || true
+  fi
   if [[ -n "$automata_fixture_pid" ]]; then
     kill "$automata_fixture_pid" >/dev/null 2>&1 || true
     wait "$automata_fixture_pid" >/dev/null 2>&1 || true
@@ -89,11 +113,15 @@ scrape_configs:
 EOF
 chmod 0644 "$automata_scratch/prometheus.yml"
 
-"$automata_container_runtime" run --rm \
-  --volume "$automata_scratch:/contract:ro" \
-  --entrypoint /bin/promtool \
-  "$automata_prometheus_image" \
-  check config /contract/prometheus.yml >/dev/null
+if [[ "$automata_native_runtime" == true ]]; then
+  "$automata_promtool" check config "$automata_scratch/prometheus.yml" >/dev/null
+else
+  "$automata_container_runtime" run --rm \
+    --volume "$automata_scratch:/contract:ro" \
+    --entrypoint /bin/promtool \
+    "$automata_prometheus_image" \
+    check config /contract/prometheus.yml >/dev/null
+fi
 
 cargo run --quiet --locked -p automata-ci-metrics \
   --example metrics_fixture -- \
@@ -158,17 +186,29 @@ if ! grep -Fq 'automata_ci_fixture_native_probe_bucket' \
   exit 1
 fi
 
-"$automata_container_runtime" run --detach --rm \
-  --name "$automata_prometheus_container" \
-  --network host \
-  --tmpfs /prometheus:rw,size=64m,mode=1777 \
-  --volume "$automata_scratch:/contract:ro" \
-  "$automata_prometheus_image" \
-  --config.file=/contract/prometheus.yml \
-  --storage.tsdb.path=/prometheus \
-  --storage.tsdb.retention.time=15m \
-  --web.listen-address="$automata_prometheus_address" \
-  --log.level=error >/dev/null
+if [[ "$automata_native_runtime" == true ]]; then
+  install -d -m 0700 -- "$automata_scratch/prometheus-data"
+  "$automata_prometheus" \
+    --config.file="$automata_scratch/prometheus.yml" \
+    --storage.tsdb.path="$automata_scratch/prometheus-data" \
+    --storage.tsdb.retention.time=15m \
+    --web.listen-address="$automata_prometheus_address" \
+    --log.level=error \
+    >"$automata_scratch/prometheus.log" 2>&1 &
+  automata_prometheus_pid=$!
+else
+  "$automata_container_runtime" run --detach --rm \
+    --name "$automata_prometheus_container" \
+    --network host \
+    --tmpfs /prometheus:rw,size=64m,mode=1777 \
+    --volume "$automata_scratch:/contract:ro" \
+    "$automata_prometheus_image" \
+    --config.file=/contract/prometheus.yml \
+    --storage.tsdb.path=/prometheus \
+    --storage.tsdb.retention.time=15m \
+    --web.listen-address="$automata_prometheus_address" \
+    --log.level=error >/dev/null
+fi
 
 automata_prometheus_ready='false'
 for _ in {1..120}; do
@@ -181,7 +221,11 @@ for _ in {1..120}; do
 done
 if [[ "$automata_prometheus_ready" != 'true' ]]; then
   printf '%s\n' 'real Prometheus did not become ready' >&2
-  "$automata_container_runtime" logs "$automata_prometheus_container" >&2 || true
+  if [[ "$automata_native_runtime" == true ]]; then
+    sed -n '1,160p' "$automata_scratch/prometheus.log" >&2
+  else
+    "$automata_container_runtime" logs "$automata_prometheus_container" >&2 || true
+  fi
   exit 1
 fi
 
@@ -206,7 +250,11 @@ for _ in {1..80}; do
 done
 if [[ "$automata_native_ingested" != 'true' ]]; then
   printf '%s\n' 'Prometheus did not ingest the native histogram sample' >&2
-  "$automata_container_runtime" logs "$automata_prometheus_container" >&2 || true
+  if [[ "$automata_native_runtime" == true ]]; then
+    sed -n '1,160p' "$automata_scratch/prometheus.log" >&2
+  else
+    "$automata_container_runtime" logs "$automata_prometheus_container" >&2 || true
+  fi
   exit 1
 fi
 
@@ -226,7 +274,11 @@ for _ in {1..80}; do
 done
 if [[ "$automata_classic_ingested" != 'true' ]]; then
   printf '%s\n' 'Prometheus did not ingest the parallel classic histogram buckets' >&2
-  "$automata_container_runtime" logs "$automata_prometheus_container" >&2 || true
+  if [[ "$automata_native_runtime" == true ]]; then
+    sed -n '1,160p' "$automata_scratch/prometheus.log" >&2
+  else
+    "$automata_container_runtime" logs "$automata_prometheus_container" >&2 || true
+  fi
   exit 1
 fi
 

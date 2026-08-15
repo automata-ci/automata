@@ -90,14 +90,14 @@ jobs:
           python3 scripts/ci/tests/service-proxy-candidate.test.py
 
       - name: Verify Prometheus metrics contract
-        env:
-          AUTOMATA_METRICS_CONTAINER_RUNTIME: docker
-        run: ./scripts/ci/verify-metrics.sh
+        run: |
+          prometheus_bin="$(./scripts/ci/prepare-prometheus-tools.sh)"
+          PATH="$prometheus_bin:$PATH" ./scripts/ci/verify-metrics.sh
 
       - name: Verify native Prometheus metrics contract
-        env:
-          AUTOMATA_METRICS_CONTAINER_RUNTIME: docker
-        run: ./scripts/ci/verify-native-metrics.sh
+        run: |
+          prometheus_bin="$(./scripts/ci/prepare-prometheus-tools.sh)"
+          PATH="$prometheus_bin:$PATH" ./scripts/ci/verify-native-metrics.sh
 
       - name: Lint
         run: |
@@ -370,6 +370,9 @@ jobs:
         env:
           AUTOMATA_SERVICE_PROXY_CONTAINER_RUNTIME: podman
         run: |
+          if [[ -n "${AUTOMATA_ENVIRONMENT_PROFILE_ID:-}" ]]; then
+            export AUTOMATA_SERVICE_PROXY_PROCESS_PROBE=metadata-only
+          fi
           ./scripts/ci/prepare-service-proxy-context.sh \
             target/service-proxy-context \
             "$AUTOMATA_EXPECTED_VERSION" \

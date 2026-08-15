@@ -4626,7 +4626,7 @@ fn service_configuration_format(network: &str, alias: &str) -> String {
          {{{{with index .NetworkSettings.Networks \"{network}\"}}}}\
          {{{{range .Aliases}}}}{{{{if eq . \"{alias}\"}}}}alias{{{{end}}}}{{{{end}}}}\
          {{{{else}}}}missing{{{{end}}}}\n\
-         {CREATE_COMMAND_FORMAT}"
+         {{{{json .Config.CreateCommand}}}}"
     )
 }
 
@@ -4876,6 +4876,13 @@ pub(crate) fn endpoint_error_from_provider(
 #[cfg(test)]
 mod capability_contract_tests {
     use super::*;
+
+    #[test]
+    fn service_configuration_reads_create_command_from_container_config() {
+        let format = service_configuration_format("job-network", "database");
+        assert!(format.ends_with("{{json .Config.CreateCommand}}"));
+        assert!(!format.ends_with(CREATE_COMMAND_FORMAT));
+    }
 
     #[test]
     fn buildkit_configuration_requires_the_attempt_scoped_docker_api() {
