@@ -14,7 +14,6 @@ use automata_ci_store::{
     ProviderRepositoryId, ProviderRepositoryVisibility, RejectProviderDelivery,
     RenewProviderDeliveryClaim, RetryProviderDelivery, TenantScope,
 };
-use sqlx::Row as _;
 use uuid::Uuid;
 
 use crate::support::{
@@ -398,40 +397,98 @@ fn assert_database_constraint(error: &sqlx::Error, expected: &str) {
     assert_eq!(constraint, Some(expected));
 }
 
-async fn assert_legacy_delivery_is_quarantined(
+async fn assert_partial_event_envelope_is_rejected(
     database: &TestDatabase,
-    delivery_id: Uuid,
-    claim_owner: ProviderDeliveryClaimOwnerId,
+    connection: &ProviderConnectionId,
 ) -> TestResult {
-    let row = sqlx::query(
+    let partial = sqlx::query(
         r"
-        SELECT state, attempt_count, claim_fence, claim_owner_id,
-               last_failure_kind, terminal_claim_owner_id, terminal_claim_fence
-        FROM provider_delivery_inbox
-        WHERE id = $1
+        INSERT INTO provider_delivery_inbox (
+            id, tenant_id, provider, connection_id, installation_id,
+            provider_repository_id, repository_visibility,
+            repository_identity, delivery_id,
+            request_digest, raw_event_digest, raw_event_object_key,
+            raw_event_size_bytes, raw_event_media_type,
+            event_envelope_schema,
+            accepted_at_ms, state_updated_at_ms
+        )
+        VALUES (
+            $1, 'delivery-envelope-legacy', 'synthetic', $2, 101,
+            202, 'private', 'automata-ci/automata', 'delivery-partial-envelope',
+            $3, $4, 'provider-events/delivery-partial-envelope/1',
+            256, 'application/json', 1, 100, 100
+        )
         ",
     )
-    .bind(delivery_id)
+    .bind(Uuid::new_v4())
+    .bind(connection.as_uuid())
+    .bind([41_u8; 32].as_slice())
+    .bind([42_u8; 32].as_slice())
+    .execute(database.pool())
+    .await
+    .expect_err("partially populated event envelopes must fail closed");
+    assert_database_constraint(&partial, "provider_delivery_inbox_event_envelope_complete");
+    Ok(())
+}
+
+async fn seed_legacy_unsealed_deliveries(
+    database: &TestDatabase,
+    connection: &ProviderConnectionId,
+) -> TestResult {
+    sqlx::query(
+        r"
+        INSERT INTO provider_delivery_inbox (
+            id, tenant_id, provider, connection_id, installation_id,
+            provider_repository_id, repository_visibility,
+            repository_identity, delivery_id,
+            request_digest, raw_event_digest, raw_event_object_key,
+            raw_event_size_bytes, raw_event_media_type,
+            accepted_at_ms, state_updated_at_ms
+        )
+        SELECT
+            md5('delivery-envelope-legacy-' || legacy.ordinal::text)::uuid,
+            'delivery-envelope-legacy', 'synthetic', $1, 101,
+            202, 'private', 'automata-ci/automata',
+            'delivery-legacy-unsealed-' || legacy.ordinal::text,
+            decode(repeat('2b', 32), 'hex'),
+            decode(repeat('2c', 32), 'hex'),
+            'provider-events/delivery-legacy-unsealed/' || legacy.ordinal::text,
+            256, 'application/json', 100, 100
+        FROM generate_series(1, 65) AS legacy(ordinal)
+        ",
+    )
+    .bind(connection.as_uuid())
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+async fn legacy_delivery_state_counts(
+    database: &TestDatabase,
+    claim_owner: ProviderDeliveryClaimOwnerId,
+) -> TestResult<(i64, i64, i64)> {
+    let counts = sqlx::query_as(
+        r"
+        SELECT
+            count(*) FILTER (WHERE state = 'rejected'),
+            count(*) FILTER (WHERE state = 'pending'),
+            count(*) FILTER (
+                WHERE state = 'rejected'
+                  AND attempt_count = 1
+                  AND claim_fence = 1
+                  AND claim_owner_id IS NULL
+                  AND last_failure_kind = 'provider_delivery.legacy_unsealed'
+                  AND terminal_claim_owner_id = $1
+                  AND terminal_claim_fence = 1
+            )
+        FROM provider_delivery_inbox
+        WHERE delivery_id LIKE 'delivery-legacy-unsealed-%'
+        ",
+    )
+    .bind(claim_owner.as_uuid())
     .fetch_one(database.pool())
     .await?;
-    assert_eq!(row.try_get::<String, _>("state")?, "rejected");
-    assert_eq!(row.try_get::<i16, _>("attempt_count")?, 1);
-    assert_eq!(row.try_get::<i64, _>("claim_fence")?, 1);
-    assert_eq!(row.try_get::<Option<Uuid>, _>("claim_owner_id")?, None);
-    assert_eq!(
-        row.try_get::<Option<String>, _>("last_failure_kind")?
-            .as_deref(),
-        Some("provider_delivery.legacy_unsealed")
-    );
-    assert_eq!(
-        row.try_get::<Option<Uuid>, _>("terminal_claim_owner_id")?,
-        Some(claim_owner.as_uuid())
-    );
-    assert_eq!(
-        row.try_get::<Option<i64>, _>("terminal_claim_fence")?,
-        Some(1)
-    );
-    Ok(())
+    Ok(counts)
 }
 
 fn failure(value: &str) -> ProviderDeliveryFailureKind {
@@ -835,14 +892,24 @@ async fn claim_rehydrates_the_exact_persisted_event_envelope() -> TestResult {
     run_with_database(|database| async move {
         seed_tenant(&database, "delivery-envelope-claim").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
-        let accepted = acceptance(
+        let shortest_media_type_envelope = ProviderDeliveryEventEnvelope::new(
+            1,
+            1,
+            Sha256Digest::from_bytes([33; 32]),
+            br"{}".to_vec(),
+            "/",
+        )?;
+        let accepted = acceptance_with_visibility_and_envelope(
             "delivery-envelope-claim",
             connection,
             "delivery-envelope-1",
             31,
             100,
+            ProviderRepositoryVisibility::Private,
+            shortest_media_type_envelope,
         );
         let expected_envelope = accepted.event_envelope().clone();
+        assert_eq!(expected_envelope.media_type(), "/");
         let receipt = database.store().accept_provider_delivery(accepted).await?;
 
         let durable: (i16, i16, Vec<u8>, Vec<u8>, String) = sqlx::query_as(
@@ -884,60 +951,8 @@ async fn claim_quarantines_legacy_unsealed_rows_without_poisoning_sealed_work() 
     run_with_database(|database| async move {
         seed_tenant(&database, "delivery-envelope-legacy").await?;
         let connection = ProviderConnectionId::from_uuid(Uuid::new_v4())?;
-
-        let partial = sqlx::query(
-            r"
-            INSERT INTO provider_delivery_inbox (
-                id, tenant_id, provider, connection_id, installation_id,
-                provider_repository_id, repository_visibility,
-                repository_identity, delivery_id,
-                request_digest, raw_event_digest, raw_event_object_key,
-                raw_event_size_bytes, raw_event_media_type,
-                event_envelope_schema,
-                accepted_at_ms, state_updated_at_ms
-            )
-            VALUES (
-                $1, 'delivery-envelope-legacy', 'synthetic', $2, 101,
-                202, 'private', 'automata-ci/automata', 'delivery-partial-envelope',
-                $3, $4, 'provider-events/delivery-partial-envelope/1',
-                256, 'application/json', 1, 100, 100
-            )
-            ",
-        )
-        .bind(Uuid::new_v4())
-        .bind(connection.as_uuid())
-        .bind([41_u8; 32].as_slice())
-        .bind([42_u8; 32].as_slice())
-        .execute(database.pool())
-        .await
-        .expect_err("partially populated event envelopes must fail closed");
-        assert_database_constraint(&partial, "provider_delivery_inbox_event_envelope_complete");
-
-        let legacy_id = Uuid::new_v4();
-        sqlx::query(
-            r"
-            INSERT INTO provider_delivery_inbox (
-                id, tenant_id, provider, connection_id, installation_id,
-                provider_repository_id, repository_visibility,
-                repository_identity, delivery_id,
-                request_digest, raw_event_digest, raw_event_object_key,
-                raw_event_size_bytes, raw_event_media_type,
-                accepted_at_ms, state_updated_at_ms
-            )
-            VALUES (
-                $1, 'delivery-envelope-legacy', 'synthetic', $2, 101,
-                202, 'private', 'automata-ci/automata', 'delivery-legacy-unsealed',
-                $3, $4, 'provider-events/delivery-legacy-unsealed/1',
-                256, 'application/json', 100, 100
-            )
-            ",
-        )
-        .bind(legacy_id)
-        .bind(connection.as_uuid())
-        .bind([43_u8; 32].as_slice())
-        .bind([44_u8; 32].as_slice())
-        .execute(database.pool())
-        .await?;
+        assert_partial_event_envelope_is_rejected(&database, &connection).await?;
+        seed_legacy_unsealed_deliveries(&database, &connection).await?;
 
         let sealed = database
             .store()
@@ -950,14 +965,45 @@ async fn claim_quarantines_legacy_unsealed_rows_without_poisoning_sealed_work() 
             ))
             .await?;
         let claim_owner = owner();
+        let first_observed_at = database_now(&database).await?;
         let claimed = database
             .store()
-            .claim_provider_delivery(claim(claim_owner, 110))
+            .claim_provider_delivery(ClaimProviderDelivery::new(
+                claim_owner,
+                UnixMillis::new(first_observed_at),
+                UnixMillis::new(first_observed_at + 60_000),
+            )?)
             .await?
             .expect("sealed work remains claimable");
         assert_eq!(claimed.receipt().id(), sealed.id());
+        assert_eq!(
+            legacy_delivery_state_counts(&database, claim_owner).await?,
+            (64, 1, 64),
+            "the first claim commits one bounded quarantine batch"
+        );
 
-        assert_legacy_delivery_is_quarantined(&database, legacy_id, claim_owner).await?;
+        let final_claim_owner = owner();
+        let final_observed_at = database_now(&database).await?;
+        assert!(
+            database
+                .store()
+                .claim_provider_delivery(ClaimProviderDelivery::new(
+                    final_claim_owner,
+                    UnixMillis::new(final_observed_at),
+                    UnixMillis::new(final_observed_at + 60_000),
+                )?)
+                .await?
+                .is_none(),
+            "the next claim drains remaining legacy work without decoding it"
+        );
+        assert_eq!(
+            legacy_delivery_state_counts(&database, claim_owner).await?,
+            (65, 0, 64)
+        );
+        assert_eq!(
+            legacy_delivery_state_counts(&database, final_claim_owner).await?,
+            (65, 0, 1)
+        );
         Ok(())
     })
     .await

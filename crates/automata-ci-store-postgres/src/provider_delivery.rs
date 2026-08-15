@@ -162,7 +162,8 @@ impl ProviderDeliveryRepository for PostgresStore {
             SELECT inbox.id, database_time.now_ms
             FROM provider_delivery_inbox AS inbox
             CROSS JOIN database_time
-            WHERE inbox.state_updated_at_ms <= database_time.now_ms
+            WHERE inbox.event_envelope_schema IS NOT NULL
+              AND inbox.state_updated_at_ms <= database_time.now_ms
               AND inbox.claim_fence < 9223372036854775807
               AND (
                 inbox.state = 'pending'
@@ -236,6 +237,7 @@ impl ProviderDeliveryRepository for PostgresStore {
                 rejected_at_ms = NULL,
                 state_updated_at_ms = $3
             WHERE inbox.id = $1
+              AND inbox.event_envelope_schema IS NOT NULL
               AND inbox.state_updated_at_ms <= $3
               AND inbox.claim_fence < 9223372036854775807
               AND (
@@ -820,7 +822,8 @@ async fn eligible_exhausted_fence(
         SELECT EXISTS (
             SELECT 1
             FROM provider_delivery_inbox
-            WHERE state_updated_at_ms <= $1
+            WHERE event_envelope_schema IS NOT NULL
+              AND state_updated_at_ms <= $1
               AND claim_fence = 9223372036854775807
               AND (
                 state = 'pending'
