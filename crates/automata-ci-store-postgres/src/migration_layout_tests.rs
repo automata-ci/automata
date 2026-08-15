@@ -191,7 +191,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0046_workflow_runtime_runner_feature_policy.sql",
-        "5f0d78e97bb793cfec4c9eb5792ae2d821e56e8e42f3f84c61fe64c9312a5a430824a6c42d8331a3dabd1f007e123b7c",
+        "acf53752f455bf3da8efc646935f33602e97cde1232c4d0bd1a5f28506b272cf5770ad8182dd5195fe07855b94533ebb",
     ),
 ];
 
@@ -525,7 +525,7 @@ fn workflow_runtime_runner_feature_policy_is_relationally_exact() {
         "workflow_runtime_policy_runner_features_mapping_fk FOREIGN KEY",
         "feature IN (",
         "'automata.core/node24-actions@v1'",
-        "automata_require_staging_workflow_runtime_policy()",
+        "automata_require_staging_workflow_runtime_runner_feature()",
         "automata_reject_workflow_runtime_policy_retained_mutation()",
         "CREATE OR REPLACE FUNCTION automata_workflow_runtime_policy_canonical",
         "CREATE OR REPLACE FUNCTION automata_workflow_runtime_policy_digest",
@@ -540,6 +540,12 @@ fn workflow_runtime_runner_feature_policy_is_relationally_exact() {
             "runner-feature policy migration lost required contract: {required}"
         );
     }
+    assert!(
+        !source.contains(
+            "FOR EACH ROW EXECUTE FUNCTION automata_require_staging_workflow_runtime_policy();"
+        ),
+        "runner features must not reuse the container-feature census trigger"
+    );
 }
 
 fn migration_paths() -> Vec<PathBuf> {

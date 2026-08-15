@@ -1,4 +1,4 @@
--- Wave 1 runner-feature policy append-only migration 0046.
+-- Wave 1 capability-policy append-only migration 0046. Earlier applied versions remain frozen.
 
 ALTER TABLE workflow_runtime_policy_mappings
     ADD COLUMN runner_feature_schema smallint,
@@ -68,9 +68,65 @@ CREATE TABLE workflow_runtime_policy_runner_features (
     ) ON DELETE RESTRICT
 );
 
+CREATE FUNCTION automata_require_staging_workflow_runtime_runner_feature() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    parent_state text;
+    declared_schema smallint;
+    declared_count integer;
+    inserted_count integer;
+BEGIN
+    IF TG_OP <> 'INSERT' THEN
+        RAISE EXCEPTION 'workflow runtime policy runner features are immutable'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_runtime_policy_runner_features_immutable';
+    END IF;
+
+    SELECT state INTO parent_state
+    FROM workflow_runtime_policy_revisions
+    WHERE tenant_id = NEW.tenant_id
+      AND repository_id = NEW.repository_id
+      AND policy_revision = NEW.policy_revision
+    FOR UPDATE;
+    IF parent_state IS DISTINCT FROM 'staging' THEN
+        RAISE EXCEPTION 'workflow runtime policy catalog is sealed'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_runtime_policy_catalog_sealed';
+    END IF;
+
+    SELECT runner_feature_schema, runner_feature_count
+    INTO declared_schema, declared_count
+    FROM workflow_runtime_policy_mappings
+    WHERE tenant_id = NEW.tenant_id
+      AND repository_id = NEW.repository_id
+      AND policy_revision = NEW.policy_revision
+      AND selector = NEW.selector
+    FOR UPDATE;
+
+    SELECT count(*)::integer INTO inserted_count
+    FROM workflow_runtime_policy_runner_features
+    WHERE tenant_id = NEW.tenant_id
+      AND repository_id = NEW.repository_id
+      AND policy_revision = NEW.policy_revision
+      AND selector = NEW.selector;
+
+    IF declared_schema IS DISTINCT FROM 1
+        OR declared_count IS NULL
+        OR inserted_count >= declared_count
+        OR inserted_count >= 64
+    THEN
+        RAISE EXCEPTION 'workflow runtime policy runner feature census exceeded'
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'workflow_runtime_policy_runner_feature_insert_census';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE TRIGGER workflow_runtime_policy_runner_features_enforce
 BEFORE INSERT OR UPDATE ON workflow_runtime_policy_runner_features
-FOR EACH ROW EXECUTE FUNCTION automata_require_staging_workflow_runtime_policy();
+FOR EACH ROW EXECUTE FUNCTION automata_require_staging_workflow_runtime_runner_feature();
 
 CREATE TRIGGER workflow_runtime_policy_runner_features_reject_delete
 BEFORE DELETE ON workflow_runtime_policy_runner_features
