@@ -2,7 +2,7 @@ use std::{fmt::Write as _, fs, path::Path, path::PathBuf};
 
 use sha2::{Digest as _, Sha384};
 
-static EMBEDDED_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+use crate::migration::MIGRATOR;
 
 const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     (
@@ -126,7 +126,7 @@ const MAX_MIGRATION_LINES: usize = 2_000;
 fn applied_migration_lineage_is_frozen() {
     let migrations = migration_paths();
     assert!(
-        !EMBEDDED_MIGRATOR.ignore_missing,
+        !MIGRATOR.ignore_missing,
         "the deployed migrator must reject missing applied versions"
     );
     assert_eq!(
@@ -135,14 +135,14 @@ fn applied_migration_lineage_is_frozen() {
         "append each new migration to the frozen inventory; never remove an applied migration"
     );
     assert_eq!(
-        EMBEDDED_MIGRATOR.iter().count(),
+        MIGRATOR.iter().count(),
         FROZEN_MIGRATIONS.len(),
         "the embedded migrator must contain the complete frozen inventory"
     );
 
     for (index, ((path, embedded), (expected_name, expected_checksum))) in migrations
         .iter()
-        .zip(EMBEDDED_MIGRATOR.iter())
+        .zip(MIGRATOR.iter())
         .zip(FROZEN_MIGRATIONS)
         .enumerate()
     {

@@ -55,7 +55,6 @@ use automata_ci_github_delivery::{
     GithubScheduleSourceCredentialProvider,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
-use automata_ci_postgres::store::PostgresStore;
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
 use automata_ci_store::{
     GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
@@ -67,6 +66,7 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderRepositoryVisibility, TenantScope,
 };
+use automata_ci_store_postgres::PostgresStore;
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionObserver, WorkflowAdmissionService,
 };

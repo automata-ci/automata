@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! `PostgreSQL` implementations of Automata's durable control-plane ports.
-
-mod migration;
+//! Compatibility facade for Automata's domain-specific `PostgreSQL` adapters.
 
 #[cfg(all(test, not(feature = "test-support")))]
 mod test_support;
@@ -11,12 +9,12 @@ mod test_support;
 pub mod test_support;
 
 /// Human authentication, authorization, and runner-enrollment adapters.
-pub mod auth;
+pub use automata_ci_auth_postgres as auth;
 /// Atomic external workspace-management adapters.
-pub mod provisioning;
+pub use automata_ci_provisioning_postgres as provisioning;
 /// Durable runner-machine authentication adapter.
-pub mod runner_auth;
+pub use automata_ci_runner_auth_postgres as runner_auth;
 /// Built-in encrypted secret-provider adapter.
-pub mod secret;
+pub use automata_ci_secret_postgres as secret;
 /// Durable control-plane storage adapter.
-pub mod store;
+pub use automata_ci_store_postgres as store;

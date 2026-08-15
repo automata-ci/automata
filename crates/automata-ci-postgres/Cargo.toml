@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-postgres"
-description = "PostgreSQL adapters for Automata's durable control-plane ports"
+description = "Compatibility facade for Automata's domain-specific PostgreSQL adapters"
 publish.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -26,6 +26,16 @@ path = "examples/postgres-test-cleanup.rs"
 required-features = ["test-support"]
 
 [dependencies]
+automata-ci-auth-postgres.workspace = true
+automata-ci-provisioning-postgres.workspace = true
+automata-ci-runner-auth-postgres.workspace = true
+automata-ci-secret-postgres.workspace = true
+automata-ci-store-postgres.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
 async-trait.workspace = true
 automata-ci-auth.workspace = true
 automata-ci-blob.workspace = true
@@ -33,6 +43,7 @@ automata-ci-control = { workspace = true, features = ["adapter-spi"] }
 automata-ci-core.workspace = true
 automata-ci-key-management.workspace = true
 automata-ci-oidc-github.workspace = true
+automata-ci-protocol.workspace = true
 automata-ci-provisioning.workspace = true
 automata-ci-schedule.workspace = true
 automata-ci-secret.workspace = true
@@ -40,18 +51,12 @@ automata-ci-store = { workspace = true, features = ["adapter-spi"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
+static_assertions.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-uuid.workspace = true
-zeroize.workspace = true
-
-[dev-dependencies]
-automata-ci-protocol.workspace = true
-static_assertions.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tracing.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

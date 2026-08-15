@@ -132,7 +132,7 @@ Rust report uses the pinned toolchain's LLVM tools and a reviewed
 ```console
 rustup component add llvm-tools-preview
 cargo install cargo-llvm-cov --version 0.8.7 --locked
-CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
+CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 \
   ./scripts/ci/run-rust-coverage.sh coverage/rust-ordinary ordinary
 ```
 

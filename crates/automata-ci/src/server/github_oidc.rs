@@ -25,9 +25,6 @@ use automata_ci_oidc_github::{
     OidcSupportedClaims, OidcTokenLifetime, RequestBearerConfig, RequestBearerKey,
     RequestBearerKeyring, Rs256Keyring, Rs256SigningKey, RsaPublicJwk,
 };
-use automata_ci_postgres::store::{
-    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository, PostgresStore,
-};
 use automata_ci_results_github::ResultsPublicEndpoint;
 use automata_ci_store::{
     GITHUB_OIDC_REQUEST_BEARER_KEY_FINGERPRINT_DOMAIN, GithubOidcAuthorityProposal,
@@ -36,6 +33,9 @@ use automata_ci_store::{
     GithubOidcLoadedKey, GithubOidcStoreError, GithubOidcSubjectPolicyMode,
     GithubOidcSubjectPolicyRevision, ReserveGithubOidcAuthority,
     github_oidc_rs256_public_key_fingerprint,
+};
+use automata_ci_store_postgres::{
+    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository, PostgresStore,
 };
 use axum::{
     Router,

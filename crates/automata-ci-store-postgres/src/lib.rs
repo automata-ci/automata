@@ -1,3 +1,7 @@
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+//! `PostgreSQL` implementation of Automata's durable store ports.
+
 use std::{fmt, net::IpAddr, str::FromStr as _, sync::Arc};
 
 use async_trait::async_trait;
@@ -26,6 +30,12 @@ use automata_ci_store::{
     AttemptAssignment, AttemptSnapshotError, AttemptStoreError, RunnerGeneration,
     RunnerSessionFence, SessionEpoch, StableRunnerSlot, TenantScope,
 };
+
+mod migration;
+#[cfg(test)]
+mod migration_layout_tests;
+#[cfg(test)]
+mod schema_bindings_tests;
 
 mod admission;
 mod conformance;
@@ -119,7 +129,7 @@ fn pg_bigint(value: u64) -> i64 {
 /// while readable-secret attempts retain a private visibility ceiling. Retries
 /// must reproduce the canonical snapshot exactly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CurrentAttemptOutputSafety {
+pub(crate) struct CurrentAttemptOutputSafety {
     secret_exposure: SecretExposureClass,
     raw_log_disposition: &'static str,
     requested_log_visibility: OutputVisibility,
@@ -129,14 +139,14 @@ pub(super) struct CurrentAttemptOutputSafety {
 }
 
 impl CurrentAttemptOutputSafety {
-    pub(super) fn readable(requested_log_visibility: &str) -> Option<Self> {
+    pub(crate) fn readable(requested_log_visibility: &str) -> Option<Self> {
         Self::with_exposure(
             SecretExposureClass::ReadableSecret,
             requested_log_visibility,
         )
     }
 
-    pub(super) fn for_authority_profile(
+    pub(crate) fn for_authority_profile(
         authority_profile: JobAuthorityProfile,
         requested_log_visibility: &str,
     ) -> Option<Self> {
@@ -147,7 +157,7 @@ impl CurrentAttemptOutputSafety {
         Self::with_exposure(secret_exposure, requested_log_visibility)
     }
 
-    pub(super) fn from_durable(
+    pub(crate) fn from_durable(
         secret_exposure: &str,
         raw_log_disposition: &str,
         requested_log_visibility: &str,
@@ -174,7 +184,7 @@ impl CurrentAttemptOutputSafety {
         .then_some(snapshot)
     }
 
-    pub(super) const fn secret_exposure_class(self) -> &'static str {
+    pub(crate) const fn secret_exposure_class(self) -> &'static str {
         match self.secret_exposure {
             SecretExposureClass::Secretless => "secretless",
             SecretExposureClass::CapabilityOnly => "capability_only",
@@ -182,27 +192,27 @@ impl CurrentAttemptOutputSafety {
         }
     }
 
-    pub(super) const fn raw_log_disposition(self) -> &'static str {
+    pub(crate) const fn raw_log_disposition(self) -> &'static str {
         self.raw_log_disposition
     }
 
-    pub(super) const fn requested_log_visibility(self) -> &'static str {
+    pub(crate) const fn requested_log_visibility(self) -> &'static str {
         output_visibility_name(self.requested_log_visibility)
     }
 
-    pub(super) const fn effective_log_visibility(self) -> &'static str {
+    pub(crate) const fn effective_log_visibility(self) -> &'static str {
         output_visibility_name(self.effective_log_visibility)
     }
 
-    pub(super) const fn output_safety_reason(self) -> &'static str {
+    pub(crate) const fn output_safety_reason(self) -> &'static str {
         self.output_safety_reason
     }
 
-    pub(super) const fn output_safety_schema(self) -> i32 {
+    pub(crate) const fn output_safety_schema(self) -> i32 {
         self.output_safety_schema
     }
 
-    pub(super) fn supports_current_authority_profile(self) -> bool {
+    pub(crate) fn supports_current_authority_profile(self) -> bool {
         let profile = match self.secret_exposure {
             SecretExposureClass::Secretless => JobAuthorityProfile::CredentialFree,
             SecretExposureClass::ReadableSecret => JobAuthorityProfile::Standard,
@@ -394,10 +404,10 @@ mod attempt_output_safety_tests {
 
 /// Clone-safe encryption configuration shared by all runner payload paths.
 #[derive(Clone)]
-pub(super) struct RunnerPayloadEncryption {
-    pub(super) codec: Arc<EnvelopeCodec>,
-    pub(super) command_purpose: KeyPurpose,
-    pub(super) response_purpose: KeyPurpose,
+pub(crate) struct RunnerPayloadEncryption {
+    pub(crate) codec: Arc<EnvelopeCodec>,
+    pub(crate) command_purpose: KeyPurpose,
+    pub(crate) response_purpose: KeyPurpose,
 }
 
 impl RunnerPayloadEncryption {
@@ -427,7 +437,7 @@ impl fmt::Debug for RunnerPayloadEncryption {
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
     pool: PgPool,
-    pub(super) runner_payload_encryption: Option<RunnerPayloadEncryption>,
+    pub(crate) runner_payload_encryption: Option<RunnerPayloadEncryption>,
 }
 
 impl PostgresStore {
@@ -484,7 +494,7 @@ impl PostgresStore {
         self
     }
 
-    pub(super) fn require_runner_payload_encryption(
+    pub(crate) fn require_runner_payload_encryption(
         &self,
     ) -> Result<&RunnerPayloadEncryption, automata_ci_store::StoreError> {
         self.runner_payload_encryption
@@ -1050,7 +1060,7 @@ impl InternalAttemptRepository for PostgresStore {
 
 const MAX_RUNNER_ATTEMPT_CALLER_CLOCK_SKEW_MILLIS: u64 = 60_000;
 
-pub(super) async fn pin_runner_attempt_read_committed(
+pub(crate) async fn pin_runner_attempt_read_committed(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), AttemptStoreError> {
     sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
@@ -1060,7 +1070,7 @@ pub(super) async fn pin_runner_attempt_read_committed(
     Ok(())
 }
 
-pub(super) async fn runner_attempt_database_now(
+pub(crate) async fn runner_attempt_database_now(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<UnixMillis, AttemptStoreError> {
     sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
@@ -1070,7 +1080,7 @@ pub(super) async fn runner_attempt_database_now(
         .map_err(operation_error)
 }
 
-pub(super) fn validate_runner_attempt_caller_clock(
+pub(crate) fn validate_runner_attempt_caller_clock(
     caller_time: UnixMillis,
     database_time: UnixMillis,
 ) -> Result<(), AttemptStoreError> {
@@ -1083,7 +1093,7 @@ pub(super) fn validate_runner_attempt_caller_clock(
     Ok(())
 }
 
-pub(super) fn runner_attempt_requested_duration(
+pub(crate) fn runner_attempt_requested_duration(
     observed_at: UnixMillis,
     expires_at: UnixMillis,
 ) -> Result<i64, AttemptStoreError> {
@@ -1094,7 +1104,7 @@ pub(super) fn runner_attempt_requested_duration(
         .ok_or_else(|| AttemptStoreError::corrupt_data("invalid runner attempt lease duration"))
 }
 
-pub(super) fn runner_attempt_database_expiry(
+pub(crate) fn runner_attempt_database_expiry(
     database_time: UnixMillis,
     requested_duration: i64,
 ) -> Result<UnixMillis, AttemptStoreError> {
@@ -1105,7 +1115,7 @@ pub(super) fn runner_attempt_database_expiry(
         .ok_or_else(|| AttemptStoreError::corrupt_data("runner attempt lease expiry overflowed"))
 }
 
-pub(super) async fn issue_lease_renewal_in_transaction(
+pub(crate) async fn issue_lease_renewal_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: RenewLease,
     reported_lifecycle: Option<JobLifecycle>,
@@ -1167,7 +1177,7 @@ pub(super) async fn issue_lease_renewal_in_transaction(
     })
 }
 
-pub(super) async fn commit_database_issued_lease_renewal_in_transaction(
+pub(crate) async fn commit_database_issued_lease_renewal_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: RenewLease,
 ) -> Result<Lease, AttemptStoreError> {
@@ -1331,7 +1341,7 @@ async fn record_github_runtime_authority_lease_renewal(
     require_single_update(result.rows_affected())
 }
 
-pub(super) async fn authorize_lease_renewal_in_transaction(
+pub(crate) async fn authorize_lease_renewal_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: RenewLease,
     reported_lifecycle: JobLifecycle,

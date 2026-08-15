@@ -25,13 +25,13 @@ use automata_ci_auth::{
     sign_in::HumanSignInFinalizer,
     time::{Clock, SystemClock},
 };
-use automata_ci_github::GithubHttpEndpoint;
-use automata_ci_key_management::KeyEncryptionProvider;
-use automata_ci_postgres::auth::{
+use automata_ci_auth_postgres::{
     PostgresHumanSessionRepository, PostgresHumanSignInFinalizer, PostgresInstallationRepository,
     PostgresLoginTransactionRepository, PostgresRequestAuthenticationResolver,
 };
-use automata_ci_postgres::store::PostgresStore;
+use automata_ci_github::GithubHttpEndpoint;
+use automata_ci_key_management::KeyEncryptionProvider;
+use automata_ci_store_postgres::PostgresStore;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use zeroize::{Zeroize as _, Zeroizing};

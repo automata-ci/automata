@@ -24,11 +24,11 @@ use automata_ci_control::maintenance::{
 use automata_ci_key_management::{
     KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes as KeySecretBytes,
 };
-use automata_ci_postgres::store::PostgresTransportSecurity;
 use automata_ci_provisioning::{
     DelegatedActorIssuer, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
 };
 use automata_ci_results_github::ResultsPublicEndpoint;
+use automata_ci_store_postgres::PostgresTransportSecurity;
 
 use crate::cli::{DatabaseTransport, ServerArgs};
 

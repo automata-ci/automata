@@ -217,6 +217,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "automata-ci-auth",
+ "automata-ci-auth-postgres",
  "automata-ci-blob",
  "automata-ci-blob-s3",
  "automata-ci-build-support",
@@ -234,11 +235,15 @@ dependencies = [
  "automata-ci-protocol-protobuf",
  "automata-ci-provisioning",
  "automata-ci-provisioning-grpc",
+ "automata-ci-provisioning-postgres",
  "automata-ci-results-github",
+ "automata-ci-runner-auth-postgres",
  "automata-ci-runner-transport",
  "automata-ci-scm",
  "automata-ci-secret",
+ "automata-ci-secret-postgres",
  "automata-ci-store",
+ "automata-ci-store-postgres",
  "automata-ci-ui-renderer",
  "automata-ci-workflow-github",
  "automata-ci-workflow-service",
@@ -332,6 +337,21 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "automata-ci-auth-postgres"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-auth",
+ "automata-ci-core",
+ "automata-ci-key-management",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "static_assertions",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -617,6 +637,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-auth",
+ "automata-ci-auth-postgres",
  "automata-ci-blob",
  "automata-ci-control",
  "automata-ci-core",
@@ -624,9 +645,13 @@ dependencies = [
  "automata-ci-oidc-github",
  "automata-ci-protocol",
  "automata-ci-provisioning",
+ "automata-ci-provisioning-postgres",
+ "automata-ci-runner-auth-postgres",
  "automata-ci-schedule",
  "automata-ci-secret",
+ "automata-ci-secret-postgres",
  "automata-ci-store",
+ "automata-ci-store-postgres",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -697,6 +722,15 @@ dependencies = [
  "tonic-prost-build",
  "tonic-types",
  "zeroize",
+]
+
+[[package]]
+name = "automata-ci-provisioning-postgres"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-provisioning",
+ "sqlx",
+ "uuid",
 ]
 
 [[package]]
@@ -793,6 +827,19 @@ dependencies = [
  "uuid",
  "x509-parser",
  "zeroize",
+]
+
+[[package]]
+name = "automata-ci-runner-auth-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "automata-ci-auth",
+ "automata-ci-control",
+ "automata-ci-core",
+ "automata-ci-store",
+ "sqlx",
+ "uuid",
 ]
 
 [[package]]
@@ -980,6 +1027,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "automata-ci-secret-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "automata-ci-key-management",
+ "automata-ci-secret",
+ "automata-ci-store",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "automata-ci-service-proxy"
 version = "0.1.0"
 dependencies = [
@@ -1004,6 +1064,29 @@ dependencies = [
  "tokio",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "automata-ci-store-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "automata-ci-auth",
+ "automata-ci-blob",
+ "automata-ci-control",
+ "automata-ci-core",
+ "automata-ci-key-management",
+ "automata-ci-oidc-github",
+ "automata-ci-schedule",
+ "automata-ci-store",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
