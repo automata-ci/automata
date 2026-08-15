@@ -31,11 +31,30 @@ jobs:
       CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ubuntu-24.04-rust-1.97.1-
 
       - name: Show pinned toolchain
         run: |
@@ -82,6 +101,7 @@ jobs:
           ./scripts/ci/tests/install.test.sh
           python3 scripts/ci/tests/integration-test-targets.test.py
           python3 scripts/ci/tests/release-handoff.test.py
+          python3 scripts/ci/tests/rust-build-cache.test.py
           python3 scripts/ci/tests/rust-coverage.test.py
           python3 scripts/ci/tests/service-proxy-buildah-containerfile.test.py
           python3 scripts/ci/tests/service-proxy-candidate.test.py
@@ -93,11 +113,79 @@ jobs:
           prometheus_bin="$(./scripts/ci/prepare-prometheus-tools.sh)"
           PATH="$prometheus_bin:$PATH" ./scripts/ci/verify-native-metrics.sh
 
+  rust_lint:
+    name: Lint Rust workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ubuntu-24.04-rust-1.97.1-
+
       - name: Lint
         run: |
           trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
           df -h -- "$GITHUB_WORKSPACE"
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  rust_docs:
+    name: Check Rust documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ubuntu-24.04-rust-1.97.1-
 
       - name: Check public API documentation
         env:
@@ -107,7 +195,41 @@ jobs:
       - name: Test workspace documentation
         run: cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
 
+  dependency_audit:
+    name: Audit Rust dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Cargo registry and cargo-deny
+        id: dependency-audit-cargo-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/bin/cargo-deny
+          key: cargo-ubuntu-24.04-rust-1.97.1-deny-0.20.2-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ubuntu-24.04-rust-1.97.1-deny-0.20.2-
+            cargo-ubuntu-24.04-rust-1.97.1-
+
       - name: Install cargo-deny
+        if: ${{ steps.dependency-audit-cargo-cache.outputs.cache-hit != 'true' }}
         run: cargo install cargo-deny --version 0.20.2 --locked
 
       - name: Test vendored renderer macro diagnostics
@@ -142,12 +264,34 @@ jobs:
       CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Cargo registry and coverage tool
+        id: coverage-cargo-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/bin/cargo-llvm-cov
+          key: cargo-ubuntu-24.04-rust-1.97.1-llvm-cov-0.8.7-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ubuntu-24.04-rust-1.97.1-llvm-cov-0.8.7-
+            cargo-ubuntu-24.04-rust-1.97.1-
 
       - name: Prepare job scratch directory
         run: install -d -m 0700 -- "$TMPDIR"
@@ -165,7 +309,9 @@ jobs:
       - name: Install pinned Rust coverage tooling
         run: |
           rustup component add llvm-tools-preview
-          cargo install cargo-llvm-cov --version 0.8.7 --locked
+          if [[ "${{ steps.coverage-cargo-cache.outputs.cache-hit }}" != true ]]; then
+            cargo install cargo-llvm-cov --version 0.8.7 --locked
+          fi
 
       - name: Test Rust workspace and PostgreSQL invariants
         run: |
@@ -205,12 +351,31 @@ jobs:
       CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ubuntu-24.04-rust-1.97.1-
 
       - name: Prepare job scratch directory
         run: install -d -m 0700 -- "$TMPDIR"
@@ -291,12 +456,34 @@ jobs:
     name: Build static Linux distribution
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.17.0
+
+      - name: Restore Cargo registry and SBOM tool
+        id: distribution-cargo-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/bin/cargo-cyclonedx
+          key: cargo-ubuntu-24.04-rust-1.97.1-cyclonedx-0.5.9-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ubuntu-24.04-rust-1.97.1-cyclonedx-0.5.9-
+            cargo-ubuntu-24.04-rust-1.97.1-
 
       - name: Read workspace version
         run: |
@@ -321,6 +508,7 @@ jobs:
           package-manager-cache: false
 
       - name: Install pinned SBOM generator
+        if: ${{ steps.distribution-cargo-cache.outputs.cache-hit != 'true' }}
         run: cargo install cargo-cyclonedx --version 0.5.9 --locked
 
       - name: Build distribution binaries
@@ -416,6 +604,9 @@ jobs:
     needs:
       - dist_build
       - verify
+      - rust_lint
+      - rust_docs
+      - dependency_audit
       - rust_coverage
       - renderer_tests
       - frontend
@@ -427,6 +618,9 @@ jobs:
         env:
           DIST_BUILD_RESULT: ${{ needs.dist_build.result }}
           VERIFY_RESULT: ${{ needs.verify.result }}
+          RUST_LINT_RESULT: ${{ needs.rust_lint.result }}
+          RUST_DOCS_RESULT: ${{ needs.rust_docs.result }}
+          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency_audit.result }}
           RUST_COVERAGE_RESULT: ${{ needs.rust_coverage.result }}
           RENDERER_TESTS_RESULT: ${{ needs.renderer_tests.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
@@ -435,6 +629,9 @@ jobs:
         run: |
           [[ "$DIST_BUILD_RESULT" == success ]]
           [[ "$VERIFY_RESULT" == success ]]
+          [[ "$RUST_LINT_RESULT" == success ]]
+          [[ "$RUST_DOCS_RESULT" == success ]]
+          [[ "$DEPENDENCY_AUDIT_RESULT" == success ]]
           [[ "$RUST_COVERAGE_RESULT" == success ]]
           [[ "$RENDERER_TESTS_RESULT" == success ]]
           [[ "$FRONTEND_RESULT" == success ]]

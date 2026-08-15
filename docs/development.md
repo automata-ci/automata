@@ -45,6 +45,21 @@ cargo test -p automata-ci --locked
 cargo test -p automata-ci-runner --locked
 ```
 
+Development and test profiles keep file/line information for first-party
+crates, while dependencies omit debug metadata. On Linux hosts with LLVM's
+linker installed, the CI-equivalent faster linker can be enabled per command:
+
+```console
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='-C link-arg=-fuse-ld=lld' \
+  cargo test -p automata-ci --locked
+```
+
+CI runs repository verification, Rust linting, documentation, dependency
+auditing, coverage, renderer tests, and distribution construction as parallel
+gates. Rust jobs share content-addressed compiler outputs through `sccache` and
+cache the locked Cargo registry plus pinned CI tools; raw `target/` directories
+are deliberately not cached because they are large and path-sensitive.
+
 Before opening a pull request, run the workspace checks used by CI:
 
 ```console
