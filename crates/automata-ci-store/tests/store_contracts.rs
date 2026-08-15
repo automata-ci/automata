@@ -23,6 +23,8 @@ mod github_schedule_api;
 mod github_service_authority_api;
 #[path = "github_subject_evidence_api.rs"]
 mod github_subject_evidence_api;
+#[path = "github_workflow_permissions_api.rs"]
+mod github_workflow_permissions_api;
 #[path = "logical_activation_api.rs"]
 mod logical_activation_api;
 #[path = "logical_activation_preparation_api.rs"]

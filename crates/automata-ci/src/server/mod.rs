@@ -79,7 +79,8 @@ pub use github_provider_config::{
 };
 pub use github_provider_credentials::{
     GithubProviderCredentialAdapterConfigurationError, GithubProviderCredentialAdapters,
-    GithubProviderCredentialReleaseSupervisor, MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
+    GithubProviderCredentialReleaseSupervisor, GithubWorkflowPermissionObservationError,
+    MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
 };
 use github_provider_runtime::GithubProviderFatalNotification;
 pub use github_provider_runtime::{
@@ -156,37 +157,40 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
         &readiness,
         &metrics,
     );
-    let components =
-        match race_initialization(initialization, &mut metrics_http, &process_cancellation).await {
-            InitializationRace::Initialization(Ok(components)) => components,
-            InitializationRace::Initialization(Err(error)) => {
-                process_cancellation.cancel();
-                let _ = metrics_http.as_mut().await;
-                let _ = signal_task.await;
-                return Err(error).context("failed to initialize control-plane adapters");
-            }
-            InitializationRace::Metrics(Err(error)) => {
-                process_cancellation.cancel();
-                let _ = signal_task.await;
-                return Err(error).context("metrics HTTP service failed during initialization");
-            }
-            InitializationRace::Metrics(Ok(())) => {
-                process_cancellation.cancel();
-                let _ = signal_task.await;
-                return Err(
-                    ServiceSupervisorError::UnexpectedStop(ManagedService::MetricsHttp).into(),
-                );
-            }
-            InitializationRace::Shutdown => {
-                process_cancellation.cancel();
-                metrics_http
-                    .as_mut()
-                    .await
-                    .context("metrics HTTP service failed during shutdown")?;
-                let _ = signal_task.await;
-                return Ok(());
-            }
-        };
+    let components = match Box::pin(race_initialization(
+        initialization,
+        &mut metrics_http,
+        &process_cancellation,
+    ))
+    .await
+    {
+        InitializationRace::Initialization(Ok(components)) => components,
+        InitializationRace::Initialization(Err(error)) => {
+            process_cancellation.cancel();
+            let _ = metrics_http.as_mut().await;
+            let _ = signal_task.await;
+            return Err(error).context("failed to initialize control-plane adapters");
+        }
+        InitializationRace::Metrics(Err(error)) => {
+            process_cancellation.cancel();
+            let _ = signal_task.await;
+            return Err(error).context("metrics HTTP service failed during initialization");
+        }
+        InitializationRace::Metrics(Ok(())) => {
+            process_cancellation.cancel();
+            let _ = signal_task.await;
+            return Err(ServiceSupervisorError::UnexpectedStop(ManagedService::MetricsHttp).into());
+        }
+        InitializationRace::Shutdown => {
+            process_cancellation.cancel();
+            metrics_http
+                .as_mut()
+                .await
+                .context("metrics HTTP service failed during shutdown")?;
+            let _ = signal_task.await;
+            return Ok(());
+        }
+    };
     if state_sampler_sender
         .send(components.state_sampler.clone())
         .is_err()

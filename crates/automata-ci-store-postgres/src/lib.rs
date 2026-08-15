@@ -51,6 +51,7 @@ mod github_service_authority;
 mod github_subject_evidence;
 mod live_log_ticket;
 mod log_notifications;
+mod github_workflow_permissions;
 mod logical_activation;
 mod logical_activation_preparation;
 mod logical_graph;

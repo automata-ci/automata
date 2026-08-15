@@ -68,6 +68,7 @@ const ISSUANCE_COLUMNS: &str = r"
 // Keep the window closed on both sides so a stuck-forward or slow process is
 // rejected before it can mutate durable credential custody.
 const MAX_GITHUB_SERVICE_AUTHORITY_CLOCK_SKEW_MILLIS: i64 = 60_000;
+const MAX_GITHUB_SERVICE_AUTHORITIES_PER_REPOSITORY: usize = 256;
 
 async fn pin_read_committed(
     connection: &mut PgConnection,
@@ -196,6 +197,297 @@ impl GithubServerServiceAuthorityRepository for PostgresStore {
         authority_id: GithubServerServiceAuthorityId,
     ) -> Result<GithubServerServiceAuthorityDescriptor, GithubServerServiceStoreError> {
         load_authority_from_pool(&self.pool, tenant, authority_id).await
+    }
+
+    async fn inspect_current_github_server_service_issuance(
+        &self,
+        tenant: &TenantScope,
+        authority_id: GithubServerServiceAuthorityId,
+    ) -> Result<Option<GithubServerServiceIssuanceReceipt>, GithubServerServiceStoreError> {
+        let query = format!(
+            "SELECT {ISSUANCE_COLUMNS} \
+             FROM github_server_service_authority_issuances \
+             WHERE authority_id = $2 AND generation = ( \
+                 SELECT current_issuance_generation \
+                 FROM github_server_service_authorities \
+                 WHERE tenant_id = $1 AND id = $2 \
+             )"
+        );
+        sqlx::query(AssertSqlSafe(query))
+            .bind(tenant.as_str())
+            .bind(authority_id.as_uuid())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(operation_error)?
+            .map(|row| decode_issuance_receipt(&row))
+            .transpose()
+    }
+
+    async fn list_github_server_service_authorities_for_repository(
+        &self,
+        tenant: &TenantScope,
+        repository_id: RepositoryId,
+        connection_id: ProviderConnectionId,
+    ) -> Result<Vec<GithubServerServiceAuthorityDescriptor>, GithubServerServiceStoreError> {
+        let query = format!(
+            "SELECT {AUTHORITY_COLUMNS} FROM github_server_service_authorities \
+             WHERE tenant_id = $1 AND repository_id = $2 \
+               AND provider_connection_id = $3 \
+               AND state IN ('active', 'retiring') \
+             ORDER BY id LIMIT 257"
+        );
+        let rows = sqlx::query(AssertSqlSafe(query))
+            .bind(tenant.as_str())
+            .bind(repository_id.as_uuid())
+            .bind(connection_id.as_uuid())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(operation_error)?;
+        if rows.len() > MAX_GITHUB_SERVICE_AUTHORITIES_PER_REPOSITORY {
+            return Err(GithubServerServiceStoreError::CorruptData);
+        }
+        rows.iter().map(decode_authority).collect()
+    }
+
+    async fn claim_github_server_service_mint(
+        &self,
+        request: ClaimGithubServerServiceMint,
+    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError> {
+        let claim_duration =
+            requested_duration(request.requested_at(), request.claim_expires_at())?;
+        let request_duration =
+            requested_duration(request.requested_at(), request.request_deadline())?;
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        pin_read_committed(&mut transaction).await?;
+        let authority_row = select_authority_for_update(&mut transaction, request.selector())
+            .await?
+            .ok_or(GithubServerServiceStoreError::NotFound)?;
+        let mut descriptor = decode_authority(&authority_row)?;
+        let key = GithubServerServiceIssuanceKey::new(request.authority_id(), request.generation());
+
+        if let Some(existing) = select_issuance_for_update(&mut transaction, key).await? {
+            let database_now = database_now_ms(&mut transaction).await?;
+            let exact = exact_mint_claim_replay(
+                &existing,
+                request.worker(),
+                claim_duration,
+                request_duration,
+            )? && live_mint_claim_at(&existing, database_now)?;
+            if !exact {
+                return Err(GithubServerServiceStoreError::RefreshAlreadyActive);
+            }
+            let claimed = decode_claimed_mint(descriptor.identity().clone(), &existing)?;
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(claimed);
+        }
+        if descriptor.state() != GithubServerServiceAuthorityState::Active {
+            return Err(GithubServerServiceStoreError::ClaimRejected);
+        }
+        if descriptor.refresh_generation().is_some() {
+            return Err(GithubServerServiceStoreError::RefreshAlreadyActive);
+        }
+        let mut database_now = database_now_ms(&mut transaction).await?;
+        validate_caller_clock(request.requested_at(), database_now)?;
+        if descriptor.consecutive_generation_failures()
+            >= MAX_GITHUB_SERVICE_CONSECUTIVE_GENERATION_FAILURES
+        {
+            if !rearm_github_server_service_failure_budget(
+                &mut transaction,
+                &descriptor,
+                UnixMillis::new(database_now),
+            )
+            .await?
+            {
+                return Err(GithubServerServiceStoreError::RetryLimitReached);
+            }
+            let rearmed = select_authority_for_update(&mut transaction, request.selector())
+                .await?
+                .ok_or(GithubServerServiceStoreError::CorruptData)?;
+            descriptor = decode_authority(&rearmed)?;
+            database_now = database_now_ms(&mut transaction).await?;
+            validate_caller_clock(request.requested_at(), database_now)?;
+        }
+        if descriptor
+            .next_mint_not_before()
+            .is_some_and(|not_before| not_before.get() > database_now)
+        {
+            return Err(GithubServerServiceStoreError::ClaimRejected);
+        }
+        if descriptor.next_generation() != request.generation() {
+            return Err(GithubServerServiceStoreError::FenceExhausted);
+        }
+        if let Some(current_generation) = descriptor.current_generation() {
+            let current_key =
+                GithubServerServiceIssuanceKey::new(request.authority_id(), current_generation);
+            let current = select_issuance_for_update(&mut transaction, current_key)
+                .await?
+                .ok_or(GithubServerServiceStoreError::CorruptData)?;
+            database_now = database_now_ms(&mut transaction).await?;
+            validate_caller_clock(request.requested_at(), database_now)?;
+            let refresh_due_by = MAX_GITHUB_SERVICE_HANDOFF_MILLIS
+                .checked_add(MAX_GITHUB_SERVICE_REQUEST_MILLIS)
+                .and_then(|lead| database_now.checked_add(lead))
+                .ok_or(GithubServerServiceStoreError::CorruptData)?;
+            if issuance_state(&current)? != GithubServerServiceIssuanceState::Ready
+                || optional_i64(&current, "provider_expires_at_ms")?
+                    .and_then(|expires| expires.checked_sub(60_000))
+                    .is_none_or(|usable_until| usable_until > refresh_due_by)
+            {
+                return Err(GithubServerServiceStoreError::ClaimRejected);
+            }
+        }
+        let claim_expires_at = issue_deadline(database_now, claim_duration)?;
+        let request_deadline = issue_deadline(database_now, request_duration)?;
+        if claim_expires_at > request_deadline {
+            return Err(GithubServerServiceStoreError::ClaimRejected);
+        }
+        let next_generation = request
+            .generation()
+            .get()
+            .checked_add(1)
+            .filter(|value| i64::try_from(*value).is_ok())
+            .ok_or(GithubServerServiceStoreError::FenceExhausted)?;
+        let conservative_expiry = request_deadline
+            .checked_add(3_780_000)
+            .ok_or(GithubServerServiceStoreError::CorruptData)?;
+        sqlx::query(
+            r"
+            INSERT INTO github_server_service_authority_issuances (
+                tenant_id, authority_id, generation, state,
+                mint_attempt_count, mint_claim_fence, mint_claim_owner_id,
+                mint_claimed_at_ms, mint_claim_expires_at_ms,
+                requested_at_ms, request_deadline_at_ms,
+                conservative_expiry_at_ms, safe_erase_after_ms,
+                created_at_ms, state_updated_at_ms
+            ) VALUES (
+                $1, $2, $3, 'claimed', 1, 1, $4, $5, $6,
+                $5, $7, $8, $8, $5, $5
+            )
+            ",
+        )
+        .bind(descriptor.identity().tenant().as_str())
+        .bind(request.authority_id().as_uuid())
+        .bind(pg_bigint(request.generation().get()))
+        .bind(request.worker().as_uuid())
+        .bind(database_now)
+        .bind(claim_expires_at)
+        .bind(request_deadline)
+        .bind(conservative_expiry)
+        .execute(&mut *transaction)
+        .await
+        .map_err(operation_error)?;
+        let updated = sqlx::query(
+            r"
+            UPDATE github_server_service_authorities
+            SET refresh_issuance_generation = $2,
+                next_issuance_generation = $4,
+                state_updated_at_ms = $3
+            WHERE id = $1
+              AND state = 'active'
+              AND refresh_issuance_generation IS NULL
+              AND state_updated_at_ms <= $3
+            ",
+        )
+        .bind(request.authority_id().as_uuid())
+        .bind(pg_bigint(request.generation().get()))
+        .bind(database_now)
+        .bind(i64_from_u64(next_generation)?)
+        .execute(&mut *transaction)
+        .await
+        .map_err(operation_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(GithubServerServiceStoreError::ClaimRejected);
+        }
+        let issuance = select_issuance_for_update(&mut transaction, key)
+            .await?
+            .ok_or(GithubServerServiceStoreError::CorruptData)?;
+        let claimed = decode_claimed_mint(descriptor.identity().clone(), &issuance)?;
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(claimed)
+    }
+
+    async fn reclaim_github_server_service_mint(
+        &self,
+        request: ReclaimGithubServerServiceMint,
+    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError> {
+        let claim_duration = requested_duration(request.observed_at(), request.claim_expires_at())?;
+        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
+        pin_read_committed(&mut transaction).await?;
+        let authority_row = select_authority_for_update(&mut transaction, request.selector())
+            .await?
+            .ok_or(GithubServerServiceStoreError::NotFound)?;
+        let descriptor = decode_authority(&authority_row)?;
+        let existing = select_issuance_for_update(&mut transaction, request.key())
+            .await?
+            .ok_or(GithubServerServiceStoreError::NotFound)?;
+        let state = issuance_state(&existing)?;
+        let database_now = database_now_ms(&mut transaction).await?;
+        if state == GithubServerServiceIssuanceState::Claimed
+            && optional_uuid(&existing, "mint_claim_owner_id")? == Some(request.worker().as_uuid())
+            && optional_claim_duration(&existing, "mint_claimed_at_ms", "mint_claim_expires_at_ms")?
+                == Some(claim_duration)
+            && live_mint_claim_at(&existing, database_now)?
+        {
+            let claimed = decode_claimed_mint(descriptor.identity().clone(), &existing)?;
+            transaction.commit().await.map_err(operation_error)?;
+            return Ok(claimed);
+        }
+        validate_caller_clock(request.observed_at(), database_now)?;
+        let request_deadline = i64_column(&existing, "request_deadline_at_ms")?;
+        let claim_expires_at = issue_deadline(database_now, claim_duration)?;
+        if descriptor.state() != GithubServerServiceAuthorityState::Active
+            || descriptor.refresh_generation() != Some(request.key().generation())
+            || state != GithubServerServiceIssuanceState::MintRetryPending
+            || optional_i64(&existing, "next_mint_at_ms")?.is_none_or(|next| next > database_now)
+            || claim_expires_at > request_deadline
+        {
+            return Err(GithubServerServiceStoreError::ClaimRejected);
+        }
+        let attempts = u16_column(&existing, "mint_attempt_count")?;
+        let fence = positive_u64(&existing, "mint_claim_fence")?;
+        if attempts >= MAX_GITHUB_SERVICE_MINT_ATTEMPTS {
+            return Err(GithubServerServiceStoreError::RetryLimitReached);
+        }
+        let next_fence = fence
+            .checked_add(1)
+            .filter(|value| i64::try_from(*value).is_ok())
+            .ok_or(GithubServerServiceStoreError::FenceExhausted)?;
+        let row = sqlx::query(AssertSqlSafe(format!(
+            r"
+            UPDATE github_server_service_authority_issuances
+            SET state = 'claimed',
+                mint_attempt_count = mint_attempt_count + 1,
+                mint_claim_fence = $3,
+                mint_claim_owner_id = $4,
+                mint_claimed_at_ms = $5,
+                mint_claim_expires_at_ms = $6,
+                mint_started_at_ms = NULL,
+                mint_started_owner_id = NULL,
+                mint_started_claim_fence = NULL,
+                mint_started_claimed_at_ms = NULL,
+                mint_started_claim_expires_at_ms = NULL,
+                next_mint_at_ms = NULL,
+                mint_failure_kind = NULL,
+                state_updated_at_ms = $5
+            WHERE authority_id = $1 AND generation = $2
+              AND state = 'mint_retry'
+              AND next_mint_at_ms <= $5
+            RETURNING {ISSUANCE_COLUMNS}
+            "
+        )))
+        .bind(request.key().authority_id().as_uuid())
+        .bind(pg_bigint(request.key().generation().get()))
+        .bind(i64_from_u64(next_fence)?)
+        .bind(request.worker().as_uuid())
+        .bind(database_now)
+        .bind(claim_expires_at)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(operation_error)?
+        .ok_or(GithubServerServiceStoreError::ClaimRejected)?;
+        let claimed = decode_claimed_mint(descriptor.identity().clone(), &row)?;
+        transaction.commit().await.map_err(operation_error)?;
+        Ok(claimed)
     }
 
     async fn begin_github_server_service_mint(
@@ -972,7 +1264,8 @@ async fn acquire_handoff(
         UnixMillis::new(database_now),
     )
     .await?;
-    if database_now >= consumer_expires_at.get()
+    if (request.consumer().action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults
+        && database_now >= consumer_expires_at.get())
         || database_now >= request.required_through().get()
         || consumer_expires_at
             .get()
@@ -1051,7 +1344,8 @@ async fn revalidate_handoff_consumer(
                 GithubServerServiceAction::PublishCheckRun => "publish",
                 GithubServerServiceAction::FetchPrivateRepositoryRevision
                 | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
-                | GithubServerServiceAction::DiscoverPrivateRepositorySchedules => {
+                | GithubServerServiceAction::DiscoverPrivateRepositorySchedules
+                | GithubServerServiceAction::ObserveWorkflowPermissionDefaults => {
                     return Err(GithubServerServiceStoreError::HandoffRejected);
                 }
             };
@@ -1154,6 +1448,63 @@ async fn revalidate_handoff_consumer(
             .bind(pg_bigint(identity.installation_id().get()))
             .bind(pg_bigint(identity.github_repository_id().get()))
             .bind(identity.github_repository_name().as_str())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(operation_error)?
+            .map(UnixMillis::new)
+        }
+        GithubServerServiceScope::WorkflowPermissionsRead => {
+            if consumer.action() != GithubServerServiceAction::ObserveWorkflowPermissionDefaults {
+                return Err(GithubServerServiceStoreError::HandoffRejected);
+            }
+            sqlx::query_scalar::<_, i64>(
+                r"
+                SELECT candidate.claimed_at_ms
+                  FROM github_workflow_permission_observation_candidates AS candidate
+                 WHERE candidate.tenant_id = $1
+                   AND candidate.observation_id = $2
+                   AND candidate.consumer_owner_id = $3
+                   AND candidate.consumer_claim_fence = $4
+                   AND candidate.consumer_action = $5
+                   AND candidate.consumer_revision = $6
+                   AND candidate.authority_id = $7
+                   AND candidate.authority_identity_digest = $8
+                   AND candidate.repository_id = $9
+                   AND candidate.provider_connection_id = $10
+                   AND candidate.provider_installation_id = $11
+                   AND candidate.github_app_id = $12
+                   AND candidate.github_repository_id = $13
+                   AND candidate.github_repository_name = $14
+                   AND candidate.github_app_client_id = $15
+                   AND candidate.github_app_jwt_issuer_kind = $16
+                   AND candidate.app_key_spki_sha256 = $17
+                   AND candidate.app_configuration_revision = $18
+                   AND candidate.policy_revision = $19
+                   AND candidate.claimed_at_ms <= $20
+                   AND candidate.expires_at_ms > $20
+                 FOR SHARE OF candidate
+                ",
+            )
+            .bind(identity.tenant().as_str())
+            .bind(consumer.consumer_id().as_uuid())
+            .bind(consumer.owner().as_uuid())
+            .bind(pg_bigint(consumer.fence().get()))
+            .bind(consumer.action().as_str())
+            .bind(pg_bigint(consumer.revision().get()))
+            .bind(identity.authority_id().as_uuid())
+            .bind(identity.identity_digest().as_bytes().as_slice())
+            .bind(identity.repository_id().as_uuid())
+            .bind(identity.connection_id().as_uuid())
+            .bind(pg_bigint(identity.installation_id().get()))
+            .bind(pg_bigint(identity.github_app_id().get()))
+            .bind(pg_bigint(identity.github_repository_id().get()))
+            .bind(identity.github_repository_name().as_str())
+            .bind(identity.app_client_id().as_str())
+            .bind(identity.jwt_issuer().as_str())
+            .bind(identity.app_key_spki_sha256().as_bytes().as_slice())
+            .bind(pg_bigint(identity.app_configuration_revision().get()))
+            .bind(pg_bigint(identity.policy_revision().get()))
+            .bind(observed_at.get())
             .fetch_optional(&mut *connection)
             .await
             .map_err(operation_error)?
@@ -1531,6 +1882,7 @@ async fn claim_next_maintenance(
             SELECT authority_id, generation, state, safe_erase_after_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND state IN (
                   'ready', 'indeterminate', 'revoke_pending',
                   'revoke_claimed', 'revoke_retry', 'quarantined'
@@ -1543,6 +1895,7 @@ async fn claim_next_maintenance(
                    LEAST(mint_claim_expires_at_ms, request_deadline_at_ms) AS due_at_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND state IN ('claimed', 'minting')
               AND LEAST(mint_claim_expires_at_ms, request_deadline_at_ms) <= $2
             ORDER BY LEAST(mint_claim_expires_at_ms, request_deadline_at_ms),
@@ -1552,6 +1905,7 @@ async fn claim_next_maintenance(
             SELECT authority_id, generation, request_deadline_at_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'mint_retry'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND request_deadline_at_ms <= $2
             ORDER BY request_deadline_at_ms, authority_id, generation
             LIMIT 64
@@ -1560,6 +1914,7 @@ async fn claim_next_maintenance(
                    request_deadline_at_ms, mint_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'mint_retry'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND next_mint_at_ms <= $2
             ORDER BY next_mint_at_ms, authority_id, generation
             LIMIT 64
@@ -1568,6 +1923,7 @@ async fn claim_next_maintenance(
                    safe_erase_after_ms, revoke_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'revoke_pending'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND state_updated_at_ms <= $2
             ORDER BY state_updated_at_ms, authority_id, generation
             LIMIT 64
@@ -1576,6 +1932,7 @@ async fn claim_next_maintenance(
                    safe_erase_after_ms, revoke_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'revoke_retry'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND next_revoke_at_ms <= $2
             ORDER BY next_revoke_at_ms, authority_id, generation
             LIMIT 64
@@ -1584,6 +1941,7 @@ async fn claim_next_maintenance(
                    safe_erase_after_ms, revoke_attempt_count
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'revoke_claimed'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND revoke_claim_expires_at_ms <= $2
             ORDER BY revoke_claim_expires_at_ms, authority_id, generation
             LIMIT 64
@@ -1593,6 +1951,7 @@ async fn claim_next_maintenance(
                    next_mint_not_before_ms
             FROM github_server_service_authorities
             WHERE tenant_id = $1 AND state = 'active'
+              AND ($4::UUID IS NULL OR id = $4)
               AND current_issuance_generation IS NULL
               AND refresh_issuance_generation IS NULL
               AND state_updated_at_ms <= $2
@@ -1603,6 +1962,7 @@ async fn claim_next_maintenance(
                    (provider_expires_at_ms::NUMERIC - 1680000)::BIGINT AS due_at_ms
             FROM github_server_service_authority_issuances
             WHERE tenant_id = $1 AND state = 'ready'
+              AND ($4::UUID IS NULL OR authority_id = $4)
               AND provider_expires_at_ms::NUMERIC - 1680000 <= $2
             ORDER BY provider_expires_at_ms::NUMERIC - 1680000,
                      authority_id, generation
@@ -1726,6 +2086,11 @@ async fn claim_next_maintenance(
     .bind(request.tenant().as_str())
     .bind(selection_now)
     .bind(selection_claim_expires_at)
+    .bind(
+        request
+            .authority()
+            .map(|selector| selector.authority_id().as_uuid()),
+    )
     .fetch_optional(&mut *transaction)
     .await
     .map_err(operation_error)?;
@@ -1744,6 +2109,12 @@ async fn claim_next_maintenance(
             .ok_or(GithubServerServiceStoreError::CorruptData)?;
     let mut descriptor = decode_authority(&authority_row)?;
     let selector = GithubServerServiceAuthoritySelector::from_identity(descriptor.identity());
+    if request
+        .authority()
+        .is_some_and(|expected| expected != &selector)
+    {
+        return Err(GithubServerServiceStoreError::ClaimRejected);
+    }
     let key = GithubServerServiceIssuanceKey::new(authority_id, generation);
     let mut operation_now = database_now_ms(&mut transaction).await?;
     if operation_now < selection_now {
@@ -3104,6 +3475,7 @@ fn decode_github_server_service_scope(value: &str) -> Option<GithubServerService
         "private_repository_source_read" => {
             Some(GithubServerServiceScope::PrivateRepositorySourceRead)
         }
+        "workflow_permissions_read" => Some(GithubServerServiceScope::WorkflowPermissionsRead),
         _ => None,
     }
 }
@@ -3133,6 +3505,9 @@ fn decode_github_server_service_action(value: &str) -> Option<GithubServerServic
         }
         "discover_private_repository_schedules" => {
             Some(GithubServerServiceAction::DiscoverPrivateRepositorySchedules)
+        }
+        "observe_workflow_permission_defaults" => {
+            Some(GithubServerServiceAction::ObserveWorkflowPermissionDefaults)
         }
         _ => None,
     }

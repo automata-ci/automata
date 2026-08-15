@@ -216,6 +216,8 @@ pub enum GithubServerServiceScope {
     ChecksWrite,
     /// Exactly `{"contents":"read"}` for private repository source reads.
     PrivateRepositorySourceRead,
+    /// Exactly `{"administration":"read"}` for effective workflow-permission discovery.
+    WorkflowPermissionsRead,
 }
 
 impl GithubServerServiceScope {
@@ -225,6 +227,7 @@ impl GithubServerServiceScope {
         match self {
             Self::ChecksWrite => "checks_write",
             Self::PrivateRepositorySourceRead => "private_repository_source_read",
+            Self::WorkflowPermissionsRead => "workflow_permissions_read",
         }
     }
 
@@ -234,6 +237,7 @@ impl GithubServerServiceScope {
         match self {
             Self::ChecksWrite => "{\"checks\":\"write\"}",
             Self::PrivateRepositorySourceRead => "{\"contents\":\"read\"}",
+            Self::WorkflowPermissionsRead => "{\"administration\":\"read\"}",
         }
     }
 
@@ -1626,6 +1630,8 @@ pub enum GithubServerServiceAction {
     FetchPrivateRepositoryChangedFiles,
     /// Resolve schedules from one exact claimed private default-branch revision.
     DiscoverPrivateRepositorySchedules,
+    /// Observe one repository's effective workflow-permission defaults.
+    ObserveWorkflowPermissionDefaults,
 }
 
 impl GithubServerServiceAction {
@@ -1640,6 +1646,7 @@ impl GithubServerServiceAction {
             Self::FetchPrivateRepositoryRevision => "fetch_private_repository_revision",
             Self::FetchPrivateRepositoryChangedFiles => "fetch_private_repository_changed_files",
             Self::DiscoverPrivateRepositorySchedules => "discover_private_repository_schedules",
+            Self::ObserveWorkflowPermissionDefaults => "observe_workflow_permission_defaults",
         }
     }
     /// Returns the only credential scope allowed for this action.
@@ -1654,6 +1661,9 @@ impl GithubServerServiceAction {
             | Self::FetchPrivateRepositoryChangedFiles
             | Self::DiscoverPrivateRepositorySchedules => {
                 GithubServerServiceScope::PrivateRepositorySourceRead
+            }
+            Self::ObserveWorkflowPermissionDefaults => {
+                GithubServerServiceScope::WorkflowPermissionsRead
             }
         }
     }
@@ -1675,9 +1685,8 @@ impl GithubServerServiceAction {
             | Self::ReconcileCheckRun
             | Self::FetchPrivateRepositoryRevision
             | Self::FetchPrivateRepositoryChangedFiles
-            | Self::DiscoverPrivateRepositorySchedules => {
-                MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS
-            }
+            | Self::DiscoverPrivateRepositorySchedules
+            | Self::ObserveWorkflowPermissionDefaults => MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS,
         }
     }
 }
@@ -1770,6 +1779,14 @@ impl AcquireGithubServerServiceHandoff {
             required_through,
             consumer.action().max_handoff_millis(),
         )?;
+        if consumer.action() == GithubServerServiceAction::ObserveWorkflowPermissionDefaults
+            && observed_at
+                .get()
+                .checked_add(consumer.action().provider_tail_millis())
+                != Some(required_through.get())
+        {
+            return Err(GithubServerServiceValueError::InvalidHandoff);
+        }
         Ok(Self {
             selector,
             proposed_handoff_id: handoff_id,
@@ -2285,6 +2302,7 @@ impl QuarantineGithubServerServiceCredential {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimNextGithubServerServiceMaintenance {
     tenant: TenantScope,
+    authority: Option<GithubServerServiceAuthoritySelector>,
     worker: GithubServerServiceWorkerId,
     observed_at: UnixMillis,
     claim_expires_at: UnixMillis,
@@ -2309,15 +2327,37 @@ impl ClaimNextGithubServerServiceMaintenance {
         )?;
         Ok(Self {
             tenant,
+            authority: None,
             worker,
             observed_at,
             claim_expires_at,
         })
     }
+    /// Constructs one bounded maintenance claim for one exact authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid interval or cross-tenant selector.
+    pub fn for_authority(
+        authority: GithubServerServiceAuthoritySelector,
+        worker: GithubServerServiceWorkerId,
+        observed_at: UnixMillis,
+        claim_expires_at: UnixMillis,
+    ) -> Result<Self, GithubServerServiceValueError> {
+        let tenant = authority.tenant().clone();
+        let mut request = Self::new(tenant, worker, observed_at, claim_expires_at)?;
+        request.authority = Some(authority);
+        Ok(request)
+    }
     /// Returns the authenticated tenant boundary.
     #[must_use]
     pub const fn tenant(&self) -> &TenantScope {
         &self.tenant
+    }
+    /// Returns the optional exact authority maintenance boundary.
+    #[must_use]
+    pub const fn authority(&self) -> Option<&GithubServerServiceAuthoritySelector> {
+        self.authority.as_ref()
     }
     /// Returns the maintenance worker identity.
     #[must_use]
@@ -2474,6 +2514,32 @@ pub trait GithubServerServiceAuthorityRepository: Send + Sync {
         tenant: &TenantScope,
         authority_id: GithubServerServiceAuthorityId,
     ) -> Result<GithubServerServiceAuthorityDescriptor, GithubServerServiceStoreError>;
+    /// Reads the descriptor's current value-free issuance projection.
+    async fn inspect_current_github_server_service_issuance(
+        &self,
+        tenant: &TenantScope,
+        authority_id: GithubServerServiceAuthorityId,
+    ) -> Result<Option<GithubServerServiceIssuanceReceipt>, GithubServerServiceStoreError>;
+    /// Lists the bounded non-retired authority set for one repository binding.
+    ///
+    /// Retiring rows remain visible so a restarted runtime can resume exact
+    /// provider revocation instead of abandoning durable credential custody.
+    async fn list_github_server_service_authorities_for_repository(
+        &self,
+        tenant: &TenantScope,
+        repository_id: RepositoryId,
+        connection_id: ProviderConnectionId,
+    ) -> Result<Vec<GithubServerServiceAuthorityDescriptor>, GithubServerServiceStoreError>;
+    /// Creates and claims the sole initial/refresh generation.
+    async fn claim_github_server_service_mint(
+        &self,
+        request: ClaimGithubServerServiceMint,
+    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError>;
+    /// Reclaims a definitively unissued retry generation.
+    async fn reclaim_github_server_service_mint(
+        &self,
+        request: ReclaimGithubServerServiceMint,
+    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError>;
     /// Persists the irreversible provider-call cutoff.
     async fn begin_github_server_service_mint(
         &self,

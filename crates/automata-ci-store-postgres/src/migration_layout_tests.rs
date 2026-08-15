@@ -133,6 +133,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0032_logical_activation_scheduling_policy.sql",
         "a1344c653b8d8b115265dfbe92caab6e4253167d68ee3cf996e368dfaffa7c39f61e7a81cd437bf73d11c7ce86ea2a7f",
     ),
+    (
+        "0033_github_workflow_permission_defaults.sql",
+        "0725af95c311d20f756f738e8828ed178f043c6e4fdf503f01bf3d82530c6d966319811f3a55a4ab8d20d28cf15b9b56",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

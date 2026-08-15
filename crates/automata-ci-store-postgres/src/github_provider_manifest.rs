@@ -265,7 +265,7 @@ impl GithubProviderManifestRepository for PostgresStore {
 }
 
 #[allow(clippy::single_match_else)] // Current and absent pointer states are symmetric.
-async fn bootstrap_locked_manifest(
+pub(super) async fn bootstrap_locked_manifest(
     transaction: &mut Transaction<'_, Postgres>,
     desired: &GithubProviderManifest,
     current: Option<GithubProviderManifestRecord>,
@@ -370,7 +370,7 @@ fn map_runtime_policy_error(
     }
 }
 
-async fn lock_or_create_tenant(
+pub(super) async fn lock_or_create_tenant(
     connection: &mut PgConnection,
     tenant: &str,
 ) -> Result<(), GithubProviderManifestStoreError> {
@@ -406,7 +406,7 @@ async fn lock_or_create_tenant(
     Ok(())
 }
 
-async fn lock_or_create_repository(
+pub(super) async fn lock_or_create_repository(
     connection: &mut PgConnection,
     manifest: &GithubProviderManifest,
 ) -> Result<(), GithubProviderManifestStoreError> {
@@ -546,7 +546,7 @@ async fn verify_repository_publication_policy(
     Ok(())
 }
 
-async fn lock_current_manifest(
+pub(super) async fn lock_current_manifest(
     connection: &mut PgConnection,
     connection_id: ProviderConnectionId,
 ) -> Result<Option<GithubProviderManifestRecord>, GithubProviderManifestStoreError> {

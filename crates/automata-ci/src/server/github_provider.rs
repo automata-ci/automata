@@ -30,7 +30,9 @@ use automata_ci_store::{
     GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
     GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository, GithubServerServiceAuthorityState,
-    GithubServerServiceScope, GithubServerServiceStoreError, ObjectKey, ProviderConnectionId,
+    GithubServerServiceScope, GithubServerServiceStoreError,
+    GithubWorkflowPermissionDefaultsObservationError,
+    GithubWorkflowPermissionDefaultsObservationRepository, ObjectKey, ProviderConnectionId,
     ProviderRepositoryVisibility, RegisterWorkflowRuntimePolicy, RepositoryId,
     Sha256Digest as StoreSha256Digest, TenantScope, WorkflowRuntimePolicy,
     WorkflowRuntimePolicyRevision, github_provider_repository_id,
@@ -120,7 +122,7 @@ impl GithubProviderBootstrapPlan {
         let mut runner_policies = Vec::with_capacity(config.repositories().len());
         let mut repositories = Vec::with_capacity(config.repositories().len());
         let mut runner_policy_digests = BTreeSet::new();
-        let mut authorities = Vec::with_capacity(config.repositories().len() * 2);
+        let mut authorities = Vec::with_capacity(config.repositories().len() * 3);
         let mut connections = Vec::with_capacity(config.repositories().len());
         let mut connection_ids = BTreeSet::new();
         let mut repository_selectors = BTreeSet::new();
@@ -205,6 +207,20 @@ impl GithubProviderBootstrapPlan {
             }
             authorities.push(checks);
 
+            let workflow_permissions = authority_identity(
+                config,
+                repository,
+                repository.workflow_permissions_authority(),
+                connection_id,
+                GithubServerServiceScope::WorkflowPermissionsRead,
+                app_key_spki_sha256,
+                broker_policy_fingerprint,
+            )?;
+            if !authority_ids.insert(workflow_permissions.authority_id()) {
+                return Err(GithubProviderBootstrapError::DuplicateSelector);
+            }
+            authorities.push(workflow_permissions);
+
             match (
                 repository.visibility(),
                 repository.private_source_authority(),
@@ -280,6 +296,80 @@ impl GithubProviderBootstrapPlan {
     #[must_use]
     pub fn authorities(&self) -> &[GithubServerServiceAuthorityIdentity] {
         &self.authorities
+    }
+
+    #[must_use]
+    pub(crate) fn staged_credential_request_resolver(
+        &self,
+    ) -> GithubProviderCredentialRequestResolver {
+        self.resolver.clone()
+    }
+
+    /// Prepares repository identities and exact staged authorities without
+    /// publishing a runtime-policy or provider-manifest current pointer.
+    pub(crate) async fn prepare_workflow_permission_bootstrap<R>(
+        &self,
+        repository: &R,
+        applied_at: UnixMillis,
+    ) -> Result<(), GithubProviderBootstrapError>
+    where
+        R: GithubServerServiceAuthorityRepository
+            + GithubWorkflowPermissionDefaultsObservationRepository
+            + ?Sized,
+    {
+        if applied_at.get() < 0 {
+            return Err(GithubProviderBootstrapError::InvalidConfiguration);
+        }
+        let mut existing = Vec::with_capacity(self.authorities.len());
+        for authority in self.authorities.iter() {
+            existing.push(
+                match repository
+                    .inspect_github_server_service_authority(
+                        authority.tenant(),
+                        authority.authority_id(),
+                    )
+                    .await
+                {
+                    Ok(descriptor) => {
+                        validate_authority_descriptor(&descriptor, authority)?;
+                        true
+                    }
+                    Err(GithubServerServiceStoreError::NotFound) => false,
+                    Err(error) => return Err(map_authority_store_error(&error)),
+                },
+            );
+        }
+        for manifest in self.manifests.iter() {
+            repository
+                .prepare_github_workflow_permission_target(manifest)
+                .await
+                .map_err(map_workflow_permission_store_error)?;
+        }
+        for (authority, exists) in self.authorities.iter().zip(existing) {
+            if exists {
+                continue;
+            }
+            let request = EnsureGithubServerServiceAuthority::new(authority.clone(), applied_at)
+                .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?;
+            let descriptor = repository
+                .ensure_github_server_service_authority(request)
+                .await
+                .map_err(|error| map_authority_store_error(&error))?;
+            validate_authority_descriptor(&descriptor, authority)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn repository_bootstrap_request(
+        &self,
+        index: usize,
+        applied_at: UnixMillis,
+    ) -> Result<BootstrapGithubProviderRepository, GithubProviderBootstrapError> {
+        let repository = self
+            .repositories
+            .get(index)
+            .ok_or(GithubProviderBootstrapError::InvalidConfiguration)?;
+        repository_bootstrap_request(repository, applied_at)
     }
 
     /// Returns exact webhook delivery connections in stable repository order.
@@ -681,19 +771,7 @@ where
         applied_at: UnixMillis,
     ) -> Result<(bool, bool), GithubProviderBootstrapError> {
         let policy = &repository.runtime_policy;
-        let request = RegisterWorkflowRuntimePolicy::new(
-            policy.tenant.clone(),
-            policy.repository_id,
-            policy.revision,
-            policy.policy.clone(),
-            applied_at,
-        )
-        .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?;
-        let manifest_request =
-            BootstrapGithubProviderManifest::new(repository.manifest.clone(), applied_at)
-                .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?;
-        let request = BootstrapGithubProviderRepository::new(request, manifest_request)
-            .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?;
+        let request = repository_bootstrap_request(repository, applied_at)?;
         let receipt = self
             .repository
             .bootstrap_github_provider_repository(request)
@@ -760,6 +838,45 @@ where
                 Ok(true)
             }
             Err(error) => Err(map_authority_store_error(&error)),
+        }
+    }
+}
+
+fn repository_bootstrap_request(
+    repository: &RepositoryBootstrap,
+    applied_at: UnixMillis,
+) -> Result<BootstrapGithubProviderRepository, GithubProviderBootstrapError> {
+    let policy = &repository.runtime_policy;
+    let policy_request = RegisterWorkflowRuntimePolicy::new(
+        policy.tenant.clone(),
+        policy.repository_id,
+        policy.revision,
+        policy.policy.clone(),
+        applied_at,
+    )
+    .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?;
+    let manifest_request =
+        BootstrapGithubProviderManifest::new(repository.manifest.clone(), applied_at)
+            .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)?;
+    BootstrapGithubProviderRepository::new(policy_request, manifest_request)
+        .map_err(|_| GithubProviderBootstrapError::InvalidConfiguration)
+}
+
+const fn map_workflow_permission_store_error(
+    error: GithubWorkflowPermissionDefaultsObservationError,
+) -> GithubProviderBootstrapError {
+    match error {
+        GithubWorkflowPermissionDefaultsObservationError::InvalidBinding => {
+            GithubProviderBootstrapError::InvalidConfiguration
+        }
+        GithubWorkflowPermissionDefaultsObservationError::Operation => {
+            GithubProviderBootstrapError::Unavailable
+        }
+        GithubWorkflowPermissionDefaultsObservationError::Conflict => {
+            GithubProviderBootstrapError::ConfigurationDrift
+        }
+        GithubWorkflowPermissionDefaultsObservationError::CorruptData => {
+            GithubProviderBootstrapError::InconsistentState
         }
     }
 }

@@ -16,13 +16,16 @@ use automata_ci_credential_github::{
     GithubInstallationTokenRevocationOutcome,
 };
 use automata_ci_store::{
-    GithubRepositoryId, GithubRuntimeAuthorityActivationSelectionTail,
+    GithubRepositoryId, GithubRepositoryName, GithubRuntimeAuthorityActivationSelectionTail,
     GithubRuntimeAuthorityIdentity, GithubRuntimeAuthorityMaterializationSelectionTail,
     GithubRuntimeAuthorityNamespace, GithubRuntimeAuthorityPreparationSelectionTail,
-    GithubServerServiceAuthorityIdentity, LogicalActivationGeneration,
-    LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
+    LogicalActivationGeneration, LogicalActivationPreparationGeneration, LogicalActivationWorkerId,
     LogicalMaterializationGeneration, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    RunnerGeneration, SessionEpoch, StableRunnerSlot,
+    ProviderConnectionId, ProviderInstallationId, ProviderRepositoryId, RepositoryId,
+    RunnerGeneration, SessionEpoch, StableRunnerSlot, TenantScope,
 };
 use serde_json::{Value, json};
 use url::Url;
@@ -106,6 +109,7 @@ fn repository(
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority),
+            "workflow_permissions_read": authority(checks_authority + 0x1000_0000),
             "private_repository_source_read": private_authority
                 .map_or(Value::Null, authority)
         }
@@ -114,7 +118,7 @@ fn repository(
 
 fn document(repositories: &[Value]) -> Value {
     json!({
-        "schema": 2,
+        "schema": 3,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
@@ -196,6 +200,7 @@ fn set_repository_revisions(repository: &mut Value, manifest: u64, policy: u64) 
     repository["manifest_revision"] = json!(manifest);
     repository["policy_revision"] = json!(policy);
     repository["authorities"]["checks_write"]["policy_revision"] = json!(policy);
+    repository["authorities"]["workflow_permissions_read"]["policy_revision"] = json!(policy);
 }
 
 fn live_test_broker(
@@ -416,6 +421,78 @@ fn same_installation_current_policy_revisions_share_one_configuration_pin() {
         fixture.broker.app_key_spki_sha256(),
         fixture.pin.app_key_spki_sha256
     );
+}
+
+#[test]
+fn installation_replacement_has_no_retained_revocation_route() {
+    let current = GithubServerServiceAuthorityIdentity::new(
+        TenantScope::from_authenticated_tenant_id("tenant-route").expect("tenant"),
+        GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0xfeec))
+            .expect("current authority"),
+        RepositoryId::from_uuid(Uuid::from_u128(0xfeeb)),
+        ProviderConnectionId::from_uuid(Uuid::from_u128(0xfeea)).expect("connection"),
+        ProviderInstallationId::new(11).expect("installation"),
+        GithubServerServiceAppId::new(17).expect("App ID"),
+        ProviderRepositoryId::new(13).expect("provider repository ID"),
+        GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
+        GithubServerServiceScope::WorkflowPermissionsRead,
+        GithubServerServiceAppClientId::new("Iv1.automata-test").expect("App client ID"),
+        GithubServerServiceJwtIssuer::AppClientId,
+        Sha256Digest::from_bytes([0x51; 32]),
+        GithubServerServiceRevision::new(3).expect("App revision"),
+        GithubServerServiceRevision::new(5).expect("policy revision"),
+        Sha256Digest::from_bytes([0x61; 32]),
+    )
+    .expect("current identity");
+    let replacement = GithubServerServiceAuthorityIdentity::new(
+        current.tenant().clone(),
+        GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0xfeed))
+            .expect("replacement authority"),
+        current.repository_id(),
+        current.connection_id(),
+        ProviderInstallationId::new(current.installation_id().get() + 1)
+            .expect("replacement installation"),
+        current.github_app_id(),
+        current.github_repository_id(),
+        current.github_repository_name().clone(),
+        current.scope(),
+        current.app_client_id().clone(),
+        current.jwt_issuer(),
+        current.app_key_spki_sha256(),
+        current.app_configuration_revision(),
+        current.policy_revision(),
+        current.configuration_fingerprint(),
+    )
+    .expect("replacement identity");
+    let transport_replacement = GithubServerServiceAuthorityIdentity::new(
+        current.tenant().clone(),
+        GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0xfeee))
+            .expect("transport replacement authority"),
+        current.repository_id(),
+        current.connection_id(),
+        current.installation_id(),
+        current.github_app_id(),
+        current.github_repository_id(),
+        current.github_repository_name().clone(),
+        current.scope(),
+        current.app_client_id().clone(),
+        current.jwt_issuer(),
+        current.app_key_spki_sha256(),
+        current.app_configuration_revision(),
+        current.policy_revision(),
+        Sha256Digest::from_bytes([0xa5; 32]),
+    )
+    .expect("transport replacement identity");
+
+    assert!(shares_server_service_revocation_route(&current, &current));
+    assert!(!shares_server_service_revocation_route(
+        &current,
+        &replacement
+    ));
+    assert!(!shares_server_service_revocation_route(
+        &current,
+        &transport_replacement
+    ));
 }
 
 #[tokio::test]
@@ -688,15 +765,15 @@ impl fmt::Debug for FakeCredentialMaintenance {
 
 #[async_trait]
 impl CredentialMaintenancePort for FakeCredentialMaintenance {
-    async fn coordinate_next(
+    async fn coordinate_authority(
         &self,
-        tenant: TenantScope,
+        selector: GithubServerServiceAuthoritySelector,
         custody: CredentialMaintenanceCustody,
     ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
         self.log
             .lock()
             .expect("log lock")
-            .push(format!("coordinate:{}", tenant.as_str()));
+            .push(format!("coordinate:{}", selector.tenant().as_str()));
         let step = self
             .steps
             .lock()
@@ -728,19 +805,391 @@ impl CredentialMaintenancePort for FakeCredentialMaintenance {
     }
 }
 
-fn tenants() -> Arc<[TenantScope]> {
-    vec![
-        TenantScope::from_authenticated_tenant_id("tenant-a").expect("tenant"),
-        TenantScope::from_authenticated_tenant_id("tenant-b").expect("tenant"),
-    ]
-    .into()
+fn maintenance_authorities() -> Arc<[GithubServerServiceAuthoritySelector]> {
+    ["tenant-a", "tenant-b"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, tenant)| {
+            GithubServerServiceAuthoritySelector::from_durable_parts(
+                TenantScope::from_authenticated_tenant_id(tenant).expect("tenant"),
+                GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(index as u128 + 1))
+                    .expect("authority ID"),
+                Sha256Digest::from_bytes(
+                    [u8::try_from(index).expect("bounded authority fixture index") + 1; 32],
+                ),
+                GithubServerServiceRevision::new(1).expect("app revision"),
+                GithubServerServiceRevision::new(1).expect("policy revision"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
 
 fn credential_commit_supervisor() -> Arc<CredentialMaintenanceCommitSupervisor> {
     Arc::new(CredentialMaintenanceCommitSupervisor::new(
         tokio::runtime::Handle::current(),
         Duration::from_millis(1),
+        1,
     ))
+}
+
+#[test]
+fn workflow_permission_refresh_budget_covers_the_maximum_topology() {
+    let (round, attempt) = workflow_permission_refresh_budgets(256).expect("bounded topology");
+    assert_eq!(round, Duration::from_millis(157_500));
+    assert_eq!(attempt, Duration::from_micros(19_687_500));
+    assert_eq!(
+        round.checked_mul(2).expect("two bounded round tails")
+            + Duration::from_millis(
+                u64::try_from(WORKFLOW_PERMISSION_INITIAL_RETRY_JITTER_MARGIN_MILLIS)
+                    .expect("retry margin"),
+            )
+            + Duration::from_millis(
+                u64::try_from(WORKFLOW_PERMISSION_REFRESH_SAFETY_MARGIN_MILLIS)
+                    .expect("commit margin"),
+            ),
+        Duration::from_mins(7) + Duration::from_secs(30)
+    );
+    assert!(workflow_permission_refresh_budgets(0).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn workflow_permission_convergence_contention_is_rate_limited_and_cancellable() {
+    let sleeper = tokio::spawn(sleep_workflow_permission_convergence_retry(
+        Instant::now() + Duration::from_secs(10),
+    ));
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(99)).await;
+    tokio::task::yield_now().await;
+    assert!(!sleeper.is_finished());
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert!(sleeper.await.expect("retry sleeper task").is_ok());
+
+    let cancelled = tokio::spawn(sleep_workflow_permission_convergence_retry(
+        Instant::now() + Duration::from_secs(10),
+    ));
+    tokio::task::yield_now().await;
+    cancelled.abort();
+    assert!(cancelled.await.is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn transient_workflow_permission_refresh_does_not_hot_loop() {
+    let owner = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(91)).expect("worker");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stop = CancellationToken::new();
+    let task_calls = Arc::clone(&calls);
+    let task_stop = stop.clone();
+    let driver = tokio::spawn(async move {
+        drive_workflow_permission_refresh_loop(
+            move || {
+                let calls = Arc::clone(&task_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::AcqRel);
+                    Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)
+                }
+            },
+            owner,
+            task_stop,
+        )
+        .await
+    });
+
+    while calls.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    tokio::task::yield_now().await;
+    let cadence = Duration::from_millis(
+        u64::try_from(automata_ci_store::GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS / 2)
+            .expect("half freshness"),
+    );
+    let first_delay = jittered_workflow_permission_retry_delay(
+        WORKFLOW_PERMISSION_REFRESH_RETRY_MIN,
+        owner,
+        0,
+        cadence,
+    );
+    tokio::time::advance(
+        first_delay
+            .checked_sub(Duration::from_millis(1))
+            .expect("positive retry delay"),
+    )
+    .await;
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    for _ in 0..16 {
+        if calls.load(Ordering::Acquire) > 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    stop.cancel();
+    assert!(driver.await.expect("refresh driver task").is_ok());
+}
+
+fn workflow_permission_duration(millis: i64, label: &'static str) -> Duration {
+    Duration::from_millis(u64::try_from(millis).expect(label))
+}
+
+fn assert_refresh_recovery_budget(round: Duration, retry: Duration, cadence: Duration) {
+    let freshness = workflow_permission_duration(
+        automata_ci_store::GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
+        "freshness",
+    );
+    let commit_margin = workflow_permission_duration(
+        WORKFLOW_PERMISSION_REFRESH_SAFETY_MARGIN_MILLIS,
+        "commit margin",
+    );
+    let remaining = freshness
+        .checked_sub(cadence)
+        .expect("cadence is shorter than freshness");
+    assert!(
+        round.checked_mul(2).expect("two bounded round tails") + retry + commit_margin <= remaining
+    );
+}
+
+async fn advance_until_call_count(calls: &AtomicUsize, duration: Duration, expected: usize) {
+    tokio::time::advance(duration).await;
+    for _ in 0..16 {
+        if calls.load(Ordering::Acquire) >= expected {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::Acquire), expected);
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_failed_refresh_round_can_recover_before_the_prior_head_expires() {
+    let owner = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(94)).expect("worker");
+    let round = workflow_permission_refresh_round_budget().expect("round budget");
+    let cadence = workflow_permission_duration(
+        automata_ci_store::GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS / 2,
+        "half freshness",
+    );
+    let retry = jittered_workflow_permission_retry_delay(
+        WORKFLOW_PERMISSION_REFRESH_RETRY_MIN,
+        owner,
+        0,
+        cadence,
+    );
+    assert_refresh_recovery_budget(round, retry, cadence);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let prior_observed_at = Arc::new(Mutex::new(None));
+    let recovered_at = Arc::new(Mutex::new(None));
+    let stop = CancellationToken::new();
+    let task_calls = Arc::clone(&calls);
+    let task_prior_observed_at = Arc::clone(&prior_observed_at);
+    let task_recovered_at = Arc::clone(&recovered_at);
+    let task_stop = stop.clone();
+    let driver = tokio::spawn(async move {
+        drive_workflow_permission_refresh_loop(
+            move || {
+                let calls = Arc::clone(&task_calls);
+                let prior_observed_at = Arc::clone(&task_prior_observed_at);
+                let recovered_at = Arc::clone(&task_recovered_at);
+                async move {
+                    let call = calls.fetch_add(1, Ordering::AcqRel);
+                    if call == 0 {
+                        *prior_observed_at.lock().expect("prior observation lock") =
+                            Some(tokio::time::Instant::now());
+                    }
+                    tokio::time::sleep(round).await;
+                    if call == 1 {
+                        Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)
+                    } else {
+                        if call == 2 {
+                            *recovered_at.lock().expect("recovery lock") =
+                                Some(tokio::time::Instant::now());
+                        }
+                        Ok(WorkflowPermissionRefreshOutcome::Ready)
+                    }
+                }
+            },
+            owner,
+            task_stop,
+        )
+        .await
+    });
+
+    while calls.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    // This target is observed at the beginning of the successful round while
+    // other targets consume the remaining budget. In the next round it moves
+    // to the tail and fails, then moves to the retry tail before recovering.
+    advance_until_call_count(&calls, round, 1).await;
+    advance_until_call_count(
+        &calls,
+        cadence
+            .checked_sub(round)
+            .expect("round fits inside cadence"),
+        2,
+    )
+    .await;
+    advance_until_call_count(&calls, round, 2).await;
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    advance_until_call_count(&calls, retry, 3).await;
+
+    tokio::time::advance(round).await;
+    for _ in 0..16 {
+        if recovered_at.lock().expect("recovery lock").is_some() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let prior_observed_at = prior_observed_at
+        .lock()
+        .expect("prior observation lock")
+        .expect("prior observation");
+    let recovered_at = recovered_at
+        .lock()
+        .expect("recovery lock")
+        .expect("recovery observation");
+    let freshness = workflow_permission_duration(
+        automata_ci_store::GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
+        "freshness",
+    );
+    let commit_margin = workflow_permission_duration(
+        WORKFLOW_PERMISSION_REFRESH_SAFETY_MARGIN_MILLIS,
+        "commit margin",
+    );
+    assert!(recovered_at.duration_since(prior_observed_at) + commit_margin <= freshness);
+    stop.cancel();
+    assert!(driver.await.expect("refresh driver task").is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn mixed_policy_mismatch_round_preserves_start_to_start_cadence() {
+    let owner = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(92)).expect("worker");
+    let round = workflow_permission_refresh_round_budget().expect("round budget");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stop = CancellationToken::new();
+    let task_calls = Arc::clone(&calls);
+    let task_stop = stop.clone();
+    let driver = tokio::spawn(async move {
+        drive_workflow_permission_refresh_loop(
+            move || {
+                let calls = Arc::clone(&task_calls);
+                async move {
+                    let call = calls.fetch_add(1, Ordering::AcqRel);
+                    if call == 0 {
+                        tokio::time::sleep(round).await;
+                    }
+                    Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch)
+                }
+            },
+            owner,
+            task_stop,
+        )
+        .await
+    });
+
+    while calls.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 1..450 {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..16 {
+        if calls.load(Ordering::Acquire) > 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    stop.cancel();
+    assert!(driver.await.expect("refresh driver task").is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn workflow_permission_refresh_cancellation_drops_a_blocked_round() {
+    let owner = GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(93)).expect("worker");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stop = CancellationToken::new();
+    let task_calls = Arc::clone(&calls);
+    let task_stop = stop.clone();
+    let driver = tokio::spawn(async move {
+        drive_workflow_permission_refresh_loop(
+            move || {
+                let calls = Arc::clone(&task_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::AcqRel);
+                    std::future::pending::<
+                        Result<WorkflowPermissionRefreshOutcome, GithubProviderRuntimeBuildError>,
+                    >()
+                    .await
+                }
+            },
+            owner,
+            task_stop,
+        )
+        .await
+    });
+
+    while calls.load(Ordering::Acquire) == 0 {
+        tokio::task::yield_now().await;
+    }
+    stop.cancel();
+    assert!(driver.await.expect("refresh driver task").is_ok());
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
+#[tokio::test]
+async fn service_credential_commit_capacity_is_exact_and_reusable() {
+    let supervisor = CredentialMaintenanceCommitSupervisor::new(
+        tokio::runtime::Handle::current(),
+        Duration::from_millis(1),
+        2,
+    );
+    let first = supervisor.try_reserve().expect("first bounded permit");
+    let second = supervisor.try_reserve().expect("second bounded permit");
+    assert!(supervisor.try_reserve().is_none());
+    drop(first);
+    assert!(supervisor.try_reserve().is_some());
+    drop(second);
+}
+
+#[tokio::test]
+async fn cancelled_service_credential_reservation_does_not_leak_drain_state() {
+    let supervisor = Arc::new(CredentialMaintenanceCommitSupervisor::new(
+        tokio::runtime::Handle::current(),
+        Duration::from_millis(1),
+        1,
+    ));
+    let held = supervisor.try_reserve().expect("held bounded permit");
+    let waiter_supervisor = Arc::clone(&supervisor);
+    let waiter = tokio::spawn(async move {
+        waiter_supervisor
+            .reserve_until(Instant::now() + Duration::from_secs(30))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while supervisor.outstanding.load(Ordering::Acquire) != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("waiter reached the cancellable semaphore wait");
+    waiter.abort();
+    assert!(waiter.await.is_err());
+    drop(held);
+    assert!(supervisor.drain(Duration::from_secs(1)).await);
+    assert!(supervisor.try_reserve().is_some());
 }
 
 #[tokio::test]
@@ -762,7 +1211,7 @@ async fn pending_commit_replays_exactly_before_more_fair_maintenance() {
     run_credential_maintenance_loop(
         maintenance,
         credential_commit_supervisor(),
-        tenants(),
+        maintenance_authorities(),
         Duration::from_millis(1),
         stop,
     )
@@ -797,7 +1246,7 @@ async fn shutdown_replays_a_closed_commit_before_maintenance_stops() {
     run_credential_maintenance_loop(
         maintenance,
         supervisor.clone(),
-        tenants(),
+        maintenance_authorities(),
         Duration::from_millis(1),
         stop,
     )
@@ -1015,7 +1464,8 @@ async fn removed_finish_custody_rejects_its_exact_stale_driver() {
         .custody
         .lock()
         .expect("service-credential custody lock")
-        .clone()
+        .first()
+        .cloned()
         .expect("Finish custody retained before confirmation");
     release.cancel();
     completion.await.expect("confirmed Finish commit");
@@ -1054,9 +1504,9 @@ impl fmt::Debug for PanicAfterCredentialHandoffMaintenance {
 
 #[async_trait]
 impl CredentialMaintenancePort for PanicAfterCredentialHandoffMaintenance {
-    async fn coordinate_next(
+    async fn coordinate_authority(
         &self,
-        _tenant: TenantScope,
+        _selector: GithubServerServiceAuthoritySelector,
         custody: CredentialMaintenanceCustody,
     ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
         let _completion = custody.supervise(Box::new(GatedPendingCommit {
@@ -1081,7 +1531,7 @@ async fn caller_task_loss_after_handoff_preserves_exact_commit_and_reuses_permit
     let run = tokio::spawn(run_credential_maintenance_loop(
         maintenance,
         supervisor.clone(),
-        tenants(),
+        maintenance_authorities(),
         Duration::from_millis(1),
         stop,
     ));
@@ -1118,9 +1568,9 @@ impl fmt::Debug for FatalPendingMaintenance {
 
 #[async_trait]
 impl CredentialMaintenancePort for FatalPendingMaintenance {
-    async fn coordinate_next(
+    async fn coordinate_authority(
         &self,
-        _tenant: TenantScope,
+        _selector: GithubServerServiceAuthoritySelector,
         custody: CredentialMaintenanceCustody,
     ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
         self.pending_started.cancel();
@@ -1140,9 +1590,9 @@ impl fmt::Debug for GatedPendingMaintenance {
 
 #[async_trait]
 impl CredentialMaintenancePort for GatedPendingMaintenance {
-    async fn coordinate_next(
+    async fn coordinate_authority(
         &self,
-        _tenant: TenantScope,
+        _selector: GithubServerServiceAuthoritySelector,
         custody: CredentialMaintenanceCustody,
     ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
         self.stop.cancel();
@@ -1166,7 +1616,7 @@ async fn shutdown_hands_an_unconfirmed_exact_commit_to_independent_custody() {
     let run = run_credential_maintenance_loop(
         maintenance,
         supervisor.clone(),
-        tenants(),
+        maintenance_authorities(),
         Duration::from_millis(1),
         stop,
     );
@@ -1518,7 +1968,7 @@ async fn first_fatal_exit_notifies_before_pending_commit_and_release_drain_finis
                 run_credential_maintenance_loop(
                     maintenance,
                     loop_commit_supervisor,
-                    tenants(),
+                    maintenance_authorities(),
                     Duration::from_millis(1),
                     stop,
                 )
@@ -1601,7 +2051,7 @@ async fn shutdown_timeout_is_visible_for_an_unconfirmed_service_credential_commi
                 run_credential_maintenance_loop(
                     maintenance,
                     loop_commit_supervisor,
-                    tenants(),
+                    maintenance_authorities(),
                     Duration::from_millis(1),
                     stop,
                 )

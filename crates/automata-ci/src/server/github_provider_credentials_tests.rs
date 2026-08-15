@@ -6,12 +6,17 @@ use std::{
     time::Duration,
 };
 
+use automata_ci_core::{
+    Architecture, EnvironmentProfile, EnvironmentProfileId, JobResourceAllocation,
+    JobResourcePolicy, OperatingSystem, ResourceCapacity, RunnerLabel,
+};
 use automata_ci_credential_github::GithubServerServiceMintCutoffOutcome;
 use automata_ci_key_management::{
     EnvelopeCodec, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
 use automata_ci_store::{
-    AdmissionObject, BeginGithubServerServiceMint, ClaimNextGithubServerServiceMaintenance,
+    AdmissionObject, BeginGithubServerServiceMint, BootstrapGithubProviderManifest,
+    BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
     FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS,
     GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckAppId, GithubCheckHeadSha, GithubCheckName,
@@ -33,7 +38,8 @@ use automata_ci_store::{
     ProviderConnectionId, ProviderDeliveryId, ProviderDeliveryIdentity, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
-    ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest, TenantScope,
+    RegisterWorkflowRuntimePolicy, ReleaseGithubServerServiceHandoff, RepositoryId, Sha256Digest,
+    TenantScope, WorkflowPermissionPolicy, WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping,
     WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use sha2::{Digest as _, Sha256};
@@ -529,7 +535,15 @@ fn authority_descriptor(
 }
 
 fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProviderManifest {
-    let runner_policy_digest = Sha256Digest::from_bytes([0x71; 32]);
+    let policy = test_runtime_policy();
+    let runner_policy_digest = policy.canonical_digest();
+    let runner_policy_size = u64::try_from(
+        policy
+            .canonical_bytes()
+            .expect("canonical runtime policy")
+            .len(),
+    )
+    .expect("policy size");
     let runner_policy = GithubProviderRunnerPolicyObject::new(
         AdmissionObject::new(
             runner_policy_digest,
@@ -537,7 +551,7 @@ fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProvider
                 "github/runner-policy/v1/{runner_policy_digest}.json"
             ))
             .expect("runner policy key"),
-            1,
+            runner_policy_size,
             GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE,
         )
         .expect("runner policy object"),
@@ -562,7 +576,7 @@ fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProvider
         automata_ci_core::JobAuthorityProfile::Standard,
         runner_policy,
         WorkflowRuntimePolicyRevision::new(1).expect("runtime policy revision"),
-        Sha256Digest::from_bytes([0x73; 32]),
+        policy.digest(),
         GithubProviderWorkflowSelection::all_direct(),
         GithubProviderGitRef::main(),
         GithubCheckName::new("Automata CI").expect("Check name"),
@@ -571,6 +585,59 @@ fn schedule_manifest(visibility: ProviderRepositoryVisibility) -> GithubProvider
         GithubProviderManifestRevision::new(3).expect("manifest revision"),
     )
     .with_repository_owner_id(ProviderRepositoryOwnerId::new(19).expect("owner ID"))
+}
+
+fn test_runtime_policy() -> WorkflowRuntimePolicy {
+    let mapping = WorkflowRuntimePolicyMapping::new(
+        RunnerLabel::new("ubuntu-latest").expect("runner label"),
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("automata.test/ubuntu-24.04").expect("profile ID"),
+            Sha256Digest::from_bytes([0x22; 32]),
+        ),
+        OperatingSystem::Linux,
+        Architecture::X86_64,
+        [],
+    )
+    .expect("runtime mapping");
+    let defaults = JobResourceAllocation::new(
+        ResourceCapacity::new(100, 256 * 1024 * 1024, 0, 0),
+        ResourceCapacity::new(1_000, 1024 * 1024 * 1024, 0, 0),
+    )
+    .expect("resource defaults");
+    let resources = JobResourcePolicy::new(
+        defaults,
+        ResourceCapacity::new(100, 128 * 1024 * 1024, 0, 0),
+        ResourceCapacity::new(4_000, 8 * 1024 * 1024 * 1024, 0, 0),
+    )
+    .expect("resource policy");
+    WorkflowRuntimePolicy::new(
+        "/__w",
+        [mapping],
+        WorkflowPermissionPolicy::from_github_default(
+            automata_ci_github::GithubDefaultWorkflowPermission::Read,
+        )
+        .expect("permission policy"),
+        resources,
+    )
+    .expect("runtime policy")
+}
+
+fn observation_bootstrap(
+    visibility: ProviderRepositoryVisibility,
+) -> BootstrapGithubProviderRepository {
+    let manifest = schedule_manifest(visibility);
+    let policy = test_runtime_policy();
+    let policy = RegisterWorkflowRuntimePolicy::new(
+        manifest.tenant().clone(),
+        manifest.repository_id(),
+        manifest.runtime_policy_revision(),
+        policy,
+        UnixMillis::new(OBSERVED_AT),
+    )
+    .expect("policy registration");
+    let manifest = BootstrapGithubProviderManifest::new(manifest, UnixMillis::new(OBSERVED_AT))
+        .expect("manifest bootstrap");
+    BootstrapGithubProviderRepository::new(policy, manifest).expect("repository bootstrap")
 }
 
 fn schedule_discovery_claim() -> GithubScheduleDiscoveryClaim {
@@ -873,6 +940,107 @@ fn registry_is_bounded_unique_and_implements_both_delivery_ports() {
         GithubProviderCredentialAdapters::with_handoffs(fake, &[checks.clone(), checks]),
         Err(GithubProviderCredentialAdapterConfigurationError::InvalidAuthorityRegistry)
     ));
+}
+
+#[test]
+fn workflow_permission_observation_is_manifest_and_authority_bound() {
+    let workflow_permissions = authority(GithubServerServiceScope::WorkflowPermissionsRead, 0x69);
+    let bootstrap = observation_bootstrap(ProviderRepositoryVisibility::Public);
+    let manifest = bootstrap.manifest().manifest();
+    assert!(workflow_permission_identity_matches(
+        &workflow_permissions,
+        manifest
+    ));
+
+    let owner =
+        GithubServerServiceWorkerId::from_uuid(Uuid::from_u128(0x6b)).expect("observation owner");
+    let candidate = automata_ci_store::GithubWorkflowPermissionObservationCandidate::new(
+        &bootstrap,
+        &workflow_permissions,
+        GithubServerServiceConsumerId::from_uuid(Uuid::from_u128(0x6c)).expect("observation ID"),
+        owner,
+        UnixMillis::new(OBSERVED_AT),
+    )
+    .expect("manifest-bound candidate");
+    let consumer = candidate.consumer();
+    assert_eq!(consumer.consumer_id(), candidate.observation_id());
+    assert_eq!(consumer.owner(), owner);
+    assert_eq!(consumer.fence().get(), manifest.revision().get());
+    assert_eq!(
+        consumer.action(),
+        GithubServerServiceAction::ObserveWorkflowPermissionDefaults
+    );
+    assert_eq!(
+        consumer.revision().get(),
+        manifest.runtime_policy_revision().get()
+    );
+
+    let release = ReleaseGithubServerServiceHandoff::new(
+        candidate.authority_selector().clone(),
+        GithubServerServiceHandoffId::from_uuid(Uuid::from_u128(0x6d)).expect("handoff ID"),
+        candidate.consumer(),
+        UnixMillis::new(OBSERVED_AT + 20),
+    )
+    .expect("release");
+    let read = automata_ci_store::GithubWorkflowPermissionDefaultsObservation::new(
+        &bootstrap,
+        candidate.clone(),
+        &release,
+        GithubServerServiceGeneration::new(1).expect("generation"),
+        automata_ci_github::GithubDefaultWorkflowPermission::Read,
+        false,
+        UnixMillis::new(OBSERVED_AT + 10),
+    )
+    .expect("exact observation");
+    let review_enabled = automata_ci_store::GithubWorkflowPermissionDefaultsObservation::new(
+        &bootstrap,
+        candidate.clone(),
+        &release,
+        GithubServerServiceGeneration::new(1).expect("generation"),
+        automata_ci_github::GithubDefaultWorkflowPermission::Read,
+        true,
+        UnixMillis::new(OBSERVED_AT + 10),
+    )
+    .expect("changed effective setting");
+    assert_eq!(read.candidate().manifest_digest(), manifest.digest());
+    assert_eq!(
+        read.candidate().runtime_policy_revision(),
+        manifest.runtime_policy_revision()
+    );
+    assert_eq!(
+        read.candidate().authority_selector().authority_id(),
+        workflow_permissions.authority_id()
+    );
+    assert_ne!(read.digest(), review_enabled.digest());
+
+    let second_candidate = automata_ci_store::GithubWorkflowPermissionObservationCandidate::new(
+        &bootstrap,
+        &workflow_permissions,
+        GithubServerServiceConsumerId::from_uuid(Uuid::from_u128(0x6e))
+            .expect("second observation ID"),
+        owner,
+        UnixMillis::new(OBSERVED_AT),
+    )
+    .expect("second candidate");
+    assert_ne!(
+        candidate.observation_id(),
+        second_candidate.observation_id()
+    );
+    assert_ne!(candidate.digest(), second_candidate.digest());
+
+    let checks = authority(GithubServerServiceScope::ChecksWrite, 0x6a);
+    assert!(!workflow_permission_identity_matches(&checks, manifest));
+    assert!(
+        automata_ci_store::GithubWorkflowPermissionObservationCandidate::new(
+            &bootstrap,
+            &checks,
+            GithubServerServiceConsumerId::from_uuid(Uuid::from_u128(0x6f))
+                .expect("wrong-scope observation ID"),
+            owner,
+            UnixMillis::new(OBSERVED_AT),
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]

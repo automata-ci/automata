@@ -14,7 +14,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -61,10 +61,14 @@ use automata_ci_store::{
     GithubCheckStoreError, GithubJobRuntimeAuthorityRepository,
     GithubRepositoryDispatchEvidenceRepository, GithubRuntimeAuthorityRepository,
     GithubRuntimeAuthorityWorkerId, GithubScheduleWorkerId, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceAuthorityRepository, GithubServerServiceJwtIssuer,
-    GithubServerServiceScope, GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
-    LogicalWorkflowAdmissionRepository, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderRepositoryVisibility, TenantScope,
+    GithubServerServiceAppId, GithubServerServiceAuthorityRepository,
+    GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
+    GithubServerServiceIssuanceState, GithubServerServiceJwtIssuer, GithubServerServiceScope,
+    GithubServerServiceWorkerId, GithubSubjectEvidenceRepository,
+    GithubWorkflowPermissionDefaultsObservation,
+    GithubWorkflowPermissionDefaultsObservationRepository, LogicalWorkflowAdmissionRepository,
+    MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
+    ProviderRepositoryVisibility, RetireGithubServerServiceAuthority, TenantScope,
 };
 use automata_ci_store_postgres::PostgresStore;
 use automata_ci_workflow_service::{
@@ -84,7 +88,8 @@ use super::{
     GithubProviderBootstrapError, GithubProviderBootstrapPlan, GithubProviderConfig,
     GithubProviderCredentialAdapterConfigurationError, GithubProviderCredentialAdapters,
     GithubProviderCredentialReleaseSupervisor, GithubProviderRepositoryConfig,
-    GithubProviderTransport, MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
+    GithubProviderTransport, GithubWorkflowPermissionObservationError,
+    MAX_GITHUB_PROVIDER_SUPERVISED_RELEASES,
     github_job_runtime_authority::{
         GithubJobRuntimeAuthorityIssuer, GithubJobRuntimeAuthorityResolver,
     },
@@ -96,8 +101,16 @@ const DEFAULT_RELEASE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_mins(2);
 const MAX_IDLE_DELAY: Duration = Duration::from_mins(1);
 const MAX_DRAIN_TIMEOUT: Duration = Duration::from_mins(10);
+const MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY: usize = 32;
 const MAX_SUPERVISED_JOB_AUTHORITY_COMMITS: usize = 1_024;
-const MAX_SUPERVISED_SERVICE_CREDENTIAL_COMMITS: usize = 1;
+const MAX_SUPERVISED_SERVICE_CREDENTIAL_COMMITS: usize =
+    MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY;
+const WORKFLOW_PERMISSION_CREDENTIAL_STARTUP_DEADLINE: Duration = Duration::from_mins(10);
+const WORKFLOW_PERMISSION_CREDENTIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
+const WORKFLOW_PERMISSION_REFRESH_SAFETY_MARGIN_MILLIS: i64 = 60_000;
+const WORKFLOW_PERMISSION_REFRESH_RETRY_MIN: Duration = Duration::from_mins(1);
+const WORKFLOW_PERMISSION_REFRESH_RETRY_MAX: Duration = Duration::from_secs(7 * 60 + 30);
+const WORKFLOW_PERMISSION_INITIAL_RETRY_JITTER_MARGIN_MILLIS: i64 = 60_000 + 60_000 / 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct JobAuthorityBrokerPin {
@@ -204,7 +217,7 @@ impl GithubProviderRuntimeShape {
         self.installations
     }
 
-    /// Returns the number of distinct tenants in the fair maintenance sweep.
+    /// Returns the number of distinct configured tenants.
     #[must_use]
     pub const fn tenant_count(self) -> usize {
         self.tenants
@@ -283,6 +296,196 @@ impl Default for GithubProviderRuntimePolicy {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("the GitHub provider runtime policy is invalid")]
 pub struct GithubProviderRuntimePolicyError;
+
+#[derive(Clone)]
+struct WorkflowPermissionObservationTarget {
+    manifest: automata_ci_store::GithubProviderManifest,
+    authority: automata_ci_store::GithubServerServiceAuthorityIdentity,
+    bootstrap: automata_ci_store::BootstrapGithubProviderRepository,
+}
+
+struct WorkflowPermissionDefaultsRefresher {
+    store: Arc<PostgresStore>,
+    adapters: Arc<GithubProviderCredentialAdapters>,
+    endpoint: GithubHttpEndpoint,
+    clock: Arc<dyn GithubServerServiceCoordinatorClock>,
+    owner: GithubServerServiceWorkerId,
+    targets: Arc<[WorkflowPermissionObservationTarget]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkflowPermissionRefreshOutcome {
+    Ready,
+    PolicyMismatch,
+}
+
+impl fmt::Debug for WorkflowPermissionDefaultsRefresher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkflowPermissionDefaultsRefresher")
+            .field("store", &"[OBSERVATION STORE]")
+            .field("adapters", &"[CREDENTIAL ADAPTERS]")
+            .field("endpoint", &"[GITHUB ENDPOINT]")
+            .field("clock", &"[COORDINATOR CLOCK]")
+            .field("owner", &self.owner)
+            .field("target_count", &self.targets.len())
+            .finish()
+    }
+}
+
+impl WorkflowPermissionDefaultsRefresher {
+    async fn refresh_all(
+        &self,
+    ) -> Result<WorkflowPermissionRefreshOutcome, GithubProviderRuntimeBuildError> {
+        let (round_budget, attempt_budget) =
+            workflow_permission_refresh_budgets(self.targets.len())?;
+        let round_deadline = Instant::now()
+            .checked_add(round_budget)
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let mut attempts = FuturesUnordered::new();
+        let mut targets = self.targets.iter();
+        for target in targets
+            .by_ref()
+            .take(MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY)
+        {
+            let deadline = Instant::now()
+                .checked_add(attempt_budget)
+                .map(|deadline| deadline.min(round_deadline))
+                .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+            attempts.push(self.refresh(target, deadline));
+        }
+        let mut first_error = None;
+        let mut policy_mismatch = false;
+        tokio::time::timeout_at(tokio::time::Instant::from_std(round_deadline), async {
+            while let Some(result) = attempts.next().await {
+                match result {
+                    Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch) => {
+                        policy_mismatch = true;
+                    }
+                    Err(error) if first_error.is_none() => first_error = Some(error),
+                    Ok(WorkflowPermissionRefreshOutcome::Ready) | Err(_) => {}
+                }
+                if let Some(target) = targets.next() {
+                    let deadline = Instant::now()
+                        .checked_add(attempt_budget)
+                        .map(|deadline| deadline.min(round_deadline))
+                        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+                    attempts.push(self.refresh(target, deadline));
+                }
+            }
+            Ok::<(), GithubProviderRuntimeBuildError>(())
+        })
+        .await
+        .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)??;
+        first_error.map_or_else(
+            || {
+                Ok(if policy_mismatch {
+                    WorkflowPermissionRefreshOutcome::PolicyMismatch
+                } else {
+                    WorkflowPermissionRefreshOutcome::Ready
+                })
+            },
+            Err,
+        )
+    }
+
+    async fn refresh(
+        &self,
+        target: &WorkflowPermissionObservationTarget,
+        operation_deadline: Instant,
+    ) -> Result<WorkflowPermissionRefreshOutcome, GithubProviderRuntimeBuildError> {
+        let request_started_at = self.clock.now();
+        let observation_id =
+            automata_ci_store::GithubServerServiceConsumerId::from_uuid(Uuid::new_v4())
+                .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let candidate = automata_ci_store::GithubWorkflowPermissionObservationCandidate::new(
+            &target.bootstrap,
+            &target.authority,
+            observation_id,
+            self.owner,
+            request_started_at,
+        )
+        .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let remaining_provider_millis = request_started_at
+            .get()
+            .checked_add(MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS)
+            .and_then(|deadline| deadline.checked_sub(self.clock.now().get()))
+            .filter(|remaining| *remaining > 0)
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let candidate_deadline = Instant::now()
+            .checked_add(Duration::from_millis(
+                u64::try_from(remaining_provider_millis)
+                    .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?,
+            ))
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let deadline = candidate_deadline.min(operation_deadline);
+        if deadline <= Instant::now() {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.store
+                .claim_github_workflow_permission_observation(candidate.clone()),
+        )
+        .await
+        .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?
+        .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let observed = self
+            .adapters
+            .observe_workflow_permission_defaults(
+                &self.endpoint,
+                &target.manifest,
+                &candidate,
+                deadline,
+            )
+            .await
+            .map_err(GithubProviderRuntimeBuildError::WorkflowPermissions)?;
+        let defaults = observed.defaults();
+        let release = observed.release_request().clone();
+        let observation = GithubWorkflowPermissionDefaultsObservation::new(
+            &target.bootstrap,
+            candidate,
+            &release,
+            observed.handoff_generation(),
+            defaults.default_workflow_permissions(),
+            defaults.can_approve_pull_request_reviews(),
+            observed.provider_observed_at(),
+        );
+        let Ok(observation) = observation else {
+            self.adapters.retain_workflow_permission_attempt(observed);
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        };
+        let finalization = automata_ci_store::FinalizeGithubWorkflowPermissionObservation::new(
+            target.bootstrap.clone(),
+            release,
+            observation,
+        );
+        let Ok(finalization) = finalization else {
+            self.adapters.retain_workflow_permission_attempt(observed);
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        };
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.store
+                .finalize_github_workflow_permission_observation(finalization),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {
+                observed.confirm_finalized();
+                Ok(WorkflowPermissionRefreshOutcome::Ready)
+            }
+            Ok(Ok(false)) => {
+                observed.confirm_finalized();
+                Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch)
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.adapters.retain_workflow_permission_attempt(observed);
+                Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)
+            }
+        }
+    }
+}
 
 /// Builder that owns already-loaded provider secrets only until construction finishes.
 pub struct GithubProviderRuntimeBuilder {
@@ -364,6 +567,7 @@ impl GithubProviderRuntimeBuilder {
         let clock = Arc::new(NonRegressingGithubProviderClock::default());
         let delivery_clock: Arc<dyn GithubDeliveryClock> = clock.clone();
         let credential_clock: Arc<dyn GithubServerServiceCoordinatorClock> = clock.clone();
+        let observation_clock = credential_clock.clone();
         let schedule_clock: Arc<dyn GithubScheduleClock> = clock.clone();
         let runtime_authority_clock: Arc<dyn GithubRuntimeAuthorityCoordinatorClock> = clock;
         let applied_at = credential_clock.now();
@@ -410,7 +614,48 @@ impl GithubProviderRuntimeBuilder {
             .into_iter()
             .collect::<Vec<_>>()
             .into();
-        if connection_ids.is_empty() || tenants.is_empty() {
+        let mut maintenance_authorities = plan
+            .authorities()
+            .iter()
+            .map(GithubServerServiceAuthoritySelector::from_identity)
+            .collect::<Vec<_>>();
+        let workflow_permission_targets: Arc<[WorkflowPermissionObservationTarget]> = plan
+            .manifests()
+            .iter()
+            .enumerate()
+            .map(|(index, manifest)| {
+                let bootstrap = plan.repository_bootstrap_request(index, applied_at)?;
+                if bootstrap.manifest().manifest() != manifest {
+                    return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+                }
+                let authority = plan
+                    .authorities()
+                    .iter()
+                    .find(|authority| {
+                        authority.scope() == GithubServerServiceScope::WorkflowPermissionsRead
+                            && authority.tenant() == manifest.tenant()
+                            && authority.repository_id() == manifest.repository_id()
+                            && authority.connection_id() == manifest.connection_id()
+                    })
+                    .cloned()
+                    .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+                Ok(WorkflowPermissionObservationTarget {
+                    manifest: manifest.clone(),
+                    authority,
+                    bootstrap,
+                })
+            })
+            .collect::<Result<Vec<_>, GithubProviderRuntimeBuildError>>()?
+            .into();
+        if connection_ids.is_empty()
+            || tenants.is_empty()
+            || maintenance_authorities.is_empty()
+            || workflow_permission_targets.is_empty()
+            || policy.release_capacity
+                < workflow_permission_targets
+                    .len()
+                    .min(MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY)
+        {
             return Err(GithubProviderRuntimeBuildError::InvalidConfiguration);
         }
 
@@ -421,8 +666,9 @@ impl GithubProviderRuntimeBuilder {
                 .map_err(|_| GithubProviderRuntimeBuildError::RunnerPolicyUnavailable)?;
         }
 
-        let ready = plan.bootstrap(store.as_ref(), applied_at).await?;
-        let credential_request_resolver = ready.credential_request_resolver();
+        plan.prepare_workflow_permission_bootstrap(store.as_ref(), applied_at)
+            .await?;
+        let credential_request_resolver = plan.staged_credential_request_resolver();
         let credential_adapter_routes = credential_request_resolver.clone();
         let resolver: Arc<dyn GithubServerServiceCredentialRequestResolver> =
             Arc::new(credential_request_resolver.clone());
@@ -447,6 +693,7 @@ impl GithubProviderRuntimeBuilder {
         let credential_commit_supervisor = Arc::new(CredentialMaintenanceCommitSupervisor::new(
             runtime_handle.clone(),
             policy.release_retry_interval,
+            MAX_SUPERVISED_SERVICE_CREDENTIAL_COMMITS,
         ));
 
         let job_authority_repository: Arc<dyn GithubRuntimeAuthorityRepository> = store.clone();
@@ -593,13 +840,22 @@ impl GithubProviderRuntimeBuilder {
             credential_clock.clone(),
             credential_worker,
         ));
+        converge_workflow_permission_authorities(
+            credential_repository.clone(),
+            credential_authority_repository.clone(),
+            coordinator.clone(),
+            credential_clock.clone(),
+            credential_commit_supervisor.clone(),
+            plan.authorities(),
+        )
+        .await?;
         let credential_issuer = Arc::new(GithubServerServiceCredentialIssuer::new(
             credential_repository.clone(),
             envelopes,
             credential_clock.clone(),
         ));
         let releases = Arc::new(GithubProviderCredentialReleaseSupervisor::new(
-            credential_clock,
+            credential_clock.clone(),
             runtime_handle,
             policy.release_capacity,
             policy.release_retry_interval,
@@ -607,10 +863,12 @@ impl GithubProviderRuntimeBuilder {
         let adapters = Arc::new(GithubProviderCredentialAdapters::new(
             credential_issuer,
             credential_repository.clone(),
-            credential_authority_repository,
+            credential_authority_repository.clone(),
+            store.clone(),
             releases.clone(),
             plan.authorities(),
             credential_adapter_routes,
+            credential_clock.clone(),
         )?);
         let schedule_private_authorities = GithubSchedulePrivateSourceAuthorities::new(
             plan.authorities()
@@ -630,6 +888,34 @@ impl GithubProviderRuntimeBuilder {
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
 
         let endpoint = provider_http_endpoint(config.transport())?;
+        let observation_owner = GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())
+            .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
+        let permission_defaults = Arc::new(WorkflowPermissionDefaultsRefresher {
+            store: store.clone(),
+            adapters: adapters.clone(),
+            endpoint: endpoint.clone(),
+            clock: observation_clock,
+            owner: observation_owner,
+            targets: workflow_permission_targets,
+        });
+        if permission_defaults.refresh_all().await? != WorkflowPermissionRefreshOutcome::Ready {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+        let _ready = plan.bootstrap(store.as_ref(), applied_at).await?;
+        let cleanup_authorities = retire_superseded_server_service_authorities(
+            credential_authority_repository.as_ref(),
+            plan.manifests(),
+            plan.authorities(),
+            credential_clock.as_ref(),
+        )
+        .await?;
+        for selector in cleanup_authorities {
+            if !maintenance_authorities.contains(&selector) {
+                maintenance_authorities.push(selector);
+            }
+        }
+        let maintenance_authorities: Arc<[GithubServerServiceAuthoritySelector]> =
+            maintenance_authorities.into();
         let admission_repository: Arc<dyn LogicalWorkflowAdmissionRepository> = store.clone();
         let mut admission = WorkflowAdmissionService::with_system_ports(
             blobs.clone(),
@@ -762,13 +1048,14 @@ impl GithubProviderRuntimeBuilder {
             schedule: Arc::new(schedule),
             checks,
             maintenance,
+            permission_defaults,
             credential_commit_supervisor,
             job_authority_maintenance,
             job_authority_drain,
             job_runtime_authority_issuer,
             release_drain,
             connection_ids,
-            tenants,
+            maintenance_authorities,
             checks_worker,
             idle_delay: policy.idle_delay,
             drain_timeout: policy.drain_timeout,
@@ -859,13 +1146,14 @@ pub struct GithubProviderRuntime {
     schedule: Arc<GithubScheduleService>,
     checks: Arc<GithubChecksPublisher>,
     maintenance: Arc<dyn CredentialMaintenancePort>,
+    permission_defaults: Arc<WorkflowPermissionDefaultsRefresher>,
     credential_commit_supervisor: Arc<CredentialMaintenanceCommitSupervisor>,
     job_authority_maintenance: Arc<GithubRuntimeAuthorityLifecycleCoordinator>,
     job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort>,
     job_runtime_authority_issuer: Arc<dyn OptionalRuntimeAuthorityIssuer>,
     release_drain: Arc<dyn ReleaseDrainPort>,
     connection_ids: Arc<[ProviderConnectionId]>,
-    tenants: Arc<[TenantScope]>,
+    maintenance_authorities: Arc<[GithubServerServiceAuthoritySelector]>,
     checks_worker: GithubCheckProjectionWorkerId,
     idle_delay: Duration,
     drain_timeout: Duration,
@@ -932,13 +1220,14 @@ impl GithubProviderRuntime {
             schedule,
             checks,
             maintenance,
+            permission_defaults,
             credential_commit_supervisor,
             job_authority_maintenance,
             job_authority_drain,
             job_runtime_authority_issuer: _,
             release_drain,
             connection_ids,
-            tenants,
+            maintenance_authorities,
             checks_worker,
             idle_delay,
             drain_timeout,
@@ -969,7 +1258,7 @@ impl GithubProviderRuntime {
                 .await,
             )
         }));
-        let maintenance_tenants = tenants;
+        let maintenance_selectors = maintenance_authorities;
         let maintenance_delay = idle_delay;
         let maintenance_stop = stop.clone();
         loops.push(runtime_loop(async move {
@@ -977,11 +1266,18 @@ impl GithubProviderRuntime {
                 run_credential_maintenance_loop(
                     maintenance,
                     credential_commit_supervisor,
-                    maintenance_tenants,
+                    maintenance_selectors,
                     maintenance_delay,
                     maintenance_stop,
                 )
                 .await,
+            )
+        }));
+        let permission_defaults_stop = stop.clone();
+        loops.push(runtime_loop(async move {
+            RuntimeLoopExit::PermissionDefaults(
+                run_workflow_permission_refresh_loop(permission_defaults, permission_defaults_stop)
+                    .await,
             )
         }));
         let job_authority_delay = idle_delay;
@@ -1015,7 +1311,11 @@ impl fmt::Debug for GithubProviderRuntime {
             .debug_struct("GithubProviderRuntime")
             .field("shape", &self.shape)
             .field("connection_count", &self.connection_ids.len())
-            .field("tenant_count", &self.tenants.len())
+            .field("tenant_count", &self.shape.tenant_count())
+            .field(
+                "maintenance_authority_count",
+                &self.maintenance_authorities.len(),
+            )
             .field("checks_worker", &self.checks_worker)
             .field(
                 "job_runtime_authority_issuer",
@@ -1063,6 +1363,12 @@ pub enum GithubProviderRuntimeBuildError {
     /// Credential adapter or release supervision configuration failed.
     #[error(transparent)]
     Credentials(#[from] GithubProviderCredentialAdapterConfigurationError),
+    /// Effective repository defaults could not be observed with least authority.
+    #[error(transparent)]
+    WorkflowPermissions(GithubWorkflowPermissionObservationError),
+    /// Observed workflow-permission provenance did not match immutable configuration.
+    #[error("the GitHub workflow-permission observation is invalid")]
+    WorkflowPermissionObservation,
     /// Delivery worker configuration was incompatible with runtime policy.
     #[error(transparent)]
     DeliveryWorker(GithubDeliveryWorkerConfigurationError),
@@ -1089,6 +1395,9 @@ pub enum GithubProviderRuntimeError {
     /// Server-service credential maintenance failed.
     #[error(transparent)]
     Credentials(#[from] GithubServerServiceCoordinatorError),
+    /// Effective repository permission-default evidence could not be refreshed.
+    #[error("GitHub workflow-permission default refresh failed")]
+    PermissionDefaults,
     /// Job-scoped repository authority lifecycle evidence was inconsistent.
     #[error(transparent)]
     JobAuthority(#[from] GithubRuntimeAuthorityLifecycleError),
@@ -1258,9 +1567,9 @@ enum CredentialMaintenanceOutcome {
 
 #[async_trait]
 trait CredentialMaintenancePort: fmt::Debug + Send + Sync {
-    async fn coordinate_next(
+    async fn coordinate_authority(
         &self,
-        tenant: TenantScope,
+        selector: GithubServerServiceAuthoritySelector,
         custody: CredentialMaintenanceCustody,
     ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError>;
 }
@@ -1272,40 +1581,50 @@ struct ServerServiceCredentialMaintenance {
 
 #[async_trait]
 impl CredentialMaintenancePort for ServerServiceCredentialMaintenance {
-    async fn coordinate_next(
+    async fn coordinate_authority(
         &self,
-        tenant: TenantScope,
+        selector: GithubServerServiceAuthoritySelector,
         custody: CredentialMaintenanceCustody,
     ) -> Result<CredentialMaintenanceOutcome, GithubServerServiceCoordinatorError> {
-        let outcome = self.coordinator.coordinate_next(tenant).await?;
-        Ok(match outcome {
-            GithubServerServiceCoordinationOutcome::Idle => CredentialMaintenanceOutcome::Idle,
-            GithubServerServiceCoordinationOutcome::MintCommitPending(pending) => {
-                CredentialMaintenanceOutcome::Pending(custody.supervise(Box::new(
-                    PendingMintCommit {
-                        pending: Box::new(CorePendingMintCommit {
-                            pending,
-                            repository: self.repository.clone(),
-                        }),
-                    },
-                )))
-            }
-            GithubServerServiceCoordinationOutcome::RevocationCommitPending(pending) => {
-                CredentialMaintenanceOutcome::Pending(custody.supervise(Box::new(
-                    PendingRevocationCommit {
-                        pending: Box::new(CorePendingRevocationCommit {
-                            pending,
-                            repository: self.repository.clone(),
-                        }),
-                    },
-                )))
-            }
-            GithubServerServiceCoordinationOutcome::Reduced { .. }
-            | GithubServerServiceCoordinationOutcome::MintAlreadyStarted(_)
-            | GithubServerServiceCoordinationOutcome::MintStartedWindowExhausted(_) => {
-                CredentialMaintenanceOutcome::Worked
-            }
-        })
+        let outcome = self.coordinator.coordinate_authority(selector).await?;
+        Ok(supervise_credential_coordination(
+            outcome,
+            custody,
+            self.repository.clone(),
+        ))
+    }
+}
+
+fn supervise_credential_coordination(
+    outcome: GithubServerServiceCoordinationOutcome,
+    custody: CredentialMaintenanceCustody,
+    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+) -> CredentialMaintenanceOutcome {
+    match outcome {
+        GithubServerServiceCoordinationOutcome::Idle => CredentialMaintenanceOutcome::Idle,
+        GithubServerServiceCoordinationOutcome::MintCommitPending(pending) => {
+            CredentialMaintenanceOutcome::Pending(custody.supervise(Box::new(PendingMintCommit {
+                pending: Box::new(CorePendingMintCommit {
+                    pending,
+                    repository,
+                }),
+            })))
+        }
+        GithubServerServiceCoordinationOutcome::RevocationCommitPending(pending) => {
+            CredentialMaintenanceOutcome::Pending(custody.supervise(Box::new(
+                PendingRevocationCommit {
+                    pending: Box::new(CorePendingRevocationCommit {
+                        pending,
+                        repository,
+                    }),
+                },
+            )))
+        }
+        GithubServerServiceCoordinationOutcome::Reduced { .. }
+        | GithubServerServiceCoordinationOutcome::MintAlreadyStarted(_)
+        | GithubServerServiceCoordinationOutcome::MintStartedWindowExhausted(_) => {
+            CredentialMaintenanceOutcome::Worked
+        }
     }
 }
 
@@ -1403,25 +1722,29 @@ impl fmt::Debug for CorePendingRevocationCommit {
     }
 }
 
-/// Independent bounded custody for the one serialized service-credential commit.
+/// Independent bounded custody for irreversible service-credential commits.
 struct CredentialMaintenanceCommitSupervisor {
     runtime: Handle,
     retry_interval: Duration,
     permits: Arc<Semaphore>,
     outstanding: Arc<AtomicUsize>,
     drained: Arc<tokio::sync::Notify>,
-    custody: Arc<Mutex<Option<Arc<SupervisedCredentialCommit>>>>,
+    custody: Arc<Mutex<Vec<Arc<SupervisedCredentialCommit>>>>,
 }
 
 impl CredentialMaintenanceCommitSupervisor {
-    fn new(runtime: Handle, retry_interval: Duration) -> Self {
+    fn new(runtime: Handle, retry_interval: Duration, capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "service-credential custody capacity is positive"
+        );
         Self {
             runtime,
             retry_interval,
-            permits: Arc::new(Semaphore::new(MAX_SUPERVISED_SERVICE_CREDENTIAL_COMMITS)),
+            permits: Arc::new(Semaphore::new(capacity)),
             outstanding: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(tokio::sync::Notify::new()),
-            custody: Arc::new(Mutex::new(None)),
+            custody: Arc::new(Mutex::new(Vec::with_capacity(capacity))),
         }
     }
 
@@ -1438,6 +1761,29 @@ impl CredentialMaintenanceCommitSupervisor {
             outstanding: Arc::clone(&self.outstanding),
             drained: Arc::clone(&self.drained),
         })
+    }
+
+    async fn reserve_until(
+        &self,
+        deadline: Instant,
+    ) -> Option<CredentialMaintenanceCommitReservation> {
+        self.redrive_retained();
+        let pending = PendingCredentialMaintenanceReservation::new(
+            Arc::clone(&self.outstanding),
+            Arc::clone(&self.drained),
+        );
+        let remaining = deadline.checked_duration_since(Instant::now());
+        let permit = match remaining {
+            Some(remaining) => {
+                tokio::time::timeout(remaining, Arc::clone(&self.permits).acquire_owned())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            }
+            None => None,
+        };
+        let permit = permit?;
+        Some(pending.commit(permit))
     }
 
     fn supervise(
@@ -1457,11 +1803,7 @@ impl CredentialMaintenanceCommitSupervisor {
                 .custody
                 .lock()
                 .expect("service-credential custody lock");
-            assert!(
-                retained.is_none(),
-                "a bounded service-credential permit admits only one exact request"
-            );
-            *retained = Some(Arc::clone(&custody));
+            retained.push(Arc::clone(&custody));
         }
 
         let (result_sender, result_receiver) = oneshot::channel();
@@ -1508,14 +1850,10 @@ impl CredentialMaintenanceCommitSupervisor {
             task_custody.removed.store(true, Ordering::Release);
             let removed = {
                 let mut retained = retained.lock().expect("service-credential custody lock");
-                if retained
-                    .as_ref()
-                    .is_some_and(|entry| Arc::ptr_eq(entry, &task_custody))
-                {
-                    retained.take()
-                } else {
-                    None
-                }
+                retained
+                    .iter()
+                    .position(|entry| Arc::ptr_eq(entry, &task_custody))
+                    .map(|index| retained.swap_remove(index))
             };
             drop(removed);
             drop(task_custody);
@@ -1536,7 +1874,7 @@ impl CredentialMaintenanceCommitSupervisor {
             .lock()
             .expect("service-credential custody lock")
             .clone();
-        if let Some(custody) = custody {
+        for custody in custody {
             let _ = self.start_driver(&custody, None);
         }
     }
@@ -1547,7 +1885,8 @@ impl CredentialMaintenanceCommitSupervisor {
             .custody
             .lock()
             .expect("service-credential custody lock")
-            .clone();
+            .first()
+            .cloned();
         let Some(custody) = custody else {
             return false;
         };
@@ -1594,12 +1933,12 @@ impl fmt::Debug for CredentialMaintenanceCommitSupervisor {
             .field("outstanding", &self.outstanding.load(Ordering::Acquire))
             .field("available_capacity", &self.permits.available_permits())
             .field(
-                "retained_custody",
+                "retained_custody_count",
                 &self
                     .custody
                     .lock()
                     .expect("service-credential custody lock")
-                    .is_some(),
+                    .len(),
             )
             .finish_non_exhaustive()
     }
@@ -1631,6 +1970,41 @@ struct CredentialMaintenanceCommitReservation {
     drained: Arc<tokio::sync::Notify>,
 }
 
+struct PendingCredentialMaintenanceReservation {
+    outstanding: Arc<AtomicUsize>,
+    drained: Arc<tokio::sync::Notify>,
+    armed: bool,
+}
+
+impl PendingCredentialMaintenanceReservation {
+    fn new(outstanding: Arc<AtomicUsize>, drained: Arc<tokio::sync::Notify>) -> Self {
+        outstanding.fetch_add(1, Ordering::AcqRel);
+        Self {
+            outstanding,
+            drained,
+            armed: true,
+        }
+    }
+
+    fn commit(mut self, permit: OwnedSemaphorePermit) -> CredentialMaintenanceCommitReservation {
+        self.armed = false;
+        CredentialMaintenanceCommitReservation {
+            _permit: permit,
+            outstanding: Arc::clone(&self.outstanding),
+            drained: Arc::clone(&self.drained),
+        }
+    }
+}
+
+impl Drop for PendingCredentialMaintenanceReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.outstanding.fetch_sub(1, Ordering::AcqRel);
+            self.drained.notify_waiters();
+        }
+    }
+}
+
 struct CredentialMaintenanceCustody {
     supervisor: Arc<CredentialMaintenanceCommitSupervisor>,
     reservation: CredentialMaintenanceCommitReservation,
@@ -1649,14 +2023,339 @@ impl Drop for CredentialMaintenanceCommitReservation {
     }
 }
 
+async fn retire_superseded_server_service_authorities(
+    repository: &dyn GithubServerServiceAuthorityRepository,
+    manifests: &[automata_ci_store::GithubProviderManifest],
+    desired: &[automata_ci_store::GithubServerServiceAuthorityIdentity],
+    clock: &dyn GithubServerServiceCoordinatorClock,
+) -> Result<Vec<GithubServerServiceAuthoritySelector>, GithubProviderRuntimeBuildError> {
+    let mut cleanup = Vec::new();
+    let mut retirement_plan = Vec::new();
+    for manifest in manifests {
+        let desired_for_repository = desired
+            .iter()
+            .filter(|identity| {
+                identity.tenant() == manifest.tenant()
+                    && identity.repository_id() == manifest.repository_id()
+                    && identity.connection_id() == manifest.connection_id()
+            })
+            .collect::<Vec<_>>();
+        let revision_watermark = desired_for_repository
+            .first()
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        if desired_for_repository.iter().any(|identity| {
+            identity.app_configuration_revision() != revision_watermark.app_configuration_revision()
+                || identity.policy_revision() != revision_watermark.policy_revision()
+        }) {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+        let existing = repository
+            .list_github_server_service_authorities_for_repository(
+                manifest.tenant(),
+                manifest.repository_id(),
+                manifest.connection_id(),
+            )
+            .await
+            .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        for descriptor in existing {
+            if desired_for_repository
+                .iter()
+                .any(|identity| identity.authority_id() == descriptor.identity().authority_id())
+            {
+                if descriptor.state() != GithubServerServiceAuthorityState::Active {
+                    return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+                }
+                continue;
+            }
+            let existing_app_revision = descriptor.identity().app_configuration_revision();
+            let existing_policy_revision = descriptor.identity().policy_revision();
+            let desired_app_revision = revision_watermark.app_configuration_revision();
+            let desired_policy_revision = revision_watermark.policy_revision();
+            let is_strictly_older = existing_app_revision <= desired_app_revision
+                && existing_policy_revision <= desired_policy_revision
+                && (existing_app_revision < desired_app_revision
+                    || existing_policy_revision < desired_policy_revision);
+            if !is_strictly_older {
+                return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+            }
+            let selector =
+                GithubServerServiceAuthoritySelector::from_identity(descriptor.identity());
+            let desired_route = desired_for_repository
+                .iter()
+                .find(|identity| identity.scope() == descriptor.identity().scope())
+                .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+            if !shares_server_service_revocation_route(descriptor.identity(), desired_route) {
+                // Installation replacement and App-identity replacement require
+                // a retained historical broker route. Schema 3 does not yet
+                // authenticate or retain that route, so fail before mutating any
+                // superseded authority in this complete validation pass.
+                return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+            }
+            retirement_plan.push((descriptor, selector));
+        }
+    }
+    for (descriptor, selector) in retirement_plan {
+        if descriptor.state() == GithubServerServiceAuthorityState::Active {
+            let request = RetireGithubServerServiceAuthority::new(selector.clone(), clock.now())
+                .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+            let retired = repository
+                .retire_github_server_service_authority(request)
+                .await
+                .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+            if !matches!(
+                retired.state(),
+                GithubServerServiceAuthorityState::Retiring
+                    | GithubServerServiceAuthorityState::Retired
+            ) {
+                return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+            }
+            if retired.state() == GithubServerServiceAuthorityState::Retired {
+                continue;
+            }
+        } else if descriptor.state() != GithubServerServiceAuthorityState::Retiring {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+        cleanup.push(selector);
+    }
+    Ok(cleanup)
+}
+
+fn shares_server_service_revocation_route(
+    existing: &automata_ci_store::GithubServerServiceAuthorityIdentity,
+    desired: &automata_ci_store::GithubServerServiceAuthorityIdentity,
+) -> bool {
+    existing.installation_id() == desired.installation_id()
+        && existing.github_app_id() == desired.github_app_id()
+        && existing.app_client_id() == desired.app_client_id()
+        && existing.jwt_issuer() == desired.jwt_issuer()
+        && existing.configuration_fingerprint() == desired.configuration_fingerprint()
+}
+
+async fn converge_workflow_permission_authorities(
+    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+    authority_repository: Arc<dyn GithubServerServiceAuthorityRepository>,
+    coordinator: Arc<GithubServerServiceCredentialCoordinator>,
+    clock: Arc<dyn GithubServerServiceCoordinatorClock>,
+    commit_supervisor: Arc<CredentialMaintenanceCommitSupervisor>,
+    authorities: &[automata_ci_store::GithubServerServiceAuthorityIdentity],
+) -> Result<(), GithubProviderRuntimeBuildError> {
+    let targets = authorities
+        .iter()
+        .filter(|authority| authority.scope() == GithubServerServiceScope::WorkflowPermissionsRead)
+        .cloned()
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+    }
+    let deadline = Instant::now()
+        .checked_add(WORKFLOW_PERMISSION_CREDENTIAL_STARTUP_DEADLINE)
+        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    let mut convergence = futures::stream::iter(targets.iter().cloned().map(|authority| {
+        converge_workflow_permission_authority(
+            repository.clone(),
+            authority_repository.clone(),
+            coordinator.clone(),
+            clock.clone(),
+            commit_supervisor.clone(),
+            authority,
+            deadline,
+        )
+    }))
+    .buffer_unordered(MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY);
+    while let Some(result) = convergence.next().await {
+        result?;
+    }
+
+    // One final bounded snapshot closes a race where a credential became
+    // non-current or too close to expiry while another target converged.
+    let required_use_through = required_workflow_permission_use_horizon(clock.as_ref())?;
+    let mut validation = futures::stream::iter(targets.iter().map(|authority| {
+        workflow_permission_authority_is_ready(
+            authority_repository.as_ref(),
+            authority,
+            required_use_through,
+            deadline,
+        )
+    }))
+    .buffer_unordered(MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY);
+    while let Some(result) = validation.next().await {
+        if !result? {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+    }
+    Ok(())
+}
+
+fn required_workflow_permission_use_horizon(
+    clock: &dyn GithubServerServiceCoordinatorClock,
+) -> Result<UnixMillis, GithubProviderRuntimeBuildError> {
+    let refresh_budget_millis =
+        i64::try_from(workflow_permission_refresh_round_budget()?.as_millis())
+            .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    clock
+        .now()
+        .get()
+        .checked_add(MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS)
+        .and_then(|horizon| horizon.checked_add(refresh_budget_millis))
+        .map(UnixMillis::new)
+        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)
+}
+
+fn workflow_permission_refresh_round_budget() -> Result<Duration, GithubProviderRuntimeBuildError> {
+    let half_freshness = automata_ci_store::GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS / 2;
+    half_freshness
+        .checked_sub(WORKFLOW_PERMISSION_INITIAL_RETRY_JITTER_MARGIN_MILLIS)
+        .and_then(|millis| millis.checked_sub(WORKFLOW_PERMISSION_REFRESH_SAFETY_MARGIN_MILLIS))
+        // A target can finish at the beginning of one successful round, then
+        // move to the tail of both the next failed round and its retry as
+        // dynamic concurrency slots refill. Reserve two complete round tails.
+        .and_then(|millis| millis.checked_div(2))
+        .filter(|millis| *millis > 0)
+        .and_then(|millis| u64::try_from(millis).ok())
+        .map(Duration::from_millis)
+        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)
+}
+
+fn workflow_permission_refresh_budgets(
+    target_count: usize,
+) -> Result<(Duration, Duration), GithubProviderRuntimeBuildError> {
+    if target_count == 0 {
+        return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+    }
+    let round_budget = workflow_permission_refresh_round_budget()?;
+    let wave_count = target_count.div_ceil(MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY);
+    let wave_count = u32::try_from(wave_count)
+        .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    let attempt_budget = round_budget
+        .checked_div(wave_count)
+        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    Ok((round_budget, attempt_budget))
+}
+
+async fn workflow_permission_authority_is_ready(
+    repository: &dyn GithubServerServiceAuthorityRepository,
+    authority: &automata_ci_store::GithubServerServiceAuthorityIdentity,
+    required_use_through: UnixMillis,
+    deadline: Instant,
+) -> Result<bool, GithubProviderRuntimeBuildError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    tokio::time::timeout(remaining, async {
+        let descriptor = repository
+            .inspect_github_server_service_authority(authority.tenant(), authority.authority_id())
+            .await
+            .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        if descriptor.identity() != authority
+            || descriptor.state() != GithubServerServiceAuthorityState::Active
+        {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+        let issuance = repository
+            .inspect_current_github_server_service_issuance(
+                authority.tenant(),
+                authority.authority_id(),
+            )
+            .await
+            .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        Ok(descriptor.current_generation().is_some_and(|generation| {
+            issuance.is_some_and(|receipt| {
+                receipt.key().authority_id() == authority.authority_id()
+                    && receipt.key().generation() == generation
+                    && receipt.state() == GithubServerServiceIssuanceState::Ready
+                    && receipt
+                        .usable_until()
+                        .is_some_and(|usable_until| usable_until >= required_use_through)
+            })
+        }))
+    })
+    .await
+    .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn converge_workflow_permission_authority(
+    repository: Arc<dyn GithubServerServiceCredentialRepository>,
+    authority_repository: Arc<dyn GithubServerServiceAuthorityRepository>,
+    coordinator: Arc<GithubServerServiceCredentialCoordinator>,
+    clock: Arc<dyn GithubServerServiceCoordinatorClock>,
+    commit_supervisor: Arc<CredentialMaintenanceCommitSupervisor>,
+    authority: automata_ci_store::GithubServerServiceAuthorityIdentity,
+    deadline: Instant,
+) -> Result<(), GithubProviderRuntimeBuildError> {
+    let selector = GithubServerServiceAuthoritySelector::from_identity(&authority);
+    loop {
+        let required_use_through = required_workflow_permission_use_horizon(clock.as_ref())?;
+        if workflow_permission_authority_is_ready(
+            authority_repository.as_ref(),
+            &authority,
+            required_use_through,
+            deadline,
+        )
+        .await?
+        {
+            return Ok(());
+        }
+        let reservation = commit_supervisor
+            .reserve_until(deadline)
+            .await
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let custody = CredentialMaintenanceCustody {
+            supervisor: commit_supervisor.clone(),
+            reservation,
+        };
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        let outcome = tokio::time::timeout(
+            remaining,
+            coordinator.coordinate_authority(selector.clone()),
+        )
+        .await
+        .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?
+        .map(|outcome| supervise_credential_coordination(outcome, custody, repository.clone()));
+        match outcome {
+            Ok(CredentialMaintenanceOutcome::Pending(completion)) => {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+                tokio::time::timeout(remaining, completion)
+                    .await
+                    .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?
+                    .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+            }
+            Ok(CredentialMaintenanceOutcome::Worked | CredentialMaintenanceOutcome::Idle)
+            | Err(
+                GithubServerServiceCoordinatorError::Repository
+                | GithubServerServiceCoordinatorError::EnvelopePreparation,
+            ) => {
+                sleep_workflow_permission_convergence_retry(deadline).await?;
+            }
+            Err(_) => {
+                return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+            }
+        }
+    }
+}
+
+async fn sleep_workflow_permission_convergence_retry(
+    deadline: Instant,
+) -> Result<(), GithubProviderRuntimeBuildError> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    tokio::time::sleep(remaining.min(WORKFLOW_PERMISSION_CREDENTIAL_RETRY_DELAY)).await;
+    Ok(())
+}
+
 async fn run_credential_maintenance_loop(
     maintenance: Arc<dyn CredentialMaintenancePort>,
     commit_supervisor: Arc<CredentialMaintenanceCommitSupervisor>,
-    tenants: Arc<[TenantScope]>,
+    authorities: Arc<[GithubServerServiceAuthoritySelector]>,
     idle_delay: Duration,
     stop: CancellationToken,
 ) -> Result<(), GithubServerServiceCoordinatorError> {
-    let mut sweep = FairSweep::new(tenants);
+    let mut sweep = FairSweep::new(authorities);
     loop {
         if stop.is_cancelled() {
             return Ok(());
@@ -1671,8 +2370,8 @@ async fn run_credential_maintenance_loop(
             supervisor: commit_supervisor.clone(),
             reservation,
         };
-        let tenant = sweep.next();
-        match maintenance.coordinate_next(tenant, custody).await {
+        let selector = sweep.next();
+        match maintenance.coordinate_authority(selector, custody).await {
             Ok(CredentialMaintenanceOutcome::Idle) => {
                 if sweep.observe(true) && sleep_or_stop(idle_delay, &stop).await {
                     return Ok(());
@@ -1701,6 +2400,125 @@ async fn run_credential_maintenance_loop(
                 }
             }
             Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn run_workflow_permission_refresh_loop(
+    refresher: Arc<WorkflowPermissionDefaultsRefresher>,
+    stop: CancellationToken,
+) -> Result<(), GithubProviderRuntimeBuildError> {
+    if refresher.targets.is_empty() {
+        return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+    }
+    let owner = refresher.owner;
+    drive_workflow_permission_refresh_loop(
+        move || {
+            let refresher = Arc::clone(&refresher);
+            async move { refresher.refresh_all().await }
+        },
+        owner,
+        stop,
+    )
+    .await
+}
+
+fn jittered_workflow_permission_retry_delay(
+    base: Duration,
+    owner: GithubServerServiceWorkerId,
+    attempt: u64,
+    maximum: Duration,
+) -> Duration {
+    let mut seed = attempt.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    for byte in owner.as_uuid().as_bytes() {
+        seed ^= u64::from(*byte);
+        seed = seed.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let maximum_jitter_millis = u64::try_from(base.as_millis() / 4).unwrap_or(u64::MAX - 1);
+    let jitter_millis = seed % maximum_jitter_millis.saturating_add(1);
+    base.checked_add(Duration::from_millis(jitter_millis))
+        .unwrap_or(maximum)
+        .min(maximum)
+}
+
+async fn drive_workflow_permission_refresh_loop<Refresh, RefreshFuture>(
+    mut refresh_all: Refresh,
+    owner: GithubServerServiceWorkerId,
+    stop: CancellationToken,
+) -> Result<(), GithubProviderRuntimeBuildError>
+where
+    Refresh: FnMut() -> RefreshFuture,
+    RefreshFuture:
+        Future<Output = Result<WorkflowPermissionRefreshOutcome, GithubProviderRuntimeBuildError>>,
+{
+    let half_freshness =
+        u64::try_from(automata_ci_store::GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS / 2)
+            .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+    let cadence = Duration::from_millis(half_freshness.max(1));
+    let mut retry_delay = WORKFLOW_PERMISSION_REFRESH_RETRY_MIN;
+    let mut retry_attempt = 0_u64;
+    loop {
+        if stop.is_cancelled() {
+            return Ok(());
+        }
+        let next_round = tokio::time::Instant::now()
+            .checked_add(cadence)
+            .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
+        // Start the first live round immediately, then schedule each successor
+        // from the preceding round's start. At most 32 provider calls run at
+        // once, leaving headroom below GitHub's shared 100-request concurrency
+        // limit while keeping all 256 configured repositories inside half of
+        // the durable freshness window. Drain every started attempt so its
+        // exact credential release remains under custody.
+        let outcome = tokio::select! {
+            biased;
+            () = stop.cancelled() => return Ok(()),
+            outcome = refresh_all() => outcome,
+        };
+        match outcome {
+            Ok(WorkflowPermissionRefreshOutcome::PolicyMismatch) => {
+                // A stable configuration mismatch invalidates the durable head.
+                // Re-observe on the normal cadence instead of hammering the
+                // provider with retries that cannot repair operator policy.
+                // Preserve start-to-start cadence so other repositories that
+                // were Ready in this mixed round cannot age past their head TTL.
+                retry_delay = WORKFLOW_PERMISSION_REFRESH_RETRY_MIN;
+                retry_attempt = 0;
+                let delay = next_round.saturating_duration_since(tokio::time::Instant::now());
+                if sleep_or_stop(delay, &stop).await {
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(_) => {
+                // Admission is independently fail-closed by the durable freshness
+                // head. A transient provider or Store outage must not terminate the
+                // only process capable of refreshing that head. Exponential,
+                // worker-jittered retries stay below the normal half-life cadence
+                // and avoid a cross-replica provider request storm.
+                let delay = jittered_workflow_permission_retry_delay(
+                    retry_delay,
+                    owner,
+                    retry_attempt,
+                    cadence,
+                );
+                if sleep_or_stop(delay, &stop).await {
+                    return Ok(());
+                }
+                retry_delay = retry_delay
+                    .checked_mul(2)
+                    .unwrap_or(WORKFLOW_PERMISSION_REFRESH_RETRY_MAX)
+                    .min(WORKFLOW_PERMISSION_REFRESH_RETRY_MAX);
+                retry_attempt = retry_attempt.saturating_add(1);
+                continue;
+            }
+            Ok(WorkflowPermissionRefreshOutcome::Ready) => {}
+        }
+        retry_delay = WORKFLOW_PERMISSION_REFRESH_RETRY_MIN;
+        retry_attempt = 0;
+        let delay = next_round.saturating_duration_since(tokio::time::Instant::now());
+        if sleep_or_stop(delay, &stop).await {
+            return Ok(());
         }
     }
 }
@@ -1801,6 +2619,7 @@ enum RuntimeLoopExit {
     Schedules(Result<(), GithubScheduleServiceError>),
     Checks(Result<(), GithubChecksPublisherError>),
     Credentials(Result<(), GithubServerServiceCoordinatorError>),
+    PermissionDefaults(Result<(), GithubProviderRuntimeBuildError>),
     JobAuthority(Result<(), GithubRuntimeAuthorityLifecycleError>),
 }
 
@@ -1859,11 +2678,15 @@ async fn supervise_runtime_loops(
             | RuntimeLoopExit::Schedules(Ok(()))
             | RuntimeLoopExit::Checks(Ok(()))
             | RuntimeLoopExit::Credentials(Ok(()))
+            | RuntimeLoopExit::PermissionDefaults(Ok(()))
             | RuntimeLoopExit::JobAuthority(Ok(())) => None,
             RuntimeLoopExit::Delivery(Err(error)) => Some(error.into()),
             RuntimeLoopExit::Schedules(Err(error)) => Some(error.into()),
             RuntimeLoopExit::Checks(Err(error)) => Some(error.into()),
             RuntimeLoopExit::Credentials(Err(error)) => Some(error.into()),
+            RuntimeLoopExit::PermissionDefaults(Err(_)) => {
+                Some(GithubProviderRuntimeError::PermissionDefaults)
+            }
             RuntimeLoopExit::JobAuthority(Err(error)) => Some(error.into()),
         };
         let pre_shutdown_exit = !stopping && !shutdown.is_cancelled();

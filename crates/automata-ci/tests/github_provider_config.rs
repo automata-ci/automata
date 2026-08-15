@@ -103,6 +103,7 @@ fn repository(
         "check_name": "Automata CI",
         "authorities": {
             "checks_write": authority(checks_authority_id, 7),
+            "workflow_permissions_read": authority(checks_authority_id + 0x1000_0000, 7),
             "private_repository_source_read": private_authority_id
                 .map_or(Value::Null, |id| authority(id, 7))
         }
@@ -142,7 +143,7 @@ fn private_repository() -> Value {
 fn manifest(repositories: Vec<Value>) -> Value {
     let repositories = Value::Array(repositories);
     json!({
-        "schema": 2,
+        "schema": 3,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
@@ -361,19 +362,26 @@ fn dashboard_url_is_a_canonical_public_automata_origin() {
 }
 
 #[test]
-fn dashboard_url_uses_an_explicit_schema_two_migration() {
+fn schema_three_requires_dashboard_and_workflow_permission_authority() {
     let explicit = manifest(vec![public_repository()]);
-    let configured = load_value("dashboard-schema-two.json", &explicit)
-        .expect("schema 2 requires and accepts an explicit trusted dashboard origin");
+    let configured = load_value("dashboard-schema-three.json", &explicit)
+        .expect("schema 3 accepts its explicit dashboard and workflow authority");
     assert_eq!(
         configured.dashboard_url().as_str(),
         "https://ci.automata.example/"
     );
 
-    let mut legacy = explicit.clone();
-    legacy["schema"] = json!(1);
+    let mut legacy_two = explicit.clone();
+    legacy_two["schema"] = json!(2);
     assert_eq!(
-        load_value("dashboard-schema-one.json", &legacy),
+        load_value("dashboard-schema-two.json", &legacy_two),
+        Err(GithubProviderConfigError)
+    );
+
+    let mut legacy_one = explicit.clone();
+    legacy_one["schema"] = json!(1);
+    assert_eq!(
+        load_value("dashboard-schema-one.json", &legacy_one),
         Err(GithubProviderConfigError)
     );
 
@@ -878,6 +886,30 @@ fn typed_values_and_nested_sources_fail_closed() {
     authority_revision["repositories"][0]["authorities"]["checks_write"]["policy_revision"] =
         json!(8);
     cases.push(("authority-policy", authority_revision));
+    let mut workflow_authority_revision = manifest(vec![private_repository()]);
+    workflow_authority_revision["repositories"][0]["authorities"]
+        ["workflow_permissions_read"]["policy_revision"] = json!(8);
+    cases.push(("workflow-authority-policy", workflow_authority_revision));
+    let mut missing_workflow_authority = manifest(vec![private_repository()]);
+    missing_workflow_authority["repositories"][0]["authorities"]
+        .as_object_mut()
+        .expect("authorities object")
+        .remove("workflow_permissions_read");
+    cases.push(("missing-workflow-authority", missing_workflow_authority));
+    let mut duplicate_checks_authority = manifest(vec![private_repository()]);
+    let checks_authority_id = duplicate_checks_authority["repositories"][0]["authorities"]
+        ["checks_write"]["authority_id"]
+        .clone();
+    duplicate_checks_authority["repositories"][0]["authorities"]
+        ["workflow_permissions_read"]["authority_id"] = checks_authority_id;
+    cases.push(("duplicate-checks-authority", duplicate_checks_authority));
+    let mut duplicate_private_authority = manifest(vec![private_repository()]);
+    let private_authority_id = duplicate_private_authority["repositories"][0]["authorities"]
+        ["private_repository_source_read"]["authority_id"]
+        .clone();
+    duplicate_private_authority["repositories"][0]["authorities"]
+        ["workflow_permissions_read"]["authority_id"] = private_authority_id;
+    cases.push(("duplicate-private-authority", duplicate_private_authority));
 
     for (case, value) in cases {
         assert_eq!(
@@ -891,7 +923,7 @@ fn typed_values_and_nested_sources_fail_closed() {
 #[test]
 fn noncurrent_provider_config_schema_fails_closed() {
     let expected = Err(GithubProviderConfigError);
-    for unsupported in [0, 1, 3, u16::MAX] {
+    for unsupported in [0, 1, 2, u16::MAX] {
         let mut value = manifest(vec![private_repository()]);
         value["schema"] = json!(unsupported);
         assert_eq!(load_value("schema.json", &value), expected);

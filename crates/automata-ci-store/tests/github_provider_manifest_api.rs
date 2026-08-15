@@ -297,7 +297,7 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
     );
     assert_eq!(
         original.digest().to_string(),
-        "0000000000000000000000000000000000000000000000000000000000000000"
+        "265b9004ccf1caf9c9e0a384039398b8a066404bdbb90847e5e0cb8c2de5c6a7"
     );
     assert_eq!(
         credential_free.authority_profile(),
@@ -340,7 +340,7 @@ fn owner_binding_uses_an_independent_domain_and_preserves_the_base_digest() {
     assert_ne!(owner.digest(), other_owner.digest());
     assert_eq!(
         base.digest().to_string(),
-        "0000000000000000000000000000000000000000000000000000000000000000"
+        "265b9004ccf1caf9c9e0a384039398b8a066404bdbb90847e5e0cb8c2de5c6a7"
     );
 }
 
@@ -400,7 +400,7 @@ fn bootstrap_request_is_nonnegative_and_port_is_object_safe() {
     let _ = accepts_manifest_repository;
 }
 
-fn manifest(
+pub(crate) fn manifest(
     manifest_revision: u64,
     app_revision: u64,
     policy_revision: u64,

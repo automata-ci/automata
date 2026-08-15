@@ -27,7 +27,7 @@ pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
 pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 
-const CONFIG_SCHEMA: u16 = 2;
+const CONFIG_SCHEMA: u16 = 3;
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -610,6 +610,7 @@ pub struct GithubProviderRepositoryConfig {
     workflow_selection: GithubProviderWorkflowSelection,
     check_name: GithubCheckName,
     checks_write_authority: GithubProviderAuthorityConfig,
+    workflow_permissions_authority: GithubProviderAuthorityConfig,
     private_source_authority: Option<GithubProviderAuthorityConfig>,
 }
 
@@ -662,9 +663,12 @@ impl GithubProviderRepositoryConfig {
             GithubCheckName::new(raw.check_name).map_err(|_| GithubProviderConfigError)?;
         let RawAuthorities {
             checks_write,
+            workflow_permissions_read,
             private_repository_source_read,
         } = raw.authorities;
         let checks_write_authority = GithubProviderAuthorityConfig::validate(&checks_write)?;
+        let workflow_permissions_authority =
+            GithubProviderAuthorityConfig::validate(&workflow_permissions_read)?;
         let private_source_authority = match (visibility, private_repository_source_read) {
             (ProviderRepositoryVisibility::Public, RawPrivateAuthority::Null(())) => None,
             (ProviderRepositoryVisibility::Private, RawPrivateAuthority::Authority(authority)) => {
@@ -673,6 +677,7 @@ impl GithubProviderRepositoryConfig {
             _ => return Err(GithubProviderConfigError),
         };
         if checks_write_authority.policy_revision != policy_revision
+            || workflow_permissions_authority.policy_revision != policy_revision
             || private_source_authority
                 .as_ref()
                 .is_some_and(|authority| authority.policy_revision != policy_revision)
@@ -699,6 +704,7 @@ impl GithubProviderRepositoryConfig {
             workflow_selection,
             check_name,
             checks_write_authority,
+            workflow_permissions_authority,
             private_source_authority,
         })
     }
@@ -817,6 +823,12 @@ impl GithubProviderRepositoryConfig {
         &self.checks_write_authority
     }
 
+    /// Returns the mandatory exact workflow-permissions-read authority configuration.
+    #[must_use]
+    pub const fn workflow_permissions_authority(&self) -> &GithubProviderAuthorityConfig {
+        &self.workflow_permissions_authority
+    }
+
     /// Returns the exact private-source authority only for a Private repository.
     #[must_use]
     pub const fn private_source_authority(&self) -> Option<&GithubProviderAuthorityConfig> {
@@ -849,6 +861,10 @@ impl fmt::Debug for GithubProviderRepositoryConfig {
             )
             .field("check_name", &"[redacted]")
             .field("checks_write_authority", &self.checks_write_authority)
+            .field(
+                "workflow_permissions_authority",
+                &self.workflow_permissions_authority,
+            )
             .field("private_source_authority", &self.private_source_authority)
             .finish()
     }
@@ -918,6 +934,7 @@ fn validate_unique_repositories(
             || !repository_names.insert(repository.repository_name.as_str().to_ascii_lowercase())
             || !internal_repository_ids.insert(repository.internal_repository_id)
             || !authority_ids.insert(repository.checks_write_authority.authority_id)
+            || !authority_ids.insert(repository.workflow_permissions_authority.authority_id)
             || repository
                 .private_source_authority
                 .as_ref()
@@ -1028,6 +1045,7 @@ enum RawAuthorityProfile {
 #[serde(deny_unknown_fields)]
 struct RawAuthorities {
     checks_write: RawAuthority,
+    workflow_permissions_read: RawAuthority,
     private_repository_source_read: RawPrivateAuthority,
 }
 

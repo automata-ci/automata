@@ -1143,6 +1143,10 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
                 case.checks_authority_id + authority_id_offset,
                 policy_revision,
             ),
+            "workflow_permissions_read": authority(
+                case.checks_authority_id + authority_id_offset + 0x1000_0000,
+                policy_revision,
+            ),
             "private_repository_source_read": case.private_source_authority_id
                 .map_or(Value::Null, |id| {
                     authority(id + authority_id_offset, policy_revision)
@@ -1153,7 +1157,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
 
 fn config_document(manifest_revision: u64, rotated: bool) -> Value {
     json!({
-        "schema": 2,
+        "schema": 3,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
