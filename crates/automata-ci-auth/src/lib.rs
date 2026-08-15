@@ -38,5 +38,5 @@ pub mod session_credential;
 pub mod sign_in;
 /// Injectable clocks and bounded Unix timestamp arithmetic.
 pub mod time;
-/// Provider-token custody and key-encryption boundaries.
+/// Provider-token custody values and vault port.
 pub mod vault;

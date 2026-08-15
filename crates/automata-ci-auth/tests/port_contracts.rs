@@ -6,7 +6,7 @@ use automata_ci_auth::{
     login::LoginTransactionRepository,
     machine::MachineIdentityVerifier,
     session::{HumanSessionRepository, SessionIssuer},
-    vault::{KeyEncryptionProvider, ProviderTokenVault},
+    vault::ProviderTokenVault,
 };
 use static_assertions::assert_obj_safe;
 
@@ -20,7 +20,6 @@ assert_obj_safe!(HumanSessionRepository);
 assert_obj_safe!(LoginTransactionRepository);
 assert_obj_safe!(GithubEndpoint);
 assert_obj_safe!(ProviderTokenVault);
-assert_obj_safe!(KeyEncryptionProvider);
 
 #[test]
 fn runtime_plugin_ports_remain_object_safe() {

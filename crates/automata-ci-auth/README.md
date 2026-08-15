@@ -4,21 +4,21 @@ This crate contains Automata's authentication and authorization domain contracts
 It deliberately has no HTTP client, database, web framework, or runtime dependency.
 
 Human identity providers, machine identity verification, session issuance, RBAC,
-provider-token custody, key encryption, and output publication policy are separate
-boundaries. The GitHub App module models the browser and device authorization
-protocols without deciding how HTTP or durable storage are implemented.
+provider-token custody, and output publication policy are separate boundaries. The
+GitHub App module models the browser and device authorization protocols without
+deciding how HTTP or durable storage are implemented.
 
 Provider access and refresh tokens are secret-bearing, non-serializable values.
 They must be handed to a `ProviderTokenVault` implementation backed by authenticated
-encryption. This crate exposes the vault and key-encryption ports; it does not pretend
-that encoding or redaction is encryption.
+encryption. This crate owns the provider-token custody values and vault port;
+`automata-ci-key-management` owns encryption and key wrapping.
 
-Durable identity, session, machine-certificate, token-metadata, vault-key, and
-key-encryption-context values have private fields and validated constructors. Their
-deserializers run the same validation, so storage and wire round trips cannot bypass
-domain invariants. Secret-bearing aggregates expose only focused borrowed accessors
-and deliberate consuming `into_parts` methods; they remain non-serializable and
-redacted in debug output.
+Durable identity, session, machine-certificate, token-metadata, and vault-key values
+have private fields and validated constructors. Their deserializers run the same
+validation, so storage and wire round trips cannot bypass domain invariants.
+Secret-bearing aggregates expose only focused borrowed accessors and deliberate
+consuming `into_parts` methods; they remain non-serializable and redacted in debug
+output.
 
 Control-plane adapters must keep browser/device transaction state in a shared,
 encrypted, single-use store so any orchestrator replica can finish a flow without
