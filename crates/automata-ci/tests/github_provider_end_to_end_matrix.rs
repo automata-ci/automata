@@ -1125,6 +1125,7 @@ fn repository_document(case: MatrixCase, manifest_revision: u64, rotated: bool) 
         "tenant_id": case.tenant,
         "connection_id": uuid(case.connection_id),
         "installation_id": case.installation_id,
+        "installation_binding_generation": 1,
         "repository_id": case.repository_id,
         "repository_owner_id": case.repository_owner_id,
         "repository": case.repository,

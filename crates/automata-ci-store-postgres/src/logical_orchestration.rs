@@ -11,24 +11,32 @@ use super::{
     PostgresStore,
     admission::{RunPublicationSnapshot, lock_repository_publication_snapshot},
     durable_schema::current_durable_schemas,
+    event_subject::{
+        load_event_subject_state_in_transaction, record_event_subject_progress_in_transaction,
+        register_event_subject_in_transaction,
+    },
     github_schedule::{
         record_github_scheduled_run_evidence_in_transaction,
+        validate_github_schedule_selection_in_transaction,
         validate_github_scheduled_run_evidence_in_transaction,
     },
     github_subject_evidence::{
         record_github_workflow_run_subject_evidence_in_transaction,
         validate_github_workflow_run_subject_evidence_in_transaction,
+        validate_github_workflow_selection_in_transaction,
     },
     secret_management::{AuthorizedHumanRepositoryAction, authorize_human_repository_action},
 };
 use automata_ci_store::{
     AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
-    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
-    GithubScheduleFireClaim, GithubSubjectEvidenceStoreError, JobEnvironmentRequirement,
-    LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
+    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource, EventControlSubject,
+    EventControlSubjectId, EventSubjectId, EventSubjectOrigin, EventSubjectProgress,
+    EventSubjectSelection, EventSubjectStoreError, EventSubjectTerminalKind,
+    EventSubjectTerminalOutcome, GithubScheduleFireClaim, GithubSubjectEvidenceStoreError,
+    JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     LogicalWorkflowInvocationId, LogicalWorkflowJobKind, ObjectKey,
-    RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
+    RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject, RepositoryId,
     ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError,
     ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
     WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowSnapshotId,
@@ -40,7 +48,7 @@ enum SubjectEvidenceAdmission {
         observed_at: UnixMillis,
     },
     AuthenticatedWorkflowDispatch {
-        claim: AuthenticatedWorkflowDispatchClaim,
+        claim: Box<AuthenticatedWorkflowDispatchClaim>,
     },
     ScheduledGithub {
         claim: GithubScheduleFireClaim,
@@ -142,7 +150,9 @@ impl LogicalWorkflowAdmissionRepository for PostgresStore {
         admit_logical_workflow_transaction(
             self,
             command,
-            SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim },
+            SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch {
+                claim: Box::new(claim),
+            },
         )
         .await
     }
@@ -303,6 +313,7 @@ fn dispatch_source_from_row(
     .map_err(|_| StoreError::corrupt_data("signed GitHub dispatch source is invalid").into())
 }
 
+#[allow(clippy::too_many_lines)] // One transaction seals every admission and event-subject invariant.
 async fn admit_logical_workflow_transaction(
     store: &PostgresStore,
     command: AdmitLogicalWorkflowRun,
@@ -318,9 +329,50 @@ async fn admit_logical_workflow_transaction(
             | SubjectEvidenceAdmission::ScheduledGithub { .. }
     );
 
-    if !claim_idempotency_receipt(&mut transaction, &command, github_subject_evidence_required)
-        .await?
-    {
+    let existing_receipt = admission_receipt_exists(&mut transaction, &command).await?;
+    let publication = if existing_receipt {
+        None
+    } else {
+        if matches!(
+            &subject_evidence,
+            SubjectEvidenceAdmission::AuthenticatedGithub { .. }
+                | SubjectEvidenceAdmission::ScheduledGithub { .. }
+        ) {
+            resolve_repository(&mut transaction, &command).await?;
+        }
+        let publication = lock_repository_publication_snapshot(
+            &mut transaction,
+            command.tenant().as_str(),
+            command.repository().id().as_uuid(),
+        )
+        .await?;
+        resolve_workflow(&mut transaction, &command).await?;
+        validate_subject_selection_authority(&mut transaction, &command, &subject_evidence).await?;
+        if replay_disabled_event_subject(&mut transaction, &command, &subject_evidence).await? {
+            transaction.commit().await.map_err(operation_error)?;
+            return Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled);
+        }
+        if !require_workflow_enabled(&mut transaction, &command).await? {
+            record_skipped_event_subject(
+                &mut transaction,
+                &command,
+                &subject_evidence,
+                command.admitted_at(),
+            )
+            .await?;
+            transaction.commit().await.map_err(operation_error)?;
+            return Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled);
+        }
+        Some(publication)
+    };
+
+    let claimed = if publication.is_some() {
+        claim_idempotency_receipt(&mut transaction, &command, github_subject_evidence_required)
+            .await?
+    } else {
+        false
+    };
+    if !claimed {
         let (receipt, admitted_at) =
             replay_receipt(&mut transaction, &command, github_subject_evidence_required).await?;
         validate_replayed_subject_evidence(
@@ -336,24 +388,20 @@ async fn admit_logical_workflow_transaction(
             &command,
         )
         .await?;
+        record_admitted_event_subject(
+            &mut transaction,
+            &command,
+            &subject_evidence,
+            admitted_at,
+            true,
+        )
+        .await?;
         transaction.commit().await.map_err(operation_error)?;
         return Ok(receipt);
     }
-
-    if matches!(
-        &subject_evidence,
-        SubjectEvidenceAdmission::AuthenticatedGithub { .. }
-            | SubjectEvidenceAdmission::ScheduledGithub { .. }
-    ) {
-        resolve_repository(&mut transaction, &command).await?;
-    }
-    let publication = lock_repository_publication_snapshot(
-        &mut transaction,
-        command.tenant().as_str(),
-        command.repository().id().as_uuid(),
-    )
-    .await?;
-    resolve_workflow(&mut transaction, &command).await?;
+    let publication = publication.ok_or_else(|| {
+        StoreError::corrupt_data("new logical admission lost its publication snapshot")
+    })?;
     resolve_snapshot(&mut transaction, &command).await?;
     let run_number = allocate_run_number(&mut transaction, command.workflow_id()).await?;
     if let Some(concurrency) = command.concurrency() {
@@ -374,6 +422,14 @@ async fn admit_logical_workflow_transaction(
         &command,
         &subject_evidence,
         dispatch_actor.as_ref(),
+    )
+    .await?;
+    record_admitted_event_subject(
+        &mut transaction,
+        &command,
+        &subject_evidence,
+        command.admitted_at(),
+        false,
     )
     .await?;
     insert_logical_jobs(&mut transaction, &command).await?;
@@ -411,17 +467,376 @@ async fn admit_logical_workflow_transaction(
     ))
 }
 
+async fn record_admitted_event_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    subject_evidence: &SubjectEvidenceAdmission,
+    admitted_at: UnixMillis,
+    expected_replay: bool,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let outcome = EventSubjectTerminalOutcome::admitted(command.run_id())
+        .map_err(event_subject_value_error)?;
+    let (origin, control_id, registration_replay, progress_replay) =
+        record_event_subject_terminal(transaction, command, subject_evidence, outcome, admitted_at)
+            .await?;
+    if progress_replay != expected_replay || (expected_replay && !registration_replay) {
+        return Err(StoreError::corrupt_data(
+            "generalized event-subject replay state disagrees with workflow admission",
+        )
+        .into());
+    }
+    link_github_check_event_control(
+        transaction,
+        command,
+        origin,
+        control_id,
+        Some(command.run_id()),
+    )
+    .await
+}
+
+async fn record_skipped_event_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    subject_evidence: &SubjectEvidenceAdmission,
+    recorded_at: UnixMillis,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let outcome = EventSubjectTerminalOutcome::skipped("workflow.disabled")
+        .map_err(event_subject_value_error)?;
+    let (origin, control_id, _, _) =
+        record_event_subject_terminal(transaction, command, subject_evidence, outcome, recorded_at)
+            .await?;
+    link_github_check_event_control(transaction, command, origin, control_id, None).await
+}
+
+async fn replay_disabled_event_subject(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    subject_evidence: &SubjectEvidenceAdmission,
+) -> Result<bool, LogicalWorkflowAdmissionStoreError> {
+    let origin = event_subject_origin(subject_evidence);
+    let subject_id = EventSubjectId::derive(
+        command.tenant(),
+        command.repository().id(),
+        origin,
+        command.workflow_path(),
+    )
+    .map_err(event_subject_value_error)?;
+    let Some((selection, control, progress)) =
+        load_event_subject_state_in_transaction(transaction, subject_id)
+            .await
+            .map_err(event_subject_store_error)?
+    else {
+        return Ok(false);
+    };
+    if !event_selection_matches_command(&selection, command, origin) {
+        return Err(StoreError::corrupt_data(
+            "terminal event selection disagrees with admission coordinates",
+        )
+        .into());
+    }
+    let Some(progress) = progress else {
+        return Ok(false);
+    };
+    if progress.outcome().kind() != EventSubjectTerminalKind::Skipped
+        || progress.outcome().reason() != Some("workflow.disabled")
+    {
+        return Err(StoreError::corrupt_data(
+            "terminal event subject has no matching logical admission receipt",
+        )
+        .into());
+    }
+    link_github_check_event_control(transaction, command, origin, control.id(), None).await?;
+    Ok(true)
+}
+
+#[allow(clippy::too_many_lines)] // One exact mutation covers admitted and disabled projections.
+async fn link_github_check_event_control(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    origin: EventSubjectOrigin,
+    control_id: EventControlSubjectId,
+    run_id: Option<RunId>,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    if matches!(origin, EventSubjectOrigin::ManualOperation(_)) {
+        return Ok(());
+    }
+    let linked = if let Some(run_id) = run_id {
+        sqlx::query(
+            r"
+            UPDATE github_check_subjects
+               SET event_control_subject_id = $1
+             WHERE tenant_id = $2
+               AND repository_id = $3
+               AND workflow_run_id = $4
+               AND subject_kind = 'workflow'
+               AND subject_key = $5
+               AND (
+                    (origin_kind = 'provider_delivery'
+                     AND provider_delivery_id = $6)
+                 OR (origin_kind = 'scheduled_fire'
+                     AND schedule_fire_id = $6)
+               )
+               AND (event_control_subject_id IS NULL OR event_control_subject_id = $1)
+            ",
+        )
+        .bind(control_id.as_uuid())
+        .bind(command.tenant().as_str())
+        .bind(command.repository().id().as_uuid())
+        .bind(run_id.as_uuid())
+        .bind(command.workflow_path())
+        .bind(origin.as_uuid())
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?
+    } else {
+        // A disabled workflow is already terminal generalized progress. Keep
+        // the optional GitHub projection subordinate to that control by
+        // linking and terminalizing it in this same transaction. The second
+        // arm is an exact no-op replay and cannot advance the revision again.
+        sqlx::query(
+            r"
+            UPDATE github_check_subjects
+               SET event_control_subject_id = $1,
+                   desired_state = CASE
+                       WHEN desired_state = 'queued' THEN 'completed'
+                       ELSE desired_state
+                   END,
+                   desired_conclusion = CASE
+                       WHEN desired_state = 'queued' THEN 'skipped'
+                       ELSE desired_conclusion
+                   END,
+                   terminal_cause = CASE
+                       WHEN desired_state = 'queued' THEN 'workflow_skipped'
+                       ELSE terminal_cause
+                   END,
+                   desired_revision = CASE
+                       WHEN desired_state = 'queued' THEN desired_revision + 1
+                       ELSE desired_revision
+                   END,
+                   desired_updated_at_ms = CASE
+                       WHEN desired_state = 'queued' THEN $6
+                       ELSE desired_updated_at_ms
+                   END
+             WHERE tenant_id = $2
+               AND repository_id = $3
+               AND workflow_run_id IS NULL
+               AND linked_at_ms IS NULL
+               AND subject_kind = 'workflow'
+               AND subject_key = $4
+               AND (
+                    (origin_kind = 'provider_delivery'
+                     AND provider_delivery_id = $5)
+                 OR (origin_kind = 'scheduled_fire'
+                     AND schedule_fire_id = $5)
+               )
+               AND (
+                    (event_control_subject_id IS NULL
+                     AND desired_state = 'queued'
+                     AND desired_conclusion IS NULL
+                     AND terminal_cause IS NULL
+                     AND desired_revision = 1
+                     AND desired_updated_at_ms <= $6)
+                 OR (event_control_subject_id = $1
+                     AND desired_state = 'completed'
+                     AND desired_conclusion = 'skipped'
+                     AND terminal_cause = 'workflow_skipped'
+                     AND desired_revision = 2
+                     AND desired_updated_at_ms <= $6)
+               )
+            ",
+        )
+        .bind(control_id.as_uuid())
+        .bind(command.tenant().as_str())
+        .bind(command.repository().id().as_uuid())
+        .bind(command.workflow_path())
+        .bind(origin.as_uuid())
+        .bind(command.admitted_at().get())
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?
+    };
+    if linked.rows_affected() != 1 {
+        return Err(StoreError::corrupt_data(
+            "generalized event control does not match one Check projection",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn record_event_subject_terminal(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    subject_evidence: &SubjectEvidenceAdmission,
+    outcome: EventSubjectTerminalOutcome,
+    recorded_at: UnixMillis,
+) -> Result<
+    (EventSubjectOrigin, EventControlSubjectId, bool, bool),
+    LogicalWorkflowAdmissionStoreError,
+> {
+    let origin = event_subject_origin(subject_evidence);
+    let subject_id = EventSubjectId::derive(
+        command.tenant(),
+        command.repository().id(),
+        origin,
+        command.workflow_path(),
+    )
+    .map_err(event_subject_value_error)?;
+    let existing = load_event_subject_state_in_transaction(transaction, subject_id)
+        .await
+        .map_err(event_subject_store_error)?;
+    let (selection, control_id, registration_replay, durable_progress) =
+        if let Some((selection, control, progress)) = existing {
+            if !event_selection_matches_command(&selection, command, origin) {
+                return Err(StoreError::corrupt_data(
+                    "generalized event selection disagrees with admission coordinates",
+                )
+                .into());
+            }
+            (selection, control.id(), true, progress)
+        } else {
+            let selection = EventSubjectSelection::new(
+                subject_id,
+                command.tenant().clone(),
+                command.repository().id(),
+                origin,
+                command.event_name(),
+                command.workflow_path(),
+                lower_hex(command.head_sha()),
+                command.source().digest(),
+                command.request_digest(),
+                recorded_at,
+            )
+            .map_err(event_subject_value_error)?;
+            let control_id = EventControlSubjectId::derive(subject_id);
+            let control = EventControlSubject::new(control_id, &selection, recorded_at)
+                .map_err(event_subject_value_error)?;
+            let request = RegisterEventSubject::new(selection.clone(), control)
+                .map_err(event_subject_value_error)?;
+            match register_event_subject_in_transaction(transaction, request).await {
+                Ok(registration) => (selection, control_id, registration.is_replay(), None),
+                Err(EventSubjectStoreError::Conflict) => {
+                    let (durable_selection, durable_control, durable_progress) =
+                        load_event_subject_state_in_transaction(transaction, subject_id)
+                            .await
+                            .map_err(event_subject_store_error)?
+                            .ok_or_else(|| {
+                                StoreError::corrupt_data(
+                                    "concurrent generalized event registration lost durable state",
+                                )
+                            })?;
+                    if !event_selection_matches_command(&durable_selection, command, origin) {
+                        return Err(StoreError::corrupt_data(
+                            "concurrent generalized event selection conflicts with admission",
+                        )
+                        .into());
+                    }
+                    (
+                        durable_selection,
+                        durable_control.id(),
+                        true,
+                        durable_progress,
+                    )
+                }
+                Err(error) => return Err(event_subject_store_error(error)),
+            }
+        };
+    if let Some(progress) = durable_progress {
+        if progress.outcome() != &outcome {
+            return Err(StoreError::corrupt_data(
+                "terminal event-subject replay conflicts with durable progress",
+            )
+            .into());
+        }
+        return Ok((origin, control_id, registration_replay, true));
+    }
+    let progress = EventSubjectProgress::new(&selection, outcome, recorded_at)
+        .map_err(event_subject_value_error)?;
+    let progress = record_event_subject_progress_in_transaction(transaction, progress)
+        .await
+        .map_err(event_subject_store_error)?;
+    Ok((
+        origin,
+        control_id,
+        registration_replay,
+        progress.is_replay(),
+    ))
+}
+
+fn event_subject_origin(subject_evidence: &SubjectEvidenceAdmission) -> EventSubjectOrigin {
+    match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
+            EventSubjectOrigin::ProviderDelivery(current_claim.claim().delivery_id())
+        }
+        SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
+            EventSubjectOrigin::ManualOperation(claim.operation_id())
+        }
+        SubjectEvidenceAdmission::ScheduledGithub { claim } => {
+            EventSubjectOrigin::ScheduleFire(claim.fire_id())
+        }
+    }
+}
+
+fn event_selection_matches_command(
+    selection: &EventSubjectSelection,
+    command: &AdmitLogicalWorkflowRun,
+    origin: EventSubjectOrigin,
+) -> bool {
+    selection.tenant() == command.tenant()
+        && selection.repository_id() == command.repository().id()
+        && selection.origin() == origin
+        && selection.event_name() == command.event_name()
+        && selection.workflow_path() == command.workflow_path()
+        && selection.source_revision() == lower_hex(command.head_sha())
+        && selection.source_digest() == command.source().digest()
+        && selection.authority_digest() == command.request_digest()
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn event_subject_value_error(
+    _error: automata_ci_store::EventSubjectValueError,
+) -> LogicalWorkflowAdmissionStoreError {
+    StoreError::corrupt_data("generalized event-subject coordinates are invalid").into()
+}
+
+fn event_subject_store_error(error: EventSubjectStoreError) -> LogicalWorkflowAdmissionStoreError {
+    match error {
+        EventSubjectStoreError::Operation(error) => StoreError::Operation(error).into(),
+        EventSubjectStoreError::Conflict => StoreError::corrupt_data(
+            "generalized event-subject identity conflicts with durable admission",
+        )
+        .into(),
+        EventSubjectStoreError::NotFound | EventSubjectStoreError::CorruptData => {
+            StoreError::corrupt_data("durable generalized event-subject state is corrupt").into()
+        }
+    }
+}
+
 fn validate_subject_evidence_boundary(
     command: &AdmitLogicalWorkflowRun,
     subject_evidence: &SubjectEvidenceAdmission,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
-        SubjectEvidenceAdmission::AuthenticatedGithub { observed_at, .. } => {
+        SubjectEvidenceAdmission::AuthenticatedGithub {
+            current_claim: _,
+            observed_at,
+        } => {
+            let provider_delivery = matches!(
+                command.idempotency(),
+                WorkflowAdmissionIdempotency::ProviderDelivery(_)
+            );
             if command.repository().provider() != "github"
-                || !matches!(
-                    command.idempotency(),
-                    WorkflowAdmissionIdempotency::ProviderDelivery(_)
-                )
+                || !provider_delivery
                 || command.admitted_at() != *observed_at
             {
                 return Err(StoreError::corrupt_data(
@@ -446,6 +861,8 @@ fn validate_subject_evidence_boundary(
                 || claim.workflow_id() != command.workflow_id()
                 || claim.workflow_path() != command.workflow_path()
                 || claim.git_ref() != command.git_ref()
+                || claim.commit_sha() != lower_hex(command.head_sha())
+                || claim.source() != command.source()
                 || command.actor() != Some(claim.actor().principal_id().as_str())
                 || claim.event_digest() != command.event().digest()
                 || !base_context_matches
@@ -478,6 +895,99 @@ fn validate_subject_evidence_boundary(
         }
     }
     Ok(())
+}
+
+async fn validate_subject_selection_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    subject_evidence: &SubjectEvidenceAdmission,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    match subject_evidence {
+        SubjectEvidenceAdmission::AuthenticatedGithub { current_claim, .. } => {
+            let request = RecordGithubWorkflowRunSubjectEvidence::from_logical_admission(
+                *current_claim,
+                command,
+            )
+            .map_err(|_| {
+                StoreError::corrupt_data("invalid signed GitHub event selection evidence")
+            })?;
+            validate_github_workflow_selection_in_transaction(transaction, &request)
+                .await
+                .map_err(subject_evidence_error)
+        }
+        SubjectEvidenceAdmission::ScheduledGithub { claim } => {
+            validate_github_schedule_selection_in_transaction(transaction, command, *claim).await
+        }
+        SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } => {
+            validate_manual_dispatch_source_authority(transaction, command, claim).await
+        }
+    }
+}
+
+async fn validate_manual_dispatch_source_authority(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: &AuthenticatedWorkflowDispatchClaim,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let source_size = i64::try_from(claim.source().encoded_size()).map_err(|_| {
+        StoreError::corrupt_data("workflow dispatch source size exceeds durable bounds")
+    })?;
+    let exact = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT TRUE
+          FROM repositories AS repository
+          JOIN workflow_definitions AS workflow
+            ON workflow.repository_id = repository.id
+           AND workflow.id = $3
+           AND workflow.path = $4
+          JOIN workflow_runs AS run
+            ON run.repository_id = repository.id
+           AND run.workflow_id = workflow.id
+           AND run.git_ref = $5
+           AND run.head_sha = $6
+           AND run.admission_epoch = $11
+          JOIN workflow_snapshots AS snapshot
+            ON snapshot.id = run.snapshot_id
+           AND snapshot.workflow_id = workflow.id
+           AND snapshot.source_digest = $7
+           AND snapshot.source_object_key = $8
+           AND snapshot.source_size_bytes = $9
+           AND snapshot.source_media_type = $10
+          JOIN github_workflow_run_subject_evidence AS evidence
+            ON evidence.tenant_id = repository.tenant_id
+           AND evidence.repository_id = repository.id
+           AND evidence.workflow_id = workflow.id
+           AND evidence.snapshot_id = snapshot.id
+           AND evidence.run_id = run.id
+           AND evidence.workflow_path = workflow.path
+           AND evidence.source_digest = snapshot.source_digest
+           AND evidence.git_ref = run.git_ref
+         WHERE repository.tenant_id = $1
+           AND repository.id = $2
+           AND repository.scm_provider = 'github'
+         LIMIT 1
+        FOR SHARE OF repository, workflow, run, snapshot, evidence
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(claim.workflow_id().as_uuid())
+    .bind(claim.workflow_path())
+    .bind(claim.git_ref())
+    .bind(decode_commit_sha_bytes(claim.commit_sha())?)
+    .bind(claim.source().digest().as_bytes().as_slice())
+    .bind(claim.source().object_key().as_str())
+    .bind(source_size)
+    .bind(claim.source().media_type())
+    .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if exact == Some(true) {
+        Ok(())
+    } else {
+        Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected)
+    }
 }
 
 async fn authorize_dispatch_subject(
@@ -839,6 +1349,29 @@ fn subject_evidence_error(
     }
 }
 
+async fn admission_receipt_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<bool, LogicalWorkflowAdmissionStoreError> {
+    sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT EXISTS (
+            SELECT 1
+            FROM workflow_admission_receipts
+            WHERE tenant_id = $1
+              AND idempotency_kind = $2
+              AND idempotency_key = $3
+        )
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.idempotency().kind())
+    .bind(command.idempotency().key())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(operation_error)
+}
+
 async fn claim_idempotency_receipt(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
@@ -1175,6 +1708,91 @@ async fn resolve_workflow(
         ));
     }
     Ok(())
+}
+
+async fn require_workflow_enabled(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<bool, LogicalWorkflowAdmissionStoreError> {
+    sqlx::query(
+        r"
+        INSERT INTO workflow_enable_state_revisions (
+            tenant_id, repository_id, workflow_id, workflow_path,
+            state_revision, enable_state, changed_at_ms
+        )
+        SELECT $1,$2,$3,$4,1,
+               CASE WHEN workflow.enabled THEN 'enabled' ELSE 'disabled' END,
+               $5
+        FROM workflow_definitions AS workflow
+        JOIN repositories AS repository
+          ON repository.id = workflow.repository_id
+         AND repository.tenant_id = $1
+        WHERE workflow.repository_id = $2
+          AND workflow.id = $3
+          AND workflow.path = $4
+        ON CONFLICT DO NOTHING
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.workflow_id().as_uuid())
+    .bind(command.workflow_path())
+    .bind(command.admitted_at().get())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    sqlx::query(
+        r"
+        INSERT INTO workflow_enable_state_current (
+            tenant_id, repository_id, workflow_id, state_revision
+        ) VALUES ($1,$2,$3,1)
+        ON CONFLICT DO NOTHING
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.workflow_id().as_uuid())
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let row = sqlx::query(
+        r"
+        SELECT revision.workflow_path, revision.enable_state
+        FROM workflow_enable_state_current AS current
+        JOIN workflow_enable_state_revisions AS revision
+          ON revision.tenant_id = current.tenant_id
+         AND revision.repository_id = current.repository_id
+         AND revision.workflow_id = current.workflow_id
+         AND revision.state_revision = current.state_revision
+        WHERE current.tenant_id = $1
+          AND current.repository_id = $2
+          AND current.workflow_id = $3
+        FOR SHARE OF current
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.workflow_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or_else(|| StoreError::corrupt_data("workflow enable state is missing"))?;
+    if row
+        .try_get::<String, _>("workflow_path")
+        .map_err(operation_error)?
+        != command.workflow_path()
+    {
+        return Err(StoreError::corrupt_data("workflow enable-state identity changed").into());
+    }
+    match row
+        .try_get::<String, _>("enable_state")
+        .map_err(operation_error)?
+        .as_str()
+    {
+        "enabled" => Ok(true),
+        "disabled" => Ok(false),
+        _ => Err(StoreError::corrupt_data("workflow enable state is invalid").into()),
+    }
 }
 
 async fn resolve_snapshot(

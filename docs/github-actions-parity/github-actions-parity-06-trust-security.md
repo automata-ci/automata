@@ -29,37 +29,56 @@ definition of done.
 
 Tasks:
 
-- [ ] Split the central event model, decoder, trigger compiler, and webhook
+- [x] Split the central event model, decoder, trigger compiler, and webhook
   normalizer into per-event modules.
-- [ ] Define a versioned normalized envelope containing only authenticated,
+- [x] Define a versioned normalized envelope containing only authenticated,
   bounded facts.
-- [ ] Give every event a canonical name, activities/defaults, typed trigger,
+- [x] Give every event a canonical name, activities/defaults, typed trigger,
   ref/SHA rule, source rule, changed-file strategy, trust inputs, and recursion
   policy.
-- [ ] Preserve exact raw JSON in immutable storage but exclude it from queue
+- [x] Preserve exact raw JSON in immutable storage but exclude it from queue
   descriptors and diagnostics.
-- [ ] Move existing push, pull request, merge group, and repository dispatch to
+- [x] Move existing push, pull request, merge group, and repository dispatch to
   the generalized path without behavior change.
 - [x] Preserve configured GitHub `all_direct` fanout from one immutable
   repository revision, with a sorted digest-bound workflow inventory and
   durable per-workflow progress and Check subjects.
-- [ ] Generalize immutable-revision workflow selection and independently
-  replayable progress and Check projection to every admission path.
-- [ ] Add a durable enabled/disabled workflow state used by webhook, manual,
-  schedule, and chained-event admission.
-- [ ] Reconcile GitHub App installation replacement and out-of-order webhook
-  delivery without changing authenticated repository identity.
-- [ ] Reject configured-but-unimplemented events at publication.
-- [ ] Add a leaf registration pattern so event families can be implemented in
+- [x] Generalize immutable-revision workflow selection and independently
+  replayable progress and Check projection across the current provider,
+  manual, and schedule admission paths; reserve the closed `workflow_run`
+  origin contract for EVT-08 chained admission.
+- [x] Add a durable enabled/disabled workflow state used by webhook, manual,
+  and schedule admission, and required by the EVT-08 chained-event entry point.
+- [x] Version GitHub App installation replacement as contiguous immutable
+  binding generations, preserve historical authenticated identity, and allow
+  central admission to finish after promotion when the old delivery was
+  already authenticated, claimed, source-materialized, and given its exact
+  per-workflow Check under the prior binding.
+- [ ] Retain generation-scoped historical credential routes across a process
+  restart so a delivery not yet source-materialized under the old installation
+  can still fetch private source and publish its old Check after replacement.
+- [x] Reject configured-but-unimplemented events at publication.
+- [x] Add a leaf registration pattern so event families can be implemented in
   parallel after this package merges.
 
 Acceptance:
 
-- [ ] Existing events pass signature, inbox, source, admission, redelivery,
+- [x] Existing events pass signature, inbox, source, admission, redelivery,
   and restart tests.
-- [ ] Duplicate keys, oversized bodies, wrong identity, and changed
+- [x] Duplicate keys, oversized bodies, wrong identity, and changed
   redeliveries fail closed.
-- [ ] Debug output contains no body or credential.
+- [x] Debug output contains no body or credential.
+
+Implementation note: the v1 registry is closed and digest-pinned; ingress seals
+facts-only envelopes against immutable raw-blob identity. Provider delivery,
+schedule, and manual origins share deterministic selection, progress, and
+control subjects, while GitHub Check projection remains a separate optional
+binding. The closed `workflow_run` origin and repository port are ready for
+EVT-08; this package does not claim that chained admission exists. Workflow
+enable-state and installation-binding history are versioned, immutable, and
+replay checked. Installation history does not imply credential availability:
+post-restart private-source and Check routing for a prior installation remains
+explicitly unchecked above.
 
 ### AUTH-01 — Permission catalog and effective defaults
 

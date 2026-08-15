@@ -89,6 +89,7 @@ fn repository(
         "tenant_id": tenant_id,
         "connection_id": uuid(connection_id),
         "installation_id": installation_id,
+        "installation_binding_generation": 1,
         "repository_id": repository_id,
         "repository_owner_id": repository_owner_id,
         "repository": name,
@@ -579,6 +580,7 @@ fn server_loads_one_sorted_mixed_visibility_registry_without_loading_nested_secr
     let private = &provider.repositories()[0];
     let public = &provider.repositories()[1];
     assert_eq!(private.installation_id().get(), 101);
+    assert_eq!(private.installation_binding_generation().get(), 1);
     assert_eq!(
         private.internal_repository_id().as_bytes(),
         *github_provider_repository_id(private.tenant(), private.repository_id())
@@ -760,6 +762,10 @@ fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
         ("app-revision", vec!["app", "configuration_revision"]),
         ("verifier-revision", vec!["webhook", "verifier_revision"]),
         ("installation", vec!["repositories", "0", "installation_id"]),
+        (
+            "installation-binding-generation",
+            vec!["repositories", "0", "installation_binding_generation"],
+        ),
         ("repository", vec!["repositories", "0", "repository_id"]),
         ("owner", vec!["repositories", "0", "repository_owner_id"]),
         (
@@ -806,6 +812,15 @@ fn invalid_scalar_configuration_cases() -> Vec<(&'static str, Value)> {
         .expect("repository object")
         .remove("authority_profile");
     cases.push(("missing-authority-profile", missing_authority_profile));
+    let mut missing_installation_generation = manifest(vec![private_repository()]);
+    missing_installation_generation["repositories"][0]
+        .as_object_mut()
+        .expect("repository object")
+        .remove("installation_binding_generation");
+    cases.push((
+        "missing-installation-binding-generation",
+        missing_installation_generation,
+    ));
     let mut invalid_issuer = manifest(vec![private_repository()]);
     invalid_issuer["app"]["jwt_issuer"] = json!("repository_id");
     cases.push(("jwt-issuer", invalid_issuer));

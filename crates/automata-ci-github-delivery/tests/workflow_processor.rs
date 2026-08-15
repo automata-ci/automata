@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -45,12 +45,12 @@ use automata_ci_store::{
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ManifestPinnedGithubDeliveryEvidence,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
     ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
-    ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
-    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowInventory,
-    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
+    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
+    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
     RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
     WorkflowAdmissionIdempotency,
@@ -121,6 +121,7 @@ struct LogicalAdmissions {
     commands: Mutex<Vec<AdmitLogicalWorkflowRun>>,
     delivery_ids: Mutex<Vec<ProviderDeliveryId>>,
     ordinary_calls: AtomicUsize,
+    workflow_disabled: AtomicBool,
 }
 
 impl LogicalAdmissions {
@@ -146,6 +147,10 @@ impl LogicalAdmissions {
         self.commands.lock().expect("commands lock").push(command);
         receipt
     }
+
+    fn disable_workflow(&self) {
+        self.workflow_disabled.store(true, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -165,6 +170,9 @@ impl LogicalWorkflowAdmissionRepository for LogicalAdmissions {
         observed_at: UnixMillis,
     ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
         assert_eq!(command.admitted_at(), observed_at);
+        if self.workflow_disabled.load(Ordering::SeqCst) {
+            return Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled);
+        }
         self.delivery_ids
             .lock()
             .expect("delivery IDs lock")
@@ -966,6 +974,33 @@ async fn accepted_path_replays_durable_progress_without_readmission() {
         first_conclusion,
         &ProviderDeliveryWorkflowConclusion::Admitted {
             run_id: first.run_id()
+        }
+    );
+}
+
+#[tokio::test]
+async fn durably_disabled_workflow_is_skipped_without_admission() {
+    let harness = harness(
+        BTreeMap::from([(WORKFLOW_PATH, ACCEPTED_WORKFLOW)]),
+        None,
+        0,
+    )
+    .await;
+    harness.logical.disable_workflow();
+
+    assert!(matches!(
+        process(&harness).await.expect("disabled processing"),
+        GithubDeliveryWorkerOutcome::Completed(_)
+    ));
+    assert!(harness.logical.commands().is_empty());
+    let completions = harness.deliveries.completions();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].outcomes().len(), 1);
+    assert_eq!(
+        completions[0].outcomes()[0].conclusion(),
+        &ProviderDeliveryWorkflowConclusion::Skipped {
+            reason: ProviderDeliveryFailureKind::new("github.workflow.disabled")
+                .expect("closed disabled reason"),
         }
     );
 }

@@ -6,12 +6,12 @@ use automata_ci_core::JobAuthorityProfile;
 use automata_ci_github_delivery::GithubScheduleServiceConfig;
 use automata_ci_results_github::CacheRepositoryMetadata;
 use automata_ci_store::{
-    GithubCheckName, GithubProviderGitRef, GithubProviderManifestRevision,
-    GithubProviderWorkflowSelection, GithubRepositoryName, GithubServerServiceAppClientId,
-    GithubServerServiceAppId, GithubServerServiceJwtIssuer, GithubServerServiceRevision,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, TenantScope, WorkflowRuntimePolicyRevision,
-    github_provider_repository_id,
+    GithubCheckName, GithubInstallationBindingGeneration, GithubProviderGitRef,
+    GithubProviderManifestRevision, GithubProviderWorkflowSelection, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, ProviderInstallationId, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, TenantScope,
+    WorkflowRuntimePolicyRevision, github_provider_repository_id,
 };
 use automata_ci_workflow_service::GithubRunnerPolicy;
 use serde::Deserialize;
@@ -595,6 +595,7 @@ pub struct GithubProviderRepositoryConfig {
     internal_repository_id: GithubProviderInternalRepositoryId,
     connection_id: GithubProviderConnectionId,
     installation_id: ProviderInstallationId,
+    installation_binding_generation: GithubInstallationBindingGeneration,
     repository_id: ProviderRepositoryId,
     repository_owner_id: ProviderRepositoryOwnerId,
     repository_name: GithubRepositoryName,
@@ -619,6 +620,9 @@ impl GithubProviderRepositoryConfig {
         let connection_id = GithubProviderConnectionId::parse(&raw.connection_id)?;
         let installation_id = ProviderInstallationId::new(raw.installation_id)
             .map_err(|_| GithubProviderConfigError)?;
+        let installation_binding_generation =
+            GithubInstallationBindingGeneration::new(raw.installation_binding_generation)
+                .map_err(|_| GithubProviderConfigError)?;
         let repository_id =
             ProviderRepositoryId::new(raw.repository_id).map_err(|_| GithubProviderConfigError)?;
         let internal_repository_id =
@@ -680,6 +684,7 @@ impl GithubProviderRepositoryConfig {
             internal_repository_id,
             connection_id,
             installation_id,
+            installation_binding_generation,
             repository_id,
             repository_owner_id,
             repository_name,
@@ -720,6 +725,12 @@ impl GithubProviderRepositoryConfig {
     #[must_use]
     pub const fn installation_id(&self) -> ProviderInstallationId {
         self.installation_id
+    }
+
+    /// Returns the required positive generation for this installation binding.
+    #[must_use]
+    pub const fn installation_binding_generation(&self) -> GithubInstallationBindingGeneration {
+        self.installation_binding_generation
     }
 
     /// Returns the stable positive GitHub repository identity.
@@ -983,6 +994,7 @@ struct RawRepository {
     tenant_id: String,
     connection_id: String,
     installation_id: u64,
+    installation_binding_generation: u64,
     repository_id: u64,
     repository_owner_id: u64,
     repository: String,

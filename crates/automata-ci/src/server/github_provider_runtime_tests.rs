@@ -66,6 +66,7 @@ fn repository(
         "tenant_id": tenant,
         "connection_id": uuid(connection),
         "installation_id": installation,
+        "installation_binding_generation": 1,
         "repository_id": repository_id,
         "repository_owner_id": owner_id,
         "repository": name,

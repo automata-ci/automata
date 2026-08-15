@@ -16,9 +16,11 @@ use automata_ci_store::{
     AuthenticatedGithubDeliveryClaim, AuthenticatedWorkflowDispatchClaim,
     BindLogicalActivationPreparation, ClaimNextLogicalJobOrchestration, ClaimProviderDelivery,
     ConsumeSelectedLogicalJobOrchestration, ConsumedLogicalJobOrchestrationAuthority,
-    EnsureGithubServerServiceAuthority, GithubCheckHeadSha, GithubCheckName,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderOrigins,
+    EnsureGithubServerServiceAuthority, EventControlSubject, EventControlSubjectId, EventSubjectId,
+    EventSubjectOrigin, EventSubjectProgress, EventSubjectRepository as _, EventSubjectSelection,
+    EventSubjectStoreError, EventSubjectTerminalOutcome, GithubCheckHeadSha, GithubCheckName,
+    GithubInstallationBindingGeneration, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName, GithubServerServiceAppClientId,
     GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
     GithubServerServiceAuthorityRepository as _, GithubServerServiceJwtIssuer,
@@ -30,12 +32,24 @@ use automata_ci_store::{
     LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, ResolveAuthenticatedWorkflowDispatchSource, StoreError,
-    TenantScope, WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    ProviderRepositoryVisibility, RegisterEventSubject, ResolveAuthenticatedWorkflowDispatchSource,
+    SetWorkflowEnableState, StoreError, TenantScope, WORKFLOW_PLAN_SCHEMA,
+    WorkflowAdmissionIdempotency, WorkflowEnableState, WorkflowEnableStateRecord,
+    WorkflowEnableStateRepository as _, WorkflowEnableStateRevision, WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
 use crate::support::{TestDatabase, TestResult, run_with_database};
+
+fn lower_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
 
 async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
     sqlx::query(
@@ -131,13 +145,28 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
 }
 
 fn fixture_manifest(tenant: TenantScope, namespace: u128) -> GithubProviderManifest {
+    fixture_manifest_binding(
+        tenant,
+        namespace,
+        u64::try_from(namespace + 101).expect("installation"),
+        1,
+        1,
+    )
+}
+
+fn fixture_manifest_binding(
+    tenant: TenantScope,
+    namespace: u128,
+    installation_id: u64,
+    manifest_revision: u64,
+    installation_generation: u64,
+) -> GithubProviderManifest {
     let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(1);
     GithubProviderManifest::new(
         tenant,
         ProviderConnectionId::from_uuid(Uuid::from_u128(namespace + 20))
             .expect("provider connection"),
-        ProviderInstallationId::new(u64::try_from(namespace + 101).expect("installation"))
-            .expect("installation"),
+        ProviderInstallationId::new(installation_id).expect("installation"),
         ProviderRepositoryId::new(u64::try_from(namespace + 102).expect("repository"))
             .expect("repository"),
         GithubRepositoryName::new(format!("sample-owner/sample-{namespace}"))
@@ -161,7 +190,11 @@ fn fixture_manifest(tenant: TenantScope, namespace: u128) -> GithubProviderManif
         GithubCheckName::new("Automata CI").expect("check name"),
         GithubProviderOrigins::github_dot_com(),
         GithubProviderManifestLimits::github_dot_com_ci(),
-        GithubProviderManifestRevision::new(1).expect("manifest revision"),
+        GithubProviderManifestRevision::new(manifest_revision).expect("manifest revision"),
+    )
+    .with_installation_binding_generation(
+        GithubInstallationBindingGeneration::new(installation_generation)
+            .expect("installation generation"),
     )
 }
 
@@ -219,7 +252,7 @@ async fn stage_authenticated_admission(
                         manifest.repository_visibility(),
                         manifest.github_repository_name().as_str(),
                     )?,
-                    format!("logical-orchestration-{namespace}"),
+                    command.idempotency().key(),
                 )?,
                 command.request_digest(),
                 crate::support::authenticated_github_event_object(command.event())?,
@@ -271,9 +304,17 @@ fn logical_command_at(
     command: &AdmitLogicalWorkflowRun,
     admitted_at: UnixMillis,
 ) -> TestResult<AdmitLogicalWorkflowRun> {
+    logical_command_at_with_idempotency(command, command.idempotency().clone(), admitted_at)
+}
+
+fn logical_command_at_with_idempotency(
+    command: &AdmitLogicalWorkflowRun,
+    idempotency: WorkflowAdmissionIdempotency,
+    admitted_at: UnixMillis,
+) -> TestResult<AdmitLogicalWorkflowRun> {
     let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
-        command.idempotency().clone(),
+        idempotency,
         command.request_digest(),
         command.repository().clone(),
         command.workflow_id(),
@@ -527,8 +568,96 @@ async fn assert_no_concrete_jobs(database: &TestDatabase, run_id: RunId) -> Test
     Ok(())
 }
 
+#[derive(sqlx::FromRow)]
+struct GeneralizedEventSubjectRow {
+    origin_kind_name: String,
+    origin_id: Uuid,
+    event_name: String,
+    workflow_path: String,
+    outcome_kind: String,
+    run_id: Uuid,
+    control_id: Uuid,
+    selection_schema: i16,
+    progress_schema: i16,
+    control_schema: i16,
+    selection_digest_size: i32,
+    progress_digest_size: i32,
+    control_digest_size: i32,
+}
+
+async fn assert_generalized_event_subject(
+    database: &TestDatabase,
+    run_id: RunId,
+    expected_origin_kind: &str,
+    expected_origin_id: Uuid,
+    expected_event_name: &str,
+    expected_workflow_path: &str,
+) -> TestResult {
+    let row: GeneralizedEventSubjectRow = sqlx::query_as(
+        r"
+            SELECT selection.origin_kind_name, selection.origin_id,
+                   selection.event_name, selection.workflow_path,
+                   progress.outcome_kind, progress.run_id, control.control_id,
+                   selection.selection_schema, progress.progress_schema,
+                   control.control_schema,
+                   octet_length(selection.selection_digest) AS selection_digest_size,
+                   octet_length(progress.progress_digest) AS progress_digest_size,
+                   octet_length(control.control_digest) AS control_digest_size
+            FROM event_subject_selections AS selection
+            JOIN event_subject_progress AS progress
+              ON progress.tenant_id = selection.tenant_id
+             AND progress.subject_id = selection.subject_id
+             AND progress.selection_digest = selection.selection_digest
+            JOIN event_control_subjects AS control
+              ON control.tenant_id = selection.tenant_id
+             AND control.subject_id = selection.subject_id
+             AND control.selection_digest = selection.selection_digest
+            WHERE progress.run_id = $1
+            ",
+    )
+    .bind(run_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(row.origin_kind_name, expected_origin_kind);
+    assert_eq!(row.origin_id, expected_origin_id);
+    assert_eq!(row.event_name, expected_event_name);
+    assert_eq!(row.workflow_path, expected_workflow_path);
+    assert_eq!(row.outcome_kind, "admitted");
+    assert_eq!(row.run_id, run_id.as_uuid());
+    assert!(!row.control_id.is_nil());
+    assert_eq!(
+        (
+            row.selection_schema,
+            row.progress_schema,
+            row.control_schema
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(
+        (
+            row.selection_digest_size,
+            row.progress_digest_size,
+            row.control_digest_size,
+        ),
+        (32, 32, 32)
+    );
+    let projected_controls: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT event_control_subject_id FROM github_check_subjects WHERE workflow_run_id = $1 AND subject_kind = 'workflow'",
+    )
+    .bind(run_id.as_uuid())
+    .fetch_all(database.pool())
+    .await?;
+    if expected_origin_kind == "manual_operation" {
+        assert!(projected_controls.is_empty());
+    } else {
+        assert_eq!(projected_controls, vec![row.control_id]);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One atomic proof covers preselection, admission, replay, and drift.
 async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
     run_with_database(|database| async move {
         seed_tenant(&database, "logical-atomic").await?;
@@ -537,6 +666,55 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
         let root_id = command.root_invocation_id();
         let (command, authenticated) =
             stage_authenticated_admission(&database, &command, 100).await?;
+        let replacement = fixture_manifest_binding(
+            command.tenant().clone(),
+            100,
+            1_101,
+            2,
+            2,
+        );
+        database
+            .store()
+            .bootstrap_github_provider_repository(
+                github_manifest_fixture::fixture_github_repository_bootstrap(
+                    replacement,
+                    UnixMillis::new(database_now_ms(&database).await?),
+                ),
+            )
+            .await?;
+        let delivery_id = authenticated.claim().delivery_id();
+        let origin = EventSubjectOrigin::ProviderDelivery(delivery_id);
+        let subject_id = EventSubjectId::derive(
+            command.tenant(),
+            command.repository().id(),
+            origin,
+            command.workflow_path(),
+        )?;
+        let preselected = EventSubjectSelection::new(
+            subject_id,
+            command.tenant().clone(),
+            command.repository().id(),
+            origin,
+            command.event_name(),
+            command.workflow_path(),
+            lower_hex(command.head_sha()),
+            command.source().digest(),
+            command.request_digest(),
+            UnixMillis::new(command.admitted_at().get() - 2),
+        )?;
+        let preselected_control = EventControlSubject::new(
+            EventControlSubjectId::derive(subject_id),
+            &preselected,
+            UnixMillis::new(command.admitted_at().get() - 1),
+        )?;
+        let preselection = database
+            .store()
+            .register_event_subject(RegisterEventSubject::new(
+                preselected,
+                preselected_control,
+            )?)
+            .await?;
+        assert!(!preselection.is_replay());
         let first = database
             .store()
             .admit_authenticated_github_delivery(
@@ -597,6 +775,341 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
         .fetch_one(database.pool())
         .await?;
         assert!(evidence_required);
+        assert_generalized_event_subject(
+            &database,
+            run_id,
+            "provider_delivery",
+            delivery_id.as_uuid(),
+            "push",
+            command.workflow_path(),
+        )
+        .await?;
+
+        let wrong_origin = EventSubjectOrigin::ManualOperation(OperationId::from_uuid(
+            Uuid::from_u128(0xe7_01),
+        ));
+        let wrong_path = ".github/workflows/not-the-admitted-workflow.yml";
+        let wrong_subject_id = EventSubjectId::derive(
+            command.tenant(),
+            command.repository().id(),
+            wrong_origin,
+            wrong_path,
+        )?;
+        let wrong_selection = EventSubjectSelection::new(
+            wrong_subject_id,
+            command.tenant().clone(),
+            command.repository().id(),
+            wrong_origin,
+            "workflow_dispatch",
+            wrong_path,
+            "wrong-workflow-revision",
+            Sha256Digest::from_bytes([0xe7; 32]),
+            Sha256Digest::from_bytes([0xe8; 32]),
+            command.admitted_at(),
+        )?;
+        let wrong_control = EventControlSubject::new(
+            EventControlSubjectId::derive(wrong_subject_id),
+            &wrong_selection,
+            command.admitted_at(),
+        )?;
+        database
+            .store()
+            .register_event_subject(RegisterEventSubject::new(
+                wrong_selection.clone(),
+                wrong_control,
+            )?)
+            .await?;
+        let cross_workflow_progress = EventSubjectProgress::new(
+            &wrong_selection,
+            EventSubjectTerminalOutcome::admitted(run_id)?,
+            command.admitted_at(),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .record_event_subject_progress(cross_workflow_progress)
+                .await,
+            Err(EventSubjectStoreError::Operation(_))
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One proof covers disable CAS, concurrent terminalization, and SQL guards.
+async fn disabled_state_blocks_new_event_admission_but_remains_versioned() -> TestResult {
+    run_with_database(|database| async move {
+        seed_tenant(&database, "logical-disabled").await?;
+        let command = fixture("logical-disabled", "delivery-disabled", 43, 130);
+        let (command, authenticated) =
+            stage_authenticated_admission(&database, &command, 130).await?;
+        let disabled = WorkflowEnableStateRecord::new(
+            command.tenant().clone(),
+            command.repository().id(),
+            command.workflow_id(),
+            command.workflow_path(),
+            WorkflowEnableStateRevision::new(1)?,
+            WorkflowEnableState::Disabled,
+            command.admitted_at(),
+        )?;
+        let request = SetWorkflowEnableState::new(disabled.clone(), None)?;
+        let first_store = database.store().clone();
+        let second_store = database.store().clone();
+        let (first, second) = tokio::join!(
+            first_store.set_workflow_enable_state(request.clone()),
+            second_store.set_workflow_enable_state(request),
+        );
+        let first = first?;
+        let second = second?;
+        assert_ne!(first.is_replay(), second.is_replay());
+        let current = database
+            .store()
+            .load_workflow_enable_state(
+                command.tenant(),
+                command.repository().id(),
+                command.workflow_id(),
+            )
+            .await?;
+        assert_eq!(current.state(), WorkflowEnableState::Disabled);
+        assert_eq!(current.revision(), WorkflowEnableStateRevision::new(1)?);
+        let mismatched_delivery = logical_command_at_with_idempotency(
+            &command,
+            WorkflowAdmissionIdempotency::provider_delivery("different-delivery")?,
+            command.admitted_at(),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_github_delivery(
+                    mismatched_delivery,
+                    authenticated,
+                    command.admitted_at(),
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::Store(_))
+        ));
+        let unauthenticated_terminal_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM event_subject_progress")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(unauthenticated_terminal_count, 0);
+        let first_admission_store = database.store().clone();
+        let second_admission_store = database.store().clone();
+        let (first_disabled, second_disabled) = tokio::join!(
+            first_admission_store.admit_authenticated_github_delivery(
+                command.clone(),
+                authenticated,
+                command.admitted_at(),
+            ),
+            second_admission_store.admit_authenticated_github_delivery(
+                command.clone(),
+                authenticated,
+                command.admitted_at(),
+            ),
+        );
+        assert!(matches!(
+            first_disabled,
+            Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled)
+        ));
+        assert!(matches!(
+            second_disabled,
+            Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled)
+        ));
+        let run_count: i64 = sqlx::query_scalar("SELECT count(*) FROM workflow_runs")
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(run_count, 0);
+        let terminal: (i64, String, Option<Uuid>, Option<String>) = sqlx::query_as(
+            r"
+            SELECT count(*) OVER (), progress.outcome_kind, progress.run_id, progress.reason
+            FROM event_subject_selections AS selection
+            JOIN event_subject_progress AS progress
+              ON progress.tenant_id = selection.tenant_id
+             AND progress.subject_id = selection.subject_id
+             AND progress.selection_digest = selection.selection_digest
+            WHERE selection.origin_kind_name = 'provider_delivery'
+              AND selection.origin_id = $1
+              AND selection.workflow_path = $2
+            ",
+        )
+        .bind(authenticated.claim().delivery_id().as_uuid())
+        .bind(command.workflow_path())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            terminal,
+            (1, "skipped".into(), None, Some("workflow.disabled".into()))
+        );
+        let linked_checks: i64 = sqlx::query_scalar(
+            r"
+            SELECT count(*)
+            FROM github_check_subjects AS check_subject
+            JOIN event_control_subjects AS control
+              ON control.control_id = check_subject.event_control_subject_id
+            JOIN event_subject_selections AS selection
+              ON selection.tenant_id = control.tenant_id
+             AND selection.subject_id = control.subject_id
+             AND selection.selection_digest = control.selection_digest
+            WHERE check_subject.provider_delivery_id = $1
+              AND selection.origin_kind_name = 'provider_delivery'
+              AND selection.origin_id = $1
+            ",
+        )
+        .bind(authenticated.claim().delivery_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(linked_checks, 1);
+        let disabled_projection: (String, Option<String>, Option<String>, i64, i64) =
+            sqlx::query_as(
+                r"
+                SELECT desired_state, desired_conclusion, terminal_cause,
+                       desired_revision, desired_updated_at_ms
+                  FROM github_check_subjects
+                 WHERE provider_delivery_id = $1
+                   AND subject_kind = 'workflow'
+                   AND subject_key = $2
+                ",
+            )
+            .bind(authenticated.claim().delivery_id().as_uuid())
+            .bind(command.workflow_path())
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(
+            disabled_projection,
+            (
+                "completed".into(),
+                Some("skipped".into()),
+                Some("workflow_skipped".into()),
+                2,
+                command.admitted_at().get(),
+            )
+        );
+        let admission_receipts: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM workflow_admission_receipts")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(admission_receipts, 0);
+
+        let enabled = WorkflowEnableStateRecord::new(
+            command.tenant().clone(),
+            command.repository().id(),
+            command.workflow_id(),
+            command.workflow_path(),
+            WorkflowEnableStateRevision::new(2)?,
+            WorkflowEnableState::Enabled,
+            UnixMillis::new(command.admitted_at().get() + 1),
+        )?;
+        database
+            .store()
+            .set_workflow_enable_state(SetWorkflowEnableState::new(
+                enabled,
+                Some(WorkflowEnableStateRevision::new(1)?),
+            )?)
+            .await?;
+        let later_attempt = UnixMillis::new(command.admitted_at().get() + 2);
+        let later_command = logical_command_at(&command, later_attempt)?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_github_delivery(
+                    later_command,
+                    authenticated,
+                    later_attempt,
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled)
+        ));
+        let terminal_replay_counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM workflow_runs), (SELECT count(*) FROM event_subject_progress)",
+        )
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(terminal_replay_counts, (0, 1));
+        let replay_projection_time: i64 = sqlx::query_scalar(
+            r"
+            SELECT desired_updated_at_ms
+              FROM github_check_subjects
+             WHERE provider_delivery_id = $1
+               AND subject_kind = 'workflow'
+               AND subject_key = $2
+            ",
+        )
+        .bind(authenticated.claim().delivery_id().as_uuid())
+        .bind(command.workflow_path())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(replay_projection_time, command.admitted_at().get());
+        for (statement, constraint) in [
+            (
+                "UPDATE workflow_enable_state_current SET state_revision = 1",
+                "workflow_enable_state_current_contiguous",
+            ),
+            (
+                "DELETE FROM workflow_enable_state_current",
+                "workflow_enable_state_current_immutable",
+            ),
+            (
+                "TRUNCATE workflow_enable_state_current",
+                "workflow_enable_state_current_immutable",
+            ),
+        ] {
+            let error = sqlx::query(statement)
+                .execute(database.pool())
+                .await
+                .expect_err("current enable-state pointer mutation must fail closed");
+            assert_eq!(
+                error
+                    .as_database_error()
+                    .and_then(sqlx::error::DatabaseError::constraint),
+                Some(constraint),
+            );
+        }
+        let orphan_revision = sqlx::query(
+            r"
+            INSERT INTO workflow_enable_state_revisions (
+                tenant_id, repository_id, workflow_id, workflow_path,
+                state_revision, enable_state, changed_at_ms
+            ) VALUES ($1,$2,$3,$4,3,'disabled',$5)
+            ",
+        )
+        .bind(command.tenant().as_str())
+        .bind(command.repository().id().as_uuid())
+        .bind(command.workflow_id().as_uuid())
+        .bind(command.workflow_path())
+        .bind(command.admitted_at().get() + 2)
+        .execute(database.pool())
+        .await
+        .expect_err("enable-state history cannot commit without advancing current");
+        assert_eq!(
+            orphan_revision
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("workflow_enable_state_revision_must_be_current"),
+        );
+        let skipped_revision = sqlx::query(
+            r"
+            INSERT INTO workflow_enable_state_revisions (
+                tenant_id, repository_id, workflow_id, workflow_path,
+                state_revision, enable_state, changed_at_ms
+            ) VALUES ($1,$2,$3,$4,4,'disabled',$5)
+            ",
+        )
+        .bind(command.tenant().as_str())
+        .bind(command.repository().id().as_uuid())
+        .bind(command.workflow_id().as_uuid())
+        .bind(command.workflow_path())
+        .bind(command.admitted_at().get() + 2)
+        .execute(database.pool())
+        .await
+        .expect_err("enable-state history cannot skip a revision");
+        assert_eq!(
+            skipped_revision
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("workflow_enable_state_revisions_contiguous"),
+        );
         Ok(())
     })
     .await
@@ -983,6 +1496,7 @@ async fn seed_dispatch_actor(
 fn workflow_dispatch_fixture(
     signed: &AdmitLogicalWorkflowRun,
     actor: &ManagementActor,
+    source: AdmissionObject,
     operation_id: OperationId,
     digest: u8,
     namespace: u128,
@@ -1020,7 +1534,7 @@ fn workflow_dispatch_fixture(
         signed.workflow_name(),
         signed.git_ref(),
         signed.snapshot_id(),
-        signed.source().clone(),
+        source,
         signed.plan().clone(),
         RunId::from_uuid(Uuid::from_u128(namespace + 4)),
         1,
@@ -1090,9 +1604,50 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
 
         let operation_id = OperationId::from_uuid(Uuid::from_u128(0xd15a_0001));
         let admitted_at = UnixMillis::new(database_now_ms(&database).await?);
+        let substituted_source = object_with_media(
+            "logical/dispatch-substituted-source.yml".into(),
+            0xee,
+            signed.source().media_type(),
+        );
+        let substituted_operation = OperationId::from_uuid(Uuid::from_u128(0xd15a_00ff));
+        let substituted_dispatch = workflow_dispatch_fixture(
+            &signed,
+            &actor,
+            substituted_source.clone(),
+            substituted_operation,
+            0xed,
+            780,
+            admitted_at,
+        );
+        let substituted_claim = AuthenticatedWorkflowDispatchClaim::new(
+            actor.clone(),
+            substituted_dispatch.repository().id(),
+            substituted_dispatch.workflow_id(),
+            substituted_dispatch.workflow_path(),
+            substituted_dispatch.git_ref(),
+            &commit_sha,
+            substituted_source,
+            substituted_operation,
+            substituted_dispatch.event().digest(),
+            substituted_dispatch
+                .base_context()
+                .ok_or("substituted dispatch base context missing")?
+                .digest(),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_workflow_dispatch(
+                    substituted_dispatch,
+                    substituted_claim,
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected)
+        ));
         let dispatch = workflow_dispatch_fixture(
             &signed,
             &actor,
+            signed.source().clone(),
             operation_id,
             0x93,
             800,
@@ -1104,6 +1659,8 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
             dispatch.workflow_id(),
             dispatch.workflow_path(),
             dispatch.git_ref(),
+            &commit_sha,
+            dispatch.source().clone(),
             operation_id,
             dispatch.event().digest(),
             dispatch
@@ -1170,10 +1727,20 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
         .fetch_one(database.pool())
         .await?;
         assert_eq!(github_evidence, 0);
+        assert_generalized_event_subject(
+            &database,
+            first.run_id(),
+            "manual_operation",
+            operation_id.as_uuid(),
+            "workflow_dispatch",
+            dispatch.workflow_path(),
+        )
+        .await?;
 
         let changed = workflow_dispatch_fixture(
             &signed,
             &actor,
+            signed.source().clone(),
             operation_id,
             0x94,
             900,
@@ -1185,6 +1752,8 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
             changed.workflow_id(),
             changed.workflow_path(),
             changed.git_ref(),
+            &commit_sha,
+            changed.source().clone(),
             operation_id,
             changed.event().digest(),
             changed
@@ -1199,6 +1768,135 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
                 .await,
             Err(LogicalWorkflowAdmissionStoreError::IdempotencyConflict)
         ));
+
+        let current_enable_state = database
+            .store()
+            .load_workflow_enable_state(
+                signed.tenant(),
+                signed.repository().id(),
+                signed.workflow_id(),
+            )
+            .await?;
+        assert_eq!(current_enable_state.state(), WorkflowEnableState::Enabled);
+        let disabled_at = UnixMillis::new(database_now_ms(&database).await?);
+        let disabled = WorkflowEnableStateRecord::new(
+            signed.tenant().clone(),
+            signed.repository().id(),
+            signed.workflow_id(),
+            signed.workflow_path(),
+            WorkflowEnableStateRevision::new(current_enable_state.revision().get() + 1)?,
+            WorkflowEnableState::Disabled,
+            disabled_at,
+        )?;
+        database
+            .store()
+            .set_workflow_enable_state(SetWorkflowEnableState::new(
+                disabled,
+                Some(current_enable_state.revision()),
+            )?)
+            .await?;
+
+        let disabled_operation = OperationId::from_uuid(Uuid::from_u128(0xd15a_0002));
+        let disabled_dispatch = workflow_dispatch_fixture(
+            &signed,
+            &actor,
+            signed.source().clone(),
+            disabled_operation,
+            0x95,
+            1_000,
+            UnixMillis::new(database_now_ms(&database).await?),
+        );
+        let disabled_claim = AuthenticatedWorkflowDispatchClaim::new(
+            actor.clone(),
+            disabled_dispatch.repository().id(),
+            disabled_dispatch.workflow_id(),
+            disabled_dispatch.workflow_path(),
+            disabled_dispatch.git_ref(),
+            &commit_sha,
+            disabled_dispatch.source().clone(),
+            disabled_operation,
+            disabled_dispatch.event().digest(),
+            disabled_dispatch
+                .base_context()
+                .ok_or("disabled dispatch base context missing")?
+                .digest(),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_workflow_dispatch(
+                    disabled_dispatch.clone(),
+                    disabled_claim.clone(),
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled)
+        ));
+        let disabled_replay = logical_command_at(
+            &disabled_dispatch,
+            UnixMillis::new(database_now_ms(&database).await?),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_workflow_dispatch(disabled_replay, disabled_claim)
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled)
+        ));
+        let changed_disabled = workflow_dispatch_fixture(
+            &signed,
+            &actor,
+            signed.source().clone(),
+            disabled_operation,
+            0x96,
+            1_100,
+            UnixMillis::new(database_now_ms(&database).await?),
+        );
+        let changed_disabled_claim = AuthenticatedWorkflowDispatchClaim::new(
+            actor.clone(),
+            changed_disabled.repository().id(),
+            changed_disabled.workflow_id(),
+            changed_disabled.workflow_path(),
+            changed_disabled.git_ref(),
+            &commit_sha,
+            changed_disabled.source().clone(),
+            disabled_operation,
+            changed_disabled.event().digest(),
+            changed_disabled
+                .base_context()
+                .ok_or("changed disabled dispatch base context missing")?
+                .digest(),
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_workflow_dispatch(
+                    changed_disabled,
+                    changed_disabled_claim,
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::Store(_))
+        ));
+        let disabled_terminal: (String, Option<Uuid>, Option<String>, i64) = sqlx::query_as(
+            r"
+            SELECT progress.outcome_kind, progress.run_id, progress.reason, count(*) OVER ()
+              FROM event_subject_selections AS selection
+              JOIN event_subject_progress AS progress
+                ON progress.tenant_id = selection.tenant_id
+               AND progress.subject_id = selection.subject_id
+               AND progress.selection_digest = selection.selection_digest
+             WHERE selection.tenant_id = $1
+               AND selection.origin_kind_name = 'manual_operation'
+               AND selection.origin_id = $2
+            ",
+        )
+        .bind(TENANT)
+        .bind(disabled_operation.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            disabled_terminal,
+            ("skipped".into(), None, Some("workflow.disabled".into()), 1)
+        );
 
         sqlx::query(
             "DELETE FROM rbac_role_permissions WHERE tenant_id=$1 AND role_id=$2 AND permission_name='runs:dispatch'",

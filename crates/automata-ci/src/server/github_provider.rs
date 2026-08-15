@@ -173,7 +173,8 @@ impl GithubProviderBootstrapPlan {
                     GithubProviderOrigins::github_dot_com(),
                     GithubProviderManifestLimits::github_dot_com_ci(),
                     repository.manifest_revision(),
-                );
+                )
+                .with_installation_binding_generation(repository.installation_binding_generation());
             if manifest.repository_id().as_uuid().as_bytes()
                 != &repository.internal_repository_id().as_bytes()
             {

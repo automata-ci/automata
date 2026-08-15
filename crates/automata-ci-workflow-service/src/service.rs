@@ -383,6 +383,8 @@ impl WorkflowAdmissionService {
                         workflow_id,
                         request.workflow_path(),
                         request.git_ref(),
+                        request.commit_sha(),
+                        source_blob.metadata.clone(),
                         operation_id,
                         event_blob.metadata.digest(),
                         base_context_blob.metadata.digest(),

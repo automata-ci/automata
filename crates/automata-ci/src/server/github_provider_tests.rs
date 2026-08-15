@@ -74,6 +74,7 @@ fn repository(
         "tenant_id": tenant,
         "connection_id": uuid(connection),
         "installation_id": installation,
+        "installation_binding_generation": 1,
         "repository_id": repository_id,
         "repository_owner_id": owner_id,
         "repository": name,
@@ -289,6 +290,11 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
     assert_eq!(plan.manifests().len(), 2);
     assert_eq!(plan.authorities().len(), 3);
     assert_eq!(plan.connections().len(), 2);
+    assert!(
+        plan.manifests()
+            .iter()
+            .all(|manifest| manifest.installation_binding_generation().get() == 1)
+    );
     assert_eq!(plan.manifests()[1].workflow_path(), ".ci/workflows");
     assert_eq!(plan.manifests()[0].git_ref(), "refs/heads/release/stable");
     assert_eq!(plan.manifests()[1].git_ref(), "refs/heads/refs/release");
@@ -355,6 +361,27 @@ fn mixed_public_private_projection_has_exact_visibility_dependent_shape() {
         .expect("private authority")
         .configuration_fingerprint();
     assert_ne!(checks_fingerprints[0], private_fingerprint);
+}
+
+#[test]
+fn configured_installation_generation_reaches_manifest_and_delivery_connection() {
+    let mut document = mixed_document();
+    document["repositories"][0]["installation_id"] = json!(303);
+    document["repositories"][0]["installation_binding_generation"] = json!(2);
+    document["repositories"][0]["manifest_revision"] = json!(2);
+    let config = load_config("installation-generation.json", &document)
+        .expect("rotated installation configuration");
+    let plan = fixed_evidence_plan(&config, 0x70);
+    let manifest = plan
+        .manifests()
+        .iter()
+        .find(|manifest| manifest.installation_id().get() == 303)
+        .expect("rotated manifest");
+    assert_eq!(manifest.installation_binding_generation().get(), 2);
+    assert!(plan.connections().iter().any(|connection| {
+        connection.installation_id().get() == 303
+            && connection.repository_id() == manifest.github_repository_id()
+    }));
 }
 
 #[tokio::test]

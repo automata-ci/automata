@@ -177,6 +177,8 @@ pub struct AuthenticatedWorkflowDispatchClaim {
     workflow_id: WorkflowId,
     workflow_path: String,
     git_ref: String,
+    commit_sha: String,
+    source: AdmissionObject,
     operation_id: OperationId,
     event_digest: Sha256Digest,
     base_context_digest: Sha256Digest,
@@ -207,17 +209,21 @@ impl AuthenticatedWorkflowDispatchClaim {
         workflow_id: WorkflowId,
         workflow_path: impl Into<String>,
         git_ref: impl Into<String>,
+        commit_sha: impl Into<String>,
+        source: AdmissionObject,
         operation_id: OperationId,
         event_digest: Sha256Digest,
         base_context_digest: Sha256Digest,
     ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
         let workflow_path = workflow_path.into();
         let git_ref = git_ref.into();
+        let commit_sha = commit_sha.into();
         validate_text(&workflow_path, "workflow path")?;
         validate_text(&git_ref, "Git ref")?;
         if !canonical_workflow_dispatch_ref(&git_ref) {
             return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
         }
+        decode_commit_sha(&commit_sha)?;
         for (value, field) in [
             (repository_id.as_uuid(), "repository ID"),
             (workflow_id.as_uuid(), "workflow ID"),
@@ -233,6 +239,8 @@ impl AuthenticatedWorkflowDispatchClaim {
             workflow_id,
             workflow_path,
             git_ref,
+            commit_sha,
+            source,
             operation_id,
             event_digest,
             base_context_digest,
@@ -267,6 +275,18 @@ impl AuthenticatedWorkflowDispatchClaim {
     #[must_use]
     pub fn git_ref(&self) -> &str {
         &self.git_ref
+    }
+
+    /// Returns the exact lowercase commit SHA proven by signed source history.
+    #[must_use]
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+
+    /// Returns the exact immutable source descriptor proven by signed history.
+    #[must_use]
+    pub const fn source(&self) -> &AdmissionObject {
+        &self.source
     }
 
     /// Returns the caller operation identity used for exact replay.
@@ -1076,6 +1096,9 @@ pub enum LogicalWorkflowAdmissionStoreError {
     /// The generalized pending queue reached its hard safety ceiling.
     #[error("workflow concurrency pending queue reached its safety limit")]
     ConcurrencyQueueFull,
+    /// The exact workflow is durably disabled for new event admission.
+    #[error("workflow is disabled for new event admission")]
+    WorkflowDisabled,
     /// This deployment requires immutable authenticated provider evidence.
     #[error("logical workflow admission source is not supported by current policy")]
     UnsupportedAdmissionSource,

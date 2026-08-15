@@ -204,6 +204,39 @@ impl GithubProviderManifestRevision {
     }
 }
 
+/// Positive generation of a repository's GitHub App installation binding.
+///
+/// The generation advances only when the installation identifier is replaced;
+/// ordinary policy, key, and verifier revisions retain the current generation.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GithubInstallationBindingGeneration(NonZeroU64);
+
+impl GithubInstallationBindingGeneration {
+    /// Constructs a positive generation inside the signed durable range.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero and values larger than `i64::MAX`.
+    pub fn new(value: u64) -> Result<Self, GithubProviderManifestValueError> {
+        NonZeroU64::new(value)
+            .filter(|value| i64::try_from(value.get()).is_ok())
+            .map(Self)
+            .ok_or(GithubProviderManifestValueError::InvalidInstallationBindingGeneration)
+    }
+
+    /// Returns the initial binding generation.
+    #[must_use]
+    pub const fn initial() -> Self {
+        Self(NonZeroU64::MIN)
+    }
+
+    /// Returns the positive generation.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
 /// Canonical full default-branch reference pinned by a provider manifest.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GithubProviderGitRef(String);
@@ -529,6 +562,7 @@ pub struct GithubProviderManifest {
     repository_id: RepositoryId,
     connection_id: ProviderConnectionId,
     installation_id: ProviderInstallationId,
+    installation_binding_generation: GithubInstallationBindingGeneration,
     github_repository_id: ProviderRepositoryId,
     github_repository_owner_id: Option<ProviderRepositoryOwnerId>,
     github_repository_name: GithubRepositoryName,
@@ -723,6 +757,7 @@ impl GithubProviderManifest {
             repository_id,
             connection_id,
             installation_id,
+            installation_binding_generation: GithubInstallationBindingGeneration::initial(),
             github_repository_id,
             github_repository_owner_id: None,
             github_repository_name,
@@ -843,6 +878,21 @@ impl GithubProviderManifest {
     #[must_use]
     pub const fn installation_id(&self) -> ProviderInstallationId {
         self.installation_id
+    }
+    /// Returns the immutable installation-binding generation.
+    #[must_use]
+    pub const fn installation_binding_generation(&self) -> GithubInstallationBindingGeneration {
+        self.installation_binding_generation
+    }
+    /// Selects an explicit installation-binding generation and rebinds the digest.
+    #[must_use]
+    pub fn with_installation_binding_generation(
+        mut self,
+        generation: GithubInstallationBindingGeneration,
+    ) -> Self {
+        self.installation_binding_generation = generation;
+        self.digest = self.compute_digest();
+        self
     }
     /// Returns the stable numeric GitHub repository ID.
     #[must_use]
@@ -1060,6 +1110,7 @@ impl GithubProviderManifest {
             && self.repository_id == other.repository_id
             && self.connection_id == other.connection_id
             && self.installation_id == other.installation_id
+            && self.installation_binding_generation == other.installation_binding_generation
             && self.github_repository_id == other.github_repository_id
             && self.github_repository_name == other.github_repository_name
             && self.github_app_id == other.github_app_id
@@ -1076,6 +1127,12 @@ impl GithubProviderManifest {
         let app_evidence_changed = self.app_key_spki_sha256 != prior.app_key_spki_sha256;
         let verifier_evidence_changed =
             self.webhook_verifier_fingerprint != prior.webhook_verifier_fingerprint;
+        let installation_changed = self.installation_id != prior.installation_id;
+        let expected_installation_generation = if installation_changed {
+            prior.installation_binding_generation.get().checked_add(1)
+        } else {
+            Some(prior.installation_binding_generation.get())
+        };
         // The repository policy revision also versions the manifest-pinned
         // server-service authorities.  An authority implementation policy can
         // therefore rotate without changing another manifest field; the
@@ -1113,9 +1170,21 @@ impl GithubProviderManifest {
         } else {
             Some(prior.runtime_policy_revision.get())
         };
-        self.same_connection_identity(prior)
+        self.tenant == prior.tenant
+            && self.repository_id == prior.repository_id
+            && self.connection_id == prior.connection_id
+            && self.github_repository_id == prior.github_repository_id
+            && self.github_repository_name == prior.github_repository_name
+            && self.github_app_id == prior.github_app_id
+            && self.app_client_id == prior.app_client_id
+            && self.jwt_issuer == prior.jwt_issuer
+            && self.origins == prior.origins
+            && expected_installation_generation == Some(self.installation_binding_generation.get())
             && self.revision.get() == expected_revision
-            && (app_evidence_changed || verifier_evidence_changed || policy_evidence_changed)
+            && (installation_changed
+                || app_evidence_changed
+                || verifier_evidence_changed
+                || policy_evidence_changed)
             && expected_app_revision == Some(self.app_configuration_revision.get())
             && expected_verifier_revision == Some(self.webhook_verifier_revision.get())
             && expected_policy_revision == Some(self.policy_revision.get())
@@ -1129,6 +1198,10 @@ impl GithubProviderManifest {
         update_part(&mut digest, self.repository_id.as_uuid().as_bytes());
         update_part(&mut digest, self.connection_id.as_uuid().as_bytes());
         update_part(&mut digest, &self.installation_id.get().to_be_bytes());
+        update_part(
+            &mut digest,
+            &self.installation_binding_generation.get().to_be_bytes(),
+        );
         update_part(&mut digest, &self.github_repository_id.get().to_be_bytes());
         if let Some(owner_id) = self.github_repository_owner_id {
             update_part(&mut digest, &owner_id.get().to_be_bytes());
@@ -1472,6 +1545,9 @@ pub enum GithubProviderManifestValueError {
     /// Manifest revision is zero or outside the durable range.
     #[error("GitHub provider manifest revision is invalid")]
     InvalidRevision,
+    /// Installation binding generation is zero or outside the durable range.
+    #[error("GitHub installation binding generation is invalid")]
+    InvalidInstallationBindingGeneration,
     /// The selected full default-branch ref is not canonical.
     #[error("GitHub provider manifest Git ref is invalid")]
     InvalidGitRef,

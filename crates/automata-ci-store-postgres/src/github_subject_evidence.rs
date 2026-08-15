@@ -5,17 +5,18 @@ use uuid::Uuid;
 
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
-    AdmissionObject, AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId,
-    GithubCheckSubjectKey, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
-    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
-    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
-    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository,
-    GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
+    AdmissionObject, AuthenticatedGithubDeliveryClaim, EventControlSubjectId, EventSubjectId,
+    EventSubjectOrigin, GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha,
+    GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
+    GithubProviderWorkflowSelection, GithubRepositoryDispatchEvidenceRepository,
+    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
+    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
     ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
@@ -258,6 +259,142 @@ impl GithubRepositoryDispatchEvidenceRepository for PostgresStore {
         let evidence = resolved_repository_dispatch_evidence(subject_id, &request)?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(evidence)
+    }
+}
+
+/// Locks and validates the claim, pinned manifest, source inventory, event,
+/// repository, and queued Check before admission policy may terminalize it.
+#[allow(clippy::too_many_lines)] // One exact SQL statement binds the full selection authority.
+pub(crate) async fn validate_github_workflow_selection_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordGithubWorkflowRunSubjectEvidence,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    // All-direct ingress initially owns one aggregate discovery Check. Derive
+    // the exact per-workflow Check inside this transaction before policy may
+    // admit or terminalize that workflow; any failed authority check rolls the
+    // derivation back with the transaction.
+    insert_all_direct_workflow_check_subject(transaction, request).await?;
+    let claim = request.admission_claim();
+    let event_subject_id = EventSubjectId::derive(
+        request.tenant(),
+        request.repository_id(),
+        EventSubjectOrigin::ProviderDelivery(request.delivery_id()),
+        request.workflow_path().as_str(),
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    let event_control_id = EventControlSubjectId::derive(event_subject_id);
+    let exact = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT TRUE
+          FROM github_provider_delivery_evidence AS evidence
+          JOIN provider_delivery_inbox AS inbox
+            ON inbox.id = evidence.provider_delivery_id
+           AND inbox.tenant_id = evidence.tenant_id
+          JOIN github_provider_manifest_revisions AS manifest
+            ON manifest.tenant_id = evidence.tenant_id
+           AND manifest.repository_id = evidence.repository_id
+           AND manifest.provider_connection_id = evidence.provider_connection_id
+           AND manifest.manifest_revision = evidence.provider_manifest_revision
+           AND manifest.manifest_digest = evidence.provider_manifest_digest
+           AND manifest.webhook_verifier_fingerprint_sha256 =
+               evidence.authenticated_webhook_verifier_fingerprint_sha256
+           AND manifest.webhook_verifier_revision =
+               evidence.authenticated_webhook_verifier_revision
+          JOIN repositories AS repository
+            ON repository.tenant_id = evidence.tenant_id
+           AND repository.id = evidence.repository_id
+          JOIN provider_delivery_workflow_inventories AS inventory
+            ON inventory.inbox_id = evidence.provider_delivery_id
+           AND inventory.tenant_id = evidence.tenant_id
+           AND inventory.manifest_digest = manifest.manifest_digest
+          JOIN provider_delivery_workflow_inventory_entries AS entry
+            ON entry.inbox_id = inventory.inbox_id
+           AND entry.tenant_id = inventory.tenant_id
+          JOIN github_check_subjects AS subject
+            ON subject.tenant_id = evidence.tenant_id
+           AND subject.repository_id = evidence.repository_id
+           AND subject.provider_delivery_id = evidence.provider_delivery_id
+         WHERE evidence.tenant_id = $1
+           AND evidence.repository_id = $2
+           AND evidence.provider_delivery_id = $3
+           AND repository.scm_provider = 'github'
+           AND repository.provider_repository_id = evidence.github_repository_id::TEXT
+           AND repository.owner = split_part(evidence.github_repository_name, '/', 1)
+           AND repository.name = split_part(evidence.github_repository_name, '/', 2)
+           AND manifest.workflow_selection_kind = 'all_direct'
+           AND inventory.source_revision = encode(evidence.github_check_head_sha, 'hex')
+           AND entry.workflow_path = $4
+           AND entry.source_state = 'ready'
+           AND entry.source_digest = $5
+           AND evidence.github_check_head_sha = $6
+           AND COALESCE(evidence.authenticated_event_name, manifest.event_name) = $7
+           AND inbox.raw_event_digest = $8
+           AND COALESCE(evidence.authenticated_event_git_ref, manifest.git_ref) = $9
+           AND inbox.state = 'claimed'
+           AND inbox.claim_owner_id = $10
+           AND inbox.attempt_count = $11
+           AND inbox.claim_fence = $12
+           AND inbox.claimed_at_ms = $13
+           AND inbox.claim_expires_at_ms = $14
+           AND $15 >= inbox.accepted_at_ms
+           AND $15 >= $13
+           AND $15 < $14
+           AND $16 = inbox.delivery_id
+           AND subject.origin_kind = 'provider_delivery'
+           AND subject.schedule_fire_id IS NULL
+           AND subject.subject_kind = 'workflow'
+           AND subject.subject_key = entry.workflow_path
+           AND subject.provider_connection_id = evidence.provider_connection_id
+           AND subject.provider_installation_id = evidence.provider_installation_id
+           AND subject.github_repository_id = evidence.github_repository_id
+           AND subject.github_repository_name = evidence.github_repository_name
+           AND subject.github_app_id = manifest.github_app_id
+           AND subject.head_sha = evidence.github_check_head_sha
+           AND subject.check_name = manifest.check_name
+           AND subject.created_at_ms = inbox.accepted_at_ms
+           AND subject.workflow_run_id IS NULL
+           AND subject.linked_at_ms IS NULL
+           AND (
+                (subject.event_control_subject_id IS NULL
+                 AND subject.desired_state = 'queued'
+                 AND subject.desired_conclusion IS NULL
+                 AND subject.terminal_cause IS NULL
+                 AND subject.desired_revision = 1
+                 AND subject.desired_updated_at_ms = inbox.accepted_at_ms)
+             OR (subject.event_control_subject_id = $17
+                 AND subject.desired_state = 'completed'
+                 AND subject.desired_conclusion = 'skipped'
+                 AND subject.terminal_cause = 'workflow_skipped'
+                 AND subject.desired_revision = 2
+                 AND subject.desired_updated_at_ms <= $15)
+           )
+        FOR SHARE OF evidence, inbox, manifest, repository, inventory, entry, subject
+        ",
+    )
+    .bind(request.tenant().as_str())
+    .bind(request.repository_id().as_uuid())
+    .bind(request.delivery_id().as_uuid())
+    .bind(request.workflow_path().as_str())
+    .bind(request.source_digest().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.event_name())
+    .bind(request.event_digest().as_bytes().as_slice())
+    .bind(request.git_ref())
+    .bind(claim.claim().owner().as_uuid())
+    .bind(i16::try_from(claim.attempt()).expect("attempt fits SMALLINT"))
+    .bind(pg_bigint(claim.claim().fence()))
+    .bind(claim.claimed_at().get())
+    .bind(claim.expires_at().get())
+    .bind(request.admitted_at().get())
+    .bind(request.provider_delivery_idempotency_key())
+    .bind(event_control_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    if exact == Some(true) {
+        Ok(())
+    } else {
+        Err(GithubSubjectEvidenceStoreError::AuthorityRejected)
     }
 }
 

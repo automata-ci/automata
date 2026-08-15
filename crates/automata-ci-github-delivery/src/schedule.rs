@@ -997,11 +997,16 @@ impl GithubScheduleService {
     ) -> Result<(Bytes, Vec<RepositoryWorkflowSource>), FireFailure> {
         let manifest = self
             .manifests
-            .load_current_github_provider_manifest(claimed.tenant(), claimed.connection_id())
+            .load_github_provider_manifest_revision(
+                claimed.tenant(),
+                claimed.connection_id(),
+                claimed.manifest_revision(),
+            )
             .await
             .map_err(|_| FireFailure::Lost)?;
         let manifest = manifest.manifest();
-        if manifest.repository_id() != claimed.repository_id()
+        if manifest.digest() != claimed.manifest_digest()
+            || manifest.repository_id() != claimed.repository_id()
             || manifest.git_ref() != claimed.default_branch_ref()
             || !manifest.selects_workflow_path(claimed.entry().workflow_path())
         {
@@ -1387,6 +1392,9 @@ const fn map_admission_request_error(error: WorkflowAdmissionRequestError) -> Fi
 fn map_admission_error(error: &WorkflowAdmissionError) -> FireFailure {
     match error {
         WorkflowAdmissionError::Store(
+            automata_ci_store::LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
+        ) => FireFailure::Skipped("github.workflow.disabled"),
+        WorkflowAdmissionError::Store(
             automata_ci_store::LogicalWorkflowAdmissionStoreError::RunNumberExhausted,
         ) => FireFailure::Failed("github.schedule.run_number_exhausted"),
         WorkflowAdmissionError::Blob(_) | WorkflowAdmissionError::Store(_) => {
@@ -1429,6 +1437,17 @@ mod tests {
             AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE,
             "application/vnd.automata.github-schedule-evidence.v1+json"
         );
+    }
+
+    #[test]
+    fn disabled_workflow_is_a_terminal_schedule_skip() {
+        let error = WorkflowAdmissionError::Store(
+            automata_ci_store::LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
+        );
+        assert!(matches!(
+            map_admission_error(&error),
+            FireFailure::Skipped("github.workflow.disabled")
+        ));
     }
 
     #[test]

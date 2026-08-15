@@ -802,6 +802,11 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
                 Ok(ProviderDeliveryWorkflowConclusion::Admitted { run_id })
             }
             Err(WorkflowAdmissionError::Store(
+                LogicalWorkflowAdmissionStoreError::WorkflowDisabled,
+            )) => Ok(ProviderDeliveryWorkflowConclusion::Skipped {
+                reason: failure_kind("github.workflow.disabled"),
+            }),
+            Err(WorkflowAdmissionError::Store(
                 LogicalWorkflowAdmissionStoreError::RunNumberExhausted,
             )) => Ok(failed("github.workflow.run_number_exhausted")),
             Err(error) => {

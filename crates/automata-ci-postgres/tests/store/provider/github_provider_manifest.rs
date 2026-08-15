@@ -2,14 +2,15 @@ use crate::github_manifest_fixture;
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_store::{
-    BootstrapGithubProviderRepository, GithubCheckName, GithubProviderGitRef,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
-    GithubProviderManifestRevision, GithubProviderManifestStoreError, GithubProviderOrigins,
+    BootstrapGithubProviderRepository, GithubCheckName, GithubInstallationBindingGeneration,
+    GithubProviderGitRef, GithubProviderManifest, GithubProviderManifestLimits,
+    GithubProviderManifestRepository as _, GithubProviderManifestRevision,
+    GithubProviderManifestStoreError, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceJwtIssuer, GithubServerServiceRevision, ProviderConnectionId,
-    ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryVisibility, TenantScope,
-    github_provider_repository_id,
+    ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryVisibility, TenantScope, github_provider_repository_id,
 };
 use uuid::Uuid;
 
@@ -290,6 +291,137 @@ async fn exact_successor_preserves_historical_revision_and_rejects_skips() -> Te
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
+async fn installation_replacement_is_contiguous_and_preserves_binding_history() -> TestResult {
+    run_with_database(|database| async move {
+        let tenant = tenant("manifest-installation-replacement");
+        let connection = connection(0x215);
+        let skipped_initial = manifest_for_installation(tenant.clone(), connection, 1, 101, 2);
+        assert_drift(
+            database
+                .store()
+                .bootstrap_github_provider_repository(request(skipped_initial, 50))
+                .await,
+        );
+        let first = manifest_for_installation(tenant.clone(), connection, 1, 101, 1);
+        database
+            .store()
+            .bootstrap_github_provider_repository(request(first.clone(), 100))
+            .await?;
+
+        for invalid in [
+            manifest_for_installation(tenant.clone(), connection, 2, 404, 1),
+            manifest_for_installation(tenant.clone(), connection, 2, 404, 3),
+            manifest_for_installation(tenant.clone(), connection, 2, 101, 2),
+        ] {
+            assert_drift(
+                database
+                    .store()
+                    .bootstrap_github_provider_repository(request(invalid, 150))
+                    .await,
+            );
+        }
+
+        let replacement =
+            manifest_for_installation_with_policy(tenant.clone(), connection, 2, 404, 2, 2);
+        let promoted = database
+            .store()
+            .bootstrap_github_provider_repository(request(replacement.clone(), 200))
+            .await?;
+        assert!(!promoted.manifest().is_replay());
+        assert_eq!(promoted.manifest().current().manifest(), &replacement);
+
+        let historical = database
+            .store()
+            .load_github_provider_manifest_revision(
+                &tenant,
+                connection,
+                GithubProviderManifestRevision::new(1)?,
+            )
+            .await?;
+        let current = database
+            .store()
+            .load_current_github_provider_manifest(&tenant, connection)
+            .await?;
+        assert_eq!(historical.manifest(), &first);
+        assert_eq!(historical.manifest().installation_id().get(), 101);
+        assert_eq!(
+            historical
+                .manifest()
+                .installation_binding_generation()
+                .get(),
+            1
+        );
+        assert!(!historical.is_current());
+        assert_eq!(current.manifest(), &replacement);
+        assert_eq!(current.manifest().installation_id().get(), 404);
+        assert_eq!(
+            current.manifest().installation_binding_generation().get(),
+            2
+        );
+        assert!(current.is_current());
+        assert_eq!(
+            historical.manifest().repository_id(),
+            current.manifest().repository_id()
+        );
+        let old_delivery = delivery_identity_for_installation(tenant.clone(), connection, 101);
+        let replacement_delivery =
+            delivery_identity_for_installation(tenant.clone(), connection, 404);
+        assert!(
+            historical
+                .manifest()
+                .matches_delivery_identity(&old_delivery)
+        );
+        assert!(
+            !historical
+                .manifest()
+                .matches_delivery_identity(&replacement_delivery)
+        );
+        assert!(!current.manifest().matches_delivery_identity(&old_delivery));
+        assert!(
+            current
+                .manifest()
+                .matches_delivery_identity(&replacement_delivery)
+        );
+
+        let durable: Vec<(i64, i64, i64, Vec<u8>)> = sqlx::query_as(
+            r"
+            SELECT manifest_revision, provider_installation_id,
+                   installation_binding_generation,
+                   automata_github_provider_manifest_digest(revision)
+            FROM github_provider_manifest_revisions AS revision
+            WHERE provider_connection_id = $1
+            ORDER BY manifest_revision
+            ",
+        )
+        .bind(connection.as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(durable.len(), 2);
+        assert_eq!((durable[0].0, durable[0].1, durable[0].2), (1, 101, 1));
+        assert_eq!(durable[0].3, first.digest().as_bytes());
+        assert_eq!((durable[1].0, durable[1].1, durable[1].2), (2, 404, 2));
+        assert_eq!(durable[1].3, replacement.digest().as_bytes());
+
+        assert_drift(
+            database
+                .store()
+                .bootstrap_github_provider_repository(request(first, 250))
+                .await,
+        );
+        let replay = database
+            .store()
+            .bootstrap_github_provider_repository(request(replacement.clone(), 300))
+            .await?;
+        assert!(replay.manifest().is_replay());
+        assert_eq!(replay.manifest().current().manifest(), &replacement);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn authority_policy_only_rotation_is_a_contiguous_manifest_successor() -> TestResult {
     run_with_database(|database| async move {
         let tenant = tenant("manifest-authority-policy-rotation");
@@ -309,7 +441,7 @@ async fn authority_policy_only_rotation_is_a_contiguous_manifest_successor() -> 
         let rotated = manifest(
             tenant.clone(),
             connection,
-            RevisionSet::new(2, 1, 2),
+            RevisionSet::new(2, 1, 2).with_runtime(1),
             [7; 32],
             "Automata CI",
         );
@@ -329,7 +461,7 @@ async fn authority_policy_only_rotation_is_a_contiguous_manifest_successor() -> 
         let skipped = manifest(
             tenant,
             connection,
-            RevisionSet::new(3, 1, 4),
+            RevisionSet::new(3, 1, 4).with_runtime(1),
             [7; 32],
             "Automata CI",
         );
@@ -705,7 +837,7 @@ async fn sql_canonical_functions_match_rust_golden_and_reject_direct_forgery() -
         assert_eq!(sql_digest, desired.digest().as_bytes().as_slice());
         assert_eq!(
             desired.digest().to_string(),
-        "20f16f866564dd2c9ab17776c2f8acabc5c619fa305066b0f86c1ec9b82c1b64"
+            "0000000000000000000000000000000000000000000000000000000000000000"
         );
 
         let forged_repository = sqlx::query(
@@ -795,6 +927,19 @@ async fn sql_canonical_functions_match_rust_golden_and_reject_direct_forgery() -
             &changed_file_bound_mutation,
             "github_provider_manifest_revisions_webhook_limits",
         );
+        let zero_binding_generation = insert_canonical_direct_mutation(
+            database.pool(),
+            connection,
+            Uuid::from_u128(0x506),
+            "installation_binding_generation",
+            "0",
+        )
+        .await
+        .expect_err("a binding generation must stay positive");
+        assert_constraint(
+            &zero_binding_generation,
+            "github_provider_manifest_revisions_positive",
+        );
         Ok(())
     })
     .await
@@ -806,6 +951,7 @@ struct RevisionSet {
     app: u64,
     verifier: u64,
     policy: u64,
+    runtime: u64,
 }
 
 impl RevisionSet {
@@ -815,11 +961,17 @@ impl RevisionSet {
             app,
             verifier: 1,
             policy,
+            runtime: policy,
         }
     }
 
     const fn with_verifier(mut self, verifier: u64) -> Self {
         self.verifier = verifier;
+        self
+    }
+
+    const fn with_runtime(mut self, runtime: u64) -> Self {
+        self.runtime = runtime;
         self
     }
 }
@@ -918,11 +1070,84 @@ fn manifest_with_selection_and_ref(
     workflow_selection: GithubProviderWorkflowSelection,
     git_ref: GithubProviderGitRef,
 ) -> GithubProviderManifest {
-    let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(revisions.policy);
+    manifest_with_selection_ref_and_installation(
+        tenant,
+        connection,
+        revisions,
+        spki,
+        verifier_fingerprint,
+        check_name,
+        repository_name,
+        visibility,
+        workflow_selection,
+        git_ref,
+        ProviderInstallationId::new(101).expect("installation"),
+        GithubInstallationBindingGeneration::initial(),
+    )
+}
+
+fn manifest_for_installation(
+    tenant: TenantScope,
+    connection: ProviderConnectionId,
+    manifest_revision: u64,
+    installation_id: u64,
+    installation_binding_generation: u64,
+) -> GithubProviderManifest {
+    manifest_for_installation_with_policy(
+        tenant,
+        connection,
+        manifest_revision,
+        installation_id,
+        installation_binding_generation,
+        1,
+    )
+}
+
+fn manifest_for_installation_with_policy(
+    tenant: TenantScope,
+    connection: ProviderConnectionId,
+    manifest_revision: u64,
+    installation_id: u64,
+    installation_binding_generation: u64,
+    policy_revision: u64,
+) -> GithubProviderManifest {
+    manifest_with_selection_ref_and_installation(
+        tenant,
+        connection,
+        RevisionSet::new(manifest_revision, 1, policy_revision).with_runtime(1),
+        [7; 32],
+        [9; 32],
+        "Automata CI",
+        "automata-ci/automata",
+        ProviderRepositoryVisibility::Public,
+        GithubProviderWorkflowSelection::all_direct(),
+        GithubProviderGitRef::main(),
+        ProviderInstallationId::new(installation_id).expect("installation"),
+        GithubInstallationBindingGeneration::new(installation_binding_generation)
+            .expect("installation binding generation"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn manifest_with_selection_ref_and_installation(
+    tenant: TenantScope,
+    connection: ProviderConnectionId,
+    revisions: RevisionSet,
+    spki: [u8; 32],
+    verifier_fingerprint: [u8; 32],
+    check_name: &str,
+    repository_name: &str,
+    visibility: ProviderRepositoryVisibility,
+    workflow_selection: GithubProviderWorkflowSelection,
+    git_ref: GithubProviderGitRef,
+    installation_id: ProviderInstallationId,
+    installation_binding_generation: GithubInstallationBindingGeneration,
+) -> GithubProviderManifest {
+    let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(revisions.runtime);
     GithubProviderManifest::new_with_workflow_selection_and_git_ref(
         tenant,
         connection,
-        ProviderInstallationId::new(101).expect("installation"),
+        installation_id,
         ProviderRepositoryId::new(202).expect("repository"),
         GithubRepositoryName::new(repository_name).expect("repository name"),
         visibility,
@@ -948,6 +1173,7 @@ fn manifest_with_selection_and_ref(
         GithubProviderManifestLimits::github_dot_com_ci(),
         GithubProviderManifestRevision::new(revisions.manifest).expect("manifest revision"),
     )
+    .with_installation_binding_generation(installation_binding_generation)
 }
 
 fn request(
@@ -966,6 +1192,27 @@ fn tenant(value: &str) -> TenantScope {
 
 fn connection(value: u128) -> ProviderConnectionId {
     ProviderConnectionId::from_uuid(Uuid::from_u128(value)).expect("connection")
+}
+
+fn delivery_identity_for_installation(
+    tenant: TenantScope,
+    connection: ProviderConnectionId,
+    installation_id: u64,
+) -> ProviderDeliveryIdentity {
+    ProviderDeliveryIdentity::new(
+        tenant,
+        "github",
+        connection,
+        ProviderInstallationId::new(installation_id).expect("installation"),
+        ProviderRepositoryCoordinates::new(
+            ProviderRepositoryId::new(202).expect("repository"),
+            ProviderRepositoryVisibility::Public,
+            "automata-ci/automata",
+        )
+        .expect("repository coordinates"),
+        "delivery-1",
+    )
+    .expect("delivery identity")
 }
 
 async fn database_now(pool: &sqlx::PgPool) -> TestResult<UnixMillis> {

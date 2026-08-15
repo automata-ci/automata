@@ -3,6 +3,8 @@
 #[path = "github_manifest_fixture.rs"]
 mod github_manifest_fixture;
 
+#[path = "event_subject_api.rs"]
+mod event_subject_api;
 #[path = "g1_api.rs"]
 mod g1_api;
 #[path = "github_authenticated_event.rs"]
@@ -57,3 +59,5 @@ mod secret_management_api;
 mod tenant_scope;
 #[path = "workflow_admission.rs"]
 mod workflow_admission;
+#[path = "workflow_enable_state_api.rs"]
+mod workflow_enable_state_api;
