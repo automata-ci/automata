@@ -352,6 +352,15 @@ export function previewJobLog(
       clearHref: jobHref,
     },
     lines,
+    live: {
+      checkpoint: null,
+      state:
+        selectedJob.status.tone === "queued" ||
+        selectedJob.status.tone === "running"
+          ? "open"
+          : "closed",
+      moreAvailable: false,
+    },
     notice: logNotice(selectedJob, lines.length),
     pagination: {
       currentCursor: null,

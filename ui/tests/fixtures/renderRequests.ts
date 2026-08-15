@@ -364,6 +364,11 @@ export const jobLogRequest: RenderRequest = {
         text: "warning: release fixture uses the maximum durable sequence",
       },
     ],
+    live: {
+      checkpoint: "checkpoint",
+      state: "open",
+      moreAvailable: true,
+    },
     notice:
       "This job is still running. This page updates automatically as logs are committed.",
     pagination: {

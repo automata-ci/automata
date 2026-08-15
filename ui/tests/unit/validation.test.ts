@@ -1632,6 +1632,28 @@ describe("render request validation", () => {
     }
   });
 
+  it("validates resumable job-log live state independently of pagination", () => {
+    const malformed = cloneRequest(jobLogRequest);
+    setPath(malformed, ["page", "live", "checkpoint"], "cursor=bad");
+    expect(() => validateRenderRequest(malformed)).toThrow(
+      "at $.page.live.checkpoint",
+    );
+
+    const missingCheckpoint = cloneRequest(jobLogRequest);
+    setPath(missingCheckpoint, ["page", "live", "checkpoint"], null);
+    expect(() => validateRenderRequest(missingCheckpoint)).toThrow(
+      "at $.page.live.checkpoint",
+    );
+
+    const restricted = cloneRequest(jobLogRequest);
+    setPath(restricted, ["page", "logVisibility"], "restricted");
+    setPath(restricted, ["page", "lines"], []);
+    expect(() => validateRenderRequest(restricted)).toThrow("at $.page.live");
+
+    setPath(restricted, ["page", "live"], null);
+    expect(() => validateRenderRequest(restricted)).not.toThrow();
+  });
+
   it.each([0, -1, 4_294_967_296, 1.5])(
     "rejects invalid job-log job attempt %s",
     (attempt) => {

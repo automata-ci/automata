@@ -1124,6 +1124,19 @@ pub(crate) struct JobLogPage {
     pub(crate) lines: Vec<LogLine>,
     pub(crate) previous_cursor: Option<String>,
     pub(crate) next_cursor: Option<String>,
+    /// Forward-only replay state for live delivery, absent on restricted or
+    /// historical reverse pages.
+    pub(crate) live: Option<JobLogLive>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JobLogLive {
+    /// Last fully decoded durable record represented by this response.
+    pub(crate) checkpoint: Option<String>,
+    /// Whether the durable log stream has received its terminal record.
+    pub(crate) stream_closed: bool,
+    /// Whether another committed page was already available at read time.
+    pub(crate) more_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

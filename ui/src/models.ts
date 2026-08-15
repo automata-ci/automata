@@ -267,6 +267,14 @@ interface JobLogPaginationModel {
   readonly label: string;
 }
 
+export interface JobLogLiveModel {
+  /** Opaque forward checkpoint for the last fully applied durable record. */
+  readonly checkpoint: string | null;
+  /** Durable stream state; a closed stream can still have unread committed pages. */
+  readonly state: "open" | "closed";
+  readonly moreAvailable: boolean;
+}
+
 export interface JobLogPageModel {
   readonly kind: "job-log";
   readonly shell: ShellModel;
@@ -278,6 +286,8 @@ export interface JobLogPageModel {
   readonly logVisibility: ResultCollectionVisibility;
   readonly search: JobLogSearchModel;
   readonly lines: readonly JobLogLineModel[];
+  /** Resumable live-tail state, absent for restricted and historical pages. */
+  readonly live: JobLogLiveModel | null;
   readonly notice: string | null;
   readonly pagination: JobLogPaginationModel;
 }

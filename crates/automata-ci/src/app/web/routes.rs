@@ -2375,13 +2375,13 @@ mod tests {
 
     use super::*;
     use crate::app::web::data::{
-        ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogPage, JobNavigationItem,
-        JobSummary, LogChannel, LogLine, RBAC_BINDING_PAGE_SIZE, RBAC_ROLE_PAGE_SIZE,
-        RBAC_USER_DETAIL_BINDING_LIMIT, RBAC_USER_PAGE_SIZE, RbacDirectBindingListPage,
-        RbacRoleListPage, RbacUserDetailPage, RbacUserListPage, Repository as DataRepository,
-        RepositoryDirectoryItem, RepositoryDirectoryPage, RepositorySettingsDestination,
-        RepositorySettingsPage, RunDetailPage, RunListPage, RunSummary, Status, Viewer,
-        VisibleCollection, Workflow, WorkflowDefinition,
+        ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogLive, JobLogPage,
+        JobNavigationItem, JobSummary, LogChannel, LogLine, RBAC_BINDING_PAGE_SIZE,
+        RBAC_ROLE_PAGE_SIZE, RBAC_USER_DETAIL_BINDING_LIMIT, RBAC_USER_PAGE_SIZE,
+        RbacDirectBindingListPage, RbacRoleListPage, RbacUserDetailPage, RbacUserListPage,
+        Repository as DataRepository, RepositoryDirectoryItem, RepositoryDirectoryPage,
+        RepositorySettingsDestination, RepositorySettingsPage, RunDetailPage, RunListPage,
+        RunSummary, Status, Viewer, VisibleCollection, Workflow, WorkflowDefinition,
     };
 
     const WORKFLOW_ID: &str = "11111111-1111-4111-8111-11111111111a";
@@ -3118,6 +3118,11 @@ mod tests {
             ],
             previous_cursor: None,
             next_cursor: Some("log_40".to_owned()),
+            live: Some(JobLogLive {
+                checkpoint: Some("log_39".to_owned()),
+                stream_closed: false,
+                more_available: true,
+            }),
         }
     }
 

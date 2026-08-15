@@ -32,8 +32,8 @@ use crate::app::repository_secrets::{
 };
 
 use super::data::{
-    ArtifactSummary, CollectionVisibility, JobLogPage as JobLogData, JobSummary, LOG_LINE_BYTES,
-    LOG_PAGE_DECODED_BYTES, LogChannel, REPOSITORY_PAGE_SIZE,
+    ArtifactSummary, CollectionVisibility, JobLogLive as JobLogLiveData, JobLogPage as JobLogData,
+    JobSummary, LOG_LINE_BYTES, LOG_PAGE_DECODED_BYTES, LogChannel, REPOSITORY_PAGE_SIZE,
     RbacDirectBindingListPage as RbacDirectBindingListData, RbacRoleListPage as RbacRoleListData,
     RbacUserDetailPage as RbacUserDetailData, RbacUserListPage as RbacUserListData,
     Repository as RepositoryData, RepositoryDirectoryItem as RepositoryDirectoryItemData,
@@ -467,8 +467,25 @@ struct JobLogPage {
     log_visibility: &'static str,
     search: JobLogSearch,
     lines: Vec<JobLogLine>,
+    live: Option<JobLogLive>,
     notice: Option<&'static str>,
     pagination: JobLogPagination,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobLogLive {
+    checkpoint: Option<String>,
+    state: &'static str,
+    more_available: bool,
+}
+
+fn job_log_live(live: JobLogLiveData) -> JobLogLive {
+    JobLogLive {
+        checkpoint: live.checkpoint,
+        state: if live.stream_closed { "closed" } else { "open" },
+        more_available: live.more_available,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2063,6 +2080,7 @@ pub(super) fn job_log(
         next_cursor: data.next_cursor,
         label: pluralized(lines.len(), "log line", "log lines"),
     };
+    let live = data.live.map(job_log_live);
     let title = format!("{} logs · Automata", data.job.name);
     let notice = job_log_notice(data.job.status);
     let return_path_candidate = job_log_href(&job_href, query, request_cursor);
@@ -2093,6 +2111,7 @@ pub(super) fn job_log(
                 clear_href: job_href.clone(),
             },
             lines,
+            live,
             notice,
             pagination,
         },
@@ -2155,7 +2174,13 @@ fn valid_job_log_data(data: &JobLogData) -> bool {
         && (data.log_visibility == CollectionVisibility::Full
             || (data.lines.is_empty()
                 && data.previous_cursor.is_none()
-                && data.next_cursor.is_none()))
+                && data.next_cursor.is_none()
+                && data.live.is_none()))
+        && data.live.as_ref().is_none_or(|live| {
+            data.log_visibility == CollectionVisibility::Full
+                && live.more_available == data.next_cursor.is_some()
+                && (!live.more_available || live.checkpoint.is_some())
+        })
         && data.lines.len() <= super::data::LOG_PAGE_SIZE
         && decoded_bytes.is_some_and(|bytes| bytes <= LOG_PAGE_DECODED_BYTES)
         && data.lines.iter().all(|line| {
