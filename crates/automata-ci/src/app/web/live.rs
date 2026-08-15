@@ -37,12 +37,12 @@ use sha2::{Digest as _, Sha256};
 use super::{
     codec::{LogSegmentExpectation, decode_log_segment},
     data::{
-        ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogPage, JobLogRequest,
-        JobNavigationItem, JobSummary, LogChannel, LogLine, Repository, RepositoryDirectoryItem,
-        RepositoryDirectoryPage, RepositoryDirectoryRequest, RepositoryPath,
-        RepositorySettingsDestination, RepositorySettingsPage, RequestContext, RunDetailPage,
-        RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status, StatusFilter,
-        VisibleCollection, WebData, WebDataError, Workflow, WorkflowDefinition,
+        ArtifactDownload, ArtifactSummary, CollectionVisibility, JobLogLive, JobLogPage,
+        JobLogRequest, JobNavigationItem, JobSummary, LogChannel, LogLine, Repository,
+        RepositoryDirectoryItem, RepositoryDirectoryPage, RepositoryDirectoryRequest,
+        RepositoryPath, RepositorySettingsDestination, RepositorySettingsPage, RequestContext,
+        RunDetailPage, RunDetailRequest, RunListPage, RunListRequest, RunSummary, Status,
+        StatusFilter, VisibleCollection, WebData, WebDataError, Workflow, WorkflowDefinition,
     },
     text::is_safe_display_text,
 };
@@ -1931,6 +1931,7 @@ impl LiveWebData {
                 lines: Vec::new(),
                 previous_cursor: None,
                 next_cursor: None,
+                live: None,
             }));
         }
         let Some(log_stream) = detail.log_stream else {
@@ -1996,6 +1997,8 @@ impl LiveWebData {
         let mut discarded_reverse_line = false;
         let mut next_exact = None;
         let mut saw_boundary = decoded_cursor.is_none();
+        let mut forward_checkpoint =
+            decoded_cursor.filter(|cursor| cursor.direction == HumanLogSegmentPageDirection::Newer);
         'segments: for segment in &page.segments {
             let blob = self
                 .objects
@@ -2017,6 +2020,13 @@ impl LiveWebData {
                     .map_err(|_| WebDataError::Corrupt)?;
             for frame in frames {
                 let candidates = render_frame_lines(&frame)?;
+                if direction == HumanLogSegmentPageDirection::Newer && candidates.is_empty() {
+                    forward_checkpoint = Some(DecodedLogCursor {
+                        sequence: frame.sequence(),
+                        line_ordinal: 0,
+                        direction: HumanLogSegmentPageDirection::Newer,
+                    });
+                }
                 if let Some(cursor) = decoded_cursor {
                     if direction == HumanLogSegmentPageDirection::Newer {
                         if frame.sequence() < cursor.sequence {
@@ -2071,6 +2081,10 @@ impl LiveWebData {
                             break 'segments;
                         }
                         decoded_bytes = next_bytes;
+                        forward_checkpoint = Some(rendered_line_cursor(
+                            &candidate,
+                            HumanLogSegmentPageDirection::Newer,
+                        ));
                         forward_lines.push(candidate);
                     }
                 }
@@ -2112,6 +2126,20 @@ impl LiveWebData {
                 cursor,
             )
         });
+        let live = (direction == HumanLogSegmentPageDirection::Newer).then(|| JobLogLive {
+            checkpoint: forward_checkpoint.map(|cursor| {
+                encode_log_cursor(
+                    tenant,
+                    repository.id,
+                    scope.run_id,
+                    scope.job_id,
+                    log_stream.id,
+                    cursor,
+                )
+            }),
+            stream_closed: log_stream.closed_at.is_some(),
+            more_available: next_cursor.is_some(),
+        });
         if log_stream.closed_at.is_some()
             && next_cursor.is_none()
             && page
@@ -2135,6 +2163,7 @@ impl LiveWebData {
             lines,
             previous_cursor,
             next_cursor,
+            live,
         }))
     }
 }
@@ -3710,6 +3739,7 @@ mod tests {
         assert!(page.lines.is_empty());
         assert!(page.previous_cursor.is_none());
         assert!(page.next_cursor.is_none());
+        assert!(page.live.is_none());
 
         let denied_cursor = JobLogRequest {
             cursor: Some("not-a-canonical-cursor".to_owned()),
@@ -3864,6 +3894,7 @@ mod tests {
         assert!(page.lines.is_empty());
         assert!(page.previous_cursor.is_none());
         assert!(page.next_cursor.is_none());
+        assert!(page.live.is_none());
     }
 
     #[tokio::test]
@@ -4198,6 +4229,25 @@ mod tests {
         assert!(page.jobs[0].logs_available);
         assert!(page.jobs[1].logs_available);
         assert!(page.next_cursor.is_none());
+        let live = page.live.expect("forward page live checkpoint");
+        assert!(live.stream_closed);
+        assert!(!live.more_available);
+        let checkpoint = live.checkpoint.expect("terminal checkpoint");
+        let replay = read_log_page(
+            &data,
+            &context,
+            &repository,
+            run_id,
+            job_id,
+            Some(checkpoint.clone()),
+            200,
+        )
+        .await;
+        assert!(replay.lines.is_empty());
+        assert_eq!(
+            replay.live.and_then(|live| live.checkpoint).as_deref(),
+            Some(checkpoint.as_str())
+        );
     }
 
     #[tokio::test]
@@ -4222,6 +4272,9 @@ mod tests {
         let first = read_log_page(&data, &context, &repository, run_id, job_id, None, 2).await;
         assert_log_texts(&first, &["line 0", "line 1"]);
         assert!(first.previous_cursor.is_none());
+        let first_live = first.live.as_ref().expect("first forward checkpoint");
+        assert!(first_live.stream_closed);
+        assert!(first_live.more_available);
         let first_next = first.next_cursor.expect("second-page cursor");
 
         let second = read_log_page(
@@ -4250,6 +4303,9 @@ mod tests {
         .await;
         assert_log_texts(&third, &["line 4"]);
         assert!(third.next_cursor.is_none());
+        let third_live = third.live.as_ref().expect("terminal forward checkpoint");
+        assert!(third_live.stream_closed);
+        assert!(!third_live.more_available);
 
         let back_to_second = read_log_page(
             &data,
@@ -4262,6 +4318,7 @@ mod tests {
         )
         .await;
         assert_log_texts(&back_to_second, &["line 2", "line 3"]);
+        assert!(back_to_second.live.is_none());
         assert_eq!(
             back_to_second.next_cursor.as_deref(),
             Some(second_next.as_str())
@@ -4277,6 +4334,7 @@ mod tests {
         )
         .await;
         assert_log_texts(&back_to_first, &["line 0", "line 1"]);
+        assert!(back_to_first.live.is_none());
         assert!(back_to_first.previous_cursor.is_none());
         assert_eq!(
             back_to_first.next_cursor.as_deref(),
@@ -4294,6 +4352,45 @@ mod tests {
         )
         .await;
         assert_eq!(direct_back_to_first.lines, back_to_first.lines);
+    }
+
+    #[tokio::test]
+    async fn forward_log_checkpoint_replays_its_record_and_then_advances() {
+        let policy = FakeLivePolicy {
+            dashboard_visibility: OutputVisibility::Public,
+            log_visibility: OutputVisibility::Public,
+            log_exposure: SecretExposureClass::Secretless,
+            raw_log_disposition: HumanRawLogDisposition::Persist,
+            allow_dashboard: true,
+            allow_logs: true,
+            allow_settings_read: false,
+            allow_settings_update: false,
+        };
+        let (data, context, repository, run_id, job_id, _) =
+            fake_live_data_with_policy_and_payload(policy, Some(b"zero\none\ntwo\n".to_vec()))
+                .await;
+        let first = read_log_page(&data, &context, &repository, run_id, job_id, None, 2).await;
+        let checkpoint = first
+            .live
+            .and_then(|live| live.checkpoint)
+            .expect("first forward checkpoint");
+
+        let replay = read_log_page(
+            &data,
+            &context,
+            &repository,
+            run_id,
+            job_id,
+            Some(checkpoint.clone()),
+            2,
+        )
+        .await;
+
+        assert_log_texts(&replay, &["one", "two"]);
+        assert_ne!(
+            replay.live.and_then(|live| live.checkpoint).as_deref(),
+            Some(checkpoint.as_str())
+        );
     }
 
     #[tokio::test]

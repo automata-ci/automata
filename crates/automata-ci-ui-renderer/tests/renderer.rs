@@ -91,6 +91,15 @@ fn valid_request() -> Value {
 
 fn job_log_request(log_visibility: &str) -> Value {
     let mut request = valid_request();
+    let live = if log_visibility == "full" {
+        json!({
+            "checkpoint": "AA",
+            "state": "closed",
+            "moreAvailable": false
+        })
+    } else {
+        Value::Null
+    };
     request["page"] = json!({
         "kind": "job-log",
         "shell": {
@@ -146,6 +155,7 @@ fn job_log_request(log_visibility: &str) -> Value {
             "durationLabel": null
         },
         "logVisibility": log_visibility,
+        "live": live,
         "search": {
             "action": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111",
             "query": "",

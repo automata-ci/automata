@@ -63,6 +63,7 @@ export function validateJobLogPage(value: unknown, path: string): void {
     "logVisibility",
     "search",
     "lines",
+    "live",
     "notice",
     "pagination",
   ]);
@@ -128,6 +129,8 @@ export function validateJobLogPage(value: unknown, path: string): void {
     previousLine = identity;
   });
 
+  validateLive(page.live, `${path}.live`, logVisibility);
+
   if (page.notice !== null) {
     expectDisplayText(
       page.notice,
@@ -136,6 +139,32 @@ export function validateJobLogPage(value: unknown, path: string): void {
     );
   }
   validateLogPagination(page.pagination, `${path}.pagination`);
+}
+
+function validateLive(
+  value: unknown,
+  path: string,
+  logVisibility: "full" | "restricted",
+): void {
+  if (value === null) {
+    return;
+  }
+  if (logVisibility === "restricted") {
+    invalid(path, "no live tail for a restricted log collection");
+  }
+  const live = expectObject(value, path, [
+    "checkpoint",
+    "state",
+    "moreAvailable",
+  ]);
+  validateCursor(live.checkpoint, `${path}.checkpoint`);
+  expectOneOf(live.state, `${path}.state`, ["open", "closed"]);
+  if (typeof live.moreAvailable !== "boolean") {
+    invalid(`${path}.moreAvailable`, "a boolean");
+  }
+  if (live.moreAvailable && live.checkpoint === null) {
+    invalid(`${path}.checkpoint`, "a checkpoint when more data is available");
+  }
 }
 
 function validateNavigationPagination(
