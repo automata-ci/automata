@@ -924,7 +924,6 @@ async fn activate_cli_session(
             SessionCredentialServiceError::InvalidLifetime
             | SessionCredentialServiceError::LifetimeOverflow
             | SessionCredentialServiceError::RandomnessUnavailable
-            | SessionCredentialServiceError::CollisionLimitExceeded
             | SessionCredentialServiceError::InternalFailure,
         ) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
@@ -968,7 +967,6 @@ async fn logout_cli(
             | SessionCredentialServiceError::InvalidLifetime
             | SessionCredentialServiceError::LifetimeOverflow
             | SessionCredentialServiceError::RandomnessUnavailable
-            | SessionCredentialServiceError::CollisionLimitExceeded
             | SessionCredentialServiceError::InternalFailure,
         ) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
     }
@@ -1024,7 +1022,6 @@ async fn logout_browser(
             | SessionCredentialServiceError::InvalidLifetime
             | SessionCredentialServiceError::LifetimeOverflow
             | SessionCredentialServiceError::RandomnessUnavailable
-            | SessionCredentialServiceError::CollisionLimitExceeded
             | SessionCredentialServiceError::InternalFailure,
         ) => error_page_response(
             StatusCode::INTERNAL_SERVER_ERROR,

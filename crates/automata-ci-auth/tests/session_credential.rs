@@ -14,15 +14,13 @@ use automata_ci_auth::{
         DurableSession, HumanSessionRepository, ResolveSession, ResolveSessionOutcome,
         RevokeOwnSession, RevokeOwnSessionOutcome, RevokePrincipalSessions,
         RevokePrincipalSessionsOutcome, SessionKind, SessionRepositoryError,
-        SessionRepositoryFuture, SessionResolutionStatus, SessionTokenDigestKeyId, TouchSession,
-        TouchSessionOutcome,
+        SessionRepositoryFuture, SessionTokenDigestKeyId, TouchSession, TouchSessionOutcome,
     },
     session_credential::{
-        InvalidSessionCredential, IssuedSessionCredential, MAX_SESSION_CREDENTIAL_ISSUE_ATTEMPTS,
-        MAX_SESSION_CREDENTIAL_KEYS, PreparedSessionCredential, SESSION_CREDENTIAL_SECRET_BYTES,
-        SessionCredential, SessionCredentialIssuance, SessionCredentialKey,
-        SessionCredentialKeyring, SessionCredentialKeyringError, SessionCredentialRequestError,
-        SessionCredentialService, SessionCredentialServiceError,
+        InvalidSessionCredential, MAX_SESSION_CREDENTIAL_KEYS, PreparedSessionCredential,
+        SESSION_CREDENTIAL_SECRET_BYTES, SessionCredential, SessionCredentialKey,
+        SessionCredentialKeyring, SessionCredentialKeyringError, SessionCredentialService,
+        SessionCredentialServiceError,
     },
     sign_in::PendingSessionCandidate,
     time::UnixTimestamp,
@@ -38,7 +36,6 @@ assert_not_impl_any!(SessionCredentialKey: Clone, serde::Serialize);
 assert_not_impl_any!(SessionCredentialKeyring: Clone, serde::Serialize);
 assert_not_impl_any!(PreparedSessionCredential: Clone, serde::Serialize);
 assert_not_impl_any!(PendingSessionCandidate: Clone, serde::Serialize);
-assert_not_impl_any!(IssuedSessionCredential: Clone, serde::Serialize);
 assert_not_impl_any!(SessionCredentialService: Clone, serde::Serialize);
 assert_not_impl_any!(CsrfToken: Clone, serde::Serialize);
 
@@ -46,13 +43,11 @@ const PRINCIPAL_ID: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 #[derive(Debug, Default)]
 struct RepositoryState {
-    create_results: VecDeque<Result<CreateSessionOutcome, SessionRepositoryError>>,
     resolve_results: VecDeque<Result<ResolveSessionOutcome, SessionRepositoryError>>,
     activation_results: VecDeque<Result<ActivateCliSessionOutcome, SessionRepositoryError>>,
     touch_results: VecDeque<Result<TouchSessionOutcome, SessionRepositoryError>>,
     revoke_results: VecDeque<Result<RevokeOwnSessionOutcome, SessionRepositoryError>>,
-    create_requests: Vec<CreateSession>,
-    persisted: Vec<CreateSession>,
+    create_requests: usize,
     resolve_requests: Vec<ResolveSession>,
     activation_requests: Vec<ActivateCliSession>,
     touch_requests: Vec<TouchSession>,
@@ -65,14 +60,6 @@ struct RecordingRepository {
 }
 
 impl RecordingRepository {
-    fn push_create(&self, result: Result<CreateSessionOutcome, SessionRepositoryError>) {
-        self.state
-            .lock()
-            .expect("repository state")
-            .create_results
-            .push_back(result);
-    }
-
     fn push_resolve(&self, result: Result<ResolveSessionOutcome, SessionRepositoryError>) {
         self.state
             .lock()
@@ -107,20 +94,9 @@ impl RecordingRepository {
 }
 
 impl HumanSessionRepository for RecordingRepository {
-    fn create(&self, request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
-        let response = {
-            let mut state = self.state.lock().expect("repository state");
-            state.create_requests.push(request.clone());
-            let response = state
-                .create_results
-                .pop_front()
-                .unwrap_or(Ok(CreateSessionOutcome::Created));
-            if response == Ok(CreateSessionOutcome::Created) {
-                state.persisted.push(request);
-            }
-            response
-        };
-        Box::pin(async move { response })
+    fn create(&self, _request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
+        self.state.lock().expect("repository state").create_requests += 1;
+        Box::pin(async { Ok(CreateSessionOutcome::Created) })
     }
 
     fn resolve<'a>(
@@ -130,11 +106,10 @@ impl HumanSessionRepository for RecordingRepository {
         let response = {
             let mut state = self.state.lock().expect("repository state");
             state.resolve_requests.push(request.clone());
-            if let Some(response) = state.resolve_results.pop_front() {
-                response
-            } else {
-                Ok(resolve_from_persisted(&state.persisted, request))
-            }
+            state
+                .resolve_results
+                .pop_front()
+                .expect("queued resolve outcome")
         };
         Box::pin(async move { response })
     }
@@ -149,7 +124,7 @@ impl HumanSessionRepository for RecordingRepository {
             state
                 .activation_results
                 .pop_front()
-                .unwrap_or(Ok(ActivateCliSessionOutcome::NotFound))
+                .expect("queued activation outcome")
         };
         Box::pin(async move { response })
     }
@@ -161,11 +136,10 @@ impl HumanSessionRepository for RecordingRepository {
         let response = {
             let mut state = self.state.lock().expect("repository state");
             state.touch_requests.push(request.clone());
-            if let Some(response) = state.touch_results.pop_front() {
-                response
-            } else {
-                Ok(touch_from_persisted(&state.persisted, request))
-            }
+            state
+                .touch_results
+                .pop_front()
+                .expect("queued touch outcome")
         };
         Box::pin(async move { response })
     }
@@ -180,7 +154,7 @@ impl HumanSessionRepository for RecordingRepository {
             state
                 .revoke_results
                 .pop_front()
-                .unwrap_or(Ok(RevokeOwnSessionOutcome::Revoked))
+                .expect("queued revoke outcome")
         };
         Box::pin(async move { response })
     }
@@ -190,70 +164,6 @@ impl HumanSessionRepository for RecordingRepository {
         _request: &'a RevokePrincipalSessions,
     ) -> SessionRepositoryFuture<'a, RevokePrincipalSessionsOutcome> {
         Box::pin(async { Ok(RevokePrincipalSessionsOutcome::new(0)) })
-    }
-}
-
-fn resolve_from_persisted(
-    persisted: &[CreateSession],
-    request: &ResolveSession,
-) -> ResolveSessionOutcome {
-    let Some(created) = persisted
-        .iter()
-        .find(|created| created.lookup() == request.lookup())
-    else {
-        return ResolveSessionOutcome::NotFound;
-    };
-    let session = created.session();
-    match session.resolution_status(
-        request.expected_kind(),
-        request.now(),
-        session.authorization_revision(),
-    ) {
-        SessionResolutionStatus::Active => ResolveSessionOutcome::Active(Box::new(session.clone())),
-        SessionResolutionStatus::WrongKindOrAudience => ResolveSessionOutcome::WrongKindOrAudience,
-        SessionResolutionStatus::Revoked => ResolveSessionOutcome::Revoked,
-        SessionResolutionStatus::Expired => ResolveSessionOutcome::Expired,
-        SessionResolutionStatus::NotYetValid => ResolveSessionOutcome::NotYetValid,
-        SessionResolutionStatus::AuthorizationRevisionChanged {
-            session_revision,
-            current_revision,
-        } => ResolveSessionOutcome::AuthorizationRevisionChanged {
-            session_revision,
-            current_revision,
-        },
-    }
-}
-
-fn touch_from_persisted(
-    persisted: &[CreateSession],
-    request: &TouchSession,
-) -> TouchSessionOutcome {
-    let Some(created) = persisted
-        .iter()
-        .find(|created| created.lookup() == request.lookup())
-    else {
-        return TouchSessionOutcome::NotFound;
-    };
-    let session = created.session();
-    match session.resolution_status(
-        request.expected_kind(),
-        request.observed_at(),
-        session.authorization_revision(),
-    ) {
-        SessionResolutionStatus::Active => {
-            TouchSessionOutcome::Unchanged(Box::new(session.clone()))
-        }
-        SessionResolutionStatus::WrongKindOrAudience => TouchSessionOutcome::WrongKindOrAudience,
-        SessionResolutionStatus::Revoked => TouchSessionOutcome::Revoked,
-        SessionResolutionStatus::Expired => TouchSessionOutcome::Expired,
-        SessionResolutionStatus::NotYetValid => TouchSessionOutcome::NotYetValid,
-        SessionResolutionStatus::AuthorizationRevisionChanged {
-            session_revision,
-            current_revision,
-        } => TouchSessionOutcome::AuthorizationRevisionChanged {
-            session_revision,
-            current_revision,
-        },
     }
 }
 
@@ -306,22 +216,6 @@ fn service(
         Arc::new(DeterministicRandom::new(random_first)),
         Arc::new(FixedClock(UnixTimestamp::from_seconds(now))),
     )
-}
-
-fn issuance<'a>(
-    tenant: &'a TenantId,
-    human: &'a AuthenticatedHuman,
-    kind: SessionKind,
-) -> SessionCredentialIssuance<'a> {
-    SessionCredentialIssuance::new(
-        tenant,
-        human,
-        kind,
-        7,
-        Duration::from_mins(5),
-        Duration::from_hours(1),
-    )
-    .expect("issuance")
 }
 
 fn raw_credential(id: &str, secret_byte: u8) -> String {
@@ -461,13 +355,13 @@ fn nonpersisting_preparation_linearly_binds_raw_credential_to_safe_candidate() {
     let rendered = format!("{prepared:?}");
     assert!(rendered.contains("[REDACTED]"));
     assert!(!rendered.contains(raw));
-    assert!(
+    assert_eq!(
         repository
             .state
             .lock()
             .expect("repository state")
-            .create_requests
-            .is_empty()
+            .create_requests,
+        0
     );
 
     let (credential, candidate) = prepared.into_parts();
@@ -487,23 +381,26 @@ fn nonpersisting_preparation_linearly_binds_raw_credential_to_safe_candidate() {
 }
 
 #[test]
-fn issuance_persists_only_domain_separated_lookup_and_fixed_audience_metadata() {
+fn preparation_domain_separates_lookup_and_csrf_before_safe_resolution() {
     let repository = Arc::new(RecordingRepository::default());
     let service = service(repository.clone(), keyring("current.1", 0x11), 100, 1);
     let tenant = TenantId::new("tenant-1").expect("tenant");
     let human = human();
-    let issued = block_on(service.issue(issuance(&tenant, &human, SessionKind::Browser)))
-        .expect("issued browser session");
-    let raw = issued.credential().expose_secret();
+    let prepared = service
+        .prepare(
+            SessionKind::Browser,
+            Duration::from_mins(5),
+            Duration::from_hours(1),
+        )
+        .expect("prepared browser credential");
+    let (credential, candidate) = prepared.into_parts();
+    let raw = credential.expose_secret();
     assert!(raw.starts_with("v1~current.1~"));
-    assert_eq!(issued.session().identity().kind(), SessionKind::Browser);
-    assert_eq!(issued.session().identity().audience(), "automata.web");
-    assert_eq!(issued.session().authorization_revision(), 7);
-    assert_eq!(issued.session().issued_at().as_seconds(), 100);
-    assert_eq!(issued.session().last_seen_at().as_seconds(), 100);
-    assert_eq!(issued.session().idle_expires_at().as_seconds(), 400);
-    assert_eq!(issued.session().expires_at().as_seconds(), 3_700);
-    let session_id = issued.session().identity().session_id().as_str();
+    assert_eq!(candidate.kind(), SessionKind::Browser);
+    assert_eq!(candidate.issued_at().as_seconds(), 100);
+    assert_eq!(candidate.idle_expires_at().as_seconds(), 400);
+    assert_eq!(candidate.expires_at().as_seconds(), 3_700);
+    let session_id = candidate.session_id().as_str();
     let parsed_id = uuid::Uuid::parse_str(session_id).expect("UUID session ID");
     assert_eq!(parsed_id.hyphenated().to_string(), session_id);
     assert!(!parsed_id.is_nil());
@@ -513,21 +410,17 @@ fn issuance_persists_only_domain_separated_lookup_and_fixed_audience_metadata() 
         b'8' | b'9' | b'a' | b'b'
     ));
 
-    let state = repository.state.lock().expect("repository state");
-    assert_eq!(state.create_requests.len(), 1);
-    let create = &state.create_requests[0];
-    assert_eq!(create.lookup().key_id().as_str(), "current.1");
-    let repository_debug = format!("{create:?}");
-    assert!(!repository_debug.contains(raw));
-    assert!(repository_debug.contains("[REDACTED]"));
-    let persisted_lookup = create.lookup().clone();
-    let lookup_digest = *create.lookup().digest().as_bytes();
-    drop(state);
+    assert_eq!(candidate.lookup().key_id().as_str(), "current.1");
+    let candidate_debug = format!("{candidate:?}");
+    assert!(!candidate_debug.contains(raw));
+    assert!(candidate_debug.contains("[REDACTED]"));
+    let prepared_lookup = candidate.lookup().clone();
+    let lookup_digest = *candidate.lookup().digest().as_bytes();
 
     let derived_lookup = service
         .derive_lookup_raw(raw, SessionKind::Browser)
         .expect("safe lookup derivation");
-    assert_eq!(derived_lookup, persisted_lookup);
+    assert_eq!(derived_lookup, prepared_lookup);
     assert!(!format!("{derived_lookup:?}").contains(raw));
 
     let csrf = service
@@ -544,6 +437,10 @@ fn issuance_persists_only_domain_separated_lookup_and_fixed_audience_metadata() 
     assert_ne!(csrf.expose_secret(), cli_csrf.expose_secret());
     assert!(!format!("{csrf:?}").contains(csrf.expose_secret()));
 
+    repository.push_resolve(Ok(ResolveSessionOutcome::Active(Box::new(
+        browser_session_at_100(&tenant, &human),
+    ))));
+    repository.push_resolve(Ok(ResolveSessionOutcome::NotFound));
     assert!(matches!(
         block_on(service.resolve_raw(raw, SessionKind::Browser)).expect("browser resolution"),
         ResolveSessionOutcome::Active(_)
@@ -570,26 +467,39 @@ fn issuance_persists_only_domain_separated_lookup_and_fixed_audience_metadata() 
 }
 
 #[test]
-fn active_rotation_issues_only_current_but_verify_only_key_resolves_old() {
+fn active_rotation_prepares_only_current_but_verify_only_key_resolves_old() {
     let repository = Arc::new(RecordingRepository::default());
     let old_service = service(repository.clone(), keyring("old.1", 0x21), 100, 5);
     let tenant = TenantId::new("tenant-1").expect("tenant");
     let human = human();
-    let old = block_on(old_service.issue(issuance(&tenant, &human, SessionKind::Cli)))
-        .expect("old issuance");
+    let old = old_service
+        .prepare(
+            SessionKind::Cli,
+            Duration::from_mins(5),
+            Duration::from_hours(1),
+        )
+        .expect("old prepared credential");
     let old_raw = old.credential().expose_secret().to_owned();
     assert!(old_raw.starts_with("v1~old.1~"));
 
     let rotated = SessionCredentialKeyring::new(key("new.2", 0x22), vec![key("old.1", 0x21)])
         .expect("rotated keyring");
     let rotated_service = service(repository.clone(), rotated, 100, 20);
+    repository.push_resolve(Ok(ResolveSessionOutcome::Active(Box::new(
+        cli_session_at_100(&tenant, &human),
+    ))));
     assert!(matches!(
         block_on(rotated_service.resolve_raw(&old_raw, SessionKind::Cli))
             .expect("verify-only resolution"),
         ResolveSessionOutcome::Active(_)
     ));
-    let new = block_on(rotated_service.issue(issuance(&tenant, &human, SessionKind::Cli)))
-        .expect("new issuance");
+    let new = rotated_service
+        .prepare(
+            SessionKind::Cli,
+            Duration::from_mins(5),
+            Duration::from_hours(1),
+        )
+        .expect("new prepared credential");
     assert!(new.credential().expose_secret().starts_with("v1~new.2~"));
 
     let before_rejections = repository
@@ -622,124 +532,24 @@ fn active_rotation_issues_only_current_but_verify_only_key_resolves_old() {
 }
 
 #[test]
-fn issuance_retries_complete_fresh_material_and_stops_at_the_collision_bound() {
+fn preparation_lifetime_and_overflow_fail_closed_before_storage() {
     let repository = Arc::new(RecordingRepository::default());
-    repository.push_create(Ok(CreateSessionOutcome::SessionIdConflict));
-    repository.push_create(Ok(CreateSessionOutcome::TokenDigestConflict));
-    repository.push_create(Ok(CreateSessionOutcome::Created));
-    let collision_service = service(repository.clone(), keyring("active", 0x31), 100, 1);
-    let tenant = TenantId::new("tenant-1").expect("tenant");
-    let human = human();
-    block_on(collision_service.issue(issuance(&tenant, &human, SessionKind::Browser)))
-        .expect("third unique allocation");
-    let state = repository.state.lock().expect("repository state");
-    assert_eq!(state.create_requests.len(), 3);
-    assert_ne!(
-        state.create_requests[0].session().identity().session_id(),
-        state.create_requests[1].session().identity().session_id()
-    );
-    assert_ne!(
-        state.create_requests[1].session().identity().session_id(),
-        state.create_requests[2].session().identity().session_id()
-    );
-    assert_ne!(
-        state.create_requests[0].lookup().digest(),
-        state.create_requests[1].lookup().digest()
-    );
-    assert_ne!(
-        state.create_requests[1].lookup().digest(),
-        state.create_requests[2].lookup().digest()
-    );
-    drop(state);
-
-    let exhausted_repository = Arc::new(RecordingRepository::default());
-    for index in 0..MAX_SESSION_CREDENTIAL_ISSUE_ATTEMPTS {
-        let collision = if index % 2 == 0 {
-            CreateSessionOutcome::SessionIdConflict
-        } else {
-            CreateSessionOutcome::TokenDigestConflict
-        };
-        exhausted_repository.push_create(Ok(collision));
-    }
-    let exhausted_service = service(
-        exhausted_repository.clone(),
-        keyring("active", 0x31),
-        100,
-        50,
-    );
-    assert_eq!(
-        block_on(exhausted_service.issue(issuance(&tenant, &human, SessionKind::Browser,)))
-            .expect_err("bounded collision exhaustion"),
-        SessionCredentialServiceError::CollisionLimitExceeded
-    );
-    assert_eq!(
-        exhausted_repository
-            .state
-            .lock()
-            .expect("repository state")
-            .create_requests
-            .len(),
-        MAX_SESSION_CREDENTIAL_ISSUE_ATTEMPTS
-    );
-}
-
-#[test]
-fn lifetime_revision_and_overflow_fail_closed_before_storage() {
-    let tenant = TenantId::new("tenant-1").expect("tenant");
-    let human = human();
-    assert_eq!(
-        SessionCredentialIssuance::new(
-            &tenant,
-            &human,
-            SessionKind::Browser,
-            0,
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-        )
-        .expect_err("zero revision"),
-        SessionCredentialRequestError::InvalidAuthorizationRevision
-    );
+    let service = service(repository.clone(), keyring("active", 0x41), u64::MAX - 5, 1);
     for (idle, absolute) in [
         (Duration::ZERO, Duration::from_secs(1)),
         (Duration::from_nanos(1), Duration::from_secs(1)),
         (Duration::from_secs(2), Duration::from_secs(1)),
     ] {
         assert_eq!(
-            SessionCredentialIssuance::new(
-                &tenant,
-                &human,
-                SessionKind::Browser,
-                1,
-                idle,
-                absolute,
-            )
-            .expect_err("invalid lifetime"),
-            SessionCredentialRequestError::InvalidLifetime
+            service
+                .prepare(SessionKind::Browser, idle, absolute)
+                .expect_err("invalid preparation lifetime"),
+            SessionCredentialServiceError::InvalidLifetime
         );
     }
 
-    let overflow_repository = Arc::new(RecordingRepository::default());
-    let overflow_service = service(
-        overflow_repository.clone(),
-        keyring("active", 0x41),
-        u64::MAX - 5,
-        1,
-    );
-    let overflow = SessionCredentialIssuance::new(
-        &tenant,
-        &human,
-        SessionKind::Browser,
-        1,
-        Duration::from_secs(2),
-        Duration::from_secs(10),
-    )
-    .expect("shape-valid overflowing request");
     assert_eq!(
-        block_on(overflow_service.issue(overflow)).expect_err("absolute overflow"),
-        SessionCredentialServiceError::LifetimeOverflow
-    );
-    assert_eq!(
-        overflow_service
+        service
             .prepare(
                 SessionKind::Browser,
                 Duration::from_secs(2),
@@ -748,47 +558,29 @@ fn lifetime_revision_and_overflow_fail_closed_before_storage() {
             .expect_err("preparation overflow"),
         SessionCredentialServiceError::LifetimeOverflow
     );
-    for (idle, absolute) in [
-        (Duration::ZERO, Duration::from_secs(1)),
-        (Duration::from_nanos(1), Duration::from_secs(1)),
-        (Duration::from_secs(2), Duration::from_secs(1)),
-    ] {
-        assert_eq!(
-            overflow_service
-                .prepare(SessionKind::Browser, idle, absolute)
-                .expect_err("invalid preparation lifetime"),
-            SessionCredentialServiceError::InvalidLifetime
-        );
-    }
-    assert!(
-        overflow_repository
+    assert_eq!(
+        repository
             .state
             .lock()
             .expect("repository state")
-            .create_requests
-            .is_empty()
+            .create_requests,
+        0
     );
     let raw = raw_credential("active", 9);
     assert_eq!(
-        block_on(overflow_service.touch_raw(&raw, SessionKind::Browser, Duration::from_secs(10),))
+        block_on(service.touch_raw(&raw, SessionKind::Browser, Duration::from_secs(10),))
             .expect_err("touch overflow"),
         SessionCredentialServiceError::LifetimeOverflow
     );
     assert_eq!(
-        block_on(overflow_service.touch_raw(
-            &raw,
-            SessionKind::Browser,
-            Duration::from_millis(500),
-        ))
-        .expect_err("fractional touch"),
+        block_on(service.touch_raw(&raw, SessionKind::Browser, Duration::from_millis(500),))
+            .expect_err("fractional touch"),
         SessionCredentialServiceError::InvalidLifetime
     );
 }
 
 #[test]
 fn randomness_failure_never_reaches_session_storage() {
-    let tenant = TenantId::new("tenant-1").expect("tenant");
-    let human = human();
     let random_repository = Arc::new(RecordingRepository::default());
     let random_service = SessionCredentialService::new(
         keyring("active", 0x41),
@@ -797,17 +589,22 @@ fn randomness_failure_never_reaches_session_storage() {
         Arc::new(FixedClock(UnixTimestamp::from_seconds(100))),
     );
     assert_eq!(
-        block_on(random_service.issue(issuance(&tenant, &human, SessionKind::Browser,)))
+        random_service
+            .prepare(
+                SessionKind::Browser,
+                Duration::from_mins(5),
+                Duration::from_hours(1),
+            )
             .expect_err("random failure"),
         SessionCredentialServiceError::RandomnessUnavailable
     );
-    assert!(
+    assert_eq!(
         random_repository
             .state
             .lock()
             .expect("repository state")
-            .create_requests
-            .is_empty()
+            .create_requests,
+        0
     );
 }
 
@@ -867,17 +664,27 @@ fn raw_helpers_touch_and_revoke_without_crossing_the_repository_boundary() {
     let service = service(repository.clone(), keyring("active", 0x51), 100, 1);
     let tenant = TenantId::new("tenant-1").expect("tenant");
     let human = human();
-    let issued =
-        block_on(service.issue(issuance(&tenant, &human, SessionKind::Browser))).expect("issuance");
-    let raw = issued.credential().expose_secret();
+    let prepared = service
+        .prepare(
+            SessionKind::Browser,
+            Duration::from_mins(5),
+            Duration::from_hours(1),
+        )
+        .expect("prepared browser credential");
+    let raw = prepared.credential().expose_secret().to_owned();
+    let active = browser_session_at_100(&tenant, &human);
+    let expected_session_id = active.identity().session_id().clone();
+    repository.push_touch(Ok(TouchSessionOutcome::Unchanged(Box::new(active.clone()))));
+    repository.push_resolve(Ok(ResolveSessionOutcome::Active(Box::new(active))));
+    repository.push_revoke(Ok(RevokeOwnSessionOutcome::Revoked));
 
     assert!(matches!(
-        block_on(service.touch_raw(raw, SessionKind::Browser, Duration::from_mins(2)))
+        block_on(service.touch_raw(&raw, SessionKind::Browser, Duration::from_mins(2)))
             .expect("touch"),
         TouchSessionOutcome::Unchanged(_)
     ));
     assert_eq!(
-        block_on(service.revoke_raw(raw, SessionKind::Browser)).expect("revoke"),
+        block_on(service.revoke_raw(&raw, SessionKind::Browser)).expect("revoke"),
         RevokeOwnSessionOutcome::Revoked
     );
     let state = repository.state.lock().expect("repository state");
@@ -888,21 +695,19 @@ fn raw_helpers_touch_and_revoke_without_crossing_the_repository_boundary() {
     let revoke = &state.revoke_requests[0];
     assert_eq!(revoke.tenant_id(), &tenant);
     assert_eq!(revoke.principal_id().as_str(), PRINCIPAL_ID);
-    assert_eq!(
-        revoke.session_id(),
-        issued.session().identity().session_id()
-    );
-    assert!(!format!("{:?}", state.touch_requests[0]).contains(raw));
-    assert!(!format!("{revoke:?}").contains(raw));
+    assert_eq!(revoke.session_id(), &expected_session_id);
+    assert!(!format!("{:?}", state.touch_requests[0]).contains(&raw));
+    assert!(!format!("{revoke:?}").contains(&raw));
     drop(state);
 
+    repository.push_resolve(Ok(ResolveSessionOutcome::NotFound));
     assert_eq!(
-        block_on(service.revoke_raw(raw, SessionKind::Cli)).expect("wrong audience"),
+        block_on(service.revoke_raw(&raw, SessionKind::Cli)).expect("wrong audience"),
         RevokeOwnSessionOutcome::NotFound
     );
     repository.push_resolve(Ok(ResolveSessionOutcome::Revoked));
     assert_eq!(
-        block_on(service.revoke_raw(raw, SessionKind::Browser)).expect("idempotent revoked"),
+        block_on(service.revoke_raw(&raw, SessionKind::Browser)).expect("idempotent revoked"),
         RevokeOwnSessionOutcome::AlreadyRevoked
     );
 }
@@ -913,31 +718,22 @@ fn repository_failures_and_inconsistent_active_records_are_sanitized() {
     let service = service(repository.clone(), keyring("active", 0x61), 100, 1);
     let tenant = TenantId::new("tenant-1").expect("tenant");
     let human = human();
-
-    repository.push_create(Err(SessionRepositoryError::Unavailable));
-    assert_eq!(
-        block_on(service.issue(issuance(&tenant, &human, SessionKind::Browser,)))
-            .expect_err("create unavailable"),
-        SessionCredentialServiceError::RepositoryUnavailable
-    );
-    repository.push_create(Err(SessionRepositoryError::InvalidRequest));
-    assert_eq!(
-        block_on(service.issue(issuance(&tenant, &human, SessionKind::Browser,)))
-            .expect_err("create invariant"),
-        SessionCredentialServiceError::InternalFailure
-    );
-
-    let issued = block_on(service.issue(issuance(&tenant, &human, SessionKind::Browser)))
-        .expect("baseline issuance");
-    let raw = issued.credential().expose_secret();
+    let prepared = service
+        .prepare(
+            SessionKind::Browser,
+            Duration::from_mins(5),
+            Duration::from_hours(1),
+        )
+        .expect("prepared browser credential");
+    let raw = prepared.credential().expose_secret().to_owned();
     repository.push_resolve(Err(SessionRepositoryError::Unavailable));
     assert_eq!(
-        block_on(service.resolve_raw(raw, SessionKind::Browser)).expect_err("resolve unavailable"),
+        block_on(service.resolve_raw(&raw, SessionKind::Browser)).expect_err("resolve unavailable"),
         SessionCredentialServiceError::RepositoryUnavailable
     );
     repository.push_touch(Err(SessionRepositoryError::CorruptData));
     assert_eq!(
-        block_on(service.touch_raw(raw, SessionKind::Browser, Duration::from_secs(30)))
+        block_on(service.touch_raw(&raw, SessionKind::Browser, Duration::from_secs(30)))
             .expect_err("touch corruption"),
         SessionCredentialServiceError::InternalFailure
     );
@@ -945,16 +741,16 @@ fn repository_failures_and_inconsistent_active_records_are_sanitized() {
         cli_session_at_100(&tenant, &human),
     ))));
     assert_eq!(
-        block_on(service.resolve_raw(raw, SessionKind::Browser))
+        block_on(service.resolve_raw(&raw, SessionKind::Browser))
             .expect_err("inconsistent active audience"),
         SessionCredentialServiceError::InternalFailure
     );
     repository.push_resolve(Ok(ResolveSessionOutcome::Active(Box::new(
-        issued.session().clone(),
+        browser_session_at_100(&tenant, &human),
     ))));
     repository.push_revoke(Err(SessionRepositoryError::Unavailable));
     assert_eq!(
-        block_on(service.revoke_raw(raw, SessionKind::Browser)).expect_err("revoke unavailable"),
+        block_on(service.revoke_raw(&raw, SessionKind::Browser)).expect_err("revoke unavailable"),
         SessionCredentialServiceError::RepositoryUnavailable
     );
 

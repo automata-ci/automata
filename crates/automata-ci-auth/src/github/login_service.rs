@@ -1939,9 +1939,6 @@ fn map_session_error(error: SessionCredentialServiceError) -> GithubLoginError {
         SessionCredentialServiceError::RandomnessUnavailable => {
             GithubLoginError::RandomnessUnavailable
         }
-        SessionCredentialServiceError::CollisionLimitExceeded => {
-            GithubLoginError::CollisionLimitExceeded
-        }
         SessionCredentialServiceError::RepositoryUnavailable => {
             GithubLoginError::StorageUnavailable
         }
