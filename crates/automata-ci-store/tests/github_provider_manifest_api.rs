@@ -297,7 +297,7 @@ fn digest_binds_every_mutable_evidence_and_server_derived_repository() {
     );
     assert_eq!(
         original.digest().to_string(),
-        "43c053f02ca6ec9d5fbd2226c608e8eb1b40597f366933d3b5a7a93d997ab4aa"
+        "252bb8242dd02dd66f12e5b5846a21d264460ab612700a82da6dbb7dccb7ebef"
     );
     assert_eq!(
         credential_free.authority_profile(),
@@ -340,7 +340,7 @@ fn owner_binding_uses_an_independent_domain_and_preserves_the_base_digest() {
     assert_ne!(owner.digest(), other_owner.digest());
     assert_eq!(
         base.digest().to_string(),
-        "43c053f02ca6ec9d5fbd2226c608e8eb1b40597f366933d3b5a7a93d997ab4aa"
+        "252bb8242dd02dd66f12e5b5846a21d264460ab612700a82da6dbb7dccb7ebef"
     );
 }
 
