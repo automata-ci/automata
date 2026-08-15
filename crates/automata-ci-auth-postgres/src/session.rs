@@ -5,11 +5,11 @@ use automata_ci_auth::{
     human::{PrincipalId, ProviderId, ProviderSubject, TenantId},
     session::{
         ActivateCliSession, ActivateCliSessionOutcome, CLI_SESSION_ACTIVATION_LIFETIME_SECONDS,
-        CreateSession, CreateSessionOutcome, DurableSession, DurableSessionIdentity,
-        HumanSessionRepository, ResolveSession, ResolveSessionOutcome, RevokeOwnSession,
-        RevokeOwnSessionOutcome, RevokePrincipalSessions, RevokePrincipalSessionsOutcome,
-        SessionId, SessionKind, SessionRepositoryError, SessionRepositoryFuture,
-        SessionResolutionStatus, SessionTokenLookup, TouchSession, TouchSessionOutcome,
+        DurableSession, DurableSessionIdentity, HumanSessionRepository, ResolveSession,
+        ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome, RevokePrincipalSessions,
+        RevokePrincipalSessionsOutcome, SessionId, SessionKind, SessionRepositoryError,
+        SessionRepositoryFuture, SessionResolutionStatus, SessionTokenLookup, TouchSession,
+        TouchSessionOutcome,
     },
 };
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
@@ -19,6 +19,29 @@ use super::support::{
     canonical_uuid, constraint, is_integrity_violation, timestamp_from_milliseconds,
     timestamp_to_milliseconds,
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct CreateSession {
+    lookup: SessionTokenLookup,
+    session: DurableSession,
+}
+
+impl CreateSession {
+    pub(super) const fn new(lookup: SessionTokenLookup, session: DurableSession) -> Self {
+        Self { lookup, session }
+    }
+
+    fn into_parts(self) -> (SessionTokenLookup, DurableSession) {
+        (self.lookup, self.session)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CreateSessionOutcome {
+    Created,
+    SessionIdConflict,
+    TokenDigestConflict,
+}
 
 /// `PostgreSQL` implementation of the durable human-session boundary.
 #[derive(Clone)]
@@ -33,7 +56,7 @@ impl PostgresHumanSessionRepository {
         Self { pool }
     }
 
-    pub(crate) async fn create_in_transaction(
+    pub(super) async fn create_in_transaction(
         transaction: &mut Transaction<'_, Postgres>,
         request: CreateSession,
     ) -> Result<(CreateSessionOutcome, Option<DurableSession>), SessionRepositoryError> {
@@ -698,24 +721,6 @@ async fn activate_pending_cli_row(
 }
 
 impl HumanSessionRepository for PostgresHumanSessionRepository {
-    fn create(&self, request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
-        Box::pin(async move {
-            let mut transaction = self
-                .pool
-                .begin()
-                .await
-                .map_err(|_| SessionRepositoryError::Unavailable)?;
-            let (outcome, _) = create_session(&mut transaction, request).await?;
-            if outcome == CreateSessionOutcome::Created {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| SessionRepositoryError::Unavailable)?;
-            }
-            Ok(outcome)
-        })
-    }
-
     fn resolve<'a>(
         &'a self,
         request: &'a ResolveSession,

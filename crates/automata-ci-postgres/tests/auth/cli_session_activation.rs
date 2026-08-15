@@ -1,14 +1,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use automata_ci_auth::{
-    human::{PrincipalId, ProviderId, ProviderSubject, TenantId},
+    human::{PrincipalId, TenantId},
     request_auth::{
         RequestAuthenticationResolver, ResolveAuthenticatedRequest,
         ResolveAuthenticatedRequestOutcome,
     },
     session::{
-        ActivateCliSession, ActivateCliSessionOutcome, CreateSession, CreateSessionOutcome,
-        DurableSession, DurableSessionIdentity, HumanSessionRepository, ResolveSession,
+        ActivateCliSession, ActivateCliSessionOutcome, HumanSessionRepository, ResolveSession,
         ResolveSessionOutcome, RevokeOwnSession, SessionId, SessionKind, SessionTokenDigest,
         SessionTokenDigestKeyId, SessionTokenLookup, TouchSession, TouchSessionOutcome,
     },
@@ -40,33 +39,6 @@ fn lookup(byte: u8) -> SessionTokenLookup {
         SessionTokenDigestKeyId::new("cli-activation-hmac-v1").expect("lookup key"),
         SessionTokenDigest::new([byte; 32]),
     )
-}
-
-fn session(
-    id: Uuid,
-    principal: Uuid,
-    kind: SessionKind,
-    authorization_revision: u64,
-) -> DurableSession {
-    let issued_at = now();
-    DurableSession::new(
-        DurableSessionIdentity::new(
-            SessionId::new(id.hyphenated().to_string()).expect("session ID"),
-            TenantId::new(TENANT).expect("tenant"),
-            PrincipalId::new(principal.hyphenated().to_string()).expect("principal"),
-            ProviderId::new("github").expect("provider"),
-            ProviderSubject::new(SUBJECT).expect("subject"),
-            kind,
-        )
-        .expect("durable identity"),
-        authorization_revision,
-        issued_at,
-        issued_at,
-        issued_at.checked_add(800).expect("idle expiry"),
-        issued_at.checked_add(900).expect("absolute expiry"),
-        None,
-    )
-    .expect("durable session")
 }
 
 async fn seed_actor(pool: &PgPool) -> TestResult<Uuid> {
@@ -112,23 +84,66 @@ async fn seed_actor(pool: &PgPool) -> TestResult<Uuid> {
     Ok(principal)
 }
 
-async fn create(
-    repository: &PostgresHumanSessionRepository,
+// These fixtures intentionally seed pre-existing rows without recreating the
+// production session-issuance API.
+async fn seed_session(
+    pool: &PgPool,
     principal: Uuid,
     id: Uuid,
     kind: SessionKind,
-    lookup: SessionTokenLookup,
-    revision: u64,
+    lookup: &SessionTokenLookup,
+    authorization_revision: u64,
 ) -> TestResult {
-    assert_eq!(
-        repository
-            .create(CreateSession::new(
-                lookup,
-                session(id, principal, kind, revision),
-            ))
-            .await?,
-        CreateSessionOutcome::Created
-    );
+    let database_time_ms: i64 =
+        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT * 1000")
+            .fetch_one(pool)
+            .await?;
+    let (session_kind, audience, lifecycle_status, activation_deadline_ms) = match kind {
+        SessionKind::Browser => ("browser", "automata.web", "active", None),
+        SessionKind::Cli => (
+            "cli",
+            "automata.cli",
+            "pending_activation",
+            Some(
+                database_time_ms
+                    .checked_add(300_000)
+                    .expect("activation deadline"),
+            ),
+        ),
+    };
+    sqlx::query(
+        r"
+        INSERT INTO human_sessions (
+            id,tenant_id,principal_id,provider_id,provider_subject,
+            session_kind,audience,token_hash,token_hash_key_id,
+            authorization_revision,predecessor_session_id,issued_at_ms,
+            last_seen_at_ms,idle_expires_at_ms,expires_at_ms,revoked_at_ms,
+            revocation_reason,revision,lifecycle_status,activation_deadline_ms,
+            activated_at_ms
+        ) VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,NULL,$10,$10,$11,$12,
+                  NULL,NULL,1,$13,$14,NULL)
+        ",
+    )
+    .bind(id)
+    .bind(TENANT)
+    .bind(principal)
+    .bind(SUBJECT)
+    .bind(session_kind)
+    .bind(audience)
+    .bind(lookup.digest().as_bytes().as_slice())
+    .bind(lookup.key_id().as_str())
+    .bind(i64::try_from(authorization_revision)?)
+    .bind(database_time_ms)
+    .bind(database_time_ms.checked_add(800_000).expect("idle expiry"))
+    .bind(
+        database_time_ms
+            .checked_add(900_000)
+            .expect("absolute expiry"),
+    )
+    .bind(lifecycle_status)
+    .bind(activation_deadline_ms)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -320,12 +335,12 @@ async fn pending_cli_is_unusable_until_one_concurrent_activation_wins() -> TestR
         let resolver = PostgresRequestAuthenticationResolver::new(pool.clone());
         let session_id = Uuid::new_v4();
         let cli_lookup = lookup(1);
-        create(
-            &repository,
+        seed_session(
+            pool,
             principal,
             session_id,
             SessionKind::Cli,
-            cli_lookup.clone(),
+            &cli_lookup,
             1,
         )
         .await?;
@@ -482,12 +497,12 @@ async fn activation_closes_every_noncurrent_or_non_cli_state() -> TestResult {
         );
 
         let browser_lookup = lookup(2);
-        create(
-            &repository,
+        seed_session(
+            pool,
             principal,
             Uuid::new_v4(),
             SessionKind::Browser,
-            browser_lookup.clone(),
+            &browser_lookup,
             1,
         )
         .await?;
@@ -542,12 +557,12 @@ async fn activation_closes_every_noncurrent_or_non_cli_state() -> TestResult {
 
         let revoked_id = Uuid::new_v4();
         let revoked_lookup = lookup(4);
-        create(
-            &repository,
+        seed_session(
+            pool,
             principal,
             revoked_id,
             SessionKind::Cli,
-            revoked_lookup.clone(),
+            &revoked_lookup,
             1,
         )
         .await?;
@@ -570,12 +585,12 @@ async fn activation_closes_every_noncurrent_or_non_cli_state() -> TestResult {
         );
 
         let disabled_lookup = lookup(5);
-        create(
-            &repository,
+        seed_session(
+            pool,
             principal,
             Uuid::new_v4(),
             SessionKind::Cli,
-            disabled_lookup.clone(),
+            &disabled_lookup,
             1,
         )
         .await?;
@@ -602,12 +617,12 @@ async fn activation_closes_every_noncurrent_or_non_cli_state() -> TestResult {
         .await?;
 
         let suspended_lookup = lookup(6);
-        create(
-            &repository,
+        seed_session(
+            pool,
             principal,
             Uuid::new_v4(),
             SessionKind::Cli,
-            suspended_lookup.clone(),
+            &suspended_lookup,
             1,
         )
         .await?;
@@ -642,12 +657,12 @@ async fn activation_closes_every_noncurrent_or_non_cli_state() -> TestResult {
         .fetch_one(pool)
         .await?;
         let stale_lookup = lookup(7);
-        create(
-            &repository,
+        seed_session(
+            pool,
             principal,
             Uuid::new_v4(),
             SessionKind::Cli,
-            stale_lookup.clone(),
+            &stale_lookup,
             u64::try_from(current_revision)?,
         )
         .await?;

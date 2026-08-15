@@ -7,10 +7,7 @@ use automata_ci_auth::{
     },
     human::{PrincipalId, ProviderIdentityAssertion, TenantId},
     login::LoginTransactionVersion,
-    session::{
-        CreateSession, CreateSessionOutcome, DurableSession, DurableSessionIdentity,
-        SessionRepositoryError,
-    },
+    session::{DurableSession, DurableSessionIdentity, SessionRepositoryError},
     sign_in::{
         FinalizeSignIn, FinalizeSignInOutcome, HumanSignInFinalizer, PendingSessionCandidate,
         PendingSessionConflict, SignInFinalizerError, SignInFinalizerFuture,
@@ -24,7 +21,9 @@ use uuid::Uuid;
 use super::{
     PostgresGithubMembershipRepository, PostgresHumanSessionRepository, PostgresProviderTokenVault,
     login::{LockSignInOutcome, lock_sign_in_for_finalization},
-    session::{database_time_milliseconds, validate_caller_time},
+    session::{
+        CreateSession, CreateSessionOutcome, database_time_milliseconds, validate_caller_time,
+    },
     support::{
         canonical_uuid, is_integrity_violation, timestamp_from_milliseconds,
         timestamp_to_milliseconds,

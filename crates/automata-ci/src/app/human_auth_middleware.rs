@@ -739,10 +739,10 @@ mod tests {
         request_auth::{RequestAuthenticationFuture, ViewerDisplayMetadata},
         secret::{SecretBytes, SystemSecureRandom},
         session::{
-            CreateSession, CreateSessionOutcome, DurableSession, DurableSessionIdentity,
-            HumanSessionRepository, ResolveSession, ResolveSessionOutcome, RevokeOwnSession,
-            RevokeOwnSessionOutcome, RevokePrincipalSessions, RevokePrincipalSessionsOutcome,
-            SessionRepositoryError, SessionRepositoryFuture, SessionTokenDigestKeyId, TouchSession,
+            DurableSession, DurableSessionIdentity, HumanSessionRepository, ResolveSession,
+            ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome,
+            RevokePrincipalSessions, RevokePrincipalSessionsOutcome, SessionRepositoryError,
+            SessionRepositoryFuture, SessionTokenDigestKeyId, TouchSession,
         },
         session_credential::{SessionCredentialKey, SessionCredentialKeyring},
         time::UnixTimestamp,
@@ -785,13 +785,6 @@ mod tests {
     }
 
     impl HumanSessionRepository for TouchingSessionRepository {
-        fn create(
-            &self,
-            _request: CreateSession,
-        ) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
-            Box::pin(async { Err(SessionRepositoryError::InvalidRequest) })
-        }
-
         fn resolve<'a>(
             &'a self,
             _request: &'a ResolveSession,

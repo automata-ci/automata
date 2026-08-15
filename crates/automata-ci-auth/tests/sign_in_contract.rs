@@ -12,10 +12,9 @@ use automata_ci_auth::{
     },
     secret::{SecretBytes, SecretString},
     session::{
-        CreateSession, CreateSessionOutcome, HumanSessionRepository, ResolveSession,
-        ResolveSessionOutcome, RevokeOwnSession, RevokeOwnSessionOutcome, RevokePrincipalSessions,
-        RevokePrincipalSessionsOutcome, SessionKind, SessionRepositoryFuture, TouchSession,
-        TouchSessionOutcome,
+        HumanSessionRepository, ResolveSession, ResolveSessionOutcome, RevokeOwnSession,
+        RevokeOwnSessionOutcome, RevokePrincipalSessions, RevokePrincipalSessionsOutcome,
+        SessionKind, SessionRepositoryFuture, TouchSession, TouchSessionOutcome,
     },
     session_credential::{
         SessionCredentialKey, SessionCredentialKeyring, SessionCredentialService,
@@ -45,10 +44,6 @@ const LOGIN_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 struct UnusedSessionRepository;
 
 impl HumanSessionRepository for UnusedSessionRepository {
-    fn create(&self, _request: CreateSession) -> SessionRepositoryFuture<'_, CreateSessionOutcome> {
-        panic!("preparing a sign-in credential must not persist a session")
-    }
-
     fn resolve<'a>(
         &'a self,
         _request: &'a ResolveSession,
