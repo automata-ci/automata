@@ -2,6 +2,7 @@
 name = "automata-ci-oidc-github"
 description = "Current GitHub Actions-compatible workload OIDC foundation for Automata"
 publish.workspace = true
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +11,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+
+[[test]]
+name = "oidc_github"
+path = "tests/oidc_github.rs"
 
 [dependencies]
 async-trait.workspace = true

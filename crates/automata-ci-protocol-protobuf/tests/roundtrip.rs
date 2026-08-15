@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 
 use automata_ci_core::{JobResourceAllocation, OperationId, ResourceCapacity, RunnerRequirements};
 use automata_ci_protocol::{LeaseRequest, ProtocolLimits, RunnerToServer, ServerToRunner};

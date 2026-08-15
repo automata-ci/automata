@@ -1,4 +1,4 @@
-mod support;
+use super::support;
 
 use automata_ci_core::{
     JobIrVersion, JobLifecycle, LogStreamId, OperationId, Sha256Digest, UnixMillis,

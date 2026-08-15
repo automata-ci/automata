@@ -2,6 +2,7 @@
 name = "automata-ci-runner-transport"
 description = "Replica-neutral mTLS HTTP/2 transport for Automata runner control"
 publish.workspace = true
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +11,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+
+[[test]]
+name = "runner_transport"
+path = "tests/runner_transport.rs"
 
 [lints]
 workspace = true

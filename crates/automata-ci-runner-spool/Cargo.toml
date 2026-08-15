@@ -2,6 +2,7 @@
 name = "automata-ci-runner-spool"
 description = "Crash-durable protected content spool for Automata runners"
 publish.workspace = true
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +11,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+
+[[test]]
+name = "runner_spool"
+path = "tests/runner_spool.rs"
 
 [lints]
 workspace = true
