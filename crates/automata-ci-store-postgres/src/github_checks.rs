@@ -16,16 +16,14 @@ use automata_ci_store::{
     GithubCheckProjectionClaimFence, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
     GithubCheckRunBindingFence, GithubCheckRunCreateFence, GithubCheckRunId, GithubCheckStoreError,
     GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubCheckSubjectOrigin,
-    GithubCheckSubjectReceipt, GithubCheckSubjectRepository, GithubCheckSubjectTarget,
-    GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckTerminalizationRepository,
-    GithubRepositoryName, GithubScheduleFireId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE,
-    InitializeGithubCheckPresentation, MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS,
-    MAX_TERMINAL_RESULT_BYTES, ProviderConnectionId, ProviderDeliveryId, ProviderInstallationId,
-    ProviderRepositoryId, RegisterGithubCheckSubject, ReleaseUnissuedGithubCheckAnnotationBatch,
-    ReleaseUnissuedGithubCheckRunCreate, RepositoryId, ResolveGithubCheckRunCreate,
-    RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations, StartGithubCheckProjection,
-    StoreError, TenantScope, TerminalizeGithubCheck,
+    GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubRepositoryName,
+    GithubScheduleFireId, GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceRevision, HUMAN_JOB_RESULT_MEDIA_TYPE, InitializeGithubCheckPresentation,
+    MAX_GITHUB_CHECK_PROJECTION_ATTEMPTS, MAX_TERMINAL_RESULT_BYTES, ProviderConnectionId,
+    ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId,
+    ReleaseUnissuedGithubCheckAnnotationBatch, ReleaseUnissuedGithubCheckRunCreate, RepositoryId,
+    ResolveGithubCheckRunCreate, RetryGithubCheckProjection, RetryUncertainGithubCheckAnnotations,
+    StoreError, TenantScope,
 };
 
 use super::{PostgresStore, pg_bigint};
@@ -633,170 +631,6 @@ const CLAIM_LOCKED_RERUN_PROJECTION_SQL: &str = r"
         evidence.checks_authority_app_configuration_revision,
         evidence.checks_authority_policy_revision
 ";
-
-#[async_trait]
-impl GithubCheckSubjectRepository for PostgresStore {
-    async fn register_github_check_subject(
-        &self,
-        request: RegisterGithubCheckSubject,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
-        let delivery_id = request
-            .identity()
-            .delivery_id()
-            .ok_or(GithubCheckStoreError::AuthorityRejected)?;
-        let mut transaction = self.pool.begin().await.map_err(operation_error)?;
-        let proposed_id = Uuid::new_v4();
-        let external_id = format!("automata-check:{proposed_id}");
-        let query = format!(
-            r"
-            INSERT INTO github_check_subjects AS subject (
-                id, tenant_id, repository_id, provider_delivery_id, subject_key,
-                provider_connection_id, provider_installation_id,
-                github_repository_id, github_app_id, head_sha, check_name,
-                external_id, created_at_ms, desired_updated_at_ms
-            )
-            SELECT
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13
-            FROM provider_delivery_inbox AS delivery
-            JOIN repositories AS repository
-              ON repository.id = $3
-             AND repository.tenant_id = $2
-             AND repository.scm_provider = 'github'
-             AND repository.provider_repository_id = $8::TEXT
-            WHERE delivery.id = $4
-              AND delivery.tenant_id = $2
-              AND delivery.provider = 'github'
-              AND delivery.connection_id = $6
-              AND delivery.installation_id = $7
-              AND delivery.provider_repository_id = $8
-              AND delivery.repository_identity = $14
-              AND repository.owner || '/' || repository.name = $14
-            ON CONFLICT (provider_delivery_id, subject_key) DO NOTHING
-            RETURNING {SUBJECT_COLUMNS}
-            "
-        );
-        let inserted = sqlx::query(AssertSqlSafe(query))
-            .bind(proposed_id)
-            .bind(request.identity().tenant().as_str())
-            .bind(request.identity().repository_id().as_uuid())
-            .bind(delivery_id.as_uuid())
-            .bind(request.identity().subject_key().as_str())
-            .bind(request.identity().connection_id().as_uuid())
-            .bind(pg_bigint(request.identity().installation_id().get()))
-            .bind(pg_bigint(request.identity().github_repository_id().get()))
-            .bind(pg_bigint(request.identity().app_id().get()))
-            .bind(request.identity().head_sha().as_bytes().as_slice())
-            .bind(request.identity().name().as_str())
-            .bind(&external_id)
-            .bind(request.created_at().get())
-            .bind(request.identity().github_repository_name().as_str())
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(operation_error)?;
-
-        if let Some(row) = inserted {
-            let durable = decode_subject(&row)?;
-            transaction.commit().await.map_err(operation_error)?;
-            return Ok(durable.receipt);
-        }
-
-        let existing = load_subject_by_replay_key(
-            &mut transaction,
-            delivery_id,
-            request.identity().subject_key(),
-        )
-        .await?;
-        let Some(existing) = existing else {
-            return Err(GithubCheckStoreError::AuthorityRejected);
-        };
-        if existing.identity != *request.identity() || existing.created_at != request.created_at() {
-            return Err(GithubCheckStoreError::ReplayConflict);
-        }
-        transaction.commit().await.map_err(operation_error)?;
-        Ok(existing.receipt)
-    }
-
-    async fn start_github_check_projection(
-        &self,
-        request: StartGithubCheckProjection,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
-        let query = format!(
-            r"
-            UPDATE github_check_subjects AS subject
-            SET desired_state = 'in_progress',
-                desired_revision = desired_revision + 1,
-                desired_updated_at_ms = $3
-            WHERE id = $1
-              AND tenant_id = $2
-              AND desired_state = 'queued'
-              AND desired_updated_at_ms <= $3
-              AND desired_revision < 9223372036854775807
-            RETURNING {SUBJECT_COLUMNS}
-            "
-        );
-        let row = sqlx::query(AssertSqlSafe(query))
-            .bind(request.target().subject_id().as_uuid())
-            .bind(request.target().tenant().as_str())
-            .bind(request.started_at().get())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(operation_error)?;
-        if let Some(row) = row {
-            return Ok(decode_subject(&row)?.receipt);
-        }
-        exact_desired_replay(
-            &self.pool,
-            request.target(),
-            GithubCheckDesiredProjection::InProgress,
-            request.started_at(),
-        )
-        .await
-    }
-}
-
-#[async_trait]
-impl GithubCheckTerminalizationRepository for PostgresStore {
-    async fn terminalize_github_check(
-        &self,
-        request: TerminalizeGithubCheck,
-    ) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
-        let query = format!(
-            r"
-            UPDATE github_check_subjects AS subject
-            SET desired_state = 'completed',
-                desired_conclusion = $3,
-                terminal_cause = $4,
-                desired_revision = desired_revision + 1,
-                desired_updated_at_ms = $5
-            WHERE id = $1
-              AND tenant_id = $2
-              AND desired_state IN ('queued', 'in_progress')
-              AND desired_updated_at_ms <= $5
-              AND desired_revision < 9223372036854775807
-            RETURNING {SUBJECT_COLUMNS}
-            "
-        );
-        let row = sqlx::query(AssertSqlSafe(query))
-            .bind(request.target().subject_id().as_uuid())
-            .bind(request.target().tenant().as_str())
-            .bind(github_check_conclusion_name(request.conclusion()))
-            .bind(github_check_terminal_cause_name(request.cause()))
-            .bind(request.terminal_at().get())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(operation_error)?;
-        if let Some(row) = row {
-            return Ok(decode_subject(&row)?.receipt);
-        }
-        exact_desired_replay(
-            &self.pool,
-            request.target(),
-            GithubCheckDesiredProjection::terminal(request.cause()),
-            request.terminal_at(),
-        )
-        .await
-    }
-}
 
 #[async_trait]
 impl GithubCheckProjectionOutbox for PostgresStore {
@@ -2011,60 +1845,6 @@ fn projection_columns(
             "completed",
             Some(github_check_conclusion_name(cause.conclusion())),
         ),
-    }
-}
-
-async fn load_subject(
-    pool: &sqlx::PgPool,
-    target: &GithubCheckSubjectTarget,
-) -> Result<Option<DecodedSubject>, GithubCheckStoreError> {
-    let query = format!(
-        "SELECT {SUBJECT_COLUMNS} FROM github_check_subjects AS subject WHERE subject.id = $1 AND subject.tenant_id = $2"
-    );
-    sqlx::query(AssertSqlSafe(query))
-        .bind(target.subject_id().as_uuid())
-        .bind(target.tenant().as_str())
-        .fetch_optional(pool)
-        .await
-        .map_err(operation_error)?
-        .map(|row| decode_subject(&row))
-        .transpose()
-}
-
-async fn load_subject_by_replay_key(
-    transaction: &mut Transaction<'_, Postgres>,
-    delivery_id: ProviderDeliveryId,
-    subject_key: &GithubCheckSubjectKey,
-) -> Result<Option<DecodedSubject>, GithubCheckStoreError> {
-    let query = format!(
-        "SELECT {SUBJECT_COLUMNS} FROM github_check_subjects AS subject WHERE subject.provider_delivery_id = $1 AND subject.subject_key = $2 FOR UPDATE"
-    );
-    sqlx::query(AssertSqlSafe(query))
-        .bind(delivery_id.as_uuid())
-        .bind(subject_key.as_str())
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-        .map(|row| decode_subject(&row))
-        .transpose()
-}
-
-async fn exact_desired_replay(
-    pool: &sqlx::PgPool,
-    target: &GithubCheckSubjectTarget,
-    expected: GithubCheckDesiredProjection,
-    expected_at: UnixMillis,
-) -> Result<GithubCheckSubjectReceipt, GithubCheckStoreError> {
-    let existing = load_subject(pool, target).await?;
-    match existing {
-        Some(existing)
-            if existing.receipt.desired() == expected
-                && existing.desired_updated_at == expected_at =>
-        {
-            Ok(existing.receipt)
-        }
-        Some(_) => Err(GithubCheckStoreError::TransitionConflict),
-        None => Err(GithubCheckStoreError::NotFound),
     }
 }
 

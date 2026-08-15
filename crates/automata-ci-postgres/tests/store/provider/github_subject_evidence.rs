@@ -10,8 +10,7 @@ use automata_ci_store::{
     EnsureGithubServerServiceAuthority, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
     GithubCheckDesiredProjection, GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName,
     GithubCheckProjectionAction, GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunId, GithubCheckSubjectId,
-    GithubCheckSubjectRepository as _, GithubCheckSubjectTarget, GithubCheckSuiteId,
+    GithubCheckRunBindingFence, GithubCheckRunId, GithubCheckSubjectId, GithubCheckSuiteId,
     GithubCheckTerminalCause, GithubProviderManifest, GithubProviderManifestLimits,
     GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
@@ -32,8 +31,8 @@ use automata_ci_store::{
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, RecordProviderDeliveryWorkflowProgress,
     RegisterProviderDeliveryWorkflowInventory, RejectProviderDelivery,
-    ResolveGithubRepositoryDispatch, StartGithubCheckProjection, StoreError, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    ResolveGithubRepositoryDispatch, StoreError, TenantScope, WorkflowAdmissionIdempotency,
+    WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -618,13 +617,26 @@ async fn noncanonical_check_state_rolls_back_delivery_completion() -> TestResult
             ))
             .await?;
         let claim = claim_delivery(&database, accepted.delivery_id(), 0x239, 60_000).await?;
-        database
-            .store()
-            .start_github_check_projection(StartGithubCheckProjection::new(
-                GithubCheckSubjectTarget::new(fixture.tenant.clone(), accepted.check_subject_id()),
-                claim.claimed_at(),
-            )?)
-            .await?;
+        // Deliberately bypass source-specific atomic admission to seed the noncanonical state.
+        let updated = sqlx::query(
+            r"
+            UPDATE github_check_subjects
+            SET desired_state = 'in_progress',
+                desired_revision = desired_revision + 1,
+                desired_updated_at_ms = $3
+            WHERE id = $1
+              AND tenant_id = $2
+              AND desired_state = 'queued'
+              AND desired_updated_at_ms <= $3
+              AND desired_revision < 9223372036854775807
+            ",
+        )
+        .bind(accepted.check_subject_id().as_uuid())
+        .bind(fixture.tenant.as_str())
+        .bind(claim.claimed_at().get())
+        .execute(database.pool())
+        .await?;
+        assert_eq!(updated.rows_affected(), 1);
         let check_before =
             load_check_projection(&database, accepted.check_subject_id().as_uuid()).await?;
         let completion =
