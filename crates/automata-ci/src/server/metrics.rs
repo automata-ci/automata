@@ -2093,12 +2093,14 @@ const fn results_http_outcome(status: ResultsHttpStatusClass) -> &'static str {
     }
 }
 
-const fn lease_poll_label_values() -> [(&'static str, &'static str, &'static str); 21] {
+const fn lease_poll_label_values() -> [(&'static str, &'static str, &'static str); 25] {
     [
         ("claimed", "new", "none"),
         ("claimed", "replay", "none"),
         ("no_work", "new", "none"),
         ("no_work", "replay", "none"),
+        ("rejected", "new", "claim_expired"),
+        ("rejected", "new", "claim_superseded"),
         ("rejected", "new", "attempt_not_found"),
         ("rejected", "new", "attempt_not_queued"),
         ("rejected", "new", "no_longer_runnable"),
@@ -2106,6 +2108,8 @@ const fn lease_poll_label_values() -> [(&'static str, &'static str, &'static str
         ("rejected", "new", "slot_out_of_range"),
         ("rejected", "new", "slot_occupied"),
         ("rejected", "new", "scan_superseded"),
+        ("rejected", "replay", "claim_expired"),
+        ("rejected", "replay", "claim_superseded"),
         ("rejected", "replay", "attempt_not_found"),
         ("rejected", "replay", "attempt_not_queued"),
         ("rejected", "replay", "no_longer_runnable"),
@@ -2199,6 +2203,8 @@ const fn lease_poll_labels(
 
 const fn lease_rejection(reason: LeaseClaimRejection) -> &'static str {
     match reason {
+        LeaseClaimRejection::ClaimExpired => "claim_expired",
+        LeaseClaimRejection::ClaimSuperseded => "claim_superseded",
         LeaseClaimRejection::AttemptNotFound => "attempt_not_found",
         LeaseClaimRejection::AttemptNotQueued => "attempt_not_queued",
         LeaseClaimRejection::NoLongerRunnable => "no_longer_runnable",

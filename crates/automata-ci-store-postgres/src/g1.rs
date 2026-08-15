@@ -5704,8 +5704,7 @@ impl RunnerClaimRepository for PostgresStore {
         let row = claim_receipt_row(&mut transaction, request).await?;
         let receipt = if let Some(row) = row.as_ref() {
             let receipt = decode_claim_receipt(row, request, true)?;
-            require_live_claim_receipt(&mut transaction, &receipt).await?;
-            Some(receipt)
+            Some(resolve_claim_receipt(&mut transaction, receipt).await?)
         } else {
             None
         };
@@ -7730,6 +7729,16 @@ async fn complete_claim_receipt(
         TryClaimOutcome::Rejected(ClaimRejection::AttemptNotFound) => {
             ("attempt_not_found", None, None, None)
         }
+        TryClaimOutcome::Rejected(ClaimRejection::ClaimExpired) => {
+            return Err(invalid_operation_receipt(
+                "a fresh claim cannot complete as an expired claim",
+            ));
+        }
+        TryClaimOutcome::Rejected(ClaimRejection::ClaimSuperseded) => {
+            return Err(invalid_operation_receipt(
+                "a fresh claim cannot complete as a superseded claim",
+            ));
+        }
         TryClaimOutcome::Rejected(ClaimRejection::AttemptNotQueued(lifecycle)) => {
             ("not_queued", None, Some(lifecycle_name(*lifecycle)), None)
         }
@@ -7873,68 +7882,113 @@ async fn replay_claim(
         .await?
         .ok_or_else(|| invalid_operation_receipt("conflicting receipt disappeared"))?;
     let receipt = decode_claim_receipt(&row, request, true)?;
-    require_live_claim_receipt(transaction, &receipt).await?;
-    Ok(receipt)
+    resolve_claim_receipt(transaction, receipt).await
 }
 
-async fn require_live_claim_receipt(
+/// Resolves the provisional claim phase of an admitted lease request.
+///
+/// A successful claim is replayable only while its exact attempt fence and
+/// lease remain live. An expired or superseded unpublished selection is
+/// atomically finalized as a durable negative outcome. The control layer can
+/// then complete one canonical no-work response, so an exact retry can never
+/// become trapped behind an undeliverable claim.
+async fn resolve_claim_receipt(
     transaction: &mut Transaction<'_, Postgres>,
-    receipt: &TryClaimReceipt,
-) -> Result<(), StoreError> {
+    receipt: TryClaimReceipt,
+) -> Result<TryClaimReceipt, StoreError> {
     let TryClaimOutcome::Claimed(claimed) = receipt.outcome() else {
-        return Ok(());
+        return Ok(receipt);
     };
     let lease = claimed.lease();
-    let assignment = claimed.assignment();
-    let session = assignment.session();
-    let row = sqlx::query(
+    let database_now = super::runner_attempt_database_now(transaction).await?;
+    let rejection = if database_now >= lease.expires_at() {
+        Some(ClaimRejection::ClaimExpired)
+    } else {
+        let assignment = claimed.assignment();
+        let session = assignment.session();
+        let live: bool = sqlx::query_scalar(
+            r"
+            SELECT EXISTS (
+                SELECT 1
+                FROM job_attempts
+                WHERE id = $1
+                  AND lifecycle IN ('leased', 'preparing', 'running', 'cancelling', 'finalizing')
+                  AND lease_id = $2
+                  AND fencing_token = $3
+                  AND runner_id = $4
+                  AND runner_session_id = $5
+                  AND runner_session_epoch = $6
+                  AND runner_generation = $7
+                  AND runner_slot = $8
+                  AND lease_issued_at_ms = $9
+                  AND lease_expires_at_ms >= $10
+            )
+            ",
+        )
+        .bind(lease.attempt_id().as_uuid())
+        .bind(lease.lease_id().as_uuid())
+        .bind(fencing_i64(lease.fencing_token())?)
+        .bind(session.runner_id().as_uuid())
+        .bind(session.session_id().as_uuid())
+        .bind(epoch_i64(session.session_epoch())?)
+        .bind(generation_i64(session.runner_generation())?)
+        .bind(i32::from(assignment.slot().ordinal()))
+        .bind(lease.issued_at().get())
+        .bind(lease.expires_at().get())
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+        (!live).then_some(ClaimRejection::ClaimSuperseded)
+    };
+    let Some(rejection) = rejection else {
+        return Ok(receipt);
+    };
+    let outcome = match rejection {
+        ClaimRejection::ClaimExpired => "claim_expired",
+        ClaimRejection::ClaimSuperseded => "claim_superseded",
+        _ => {
+            return Err(invalid_operation_receipt(
+                "live claim resolved to an invalid terminal reason",
+            ));
+        }
+    };
+
+    let updated = sqlx::query(
         r"
-        SELECT lifecycle IN ('leased', 'preparing', 'running', 'cancelling', 'finalizing')
-                   AS lifecycle_is_active,
-               COALESCE(lease_id = $2
-                   AND fencing_token = $3
-                   AND runner_id = $4
-                   AND runner_session_id = $5
-                   AND runner_session_epoch = $6
-                   AND runner_generation = $7
-                   AND runner_slot = $8
-                   AND lease_issued_at_ms = $9
-                   AND lease_expires_at_ms >= $10, FALSE) AS exact_live_fence
-        FROM job_attempts
-        WHERE id = $1
-        FOR UPDATE
+        UPDATE runner_operation_receipts
+        SET outcome = $3,
+            claimed_fencing_token = NULL,
+            rejection_lifecycle = NULL,
+            occupied_attempt_id = NULL,
+            claimed_job_id = NULL,
+            claimed_run_id = NULL,
+            claimed_job_ir_schema = NULL,
+            claimed_job_ir_size_bytes = NULL,
+            claimed_job_ir_digest = NULL,
+            claimed_job_ir_object_key = NULL,
+            completed_at_ms = $4
+        WHERE runner_session_id = $1
+          AND operation_id = $2
+          AND outcome = 'claimed'
         ",
     )
-    .bind(lease.attempt_id().as_uuid())
-    .bind(lease.lease_id().as_uuid())
-    .bind(fencing_i64(lease.fencing_token())?)
-    .bind(session.runner_id().as_uuid())
-    .bind(session.session_id().as_uuid())
-    .bind(epoch_i64(session.session_epoch())?)
-    .bind(generation_i64(session.runner_generation())?)
-    .bind(i32::from(assignment.slot().ordinal()))
-    .bind(lease.issued_at().get())
-    .bind(lease.expires_at().get())
-    .fetch_optional(&mut **transaction)
+    .bind(receipt.session_id().as_uuid())
+    .bind(receipt.operation_id().as_uuid())
+    .bind(outcome)
+    .bind(database_now.get())
+    .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    let Some(row) = row else {
-        return Err(StoreError::AttemptFenceRejected(lease.attempt_id()));
-    };
-    let lifecycle_is_active: bool = row
-        .try_get("lifecycle_is_active")
-        .map_err(operation_error)?;
-    let exact_live_fence: bool = row.try_get("exact_live_fence").map_err(operation_error)?;
-    if !lifecycle_is_active || !exact_live_fence {
-        return Err(StoreError::AttemptFenceRejected(lease.attempt_id()));
+    if updated.rows_affected() != 1 {
+        return Err(invalid_operation_receipt(
+            "terminal claim did not finalize exactly once",
+        ));
     }
-    let database_now = super::runner_attempt_database_now(transaction).await?;
-    if database_now >= lease.expires_at() {
-        return Err(StoreError::Attempt(AttemptStoreError::LeaseExpired(
-            lease.attempt_id(),
-        )));
-    }
-    Ok(())
+    Ok(TryClaimReceipt::new(
+        receipt.request_key(),
+        TryClaimOutcome::Rejected(rejection),
+        true,
+    ))
 }
 
 async fn claim_receipt_row(
@@ -7987,6 +8041,8 @@ fn decode_claim_receipt(
     }
     let name: &str = row.try_get("outcome").map_err(operation_error)?;
     let outcome = match name {
+        "claim_expired" => TryClaimOutcome::Rejected(ClaimRejection::ClaimExpired),
+        "claim_superseded" => TryClaimOutcome::Rejected(ClaimRejection::ClaimSuperseded),
         "claimed" => {
             let attempt_id = receipt_attempt_id(row)?;
             let lease_id = receipt_lease_id(row)?;

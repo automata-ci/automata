@@ -735,6 +735,12 @@ impl ClaimedAttempt {
 /// Durable negative claim decision. Retrying the same operation replays it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimRejection {
+    /// A claim that never produced a replayable runner response reached its
+    /// lease deadline and can no longer be delivered.
+    ClaimExpired,
+    /// The exact attempt fence stopped being current before the claimed lease
+    /// could be delivered.
+    ClaimSuperseded,
     /// The selected attempt no longer exists.
     AttemptNotFound,
     /// The selected attempt is no longer queued.

@@ -22,6 +22,10 @@ pub enum LeasePollObservation {
 /// Privacy-safe durable claim rejection categories.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LeaseClaimRejection {
+    /// An unpublished claim reached its lease deadline and became terminal.
+    ClaimExpired,
+    /// An unpublished claim lost its exact attempt fence and became terminal.
+    ClaimSuperseded,
     /// The selected attempt no longer exists at transactional recheck.
     AttemptNotFound,
     /// The selected attempt is no longer in the queued lifecycle state.
