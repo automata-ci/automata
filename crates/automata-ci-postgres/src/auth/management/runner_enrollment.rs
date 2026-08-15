@@ -315,6 +315,7 @@ impl PostgresHumanRbacManagementRepository {
             &request.actor,
             &["runners:enroll"],
             descriptor,
+            map_database_error,
         )
         .await?;
         let MutationAuthorization::Authorized(actor) = authorization else {
