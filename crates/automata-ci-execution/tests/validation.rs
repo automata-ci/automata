@@ -136,6 +136,45 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
 }
 
 #[test]
+fn immutable_image_enforces_docker_name_boundary_and_canonical_ipv6() {
+    const DIGEST: &str = "@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let maximum_repository_name = "a".repeat(255);
+    let maximum_reference = format!("r.io/{maximum_repository_name}{DIGEST}");
+    assert_eq!(
+        ImmutableImage::new(&maximum_reference)
+            .expect("255-byte Docker repository name")
+            .reference(),
+        maximum_reference
+    );
+
+    let overlong_repository_name = "a".repeat(256);
+    assert_eq!(
+        ImmutableImage::new(format!("r.io/{overlong_repository_name}{DIGEST}")),
+        Err(ValueError::InvalidImmutableImage)
+    );
+
+    let canonical = format!("[2001:db8::1]/team/alpine{DIGEST}");
+    assert_eq!(
+        ImmutableImage::new(&canonical)
+            .expect("canonical bracketed IPv6 registry")
+            .reference(),
+        canonical
+    );
+    for alias in [
+        "[2001:DB8::1]",
+        "[2001:0db8:0000:0000:0000:0000:0000:0001]",
+        "[::ffff:192.0.2.1]",
+    ] {
+        assert_eq!(
+            ImmutableImage::new(format!("{alias}/team/alpine{DIGEST}")),
+            Err(ValueError::InvalidImmutableImage),
+            "noncanonical IPv6 registry alias was accepted: {alias}"
+        );
+    }
+}
+
+#[test]
 fn windows_hyperv_container_profile_is_explicit_and_digest_pinned() {
     const WINDOWS_IMAGE: &str = "mcr.microsoft.com/windows/servercore@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let environment = SandboxEnvironment::windows_hyperv_container(

@@ -13,6 +13,7 @@ use crate::{
 };
 
 const MAX_IDENTIFIER_BYTES: usize = 64;
+const MAX_DOCKER_REPOSITORY_NAME_BYTES: usize = 255;
 const MAX_TARGET_PATH_BYTES: usize = 4_096;
 const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
@@ -187,16 +188,13 @@ impl ImmutableImage {
 }
 
 fn valid_registry_qualified_repository(repository: &str) -> bool {
-    let mut components = repository.split('/');
-    let Some(registry) = components.next() else {
-        return false;
-    };
-    let Some(first_repository) = components.next() else {
+    let Some((registry, repository_name)) = repository.split_once('/') else {
         return false;
     };
     valid_registry(registry)
-        && valid_repository_component(first_repository)
-        && components.all(valid_repository_component)
+        && !repository_name.is_empty()
+        && repository_name.len() <= MAX_DOCKER_REPOSITORY_NAME_BYTES
+        && repository_name.split('/').all(valid_repository_component)
 }
 
 fn valid_registry(value: &str) -> bool {
@@ -204,7 +202,16 @@ fn valid_registry(value: &str) -> bool {
         let Some((address, port)) = rest.split_once(']') else {
             return false;
         };
-        return Ipv6Addr::from_str(address).is_ok()
+        if !address
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b':')
+        {
+            return false;
+        }
+        let Ok(address_value) = Ipv6Addr::from_str(address) else {
+            return false;
+        };
+        return address_value.to_string() == address
             && (port.is_empty() || port.strip_prefix(':').is_some_and(valid_canonical_port));
     }
 
