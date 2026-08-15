@@ -4,17 +4,15 @@ use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_store::{
     BeginGithubServerServiceMint, BeginGithubServerServiceMintOutcome,
-    ClaimGithubServerServiceMint, ClaimGithubServerServiceRevocation,
     ClaimNextGithubServerServiceMaintenance, EnsureGithubServerServiceAuthority,
-    EraseExpiredGithubServerServiceIssuance, FinishGithubServerServiceMint, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository as _,
-    GithubServerServiceAuthoritySelector, GithubServerServiceEnvelopeMetadata,
+    FinishGithubServerServiceMint, GithubRepositoryName, GithubServerServiceAppClientId,
+    GithubServerServiceAppId, GithubServerServiceAuthorityId, GithubServerServiceAuthorityIdentity,
+    GithubServerServiceAuthorityRepository as _, GithubServerServiceEnvelopeMetadata,
     GithubServerServiceGeneration, GithubServerServiceIssuanceState, GithubServerServiceJwtIssuer,
     GithubServerServiceMaintenanceOutcome, GithubServerServiceRevision, GithubServerServiceScope,
     GithubServerServiceStoreError, GithubServerServiceWorkerId,
     ProtectedGithubServerServiceCredential, ProviderConnectionId, ProviderInstallationId,
-    ProviderRepositoryId, ReconcileExpiredGithubServerServiceMint, RepositoryId, TenantScope,
+    ProviderRepositoryId, RepositoryId, TenantScope,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -22,7 +20,6 @@ use uuid::Uuid;
 use crate::support::{TestClock, TestDatabase, TestResult, run_with_unmigrated_database};
 
 const CLAIM_DURATION_MILLIS: i64 = 2_000;
-const REQUEST_DURATION_MILLIS: i64 = 10_000;
 
 #[derive(Clone)]
 struct Fixture {
@@ -97,18 +94,35 @@ async fn caller_clock_is_admission_only_and_database_issues_full_duration() -> T
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
-async fn delayed_authority_lock_rebases_both_fences_and_replays_exact_duration() -> TestResult {
+#[allow(clippy::too_many_lines)] // One lock wait proves operation-time rebasing and duplicate suppression.
+async fn delayed_refresh_issuance_lock_rebases_atomic_fences_without_duplicate() -> TestResult {
     run_with_unmigrated_database(|database| async move {
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         apply_authority_migrations(&database).await?;
         let fixture = seed_authority(&database).await?;
+
+        let current = claim_and_begin(&database, &fixture, CLAIM_DURATION_MILLIS).await?;
+        let committed_at = current.claimed_at().get() + 50;
+        clock.set(committed_at).await?;
+        let ready = database
+            .store()
+            .finish_github_server_service_mint(&FinishGithubServerServiceMint::ready(
+                current.claim().clone(),
+                protected_for_claim(&fixture.identity, &current)?,
+                UnixMillis::new(committed_at),
+            )?)
+            .await?;
+        assert_eq!(ready.state(), GithubServerServiceIssuanceState::Ready);
+
+        // The fixture credential expires 3,600,000ms after its request and
+        // refresh becomes due 1,680,000ms before that expiry.
+        let refresh_due_at = current.receipt().requested_at().get() + 1_920_000;
+        clock.set(refresh_due_at).await?;
         let caller_observed_at = database_now_ms(&database).await?;
-        let request = ClaimGithubServerServiceMint::new(
-            selector(&fixture.identity),
-            GithubServerServiceGeneration::new(1)?,
+        let request = ClaimNextGithubServerServiceMaintenance::new(
+            fixture.tenant.clone(),
             GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
             UnixMillis::new(caller_observed_at),
-            UnixMillis::new(caller_observed_at + REQUEST_DURATION_MILLIS),
             UnixMillis::new(caller_observed_at + CLAIM_DURATION_MILLIS),
         )?;
         let replay_request = request.clone();
@@ -117,22 +131,29 @@ async fn delayed_authority_lock_rebases_both_fences_and_replays_exact_duration()
         let blocking_backend_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
-        sqlx::query("SELECT id FROM github_server_service_authorities WHERE id = $1 FOR UPDATE")
-            .bind(fixture.identity.authority_id().as_uuid())
-            .fetch_one(&mut *blocker)
-            .await?;
+        sqlx::query(
+            r"
+            SELECT generation
+            FROM github_server_service_authority_issuances
+            WHERE authority_id = $1 AND generation = 1
+            FOR UPDATE
+            ",
+        )
+        .bind(fixture.identity.authority_id().as_uuid())
+        .fetch_one(&mut *blocker)
+        .await?;
 
         let claimant_database = Arc::clone(&database);
         let claimant = tokio::spawn(async move {
             claimant_database
                 .store()
-                .claim_github_server_service_mint(request)
+                .claim_next_github_server_service_maintenance(request)
                 .await
         });
         wait_for_backend_blocked_by(
             database.pool(),
             blocking_backend_pid,
-            "FROM github_server_service_authorities",
+            "mint_claim_fence, mint_claim_owner_id",
         )
         .await?;
         clock
@@ -145,7 +166,20 @@ async fn delayed_authority_lock_rebases_both_fences_and_replays_exact_duration()
         let release_floor = database_now_ms(&database).await?;
         blocker.commit().await?;
 
-        let claimed = tokio::time::timeout(Duration::from_secs(10), claimant).await???;
+        let outcome = tokio::time::timeout(Duration::from_secs(10), claimant)
+            .await???
+            .expect("the due refresh must remain discoverable after the issuance lock");
+        let GithubServerServiceMaintenanceOutcome::Mint(claimed) = outcome else {
+            panic!("the due refresh must produce a mint claim");
+        };
+        assert_eq!(
+            claimed.claim().key().authority_id(),
+            fixture.identity.authority_id()
+        );
+        assert_eq!(
+            claimed.claim().key().generation(),
+            GithubServerServiceGeneration::new(2)?
+        );
         assert!(claimed.claimed_at().get() >= release_floor);
         assert_eq!(claimed.receipt().requested_at(), claimed.claimed_at());
         assert_eq!(
@@ -154,20 +188,20 @@ async fn delayed_authority_lock_rebases_both_fences_and_replays_exact_duration()
         );
         assert_eq!(
             claimed.receipt().request_deadline().get() - claimed.receipt().requested_at().get(),
-            REQUEST_DURATION_MILLIS
+            CLAIM_DURATION_MILLIS
         );
         assert!(
             claimed.claimed_at().get() >= caller_observed_at + CLAIM_DURATION_MILLIS,
             "the original caller lease had elapsed before the row lock was released"
         );
 
-        let replayed = database
+        let duplicate = database
             .store()
-            .claim_github_server_service_mint(replay_request)
+            .claim_next_github_server_service_maintenance(replay_request)
             .await?;
-        assert_eq!(
-            replayed, claimed,
-            "rebased lost response must replay exactly"
+        assert!(
+            duplicate.is_none(),
+            "a live rebased refresh claim must not be duplicated"
         );
         Ok(())
     })
@@ -180,7 +214,7 @@ async fn fast_clock_cannot_reduce_live_mint_or_erase_ready_custody() -> TestResu
     run_with_unmigrated_database(|database| async move {
         apply_authority_migrations(&database).await?;
         let fixture = seed_authority(&database).await?;
-        let claimed = claim_and_begin(&database, &fixture, 30_000, 120_000).await?;
+        let claimed = claim_and_begin(&database, &fixture, 30_000).await?;
 
         let fast_observed_at = database_now_ms(&database).await? + 45_000;
         let maintenance = database
@@ -199,21 +233,6 @@ async fn fast_clock_cannot_reduce_live_mint_or_erase_ready_custody() -> TestResu
             "database-live mint must not be reduced"
         );
 
-        let reconcile = database
-            .store()
-            .reconcile_expired_github_server_service_mint(
-                ReconcileExpiredGithubServerServiceMint::new(
-                    selector(&fixture.identity),
-                    claimed.claim().key(),
-                    UnixMillis::new(fast_observed_at),
-                )?,
-            )
-            .await;
-        assert!(matches!(
-            reconcile,
-            Err(GithubServerServiceStoreError::ClaimRejected)
-        ));
-
         let committed_at = UnixMillis::new(database_now_ms(&database).await?);
         let protected = protected_for_claim(&fixture.identity, &claimed)?;
         let finish =
@@ -224,20 +243,6 @@ async fn fast_clock_cannot_reduce_live_mint_or_erase_ready_custody() -> TestResu
             .await?;
         assert_eq!(ready.state(), GithubServerServiceIssuanceState::Ready);
 
-        let erase = database
-            .store()
-            .erase_expired_github_server_service_issuance(
-                EraseExpiredGithubServerServiceIssuance::new(
-                    selector(&fixture.identity),
-                    ready.key(),
-                    ready.safe_erase_after(),
-                )?,
-            )
-            .await;
-        assert!(matches!(
-            erase,
-            Err(GithubServerServiceStoreError::ClaimRejected)
-        ));
         let scan = database
             .store()
             .claim_next_github_server_service_maintenance(
@@ -266,7 +271,7 @@ async fn late_ready_result_is_retained_revoke_only_and_replays() -> TestResult {
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         apply_authority_migrations(&database).await?;
         let fixture = seed_authority(&database).await?;
-        let claimed = claim_and_begin(&database, &fixture, 2_000, 5_000).await?;
+        let claimed = claim_and_begin(&database, &fixture, 2_000).await?;
         let protected = protected_for_claim(&fixture.identity, &claimed)?;
         let committed_at = UnixMillis::new(claimed.claimed_at().get() + 50);
         let finish =
@@ -300,31 +305,40 @@ async fn late_ready_result_is_retained_revoke_only_and_replays() -> TestResult {
         assert_eq!(replayed, retained);
 
         let revocation_observed_at = database_now_ms(&database).await?;
-        let revocation_request = ClaimGithubServerServiceRevocation::new(
-            selector(&fixture.identity),
-            retained.key(),
+        let revocation_request = ClaimNextGithubServerServiceMaintenance::new(
+            fixture.tenant.clone(),
             GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
             UnixMillis::new(revocation_observed_at),
             UnixMillis::new(revocation_observed_at + 500),
         )?;
-        let revocation_replay_request = revocation_request.clone();
-        let first = database
+        let first_outcome = database
             .store()
-            .claim_github_server_service_revocation(revocation_request.clone())
-            .await?;
-        let replay = database
+            .claim_next_github_server_service_maintenance(revocation_request.clone())
+            .await?
+            .expect("the retained credential must be due for revocation");
+        let GithubServerServiceMaintenanceOutcome::Revocation(first) = first_outcome else {
+            panic!("the retained credential must produce a revocation claim");
+        };
+        assert_eq!(first.claim().key(), retained.key());
+        let live_duplicate = database
             .store()
-            .claim_github_server_service_revocation(revocation_replay_request)
+            .claim_next_github_server_service_maintenance(revocation_request.clone())
             .await?;
-        assert_eq!(replay.claim(), first.claim());
-        assert_eq!(replay.claimed_at(), first.claimed_at());
-        assert_eq!(replay.claim_expires_at(), first.claim_expires_at());
+        assert!(
+            live_duplicate.is_none(),
+            "a live revocation claim must not be duplicated"
+        );
 
         wait_until_database_time(&clock, first.claim_expires_at().get()).await?;
-        let takeover = database
+        let takeover_outcome = database
             .store()
-            .claim_github_server_service_revocation(revocation_request)
-            .await?;
+            .claim_next_github_server_service_maintenance(revocation_request)
+            .await?
+            .expect("the expired revocation claim must be recoverable");
+        let GithubServerServiceMaintenanceOutcome::Revocation(takeover) = takeover_outcome else {
+            panic!("the expired revocation must produce a replacement claim");
+        };
+        assert_eq!(takeover.claim().key(), retained.key());
         assert_eq!(
             takeover.claim().fence().get(),
             first.claim().fence().get() + 1
@@ -406,20 +420,30 @@ async fn claim_and_begin(
     database: &TestDatabase,
     fixture: &Fixture,
     claim_duration: i64,
-    request_duration: i64,
 ) -> TestResult<automata_ci_store::ClaimedGithubServerServiceMint> {
     let observed_at = database_now_ms(database).await?;
-    let claimed = database
+    let outcome = database
         .store()
-        .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-            selector(&fixture.identity),
-            GithubServerServiceGeneration::new(1)?,
+        .claim_next_github_server_service_maintenance(ClaimNextGithubServerServiceMaintenance::new(
+            fixture.tenant.clone(),
             GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
             UnixMillis::new(observed_at),
-            UnixMillis::new(observed_at + request_duration),
             UnixMillis::new(observed_at + claim_duration),
         )?)
-        .await?;
+        .await?
+        .expect("the bootstrap authority must produce one mint claim");
+    let GithubServerServiceMaintenanceOutcome::Mint(claimed) = outcome else {
+        panic!("the bootstrap authority must produce a mint outcome");
+    };
+    let claimed = *claimed;
+    assert_eq!(
+        claimed.claim().key().authority_id(),
+        fixture.identity.authority_id()
+    );
+    assert_eq!(
+        claimed.claim().key().generation(),
+        GithubServerServiceGeneration::new(1)?
+    );
     database
         .store()
         .begin_github_server_service_mint(BeginGithubServerServiceMint::new(
@@ -453,12 +477,6 @@ fn protected_for_claim(
             vec![9; 48],
         )?,
     )?)
-}
-
-fn selector(
-    identity: &GithubServerServiceAuthorityIdentity,
-) -> GithubServerServiceAuthoritySelector {
-    GithubServerServiceAuthoritySelector::from_identity(identity)
 }
 
 async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {

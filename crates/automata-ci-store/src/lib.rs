@@ -153,15 +153,13 @@ pub use github_schedule::{
 };
 pub use github_service_authority::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
-    BeginGithubServerServiceMintOutcome, ClaimGithubServerServiceMint,
-    ClaimGithubServerServiceRevocation, ClaimNextGithubServerServiceMaintenance,
+    BeginGithubServerServiceMintOutcome, ClaimNextGithubServerServiceMaintenance,
     ClaimedGithubServerServiceMint, ClaimedGithubServerServiceRevocation,
-    EnsureGithubServerServiceAuthority, EraseExpiredGithubServerServiceIssuance,
-    FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
-    GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS, GITHUB_SERVICE_GENERATION_FAILURE_BACKOFF_MILLIS,
-    GITHUB_SERVICE_PROVIDER_CLOCK_SKEW_MILLIS, GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS,
-    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubServerServiceAction,
-    GithubServerServiceAppClientId, GithubServerServiceAppId,
+    EnsureGithubServerServiceAuthority, FinishGithubServerServiceMint,
+    FinishGithubServerServiceRevocation, GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS,
+    GITHUB_SERVICE_GENERATION_FAILURE_BACKOFF_MILLIS, GITHUB_SERVICE_PROVIDER_CLOCK_SKEW_MILLIS,
+    GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS, GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS,
+    GithubServerServiceAction, GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceAuthorityDescriptor, GithubServerServiceAuthorityId,
     GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
     GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
@@ -180,7 +178,6 @@ pub use github_service_authority::{
     MAX_GITHUB_SERVICE_REVOKE_ATTEMPTS, MAX_GITHUB_SERVICE_REVOKE_CLAIM_MILLIS,
     MAX_GITHUB_SERVICE_REVOKE_RETRY_MILLIS, MIN_GITHUB_SERVICE_READY_USE_MILLIS,
     ProtectedGithubServerServiceCredential, QuarantineGithubServerServiceCredential,
-    ReclaimGithubServerServiceMint, ReconcileExpiredGithubServerServiceMint,
     ReleaseGithubServerServiceHandoff, RetireGithubServerServiceAuthority,
 };
 pub use github_subject_evidence::{

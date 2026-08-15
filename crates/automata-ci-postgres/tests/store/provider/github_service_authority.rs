@@ -5,11 +5,9 @@ use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AcquireGithubServerServiceHandoff,
     AdmissionObject, BeginGithubServerServiceMint, BindGithubCheckSuite,
-    ClaimGithubCheckProjection, ClaimGithubServerServiceMint, ClaimGithubServerServiceRevocation,
-    ClaimNextGithubServerServiceMaintenance, ClaimProviderDelivery,
-    EnsureGithubServerServiceAuthority, EraseExpiredGithubServerServiceIssuance,
-    FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
-    GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS, GITHUB_SERVICE_GENERATION_FAILURE_BACKOFF_MILLIS,
+    ClaimGithubCheckProjection, ClaimNextGithubServerServiceMaintenance, ClaimProviderDelivery,
+    EnsureGithubServerServiceAuthority, FinishGithubServerServiceMint,
+    FinishGithubServerServiceRevocation, GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS,
     GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
     GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId, GithubCheckSuiteId,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
@@ -24,13 +22,12 @@ use automata_ci_store::{
     GithubServerServiceIssuanceState, GithubServerServiceJwtIssuer,
     GithubServerServiceMaintenanceOutcome, GithubServerServiceRevision, GithubServerServiceScope,
     GithubServerServiceStoreError, GithubServerServiceWorkerId,
-    GithubSubjectEvidenceRepository as _, ObjectKey, ProtectedGithubServerServiceCredential,
-    ProviderConnectionId, ProviderDeliveryClaimOwnerId,
+    GithubSubjectEvidenceRepository as _, MAX_GITHUB_SERVICE_REVOKE_CLAIM_MILLIS, ObjectKey,
+    ProtectedGithubServerServiceCredential, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
     ProviderDeliveryClaimRenewalRepository as _, ProviderDeliveryIdentity,
     ProviderDeliveryRenewalTiming, ProviderDeliveryRepository as _, ProviderInstallationId,
     ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, QuarantineGithubServerServiceCredential,
-    ReclaimGithubServerServiceMint, ReconcileExpiredGithubServerServiceMint,
     ReleaseGithubServerServiceHandoff, RenewProviderDeliveryClaim, RepositoryId,
     RetireGithubServerServiceAuthority, TenantScope,
 };
@@ -311,6 +308,104 @@ async fn maintenance_bootstraps_and_recovers_generation_after_lost_claim() -> Te
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn production_sized_mint_retry_waits_for_deadline_reduction() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = seed_fixture(&database, "maintenance-mint-retry", 10).await?;
+        let identity = ensure_authority(
+            &database,
+            &fixture,
+            GithubServerServiceScope::ChecksWrite,
+            Uuid::new_v4(),
+            100,
+        )
+        .await?;
+        let requested_at = 1_000;
+        let request_deadline = requested_at + MAX_GITHUB_SERVICE_REVOKE_CLAIM_MILLIS;
+        let key = GithubServerServiceIssuanceKey::new(
+            identity.authority_id(),
+            GithubServerServiceGeneration::new(1)?,
+        );
+        let claimed = claim_next_mint(
+            &database,
+            &identity,
+            key.generation(),
+            requested_at,
+            request_deadline,
+        )
+        .await?;
+
+        set_database_test_clock(&database, 1_050).await?;
+        database
+            .store()
+            .begin_github_server_service_mint(BeginGithubServerServiceMint::new(
+                &claimed,
+                UnixMillis::new(1_050),
+            )?)
+            .await?;
+        let retry_at = 1_200;
+        set_database_test_clock(&database, 1_100).await?;
+        let pending = database
+            .store()
+            .finish_github_server_service_mint(&FinishGithubServerServiceMint::retry(
+                claimed.claim().clone(),
+                GithubServerServiceFailureKind::new("provider_unavailable")?,
+                UnixMillis::new(1_100),
+                UnixMillis::new(retry_at),
+            )?)
+            .await?;
+        assert_eq!(pending.key(), key);
+        assert_eq!(
+            pending.state(),
+            GithubServerServiceIssuanceState::MintRetryPending
+        );
+        assert_eq!(
+            pending.request_deadline(),
+            UnixMillis::new(request_deadline)
+        );
+        assert_eq!(pending.mint_attempts(), 1);
+
+        let retry = claim_next_maintenance(
+            &database,
+            identity.tenant(),
+            retry_at,
+            retry_at + MAX_GITHUB_SERVICE_REVOKE_CLAIM_MILLIS,
+        )
+        .await?;
+        assert!(
+            retry.is_none(),
+            "a second production-sized claim cannot fit the original request deadline"
+        );
+        assert_issuance_state(&database, key, "mint_retry").await?;
+
+        let reduced = claim_next_reduced(
+            &database,
+            &identity,
+            key,
+            request_deadline,
+            request_deadline + 100,
+            GithubServerServiceIssuanceState::Rejected,
+        )
+        .await?;
+        assert_eq!(reduced.mint_attempts(), 1);
+        let already_reduced = claim_next_maintenance(
+            &database,
+            identity.tenant(),
+            request_deadline + 1,
+            request_deadline + 101,
+        )
+        .await?;
+        assert!(
+            already_reduced.is_none(),
+            "the terminal retry reduction must not be replayed as maintenance"
+        );
+        assert_issuance_state(&database, key, "rejected").await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn maintenance_skip_locked_makes_progress_on_the_next_authority() -> TestResult {
     run_with_database(|database| async move {
         let fixture = seed_fixture(&database, "maintenance-skip-locked", 10).await?;
@@ -513,6 +608,7 @@ async fn maintenance_uses_the_bounded_head_after_more_than_sixty_four_retired_ro
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // One constrained fixture proves saturated-current quarantine atomically.
 async fn saturated_failure_budget_still_quarantines_current() -> TestResult {
     run_with_database(|database| async move {
         let current_fixture = seed_fixture(&database, "failure-breaker-current", 10).await?;
@@ -525,12 +621,56 @@ async fn saturated_failure_budget_still_quarantines_current() -> TestResult {
         )
         .await?;
         mint_ready(&database, &current_identity, 1, 100, 200, 150).await?;
-        let mut refresh_at = 1_920_100;
-        for generation in 2..=33 {
-            refresh_at =
-                reject_claimed_generation(&database, &current_identity, generation, refresh_at)
-                    .await?;
-        }
+
+        // A production-sized refresh window reaches the current credential's
+        // safe-erasure boundary before 32 one-minute failure gates can elapse.
+        // The adjacent rearm test exercises those 32 failures organically; this
+        // fixture starts at the resulting constraint-valid saturated state so
+        // this test can isolate quarantine of a still-current credential.
+        let next_mint_not_before = 200;
+        let mint_gate_generation = 1_u64;
+        let failure_budget_rearm_at =
+            next_mint_not_before + GITHUB_SERVICE_FAILURE_BUDGET_REARM_MILLIS;
+        let mut saturated_setup = database.pool().begin().await?;
+        sqlx::query(
+            "ALTER TABLE github_server_service_authorities \
+             DISABLE TRIGGER github_server_service_authorities_update_guard",
+        )
+        .execute(&mut *saturated_setup)
+        .await?;
+        let saturated = sqlx::query(
+            r"
+            UPDATE github_server_service_authorities
+            SET consecutive_generation_failures = 32,
+                next_mint_not_before_ms = $2,
+                mint_gate_generation = $3,
+                failure_budget_rearm_at_ms = $4,
+                state_updated_at_ms = $2
+            WHERE id = $1
+              AND state = 'active'
+              AND current_issuance_generation = 1
+              AND refresh_issuance_generation IS NULL
+              AND next_issuance_generation = 2
+            ",
+        )
+        .bind(current_identity.authority_id().as_uuid())
+        .bind(next_mint_not_before)
+        .bind(i64::try_from(mint_gate_generation)?)
+        .bind(failure_budget_rearm_at)
+        .execute(&mut *saturated_setup)
+        .await?;
+        sqlx::query("SET CONSTRAINTS ALL IMMEDIATE")
+            .execute(&mut *saturated_setup)
+            .await?;
+        sqlx::query(
+            "ALTER TABLE github_server_service_authorities \
+             ENABLE TRIGGER github_server_service_authorities_update_guard",
+        )
+        .execute(&mut *saturated_setup)
+        .await?;
+        saturated_setup.commit().await?;
+        assert_eq!(saturated.rows_affected(), 1);
+
         let before_quarantine = database
             .store()
             .inspect_github_server_service_authority(
@@ -543,6 +683,23 @@ async fn saturated_failure_budget_still_quarantines_current() -> TestResult {
             before_quarantine.current_generation(),
             Some(GithubServerServiceGeneration::new(1)?)
         );
+        assert_eq!(
+            before_quarantine.next_generation(),
+            GithubServerServiceGeneration::new(2)?
+        );
+        assert_eq!(before_quarantine.refresh_generation(), None);
+        assert_eq!(
+            before_quarantine.next_mint_not_before(),
+            Some(UnixMillis::new(next_mint_not_before))
+        );
+        assert_eq!(
+            before_quarantine.mint_gate_generation(),
+            Some(GithubServerServiceGeneration::new(mint_gate_generation)?)
+        );
+        assert_eq!(
+            before_quarantine.failure_budget_rearm_at(),
+            Some(UnixMillis::new(failure_budget_rearm_at))
+        );
         let current_metadata = GithubServerServiceEnvelopeMetadata::new(
             current_identity.clone(),
             GithubServerServiceGeneration::new(1)?,
@@ -552,7 +709,8 @@ async fn saturated_failure_budget_still_quarantines_current() -> TestResult {
             32,
             Sha256Digest::from_bytes([21; 32]),
         )?;
-        set_database_test_clock(&database, refresh_at).await?;
+        let quarantined_at = 1_000;
+        set_database_test_clock(&database, quarantined_at).await?;
         let quarantined = database
             .store()
             .quarantine_github_server_service_credential(
@@ -564,7 +722,7 @@ async fn saturated_failure_budget_still_quarantines_current() -> TestResult {
                     ),
                     current_metadata.aad_digest(),
                     GithubServerServiceFailureKind::new("aad_corrupt")?,
-                    UnixMillis::new(refresh_at),
+                    UnixMillis::new(quarantined_at),
                 )?,
             )
             .await?;
@@ -604,31 +762,24 @@ async fn saturated_failure_budget_rearms_one_probationary_generation() -> TestRe
         let mut last_failure_at = 0;
         for generation in 1..=32 {
             let generation = GithubServerServiceGeneration::new(generation)?;
-            set_database_test_clock(&database, requested_at).await?;
-            let claimed = database
-                .store()
-                .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-                    authority_selector(&identity),
-                    generation,
-                    GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-                    UnixMillis::new(requested_at),
-                    UnixMillis::new(requested_at + 1_000),
-                    UnixMillis::new(requested_at + 500),
-                )?)
-                .await?;
+            let claimed = claim_next_mint(
+                &database,
+                &identity,
+                generation,
+                requested_at,
+                requested_at + 500,
+            )
+            .await?;
             last_failure_at = requested_at + 500;
-            set_database_test_clock(&database, last_failure_at).await?;
-            let receipt = database
-                .store()
-                .reconcile_expired_github_server_service_mint(
-                    ReconcileExpiredGithubServerServiceMint::new(
-                        authority_selector(&identity),
-                        claimed.claim().key(),
-                        UnixMillis::new(last_failure_at),
-                    )?,
-                )
-                .await?;
-            assert_eq!(receipt.state(), GithubServerServiceIssuanceState::Rejected);
+            claim_next_reduced(
+                &database,
+                &identity,
+                claimed.claim().key(),
+                last_failure_at,
+                last_failure_at + 100,
+                GithubServerServiceIssuanceState::Rejected,
+            )
+            .await?;
             requested_at = last_failure_at + 60_000;
         }
 
@@ -696,9 +847,9 @@ async fn current_refresh_handoff_revocation_and_retirement_are_fenced() -> TestR
     run_with_database(|database| async move {
         let scenario = prepare_lifecycle_scenario(&database).await?;
 
-        let revoke_worker_uuid = rotate_lifecycle_authority(&database, &scenario).await?;
+        rotate_lifecycle_authority(&database, &scenario).await?;
 
-        release_and_revoke_previous(&database, &scenario, revoke_worker_uuid).await?;
+        release_and_revoke_previous(&database, &scenario).await?;
 
         retire_lifecycle_authority(&database, &scenario.authority).await?;
 
@@ -830,7 +981,7 @@ async fn prepare_lifecycle_scenario(database: &TestDatabase) -> TestResult<Lifec
 async fn rotate_lifecycle_authority(
     database: &TestDatabase,
     scenario: &LifecycleScenario,
-) -> TestResult<Uuid> {
+) -> TestResult {
     // Committing generation two atomically makes it current and moves the
     // prior current generation into revoke-only custody.
     mint_ready(
@@ -866,30 +1017,19 @@ async fn rotate_lifecycle_authority(
         scenario.authority.authority_id(),
         GithubServerServiceGeneration::new(1)?,
     );
-    let revoke_worker_uuid = Uuid::new_v4();
-    set_database_test_clock(database, 2_222_000).await?;
-    let live_error = database
-        .store()
-        .claim_github_server_service_revocation(ClaimGithubServerServiceRevocation::new(
-            authority_selector(&scenario.authority),
-            old_key,
-            GithubServerServiceWorkerId::from_uuid(revoke_worker_uuid)?,
-            UnixMillis::new(2_222_000),
-            UnixMillis::new(2_223_000),
-        )?)
-        .await
-        .expect_err("live handoff must block revocation");
-    assert!(matches!(
-        live_error,
-        GithubServerServiceStoreError::HandoffStillLive
-    ));
-    Ok(revoke_worker_uuid)
+    let live =
+        claim_next_maintenance(database, scenario.authority.tenant(), 2_222_000, 2_223_000).await?;
+    assert!(
+        live.is_none(),
+        "a live handoff must exclude its exact revocation from maintenance"
+    );
+    assert_issuance_state(database, old_key, "revoke_pending").await?;
+    Ok(())
 }
 
 async fn release_and_revoke_previous(
     database: &TestDatabase,
     scenario: &LifecycleScenario,
-    revoke_worker_uuid: Uuid,
 ) -> TestResult {
     set_database_test_clock(database, 2_223_000).await?;
     database
@@ -906,18 +1046,10 @@ async fn release_and_revoke_previous(
         scenario.authority.authority_id(),
         GithubServerServiceGeneration::new(1)?,
     );
-    set_database_test_clock(database, 2_224_000).await?;
-    let revoke = database
-        .store()
-        .claim_github_server_service_revocation(ClaimGithubServerServiceRevocation::new(
-            authority_selector(&scenario.authority),
-            old_key,
-            GithubServerServiceWorkerId::from_uuid(revoke_worker_uuid)?,
-            UnixMillis::new(2_224_000),
-            UnixMillis::new(2_225_000),
-        )?)
-        .await
-        .map_err(|error| format!("claim prior-generation revocation: {error}"))?;
+    let revoke =
+        claim_next_revocation(database, &scenario.authority, old_key, 2_224_000, 2_225_000)
+            .await
+            .map_err(|error| format!("claim prior-generation revocation: {error}"))?;
     set_database_test_clock(database, 2_224_500).await?;
     let revoked = database
         .store()
@@ -952,18 +1084,10 @@ async fn retire_lifecycle_authority(
         authority.authority_id(),
         GithubServerServiceGeneration::new(2)?,
     );
-    set_database_test_clock(database, 2_231_000).await?;
-    let current_revoke = database
-        .store()
-        .claim_github_server_service_revocation(ClaimGithubServerServiceRevocation::new(
-            authority_selector(authority),
-            current_key,
-            GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(2_231_000),
-            UnixMillis::new(2_232_000),
-        )?)
-        .await
-        .map_err(|error| format!("claim current-generation revocation: {error}"))?;
+    let current_revoke =
+        claim_next_revocation(database, authority, current_key, 2_231_000, 2_232_000)
+            .await
+            .map_err(|error| format!("claim current-generation revocation: {error}"))?;
     set_database_test_clock(database, 2_231_500).await?;
     database
         .store()
@@ -1272,18 +1396,14 @@ async fn prepare_expired_mint(
         100,
     )
     .await?;
-    set_database_test_clock(database, 1_000).await?;
-    let claimed = database
-        .store()
-        .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-            authority_selector(&identity),
-            GithubServerServiceGeneration::new(1)?,
-            GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(1_000),
-            UnixMillis::new(2_000),
-            UnixMillis::new(1_500),
-        )?)
-        .await?;
+    let claimed = claim_next_mint(
+        database,
+        &identity,
+        GithubServerServiceGeneration::new(1)?,
+        1_000,
+        2_000,
+    )
+    .await?;
     set_database_test_clock(database, 1_100).await?;
     database
         .store()
@@ -1339,44 +1459,25 @@ async fn reconcile_expired_mint(
     claimed: &automata_ci_store::ClaimedGithubServerServiceMint,
 ) -> TestResult<GithubServerServiceIssuanceKey> {
     let key = claimed.claim().key();
-    set_database_test_clock(database, 1_499).await?;
-    let early = database
-        .store()
-        .reconcile_expired_github_server_service_mint(ReconcileExpiredGithubServerServiceMint::new(
-            authority_selector(identity),
-            key,
-            UnixMillis::new(1_499),
-        )?)
-        .await
-        .expect_err("a live mint claim must not be reconciled");
-    assert!(matches!(
-        early,
-        GithubServerServiceStoreError::ClaimRejected
-    ));
+    let early = claim_next_maintenance(database, identity.tenant(), 1_999, 2_099).await?;
+    assert!(early.is_none(), "a live mint claim must not be reduced");
+    assert_issuance_state(database, key, "minting").await?;
 
-    set_database_test_clock(database, 1_500).await?;
-    let indeterminate = database
-        .store()
-        .reconcile_expired_github_server_service_mint(ReconcileExpiredGithubServerServiceMint::new(
-            authority_selector(identity),
-            key,
-            UnixMillis::new(1_500),
-        )?)
-        .await?;
-    assert_eq!(
-        indeterminate.state(),
-        GithubServerServiceIssuanceState::Indeterminate
+    claim_next_reduced(
+        database,
+        identity,
+        key,
+        2_000,
+        2_100,
+        GithubServerServiceIssuanceState::Indeterminate,
+    )
+    .await?;
+    let replay = claim_next_maintenance(database, identity.tenant(), 2_100, 2_200).await?;
+    assert!(
+        replay.is_none(),
+        "an already reduced generation must not be rediscovered"
     );
-    set_database_test_clock(database, 1_600).await?;
-    let replay = database
-        .store()
-        .reconcile_expired_github_server_service_mint(ReconcileExpiredGithubServerServiceMint::new(
-            authority_selector(identity),
-            key,
-            UnixMillis::new(1_600),
-        )?)
-        .await?;
-    assert_eq!(replay, indeterminate);
+    assert_issuance_state(database, key, "indeterminate").await?;
     Ok(key)
 }
 
@@ -1385,22 +1486,12 @@ async fn assert_indeterminate_mint_gate(
     identity: &GithubServerServiceAuthorityIdentity,
     key: GithubServerServiceIssuanceKey,
 ) -> TestResult<GithubServerServiceGeneration> {
-    set_database_test_clock(database, 1_700).await?;
-    let remint = database
-        .store()
-        .reclaim_github_server_service_mint(ReclaimGithubServerServiceMint::new(
-            authority_selector(identity),
-            key,
-            GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(1_700),
-            UnixMillis::new(1_800),
-        )?)
-        .await
-        .expect_err("an ambiguous generation must never be reminted");
-    assert!(matches!(
-        remint,
-        GithubServerServiceStoreError::ClaimRejected
-    ));
+    let remint = claim_next_maintenance(database, identity.tenant(), 2_200, 2_300).await?;
+    assert!(
+        remint.is_none(),
+        "an ambiguous generation must never be reminted"
+    );
+    assert_issuance_state(database, key, "indeterminate").await?;
     let descriptor = database
         .store()
         .inspect_github_server_service_authority(identity.tenant(), identity.authority_id())
@@ -1408,23 +1499,11 @@ async fn assert_indeterminate_mint_gate(
     assert_eq!(descriptor.refresh_generation(), None);
 
     let next_generation = GithubServerServiceGeneration::new(2)?;
-    set_database_test_clock(database, 2_100).await?;
-    let gated = database
-        .store()
-        .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-            authority_selector(identity),
-            next_generation,
-            GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(2_100),
-            UnixMillis::new(3_000),
-            UnixMillis::new(2_500),
-        )?)
-        .await
-        .expect_err("indeterminate authority must gate a successor until safe erasure");
-    assert!(matches!(
-        gated,
-        GithubServerServiceStoreError::ClaimRejected
-    ));
+    let gated = claim_next_maintenance(database, identity.tenant(), 2_300, 2_400).await?;
+    assert!(
+        gated.is_none(),
+        "indeterminate authority must gate a successor until safe erasure"
+    );
     Ok(next_generation)
 }
 
@@ -1434,54 +1513,35 @@ async fn erase_and_advance_indeterminate_mint(
     key: GithubServerServiceIssuanceKey,
     next_generation: GithubServerServiceGeneration,
 ) -> TestResult {
-    set_database_test_clock(database, 3_781_999).await?;
-    let early = database
-        .store()
-        .erase_expired_github_server_service_issuance(EraseExpiredGithubServerServiceIssuance::new(
-            authority_selector(identity),
-            key,
-            UnixMillis::new(3_781_999),
-        )?)
-        .await
-        .expect_err("ambiguous custody must remain until conservative expiry");
-    assert!(matches!(
-        early,
-        GithubServerServiceStoreError::ClaimRejected
-    ));
-    set_database_test_clock(database, 3_782_000).await?;
-    let erased = database
-        .store()
-        .erase_expired_github_server_service_issuance(EraseExpiredGithubServerServiceIssuance::new(
-            authority_selector(identity),
-            key,
-            UnixMillis::new(3_782_000),
-        )?)
-        .await?;
-    assert_eq!(erased.state(), GithubServerServiceIssuanceState::Revoked);
-
-    set_database_test_clock(database, 3_782_000).await?;
-    database
-        .store()
-        .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-            authority_selector(identity),
-            next_generation,
-            GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(3_782_000),
-            UnixMillis::new(3_783_000),
-            UnixMillis::new(3_782_500),
-        )?)
-        .await?;
+    let early = claim_next_maintenance(database, identity.tenant(), 3_781_999, 3_782_099).await?;
+    assert!(
+        early.is_none(),
+        "ambiguous custody must remain until conservative expiry"
+    );
+    assert_issuance_state(database, key, "indeterminate").await?;
+    let claimed =
+        claim_next_mint(database, identity, next_generation, 3_782_000, 3_782_500).await?;
     let pre_io_key = GithubServerServiceIssuanceKey::new(identity.authority_id(), next_generation);
-    set_database_test_clock(database, 3_782_500).await?;
-    let rejected = database
-        .store()
-        .reconcile_expired_github_server_service_mint(ReconcileExpiredGithubServerServiceMint::new(
-            authority_selector(identity),
-            pre_io_key,
-            UnixMillis::new(3_782_500),
-        )?)
-        .await?;
-    assert_eq!(rejected.state(), GithubServerServiceIssuanceState::Rejected);
+    assert_eq!(claimed.claim().key(), pre_io_key);
+    assert_issuance_state(database, key, "indeterminate").await?;
+    claim_next_reduced(
+        database,
+        identity,
+        key,
+        3_782_000,
+        3_782_100,
+        GithubServerServiceIssuanceState::Revoked,
+    )
+    .await?;
+    claim_next_reduced(
+        database,
+        identity,
+        pre_io_key,
+        3_782_500,
+        3_782_600,
+        GithubServerServiceIssuanceState::Rejected,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1500,18 +1560,7 @@ async fn late_known_token_narrows_indeterminate_failure_gate_to_authenticated_ex
         )
         .await?;
         let generation = GithubServerServiceGeneration::new(1)?;
-        set_database_test_clock(&database, 1_000).await?;
-        let claimed = database
-            .store()
-            .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-                authority_selector(&identity),
-                generation,
-                GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-                UnixMillis::new(1_000),
-                UnixMillis::new(2_000),
-                UnixMillis::new(1_500),
-            )?)
-            .await?;
+        let claimed = claim_next_mint(&database, &identity, generation, 1_000, 2_000).await?;
         set_database_test_clock(&database, 1_100).await?;
         database
             .store()
@@ -1521,17 +1570,15 @@ async fn late_known_token_narrows_indeterminate_failure_gate_to_authenticated_ex
             )?)
             .await?;
         let key = claimed.claim().key();
-        set_database_test_clock(&database, 1_500).await?;
-        database
-            .store()
-            .reconcile_expired_github_server_service_mint(
-                ReconcileExpiredGithubServerServiceMint::new(
-                    authority_selector(&identity),
-                    key,
-                    UnixMillis::new(1_500),
-                )?,
-            )
-            .await?;
+        claim_next_reduced(
+            &database,
+            &identity,
+            key,
+            2_000,
+            2_100,
+            GithubServerServiceIssuanceState::Indeterminate,
+        )
+        .await?;
         let ambiguous = database
             .store()
             .inspect_github_server_service_authority(identity.tenant(), identity.authority_id())
@@ -1552,34 +1599,12 @@ async fn late_known_token_narrows_indeterminate_failure_gate_to_authenticated_ex
         );
 
         let successor = GithubServerServiceGeneration::new(2)?;
-        set_database_test_clock(&database, 219_999).await?;
-        let early = database
-            .store()
-            .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-                authority_selector(&identity),
-                successor,
-                GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-                UnixMillis::new(219_999),
-                UnixMillis::new(220_099),
-                UnixMillis::new(220_098),
-            )?)
-            .await;
-        assert!(matches!(
-            early,
-            Err(GithubServerServiceStoreError::ClaimRejected)
-        ));
-        set_database_test_clock(&database, 220_000).await?;
-        database
-            .store()
-            .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-                authority_selector(&identity),
-                successor,
-                GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-                UnixMillis::new(220_000),
-                UnixMillis::new(220_100),
-                UnixMillis::new(220_099),
-            )?)
-            .await?;
+        let early = claim_next_maintenance(&database, identity.tenant(), 219_999, 220_099).await?;
+        assert!(
+            early.is_none(),
+            "the authenticated expiry gate is exclusive"
+        );
+        claim_next_mint(&database, &identity, successor, 220_000, 220_100).await?;
         Ok(())
     })
     .await
@@ -1611,9 +1636,9 @@ async fn finish_late_known_token(
     let revoke_only = FinishGithubServerServiceMint::issued_revoke_only(
         claimed.claim().clone(),
         protected,
-        UnixMillis::new(1_600),
+        UnixMillis::new(2_100),
     )?;
-    set_database_test_clock(database, 1_600).await?;
+    set_database_test_clock(database, 2_100).await?;
     let retained = database
         .store()
         .finish_github_server_service_mint(&revoke_only)
@@ -2238,36 +2263,81 @@ async fn claim_next_maintenance(
         .await?)
 }
 
-async fn reject_claimed_generation(
+async fn claim_next_mint(
     database: &TestDatabase,
     identity: &GithubServerServiceAuthorityIdentity,
-    generation: u64,
-    requested_at: i64,
-) -> TestResult<i64> {
-    set_database_test_clock(database, requested_at).await?;
-    let claimed = database
-        .store()
-        .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-            authority_selector(identity),
-            GithubServerServiceGeneration::new(generation)?,
-            GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(requested_at),
-            UnixMillis::new(requested_at + 100),
-            UnixMillis::new(requested_at + 99),
-        )?)
-        .await?;
-    let rejected_at = requested_at + 99;
-    set_database_test_clock(database, rejected_at).await?;
-    let receipt = database
-        .store()
-        .reconcile_expired_github_server_service_mint(ReconcileExpiredGithubServerServiceMint::new(
-            authority_selector(identity),
-            claimed.claim().key(),
-            UnixMillis::new(rejected_at),
-        )?)
-        .await?;
-    assert_eq!(receipt.state(), GithubServerServiceIssuanceState::Rejected);
-    Ok(rejected_at + GITHUB_SERVICE_GENERATION_FAILURE_BACKOFF_MILLIS)
+    generation: GithubServerServiceGeneration,
+    observed_at: i64,
+    expires_at: i64,
+) -> TestResult<automata_ci_store::ClaimedGithubServerServiceMint> {
+    let outcome = claim_next_maintenance(database, identity.tenant(), observed_at, expires_at)
+        .await?
+        .expect("the exact authority must have one due mint");
+    let GithubServerServiceMaintenanceOutcome::Mint(claimed) = outcome else {
+        panic!("the exact authority must produce a mint outcome");
+    };
+    let expected_key = GithubServerServiceIssuanceKey::new(identity.authority_id(), generation);
+    assert_eq!(claimed.claim().selector(), &authority_selector(identity));
+    assert_eq!(claimed.claim().key(), expected_key);
+    Ok(*claimed)
+}
+
+async fn claim_next_revocation(
+    database: &TestDatabase,
+    identity: &GithubServerServiceAuthorityIdentity,
+    key: GithubServerServiceIssuanceKey,
+    observed_at: i64,
+    expires_at: i64,
+) -> TestResult<automata_ci_store::ClaimedGithubServerServiceRevocation> {
+    let outcome = claim_next_maintenance(database, identity.tenant(), observed_at, expires_at)
+        .await?
+        .expect("the exact authority must have one due revocation");
+    let GithubServerServiceMaintenanceOutcome::Revocation(claimed) = outcome else {
+        panic!("the exact authority must produce a revocation outcome");
+    };
+    assert_eq!(claimed.claim().selector(), &authority_selector(identity));
+    assert_eq!(claimed.claim().key(), key);
+    Ok(*claimed)
+}
+
+async fn claim_next_reduced(
+    database: &TestDatabase,
+    identity: &GithubServerServiceAuthorityIdentity,
+    key: GithubServerServiceIssuanceKey,
+    observed_at: i64,
+    expires_at: i64,
+    expected_state: GithubServerServiceIssuanceState,
+) -> TestResult<automata_ci_store::GithubServerServiceIssuanceReceipt> {
+    let outcome = claim_next_maintenance(database, identity.tenant(), observed_at, expires_at)
+        .await?
+        .expect("the exact authority must have one due reduction");
+    let GithubServerServiceMaintenanceOutcome::Reduced { selector, receipt } = outcome else {
+        panic!("the exact authority must produce a reduced outcome");
+    };
+    assert_eq!(selector, authority_selector(identity));
+    assert_eq!(receipt.key(), key);
+    assert_eq!(receipt.state(), expected_state);
+    Ok(receipt)
+}
+
+async fn assert_issuance_state(
+    database: &TestDatabase,
+    key: GithubServerServiceIssuanceKey,
+    expected: &str,
+) -> TestResult {
+    let state: String = sqlx::query_scalar(
+        r"
+        SELECT state
+        FROM github_server_service_authority_issuances
+        WHERE authority_id = $1 AND generation = $2
+        ",
+    )
+    .bind(key.authority_id().as_uuid())
+    .bind(i64::try_from(key.generation().get())?)
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(state, expected);
+    Ok(())
 }
 
 async fn mint_ready(
@@ -2280,20 +2350,15 @@ async fn mint_ready(
 ) -> TestResult {
     let generation_number = generation;
     let generation = GithubServerServiceGeneration::new(generation)?;
-    let worker = GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?;
-    set_database_test_clock(database, requested_at).await?;
-    let claimed = database
-        .store()
-        .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-            authority_selector(identity),
-            generation,
-            worker,
-            UnixMillis::new(requested_at),
-            UnixMillis::new(claim_expires_at),
-            UnixMillis::new(claim_expires_at - 1),
-        )?)
-        .await
-        .map_err(|error| format!("claim ready generation {generation_number}: {error}"))?;
+    let claimed = claim_next_mint(
+        database,
+        identity,
+        generation,
+        requested_at,
+        claim_expires_at,
+    )
+    .await
+    .map_err(|error| format!("claim ready generation {generation_number}: {error}"))?;
     set_database_test_clock(database, requested_at + 10).await?;
     database
         .store()

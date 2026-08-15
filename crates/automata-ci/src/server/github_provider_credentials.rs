@@ -1052,9 +1052,7 @@ fn map_authority_resolution_store_error(
         | GithubServerServiceStoreError::IdentityConflict
         | GithubServerServiceStoreError::ClaimRejected
         | GithubServerServiceStoreError::HandoffRejected
-        | GithubServerServiceStoreError::RefreshAlreadyActive
         | GithubServerServiceStoreError::FenceExhausted
-        | GithubServerServiceStoreError::RetryLimitReached
         | GithubServerServiceStoreError::HandoffStillLive => {
             GithubProviderCredentialHandoffError::Inconsistent
         }
