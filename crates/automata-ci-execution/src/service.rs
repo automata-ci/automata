@@ -4,14 +4,50 @@ use std::{
     time::Duration,
 };
 
-use crate::{
-    ContainerHandle, ExecutionEnvironment, ImmutableImage, MAX_SANDBOX_HANDLE_BYTES, ValueError,
-};
+use crate::{ExecutionEnvironment, ImmutableImage, MAX_SANDBOX_HANDLE_BYTES, ValueError};
 
 const MAX_SERVICE_NAME_BYTES: usize = 256;
 const MAX_HEALTH_COMMAND_BYTES: usize = 64 * 1024;
 const MAX_HEALTH_RETRIES: u32 = 1_000;
 const MAX_HEALTH_DURATION: Duration = Duration::from_hours(24);
+
+/// Opaque provider-owned handle for one service container.
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct ContainerHandle(String);
+
+impl ContainerHandle {
+    /// Creates a bounded portable container token.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, or path-like tokens.
+    pub fn new(value: impl Into<String>) -> Result<Self, ValueError> {
+        let value = value.into();
+        let valid = !value.is_empty()
+            && value.len() <= MAX_SANDBOX_HANDLE_BYTES
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte));
+        valid
+            .then_some(Self(value))
+            .ok_or(ValueError::InvalidSandboxHandle)
+    }
+
+    /// Borrows the provider-owned token.
+    ///
+    /// Consumers must treat this value as opaque and must not derive host
+    /// paths, container names, or authorization decisions from its contents.
+    #[must_use]
+    pub fn opaque(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for ContainerHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ContainerHandle([OPAQUE])")
+    }
+}
 
 /// Transport protocol for one provider-published service port.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
