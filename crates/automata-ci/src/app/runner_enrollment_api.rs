@@ -1,4 +1,4 @@
-//! One-time runner enrollment over the human HTTPS listener.
+//! One-time runner enrollment over the control-plane HTTPS listener.
 
 use std::{fmt, sync::Arc, time::Duration};
 
@@ -12,7 +12,7 @@ use automata_ci_auth::{
 };
 use automata_ci_auth_postgres::management::{
     ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresHumanRbacManagementRepository,
+    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
     PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
     RunnerEnrollmentPrepareOutcome,
 };
@@ -321,27 +321,39 @@ fn server_root_authority(
 pub(crate) struct RunnerCertificateIssuerError;
 
 #[derive(Clone)]
-struct RunnerEnrollmentApiState {
-    repository: Arc<PostgresHumanRbacManagementRepository>,
-    issuer: Arc<RunnerCertificateIssuer>,
+struct RunnerEnrollmentCreateApiState {
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
     clock: Arc<dyn Clock>,
+}
+
+#[derive(Clone)]
+struct RunnerEnrollmentRedeemApiState {
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
+    issuer: Arc<RunnerCertificateIssuer>,
     capability_readiness: RunnerCapabilityReadiness,
     redemptions: Arc<tokio::sync::Semaphore>,
 }
 
-pub(crate) fn runner_enrollment_api_router(
-    repository: Arc<PostgresHumanRbacManagementRepository>,
-    issuer: Arc<RunnerCertificateIssuer>,
+pub(crate) fn runner_enrollment_create_router(
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
     clock: Arc<dyn Clock>,
-    capability_readiness: RunnerCapabilityReadiness,
 ) -> Router {
     Router::new()
         .route(RUNNER_ENROLLMENTS_PATH, post(create_enrollment))
+        .with_state(RunnerEnrollmentCreateApiState { repository, clock })
+        .layer(axum::middleware::from_fn(super::api_security::no_store))
+}
+
+pub(crate) fn runner_enrollment_redeem_router(
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
+    issuer: Arc<RunnerCertificateIssuer>,
+    capability_readiness: RunnerCapabilityReadiness,
+) -> Router {
+    Router::new()
         .route(RUNNER_ENROLLMENT_REDEEM_PATH, post(redeem_enrollment))
-        .with_state(RunnerEnrollmentApiState {
+        .with_state(RunnerEnrollmentRedeemApiState {
             repository,
             issuer,
-            clock,
             capability_readiness,
             redemptions: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REDEMPTIONS)),
         })
@@ -349,7 +361,7 @@ pub(crate) fn runner_enrollment_api_router(
 }
 
 async fn create_enrollment(
-    State(state): State<RunnerEnrollmentApiState>,
+    State(state): State<RunnerEnrollmentCreateApiState>,
     request: Request,
 ) -> Response {
     let actor = match actor_from_request(&state, &request) {
@@ -407,7 +419,7 @@ async fn create_enrollment(
 }
 
 async fn redeem_enrollment(
-    State(state): State<RunnerEnrollmentApiState>,
+    State(state): State<RunnerEnrollmentRedeemApiState>,
     request: Request,
 ) -> Response {
     let Ok(_permit) = state.redemptions.try_acquire() else {
@@ -548,7 +560,7 @@ fn decide_enrollment_preparation(
 }
 
 fn actor_from_request(
-    state: &RunnerEnrollmentApiState,
+    state: &RunnerEnrollmentCreateApiState,
     request: &Request,
 ) -> Result<ManagementActor, ApiError> {
     let snapshot = request

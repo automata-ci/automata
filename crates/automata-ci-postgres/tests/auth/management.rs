@@ -8,6 +8,7 @@ use automata_ci_auth::{
         AuthorizationScope, Permission, RepositoryResource, RepositoryResourceId, RoleName,
     },
     human::{PrincipalId, TenantId},
+    installation::InstallationTenant,
     management::{
         ChangeMemberStatus, CreateRole, DeleteRole, DirectBindingGrantOptionCollection,
         DirectBindingGrantOptionsState, GrantRole, HumanRbacManagementRepository,
@@ -28,10 +29,13 @@ use automata_ci_core::{
     RunnerId, RunnerLabel, RunnerPlatform, Sha256Digest,
 };
 use automata_ci_postgres::auth::{
-    PostgresHumanRbacManagementRepository,
+    ConfigureDeploymentInstallation, ConfigureDeploymentInstallationOutcome,
+    PostgresHumanRbacManagementRepository, PostgresInstallationAuthorityRepository,
     management::{
         ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken,
-        MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
+        EnsureInstallationBootstrapRunnerEnrollmentToken,
+        InstallationBootstrapRunnerEnrollmentTokenOutcome, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+        MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
         PrepareRunnerEnrollment, RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
     },
 };
@@ -41,6 +45,16 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::support::{TestResult, run_with_database};
+
+#[derive(sqlx::FromRow)]
+struct StoredRunnerEnrollmentIssuer {
+    tenant_id: String,
+    issuer_kind: String,
+    issued_by_principal_id: Option<Uuid>,
+    issued_by_session_id: Option<Uuid>,
+    issued_authorization_revision: Option<i64>,
+    installation_authority_sha256: Option<Vec<u8>>,
+}
 
 fn uuid(value: &str) -> Uuid {
     Uuid::parse_str(value).expect("test UUID")
@@ -352,7 +366,11 @@ async fn seed_cli_session(
             "UPDATE human_sessions SET lifecycle_status='active',activated_at_ms=$2,revision=revision+1 WHERE id=$1",
         )
         .bind(session_id)
-        .bind(future_activation.then_some(database_time_ms + 30_000))
+        .bind(if future_activation {
+            database_time_ms + 30_000
+        } else {
+            database_time_ms
+        })
         .execute(pool)
         .await?;
     }
@@ -3177,6 +3195,521 @@ async fn grant_role_rechecks_active_target_after_the_option_snapshot() -> TestRe
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(
     clippy::too_many_lines,
+    reason = "the test keeps tenant authority, exact replay, audit, and schema guards visible as one contract"
+)]
+async fn deployment_bootstrap_is_exact_concurrent_nonadopting_and_digest_only() -> TestResult {
+    run_with_database(|database| async move {
+        let pool = database.pool();
+        let installation_repository =
+            PostgresInstallationAuthorityRepository::new(pool.clone());
+        let repository = PostgresRunnerEnrollmentRepository::new(pool.clone());
+        let bootstrap_operation_id = Uuid::new_v4();
+        let bootstrap_request = ConfigureDeploymentInstallation::new(
+            [31_u8; 32],
+            bootstrap_operation_id,
+            InstallationTenant::new(
+                tenant("deployment-runner-enrollment"),
+                "Local deployment",
+            )?,
+        )?;
+        let bootstrap_debug = format!("{bootstrap_request:?}");
+        assert!(!bootstrap_debug.contains("installation_authority_sha256"));
+        assert!(!bootstrap_debug.contains("31, 31"));
+
+        for display_name in ["\u{00a0}Raw tenant", "Raw tenant\u{3000}"] {
+            let invalid_boundary = sqlx::query(
+                r"
+                UPDATE installation_state
+                SET state='pending',configuration_mode='human',
+                    bootstrap_token_hash=$1,
+                    bootstrap_hash_key_id='bootstrap-test-v1',
+                    expected_provider_id='github',expected_provider_subject='42',
+                    challenge_expires_at_ms=160000,
+                    tenant_id='raw-boundary-tenant',tenant_display_name=$2,
+                    updated_at_ms=100000,revision=revision+1
+                WHERE singleton=TRUE
+                ",
+            )
+            .bind([27_u8; 32].as_slice())
+            .bind(display_name)
+            .execute(pool)
+            .await
+            .expect_err("durable installation identity must reject boundary whitespace");
+            assert_eq!(
+                invalid_boundary
+                    .as_database_error()
+                    .and_then(sqlx::error::DatabaseError::constraint),
+                Some("installation_state_tenant_display_name_shape")
+            );
+        }
+
+        seed_tenant(pool, "unrelated-existing-tenant").await?;
+        seed_tenant(pool, "preexisting-unbound-tenant").await?;
+        assert!(matches!(
+            installation_repository
+                .configure_deployment(ConfigureDeploymentInstallation::new(
+                    [29_u8; 32],
+                    Uuid::new_v4(),
+                    InstallationTenant::new(
+                        tenant("preexisting-unbound-tenant"),
+                        "preexisting-unbound-tenant",
+                    )?,
+                )?)
+                .await?,
+            ConfigureDeploymentInstallationOutcome::Conflict
+        ));
+        sqlx::query(
+            "INSERT INTO tenants (id,display_name,created_at_ms,updated_at_ms) VALUES ('preexisting-name-owner','Reserved deployment name',100000,100000)",
+        )
+        .execute(pool)
+        .await?;
+        assert!(matches!(
+            installation_repository
+                .configure_deployment(ConfigureDeploymentInstallation::new(
+                    [30_u8; 32],
+                    Uuid::new_v4(),
+                    InstallationTenant::new(
+                        tenant("new-id-for-reserved-name"),
+                        "Reserved deployment name",
+                    )?,
+                )?)
+                .await?,
+            ConfigureDeploymentInstallationOutcome::Conflict
+        ));
+        let absent_counts: (i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM tenants
+                    WHERE id='new-id-for-reserved-name'),
+                (SELECT count(*) FROM installation_state
+                    WHERE configuration_mode='deployment'),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='auth.installation.deployment_configured')
+            ",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(absent_counts, (0, 0, 0));
+
+        let (left, right) = tokio::join!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                installation_repository.configure_deployment(bootstrap_request.clone()),
+            ),
+            installation_repository.configure_deployment(bootstrap_request.clone()),
+        );
+        // A real caller may lose the first result at its total deadline after
+        // commit. Treat it as ambiguous and recover only by exact replay.
+        let bootstrap_outcomes = [left??, right?];
+        assert_eq!(
+            bootstrap_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ConfigureDeploymentInstallationOutcome::Applied(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            bootstrap_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ConfigureDeploymentInstallationOutcome::Replayed(_)))
+                .count(),
+            1
+        );
+        let authority = bootstrap_outcomes
+            .into_iter()
+            .find_map(|outcome| match outcome {
+                ConfigureDeploymentInstallationOutcome::Applied(proof) => Some(proof),
+                _ => None,
+            })
+            .ok_or("deployment installation was not configured")?;
+        assert!(matches!(
+            installation_repository
+                .configure_deployment(bootstrap_request.clone())
+                .await?,
+            ConfigureDeploymentInstallationOutcome::Replayed(_)
+        ));
+
+        let bootstrap_counts: (i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM tenants
+                    WHERE id='deployment-runner-enrollment'
+                      AND display_name='Local deployment'),
+                (SELECT count(*) FROM installation_state
+                    WHERE state='configured' AND configuration_mode='deployment'),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='auth.installation.deployment_configured'
+                      AND outcome='succeeded')
+            ",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(bootstrap_counts, (1, 1, 1));
+        let legacy_installation_objects: Vec<String> = sqlx::query_scalar(
+            r"
+                SELECT 'relation:' || relation.relname AS name
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid=relation.relnamespace
+                WHERE namespace.nspname=current_schema()
+                  AND relation.relname LIKE 'human_auth_installation_state%'
+                UNION ALL
+                SELECT 'constraint:' || constraint_name.conname
+                FROM pg_constraint AS constraint_name
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid=constraint_name.connamespace
+                WHERE namespace.nspname=current_schema()
+                  AND constraint_name.conname LIKE
+                      'human_auth_installation_state%'
+                UNION ALL
+                SELECT 'trigger:' || trigger_name.tgname
+                FROM pg_trigger AS trigger_name
+                JOIN pg_class AS relation
+                  ON relation.oid=trigger_name.tgrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid=relation.relnamespace
+                WHERE namespace.nspname=current_schema()
+                  AND trigger_name.tgname LIKE
+                      'human_auth_installation_state%'
+                UNION ALL
+                SELECT 'function:' || function_name.proname
+                FROM pg_proc AS function_name
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid=function_name.pronamespace
+                WHERE namespace.nspname=current_schema()
+                  AND function_name.proname LIKE
+                      'human_auth_installation_state%'
+                ORDER BY name
+            ",
+        )
+        .fetch_all(pool)
+        .await?;
+        assert!(
+            legacy_installation_objects.is_empty(),
+            "legacy installation schema objects survived: {legacy_installation_objects:?}"
+        );
+
+        let enrollment_id = Uuid::new_v4();
+        let token_sha256 = [41_u8; 32];
+        let request = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+            authority.clone(),
+            enrollment_id,
+            token_sha256,
+            RunnerGroup::new("local")?,
+            60_000,
+        )?;
+        let redacted = format!("{request:?}");
+        assert!(!redacted.contains("token_sha256"));
+        assert!(!redacted.contains("41, 41"));
+        let (left, right) = tokio::join!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                repository.ensure_installation_bootstrap_runner_enrollment_token(request.clone()),
+            ),
+            repository.ensure_installation_bootstrap_runner_enrollment_token(request.clone()),
+        );
+        let outcomes = [left??, right?];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(_)
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(_)
+                ))
+                .count(),
+            1
+        );
+        let record = outcomes
+            .into_iter()
+            .find_map(|outcome| match outcome {
+                InstallationBootstrapRunnerEnrollmentTokenOutcome::Applied(record) => Some(record),
+                _ => None,
+            })
+            .ok_or("deployment runner token was not applied")?;
+        assert_eq!(record.enrollment_id, enrollment_id);
+        assert_eq!(record.runner_group, "local");
+        assert_eq!(
+            repository
+                .ensure_installation_bootstrap_runner_enrollment_token(request.clone())
+                .await?,
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Replayed(record.clone())
+        );
+        let stored: StoredRunnerEnrollmentIssuer = sqlx::query_as(
+            r"
+            SELECT tenant_id,issuer_kind,issued_by_principal_id,issued_by_session_id,
+                   issued_authorization_revision,installation_authority_sha256
+            FROM runner_enrollment_tokens WHERE id=$1
+            ",
+        )
+        .bind(enrollment_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(stored.tenant_id, "deployment-runner-enrollment");
+        assert_eq!(stored.issuer_kind, "installation_bootstrap");
+        assert_eq!(stored.issued_by_principal_id, None);
+        assert_eq!(stored.issued_by_session_id, None);
+        assert_eq!(stored.issued_authorization_revision, None);
+        let stored_authority = stored
+            .installation_authority_sha256
+            .ok_or("installation authority digest was not stored")?;
+        assert_eq!(stored_authority.len(), 32);
+        assert_ne!(stored_authority, vec![0_u8; 32]);
+        assert_ne!(stored_authority, vec![31_u8; 32]);
+
+        let crossed_bootstraps = [
+            ConfigureDeploymentInstallation::new(
+                [31_u8; 32],
+                Uuid::new_v4(),
+                InstallationTenant::new(
+                    tenant("deployment-runner-enrollment"),
+                    "Local deployment",
+                )?,
+            )?,
+            ConfigureDeploymentInstallation::new(
+                [33_u8; 32],
+                bootstrap_operation_id,
+                InstallationTenant::new(
+                    tenant("deployment-runner-enrollment"),
+                    "Local deployment",
+                )?,
+            )?,
+            ConfigureDeploymentInstallation::new(
+                [31_u8; 32],
+                bootstrap_operation_id,
+                InstallationTenant::new(tenant("crossed-tenant"), "Local deployment")?,
+            )?,
+            ConfigureDeploymentInstallation::new(
+                [31_u8; 32],
+                bootstrap_operation_id,
+                InstallationTenant::new(
+                    tenant("deployment-runner-enrollment"),
+                    "Crossed display name",
+                )?,
+            )?,
+        ];
+        for crossed in crossed_bootstraps {
+            assert!(matches!(
+                installation_repository.configure_deployment(crossed).await?,
+                ConfigureDeploymentInstallationOutcome::Conflict
+            ));
+        }
+        let crossed_counts: (i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM tenants
+                    WHERE id LIKE 'crossed-%'),
+                (SELECT count(*) FROM installation_state
+                    WHERE configuration_mode='deployment'),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='auth.installation.deployment_configured'
+                      AND outcome='succeeded')
+            ",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(crossed_counts, (0, 1, 1));
+
+        let conflicting_requests = [
+            EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+                authority.clone(),
+                enrollment_id,
+                [42_u8; 32],
+                RunnerGroup::new("local")?,
+                60_000,
+            )?,
+            EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+                authority.clone(),
+                enrollment_id,
+                token_sha256,
+                RunnerGroup::new("other")?,
+                60_000,
+            )?,
+            EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+                authority.clone(),
+                enrollment_id,
+                token_sha256,
+                RunnerGroup::new("local")?,
+                120_000,
+            )?,
+        ];
+        for conflicting in conflicting_requests {
+            assert_eq!(
+                repository
+                    .ensure_installation_bootstrap_runner_enrollment_token(conflicting)
+                    .await?,
+                InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict
+            );
+        }
+        let reused_digest = EnsureInstallationBootstrapRunnerEnrollmentToken::new(
+            authority.clone(),
+            Uuid::new_v4(),
+            token_sha256,
+            RunnerGroup::new("other")?,
+            60_000,
+        )?;
+        assert_eq!(
+            repository
+                .ensure_installation_bootstrap_runner_enrollment_token(reused_digest)
+                .await?,
+            InstallationBootstrapRunnerEnrollmentTokenOutcome::Conflict
+        );
+        let committed_counts: (i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM runner_groups),
+                (SELECT count(*) FROM runner_enrollment_tokens),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.enrollment_token.installation_bootstrap'
+                      AND outcome='succeeded'),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.enrollment_token.installation_bootstrap'
+                      AND outcome='failed')
+            ",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(committed_counts, (1, 1, 1, 4));
+
+        let malformed = sqlx::query(
+            r"
+            INSERT INTO runner_enrollment_tokens (
+                id,tenant_id,runner_group_id,token_sha256,issuer_kind,
+                issued_at_ms,expires_at_ms
+            ) VALUES ($1,'deployment-runner-enrollment',$2,$3,
+                      'installation_bootstrap',100000,160000)
+            ",
+        )
+        .bind(Uuid::new_v4())
+        .bind(record.runner_group_id)
+        .bind([43_u8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect_err("deployment issuer shape must be total");
+        assert_eq!(
+            malformed
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("runner_enrollment_tokens_issuer_shape")
+        );
+
+        let invalid_authority = sqlx::query(
+            r"
+            INSERT INTO runner_enrollment_tokens (
+                id,tenant_id,runner_group_id,token_sha256,issuer_kind,
+                installation_authority_sha256,issued_at_ms,expires_at_ms
+            ) VALUES ($1,'deployment-runner-enrollment',$2,$3,
+                      'installation_bootstrap',$4,100000,160000)
+            ",
+        )
+        .bind(Uuid::new_v4())
+        .bind(record.runner_group_id)
+        .bind([44_u8; 32].as_slice())
+        .bind([0_u8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect_err("deployment authority digest must be nonzero");
+        assert_eq!(
+            invalid_authority
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("runner_enrollment_tokens_installation_authority_digest")
+        );
+
+        let unbound_authority = sqlx::query(
+            r"
+            INSERT INTO runner_enrollment_tokens (
+                id,tenant_id,runner_group_id,token_sha256,issuer_kind,
+                installation_authority_sha256,issued_at_ms,expires_at_ms
+            ) VALUES ($1,'deployment-runner-enrollment',$2,$3,
+                      'installation_bootstrap',$4,100000,160000)
+            ",
+        )
+        .bind(Uuid::new_v4())
+        .bind(record.runner_group_id)
+        .bind([45_u8; 32].as_slice())
+        .bind([99_u8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect_err("deployment authority must be durably bound to the exact tenant");
+        assert_eq!(
+            unbound_authority
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("runner_enrollment_tokens_installation_authority_fkey")
+        );
+
+        let rewrite = sqlx::query(
+            "UPDATE runner_enrollment_tokens SET installation_authority_sha256=$2 WHERE id=$1",
+        )
+        .bind(enrollment_id)
+        .bind([46_u8; 32].as_slice())
+        .execute(pool)
+        .await
+        .expect_err("deployment issuer authority must be immutable");
+        assert_eq!(
+            rewrite
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("runner_enrollment_tokens_consume_once")
+        );
+
+        let tenant_rewrite = sqlx::query(
+            "UPDATE tenants SET display_name='Rebound deployment' WHERE id='deployment-runner-enrollment'",
+        )
+        .execute(pool)
+        .await
+        .expect_err("bound tenant identity must remain exact");
+        assert_eq!(
+            tenant_rewrite
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("installation_state_exact_configured_tenant_fkey")
+        );
+
+        for (statement, expected_constraint) in [
+            (
+                "UPDATE installation_state SET tenant_display_name='Rewritten' WHERE singleton",
+                "installation_state_configured_immutable",
+            ),
+            (
+                "DELETE FROM installation_state WHERE singleton",
+                "installation_state_singleton_immutable",
+            ),
+            (
+                "TRUNCATE installation_state CASCADE",
+                "installation_state_singleton_immutable",
+            ),
+        ] {
+            let immutable = sqlx::query(statement)
+                .execute(pool)
+                .await
+                .expect_err("deployment installation binding must be immutable");
+            assert_eq!(
+                immutable
+                    .as_database_error()
+                    .and_then(sqlx::error::DatabaseError::constraint),
+                Some(expected_constraint)
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(
+    clippy::too_many_lines,
     reason = "the integration test keeps issuance, concurrent consumption, and durable assertions contiguous"
 )]
 async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResult {
@@ -3206,9 +3739,16 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
         )
         .await?;
         let session_id = Uuid::new_v4();
-        let authority_revision =
-            seed_session(pool, "runner-enrollment", manager, session_id).await?;
-        let repository = PostgresHumanRbacManagementRepository::new(pool.clone());
+        let authority_revision = seed_cli_session(
+            pool,
+            "runner-enrollment",
+            manager,
+            session_id,
+            "active",
+            false,
+        )
+        .await?;
+        let repository = PostgresRunnerEnrollmentRepository::new(pool.clone());
         let token_sha256 = [7_u8; 32];
         let enrollment_id = Uuid::new_v4();
         let issued = repository
@@ -3229,13 +3769,33 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
         let ManagementMutationOutcome::Applied(issued) = issued else {
             return Err("runner token was not issued".into());
         };
+        sqlx::query(
+            r"
+            UPDATE tenant_human_memberships
+            SET authorization_revision=authorization_revision+1
+            WHERE tenant_id='runner-enrollment' AND principal_id=$1
+            ",
+        )
+        .bind(manager)
+        .execute(pool)
+        .await?;
+        let rotated_session_id = Uuid::new_v4();
+        let rotated_authority_revision = seed_cli_session(
+            pool,
+            "runner-enrollment",
+            manager,
+            rotated_session_id,
+            "active",
+            false,
+        )
+        .await?;
         let retried = repository
             .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
                 actor: actor(
                     "runner-enrollment",
                     manager,
-                    session_id,
-                    authority_revision,
+                    rotated_session_id,
+                    rotated_authority_revision,
                     "retry-runner-token",
                 ),
                 enrollment_id,
@@ -3255,6 +3815,45 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
         .fetch_one(pool)
         .await?;
         assert_eq!(successful_create_audits, 1);
+        let replay_state: (i64, i64, i64, Option<Uuid>, Option<i64>) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.enrollment_token.create'
+                      AND resource_id=$1 AND outcome='failed'),
+                (SELECT count(*) FROM runner_enrollment_tokens WHERE id=$2),
+                (SELECT count(*) FROM runner_groups
+                    WHERE tenant_id='runner-enrollment' AND name='trusted-linux'),
+                (SELECT issued_by_session_id FROM runner_enrollment_tokens WHERE id=$2),
+                (SELECT issued_authorization_revision
+                    FROM runner_enrollment_tokens WHERE id=$2)
+            ",
+        )
+        .bind(enrollment_id.hyphenated().to_string())
+        .bind(enrollment_id)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            replay_state,
+            (0, 1, 1, Some(session_id), Some(authority_revision))
+        );
+        let audit_evidence: (Option<Uuid>, Option<i64>) = sqlx::query_as(
+            r"
+            SELECT actor_session_id,authorization_revision
+            FROM security_audit_events
+            WHERE action='runner.enrollment_token.create'
+              AND resource_id=$1 AND outcome='succeeded'
+            ",
+        )
+        .bind(enrollment_id.hyphenated().to_string())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            audit_evidence,
+            (Some(session_id), Some(authority_revision))
+        );
+        let session_id = rotated_session_id;
+        let authority_revision = rotated_authority_revision;
         let conflicting = repository
             .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
                 actor: actor(

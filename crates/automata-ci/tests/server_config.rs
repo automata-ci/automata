@@ -648,6 +648,19 @@ fn installation_bootstrap_requires_proof_identity_and_exact_tenant() {
         ServerConfig::from_args(&args),
         Err(ServerConfigError::InvalidBootstrapConfiguration)
     ));
+
+    for display_name in [
+        " Automata CI",
+        "Automata CI ",
+        "\u{00a0}Automata CI",
+        "Automata CI\u{3000}",
+    ] {
+        args.bootstrap_tenant_display_name = Some(display_name.into());
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidBootstrapConfiguration)
+        ));
+    }
 }
 
 #[test]

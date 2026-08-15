@@ -183,6 +183,34 @@ fn durable_session(tenant_id: &str) -> DurableSession {
 }
 
 #[test]
+fn tenant_display_name_is_canonical_across_construction_and_deserialization() {
+    let tenant_id = TenantId::new("tenant-a").expect("tenant");
+    for display_name in [
+        " Tenant A",
+        "Tenant A ",
+        "\u{00a0}Tenant A",
+        "Tenant A\u{3000}",
+    ] {
+        assert_eq!(
+            InstallationTenant::new(tenant_id.clone(), display_name),
+            Err(InstallationValueError::InvalidTenantDisplayName)
+        );
+        assert!(
+            serde_json::from_value::<InstallationTenant>(serde_json::json!({
+                "tenant_id": "tenant-a",
+                "display_name": display_name,
+            }))
+            .is_err(),
+            "deserialization must not bypass display-name canonicalization"
+        );
+    }
+    assert_eq!(
+        InstallationTenant::new(tenant_id, "Tenant A").expect("canonical tenant"),
+        tenant()
+    );
+}
+
+#[test]
 fn proof_verifiers_are_redacted_and_key_ids_match_database_shape() {
     assert!(InstallationProofKeyId::new(":invalid").is_err());
     assert!(InstallationProofKeyId::new(".invalid").is_err());

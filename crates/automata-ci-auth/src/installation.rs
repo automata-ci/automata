@@ -170,7 +170,8 @@ impl InstallationTenant {
     ///
     /// # Errors
     ///
-    /// Rejects empty, oversized, or control-bearing display labels.
+    /// Rejects empty, oversized, leading- or trailing-whitespace, or
+    /// control-bearing display labels.
     pub fn new(
         tenant_id: TenantId,
         display_name: impl Into<String>,
@@ -178,6 +179,7 @@ impl InstallationTenant {
         let display_name = display_name.into();
         if display_name.is_empty()
             || display_name.len() > MAX_TENANT_DISPLAY_NAME_BYTES
+            || display_name.trim() != display_name
             || display_name.chars().any(char::is_control)
         {
             return Err(InstallationValueError::InvalidTenantDisplayName);
@@ -245,8 +247,8 @@ pub enum InstallationState {
         /// Immutable challenge deadline.
         expires_at: UnixTimestamp,
     },
-    /// Installation completed with one immutable initial administrator identity.
-    Configured {
+    /// Human installation completed with one immutable initial administrator identity.
+    HumanConfigured {
         /// Current singleton state revision.
         revision: InstallationRevision,
         /// Created tenant identity.
@@ -262,6 +264,15 @@ pub enum InstallationState {
         /// Durable setup completion timestamp.
         configured_at: UnixTimestamp,
     },
+    /// Deployment installation completed without fabricating a human identity.
+    DeploymentConfigured {
+        /// Current singleton state revision.
+        revision: InstallationRevision,
+        /// Created tenant identity.
+        tenant_id: TenantId,
+        /// Durable setup completion timestamp.
+        configured_at: UnixTimestamp,
+    },
 }
 
 impl InstallationState {
@@ -272,7 +283,8 @@ impl InstallationState {
             Self::Unconfigured { revision }
             | Self::Armed { revision, .. }
             | Self::LoginBound { revision, .. }
-            | Self::Configured { revision, .. } => *revision,
+            | Self::HumanConfigured { revision, .. }
+            | Self::DeploymentConfigured { revision, .. } => *revision,
         }
     }
 }
@@ -762,7 +774,7 @@ pub enum InstallationValueError {
     #[error("installation proof key ID is invalid")]
     /// The digest-key identifier was empty, oversized, or non-portable.
     InvalidProofKeyId,
-    /// The tenant display label was empty, oversized, or control-bearing.
+    /// The tenant display label was empty, oversized, whitespace-padded, or control-bearing.
     #[error("installation tenant display name is invalid")]
     InvalidTenantDisplayName,
     #[error("installation challenge lifetime is invalid")]

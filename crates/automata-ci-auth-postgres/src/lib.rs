@@ -20,9 +20,13 @@ mod support;
 pub use delegated_actor::PostgresDelegatedActorResolver;
 pub use github_mapping_management::PostgresGithubMappingManagementRepository;
 pub use github_membership::PostgresGithubMembershipRepository;
-pub use installation::PostgresInstallationRepository;
+pub use installation::{
+    ConfigureDeploymentInstallation, ConfigureDeploymentInstallationOutcome,
+    ConfiguredDeploymentInstallationProof, DeploymentInstallationRequestError,
+    PostgresInstallationAuthorityRepository, PostgresInstallationRepository,
+};
 pub use login::PostgresLoginTransactionRepository;
-pub use management::PostgresHumanRbacManagementRepository;
+pub use management::{PostgresHumanRbacManagementRepository, PostgresRunnerEnrollmentRepository};
 pub use provider_tokens::PostgresProviderTokenVault;
 pub use request_auth::PostgresRequestAuthenticationResolver;
 pub use session::PostgresHumanSessionRepository;

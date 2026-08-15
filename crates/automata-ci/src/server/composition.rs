@@ -14,6 +14,7 @@ use automata_ci_auth::{
 };
 use automata_ci_auth_postgres::{
     PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
+    PostgresRunnerEnrollmentRepository,
 };
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
 use automata_ci_blob_s3::S3BlobStoreConfigError;
@@ -133,7 +134,9 @@ use crate::app::{
         OperationalRepositorySecretWebData, RepositorySecretWebData,
         repository_secret_browser_router,
     },
-    runner_enrollment_api::{RunnerCertificateIssuer, runner_enrollment_api_router},
+    runner_enrollment_api::{
+        RunnerCertificateIssuer, runner_enrollment_create_router, runner_enrollment_redeem_router,
+    },
     secret_api::{RepositorySecretApiBackend, repository_secret_api_router},
     web::{
         LiveWebData, ManagementRbacWebData, RbacWebData, RequestContext, SetupPageAvailability,
@@ -189,6 +192,7 @@ pub(crate) struct ProductionComponents {
     pub(crate) secret_mutation_recovery_loop: Option<SecretMutationRecoveryLoop>,
     pub(crate) state_sampler: ControlPlaneStateSampler,
     pub(crate) human_api: Router,
+    pub(crate) runner_enrollment_redeem_api: Router,
     pub(crate) delegated_actor_api: Option<Router>,
     pub(crate) live_log_stream_api: Router,
     pub(crate) log_commit_listener: Option<PostgresLogCommitListener>,
@@ -221,6 +225,10 @@ impl fmt::Debug for ProductionComponents {
             )
             .field("state_sampler", &self.state_sampler)
             .field("human_api", &self.human_api)
+            .field(
+                "runner_enrollment_redeem_api",
+                &self.runner_enrollment_redeem_api,
+            )
             .field("delegated_actor_api", &self.delegated_actor_api)
             .field("live_log_stream_api", &self.live_log_stream_api)
             .field("log_commit_listener", &self.log_commit_listener)
@@ -341,6 +349,35 @@ impl ProductionComponents {
             RunnerCapabilityReadiness::unavailable()
         };
         verify_runner_capability_readiness(store.as_ref(), capability_readiness).await?;
+        let (runner_enrollment_repository, runner_enrollment_redeem_api) =
+            match config.runner_public_authority.as_ref() {
+                Some(authority) => {
+                    let client_ca = config.load_client_ca_pem()?;
+                    let client_ca_key = config.load_client_ca_private_key_pem()?;
+                    let server_ca = config.load_runner_server_ca_pem()?;
+                    let server_certificate = config.load_server_certificate_pem()?;
+                    let issuer = Arc::new(
+                        RunnerCertificateIssuer::from_pem(
+                            &client_ca,
+                            &client_ca_key,
+                            &server_ca,
+                            &server_certificate,
+                            format!("https://{authority}/"),
+                        )
+                        .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
+                    );
+                    let repository = Arc::new(PostgresRunnerEnrollmentRepository::new(
+                        store.postgres_pool().clone(),
+                    ));
+                    let router = runner_enrollment_redeem_router(
+                        Arc::clone(&repository),
+                        issuer,
+                        capability_readiness,
+                    );
+                    (Some(repository), router)
+                }
+                None => (None, Router::new()),
+            };
         let state_repository: Arc<dyn ControlPlaneStateRepository> = store.clone();
         let state_sampler = metrics.state_sampler(state_repository);
 
@@ -440,8 +477,8 @@ impl ProductionComponents {
             secret_management.as_ref(),
             repository_secret_web.clone(),
             fallback_tenant,
-            capability_readiness,
             Arc::clone(&live_log_service),
+            runner_enrollment_repository,
         )
         .await?;
         let github_provider_config = validate_effective_ui_tenant(config, &human.effective_tenant)?;
@@ -636,6 +673,7 @@ impl ProductionComponents {
             secret_mutation_recovery_loop,
             state_sampler,
             human_api: human.router,
+            runner_enrollment_redeem_api,
             delegated_actor_api,
             live_log_stream_api,
             log_commit_listener: Some(log_commit_listener),
@@ -1196,7 +1234,8 @@ impl SetupPageAvailability for InstallationSetupPageAvailability {
             Ok(
                 InstallationState::Unconfigured { .. }
                 | InstallationState::LoginBound { .. }
-                | InstallationState::Configured { .. },
+                | InstallationState::HumanConfigured { .. }
+                | InstallationState::DeploymentConfigured { .. },
             ) => Ok(SetupPageAvailabilityState::Absent),
             Err(InstallationRepositoryError::Unavailable) => {
                 Err(SetupPageAvailabilityError::Unavailable)
@@ -1368,13 +1407,18 @@ mod setup_page_composition_tests {
                 login_transaction_id,
                 expires_at: UnixTimestamp::from_seconds(1_000),
             },
-            "configured" => InstallationState::Configured {
+            "configured" => InstallationState::HumanConfigured {
                 revision,
                 tenant_id,
                 principal_id: PrincipalId::new("initial-administrator").expect("principal ID"),
                 provider_id,
                 provider_subject: expected_provider_subject,
                 login_transaction_id,
+                configured_at: UnixTimestamp::from_seconds(900),
+            },
+            "deployment_configured" => InstallationState::DeploymentConfigured {
+                revision,
+                tenant_id,
                 configured_at: UnixTimestamp::from_seconds(900),
             },
             _ => panic!("unknown installation test disposition"),
@@ -1429,7 +1473,12 @@ mod setup_page_composition_tests {
         );
         assert!(renderer.requests().is_empty());
 
-        for disposition in ["unconfigured", "login_bound", "configured"] {
+        for disposition in [
+            "unconfigured",
+            "login_bound",
+            "configured",
+            "deployment_configured",
+        ] {
             let repository = Arc::new(MutableInstallationRepository::new(Ok(installation_state(
                 disposition,
             ))));
@@ -1578,6 +1627,45 @@ mod setup_page_composition_tests {
             assert!(renderer.requests().is_empty());
         }
     }
+
+    #[test]
+    fn deployment_installation_cannot_be_reinterpreted_as_human_configuration() {
+        assert!(matches!(
+            classify_human_installation(&installation_state("deployment_configured")),
+            Err(ServerCompositionError::HumanAuthenticationState)
+        ));
+        assert!(matches!(
+            classify_human_installation(&installation_state("configured")),
+            Ok(HumanInstallationDisposition::Configured(tenant_id))
+                if tenant_id.as_str() == "setup-composition-test"
+        ));
+    }
+}
+
+enum HumanInstallationDisposition {
+    Configured(TenantId),
+    SetupRequired,
+}
+
+fn classify_human_installation(
+    installation: &InstallationState,
+) -> Result<HumanInstallationDisposition, ServerCompositionError> {
+    match installation {
+        InstallationState::HumanConfigured {
+            tenant_id,
+            provider_id,
+            ..
+        } if provider_id.as_str() == "github" => {
+            Ok(HumanInstallationDisposition::Configured(tenant_id.clone()))
+        }
+        InstallationState::HumanConfigured { .. }
+        | InstallationState::DeploymentConfigured { .. } => {
+            Err(ServerCompositionError::HumanAuthenticationState)
+        }
+        InstallationState::Unconfigured { .. }
+        | InstallationState::Armed { .. }
+        | InstallationState::LoginBound { .. } => Ok(HumanInstallationDisposition::SetupRequired),
+    }
 }
 
 #[allow(
@@ -1593,8 +1681,8 @@ async fn build_human_api(
     secret_management: Option<&SecretManagementComposition>,
     repository_secret_web: Option<Arc<dyn RepositorySecretWebData>>,
     fallback_tenant: TenantId,
-    capability_readiness: RunnerCapabilityReadiness,
     live_log_service: Arc<LiveLogService>,
+    runner_enrollment_repository: Option<Arc<PostgresRunnerEnrollmentRepository>>,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
     let deployment_token = config.load_conformance_export_token()?;
     let mut router = match deployment_token.as_deref() {
@@ -1615,28 +1703,6 @@ async fn build_human_api(
         None => Router::new(),
     };
 
-    let enrollment_issuer = if config.human_auth().is_some() {
-        let client_ca = config.load_client_ca_pem()?;
-        let client_ca_key = config.load_client_ca_private_key_pem()?;
-        let server_ca = config.load_runner_server_ca_pem()?;
-        let server_certificate = config.load_server_certificate_pem()?;
-        let authority = config
-            .runner_public_authority
-            .as_ref()
-            .ok_or(ServerCompositionError::InvalidRunnerEnrollment)?;
-        Some(Arc::new(
-            RunnerCertificateIssuer::from_pem(
-                &client_ca,
-                &client_ca_key,
-                &server_ca,
-                &server_certificate,
-                format!("https://{authority}/"),
-            )
-            .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
-        ))
-    } else {
-        None
-    };
     let Some(config) = config.human_auth() else {
         return Ok(HumanApiComposition {
             router,
@@ -1656,18 +1722,9 @@ async fn build_human_api(
         .load()
         .await
         .map_err(|_| ServerCompositionError::HumanAuthenticationState)?;
-    let (tenant_id, setup_service) = match installation {
-        InstallationState::Configured {
-            tenant_id,
-            provider_id,
-            ..
-        } if provider_id.as_str() == "github" => (tenant_id, None),
-        InstallationState::Configured { .. } => {
-            return Err(ServerCompositionError::HumanAuthenticationState);
-        }
-        InstallationState::Unconfigured { .. }
-        | InstallationState::Armed { .. }
-        | InstallationState::LoginBound { .. } => {
+    let (tenant_id, setup_service) = match classify_human_installation(&installation)? {
+        HumanInstallationDisposition::Configured(tenant_id) => (tenant_id, None),
+        HumanInstallationDisposition::SetupRequired => {
             let bootstrap = config
                 .bootstrap()
                 .ok_or(ServerCompositionError::HumanAuthenticationNotConfigured)?;
@@ -1692,20 +1749,19 @@ async fn build_human_api(
                 .await
                 .map_err(|_| ServerCompositionError::HumanAuthenticationSetup)?;
             drop(token);
-            match state {
-                InstallationState::Configured {
-                    tenant_id,
-                    provider_id,
-                    ..
-                } if provider_id.as_str() == "github" => (tenant_id, None),
-                InstallationState::Configured { .. } => {
-                    return Err(ServerCompositionError::HumanAuthenticationState);
-                }
-                InstallationState::Armed { tenant_id, .. }
-                | InstallationState::LoginBound { tenant_id, .. } => (tenant_id, Some(service)),
-                InstallationState::Unconfigured { .. } => {
-                    return Err(ServerCompositionError::HumanAuthenticationSetup);
-                }
+            match classify_human_installation(&state)? {
+                HumanInstallationDisposition::Configured(tenant_id) => (tenant_id, None),
+                HumanInstallationDisposition::SetupRequired => match state {
+                    InstallationState::Armed { tenant_id, .. }
+                    | InstallationState::LoginBound { tenant_id, .. } => (tenant_id, Some(service)),
+                    InstallationState::Unconfigured { .. } => {
+                        return Err(ServerCompositionError::HumanAuthenticationSetup);
+                    }
+                    InstallationState::HumanConfigured { .. }
+                    | InstallationState::DeploymentConfigured { .. } => {
+                        return Err(ServerCompositionError::HumanAuthenticationState);
+                    }
+                },
             }
         }
     };
@@ -1752,11 +1808,9 @@ async fn build_human_api(
     let management = Arc::new(PostgresHumanRbacManagementRepository::new(
         store.postgres_pool().clone(),
     ));
-    router = router.merge(runner_enrollment_api_router(
-        Arc::clone(&management),
-        enrollment_issuer.ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
+    router = router.merge(runner_enrollment_create_router(
+        runner_enrollment_repository.ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
         Arc::clone(runtime.clock()),
-        capability_readiness,
     ));
     let management_api_repository: Arc<
         dyn automata_ci_auth::management::HumanRbacManagementRepository,

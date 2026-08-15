@@ -169,6 +169,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0041_private_pull_request_files_authority.sql",
         "8bdd45b0680b2f08e273c5b3f2386e293c946d63925af1a166df389884467f5eaa76535f3871b1cd0c723aa0fe794b44",
     ),
+    (
+        "0042_installation_runner_bootstrap.sql",
+        "f5b03facfd4a0bc857c8f313e1c7bdbda7e6a5293fe3f7da808e37593d29296ab73efc460e6dccfe702ed98a9a7df8c1",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -427,6 +431,73 @@ fn provider_delivery_event_envelope_is_complete_bounded_and_legacy_nullable() {
         32_768,
         "product and durable provider-envelope byte limits diverged"
     );
+}
+
+#[test]
+fn installation_runner_bootstrap_is_closed_and_immutable() {
+    let source = include_str!("../migrations/0042_installation_runner_bootstrap.sql");
+
+    for required in [
+        "ALTER TABLE human_auth_installation_state\n    RENAME TO installation_state",
+        "RENAME COLUMN target_tenant_id TO tenant_id",
+        "RENAME COLUMN target_tenant_display_name TO tenant_display_name",
+        "ascii(left(tenant_display_name, 1))",
+        "ascii(right(tenant_display_name, 1))",
+        "8287, 12288",
+        "ADD COLUMN configuration_mode text COLLATE pg_catalog.\"C\"",
+        "configuration_mode IN ('human', 'deployment')",
+        "state = 'configured'\n            AND configuration_mode = 'human'",
+        "state = 'configured'\n            AND configuration_mode = 'deployment'",
+        "deployment_bootstrap_operation_id IS NOT NULL",
+        "deployment_bootstrap_audit_event_id IS NOT NULL",
+        "deployment_authority_sha256 IS NOT NULL",
+        "configured_tenant_id = tenant_id",
+        "FOREIGN KEY (configured_tenant_id, tenant_display_name)",
+        "REFERENCES tenants(id, display_name) ON DELETE RESTRICT",
+        "FOREIGN KEY (deployment_bootstrap_audit_event_id)",
+        "REFERENCES security_audit_events(event_id) ON DELETE RESTRICT",
+        "UNIQUE (configured_tenant_id, deployment_authority_sha256)",
+        "installation_state_deployment_completion_exact",
+        "installation_state_human_completion_exact",
+        "CREATE TRIGGER installation_state_lifecycle_guard",
+        "UPDATE runner_enrollment_tokens\nSET issuer_kind = 'human'",
+        "ADD COLUMN issuer_kind text COLLATE pg_catalog.\"C\"",
+        "ADD COLUMN installation_authority_sha256 bytea",
+        "issuer_kind IN ('human', 'installation_bootstrap')",
+        "octet_length(installation_authority_sha256) = 32",
+        "issuer_kind = 'human'",
+        "issued_by_principal_id IS NOT NULL",
+        "issued_by_session_id IS NOT NULL",
+        "issued_authorization_revision IS NOT NULL",
+        "installation_authority_sha256 IS NULL",
+        "issuer_kind = 'installation_bootstrap'",
+        "issued_by_principal_id IS NULL",
+        "issued_by_session_id IS NULL",
+        "issued_authorization_revision IS NULL",
+        "installation_authority_sha256 IS NOT NULL",
+        "FOREIGN KEY (tenant_id, installation_authority_sha256)",
+        "REFERENCES installation_state(",
+        "NEW.issuer_kind IS DISTINCT FROM OLD.issuer_kind",
+        "NEW.installation_authority_sha256 IS DISTINCT FROM OLD.installation_authority_sha256",
+    ] {
+        assert!(
+            source.contains(required),
+            "runner-enrollment issuance migration lost required contract: {required}"
+        );
+    }
+    for forbidden in [
+        "CREATE TABLE deployment_tenant_authorities",
+        "deployment_authority_id",
+        "deployment_bootstrap'",
+        "DEFAULT",
+        "ADD COLUMN IF NOT EXISTS",
+        "CREATE TABLE IF NOT EXISTS",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "runner-enrollment issuance migration retained compatibility surface: {forbidden}"
+        );
+    }
 }
 
 fn migration_paths() -> Vec<PathBuf> {

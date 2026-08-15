@@ -344,18 +344,16 @@ async fn database_now_minus_sixty_rolls_back_expired_bootstrap_authority() -> Te
             .execute(pool)
             .await?;
         sqlx::query(
-            "ALTER TABLE human_auth_installation_state DISABLE TRIGGER human_auth_installation_state_lifecycle_guard",
+            "ALTER TABLE installation_state DISABLE TRIGGER installation_state_lifecycle_guard",
         )
         .execute(pool)
         .await?;
+        sqlx::query("UPDATE installation_state SET updated_at_ms=$1-90000 WHERE singleton")
+            .bind(database_now_ms)
+            .execute(pool)
+            .await?;
         sqlx::query(
-            "UPDATE human_auth_installation_state SET updated_at_ms=$1-90000 WHERE singleton",
-        )
-        .bind(database_now_ms)
-        .execute(pool)
-        .await?;
-        sqlx::query(
-            "ALTER TABLE human_auth_installation_state ENABLE TRIGGER human_auth_installation_state_lifecycle_guard",
+            "ALTER TABLE installation_state ENABLE TRIGGER installation_state_lifecycle_guard",
         )
         .execute(pool)
         .await?;
@@ -437,7 +435,7 @@ async fn database_now_minus_sixty_rolls_back_expired_bootstrap_authority() -> Te
               (SELECT count(*) FROM human_sessions),
               (SELECT count(*) FROM rbac_role_bindings),
               (SELECT status FROM human_login_transactions WHERE id=$1),
-              (SELECT revision FROM human_auth_installation_state WHERE singleton)
+              (SELECT revision FROM installation_state WHERE singleton)
             ",
         )
         .bind(Uuid::parse_str(LOGIN_ID)?)
@@ -456,8 +454,7 @@ async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay
         let pool = database.pool();
         let clock = TestClock::freeze_at_database_now(pool).await?;
         let encryption = keyring();
-        let installation =
-            PostgresInstallationRepository::new(pool.clone(), encryption.clone());
+        let installation = PostgresInstallationRepository::new(pool.clone(), encryption.clone());
         let login = PostgresLoginTransactionRepository::new(pool.clone(), encryption);
         let armed = installation
             .arm(ArmInstallationSetup::new(
@@ -467,8 +464,8 @@ async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay
                 ProviderSubject::new("424242")?,
                 scenario_time(150),
                 scenario_time(152),
-        )?)
-        .await?;
+            )?)
+            .await?;
         let (transaction, _) = login_transaction(LOGIN_ID, 0x4a, 150, 152);
         login.create(transaction).await?;
         let final_deadline_ms: i64 = sqlx::query_scalar(
@@ -477,7 +474,7 @@ async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay
                 installation.challenge_expires_at_ms,
                 login.expires_at_ms
             )
-            FROM human_auth_installation_state AS installation
+            FROM installation_state AS installation
             JOIN human_login_transactions AS login ON login.id=$1
             WHERE installation.singleton
             ",
@@ -509,7 +506,7 @@ async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay
         sqlx::query(
             r"
             CREATE TRIGGER advance_installation_binding_test_clock
-            BEFORE UPDATE ON human_auth_installation_state
+            BEFORE UPDATE ON installation_state
             FOR EACH STATEMENT EXECUTE FUNCTION advance_installation_binding_test_clock()
             ",
         )
@@ -528,7 +525,7 @@ async fn login_binding_final_write_rechecks_both_deadlines_after_statement_delay
             InstallationRepositoryError::Expired
         );
         let unchanged: (String, Option<Uuid>, i64) = sqlx::query_as(
-            "SELECT state,setup_transaction_id,revision FROM human_auth_installation_state WHERE singleton",
+            "SELECT state,setup_transaction_id,revision FROM installation_state WHERE singleton",
         )
         .fetch_one(pool)
         .await?;
@@ -626,7 +623,7 @@ async fn exact_bound_login_replays_after_restart_and_a_different_login_fails_clo
         assert_eq!(*revision, InstallationRevision::new(3).expect("revision"));
         assert_eq!(login_transaction_id.as_str(), REBIND_FIRST_LOGIN_ID);
         let challenge_expiry_ms: i64 = sqlx::query_scalar(
-            "SELECT challenge_expires_at_ms FROM human_auth_installation_state WHERE singleton",
+            "SELECT challenge_expires_at_ms FROM installation_state WHERE singleton",
         )
         .fetch_one(database.pool())
         .await?;
@@ -732,9 +729,9 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
 
         let direct_rewrite = sqlx::query(
             r"
-            UPDATE human_auth_installation_state
+            UPDATE installation_state
             SET expected_provider_subject='substituted',
-                updated_at_ms=human_auth_installation_state.updated_at_ms,
+                updated_at_ms=installation_state.updated_at_ms,
                 revision=revision+1
             ",
         )
@@ -745,11 +742,11 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
             direct_rewrite
                 .as_database_error()
                 .and_then(sqlx::error::DatabaseError::constraint),
-            Some("human_auth_installation_state_pending_exact")
+            Some("installation_state_pending_exact")
         );
         let direct_early_bind = sqlx::query(
             r"
-            UPDATE human_auth_installation_state
+            UPDATE installation_state
             SET setup_transaction_id=$1,
                 updated_at_ms=floor(extract(epoch FROM clock_timestamp()))::BIGINT * 1000,
                 revision=revision+1
@@ -763,7 +760,7 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
             direct_early_bind
                 .as_database_error()
                 .and_then(sqlx::error::DatabaseError::constraint),
-            Some("human_auth_installation_state_bind_exact")
+            Some("installation_state_bind_exact")
         );
         assert_eq!(
             installation
@@ -808,7 +805,7 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
                    installation.updated_at_ms, installation.expected_provider_id,
                    login.tenant_id, login.purpose, login.provider_id,
                    login.created_at_ms, login.expires_at_ms
-            FROM human_auth_installation_state AS installation
+            FROM installation_state AS installation
             JOIN human_login_transactions AS login ON login.id=$1
             ",
         )
@@ -913,7 +910,7 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
             completed.principal_id()
         );
 
-        let InstallationState::Configured {
+        let InstallationState::HumanConfigured {
             principal_id,
             revision,
             ..
@@ -1036,7 +1033,7 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
             SELECT installation.state, installation.bootstrap_token_hash,
                    installation.bootstrap_hash_key_id, login.status,
                    membership.authorization_revision, identity.normalized_login
-            FROM human_auth_installation_state AS installation
+            FROM installation_state AS installation
             JOIN human_login_transactions AS login
               ON login.id=installation.setup_transaction_id
             JOIN tenant_human_memberships AS membership
@@ -1055,7 +1052,7 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
         assert_eq!(durable_state.4, 3);
         assert_eq!(durable_state.5, "octocat");
 
-        let singleton_delete = sqlx::query("DELETE FROM human_auth_installation_state")
+        let singleton_delete = sqlx::query("DELETE FROM installation_state")
             .execute(database.pool())
             .await
             .expect_err("singleton deletion must fail");
@@ -1063,7 +1060,7 @@ async fn bootstrap_is_proof_bound_atomic_encrypted_and_exactly_once() -> TestRes
             singleton_delete
                 .as_database_error()
                 .and_then(sqlx::error::DatabaseError::constraint),
-            Some("human_auth_installation_state_singleton_immutable")
+            Some("installation_state_singleton_immutable")
         );
         Ok(())
     })
