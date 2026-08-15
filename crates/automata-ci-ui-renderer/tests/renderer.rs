@@ -89,6 +89,80 @@ fn valid_request() -> Value {
     })
 }
 
+fn job_log_request(log_visibility: &str) -> Value {
+    let mut request = valid_request();
+    request["page"] = json!({
+        "kind": "job-log",
+        "shell": {
+            "productName": "Automata",
+            "homeHref": "/repositories",
+            "signIn": {
+                "action": "/auth/github/login",
+                "returnPath": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111"
+            },
+            "signOut": null,
+            "documentTitle": "Build logs · Automata",
+            "description": "Job logs for Automata",
+            "viewer": null,
+            "navigation": [
+                { "label": "Repositories", "href": "/repositories", "current": false },
+                { "label": "Actions", "href": "/automata-ci/automata/actions", "current": true }
+            ]
+        },
+        "repository": {
+            "owner": "automata-ci",
+            "name": "automata",
+            "sourceHref": "https://github.com/automata-ci/automata",
+            "runsHref": "/automata-ci/automata/actions",
+            "settingsHref": null
+        },
+        "run": {
+            "number": "1842",
+            "name": "Build and test",
+            "href": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000",
+            "workflowName": "CI",
+            "workflowHref": "/automata-ci/automata/actions/workflows/22222222-2222-4222-8222-222222222222",
+            "attempt": 1
+        },
+        "jobs": [{
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Build",
+            "href": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111",
+            "status": { "label": "Succeeded", "tone": "success" }
+        }],
+        "navigationPagination": {
+            "previousHref": null,
+            "nextHref": null,
+            "label": "1 job"
+        },
+        "job": {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "name": "Build",
+            "href": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111",
+            "attempt": 1,
+            "runnerLabel": null,
+            "status": { "label": "Succeeded", "tone": "success" },
+            "startedAt": null,
+            "durationLabel": null
+        },
+        "logVisibility": log_visibility,
+        "search": {
+            "action": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111",
+            "query": "",
+            "clearHref": "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/11111111-1111-4111-8111-111111111111"
+        },
+        "lines": [],
+        "notice": null,
+        "pagination": {
+            "currentCursor": null,
+            "previousCursor": null,
+            "nextCursor": null,
+            "label": "0 log lines"
+        }
+    });
+    request
+}
+
 fn repository_directory_request() -> Value {
     let assets = client_assets();
     json!({
@@ -191,6 +265,18 @@ fn repository_directory_accepts_only_exact_authenticated_settings_destinations()
         renderer.render(&unsupported.to_string()),
         Err(RenderError::GuestExecution)
     );
+}
+
+#[test]
+fn renders_current_job_log_visibility_contract() {
+    let renderer = WasmtimeRenderer::new(RenderPolicy::default()).expect("renderer initializes");
+
+    for visibility in ["full", "restricted"] {
+        let html = renderer
+            .render(&job_log_request(visibility).to_string())
+            .expect("current job-log model renders");
+        assert!(html.as_str().contains("Build logs · Automata"));
+    }
 }
 
 #[test]
