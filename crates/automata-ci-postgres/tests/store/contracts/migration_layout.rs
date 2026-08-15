@@ -113,6 +113,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0027_workspace_usage_feed.sql",
         "23d9d52552f960e0b8015cedacf8bbe591773dbb82856e73eb4e436c4840be5475887da0ebbe6330185fee13f835734f",
     ),
+    (
+        "0028_allow_queued_cancellation_after_lease_retry.sql",
+        "4841124d150802cd51308c78f1f9607e9ca04c4b077e08eb89936ed5aa7ab527fc1add96b34bb95b0825286191a17d0e",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

@@ -114,6 +114,49 @@ async fn queued_cancellation_projects_exact_blob_free_server_authority() -> Test
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn queued_cancellation_accepts_released_lease_fencing_history() -> TestResult {
+    run_with_database(|database| async move {
+        let (fixture, _, attempt_id) =
+            seed_materialized_instance_for_cancellation(&database).await?;
+        let updated = sqlx::query(
+            r"
+            UPDATE job_attempts
+            SET fencing_token = 2, lease_failures = 2
+            WHERE id = $1
+              AND lifecycle = 'queued'
+              AND lease_id IS NULL
+              AND runner_id IS NULL
+              AND runner_session_id IS NULL
+              AND runner_session_epoch IS NULL
+              AND runner_generation IS NULL
+              AND runner_slot IS NULL
+              AND lease_issued_at_ms IS NULL
+              AND lease_expires_at_ms IS NULL
+            ",
+        )
+        .bind(attempt_id.as_uuid())
+        .execute(database.pool())
+        .await?
+        .rows_affected();
+        assert_eq!(updated, 1, "fixture must be a released queued attempt");
+
+        let (operation_id, cancelled_at) =
+            request_server_cancellation(&database, attempt_id).await?;
+        assert_server_cancellation_terminal(
+            &database,
+            &fixture,
+            attempt_id,
+            operation_id,
+            cancelled_at,
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+}
+
 async fn seed_materialized_instance_for_cancellation(
     database: &TestDatabase,
 ) -> TestResult<(Fixture, PreparedInstance, automata_ci_core::AttemptId)> {
