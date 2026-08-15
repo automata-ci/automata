@@ -14,12 +14,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CancellationRecord, CommandDisposition, CommandTombstone, DiskSchemaVersion, DurableCommand,
-    EndpointCancellationCompletion, EndpointOperation, EndpointResultContentRef, LeaseOfferRecord,
-    LeaseRejectionRecord, LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement,
-    LogSegmentPublication, OrphanAbandonmentReason, OrphanAuthorityGrant, OrphanDelivery,
-    OrphanRecord, OutboundOperationCursor, OutboundOperationSequence, ProviderFailureOutcome,
-    ProviderOperation, ProviderOperationKind, ProviderOperationOutcome,
-    RuntimeAuthorityDeliveryRecord, SandboxIdentity, TerminalResultRecord,
+    EndpointOperation, EndpointResultContentRef, LeaseOfferRecord, LeaseRejectionRecord,
+    LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement, LogSegmentPublication,
+    OrphanAbandonmentReason, OrphanAuthorityGrant, OrphanDelivery, OrphanRecord,
+    OutboundOperationCursor, OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation,
+    ProviderOperationKind, ProviderOperationOutcome, RuntimeAuthorityDeliveryRecord,
+    SandboxIdentity, TerminalResultRecord,
 };
 use crate::{
     JournalInvariantError, MAX_COMMAND_TOMBSTONES, MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT,
@@ -538,7 +538,8 @@ impl SlotSnapshot {
             || binding.guard() != self.offer.lease().guard()
             || binding.offer_operation_id() != self.offer.command().operation_id()
             || binding.offer_sequence() != self.offer.command().sequence()
-            || binding.job_ir_digest() != self.offer.job_ir().content().sha256()
+            || self.offer.job_ir().content().public_plaintext_sha256()
+                != Some(binding.job_ir_digest())
         {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
         }
@@ -561,7 +562,7 @@ impl SlotSnapshot {
                 .checked_add(operation.accounted_content_refs())
                 .ok_or(JournalInvariantError::DecodedStateInvalid)?;
             content_bytes = content_bytes
-                .checked_add(operation.accounted_content_bytes())
+                .checked_add(operation.accounted_content_bytes()?)
                 .ok_or(JournalInvariantError::DecodedStateInvalid)?;
             if !ids.insert(operation.operation_id())
                 || operation.is_recovery_pending() && index + 1 != self.endpoint_operations.len()
@@ -1267,7 +1268,8 @@ impl StoredJournal {
             || binding.guard() != slot.offer.lease().guard()
             || binding.offer_operation_id() != slot.offer.command().operation_id()
             || binding.offer_sequence() != slot.offer.command().sequence()
-            || binding.job_ir_digest() != slot.offer.job_ir().content().sha256()
+            || slot.offer.job_ir().content().public_plaintext_sha256()
+                != Some(binding.job_ir_digest())
         {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
         }
@@ -1575,13 +1577,15 @@ impl StoredJournal {
         if prospective_refs > MAX_ENDPOINT_CONTENT_REFS_PER_SLOT {
             return Err(JournalInvariantError::EndpointContentRefLimit);
         }
-        let content_bytes = slot
-            .endpoint_operations
-            .iter()
-            .try_fold(operation.accounted_content_bytes(), |total, current| {
-                total.checked_add(current.accounted_content_bytes())
-            });
-        if content_bytes.is_none_or(|bytes| bytes > MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT) {
+        let content_bytes = slot.endpoint_operations.iter().try_fold(
+            operation.accounted_content_bytes()?,
+            |total, current| {
+                total
+                    .checked_add(current.accounted_content_bytes()?)
+                    .ok_or(JournalInvariantError::EndpointContentBytesLimit)
+            },
+        )?;
+        if content_bytes > MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT {
             return Err(JournalInvariantError::EndpointContentBytesLimit);
         }
         slot.endpoint_operations.push(operation);
@@ -1628,10 +1632,9 @@ impl StoredJournal {
         slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
         operation_id: OperationId,
-        completion: EndpointCancellationCompletion,
     ) -> Result<bool, JournalInvariantError> {
         let slot = self.slot_mut(session_id, slot, guard)?;
-        if completion == EndpointCancellationCompletion::SandboxAbsent && slot.sandbox.is_some() {
+        if slot.sandbox.is_some() {
             return Err(JournalInvariantError::EndpointSandboxStillPresent);
         }
         let changed = slot

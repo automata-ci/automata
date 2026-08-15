@@ -620,7 +620,7 @@ fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> Exe
         UnixMillis::new(1_000_000),
     )
     .expect("valid lease");
-    let content = DurableContentRef::after_commit(
+    let content = DurableContentRef::after_public_commit(
         ContentKind::JobIr,
         1,
         Sha256Digest::from_bytes([3; 32]),

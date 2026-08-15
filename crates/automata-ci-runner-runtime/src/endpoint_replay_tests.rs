@@ -35,7 +35,8 @@ use automata_ci_runner_journal::{
 };
 use automata_ci_runner_spool::{
     ContentCommitFault, ContentCommitFaultInjector, ContentCommitStage, ContentCommitmentDomain,
-    ContentProtectionError, ContentProtector, FileSpool, FileSpoolOptions, ProtectionId, SpoolRoot,
+    ContentProtectionError, ContentProtector, FileSpool, FileSpoolOptions, ProtectionId,
+    SpoolLimits, SpoolRoot, endpoint_result_allocation,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -76,8 +77,9 @@ impl TestProtector {
         }
     }
 
-    fn tag(reference: &DurableContentRef, bytes: &[u8]) -> [u8; 32] {
+    fn tag(&self, reference: &DurableContentRef, bytes: &[u8]) -> [u8; 32] {
         let mut digest = Sha256::new();
+        digest.update(self.key);
         digest.update(reference.cache_key().as_str().as_bytes());
         digest.update(bytes);
         digest.finalize().into()
@@ -111,13 +113,43 @@ impl ContentProtector for TestProtector {
         Ok(digest.finalize().into())
     }
 
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        endpoint_result_allocation(plaintext_bytes).map_err(|_| ContentProtectionError::Failed)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ContentProtectionError> {
-        let mut protected: Vec<_> = plaintext.iter().map(|byte| byte ^ 0xa5).collect();
-        protected.extend_from_slice(&Self::tag(reference, &protected));
+        let mut protected = if let Some(allocation) = reference.endpoint_result_allocation_bytes() {
+            let allocation =
+                usize::try_from(allocation).map_err(|_| ContentProtectionError::Failed)?;
+            let body_bytes = allocation
+                .checked_sub(32)
+                .ok_or(ContentProtectionError::Failed)?;
+            let required = 8_usize
+                .checked_add(plaintext.len())
+                .ok_or(ContentProtectionError::Failed)?;
+            if required > body_bytes {
+                return Err(ContentProtectionError::Failed);
+            }
+            let mut body = Vec::with_capacity(allocation);
+            body.extend_from_slice(
+                &u64::try_from(plaintext.len())
+                    .map_err(|_| ContentProtectionError::Failed)?
+                    .to_be_bytes(),
+            );
+            body.extend(plaintext.iter().map(|byte| byte ^ 0xa5));
+            body.resize(body_bytes, 0);
+            body
+        } else {
+            plaintext.iter().map(|byte| byte ^ 0xa5).collect()
+        };
+        protected.extend_from_slice(&self.tag(reference, &protected));
         Ok(protected)
     }
 
@@ -131,8 +163,24 @@ impl ContentProtector for TestProtector {
             .checked_sub(32)
             .ok_or(ContentProtectionError::AuthenticationFailed)?;
         let (ciphertext, tag) = protected.split_at(split);
-        if tag != Self::tag(reference, ciphertext) {
+        if tag != self.tag(reference, ciphertext) {
             return Err(ContentProtectionError::AuthenticationFailed);
+        }
+        if reference.endpoint_result_allocation_bytes().is_some() {
+            let length = ciphertext
+                .get(..8)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_be_bytes)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(ContentProtectionError::AuthenticationFailed)?;
+            let end = 8_usize
+                .checked_add(length)
+                .filter(|end| *end <= ciphertext.len())
+                .ok_or(ContentProtectionError::AuthenticationFailed)?;
+            if ciphertext[end..].iter().any(|byte| *byte != 0) {
+                return Err(ContentProtectionError::AuthenticationFailed);
+            }
+            return Ok(ciphertext[8..end].iter().map(|byte| byte ^ 0xa5).collect());
         }
         Ok(ciphertext.iter().map(|byte| byte ^ 0xa5).collect())
     }
@@ -418,7 +466,10 @@ fn record_test_runtime_authority(
     let content =
         RuntimeAuthorityContentRef::new(content_ref(ContentKind::RuntimeAuthority, 64, 0x12))
             .expect("authority content");
-    let digest = content.content().sha256();
+    let digest = content
+        .content()
+        .public_plaintext_sha256()
+        .expect("runtime authority public digest");
     let generation = RuntimeAuthorityGeneration::new(1).expect("authority generation");
     let acknowledgement_operation_id = OperationId::new();
     let authority = RuntimeAuthorityDeliveryRecord::new(
@@ -428,7 +479,11 @@ fn record_test_runtime_authority(
             lease.guard(),
             offer.command().operation_id(),
             offer.command().sequence(),
-            offer.job_ir().content().sha256(),
+            offer
+                .job_ir()
+                .content()
+                .public_plaintext_sha256()
+                .expect("job IR public digest"),
             generation,
         ),
         OperationId::new(),
@@ -486,6 +541,14 @@ fn record_test_sandbox(
 
 impl Fixture {
     fn new(label: &str, restart_safe: bool) -> Self {
+        Self::new_with_spool_limits(label, restart_safe, None)
+    }
+
+    fn new_with_spool_limits(
+        label: &str,
+        restart_safe: bool,
+        spool_limits: Option<SpoolLimits>,
+    ) -> Self {
         let scratch = Scratch::new(label);
         let runner_id = RunnerId::new();
         let session_id = RunnerSessionId::new();
@@ -556,13 +619,13 @@ impl Fixture {
         let provider = Arc::new(FakeProvider::new(inspection.clone(), restart_safe));
         let spool_fault = Arc::new(ArmableContentFault::default());
         let spool_root = SpoolRoot::explicit(scratch.child("spool")).expect("spool root");
+        let mut spool_options = FileSpoolOptions::new().with_fault_injector(spool_fault.clone());
+        if let Some(limits) = spool_limits {
+            spool_options = spool_options.with_limits(limits);
+        }
         let spool = Arc::new(
-            FileSpool::open_with_options(
-                spool_root,
-                Arc::new(TestProtector::new()),
-                FileSpoolOptions::new().with_fault_injector(spool_fault.clone()),
-            )
-            .expect("spool"),
+            FileSpool::open_with_options(spool_root, Arc::new(TestProtector::new()), spool_options)
+                .expect("spool"),
         );
         Self {
             scratch,
@@ -613,7 +676,7 @@ impl Fixture {
 }
 
 fn content_ref(kind: ContentKind, size: u64, marker: u8) -> DurableContentRef {
-    DurableContentRef::after_commit(
+    DurableContentRef::after_public_commit(
         kind,
         size,
         Sha256Digest::from_bytes([marker; 32]),
@@ -691,7 +754,10 @@ fn secret_bearing_requests_never_serialize_into_journal_spool_identity_or_debug(
         .content();
     let raw_secret_digest: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
     assert_ne!(
-        request_ref.sha256().as_bytes(),
+        request_ref
+            .public_plaintext_sha256()
+            .expect("request commitment public digest")
+            .as_bytes(),
         raw_secret_digest.as_slice()
     );
     let journal_bytes = fs::read(fixture.scratch.child("state").join("runner-journal.json"))
@@ -709,6 +775,60 @@ fn secret_bearing_requests_never_serialize_into_journal_spool_identity_or_debug(
                 !bytes
                     .windows(secret.len())
                     .any(|part| part == secret.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn endpoint_result_journal_identity_exposes_neither_plaintext_digest_nor_exact_size() {
+    let fixture = Fixture::new("result-secret-redaction", false);
+    let operation_id = OperationId::new();
+    let request = Fixture::request(operation_id, "/workspace/low-entropy-secret");
+    let plaintext = fixture
+        .endpoint()
+        .copy_from(&request, &automata_ci_execution::NeverCancelled)
+        .expect("endpoint result");
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&plaintext).into()).to_string();
+    let snapshot = fixture.journal.snapshot().expect("snapshot");
+    let result = snapshot
+        .slot(fixture.slot)
+        .expect("slot")
+        .endpoint_operations()[0]
+        .result()
+        .expect("durable result")
+        .content();
+    assert_eq!(result.public_plaintext_bytes(), None);
+    assert_eq!(result.public_plaintext_sha256(), None);
+    assert_eq!(result.endpoint_result_allocation_bytes(), Some(65_536));
+
+    let debug = format!("{result:?}");
+    let journal = fs::read_to_string(fixture.scratch.child("state").join("runner-journal.json"))
+        .expect("journal bytes");
+    for exposed in [&debug, result.cache_key().as_str()] {
+        assert!(!exposed.contains(&digest));
+        assert!(!exposed.contains("plaintext_sha256"));
+        assert!(!exposed.contains("plaintext_bytes"));
+    }
+    assert!(!journal.contains(&digest));
+    let result_metadata = journal
+        .split_once("\"phase\":\"completed\",\"result\":")
+        .map(|(_, result)| result)
+        .expect("completed result metadata");
+    assert!(!result_metadata.contains("plaintext_sha256"));
+    assert!(!result_metadata.contains("plaintext_bytes"));
+    assert_ne!(
+        result.accounted_bytes(),
+        u64::try_from(plaintext.len()).expect("bounded plaintext")
+    );
+    for entry in fs::read_dir(fixture.scratch.child("spool")).expect("spool directory") {
+        let entry = entry.expect("spool entry");
+        if entry.file_type().expect("entry type").is_file() {
+            let protected = fs::read(entry.path()).expect("spool file");
+            assert!(
+                !protected
+                    .windows(plaintext.len())
+                    .any(|bytes| bytes == plaintext)
             );
         }
     }
@@ -849,7 +969,10 @@ fn termination_is_durable_before_backend_observes_it() {
         .slot(fixture.slot)
         .expect("slot")
         .endpoint_operations()[0];
-    assert_eq!(operation.state(), &EndpointOperationState::Cancelled);
+    assert_eq!(
+        operation.state(),
+        &EndpointOperationState::CancellationRequested
+    );
     assert!(operation.result().is_none());
     assert_eq!(fixture.terminations.load(Ordering::SeqCst), 1);
 }
@@ -1012,6 +1135,65 @@ fn invocation_commit_fault_never_reaches_the_backend() {
 }
 
 #[test]
+fn shared_result_capacity_is_reserved_before_provider_inspection_or_backend_invocation() {
+    let limits = SpoolLimits::new(2_048, 67_584, 1, 65_536).expect("bounded one-object spool");
+    let fixture =
+        Fixture::new_with_spool_limits("result-capacity-before-provider", false, Some(limits));
+    let request = Fixture::request(OperationId::new(), "/workspace/capacity");
+    let error = fixture
+        .endpoint()
+        .copy_from(&request, &automata_ci_execution::NeverCancelled)
+        .expect_err("request content consumes the only shared object slot");
+    assert_eq!(error.kind(), ExecutionErrorKind::LocalStorage);
+    assert_eq!(fixture.provider.inspections.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+    let snapshot = fixture.journal.snapshot().expect("snapshot");
+    assert_eq!(
+        snapshot
+            .slot(fixture.slot)
+            .expect("slot")
+            .endpoint_operations()[0]
+            .state(),
+        &EndpointOperationState::Accepted
+    );
+}
+
+#[test]
+fn failed_binding_releases_shared_result_capacity_for_the_exact_accepted_retry() {
+    let limits = SpoolLimits::new(2_048, 67_584, 2, 65_536).expect("bounded two-object spool");
+    let fixture = Fixture::new_with_spool_limits("result-capacity-release", false, Some(limits));
+    let request = Fixture::request(OperationId::new(), "/workspace/capacity-release");
+    let exited = SandboxInspection::new(
+        fixture.inspection.handle().clone(),
+        fixture.inspection.generation(),
+        fixture.inspection.custody(),
+        fixture.inspection.profile().clone(),
+        SandboxState::Stopped,
+    );
+    *fixture.provider.inspection.lock().expect("inspection lock") = exited;
+    assert_eq!(
+        fixture
+            .endpoint()
+            .copy_from(&request, &automata_ci_execution::NeverCancelled)
+            .expect_err("exited binding")
+            .kind(),
+        ExecutionErrorKind::InvalidState
+    );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+
+    *fixture.provider.inspection.lock().expect("inspection lock") = fixture.inspection.clone();
+    assert_eq!(
+        fixture
+            .endpoint()
+            .copy_from(&request, &automata_ci_execution::NeverCancelled)
+            .expect("exact accepted retry after reservation release"),
+        b"protected replay result"
+    );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.spool.usage().expect("spool usage").0, 2);
+}
+
+#[test]
 fn result_spool_fault_leaves_ambiguous_non_replay_provider_fenced() {
     let fixture = Fixture::new("result-spool-fault", false);
     let operation_id = OperationId::new();
@@ -1075,7 +1257,7 @@ fn result_journal_fault_preserves_payload_first_ambiguous_state() {
 }
 
 #[test]
-fn cancellation_journal_fault_is_never_exposed_as_backend_termination() {
+fn cancellation_journal_fault_terminates_backend_but_leaves_durable_ambiguity() {
     let fixture = Fixture::new("cancellation-journal-fault", true);
     let operation_id = OperationId::new();
     let request = Fixture::request(operation_id, "/workspace/cancel-journal");
@@ -1089,7 +1271,7 @@ fn cancellation_journal_fault_is_never_exposed_as_backend_termination() {
         .expect_err("cancellation storage failure wins wrapper result");
     assert_eq!(error.kind(), ExecutionErrorKind::LocalStorage);
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(fixture.terminations.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.terminations.load(Ordering::SeqCst), 1);
     let snapshot = fixture.journal.snapshot().expect("snapshot");
     let operation = &snapshot
         .slot(fixture.slot)

@@ -136,13 +136,14 @@ pub enum SpoolEvent {
         /// Local elapsed time spent in the operation.
         duration: Duration,
     },
-    /// Plaintext bytes successfully persisted, loaded, or removed.
+    /// Logical protected-content bytes successfully persisted, loaded, or removed.
     ContentBytes {
         /// Operation that accounted the bytes.
         operation: SpoolOperation,
         /// Semantic role of the accounted content.
         content_kind: ContentKind,
-        /// Plaintext byte count; never the bytes themselves.
+        /// Exact plaintext bytes for public kinds, or the opaque padded
+        /// allocation class for an endpoint result; never the bytes themselves.
         bytes: u64,
     },
     /// One protection-adapter invocation completed.

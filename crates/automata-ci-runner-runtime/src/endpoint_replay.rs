@@ -17,12 +17,13 @@ use automata_ci_execution::{
 };
 use automata_ci_protocol::RunnerSlotOrdinal;
 use automata_ci_runner_journal::{
-    EndpointCancellationCompletion, EndpointOperation, EndpointOperationKind,
-    EndpointOperationState, EndpointRequestContentRef, EndpointResultContentRef, JournalError,
-    JournalInvariantError, RUNNER_JOURNAL_SCHEMA_VERSION, RunnerJournal,
+    EndpointOperation, EndpointOperationKind, EndpointOperationState, EndpointRequestContentRef,
+    EndpointResultContentRef, JournalError, JournalInvariantError, RUNNER_JOURNAL_SCHEMA_VERSION,
+    RunnerJournal,
 };
 use automata_ci_runner_spool::{
-    ContentCommitmentDomain, ContentKind, DurableContentStore, KeyedContentCommitment,
+    ContentCommitmentDomain, ContentKind, DurableContentStore, EndpointResultCapacityReservation,
+    KeyedContentCommitment,
 };
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
@@ -141,6 +142,10 @@ impl DurableExecutionEndpoint {
         if self.linearize_pre_invocation_cancellation(operation_id, stage, cancellation)? {
             return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
         }
+        let result_capacity = self
+            .content_operations
+            .reserve_endpoint_result(self.journal.as_ref(), self.spool.as_ref(), reservation)
+            .map_err(|_| execution_error(ExecutionErrorKind::LocalStorage, stage))?;
         let binding_cancellation = LinearizedCancellation::new(
             cancellation,
             self.journal.as_ref(),
@@ -190,7 +195,6 @@ impl DurableExecutionEndpoint {
             return Err(execution_error(ExecutionErrorKind::LocalStorage, stage));
         }
         if observed.cancellation_won() {
-            self.complete_cancellation(operation_id, stage)?;
             return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
         }
         if self.linearize_returned_cancellation(operation_id, stage, cancellation)? {
@@ -201,7 +205,7 @@ impl DurableExecutionEndpoint {
         if u64::try_from(encoded.len()).map_or(true, |bytes| bytes > reservation) {
             return Err(execution_error(ExecutionErrorKind::InvalidState, stage));
         }
-        self.publish_result(operation_id, &encoded, stage)?;
+        self.publish_result(operation_id, &encoded, result_capacity, stage)?;
         result
     }
 
@@ -327,35 +331,31 @@ impl DurableExecutionEndpoint {
         &self,
         operation_id: OperationId,
         encoded: &[u8],
+        capacity: Box<dyn EndpointResultCapacityReservation<'_> + '_>,
         stage: ExecutionStage,
     ) -> Result<(), ExecutionError> {
-        let committed = self.content_operations.publish_reclaiming_capacity(
-            self.journal.as_ref(),
-            self.spool.as_ref(),
-            || {
-                let publication = self
-                    .spool
-                    .persist(ContentKind::EndpointResult, encoded)
-                    .map_err(ExecutionEventError::Spool)?;
-                match publication.commit_with(|content| {
-                    let result = EndpointResultContentRef::new(content.clone())?;
-                    self.journal.record_endpoint_result(
-                        self.session_id,
-                        self.slot,
-                        self.guard,
-                        operation_id,
-                        result,
-                    )
-                }) {
-                    Ok(_) => Ok(()),
-                    Err(failure) => {
-                        let (error, publication) = failure.into_parts();
-                        publication.abort();
-                        Err(ExecutionEventError::Journal(error))
-                    }
+        let committed = self.content_operations.run(|| {
+            let publication = capacity
+                .persist(encoded)
+                .map_err(ExecutionEventError::Spool)?;
+            match publication.commit_with(|content| {
+                let result = EndpointResultContentRef::new(content.clone())?;
+                self.journal.record_endpoint_result(
+                    self.session_id,
+                    self.slot,
+                    self.guard,
+                    operation_id,
+                    result,
+                )
+            }) {
+                Ok(_) => Ok(()),
+                Err(failure) => {
+                    let (error, publication) = failure.into_parts();
+                    publication.abort();
+                    Err(ExecutionEventError::Journal(error))
                 }
-            },
-        );
+            }
+        });
         match committed {
             Ok(()) => Ok(()),
             Err(ExecutionEventError::Journal(JournalError::Invariant(
@@ -433,10 +433,7 @@ impl DurableExecutionEndpoint {
                     })
                     .ok_or_else(|| execution_error(ExecutionErrorKind::LocalStorage, stage))?;
                 match operation.state() {
-                    EndpointOperationState::CancellationRequested => {
-                        self.complete_cancellation(operation_id, stage)?;
-                        Ok(true)
-                    }
+                    EndpointOperationState::CancellationRequested => Ok(true),
                     EndpointOperationState::Cancelled | EndpointOperationState::Abandoned => {
                         Ok(true)
                     }
@@ -448,23 +445,6 @@ impl DurableExecutionEndpoint {
                 }
             }
         }
-    }
-
-    fn complete_cancellation(
-        &self,
-        operation_id: OperationId,
-        stage: ExecutionStage,
-    ) -> Result<(), ExecutionError> {
-        self.journal
-            .complete_endpoint_cancellation(
-                self.session_id,
-                self.slot,
-                self.guard,
-                operation_id,
-                EndpointCancellationCompletion::BackendReturned,
-            )
-            .map(|_| ())
-            .map_err(|_| execution_error(ExecutionErrorKind::LocalStorage, stage))
     }
 
     fn verify_live_binding(
@@ -725,6 +705,11 @@ impl Cancellation for LinearizedCancellation<'_> {
         match self.source.disposition() {
             CancellationDisposition::Active => CancellationDisposition::Active,
             CancellationDisposition::Terminate => {
+                if self.cancellation_won.load(Ordering::Acquire)
+                    || self.storage_failed.load(Ordering::Acquire)
+                {
+                    return CancellationDisposition::Terminate;
+                }
                 let committed = self.journal.record_endpoint_cancellation(
                     self.session_id,
                     self.slot,
@@ -751,7 +736,11 @@ impl Cancellation for LinearizedCancellation<'_> {
                     }
                 } else {
                     self.storage_failed.store(true, Ordering::Release);
-                    CancellationDisposition::Active
+                    // Durable cancellation could not be recorded. Terminate
+                    // backend work so the caller reaches fail-closed recovery,
+                    // but leave the invocation unresolved for exact sandbox
+                    // destruction rather than claiming durable quiescence.
+                    CancellationDisposition::Terminate
                 }
             }
         }

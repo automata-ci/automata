@@ -18,13 +18,13 @@ use self::{
     platform::PlatformDirectory,
 };
 use crate::{
-    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef,
-    EndpointCancellationCompletion, EndpointOperation, EndpointResultContentRef, JournalError,
-    JournalMutationDomain, JournalMutationObservation, JournalMutationOutcome, JournalObserver,
-    JournalSnapshot, LeaseOfferRecord, LogSegmentAcknowledgement, LogSegmentPublication,
-    NoopJournalObserver, OrphanAbandonmentReason, OrphanAuthorityProof, OrphanAuthorityVerifier,
-    OrphanDelivery, OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation,
-    RunnerJournal, SandboxIdentity, SessionBinding, TerminalResultRecord, model::StoredJournal,
+    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef, EndpointOperation,
+    EndpointResultContentRef, JournalError, JournalMutationDomain, JournalMutationObservation,
+    JournalMutationOutcome, JournalObserver, JournalSnapshot, LeaseOfferRecord,
+    LogSegmentAcknowledgement, LogSegmentPublication, NoopJournalObserver, OrphanAbandonmentReason,
+    OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanDelivery, OutboundOperationSequence,
+    ProviderFailureOutcome, ProviderOperation, RunnerJournal, SandboxIdentity, SessionBinding,
+    TerminalResultRecord, model::StoredJournal,
 };
 
 pub use state_root::StateRoot;
@@ -537,10 +537,9 @@ impl RunnerJournal for FileJournal {
         slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
         operation_id: OperationId,
-        completion: EndpointCancellationCompletion,
     ) -> Result<JournalSnapshot, JournalError> {
         self.mutate(JournalMutationDomain::Endpoint, |state| {
-            state.complete_endpoint_cancellation(session_id, slot, guard, operation_id, completion)
+            state.complete_endpoint_cancellation(session_id, slot, guard, operation_id)
         })
     }
 

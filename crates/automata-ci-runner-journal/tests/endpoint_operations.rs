@@ -4,11 +4,12 @@ use automata_ci_core::{JobLifecycle, LeaseGuard, OperationId, UnixMillis};
 use automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB;
 use automata_ci_runner_journal::{
     CancellationRecord, CommitFault, CommitFaultInjector, CommitStage, ContentKind,
-    ENDPOINT_REQUEST_COMMITMENT_BYTES, EndpointCancellationCompletion, EndpointOperation,
-    EndpointOperationKind, EndpointOperationState, EndpointRequestContentRef,
-    EndpointResultContentRef, FileJournal, FileJournalOptions, JournalError, JournalInvariantError,
-    JournalSnapshot, MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT, MAX_ENDPOINT_CONTENT_REFS_PER_SLOT,
-    MAX_ENDPOINT_RESULT_CONTENT_BYTES, ProviderName, ProviderOperation, ProviderOperationKind,
+    ENDPOINT_REQUEST_COMMITMENT_BYTES, EndpointOperation, EndpointOperationKind,
+    EndpointOperationState, EndpointRequestContentRef, EndpointResultContentRef, FileJournal,
+    FileJournalOptions, JournalError, JournalInvariantError, JournalSnapshot,
+    MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT, MAX_ENDPOINT_CONTENT_REFS_PER_SLOT,
+    MAX_ENDPOINT_RESULT_ALLOCATION_BYTES, MAX_ENDPOINT_RESULT_CONTENT_BYTES, MAX_JOURNAL_BYTES,
+    MIN_ENDPOINT_RESULT_ALLOCATION_BYTES, ProviderName, ProviderOperation, ProviderOperationKind,
     RunnerJournal, SandboxHandle, SandboxIdentity,
 };
 
@@ -30,9 +31,45 @@ fn accepted_operation(
     .expect("valid accepted operation")
 }
 
+fn accepted_operation_with_protection_id(
+    operation_id: OperationId,
+    kind: EndpointOperationKind,
+    marker: u8,
+    reservation: u64,
+    protection_id: &str,
+) -> EndpointOperation {
+    EndpointOperation::accepted(
+        operation_id,
+        kind,
+        EndpointRequestContentRef::new(Fixture::content_with_protection_id(
+            ContentKind::EndpointRequest,
+            32,
+            marker,
+            protection_id,
+        ))
+        .expect("valid request commitment"),
+        reservation,
+    )
+    .expect("valid accepted operation")
+}
+
 fn result(marker: u8, size: u64) -> EndpointResultContentRef {
     EndpointResultContentRef::new(Fixture::content(ContentKind::EndpointResult, size, marker))
         .expect("valid endpoint result")
+}
+
+fn result_with_protection_id(
+    marker: u8,
+    size: u64,
+    protection_id: &str,
+) -> EndpointResultContentRef {
+    EndpointResultContentRef::new(Fixture::content_with_protection_id(
+        ContentKind::EndpointResult,
+        size,
+        marker,
+        protection_id,
+    ))
+    .expect("valid endpoint result")
 }
 
 fn accepted_journal(label: &str) -> (Scratch, Fixture, FileJournal) {
@@ -148,7 +185,6 @@ fn apply_transition(
             fixture.slot,
             guard,
             operation_id,
-            EndpointCancellationCompletion::SandboxAbsent,
         ),
         EndpointTransition::Abandon => journal.abandon_endpoint_operation(
             fixture.session_id,
@@ -542,7 +578,7 @@ fn unresolved_endpoint_operation_structurally_fences_finalization_and_release() 
 }
 
 #[test]
-fn invoked_cancellation_requires_backend_return_or_exact_sandbox_absence() {
+fn invoked_cancellation_requires_exact_sandbox_absence() {
     let (_scratch, fixture, journal) =
         accepted_journal_with_sandbox("endpoint-cancellation-resolution");
     let guard = fixture.lease.guard();
@@ -573,7 +609,6 @@ fn invoked_cancellation_requires_backend_return_or_exact_sandbox_absence() {
             fixture.slot,
             guard,
             operation_id,
-            EndpointCancellationCompletion::SandboxAbsent,
         ),
         Err(JournalError::Invariant(
             JournalInvariantError::EndpointSandboxStillPresent
@@ -592,15 +627,21 @@ fn invoked_cancellation_requires_backend_return_or_exact_sandbox_absence() {
             JournalInvariantError::EndpointRecoveryPending
         ))
     ));
+    let destroy = OperationId::new();
     journal
-        .complete_endpoint_cancellation(
+        .record_provider_intent(
             fixture.session_id,
             fixture.slot,
             guard,
-            operation_id,
-            EndpointCancellationCompletion::BackendReturned,
+            ProviderOperation::intent(destroy, ProviderOperationKind::DestroySandbox),
         )
-        .expect("backend returned after cancellation");
+        .expect("destroy exact generation intent");
+    journal
+        .complete_provider_operation(fixture.session_id, fixture.slot, guard, destroy)
+        .expect("exact generation absent");
+    journal
+        .complete_endpoint_cancellation(fixture.session_id, fixture.slot, guard, operation_id)
+        .expect("resolve cancellation only after absence proof");
     record_and_ack_terminal(&journal, &fixture, JobLifecycle::Failed);
 }
 
@@ -678,7 +719,7 @@ fn endpoint_replay_conflicts_and_result_reservations_fail_closed() {
             fixture.slot,
             guard,
             operation_id,
-            result(0x42, 65),
+            result(0x42, MIN_ENDPOINT_RESULT_ALLOCATION_BYTES),
         ),
         Err(JournalError::Invariant(
             JournalInvariantError::EndpointResultExceedsReservation
@@ -727,7 +768,9 @@ fn reservation_bounds_are_overflow_safe_and_cancelled_capacity_shrinks_to_retain
     let operation = &cancelled.slot(fixture.slot).unwrap().endpoint_operations()[0];
     assert_eq!(operation.state(), &EndpointOperationState::Cancelled);
     assert_eq!(
-        operation.accounted_content_bytes(),
+        operation
+            .accounted_content_bytes()
+            .expect("bounded retained content"),
         ENDPOINT_REQUEST_COMMITMENT_BYTES
     );
     assert_eq!(operation.accounted_content_refs(), 1);
@@ -751,9 +794,9 @@ fn reservation_bounds_are_overflow_safe_and_cancelled_capacity_shrinks_to_retain
 fn completed_results_charge_actual_bytes_and_reject_before_the_next_invocation() {
     let (_scratch, fixture, journal) = accepted_journal("endpoint-byte-capacity");
     let guard = fixture.lease.guard();
-    let per_full_operation = ENDPOINT_REQUEST_COMMITMENT_BYTES + MAX_ENDPOINT_RESULT_CONTENT_BYTES;
+    let per_full_operation =
+        ENDPOINT_REQUEST_COMMITMENT_BYTES + MAX_ENDPOINT_RESULT_ALLOCATION_BYTES;
     let full = MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT / per_full_operation;
-    let remainder = MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT % per_full_operation;
     for ordinal in 0..full {
         let operation_id = OperationId::new();
         journal
@@ -785,7 +828,12 @@ fn completed_results_charge_actual_bytes_and_reject_before_the_next_invocation()
             )
             .expect("retain full endpoint result object");
     }
-    if remainder > ENDPOINT_REQUEST_COMMITMENT_BYTES {
+    let retained_full = full * per_full_operation;
+    let remaining = MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT - retained_full;
+    let per_small_operation =
+        ENDPOINT_REQUEST_COMMITMENT_BYTES + MIN_ENDPOINT_RESULT_ALLOCATION_BYTES;
+    let small = remaining / per_small_operation;
+    for ordinal in 0..small {
         let operation_id = OperationId::new();
         journal
             .accept_endpoint_operation(
@@ -795,23 +843,26 @@ fn completed_results_charge_actual_bytes_and_reject_before_the_next_invocation()
                 accepted_operation(
                     operation_id,
                     EndpointOperationKind::Exec,
-                    0xfa,
-                    remainder - ENDPOINT_REQUEST_COMMITMENT_BYTES,
+                    u8::try_from((ordinal + full) % 251).expect("bounded marker"),
+                    1,
                 ),
             )
-            .expect("reserve exact remaining bytes");
+            .expect("reserve minimum endpoint result class");
         journal
             .commit_endpoint_invocation(fixture.session_id, fixture.slot, guard, operation_id)
-            .expect("commit final capacity fixture");
+            .expect("commit minimum capacity fixture");
         journal
             .record_endpoint_result(
                 fixture.session_id,
                 fixture.slot,
                 guard,
                 operation_id,
-                result(0xf9, remainder - ENDPOINT_REQUEST_COMMITMENT_BYTES),
+                result(
+                    u8::try_from((ordinal + full + 1) % 251).expect("bounded marker"),
+                    1,
+                ),
             )
-            .expect("retain exact remaining bytes");
+            .expect("retain minimum endpoint result class");
     }
     let rejected = OperationId::new();
     assert!(matches!(
@@ -866,6 +917,22 @@ fn non_evicting_entry_ceiling_rejects_the_next_operation() {
             .len(),
         MAX_ENDPOINT_OPERATIONS_PER_JOB
     );
+    let replayed = journal
+        .accept_endpoint_operation(
+            fixture.session_id,
+            fixture.slot,
+            guard,
+            accepted_operation(operation_id, EndpointOperationKind::Wait, 0x51, 1),
+        )
+        .expect("exact replay remains admissible at the entry ceiling");
+    assert_eq!(
+        replayed
+            .slot(fixture.slot)
+            .expect("slot")
+            .endpoint_operations()
+            .len(),
+        MAX_ENDPOINT_OPERATIONS_PER_JOB
+    );
     assert!(matches!(
         journal.accept_endpoint_operation(
             fixture.session_id,
@@ -888,12 +955,19 @@ fn reference_ceiling_is_aligned_with_the_shared_endpoint_execution_bound() {
     let (scratch, fixture, journal) = accepted_journal("endpoint-reference-capacity");
     let guard = fixture.lease.guard();
     let operation_id = OperationId::new();
+    let protection_id = "p".repeat(64);
     journal
         .accept_endpoint_operation(
             fixture.session_id,
             fixture.slot,
             guard,
-            accepted_operation(operation_id, EndpointOperationKind::Wait, 0x61, 1),
+            accepted_operation_with_protection_id(
+                operation_id,
+                EndpointOperationKind::CopyFrom,
+                0x61,
+                MAX_ENDPOINT_RESULT_CONTENT_BYTES,
+                &protection_id,
+            ),
         )
         .expect("seed operation");
     journal
@@ -905,14 +979,16 @@ fn reference_ceiling_is_aligned_with_the_shared_endpoint_execution_bound() {
             fixture.slot,
             guard,
             operation_id,
-            result(0x62, 1),
+            result_with_protection_id(0x62, 1, &protection_id),
         )
         .expect("seed result");
     drop(journal);
-    expand_only_endpoint_operation(
-        &scratch.child("state").join("runner-journal.json"),
-        operation_id,
-        MAX_ENDPOINT_OPERATIONS_PER_JOB,
+    let path = scratch.child("state").join("runner-journal.json");
+    expand_only_endpoint_operation(&path, operation_id, MAX_ENDPOINT_OPERATIONS_PER_JOB);
+    assert!(
+        usize::try_from(fs::metadata(&path).expect("journal metadata").len())
+            .is_ok_and(|bytes| bytes <= MAX_JOURNAL_BYTES),
+        "the maximum admitted current-schema endpoint journal must fit its hard read bound"
     );
     let journal = fixture.open(&scratch);
     assert!(matches!(
@@ -967,7 +1043,13 @@ fn expand_only_endpoint_operation(path: &Path, original_id: OperationId, count: 
     let operation = journal[start..end].to_owned();
     let original_id = original_id.to_string();
     let expanded = (0..count)
-        .map(|_| operation.replacen(&original_id, &OperationId::new().to_string(), 1))
+        .map(|index| {
+            if index == 0 {
+                operation.clone()
+            } else {
+                operation.replacen(&original_id, &OperationId::new().to_string(), 1)
+            }
+        })
         .collect::<Vec<_>>()
         .join(",");
     journal.replace_range(start..end, &expanded);

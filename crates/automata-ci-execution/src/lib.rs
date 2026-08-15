@@ -39,7 +39,8 @@ pub use automata_ci_core::{
 };
 pub use capability::{ProviderCapabilities, SandboxCapability};
 pub use endpoint::{
-    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, EnvironmentName,
+    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest,
+    ENDPOINT_JOB_SETUP_OPERATIONS, ENDPOINT_OPERATIONS_PER_RUN_STEP, EnvironmentName,
     EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint,
     ExecutionEnvironment, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
     ExecutionSignal, ExecutionTermination, MAX_ENDPOINT_OPERATIONS_PER_JOB, NeverCancelled,

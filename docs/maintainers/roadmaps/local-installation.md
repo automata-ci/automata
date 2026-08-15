@@ -889,10 +889,14 @@ sandbox/provider interfaces. Reuse executor requests, operation identity,
 runner custody, copy/exec/attach/output bounds, cancellation, and result
 delivery. Add fake-daemon conformance and an ignored live Docker suite.
 
-Foundation status: the shared sandbox contract now carries mandatory exact
-runner custody and durable slot identity. `LocalDocker` product exposure stays
-closed until a host-owned, bounded, non-evicting operation journal can preserve
-accepted/committed/result/cancellation linearization for the sandbox lifetime.
+Foundation status: the shared sandbox contract carries mandatory exact runner
+custody and durable slot identity. The existing runner path now applies one
+host-owned, bounded, non-evicting operation linearization gate to every provider,
+with protected request commitments, payload-first opaque results, physical
+result-capacity reservation, and sandbox-absence-gated cancellation recovery.
+`LocalDocker` product exposure remains closed until guest replay is likewise
+non-evicting and fail-at-capacity for the container lifetime, and the provider
+proves that exited jobs are never restarted.
 
 Gate: shell and JavaScript-action sandboxes execute; restart attach and exact
 cancellation work; realized configuration is inspected; foreign collisions

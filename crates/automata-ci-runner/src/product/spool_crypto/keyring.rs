@@ -108,6 +108,13 @@ impl ContentProtector for Aes256GcmContentKeyring {
             .keyed_commitment(protection_id, domain, material_digest)
     }
 
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        self.active.endpoint_result_protected_bytes(plaintext_bytes)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,

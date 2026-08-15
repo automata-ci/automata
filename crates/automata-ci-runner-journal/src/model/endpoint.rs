@@ -1,9 +1,10 @@
 use automata_ci_core::OperationId;
-use automata_ci_runner_spool::{ContentKind, DurableContentRef};
+use automata_ci_runner_spool::{ContentKind, DurableContentRef, endpoint_result_allocation};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ENDPOINT_REQUEST_COMMITMENT_BYTES, JournalInvariantError, MAX_ENDPOINT_RESULT_CONTENT_BYTES,
+    ENDPOINT_REQUEST_COMMITMENT_BYTES, JournalInvariantError, MAX_ENDPOINT_RESULT_ALLOCATION_BYTES,
+    MAX_ENDPOINT_RESULT_CONTENT_BYTES, MIN_ENDPOINT_RESULT_ALLOCATION_BYTES,
 };
 
 /// Closed execution-endpoint operation domain retained for exact replay.
@@ -20,16 +21,6 @@ pub enum EndpointOperationKind {
     CopyTo,
     /// Copies bounded bytes out of the sandbox.
     CopyFrom,
-}
-
-/// Trusted proof that an invoked cancellation no longer has live backend work.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EndpointCancellationCompletion {
-    /// The synchronous provider call returned after observing termination.
-    BackendReturned,
-    /// Recovery durably removed the exact sandbox identity.
-    SandboxAbsent,
 }
 
 /// Protected fixed-size commitment to an exact endpoint request.
@@ -57,7 +48,7 @@ impl EndpointRequestContentRef {
 
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
         if self.0.kind() != ContentKind::EndpointRequest
-            || self.0.size() != ENDPOINT_REQUEST_COMMITMENT_BYTES
+            || self.0.public_plaintext_bytes() != Some(ENDPOINT_REQUEST_COMMITMENT_BYTES)
         {
             return Err(JournalInvariantError::InvalidEndpointRequestContent);
         }
@@ -75,7 +66,7 @@ impl EndpointResultContentRef {
     ///
     /// # Errors
     ///
-    /// Rejects a reference with the wrong kind or an empty/oversized object.
+    /// Rejects a reference with the wrong kind or protected allocation class.
     pub fn new(content: DurableContentRef) -> Result<Self, JournalInvariantError> {
         let value = Self(content);
         value.validate()?;
@@ -89,9 +80,12 @@ impl EndpointResultContentRef {
     }
 
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
+        let allocation = self.0.endpoint_result_allocation_bytes();
         if self.0.kind() != ContentKind::EndpointResult
-            || self.0.size() == 0
-            || self.0.size() > MAX_ENDPOINT_RESULT_CONTENT_BYTES
+            || allocation.is_none_or(|bytes| {
+                !(MIN_ENDPOINT_RESULT_ALLOCATION_BYTES..=MAX_ENDPOINT_RESULT_ALLOCATION_BYTES)
+                    .contains(&bytes)
+            })
         {
             return Err(JournalInvariantError::InvalidEndpointResultContent);
         }
@@ -103,9 +97,11 @@ impl EndpointResultContentRef {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointOperation {
+    #[serde(rename = "id")]
     operation_id: OperationId,
     kind: EndpointOperationKind,
     request: EndpointRequestContentRef,
+    #[serde(rename = "reservation")]
     reserved_result_bytes: u64,
     state: EndpointOperationState,
 }
@@ -120,7 +116,7 @@ pub enum EndpointOperationState {
     InvocationCommitted,
     /// Termination won the durable race, but backend quiescence is not proven.
     CancellationRequested,
-    /// Cancellation is complete and no backend invocation remains live.
+    /// Cancellation is complete after the exact sandbox was proven absent.
     Cancelled,
     /// Recovery proved the exact sandbox generation absent after ambiguity.
     Abandoned,
@@ -207,21 +203,27 @@ impl EndpointOperation {
     }
 
     /// Returns bytes charged against the per-slot retained-content budget.
-    #[must_use]
-    pub const fn accounted_content_bytes(&self) -> u64 {
-        match &self.state {
+    ///
+    /// # Errors
+    ///
+    /// Rejects an incoherent result allocation or arithmetic overflow.
+    pub fn accounted_content_bytes(&self) -> Result<u64, JournalInvariantError> {
+        let result_bytes = match &self.state {
             EndpointOperationState::Accepted
             | EndpointOperationState::InvocationCommitted
             | EndpointOperationState::CancellationRequested => {
-                ENDPOINT_REQUEST_COMMITMENT_BYTES + self.reserved_result_bytes
+                endpoint_result_allocation(self.reserved_result_bytes)
+                    .map_err(|_| JournalInvariantError::InvalidEndpointResultReservation)?
             }
-            EndpointOperationState::Completed { result } => {
-                ENDPOINT_REQUEST_COMMITMENT_BYTES + result.content().size()
-            }
-            EndpointOperationState::Cancelled | EndpointOperationState::Abandoned => {
-                ENDPOINT_REQUEST_COMMITMENT_BYTES
-            }
-        }
+            EndpointOperationState::Completed { result } => result
+                .content()
+                .endpoint_result_allocation_bytes()
+                .ok_or(JournalInvariantError::InvalidEndpointResultContent)?,
+            EndpointOperationState::Cancelled | EndpointOperationState::Abandoned => 0,
+        };
+        ENDPOINT_REQUEST_COMMITMENT_BYTES
+            .checked_add(result_bytes)
+            .ok_or(JournalInvariantError::DecodedStateInvalid)
     }
 
     /// Returns protected references charged against the per-slot reference budget.
@@ -304,7 +306,9 @@ impl EndpointOperation {
         result: EndpointResultContentRef,
     ) -> Result<bool, JournalInvariantError> {
         result.validate()?;
-        if result.content().size() > self.reserved_result_bytes {
+        let reserved_allocation = endpoint_result_allocation(self.reserved_result_bytes)
+            .map_err(|_| JournalInvariantError::InvalidEndpointResultReservation)?;
+        if result.content().accounted_bytes() > reserved_allocation {
             return Err(JournalInvariantError::EndpointResultExceedsReservation);
         }
         match &self.state {
@@ -338,11 +342,13 @@ impl EndpointOperation {
         }
         if let EndpointOperationState::Completed { result } = &self.state {
             result.validate()?;
-            if result.content().size() > self.reserved_result_bytes {
+            let reserved_allocation = endpoint_result_allocation(self.reserved_result_bytes)
+                .map_err(|_| JournalInvariantError::DecodedStateInvalid)?;
+            if result.content().accounted_bytes() > reserved_allocation {
                 return Err(JournalInvariantError::DecodedStateInvalid);
             }
         }
-        self.accounted_content_bytes()
+        self.accounted_content_bytes()?
             .checked_sub(ENDPOINT_REQUEST_COMMITMENT_BYTES)
             .ok_or(JournalInvariantError::DecodedStateInvalid)?;
         Ok(())

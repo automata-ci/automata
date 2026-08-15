@@ -6,10 +6,9 @@ use automata_ci_protocol::{
     SessionDisposition,
 };
 use automata_ci_runner_journal::{
-    EndpointCancellationCompletion, EndpointOperationState, JournalContentRetainSet,
-    OrphanAbandonmentPermissions, OrphanAbandonmentReason, OrphanAuthorityError,
-    OrphanAuthorityGrant, OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanClaim,
-    OrphanDelivery, RunnerJournal, SlotSnapshot,
+    EndpointOperationState, JournalContentRetainSet, OrphanAbandonmentPermissions,
+    OrphanAbandonmentReason, OrphanAuthorityError, OrphanAuthorityGrant, OrphanAuthorityProof,
+    OrphanAuthorityVerifier, OrphanClaim, OrphanDelivery, RunnerJournal, SlotSnapshot,
 };
 use automata_ci_runner_spool::DurableContentStore;
 use sha2::{Digest as _, Sha256};
@@ -291,7 +290,6 @@ impl OrphanRecoveryCoordinator {
                         slot,
                         guard,
                         operation.operation_id(),
-                        EndpointCancellationCompletion::SandboxAbsent,
                     )?;
                 }
                 EndpointOperationState::Cancelled

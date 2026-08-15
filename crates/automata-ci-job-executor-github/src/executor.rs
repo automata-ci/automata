@@ -7780,8 +7780,8 @@ mod tests {
 
     use automata_ci_core::AttemptId;
     use automata_ci_execution::{
-        Cancellation, CancellationDisposition, ExecutionOutputRecord, ExecutionOutputStream,
-        TargetPath,
+        Cancellation, CancellationDisposition, ENDPOINT_JOB_SETUP_OPERATIONS,
+        ENDPOINT_OPERATIONS_PER_RUN_STEP, ExecutionOutputRecord, ExecutionOutputStream, TargetPath,
     };
     use automata_ci_expression_github::GithubValue;
     use automata_ci_github_runtime::{
@@ -7791,15 +7791,34 @@ mod tests {
     use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionCancellationReason};
 
     use super::{
-        ActionBudgetRejection, ActionExecutionBudget, AttemptPaths, CleanupCancellation,
-        ExecutorAdapterErrorKind, GithubStatus, JobConclusion, MAX_ACTION_INVOCATIONS,
-        MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS, MAX_COMPOSITE_DERIVED_BYTES,
-        MAX_EVENT_DEPTH, ProviderCancellationBridge, SecretMasker,
+        ActionBudgetRejection, ActionExecutionBudget, AttemptPaths, COMMAND_FILE_KINDS,
+        CleanupCancellation, ExecutorAdapterErrorKind, GithubStatus, JobConclusion,
+        MAX_ACTION_INVOCATIONS, MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS,
+        MAX_COMPOSITE_DERIVED_BYTES, MAX_EVENT_DEPTH, ProviderCancellationBridge, SecretMasker,
         action_invocation_count_rejection, composite_child_step_rejection,
         composite_derived_bytes_rejection, encode_action_outputs, event_depth_rejection,
         github_value_from_json, parse_output_with_cancellation, reconcile_cancelled_operation,
         reconcile_post_operation, resource_exhausted,
     };
+
+    #[test]
+    fn shared_endpoint_capacity_matches_the_current_run_step_fanout() {
+        let setup = 1_usize // prepare attempt directories
+            + 1; // copy event document
+        let run_step = 1_usize // copy script
+            + COMMAND_FILE_KINDS.len() // initialize command files
+            + 2 // initialize artifact and artifact-list files
+            + 1 // execute phase
+            + COMMAND_FILE_KINDS.len() // read command files
+            + 1; // read artifact declarations
+        assert_eq!(ENDPOINT_JOB_SETUP_OPERATIONS, setup);
+        assert_eq!(ENDPOINT_OPERATIONS_PER_RUN_STEP, run_step);
+        assert_eq!(
+            automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB,
+            automata_ci_core::MAX_LOGICAL_STEPS * run_step + setup,
+            "dynamic action phases and artifact hashes consume the shared budget after this baseline",
+        );
+    }
 
     #[test]
     fn shutdown_terminates_endpoint_and_provider_control_work() {

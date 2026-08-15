@@ -4,12 +4,12 @@ use automata_ci_core::{
 use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal, RuntimeAuthorityGeneration};
 
 use crate::{
-    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef,
-    EndpointCancellationCompletion, EndpointOperation, EndpointResultContentRef, JournalError,
-    JournalSnapshot, LeaseOfferRecord, LogSegmentAcknowledgement, LogSegmentPublication,
-    OrphanAbandonmentReason, OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanDelivery,
-    OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation,
-    RuntimeAuthorityDeliveryRecord, SandboxIdentity, SessionBinding, TerminalResultRecord,
+    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef, EndpointOperation,
+    EndpointResultContentRef, JournalError, JournalSnapshot, LeaseOfferRecord,
+    LogSegmentAcknowledgement, LogSegmentPublication, OrphanAbandonmentReason,
+    OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanDelivery, OutboundOperationSequence,
+    ProviderFailureOutcome, ProviderOperation, RuntimeAuthorityDeliveryRecord, SandboxIdentity,
+    SessionBinding, TerminalResultRecord,
 };
 
 /// Backend-neutral, object-safe port for crash-recoverable runner state.
@@ -313,8 +313,7 @@ pub trait RunnerJournal: Send + Sync {
         operation_id: OperationId,
     ) -> Result<JournalSnapshot, JournalError>;
 
-    /// Completes a cancellation only after the backend returned or exact
-    /// sandbox absence was proven.
+    /// Completes a cancellation only after exact sandbox absence is durable.
     ///
     /// # Errors
     ///
@@ -326,7 +325,6 @@ pub trait RunnerJournal: Send + Sync {
         slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
         operation_id: OperationId,
-        completion: EndpointCancellationCompletion,
     ) -> Result<JournalSnapshot, JournalError>;
 
     /// Resolves an uncertain invocation after exact sandbox absence is durable.

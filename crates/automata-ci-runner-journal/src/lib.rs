@@ -25,17 +25,17 @@ pub use file::{
 pub use journal::RunnerJournal;
 pub use model::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, CommandTombstone, DurableCommand,
-    EndpointCancellationCompletion, EndpointOperation, EndpointOperationKind,
-    EndpointOperationState, EndpointRequestContentRef, EndpointResultContentRef, JobIrContentRef,
-    JournalSnapshot, LeaseOfferRecord, LeaseOfferStatus, LeasePollCheckpoint, LeaseRejectionRecord,
-    LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement, LogSegmentPublication,
-    OrphanAbandonmentPermissions, OrphanAbandonmentReason, OrphanAuthorityError,
-    OrphanAuthorityGrant, OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanClaim,
-    OrphanDelivery, OrphanRecord, OutboundOperationCursor, OutboundOperationSequence,
-    PendingDeliveryTimestamps, ProviderFailureKind, ProviderFailureOutcome, ProviderName,
-    ProviderOperation, ProviderOperationKind, ProviderOperationOutcome, RuntimeAuthorityContentRef,
-    RuntimeAuthorityDeliveryRecord, SandboxHandle, SandboxIdentity, SessionBinding,
-    SessionSnapshot, SlotSnapshot, TerminalResultRecord,
+    EndpointOperation, EndpointOperationKind, EndpointOperationState, EndpointRequestContentRef,
+    EndpointResultContentRef, JobIrContentRef, JournalSnapshot, LeaseOfferRecord, LeaseOfferStatus,
+    LeasePollCheckpoint, LeaseRejectionRecord, LogDeliveryCursor, LogSegment,
+    LogSegmentAcknowledgement, LogSegmentPublication, OrphanAbandonmentPermissions,
+    OrphanAbandonmentReason, OrphanAuthorityError, OrphanAuthorityGrant, OrphanAuthorityProof,
+    OrphanAuthorityVerifier, OrphanClaim, OrphanDelivery, OrphanRecord, OutboundOperationCursor,
+    OutboundOperationSequence, PendingDeliveryTimestamps, ProviderFailureKind,
+    ProviderFailureOutcome, ProviderName, ProviderOperation, ProviderOperationKind,
+    ProviderOperationOutcome, RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
+    SandboxHandle, SandboxIdentity, SessionBinding, SessionSnapshot, SlotSnapshot,
+    TerminalResultRecord,
 };
 pub use observer::{
     JournalMutationDomain, JournalMutationObservation, JournalMutationOutcome, JournalObserver,
@@ -46,7 +46,7 @@ pub use observer::{
 ///
 /// Obsolete or future schemas fail closed rather than being interpreted by
 /// compatibility readers.
-pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 4;
+pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 5;
 
 /// Largest delivery enqueue timestamp accepted by the durable journal.
 ///
@@ -68,14 +68,38 @@ pub const MAX_PROVIDER_OPERATIONS_PER_SLOT: usize = 32;
 pub const MAX_ENDPOINT_CONTENT_REFS_PER_SLOT: usize =
     automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB * 2;
 
-/// Maximum aggregate request-commitment and result bytes reserved by one slot.
-pub const MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT: u64 = 1024 * 1024 * 1024;
-
 /// Maximum protected result object for one execution-endpoint operation.
 pub const MAX_ENDPOINT_RESULT_CONTENT_BYTES: u64 = 17 * 1024 * 1024;
 
 /// Exact protected request commitment retained for every endpoint operation.
 pub const ENDPOINT_REQUEST_COMMITMENT_BYTES: u64 = 32;
+
+/// Smallest opaque protected allocation retained by an endpoint result.
+pub const MIN_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 = endpoint_result_allocation_or_panic(1);
+
+/// Largest opaque protected allocation retained by an endpoint result.
+pub const MAX_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 =
+    endpoint_result_allocation_or_panic(MAX_ENDPOINT_RESULT_CONTENT_BYTES);
+
+/// Maximum aggregate endpoint content charged to one slot.
+///
+/// This admits the maximum shared endpoint-operation count when every retained
+/// result is in the smallest protected allocation class, while still reserving
+/// the largest result class for the sole operation allowed to be in flight.
+/// Larger cumulative retained output fails closed before a successor backend
+/// invocation.
+pub const MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT: u64 = ENDPOINT_REQUEST_COMMITMENT_BYTES
+    * automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB as u64
+    + MIN_ENDPOINT_RESULT_ALLOCATION_BYTES
+        * (automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB as u64 - 1)
+    + MAX_ENDPOINT_RESULT_ALLOCATION_BYTES;
+
+const fn endpoint_result_allocation_or_panic(plaintext_bytes: u64) -> u64 {
+    match automata_ci_runner_spool::endpoint_result_allocation(plaintext_bytes) {
+        Ok(bytes) => bytes,
+        Err(_) => panic!("endpoint result bound must fit the protected spool"),
+    }
+}
 
 /// Maximum recent server-command digest tombstones retained per session.
 pub const MAX_COMMAND_TOMBSTONES: usize = 256;

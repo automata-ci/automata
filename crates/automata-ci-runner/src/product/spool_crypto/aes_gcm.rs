@@ -2,7 +2,7 @@ use std::fmt;
 
 use automata_ci_runner_spool::{
     ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
-    DurableContentRef, MAX_CONTENT_OBJECT_BYTES, ProtectionId,
+    DurableContentRef, MAX_CONTENT_OBJECT_BYTES, ProtectionId, endpoint_result_allocation,
 };
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey},
@@ -10,6 +10,7 @@ use ring::{
     rand::{SecureRandom as _, SystemRandom},
 };
 use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
 use super::error::ContentProtectorConfigurationError;
@@ -18,9 +19,12 @@ use super::error::ContentProtectorConfigurationError;
 pub(in crate::product) const AES_256_GCM_KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
 const TAG_BYTES: usize = 16;
-const HEADER: &[u8; 4] = b"ASP1";
+const HEADER: &[u8; 4] = b"ASP2";
 const ENCODED_OVERHEAD: usize = HEADER.len() + NONCE_BYTES + TAG_BYTES;
-const AAD_DOMAIN: &[u8] = b"automata.runner.spool.aes256gcm.v1\0";
+const ENDPOINT_RESULT_ENVELOPE_HEADER: &[u8; 4] = b"EPR1";
+const ENDPOINT_RESULT_ENVELOPE_BYTES: usize = ENDPOINT_RESULT_ENVELOPE_HEADER.len() + 8 + 32;
+const ENDPOINT_RESULT_MATERIAL_DOMAIN: &[u8] = b"automata.runner.endpoint-result.material.v1\0";
+const AAD_DOMAIN: &[u8] = b"automata.runner.spool.aes256gcm.v2\0";
 const COMMITMENT_KEY_DOMAIN: &[u8] = b"automata.runner.spool.commitment-key.v1\0";
 
 /// AES-256-GCM implementation of the runner spool protection boundary.
@@ -72,7 +76,15 @@ impl Aes256GcmContentProtector {
     }
 
     fn matching_reference(&self, reference: &DurableContentRef) -> bool {
-        reference.protection_id() == &self.id && reference.size() <= MAX_CONTENT_OBJECT_BYTES
+        reference.protection_id() == &self.id
+            && match (
+                reference.public_plaintext_bytes(),
+                reference.endpoint_result_allocation_bytes(),
+            ) {
+                (Some(bytes), None) => bytes <= MAX_CONTENT_OBJECT_BYTES,
+                (None, Some(bytes)) => bytes > 0,
+                _ => false,
+            }
     }
 
     fn associated_data(reference: &DurableContentRef) -> Vec<u8> {
@@ -90,8 +102,24 @@ impl Aes256GcmContentProtector {
             ContentKind::EndpointRequest => 5,
             ContentKind::EndpointResult => 6,
         });
-        data.extend_from_slice(&reference.size().to_be_bytes());
-        data.extend_from_slice(reference.sha256().as_bytes());
+        match (
+            reference.public_plaintext_bytes(),
+            reference.public_plaintext_sha256(),
+            reference.endpoint_result_allocation_bytes(),
+            reference.endpoint_result_identity(),
+        ) {
+            (Some(bytes), Some(digest), None, None) => {
+                data.push(1);
+                data.extend_from_slice(&bytes.to_be_bytes());
+                data.extend_from_slice(digest.as_bytes());
+            }
+            (None, None, Some(allocation), Some(identity)) => {
+                data.push(2);
+                data.extend_from_slice(&allocation.to_be_bytes());
+                data.extend_from_slice(identity.as_bytes());
+            }
+            _ => unreachable!("validated durable content identities are kind coherent"),
+        }
         let cache_length =
             u16::try_from(cache_key.len()).expect("cache keys are bounded below u16");
         data.extend_from_slice(&cache_length.to_be_bytes());
@@ -103,9 +131,120 @@ impl Aes256GcmContentProtector {
         data
     }
 
-    fn plaintext_matches(reference: &DurableContentRef, plaintext: &[u8]) -> bool {
-        u64::try_from(plaintext.len()) == Ok(reference.size())
-            && Sha256::digest(plaintext).as_slice() == reference.sha256().as_bytes()
+    fn endpoint_result_material_digest(
+        plaintext: &[u8],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        let plaintext_bytes =
+            u64::try_from(plaintext.len()).map_err(|_| ContentProtectionError::Failed)?;
+        let plaintext_sha256: [u8; 32] = Sha256::digest(plaintext).into();
+        let mut material = Sha256::new();
+        material.update(ENDPOINT_RESULT_MATERIAL_DOMAIN);
+        material.update(plaintext_bytes.to_be_bytes());
+        material.update(plaintext_sha256);
+        Ok(material.finalize().into())
+    }
+
+    fn plaintext_matches(
+        &self,
+        reference: &DurableContentRef,
+        plaintext: &[u8],
+    ) -> Result<bool, ContentProtectionError> {
+        if let (Some(bytes), Some(digest)) = (
+            reference.public_plaintext_bytes(),
+            reference.public_plaintext_sha256(),
+        ) {
+            return Ok(u64::try_from(plaintext.len()) == Ok(bytes)
+                && Sha256::digest(plaintext).as_slice() == digest.as_bytes());
+        }
+        let plaintext_bytes =
+            u64::try_from(plaintext.len()).map_err(|_| ContentProtectionError::Failed)?;
+        let allocation = endpoint_result_allocation(plaintext_bytes)
+            .map_err(|_| ContentProtectionError::Failed)?;
+        if reference.endpoint_result_allocation_bytes() != Some(allocation) {
+            return Ok(false);
+        }
+        let material = Self::endpoint_result_material_digest(plaintext)?;
+        let expected = self.keyed_commitment(
+            &self.id,
+            ContentCommitmentDomain::EndpointResultIdentity,
+            &material,
+        )?;
+        let Some(actual) = reference.endpoint_result_identity() else {
+            return Ok(false);
+        };
+        Ok(bool::from(expected.ct_eq(actual.as_bytes())))
+    }
+
+    fn protected_plaintext(
+        reference: &DurableContentRef,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, ContentProtectionError> {
+        if reference.kind() != ContentKind::EndpointResult {
+            return Ok(plaintext.to_vec());
+        }
+        let allocation = reference
+            .endpoint_result_allocation_bytes()
+            .ok_or(ContentProtectionError::Failed)?;
+        let protected_plaintext_bytes = allocation
+            .checked_sub(u64::try_from(ENCODED_OVERHEAD).expect("fixed overhead fits u64"))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or(ContentProtectionError::Failed)?;
+        let required = ENDPOINT_RESULT_ENVELOPE_BYTES
+            .checked_add(plaintext.len())
+            .ok_or(ContentProtectionError::Failed)?;
+        if required > protected_plaintext_bytes {
+            return Err(ContentProtectionError::Failed);
+        }
+        let mut enveloped = Vec::with_capacity(protected_plaintext_bytes);
+        enveloped.extend_from_slice(ENDPOINT_RESULT_ENVELOPE_HEADER);
+        enveloped.extend_from_slice(
+            &u64::try_from(plaintext.len())
+                .map_err(|_| ContentProtectionError::Failed)?
+                .to_be_bytes(),
+        );
+        enveloped.extend_from_slice(&Sha256::digest(plaintext));
+        enveloped.extend_from_slice(plaintext);
+        enveloped.resize(protected_plaintext_bytes, 0);
+        Ok(enveloped)
+    }
+
+    fn open_endpoint_result(
+        &self,
+        reference: &DurableContentRef,
+        enveloped: &[u8],
+    ) -> Result<Vec<u8>, ContentProtectionError> {
+        if enveloped.len() < ENDPOINT_RESULT_ENVELOPE_BYTES
+            || &enveloped[..ENDPOINT_RESULT_ENVELOPE_HEADER.len()]
+                != ENDPOINT_RESULT_ENVELOPE_HEADER
+        {
+            return Err(ContentProtectionError::AuthenticationFailed);
+        }
+        let length_offset = ENDPOINT_RESULT_ENVELOPE_HEADER.len();
+        let digest_offset = length_offset + 8;
+        let payload_offset = digest_offset + 32;
+        let plaintext_bytes = u64::from_be_bytes(
+            enveloped[length_offset..digest_offset]
+                .try_into()
+                .map_err(|_| ContentProtectionError::AuthenticationFailed)?,
+        );
+        let plaintext_length = usize::try_from(plaintext_bytes)
+            .map_err(|_| ContentProtectionError::AuthenticationFailed)?;
+        let payload_end = payload_offset
+            .checked_add(plaintext_length)
+            .filter(|end| *end <= enveloped.len())
+            .ok_or(ContentProtectionError::AuthenticationFailed)?;
+        if enveloped[payload_end..].iter().any(|byte| *byte != 0) {
+            return Err(ContentProtectionError::AuthenticationFailed);
+        }
+        let plaintext = enveloped[payload_offset..payload_end].to_vec();
+        if Sha256::digest(&plaintext).as_slice() != &enveloped[digest_offset..payload_offset]
+            || !self
+                .plaintext_matches(reference, &plaintext)
+                .map_err(|_| ContentProtectionError::AuthenticationFailed)?
+        {
+            return Err(ContentProtectionError::AuthenticationFailed);
+        }
+        Ok(plaintext)
     }
 }
 
@@ -144,6 +283,13 @@ impl ContentProtector for Aes256GcmContentProtector {
             .map_err(|_| ContentProtectionError::Failed)
     }
 
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        endpoint_result_allocation(plaintext_bytes).map_err(|_| ContentProtectionError::Failed)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,
@@ -152,10 +298,11 @@ impl ContentProtector for Aes256GcmContentProtector {
         if !self.matching_reference(reference) {
             return Err(ContentProtectionError::KeyUnavailable);
         }
-        if !Self::plaintext_matches(reference, plaintext) {
+        if !self.plaintext_matches(reference, plaintext)? {
             return Err(ContentProtectionError::Failed);
         }
-        let capacity = plaintext
+        let mut ciphertext = Self::protected_plaintext(reference, plaintext)?;
+        let capacity = ciphertext
             .len()
             .checked_add(ENCODED_OVERHEAD)
             .ok_or(ContentProtectionError::Failed)?;
@@ -164,7 +311,6 @@ impl ContentProtector for Aes256GcmContentProtector {
             .fill(&mut nonce_bytes)
             .map_err(|_| ContentProtectionError::Failed)?;
         let nonce = Nonce::assume_unique_for_key(nonce_bytes);
-        let mut ciphertext = plaintext.to_vec();
         self.key
             .seal_in_place_append_tag(
                 nonce,
@@ -187,13 +333,18 @@ impl ContentProtector for Aes256GcmContentProtector {
         if !self.matching_reference(reference) {
             return Err(ContentProtectionError::KeyUnavailable);
         }
-        let expected_length = reference
-            .size()
-            .checked_add(
-                u64::try_from(ENCODED_OVERHEAD)
-                    .expect("the fixed protection overhead always fits u64"),
-            )
-            .ok_or(ContentProtectionError::AuthenticationFailed)?;
+        let expected_length = match reference.endpoint_result_allocation_bytes() {
+            Some(allocation) => allocation,
+            None => reference
+                .public_plaintext_bytes()
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        u64::try_from(ENCODED_OVERHEAD)
+                            .expect("the fixed protection overhead always fits u64"),
+                    )
+                })
+                .ok_or(ContentProtectionError::AuthenticationFailed)?,
+        };
         if u64::try_from(protected.len()) != Ok(expected_length)
             || &protected[..HEADER.len()] != HEADER
         {
@@ -212,9 +363,15 @@ impl ContentProtector for Aes256GcmContentProtector {
                 &mut ciphertext,
             )
             .map_err(|_| ContentProtectionError::AuthenticationFailed)?;
-        let plaintext_length = plaintext.len();
-        ciphertext.truncate(plaintext_length);
-        if !Self::plaintext_matches(reference, &ciphertext) {
+        let opened_length = plaintext.len();
+        ciphertext.truncate(opened_length);
+        if reference.kind() == ContentKind::EndpointResult {
+            return self.open_endpoint_result(reference, &ciphertext);
+        }
+        if !self
+            .plaintext_matches(reference, &ciphertext)
+            .map_err(|_| ContentProtectionError::AuthenticationFailed)?
+        {
             return Err(ContentProtectionError::AuthenticationFailed);
         }
         Ok(ciphertext)

@@ -17,8 +17,8 @@ pub use cursor::{
     OutboundOperationCursor, OutboundOperationSequence,
 };
 pub use endpoint::{
-    EndpointCancellationCompletion, EndpointOperation, EndpointOperationKind,
-    EndpointOperationState, EndpointRequestContentRef, EndpointResultContentRef,
+    EndpointOperation, EndpointOperationKind, EndpointOperationState, EndpointRequestContentRef,
+    EndpointResultContentRef,
 };
 pub use orphan::{
     OrphanAbandonmentPermissions, OrphanAbandonmentReason, OrphanAuthorityError,

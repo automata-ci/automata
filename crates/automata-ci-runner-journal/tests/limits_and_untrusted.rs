@@ -25,7 +25,7 @@ const _: () = {
 };
 
 fn reference(kind: ContentKind, size: u64) -> DurableContentRef {
-    DurableContentRef::after_commit(
+    DurableContentRef::after_public_commit(
         kind,
         size,
         Sha256Digest::from_bytes([0x99; 32]),

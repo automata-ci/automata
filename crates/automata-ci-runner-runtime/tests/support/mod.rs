@@ -52,9 +52,9 @@ use automata_ci_runner_runtime::{
 };
 use automata_ci_runner_spool::{
     ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
-    DurableContentPublication, DurableContentRef, DurableContentStore, FileSpool,
-    KeyedContentCommitment, ProtectionId, RetainedContentError, RetainedContentSource, SpoolError,
-    SpoolRoot,
+    DurableContentPublication, DurableContentRef, DurableContentStore,
+    EndpointResultCapacityReservation, FileSpool, KeyedContentCommitment, ProtectionId,
+    RetainedContentError, RetainedContentSource, SpoolError, SpoolRoot, endpoint_result_allocation,
 };
 use automata_ci_runner_transport::PreparedRequest;
 use sha2::{Digest as _, Sha256};
@@ -79,6 +79,13 @@ macro_rules! forward_keyed_commitments {
         ) -> Result<KeyedContentCommitment, SpoolError> {
             self.inner
                 .recreate_keyed_commitment(protection_id, domain, material_digest)
+        }
+
+        fn reserve_endpoint_result(
+            &self,
+            maximum_plaintext_bytes: u64,
+        ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+            self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
         }
     };
 }
@@ -594,18 +601,51 @@ impl ContentProtector for TestProtector {
         Ok(digest.finalize().into())
     }
 
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        endpoint_result_allocation(plaintext_bytes).map_err(|_| ContentProtectionError::Failed)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ContentProtectionError> {
-        let mut protected = Vec::with_capacity(plaintext.len() + 32);
-        protected.extend(
+        let mut protected = if let Some(allocation) = reference.endpoint_result_allocation_bytes() {
+            let allocation =
+                usize::try_from(allocation).map_err(|_| ContentProtectionError::Failed)?;
+            let body_bytes = allocation
+                .checked_sub(32)
+                .ok_or(ContentProtectionError::Failed)?;
+            let required = 8_usize
+                .checked_add(plaintext.len())
+                .ok_or(ContentProtectionError::Failed)?;
+            if required > body_bytes {
+                return Err(ContentProtectionError::Failed);
+            }
+            let mut body = Vec::with_capacity(allocation);
+            body.extend_from_slice(
+                &u64::try_from(plaintext.len())
+                    .map_err(|_| ContentProtectionError::Failed)?
+                    .to_be_bytes(),
+            );
+            body.extend(
+                plaintext
+                    .iter()
+                    .enumerate()
+                    .map(|(index, byte)| byte ^ self.key[index % self.key.len()]),
+            );
+            body.resize(body_bytes, 0);
+            body
+        } else {
             plaintext
                 .iter()
                 .enumerate()
-                .map(|(index, byte)| byte ^ self.key[index % self.key.len()]),
-        );
+                .map(|(index, byte)| byte ^ self.key[index % self.key.len()])
+                .collect()
+        };
         protected.extend_from_slice(&self.tag(reference, &protected));
         Ok(protected)
     }
@@ -623,6 +663,24 @@ impl ContentProtector for TestProtector {
         if protected[tag_offset..] != self.tag(reference, ciphertext) {
             return Err(ContentProtectionError::AuthenticationFailed);
         }
+        let ciphertext = if reference.endpoint_result_allocation_bytes().is_some() {
+            let length = ciphertext
+                .get(..8)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_be_bytes)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(ContentProtectionError::AuthenticationFailed)?;
+            let end = 8_usize
+                .checked_add(length)
+                .filter(|end| *end <= ciphertext.len())
+                .ok_or(ContentProtectionError::AuthenticationFailed)?;
+            if ciphertext[end..].iter().any(|byte| *byte != 0) {
+                return Err(ContentProtectionError::AuthenticationFailed);
+            }
+            &ciphertext[8..end]
+        } else {
+            ciphertext
+        };
         Ok(ciphertext
             .iter()
             .enumerate()
@@ -5853,7 +5911,11 @@ fn record_test_authority_delivery_with_expiries_and_acknowledgement(
                 fixture.lease.guard(),
                 offer.command().operation_id(),
                 offer.command().sequence(),
-                offer.job_ir().content().sha256(),
+                offer
+                    .job_ir()
+                    .content()
+                    .public_plaintext_sha256()
+                    .expect("job IR public digest"),
                 INITIAL_RUNTIME_AUTHORITY_GENERATION,
             ),
             request_operation_id,

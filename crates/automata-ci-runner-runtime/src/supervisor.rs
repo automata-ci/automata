@@ -24,11 +24,11 @@ use automata_ci_protocol_protobuf::{
 };
 use automata_ci_runner_journal::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand,
-    EndpointCancellationCompletion, EndpointOperationState, JobIrContentRef,
-    JournalContentRetainSet, JournalInvariantError, LeaseOfferRecord, LeaseOfferStatus,
-    LeasePollCheckpoint, LogSegmentAcknowledgement, ProviderOperationKind, RunnerJournal,
-    RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
-    SessionBinding as JournalSessionBinding, SlotSnapshot, TerminalResultRecord,
+    EndpointOperationState, JobIrContentRef, JournalContentRetainSet, JournalInvariantError,
+    LeaseOfferRecord, LeaseOfferStatus, LeasePollCheckpoint, LogSegmentAcknowledgement,
+    ProviderOperationKind, RunnerJournal, RuntimeAuthorityContentRef,
+    RuntimeAuthorityDeliveryRecord, SessionBinding as JournalSessionBinding, SlotSnapshot,
+    TerminalResultRecord,
 };
 use automata_ci_runner_spool::{ContentKind, DurableContentStore};
 use automata_ci_runner_transport::PreparedRequest;
@@ -1206,13 +1206,19 @@ impl RunnerSessionSupervisor {
             return self.inner.ports.journal.snapshot().map_err(Into::into);
         }
         let job = self.load_job(durable)?;
+        let job_ir_digest = durable
+            .offer()
+            .job_ir()
+            .content()
+            .public_plaintext_sha256()
+            .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
         let binding = RuntimeAuthorityDeliveryBinding::new(
             durable.offer().lease().attempt_id(),
             durable.slot(),
             durable.offer().lease().guard(),
             durable.offer().command().operation_id(),
             durable.offer().command().sequence(),
-            durable.offer().job_ir().content().sha256(),
+            job_ir_digest,
             INITIAL_RUNTIME_AUTHORITY_GENERATION,
         );
         if durable.runtime_authority_delivery().is_none() {
@@ -1269,11 +1275,11 @@ impl RunnerSessionSupervisor {
         let request_operation_id = self.stable_runtime_authority_operation_id(
             durable,
             StableIdDomain::RuntimeAuthorityRequest,
-        );
+        )?;
         let acknowledgement_operation_id = self.stable_runtime_authority_operation_id(
             durable,
             StableIdDomain::RuntimeAuthorityAcknowledgement,
-        );
+        )?;
         let request = RuntimeAuthorityRequest::new(
             Self::request_header(session, request_operation_id),
             binding,
@@ -1455,7 +1461,7 @@ impl RunnerSessionSupervisor {
         &self,
         durable: &SlotSnapshot,
         domain: StableIdDomain,
-    ) -> OperationId {
+    ) -> Result<OperationId, RunnerRuntimeError> {
         let binding = durable.offer();
         let mut identity = binding
             .command()
@@ -1467,9 +1473,16 @@ impl RunnerSessionSupervisor {
         identity.extend_from_slice(binding.lease().attempt_id().as_uuid().as_bytes());
         identity.extend_from_slice(binding.lease().lease_id().as_uuid().as_bytes());
         identity.extend_from_slice(&binding.lease().fencing_token().get().to_be_bytes());
-        identity.extend_from_slice(binding.job_ir().content().sha256().as_bytes());
+        identity.extend_from_slice(
+            binding
+                .job_ir()
+                .content()
+                .public_plaintext_sha256()
+                .ok_or(RunnerRuntimeError::InvalidDurablePayload)?
+                .as_bytes(),
+        );
         identity.extend_from_slice(&INITIAL_RUNTIME_AUTHORITY_GENERATION.get().to_be_bytes());
-        self.inner.ports.ids.stable_operation_id(domain, &identity)
+        Ok(self.inner.ports.ids.stable_operation_id(domain, &identity))
     }
 
     async fn send_until_operation_ack(
@@ -1520,7 +1533,11 @@ impl RunnerSessionSupervisor {
     fn load_job(&self, durable: &SlotSnapshot) -> Result<JobIrEnvelope, RunnerRuntimeError> {
         let content = durable.offer().job_ir().content();
         let encoded = self.inner.ports.spool.load(content)?;
-        if encoded.len() != usize::try_from(content.size()).unwrap_or(usize::MAX) {
+        if content
+            .public_plaintext_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            != Some(encoded.len())
+        {
             return Err(RunnerRuntimeError::InvalidDurablePayload);
         }
         let job = decode_job_ir(&encoded, self.inner.config.protocol_limits())
@@ -1542,7 +1559,11 @@ impl RunnerSessionSupervisor {
             .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
         let content = delivery.content().content();
         let encoded = Zeroizing::new(self.inner.ports.spool.load(content)?);
-        if encoded.len() != usize::try_from(content.size()).unwrap_or(usize::MAX) {
+        if content
+            .public_plaintext_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            != Some(encoded.len())
+        {
             return Err(RunnerRuntimeError::InvalidDurablePayload);
         }
         decode_runtime_authorities(
@@ -2890,7 +2911,6 @@ impl RunnerSessionSupervisor {
                             slot,
                             guard,
                             operation_id,
-                            EndpointCancellationCompletion::SandboxAbsent,
                         )?;
                     } else {
                         self.inner.ports.journal.abandon_endpoint_operation(

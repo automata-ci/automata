@@ -17,7 +17,10 @@ const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
 pub enum CancellationDisposition {
     /// No cancellation has been requested.
     Active,
-    /// Stop backend work; the caller is durably abandoning the operation.
+    /// Stop backend work and return within the provider's termination grace.
+    ///
+    /// The durable runner may still require exact sandbox destruction before
+    /// it records cancellation as complete.
     Terminate,
 }
 
@@ -35,8 +38,9 @@ pub trait Cancellation: Send + Sync {
     /// Returns the current cancellation meaning.
     ///
     /// Adapters must check this between bounded backend phases. Termination
-    /// requests prompt quiescence but does not prove that an in-flight backend
-    /// mutation was rolled back.
+    /// requests require bounded backend termination but do not themselves prove
+    /// that an in-flight backend mutation was rolled back. Durable cancellation
+    /// is complete only after the exact sandbox is proven absent.
     #[must_use]
     fn disposition(&self) -> CancellationDisposition;
 }
@@ -51,13 +55,30 @@ impl Cancellation for NeverCancelled {
     }
 }
 
-/// Maximum endpoint calls one admitted job may expose to a provider.
+/// Endpoint calls made before the first workflow step.
 ///
-/// The durable replay journal and protected spool size their non-evicting
-/// operation/reference budgets from this execution boundary. The bound is
-/// deliberately shared rather than independently approximated from workflow
-/// steps or nested action invocations.
-pub const MAX_ENDPOINT_OPERATIONS_PER_JOB: usize = 10_000;
+/// The current whole-job executor creates the attempt directories and copies
+/// the immutable event document before it starts an admitted step.
+pub const ENDPOINT_JOB_SETUP_OPERATIONS: usize = 2;
+
+/// Maximum endpoint calls made by one admitted literal run step.
+///
+/// One run step copies its script, initializes seven command/artifact files,
+/// invokes the process, and reads six command/artifact files. Keeping the
+/// exact executor fan-out here makes the durable journal and shared protected
+/// spool derive capacity from the same admission boundary.
+pub const ENDPOINT_OPERATIONS_PER_RUN_STEP: usize = 15;
+
+/// Hard shared endpoint-operation budget for one admitted job.
+///
+/// The budget admits the current maximum-size run-only job with no dynamically
+/// declared artifact subjects. Composite/action phases and artifact hashing
+/// consume this same non-evicting budget; expansions beyond it fail closed
+/// before the next provider invocation. This is an execution admission bound,
+/// not an independently selected cache size.
+pub const MAX_ENDPOINT_OPERATIONS_PER_JOB: usize = automata_ci_core::MAX_LOGICAL_STEPS
+    * ENDPOINT_OPERATIONS_PER_RUN_STEP
+    + ENDPOINT_JOB_SETUP_OPERATIONS;
 
 /// Validated executable plus literal arguments. No shell command string exists
 /// in the execution contract.

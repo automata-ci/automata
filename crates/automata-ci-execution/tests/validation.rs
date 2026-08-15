@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use automata_ci_execution::{
-    CancellationDisposition, EnvironmentName, EnvironmentProfile, EnvironmentProfileId,
-    EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
-    ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination,
-    ImmutableImage, MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
+    CancellationDisposition, ENDPOINT_JOB_SETUP_OPERATIONS, ENDPOINT_OPERATIONS_PER_RUN_STEP,
+    EnvironmentName, EnvironmentProfile, EnvironmentProfileId, EnvironmentValue,
+    EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment, ExecutionOutput,
+    ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination, ImmutableImage,
+    MAX_ENDPOINT_OPERATIONS_PER_JOB, MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
     MAX_EXECUTION_OUTPUT_RECORDS, NetworkPolicy, OperationId, ProviderCapabilities, ProviderId,
     ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody,
     SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxSpec,
@@ -17,6 +18,18 @@ use automata_ci_execution::{
 fn only_termination_authorizes_backend_quiescence() {
     assert!(!CancellationDisposition::Active.requires_termination());
     assert!(CancellationDisposition::Terminate.requires_termination());
+}
+
+#[test]
+fn endpoint_operation_budget_admits_every_maximum_run_only_phase() {
+    assert_eq!(ENDPOINT_JOB_SETUP_OPERATIONS, 2);
+    assert_eq!(ENDPOINT_OPERATIONS_PER_RUN_STEP, 15);
+    assert_eq!(
+        MAX_ENDPOINT_OPERATIONS_PER_JOB,
+        automata_ci_core::MAX_LOGICAL_STEPS * ENDPOINT_OPERATIONS_PER_RUN_STEP
+            + ENDPOINT_JOB_SETUP_OPERATIONS
+    );
+    assert_eq!(MAX_ENDPOINT_OPERATIONS_PER_JOB, 30_722);
 }
 
 const IMAGE: &str = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
