@@ -66,7 +66,10 @@ use crate::{
     },
     error::{ExecutorAdapterError, ExecutorAdapterErrorKind, PortErrorKind},
     output::{SecretMasker, emit_system, parse_output_with_cancellation, process_output},
-    shell::{composite_shell, resolve_shell_template, shell_argv},
+    shell::{
+        ShellAdmissionRejection, admit_shell_template, composite_shell, resolve_shell_template,
+        shell_argv,
+    },
 };
 use automata_ci_workflow_github::GithubConditionCompiler;
 
@@ -420,6 +423,20 @@ impl GithubJobExecutor {
         }
         let workspace =
             job_workspace(job, &environment).map_err(|_| AdmissionRejection::InvalidJob)?;
+        if self.ports.toolchain.platform() != workspace.platform() {
+            return Err(AdmissionRejection::CapabilityChanged);
+        }
+        for step in job.job().steps() {
+            let SemanticStep::Run { values } = step.kind() else {
+                continue;
+            };
+            admit_shell_template(self.ports.toolchain.as_ref(), values.shell()).map_err(
+                |rejection| match rejection {
+                    ShellAdmissionRejection::Invalid => AdmissionRejection::InvalidJob,
+                    ShellAdmissionRejection::MissingTool => AdmissionRejection::CapabilityChanged,
+                },
+            )?;
+        }
         validate_environment_overlay_names(
             command_file_platform(workspace.platform()),
             job.job().environment().keys().map(String::as_str).chain(

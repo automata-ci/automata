@@ -9,13 +9,14 @@ use automata_ci_core::{
 use automata_ci_execution::{NetworkPolicy, RootFilesystemPolicy, SandboxPrivilegePolicy};
 use automata_ci_github_runtime::CommandFileKind;
 use automata_ci_runner_runtime::{
-    AdmissionRejection, ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
+    AdmissionRejection, ExecutionCancellation, ExecutionEvents, JobExecutor,
 };
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 
 use support::{
-    Fixture, PhaseResponse, action_step, run_step, run_step_with_named_shell,
-    run_step_with_working_directory, windows_envelope, windows_envelope_with_output_definitions,
+    Fixture, PhaseResponse, action_step, run_step, run_step_with_command_template,
+    run_step_with_named_shell, run_step_with_working_directory, windows_envelope,
+    windows_envelope_with_output_definitions,
 };
 
 fn output_expression(source: &str) -> ExpressionProgram {
@@ -63,7 +64,11 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
             .with_file(CommandFileKind::Output, b"digest=abc123\r\n".to_vec()),
         PhaseResponse::success(),
     ]);
-    let producer = run_step("producer", "Producer", "Write-Output 'producer'");
+    let producer = run_step(
+        "producer",
+        "Producer",
+        "Write-Output 'producer'\nWrite-Output 'next'",
+    );
     let second = run_step_with_working_directory(
         "consumer",
         "Consumer",
@@ -153,10 +158,14 @@ async fn windows_default_shell_maps_paths_and_applies_crlf_command_files() {
     );
     assert_eq!(state.scripts.len(), 2);
     assert!(state.scripts.iter().all(|script| {
-        script.starts_with(b"$ErrorActionPreference = 'stop'\n")
+        script.starts_with(b"$ErrorActionPreference = 'stop'\r\n")
             && script.ends_with(
                 b"if ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }",
             )
+            && script
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| *byte != b'\n' || index > 0 && script[index - 1] == b'\r')
     }));
     drop(state);
 
@@ -222,8 +231,72 @@ async fn windows_named_shells_use_platform_argv_and_script_extensions() {
         r"C:\hostedtoolcache\windows\Python\3.13.0\x64\python.exe"
     );
     assert!(commands[3].argv().arguments()[0].ends_with("step-3.py"));
-    assert_eq!(state.scripts[2], b"echo cmd\r\n");
+    assert_eq!(state.scripts[2], b"@echo off\r\necho cmd");
     assert_eq!(state.scripts[3], b"print('python')");
+}
+
+#[tokio::test]
+async fn safe_windows_command_templates_execute_as_direct_argv() {
+    let fixture = Fixture::windows(vec![PhaseResponse::success(); 3]);
+    let job = windows_envelope(vec![
+        run_step_with_command_template(
+            "pwsh-template",
+            "PowerShell Core template",
+            "Write-Output pwsh\nWrite-Output next",
+            "pwsh -File {0}",
+        ),
+        run_step_with_command_template(
+            "powershell-template",
+            "Windows PowerShell template",
+            "Write-Output powershell",
+            "powershell -File {0}",
+        ),
+        run_step_with_command_template(
+            "python-template",
+            "Python template",
+            "print('first')\nprint('second')",
+            "python -u {0}",
+        ),
+    ]);
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(fixture.request(job), events, ExecutionCancellation::new())
+        .await
+        .expect("safe Windows command templates execute");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let commands = phase_commands(&state);
+    assert_eq!(commands.len(), 3);
+    assert_eq!(
+        commands[0].argv().program().as_str(),
+        r"C:\Program Files\PowerShell\7\pwsh.exe"
+    );
+    assert_eq!(commands[0].argv().arguments()[0], "-File");
+    assert!(commands[0].argv().arguments()[1].ends_with("step-0.ps1"));
+    assert_eq!(
+        commands[1].argv().program().as_str(),
+        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    );
+    assert_eq!(commands[1].argv().arguments()[0], "-File");
+    assert!(commands[1].argv().arguments()[1].ends_with("step-1.ps1"));
+    assert_eq!(
+        commands[2].argv().program().as_str(),
+        r"C:\hostedtoolcache\windows\Python\3.13.0\x64\python.exe"
+    );
+    assert_eq!(commands[2].argv().arguments()[0], "-u");
+    assert!(commands[2].argv().arguments()[1].ends_with("step-2.py"));
+    for script in &state.scripts {
+        assert!(
+            script
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| *byte != b'\n' || index > 0 && script[index - 1] == b'\r'),
+            "Windows scripts must use CRLF"
+        );
+    }
 }
 
 #[test]
@@ -277,8 +350,8 @@ fn windows_reserved_environment_aliases_fail_admission() {
     assert_eq!(fixture.provider.counts(), (0, 0, 0));
 }
 
-#[tokio::test]
-async fn windows_rejects_unconfigured_bash_shell() {
+#[test]
+fn windows_rejects_unconfigured_bash_shell_during_admission() {
     let fixture = Fixture::windows(Vec::new());
     let job = windows_envelope(vec![run_step_with_named_shell(
         "bash",
@@ -286,15 +359,12 @@ async fn windows_rejects_unconfigured_bash_shell() {
         "echo unsupported",
         "bash",
     )]);
-    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
-
-    let error = fixture
-        .executor
-        .execute(fixture.request(job), events, ExecutionCancellation::new())
-        .await
-        .expect_err("Bash is not implicitly provided by a Windows container profile");
-
-    assert_eq!(error.kind(), ExecutorErrorKind::Unsupported);
+    assert_eq!(
+        fixture.executor.admit(&job),
+        Err(AdmissionRejection::InvalidJob),
+        "Bash is not implicitly provided by a Windows container profile"
+    );
+    assert_eq!(fixture.provider.counts(), (0, 0, 0));
     let state = fixture.endpoint_state.lock().expect("endpoint lock");
     assert!(phase_commands(&state).is_empty());
     assert!(state.scripts.is_empty());

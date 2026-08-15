@@ -15,7 +15,7 @@ use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase}
 use support::{
     Fixture, PHASE_FILE_ENVIRONMENT_NAMES, PhaseResponse, SECRET, credential_free_envelope,
     envelope_with_environment, envelope_with_working_directory, environment_map, run_step,
-    run_step_with_named_shell, run_step_with_working_directory,
+    run_step_with_command_template, run_step_with_named_shell, run_step_with_working_directory,
 };
 
 #[tokio::test]
@@ -469,6 +469,69 @@ async fn python_and_pwsh_use_exact_script_suffixes_argv_and_powershell_fixup() {
     assert_eq!(pwsh_command.argv().arguments()[0], "-command");
     assert!(pwsh_command.argv().arguments()[1].starts_with(". '/__automata/attempts/"));
     assert!(pwsh_command.argv().arguments()[1].ends_with("/scripts/step-1.ps1'"));
+}
+
+#[tokio::test]
+async fn safe_posix_command_templates_execute_as_direct_argv_without_an_outer_shell() {
+    let fixture = Fixture::secretless(Vec::new(), vec![PhaseResponse::success(); 4]);
+    let job = support::envelope(vec![
+        run_step_with_command_template(
+            "bash-template",
+            "Bash template",
+            "printf bash",
+            "bash --noprofile --norc -e -o pipefail {0}",
+        ),
+        run_step_with_command_template("sh-template", "Sh template", "printf sh", "sh -e {0}"),
+        run_step_with_command_template(
+            "python-template",
+            "Python template",
+            "print('python')",
+            "python -u {0}",
+        ),
+        run_step_with_command_template(
+            "pwsh-template",
+            "PowerShell template",
+            "Write-Output pwsh",
+            "pwsh -File {0}",
+        ),
+    ]);
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(fixture.request(job), events, ExecutionCancellation::new())
+        .await
+        .expect("safe command templates execute");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let commands = state
+        .commands
+        .iter()
+        .filter(|command| {
+            command
+                .environment()
+                .values()
+                .iter()
+                .any(|variable| variable.name().as_str() == "GITHUB_ENV")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commands.len(), 4);
+    assert_eq!(commands[0].argv().program().as_str(), "/usr/bin/bash");
+    assert_eq!(
+        &commands[0].argv().arguments()[..5],
+        ["--noprofile", "--norc", "-e", "-o", "pipefail"]
+    );
+    assert!(commands[0].argv().arguments()[5].ends_with("step-0.sh"));
+    assert_eq!(commands[1].argv().program().as_str(), "/usr/bin/sh");
+    assert_eq!(commands[1].argv().arguments()[0], "-e");
+    assert!(commands[1].argv().arguments()[1].ends_with("step-1.sh"));
+    assert_eq!(commands[2].argv().program().as_str(), "/usr/bin/python3");
+    assert_eq!(commands[2].argv().arguments()[0], "-u");
+    assert!(commands[2].argv().arguments()[1].ends_with("step-2.py"));
+    assert_eq!(commands[3].argv().program().as_str(), "/usr/bin/pwsh");
+    assert_eq!(commands[3].argv().arguments()[0], "-File");
+    assert!(commands[3].argv().arguments()[1].ends_with("step-3.ps1"));
 }
 
 #[tokio::test]

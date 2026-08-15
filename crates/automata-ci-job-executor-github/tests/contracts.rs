@@ -18,7 +18,10 @@ use automata_ci_runner_runtime::{AdmissionRejection, JobExecutor};
 use bytes::Bytes;
 use static_assertions::assert_obj_safe;
 
-use support::{Fixture, envelope, envelope_with_environment, prepared_node24_action, run_step};
+use support::{
+    Fixture, envelope, envelope_with_environment, prepared_node24_action, run_step,
+    run_step_with_command_template, run_step_with_named_shell, windows_envelope,
+};
 
 assert_obj_safe!(ActionPreparationPort);
 assert_obj_safe!(RepositoryCredentialPort);
@@ -230,6 +233,117 @@ fn safe_local_actions_admit_while_container_actions_fail_closed() {
         ),
     )]);
     assert!(fixture.executor.admit(&container).is_err());
+}
+
+#[test]
+fn static_shell_contracts_are_checked_at_admission_before_provider_work() {
+    for (name, step) in [
+        (
+            "POSIX command mode",
+            run_step_with_command_template("unsafe", "Unsafe", "true", "bash -c {0}"),
+        ),
+        (
+            "POSIX cmd",
+            run_step_with_named_shell("unsafe", "Unsafe", "true", "cmd"),
+        ),
+    ] {
+        let fixture = Fixture::new(Vec::new(), Vec::new());
+        assert_eq!(
+            fixture.executor.admit(&envelope(vec![step])),
+            Err(AdmissionRejection::InvalidJob),
+            "{name} must fail closed during admission"
+        );
+        assert_eq!(fixture.provider.counts(), (0, 0, 0));
+    }
+
+    for (name, step) in [
+        (
+            "Windows Git Bash",
+            run_step_with_named_shell("unsafe", "Unsafe", "true", "bash"),
+        ),
+        (
+            "Windows sh",
+            run_step_with_named_shell("unsafe", "Unsafe", "true", "sh"),
+        ),
+        (
+            "Windows cmd command template",
+            run_step_with_command_template("unsafe", "Unsafe", "true", "cmd /C {0}"),
+        ),
+    ] {
+        let fixture = Fixture::windows(Vec::new());
+        assert_eq!(
+            fixture.executor.admit(&windows_envelope(vec![step])),
+            Err(AdmissionRejection::InvalidJob),
+            "{name} must fail closed during admission"
+        );
+        assert_eq!(fixture.provider.counts(), (0, 0, 0));
+    }
+}
+
+#[test]
+fn every_advertised_static_shell_contract_passes_admission_on_its_platform() {
+    for step in [
+        run_step("default", "Default", "true"),
+        run_step_with_named_shell("bash", "Bash", "true", "bash"),
+        run_step_with_named_shell("sh", "Sh", "true", "sh"),
+        run_step_with_named_shell("python", "Python", "true", "python"),
+        run_step_with_named_shell("pwsh", "PowerShell Core", "true", "pwsh"),
+        run_step_with_command_template(
+            "bash-template",
+            "Bash template",
+            "true",
+            "bash --noprofile --norc -e -o pipefail {0}",
+        ),
+        run_step_with_command_template("sh-template", "Sh template", "true", "sh -e {0}"),
+        run_step_with_command_template(
+            "python-template",
+            "Python template",
+            "true",
+            "python -u {0}",
+        ),
+        run_step_with_command_template(
+            "pwsh-template",
+            "PowerShell template",
+            "true",
+            "pwsh -File {0}",
+        ),
+    ] {
+        Fixture::new(Vec::new(), Vec::new())
+            .executor
+            .admit(&envelope(vec![step]))
+            .expect("advertised POSIX shell contract");
+    }
+
+    for step in [
+        run_step("default", "Default", "true"),
+        run_step_with_named_shell("python", "Python", "true", "python"),
+        run_step_with_named_shell("pwsh", "PowerShell Core", "true", "pwsh"),
+        run_step_with_named_shell("powershell", "Windows PowerShell", "true", "powershell"),
+        run_step_with_named_shell("cmd", "Command Prompt", "true", "cmd"),
+        run_step_with_command_template(
+            "python-template",
+            "Python template",
+            "true",
+            "python -u {0}",
+        ),
+        run_step_with_command_template(
+            "pwsh-template",
+            "PowerShell template",
+            "true",
+            "pwsh -File {0}",
+        ),
+        run_step_with_command_template(
+            "powershell-template",
+            "Windows PowerShell template",
+            "true",
+            "powershell -File {0}",
+        ),
+    ] {
+        Fixture::windows(Vec::new())
+            .executor
+            .admit(&windows_envelope(vec![step]))
+            .expect("advertised Windows shell contract");
+    }
 }
 
 #[test]

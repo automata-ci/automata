@@ -579,6 +579,17 @@ pub fn run_step_with_named_shell(id: &str, name: &str, command: &str, shell: &st
     )
 }
 
+pub fn run_step_with_command_template(id: &str, name: &str, command: &str, shell: &str) -> StepIr {
+    run_step_with_shell(
+        id,
+        name,
+        command,
+        ShellTemplate::command_template(
+            ValueTemplate::literal(shell).expect("command shell template"),
+        ),
+    )
+}
+
 pub fn run_step_with_working_directory(
     id: &str,
     name: &str,

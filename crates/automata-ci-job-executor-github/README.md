@@ -39,6 +39,61 @@ treated as no summary; it does not suppress other valid phase-file effects. An
 independently signaled execution-cancellation token remains dominant under the
 executor's cancellation contract.
 
+## Shell dispatch contract
+
+Shell executables come only from the immutable environment toolchain; workflow
+text is never searched on `PATH` and is never executed through an extra outer
+shell. The POSIX default selects configured `bash`, then configured `sh`, with
+`-e`. The Windows default selects configured PowerShell Core, then configured
+Windows PowerShell. Explicit POSIX `bash` uses
+`--noprofile --norc -e -o pipefail`; the other named-shell argument vectors
+match the pinned runner contract.
+
+The advertised named-shell matrix is:
+
+| Target | Named shells |
+| --- | --- |
+| POSIX | `bash`, `sh`, `python`, `pwsh` |
+| Windows Hyper-V container | `python`, `pwsh`, `powershell`, `cmd` |
+
+Custom command templates use a deliberately closed grammar. A template must
+use single ASCII spaces, contain exactly one `{0}` as its complete final token,
+contain no other braces or control characters, and select one configured
+interpreter. The accepted forms are:
+
+- `bash {0}`, `bash -e {0}`,
+  `bash --noprofile --norc -e -o pipefail {0}`, and
+  `bash --noprofile --norc -eo pipefail {0}`;
+- `sh {0}` and `sh -e {0}`;
+- `python {0}` and `python -u {0}`;
+- `pwsh -File {0}` and `powershell -File {0}` (case-insensitive `-File`).
+
+The platform matrix still applies after parsing. In particular, the current
+Windows Hyper-V profile does not advertise Git Bash or `sh`; those requests
+fail at admission instead of relying on a host installation. Arbitrary
+executables, quoted or embedded placeholders, command modes such as `-c` or
+`-Command`, and custom `cmd` templates fail closed. Literal shell contracts and
+tool availability are checked during admission, before provider work. A shell
+derived from an expression is checked immediately after evaluation and before
+the script is copied or any user command runs. Missing configured tools surface
+as a capability change; malformed or platform-incompatible contracts surface
+as invalid jobs.
+
+Scripts are UTF-8 without a BOM. POSIX scripts retain LF input. Every Windows
+script is normalized to CRLF; PowerShell scripts receive error-stop and
+`$LASTEXITCODE` propagation guards, and `cmd` scripts receive `@echo off`.
+Extensions follow the selected interpreter (`.sh`, `.py`, `.ps1`, or `.cmd`).
+The hardened `cmd` divergence uses `/D /E:ON /V:OFF /C` with the script path as
+a separately bounded argv value, rather than GitHub's nested `/S /C CALL`
+command string. Paths containing `"`, `%`, `&`, `|`, `<`, `>`, `^`, `(`, or
+`)` are rejected for `cmd`; `!` remains literal because delayed expansion is
+disabled.
+
+The executor receives the already-resolved workflow/job working-directory
+default in the job IR. A step-local directory overrides it; otherwise the
+resolved default applies, then the workspace. Every resulting path remains
+confined to the workspace.
+
 - [Compatibility documentation](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md)
 - API documentation: run `cargo doc -p automata-ci-job-executor-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)
