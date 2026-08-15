@@ -1,3 +1,5 @@
+mod credential;
+
 use automata_ci_auth::secret::SecretString;
 use automata_ci_scm::{
     ArchiveFormat, ArchiveLimits, ExactRevision, RepositoryId, RepositorySnapshot,

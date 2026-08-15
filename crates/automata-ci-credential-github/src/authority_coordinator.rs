@@ -12,12 +12,12 @@ use automata_ci_core::{
     JobAuthorityProfile, JobIrEnvelope, JobPermissionRequest,
     PermissionLevel as JobPermissionLevel, UnixMillis,
 };
-use automata_ci_credential::{
+use automata_ci_key_management::{EnvelopeCodec, SecretBytes};
+use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
     PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
     WorkloadIdentity,
 };
-use automata_ci_key_management::{EnvelopeCodec, SecretBytes};
 use automata_ci_scm::{RepositoryId as ScmRepositoryId, ScmProviderId};
 use automata_ci_store::{
     AuthenticateGithubRuntimeAuthorityUnprotectedErasure, BeginGithubRuntimeAuthorityMint,
@@ -1480,15 +1480,15 @@ mod tests {
     use automata_ci_core::{
         AttemptId, FencingToken, JobId, JobIrVersion, LeaseId, RunId, RunnerId, RunnerSessionId,
     };
-    use automata_ci_credential::{
-        CredentialProvenance, MinimumValidity, PermissionLevel, PermissionName, PermissionSet,
-        ProviderResourceId, RepositoryScope,
-    };
     use automata_ci_key_management::{
         EncryptedEnvelope, KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, KeyId,
         KeyPurpose, WrappedDataKey,
     };
     use automata_ci_scm::RepositoryId as ScmRepositoryId;
+    use automata_ci_scm::credential::{
+        CredentialProvenance, MinimumValidity, PermissionLevel, PermissionName, PermissionSet,
+        ProviderResourceId, RepositoryScope,
+    };
     use automata_ci_store::{
         ClaimGithubRuntimeAuthorityRevocation, ClaimedGithubRuntimeAuthorityRevocation,
         ConfirmGithubRuntimeAuthorityRevocation, DeferGithubRuntimeAuthorityRevocation,

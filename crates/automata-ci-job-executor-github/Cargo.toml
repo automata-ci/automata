@@ -25,7 +25,6 @@ automata-ci-core.workspace = true
 automata-ci-execution.workspace = true
 automata-ci-expression-github.workspace = true
 automata-ci-github-runtime.workspace = true
-automata-ci-output-policy.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-protocol-protobuf.workspace = true
 automata-ci-runner-journal.workspace = true

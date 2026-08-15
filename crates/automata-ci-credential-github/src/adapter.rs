@@ -4,11 +4,11 @@ use automata_ci_auth::{
     secret::SecretString,
     time::{Clock, SystemClock, UnixTimestamp},
 };
-use automata_ci_credential::{
+use automata_ci_scm::ScmProviderId;
+use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, CredentialProvenance, PermissionLevel, PermissionSet,
     ProviderResourceId, RepositoryCredentialRequest,
 };
-use automata_ci_scm::ScmProviderId;
 use reqwest::{
     Client, StatusCode,
     header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT},

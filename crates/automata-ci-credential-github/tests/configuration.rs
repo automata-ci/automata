@@ -3,10 +3,10 @@ mod support;
 use std::{sync::Arc, time::Duration};
 
 use automata_ci_auth::secret::SecretString;
-use automata_ci_credential::ProviderResourceId;
 use automata_ci_credential_github::{
     GithubAppCredentialBroker, GithubAppCredentialConfig, GithubAppHttpLimits, GithubInstallationId,
 };
+use automata_ci_scm::credential::ProviderResourceId;
 use support::{FixedClock, INSTALLATION_ID, ISSUER, NOW, pkcs8_private_key, private_key};
 use url::Url;
 

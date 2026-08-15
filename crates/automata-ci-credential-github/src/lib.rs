@@ -47,7 +47,7 @@ pub use authority_issuer::{
     GithubRuntimeAuthorityIdentityResolutionValueError, GithubRuntimeAuthorityIdentityResolver,
     GithubRuntimeAuthorityIssuerConfigurationError, ResolvedGithubRuntimeAuthorityIdentity,
 };
-pub use automata_ci_credential::ProviderResourceId as GithubAppIssuer;
+pub use automata_ci_scm::credential::ProviderResourceId as GithubAppIssuer;
 pub use config::{
     GITHUB_API_VERSION, GithubAppConfigurationError, GithubAppCredentialConfig,
     GithubAppHttpLimits, GithubInstallationId,

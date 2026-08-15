@@ -22,6 +22,7 @@ use automata_ci_auth::{
     session::SessionId,
     time::UnixTimestamp,
 };
+use automata_ci_control::runner_auth::RunnerMachineDirectory as _;
 use automata_ci_core::{
     Architecture, MAX_REGISTERED_RUNNERS, OperatingSystem, RunnerCapabilities, RunnerGroup,
     RunnerId, RunnerLabel, RunnerPlatform, Sha256Digest,
@@ -36,7 +37,6 @@ use automata_ci_postgres::auth::{
 };
 use automata_ci_postgres::runner_auth::PostgresRunnerMachineDirectory;
 use automata_ci_postgres_test_support::TestClock;
-use automata_ci_runner_auth::RunnerMachineDirectory as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 

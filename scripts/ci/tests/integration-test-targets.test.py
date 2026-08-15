@@ -16,7 +16,6 @@ AGGREGATES = {
     "automata-ci-blob-s3": "blob_s3",
     "automata-ci-control": "control",
     "automata-ci-core": "core",
-    "automata-ci-credential": "credential",
     "automata-ci-execution": "execution",
     "automata-ci-expression-github": "expression_github",
     "automata-ci-github-delivery": "github_delivery",

@@ -1,5 +1,6 @@
 //! Production composition and strict configuration for the runner daemon.
 
+pub(crate) mod action_cache;
 mod composition;
 mod config;
 mod context;

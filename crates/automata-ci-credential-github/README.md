@@ -5,7 +5,7 @@ broker for GitHub Apps. It exchanges a short-lived App assertion for an
 installation token scoped to one repository and an exact permission set.
 
 The adapter implements the provider-neutral contracts in
-`automata-ci-credential`; it does not provide human login or expose the App
+`automata_ci_scm::credential`; it does not provide human login or expose the App
 private key through that boundary.
 
 `GithubRepositoryRuntimeAuthorityIssuer` is the server-side job bridge. It

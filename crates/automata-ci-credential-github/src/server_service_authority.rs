@@ -5,13 +5,13 @@ use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use automata_ci_auth::{secret::SecretString, time::UnixTimestamp};
 use automata_ci_core::UnixMillis;
-use automata_ci_credential::{
+use automata_ci_key_management::{
+    EnvelopeCodec, EnvelopeError, KeyEncryptionError, PreparedEnvelope, SecretBytes,
+};
+use automata_ci_scm::credential::{
     CredentialError, CredentialErrorKind, MinimumValidity, PermissionLevel, PermissionName,
     PermissionSet, ProviderResourceId, RepositoryCredentialRequest, RepositoryScope,
     WorkloadIdentity,
-};
-use automata_ci_key_management::{
-    EnvelopeCodec, EnvelopeError, KeyEncryptionError, PreparedEnvelope, SecretBytes,
 };
 use automata_ci_scm::{RepositoryId as ScmRepositoryId, ScmProviderId};
 use automata_ci_store::{

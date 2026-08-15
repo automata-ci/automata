@@ -1,13 +1,13 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
+use automata_ci_auth::output_policy::SecretExposureClass;
 use automata_ci_core::{JobSecretExposure, LogChannel, MAX_LOG_FRAME_BYTES};
 use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
 use automata_ci_github_runtime::{
     Annotation, GithubWorkflowCommandSession, LegacyStepMutation, WorkflowCommandEvent,
     WorkflowCommandLimits, WorkflowCommandPolicy, WorkflowCommandProcessor, WorkflowLine,
 };
-use automata_ci_output_policy::SecretExposureClass;
 use automata_ci_runner_runtime::{ExecutionEvents, LogEvent};
 use zeroize::Zeroize as _;
 

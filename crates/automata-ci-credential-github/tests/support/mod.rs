@@ -12,12 +12,12 @@ use automata_ci_auth::{
     secret::SecretString,
     time::{Clock, UnixTimestamp},
 };
-use automata_ci_credential::{
-    MinimumValidity, PermissionLevel, PermissionName, PermissionSet, ProviderResourceId,
-    RepositoryCredentialRequest, RepositoryScope, WorkloadIdentity,
-};
 use automata_ci_credential_github::{
     GithubAppCredentialBroker, GithubAppCredentialConfig, GithubAppHttpLimits, GithubInstallationId,
+};
+use automata_ci_scm::credential::{
+    MinimumValidity, PermissionLevel, PermissionName, PermissionSet, ProviderResourceId,
+    RepositoryCredentialRequest, RepositoryScope, WorkloadIdentity,
 };
 use automata_ci_scm::{RepositoryId, ScmProviderId};
 use axum::{
@@ -189,7 +189,7 @@ impl FixtureServer {
             self.url("api/v3/"),
             ProviderResourceId::new(ISSUER).unwrap(),
             GithubInstallationId::new(INSTALLATION_ID).unwrap(),
-            "automata-ci-credential-tests/0.1.0",
+            "automata-ci-credential-github-tests/0.1.0",
             limits,
         )
         .expect("fixture config");

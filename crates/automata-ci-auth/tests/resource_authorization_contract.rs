@@ -1,3 +1,6 @@
+#[path = "resource_authorization_contract/output_policy_contract.rs"]
+mod output_policy_contract;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use automata_ci_auth::{

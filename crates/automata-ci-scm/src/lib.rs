@@ -18,6 +18,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// Least-privilege workload credential issuance contracts.
+pub mod credential;
+
 mod model;
 mod port;
 

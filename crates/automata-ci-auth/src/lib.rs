@@ -24,6 +24,8 @@ pub mod login;
 pub mod machine;
 /// Privileged authentication-management commands and repository ports.
 pub mod management;
+/// Dashboard, log, and artifact publication policy.
+pub mod output_policy;
 /// Request-time session authentication snapshots and resolution ports.
 pub mod request_auth;
 /// Redacted secret, opaque-token, and PKCE primitives.

@@ -1,11 +1,6 @@
 use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
 use automata_ci_action::{ActionBundleLimits, ActionResolver, ImmutableActionResolver};
-#[cfg(unix)]
-use automata_ci_action_cache_file::{
-    ActionArchiveCacheLimits, ActionArchiveCacheRoot, ActionReferenceIndexLimits,
-    ActionReferenceIndexRoot, FileActionArchiveCache, FileActionReferenceIndex,
-};
 use automata_ci_action_github::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
@@ -60,6 +55,11 @@ mod podman_process_trust;
 #[cfg(target_os = "linux")]
 use podman_process_trust::PodmanProcessTrust;
 
+#[cfg(unix)]
+use super::action_cache::{
+    ActionArchiveCacheLimits, ActionArchiveCacheRoot, ActionReferenceIndexLimits,
+    ActionReferenceIndexRoot, FileActionArchiveCache, FileActionReferenceIndex,
+};
 use super::managed_secret_delivery::ManagedSecretJobExecutor;
 #[cfg(not(target_os = "linux"))]
 use super::state::RuntimeMountSnapshot;

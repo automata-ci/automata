@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::human::{PrincipalId, TenantId};
 
-use automata_ci_output_policy::OutputKind;
-pub use automata_ci_output_policy::{
+use crate::output_policy::OutputKind;
+pub use crate::output_policy::{
     OutputVisibility, RepositoryPublicationPolicy, SecretExposureClass,
 };
 

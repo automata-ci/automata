@@ -27,7 +27,6 @@ path = "tests/runner.rs"
 anyhow.workspace = true
 async-trait.workspace = true
 automata-ci-action.workspace = true
-automata-ci-action-cache-file.workspace = true
 automata-ci-action-github.workspace = true
 automata-ci-blob.workspace = true
 automata-ci-blob-s3.workspace = true
@@ -74,6 +73,7 @@ x509-parser.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(unix)'.dependencies]
+libc.workspace = true
 rustix.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -85,8 +85,10 @@ automata-ci-build-support.workspace = true
 [dev-dependencies]
 automata-ci-auth.workspace = true
 automata-ci-protocol-protobuf.workspace = true
+flate2.workspace = true
 rcgen.workspace = true
 sha2.workspace = true
+tar.workspace = true
 time.workspace = true
 
 [lints]

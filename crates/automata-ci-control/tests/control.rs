@@ -1,9 +1,14 @@
 //! Control-domain contracts and application behavior.
 
+mod runner_auth_support;
 mod runner_control_support;
 mod scheduling_support;
 
+mod github_oidc_runtime_authority;
 mod lease_poll;
+mod runner_auth_authentication;
+mod runner_auth_authorization;
+mod runner_auth_contracts;
 mod runner_control_capability_admission;
 mod runner_control_contracts;
 mod runner_control_durable_contracts;

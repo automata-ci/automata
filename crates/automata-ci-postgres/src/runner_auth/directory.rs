@@ -2,11 +2,11 @@ use std::fmt;
 
 use async_trait::async_trait;
 use automata_ci_auth::{machine::ExternalRunnerIdentity, time::UnixTimestamp};
-use automata_ci_control::runner_control::DesiredRunnerState;
-use automata_ci_core::{RunnerId, Sha256Digest};
-use automata_ci_runner_auth::{
+use automata_ci_control::runner_auth::{
     RunnerMachineDirectory, RunnerMachineDirectoryError, RunnerMachineRecord,
 };
+use automata_ci_control::runner_control::DesiredRunnerState;
+use automata_ci_core::{RunnerId, Sha256Digest};
 use automata_ci_store::RunnerGeneration;
 use sqlx::{PgPool, Row as _};
 use uuid::Uuid;

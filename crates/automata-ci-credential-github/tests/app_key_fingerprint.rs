@@ -1,9 +1,9 @@
 mod support;
 
-use automata_ci_credential::ProviderResourceId;
 use automata_ci_credential_github::{
     GithubAppCredentialBroker, GithubAppCredentialConfig, GithubInstallationId,
 };
+use automata_ci_scm::credential::ProviderResourceId;
 use support::{INSTALLATION_ID, ISSUER, pkcs8_private_key, private_key};
 
 const EXPECTED_SPKI_SHA256: &str =

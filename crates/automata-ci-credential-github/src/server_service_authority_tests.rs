@@ -7,10 +7,10 @@ use std::{
 };
 
 use automata_ci_auth::{secret::SecretString, time::UnixTimestamp};
-use automata_ci_credential::{CredentialProvenance, ProviderResourceId};
 use automata_ci_key_management::{
     EncryptedEnvelope, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
+use automata_ci_scm::credential::{CredentialProvenance, ProviderResourceId};
 use automata_ci_store::{
     GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS, GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS,
     GithubRepositoryName, GithubServerServiceAction, GithubServerServiceAppClientId,
