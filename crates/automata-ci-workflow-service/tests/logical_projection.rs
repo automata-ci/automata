@@ -2,12 +2,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use automata_ci_core::{
     Architecture, ContainerFeature, ContextValue, EnvironmentProfile, EnvironmentProfileId,
-    JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobIrEnvelope,
-    JobPermissionGrant, JobPermissionRequest, JobResourceAllocation, JobResourcePolicy,
-    JobValidationError, OperatingSystem, OutputSensitivity, PermissionLevel, ResourceCapacity,
-    RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit, SemanticStep, Sha256Digest,
-    ShellTemplate, TransportProtocol, ValueSource, ValueTemplateSegment, WorkflowEventProvenance,
-    WorkflowId, WorkflowJobKey, WorkflowPlan,
+    IsolationLevel, JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId,
+    JobIrEnvelope, JobPermissionGrant, JobPermissionRequest, JobResourceAllocation,
+    JobResourcePolicy, JobValidationError, OperatingSystem, OutputSensitivity, PermissionLevel,
+    ResourceCapacity, RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit, SandboxFeature,
+    SemanticStep, Sha256Digest, ShellTemplate, TransportProtocol, ValueSource,
+    ValueTemplateSegment, WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_protocol::ProtocolLimits;
@@ -225,10 +225,17 @@ fn runtime_reference(
 }
 
 fn execution(instance: &automata_ci_workflow_service::ActivatedJobInstance) -> JobExecutionContext {
+    execution_with_workspace(instance, "/workspace/synthetic")
+}
+
+fn execution_with_workspace(
+    instance: &automata_ci_workflow_service::ActivatedJobInstance,
+    workspace: &str,
+) -> JobExecutionContext {
     JobExecutionContext::new(
         "Synthetic CI",
         GIT_REF,
-        "/workspace/synthetic",
+        workspace,
         JobContentReference::new(
             "runs/synthetic/event.json",
             Sha256Digest::from_bytes([7; 32]),
@@ -268,6 +275,14 @@ fn project_envelope_with_profiles(
     source: &str,
     profiles: &GithubRunnerProfileCatalog,
 ) -> JobIrEnvelope {
+    project_envelope_with_profiles_and_workspace(source, profiles, "/workspace/synthetic")
+}
+
+fn project_envelope_with_profiles_and_workspace(
+    source: &str,
+    profiles: &GithubRunnerProfileCatalog,
+    workspace: &str,
+) -> JobIrEnvelope {
     let plan = plan(source);
     let activation = activate(&plan);
     let instance = &activation.instances()[0];
@@ -282,7 +297,7 @@ fn project_envelope_with_profiles(
             fixed_id(31, WorkflowId::from_uuid),
             fixed_id(32, automata_ci_core::RunId::from_uuid),
             fixed_id(33, JobId::from_uuid),
-            execution(instance),
+            execution_with_workspace(instance, workspace),
             profiles,
             JobAuthorityProfile::Standard,
             &permission_policy(),
@@ -462,6 +477,53 @@ jobs:
         requirements
             .container_features()
             .contains(&ContainerFeature::DOCKER_COMPATIBLE_API)
+    );
+    assert_eq!(requirements.minimum_isolation(), IsolationLevel::Process);
+    assert!(
+        !requirements
+            .sandbox_features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+    );
+}
+
+#[test]
+fn windows_profile_projection_requires_the_exact_hyperv_container_boundary() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: windows-2025
+    steps: [{run: Write-Output ok}]
+";
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.test/windows-2025").expect("profile id"),
+        Sha256Digest::from_bytes([0x25; 32]),
+    );
+    let profiles = GithubRunnerProfileCatalog::new([GithubRunnerProfileMapping::new(
+        "windows-2025",
+        profile.clone(),
+        OperatingSystem::Windows,
+        Architecture::X86_64,
+    )
+    .expect("Windows profile mapping")])
+    .expect("profile catalog");
+
+    let envelope =
+        project_envelope_with_profiles_and_workspace(source, &profiles, "/__w/synthetic");
+    let requirements = envelope.job().requirements();
+    assert_eq!(requirements.environment_profile(), Some(&profile));
+    assert_eq!(
+        requirements.operating_system(),
+        Some(&OperatingSystem::Windows)
+    );
+    assert_eq!(
+        requirements.minimum_isolation(),
+        IsolationLevel::VirtualMachine
+    );
+    assert!(
+        requirements
+            .sandbox_features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
     );
 }
 

@@ -48,6 +48,14 @@ blocking trust order is `EVT-01` -> `AUTH-02` -> `WIN-ISO-01`; component
 provider work may proceed offline but cannot advertise support before that
 route and the management/recovery gates pass.
 
+Current component placement foundation binds GitHub-projected Windows jobs to
+both VM-grade isolation and the exact
+`automata.core/windows-hyperv-container@v1` launch capability. Only the
+`windows_hyperv` runner composition advertises it; Linux and macOS do not.
+Capability intersection and scheduler matching reject a generic VM before a
+placement becomes a lease. This is not the AUTH-02 trust grant and does not
+make Windows schedulable in production.
+
 ## Work packages
 
 ### WIN-ISO — Disposable Hyper-V-isolated Windows containers

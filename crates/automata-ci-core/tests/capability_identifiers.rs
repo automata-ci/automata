@@ -9,6 +9,10 @@ fn known_identifiers_have_stable_namespaced_wire_values() {
         "automata.core/network-isolation@v1",
     );
     assert_eq!(
+        SandboxFeature::WINDOWS_HYPERV_CONTAINER.as_str(),
+        "automata.core/windows-hyperv-container@v1",
+    );
+    assert_eq!(
         ContainerFeature::SERVICE_CONTAINERS.as_str(),
         "automata.core/service-containers@v1",
     );

@@ -113,6 +113,14 @@ and `ContainerUser` identity. Configuration rejects every host-network,
 host-filesystem, administrator, native-process, process-isolated-container, or
 mutable-image alternative.
 
+The resulting inventory advertises
+`automata.core/windows-hyperv-container@v1` only for `windows_hyperv`. GitHub
+Windows projection requires that exact launch capability together with
+`IsolationLevel::VirtualMachine`; a generic VM advertisement, including the
+macOS VM provider, cannot match. Registered and live-observed capabilities are
+intersected before scheduler matching, and the match is repeated before a
+placement can become a lease.
+
 It advertises only PowerShell and `cmd.exe` shell steps plus command files, with
 optional support for one absolute standalone Python interpreter. Every
 configured interpreter is exercised through a copied script in a disposable
@@ -127,7 +135,9 @@ The checked-in runtime and image digests are placeholders, not promoted
 artifacts. Unit and injected-runtime tests do not prove a physical Windows host,
 HCS/HCN behavior, image contents, patch compatibility, or nested Job Object
 enforcement. Keep this runner out of production until a reviewed image and the
-physical-host acceptance gate are published.
+physical-host acceptance gate are published. The exact launch requirement also
+does not create the AUTH-02 one-use trust grant; Windows remains unavailable
+until authenticated placement evidence is implemented and accepted.
 
 Copy [`runner.windows.example.json`](runner.windows.example.json) to an ignored
 host-specific path, replace every placeholder digest, and follow the

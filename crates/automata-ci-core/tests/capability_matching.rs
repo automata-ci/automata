@@ -136,6 +136,88 @@ fn typed_requirement_matching_checks_groups_resources_and_features() {
 }
 
 #[test]
+fn windows_requirements_cannot_fall_back_to_a_generic_vm_runner() {
+    let requirements = RunnerRequirements::default()
+        .with_windows_hyperv_container()
+        .with_minimum_isolation(IsolationLevel::Process)
+        .with_sandbox_features([SandboxFeature::NETWORK_ISOLATION]);
+    assert_eq!(
+        requirements.operating_system(),
+        Some(&OperatingSystem::Windows)
+    );
+    assert_eq!(
+        requirements.minimum_isolation(),
+        IsolationLevel::VirtualMachine
+    );
+    assert!(
+        requirements
+            .sandbox_features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+    );
+
+    let generic_vm = RunnerCapabilities::new(
+        RunnerId::new(),
+        RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
+    )
+    .with_sandbox(SandboxCapabilities::new(
+        IsolationLevel::VirtualMachine,
+        [SandboxFeature::NETWORK_ISOLATION],
+    ));
+    let mismatch = generic_vm
+        .satisfies(&requirements)
+        .expect_err("generic VM isolation cannot impersonate a Hyper-V container");
+    assert_eq!(
+        mismatch.as_slice(),
+        &[RequirementMismatch::MissingSandboxFeature(
+            SandboxFeature::WINDOWS_HYPERV_CONTAINER,
+        )]
+    );
+
+    let exact = generic_vm.with_sandbox(SandboxCapabilities::new(
+        IsolationLevel::VirtualMachine,
+        [
+            SandboxFeature::NETWORK_ISOLATION,
+            SandboxFeature::WINDOWS_HYPERV_CONTAINER,
+        ],
+    ));
+    assert_eq!(exact.satisfies(&requirements), Ok(()));
+}
+
+#[test]
+fn windows_hyperv_requirement_serde_rejects_weakened_or_cross_platform_shapes() {
+    let exact = RunnerRequirements::default().with_windows_hyperv_container();
+    let mut missing_launch = serde_json::to_value(&exact).expect("serialize requirements");
+    missing_launch["sandbox_features"] = serde_json::json!([]);
+    assert!(serde_json::from_value::<RunnerRequirements>(missing_launch).is_err());
+
+    let mut weak_isolation = serde_json::to_value(&exact).expect("serialize requirements");
+    weak_isolation["minimum_isolation"] = serde_json::json!("shared_kernel");
+    assert!(serde_json::from_value::<RunnerRequirements>(weak_isolation).is_err());
+
+    let mut wrong_platform = serde_json::to_value(&exact).expect("serialize requirements");
+    wrong_platform["operating_system"] = serde_json::json!("linux");
+    assert!(serde_json::from_value::<RunnerRequirements>(wrong_platform).is_err());
+
+    let linux = RunnerRequirements::default()
+        .with_operating_system(OperatingSystem::Linux)
+        .with_minimum_isolation(IsolationLevel::SharedKernel)
+        .with_sandbox_features([SandboxFeature::NETWORK_ISOLATION]);
+    assert_eq!(linux.minimum_isolation(), IsolationLevel::SharedKernel);
+    assert!(
+        !linux
+            .sandbox_features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+    );
+    assert_eq!(
+        serde_json::from_value::<RunnerRequirements>(
+            serde_json::to_value(&linux).expect("serialize Linux requirements")
+        )
+        .expect("Linux requirements retain their existing shape"),
+        linux
+    );
+}
+
+#[test]
 fn allocation_requests_are_placement_evidence_but_limits_require_enforcement_capacity() {
     let allocation = JobResourceAllocation::new(
         ResourceCapacity::new(500, 512 * 1024 * 1024, 0, 0),

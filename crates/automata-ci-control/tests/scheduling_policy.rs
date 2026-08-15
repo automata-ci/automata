@@ -6,7 +6,8 @@ use automata_ci_control::scheduling::{
 use automata_ci_core::{RequirementMismatch, UnixMillis};
 
 use super::scheduling_support::{
-    attempt_id, candidate, effective_runner, job_id, label, routing, runner_id,
+    attempt_id, candidate, effective_runner, job_id, label, routing, runner_id, windows_candidate,
+    windows_effective_runner,
 };
 
 #[test]
@@ -99,6 +100,35 @@ fn incompatibility_preserves_complete_core_matching_diagnostics() {
         runner_declines[0].mismatches(),
         &[RequirementMismatch::MissingLabel(label("gpu"))]
     );
+}
+
+#[test]
+fn windows_hyperv_launch_kind_is_enforced_before_placement() {
+    let candidates = [windows_candidate(1, 100)];
+    let generic_vm_runners = [windows_effective_runner(1, false, &[1])];
+    let decision = DeterministicScheduler.decide(
+        SchedulingInput::new(&candidates, &generic_vm_runners).expect("scheduling snapshot"),
+    );
+    let PlacementDecision::Decline(PlacementDecline::Candidates(declines)) = decision else {
+        panic!("a generic Windows VM must be declined before placement")
+    };
+    let CandidateDeclineReason::NoCompatibleRunner(runner_declines) = declines[0].reason() else {
+        panic!("an exact capability decline was expected")
+    };
+    assert_eq!(
+        runner_declines[0].mismatches(),
+        &[RequirementMismatch::MissingSandboxFeature(
+            automata_ci_core::SandboxFeature::WINDOWS_HYPERV_CONTAINER,
+        )]
+    );
+
+    let exact_runners = [windows_effective_runner(1, true, &[1])];
+    assert!(matches!(
+        DeterministicScheduler.decide(
+            SchedulingInput::new(&candidates, &exact_runners).expect("scheduling snapshot")
+        ),
+        PlacementDecision::Place(_)
+    ));
 }
 
 #[test]

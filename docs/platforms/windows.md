@@ -83,6 +83,10 @@ implemented scope is intentionally smaller than production acceptance:
 - [x] On provider open, replay the bounded lifecycle journal, destructively
       reconcile journal-owned containers, enumerate Automata-labelled
       leftovers, and refuse registration if any unexplained resource remains.
+- [x] Bind every GitHub-projected Windows requirement to VM-grade isolation and
+      the exact `automata.core/windows-hyperv-container@v1` capability; advertise
+      that capability only from `windows_hyperv` and enforce matching before
+      placement.
 - [x] Keep JavaScript/composite actions, services, nested job containers,
       egress, GPUs, ephemeral-disk claims, and parallel capacity unavailable
       unless their later packages pass.
@@ -90,7 +94,7 @@ implemented scope is intentionally smaller than production acceptance:
 This pull request does **not** prove or complete:
 
 - [ ] authenticated workload trust classification;
-- [ ] fail-closed trust-to-provider routing;
+- [ ] the AUTH-02 one-use trust decision and trust-to-provider admission grant;
 - [ ] a least-privilege broker between a compromised runner and the container
       management endpoint;
 - [ ] an independent watchdog and broker-mediated recovery while the runner is
@@ -662,8 +666,11 @@ implicit default.
 - [ ] Carry authenticated event identity, repository/ref provenance, actor,
       fork/Dependabot status, policy version, requested secrets, and trust
       classification into scheduling.
-- [ ] Define the exact `WindowsHyperVContainer` requirement and reject
-      unknown, missing, stale, or unsigned placement evidence.
+- [x] Define the exact `WindowsHyperVContainer` requirement, pair it with
+      `IsolationLevel::VirtualMachine`, carry it through JobIR/protobuf replay,
+      and reject generic VM or alternate-provider capabilities before lease.
+- [ ] Reject unknown, missing, stale, or unsigned authenticated placement
+      evidence through the AUTH-02 one-use grant.
 - [ ] Ensure no scheduler, rerun, recovery, administrative API, or capacity
       fallback can select an alternate Windows boundary.
 - [ ] Bind a one-use admission grant to attempt, operation, generation,

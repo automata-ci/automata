@@ -686,6 +686,14 @@ fn runner_requirements(
 
     let labels = decode_labels(value.labels, "runner_requirements.labels")?;
     let groups = decode_groups(value.eligible_groups, "runner_requirements.eligible_groups")?;
+    let operating_system = value
+        .operating_system
+        .map(self::operating_system)
+        .transpose()?;
+    let minimum_isolation = isolation_level(
+        value.minimum_isolation,
+        "runner_requirements.minimum_isolation",
+    )?;
     let sandbox_features = value
         .sandbox_features
         .into_iter()
@@ -714,6 +722,12 @@ fn runner_requirements(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    validate_windows_hyperv_requirement(
+        operating_system.as_ref(),
+        minimum_isolation,
+        &sandbox_features,
+    )?;
+
     let mut requirements = core::RunnerRequirements::default()
         .with_labels(labels)
         .with_eligible_groups(groups)
@@ -724,16 +738,12 @@ fn runner_requirements(
             )?,
             "runner_requirements.minimum_resources.gpu_count",
         )?)
-        .with_minimum_isolation(isolation_level(
-            value.minimum_isolation,
-            "runner_requirements.minimum_isolation",
-        )?)
+        .with_minimum_isolation(minimum_isolation)
         .with_sandbox_features(sandbox_features)
         .with_container_features(container_features)
         .with_features(features);
-    if let Some(operating_system) = value.operating_system {
-        requirements =
-            requirements.with_operating_system(self::operating_system(operating_system)?);
+    if let Some(operating_system) = operating_system {
+        requirements = requirements.with_operating_system(operating_system);
     }
     if let Some(architecture) = value.architecture {
         requirements = requirements.with_architecture(self::architecture(architecture)?);
@@ -751,6 +761,31 @@ fn runner_requirements(
         requirements = requirements.with_resource_allocation(allocation);
     }
     Ok(requirements)
+}
+
+fn validate_windows_hyperv_requirement(
+    operating_system: Option<&core::OperatingSystem>,
+    minimum_isolation: core::IsolationLevel,
+    sandbox_features: &[core::SandboxFeature],
+) -> Result<(), DecodeError> {
+    let exact_launch = sandbox_features.contains(&core::SandboxFeature::WINDOWS_HYPERV_CONTAINER);
+    if matches!(operating_system, Some(core::OperatingSystem::Windows)) {
+        if minimum_isolation < core::IsolationLevel::VirtualMachine {
+            return Err(DecodeError::InvalidValue {
+                field: "runner_requirements.minimum_isolation",
+            });
+        }
+        if !exact_launch {
+            return Err(DecodeError::InvalidValue {
+                field: "runner_requirements.sandbox_features",
+            });
+        }
+    } else if exact_launch {
+        return Err(DecodeError::InvalidValue {
+            field: "runner_requirements.sandbox_features",
+        });
+    }
+    Ok(())
 }
 
 fn validate_runner_requirement_collections(

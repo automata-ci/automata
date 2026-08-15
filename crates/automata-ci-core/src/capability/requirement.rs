@@ -77,6 +77,15 @@ impl<'de> Deserialize<'de> for RunnerRequirements {
                 value.schema_version, RUNNER_REQUIREMENTS_SCHEMA_VERSION
             )));
         }
+        if !windows_hyperv_requirement_is_valid(
+            value.operating_system.as_ref(),
+            value.minimum_isolation,
+            &value.sandbox_features,
+        ) {
+            return Err(D::Error::custom(
+                "Windows runner requirements must bind VM isolation and the exact Hyper-V-container launch capability",
+            ));
+        }
         Ok(Self {
             schema_version: value.schema_version,
             labels: value.labels,
@@ -186,7 +195,26 @@ impl RunnerRequirements {
     /// Requires one operating-system family.
     #[must_use]
     pub fn with_operating_system(mut self, operating_system: OperatingSystem) -> Self {
+        if operating_system == OperatingSystem::Windows {
+            return self.with_windows_hyperv_container();
+        }
+        self.sandbox_features
+            .remove(&SandboxFeature::WINDOWS_HYPERV_CONTAINER);
         self.operating_system = Some(operating_system);
+        self
+    }
+
+    /// Requires the only accepted Windows launch shape: a Hyper-V-isolated
+    /// container with a dedicated guest-kernel boundary.
+    ///
+    /// This is intentionally stronger than a generic virtual-machine minimum:
+    /// another VM-backed provider cannot satisfy the exact launch requirement.
+    #[must_use]
+    pub fn with_windows_hyperv_container(mut self) -> Self {
+        self.operating_system = Some(OperatingSystem::Windows);
+        self.minimum_isolation = self.minimum_isolation.max(IsolationLevel::VirtualMachine);
+        self.sandbox_features
+            .insert(SandboxFeature::WINDOWS_HYPERV_CONTAINER);
         self
     }
 
@@ -218,7 +246,12 @@ impl RunnerRequirements {
     /// Replaces the weakest acceptable isolation boundary.
     #[must_use]
     pub const fn with_minimum_isolation(mut self, isolation: IsolationLevel) -> Self {
-        self.minimum_isolation = isolation;
+        self.minimum_isolation = if matches!(&self.operating_system, Some(OperatingSystem::Windows))
+        {
+            IsolationLevel::VirtualMachine
+        } else {
+            isolation
+        };
         self
     }
 
@@ -229,6 +262,16 @@ impl RunnerRequirements {
         features: impl IntoIterator<Item = SandboxFeature>,
     ) -> Self {
         self.sandbox_features = features.into_iter().collect();
+        if self
+            .sandbox_features
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+        {
+            return self.with_windows_hyperv_container();
+        }
+        if self.operating_system == Some(OperatingSystem::Windows) {
+            self.sandbox_features
+                .insert(SandboxFeature::WINDOWS_HYPERV_CONTAINER);
+        }
         self
     }
 
@@ -254,6 +297,21 @@ impl RunnerRequirements {
     pub fn with_environment_profile(mut self, profile: EnvironmentProfile) -> Self {
         self.environment_profile = Some(profile);
         self
+    }
+}
+
+fn windows_hyperv_requirement_is_valid(
+    operating_system: Option<&OperatingSystem>,
+    minimum_isolation: IsolationLevel,
+    sandbox_features: &BTreeSet<SandboxFeature>,
+) -> bool {
+    let requires_hyperv = sandbox_features.contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER);
+    match operating_system {
+        Some(OperatingSystem::Windows) => {
+            minimum_isolation >= IsolationLevel::VirtualMachine && requires_hyperv
+        }
+        Some(OperatingSystem::Linux | OperatingSystem::Macos | OperatingSystem::Other(_))
+        | None => !requires_hyperv,
     }
 }
 
