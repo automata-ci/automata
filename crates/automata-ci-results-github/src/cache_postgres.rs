@@ -1451,8 +1451,8 @@ mod tests {
     #[test]
     fn cache_entry_census_limit_is_one_over_the_repository_limit() {
         assert_eq!(
-            CACHE_ENTRY_CENSUS_LIMIT,
-            MAX_REPOSITORY_CACHE_ENTRIES as i64 + 1
+            usize::try_from(CACHE_ENTRY_CENSUS_LIMIT).expect("cache entry census limit fits usize"),
+            MAX_REPOSITORY_CACHE_ENTRIES + 1
         );
     }
 }

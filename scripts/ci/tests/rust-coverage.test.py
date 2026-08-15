@@ -1328,7 +1328,7 @@ exit 99
             "-p automata-ci-postgres-test-support --test postgres_18",
             "-p automata-ci-results-github --test postgres_artifacts --test postgres_cache",
             "--test github_provider_end_to_end_matrix",
-            "--test rustfs_contract",
+            "--test blob_s3",
             "--test live_github_rustfs",
             "--test live_checkout_pipeline",
             "--test rustfs_results",

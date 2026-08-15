@@ -147,9 +147,9 @@ run_postgres() {
 }
 
 run_s3() {
-  run_ignored_command cargo test -p automata-ci-blob-s3 --test rustfs_contract \
+  run_ignored_command cargo test -p automata-ci-blob-s3 --test blob_s3 \
     --all-features --locked -- \
-    --ignored --test-threads=1
+    rustfs_contract:: --ignored --test-threads=1
   run_ignored_command cargo test -p automata-ci-action --test live_github_rustfs \
     --all-features --locked -- \
     --ignored --test-threads=1

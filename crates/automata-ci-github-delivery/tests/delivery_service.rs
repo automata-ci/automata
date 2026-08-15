@@ -66,7 +66,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use subject_evidence::{
+use super::subject_evidence::{
     fixture_check_head_sha, fixture_subject_evidence, fixture_subject_evidence_with_head,
 };
 
@@ -3669,4 +3669,3 @@ fn timing_configuration_is_bounded_and_coherent() {
         Err(GithubDeliveryServiceConfigurationError::InvalidRenewalDuration)
     );
 }
-mod subject_evidence;

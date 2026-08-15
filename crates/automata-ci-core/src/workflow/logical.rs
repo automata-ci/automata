@@ -2562,6 +2562,107 @@ impl LogicalWorkflowPlan {
     }
 }
 
+fn validate_logical_graph(
+    jobs: &[LogicalJobTemplate],
+    keys: &BTreeSet<&WorkflowJobKey>,
+) -> Result<(), WorkflowPlanError> {
+    for job in jobs {
+        for dependency in job.needs() {
+            if dependency.value() == job.key().value() {
+                return Err(WorkflowPlanError::SelfDependency(
+                    job.key().value().to_string(),
+                ));
+            }
+            if !keys.contains(dependency.value()) {
+                return Err(WorkflowPlanError::UnknownDependency {
+                    job: job.key().value().to_string(),
+                    dependency: dependency.value().to_string(),
+                });
+            }
+        }
+        for reference in job.result_references() {
+            if !keys.contains(reference.value().job()) {
+                return Err(WorkflowPlanError::UnknownResultJob {
+                    job: job.key().value().to_string(),
+                    dependency: reference.value().job().to_string(),
+                });
+            }
+            if !job
+                .needs()
+                .iter()
+                .any(|dependency| dependency.value() == reference.value().job())
+            {
+                return Err(WorkflowPlanError::ResultNotDependency {
+                    job: job.key().value().to_string(),
+                    dependency: reference.value().job().to_string(),
+                });
+            }
+            validate_result_reference(reference.value(), jobs)?;
+        }
+    }
+    validate_acyclic(jobs)
+}
+
+fn validate_result_reference(
+    reference: &LogicalResultReference,
+    jobs: &[LogicalJobTemplate],
+) -> Result<(), WorkflowPlanError> {
+    let Some(job) = jobs
+        .iter()
+        .find(|candidate| candidate.key().value() == reference.job())
+    else {
+        return Err(WorkflowPlanError::UnknownResultJob {
+            job: "workflow output".to_owned(),
+            dependency: reference.job().to_string(),
+        });
+    };
+    if let LogicalResultValue::Output(output) = reference.value()
+        && !job
+            .outputs()
+            .iter()
+            .any(|item| item.key().value() == output)
+    {
+        return Err(WorkflowPlanError::UnknownResultOutput {
+            job: reference.job().to_string(),
+            output: output.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_acyclic(jobs: &[LogicalJobTemplate]) -> Result<(), WorkflowPlanError> {
+    let mut complete = BTreeSet::new();
+    let mut visiting = BTreeSet::new();
+    for job in jobs {
+        visit(job.key().value(), jobs, &mut visiting, &mut complete)?;
+    }
+    Ok(())
+}
+
+fn visit<'a>(
+    key: &'a WorkflowJobKey,
+    jobs: &'a [LogicalJobTemplate],
+    visiting: &mut BTreeSet<&'a WorkflowJobKey>,
+    complete: &mut BTreeSet<&'a WorkflowJobKey>,
+) -> Result<(), WorkflowPlanError> {
+    if complete.contains(key) {
+        return Ok(());
+    }
+    if !visiting.insert(key) {
+        return Err(WorkflowPlanError::DependencyCycle);
+    }
+    let job = jobs
+        .iter()
+        .find(|candidate| candidate.key().value() == key)
+        .expect("dependency existence was checked");
+    for dependency in job.needs() {
+        visit(dependency.value(), jobs, visiting, complete)?;
+    }
+    visiting.remove(key);
+    complete.insert(key);
+    Ok(())
+}
+
 #[cfg(test)]
 mod limit_contract_tests {
     use super::*;
@@ -2739,105 +2840,4 @@ mod limit_contract_tests {
             Some(LogicalWorkflowLimitRejection::FieldBytes)
         );
     }
-}
-
-fn validate_logical_graph(
-    jobs: &[LogicalJobTemplate],
-    keys: &BTreeSet<&WorkflowJobKey>,
-) -> Result<(), WorkflowPlanError> {
-    for job in jobs {
-        for dependency in job.needs() {
-            if dependency.value() == job.key().value() {
-                return Err(WorkflowPlanError::SelfDependency(
-                    job.key().value().to_string(),
-                ));
-            }
-            if !keys.contains(dependency.value()) {
-                return Err(WorkflowPlanError::UnknownDependency {
-                    job: job.key().value().to_string(),
-                    dependency: dependency.value().to_string(),
-                });
-            }
-        }
-        for reference in job.result_references() {
-            if !keys.contains(reference.value().job()) {
-                return Err(WorkflowPlanError::UnknownResultJob {
-                    job: job.key().value().to_string(),
-                    dependency: reference.value().job().to_string(),
-                });
-            }
-            if !job
-                .needs()
-                .iter()
-                .any(|dependency| dependency.value() == reference.value().job())
-            {
-                return Err(WorkflowPlanError::ResultNotDependency {
-                    job: job.key().value().to_string(),
-                    dependency: reference.value().job().to_string(),
-                });
-            }
-            validate_result_reference(reference.value(), jobs)?;
-        }
-    }
-    validate_acyclic(jobs)
-}
-
-fn validate_result_reference(
-    reference: &LogicalResultReference,
-    jobs: &[LogicalJobTemplate],
-) -> Result<(), WorkflowPlanError> {
-    let Some(job) = jobs
-        .iter()
-        .find(|candidate| candidate.key().value() == reference.job())
-    else {
-        return Err(WorkflowPlanError::UnknownResultJob {
-            job: "workflow output".to_owned(),
-            dependency: reference.job().to_string(),
-        });
-    };
-    if let LogicalResultValue::Output(output) = reference.value()
-        && !job
-            .outputs()
-            .iter()
-            .any(|item| item.key().value() == output)
-    {
-        return Err(WorkflowPlanError::UnknownResultOutput {
-            job: reference.job().to_string(),
-            output: output.to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_acyclic(jobs: &[LogicalJobTemplate]) -> Result<(), WorkflowPlanError> {
-    let mut complete = BTreeSet::new();
-    let mut visiting = BTreeSet::new();
-    for job in jobs {
-        visit(job.key().value(), jobs, &mut visiting, &mut complete)?;
-    }
-    Ok(())
-}
-
-fn visit<'a>(
-    key: &'a WorkflowJobKey,
-    jobs: &'a [LogicalJobTemplate],
-    visiting: &mut BTreeSet<&'a WorkflowJobKey>,
-    complete: &mut BTreeSet<&'a WorkflowJobKey>,
-) -> Result<(), WorkflowPlanError> {
-    if complete.contains(key) {
-        return Ok(());
-    }
-    if !visiting.insert(key) {
-        return Err(WorkflowPlanError::DependencyCycle);
-    }
-    let job = jobs
-        .iter()
-        .find(|candidate| candidate.key().value() == key)
-        .expect("dependency existence was checked");
-    for dependency in job.needs() {
-        visit(dependency.value(), jobs, visiting, complete)?;
-    }
-    visiting.remove(key);
-    complete.insert(key);
-    Ok(())
 }

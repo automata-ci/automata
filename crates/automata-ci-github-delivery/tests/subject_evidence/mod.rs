@@ -13,7 +13,6 @@ use automata_ci_store::{
 };
 use uuid::Uuid;
 
-#[allow(dead_code)] // This shared module is compiled independently by each integration target.
 const FIXTURE_AFTER: &str = "0123456789abcdef0123456789abcdef01234567";
 const FIXTURE_RUNTIME_POLICY: &[u8] = br#"{
   "workspace":{"derivation":1,"root":"/__w","schema":1},
@@ -52,7 +51,6 @@ pub fn fixture_github_runtime_policy(revision: u64) -> FixtureGithubRuntimePolic
     }
 }
 
-#[allow(dead_code)] // Used by the worker target; delivery_service selects an explicit head.
 /// Builds manifest-pinned delivery evidence with the fixed integration-test head.
 ///
 /// # Panics
@@ -103,7 +101,6 @@ pub fn fixture_subject_evidence_with_head(
 }
 
 /// Builds all-direct manifest-pinned evidence for worker fan-out tests.
-#[allow(dead_code)] // The shared module is also compiled by non-worker integration targets.
 pub fn fixture_all_direct_subject_evidence(
     delivery_id: ProviderDeliveryId,
     identity: &ProviderDeliveryIdentity,

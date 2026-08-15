@@ -90,7 +90,7 @@ cargo test -p automata-ci-github --test live_repository_snapshot --locked -- --i
 # AUTOMATA_TEST_S3_SECRET_KEY, and the service's exact
 # AUTOMATA_TEST_S3_KMS_KEY_ID. The results contracts also need
 # AUTOMATA_TEST_DATABASE_URL.
-cargo test -p automata-ci-blob-s3 --test rustfs_contract --locked -- --ignored --test-threads=1
+cargo test -p automata-ci-blob-s3 --test blob_s3 --locked -- rustfs_contract:: --ignored --test-threads=1
 cargo test -p automata-ci-action --test live_github_rustfs --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-action-github --test live_checkout_pipeline --locked -- --ignored --test-threads=1
 cargo test -p automata-ci-results-github --test rustfs_results --locked -- --ignored --test-threads=1
@@ -306,7 +306,7 @@ The S3 contract creates the test bucket when necessary and verifies immutable
 publication before other suites use it:
 
 ```console
-cargo test -p automata-ci-blob-s3 --test rustfs_contract --all-features --locked -- --ignored
+cargo test -p automata-ci-blob-s3 --test blob_s3 --all-features --locked -- rustfs_contract:: --ignored
 ./scripts/ci/verify-postgres-version.sh
 ./scripts/ci/run-postgres-tests.sh
 ```

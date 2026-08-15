@@ -1,6 +1,7 @@
 [package]
 name = "automata-ci-protocol"
 description = "Versioned wire messages for Automata runners"
+autotests = false
 publish.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -10,6 +11,10 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
+
+[[test]]
+name = "protocol"
+path = "tests/protocol.rs"
 
 [lints]
 workspace = true

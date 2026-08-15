@@ -2092,29 +2092,6 @@ fn decode_delivery_event_evidence(
     result.map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)
 }
 
-#[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod schema_tests {
-    use super::{
-        AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION, authenticated_event_envelope_schema_is_current,
-    };
-
-    #[test]
-    fn authenticated_event_envelope_rejects_noncurrent_schemas() {
-        assert!(authenticated_event_envelope_schema_is_current(
-            AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION
-        ));
-        for version in [
-            0,
-            AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION
-                .checked_add(1)
-                .expect("schema version has room for a forward-version test"),
-        ] {
-            assert!(!authenticated_event_envelope_schema_is_current(version));
-        }
-    }
-}
-
 async fn load_run_evidence<'e, E>(
     executor: E,
     tenant: &TenantScope,
@@ -2924,3 +2901,25 @@ const EVIDENCE_VISIBILITY_AUTHORITY_EXACT: &str = r"
         AND private_source_authority.id IS NOT NULL
     )
 ";
+
+#[cfg(test)]
+mod schema_tests {
+    use super::{
+        AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION, authenticated_event_envelope_schema_is_current,
+    };
+
+    #[test]
+    fn authenticated_event_envelope_rejects_noncurrent_schemas() {
+        assert!(authenticated_event_envelope_schema_is_current(
+            AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION
+        ));
+        for version in [
+            0,
+            AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION
+                .checked_add(1)
+                .expect("schema version has room for a forward-version test"),
+        ] {
+            assert!(!authenticated_event_envelope_schema_is_current(version));
+        }
+    }
+}
