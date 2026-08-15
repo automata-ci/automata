@@ -6,6 +6,7 @@ use automata_ci_core::{
 use automata_ci_store::{
     HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA,
     LOGICAL_ORCHESTRATION_SCHEMA, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
+    WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA, WORKFLOW_RUNTIME_POLICY_SCHEMA,
     WORKFLOW_WORKSPACE_DERIVATION_VERSION, adapter_spi::secret_custody_canary_schema_version,
 };
 
@@ -28,6 +29,8 @@ pub(super) struct CurrentDurableSchemas {
     pub(super) secret_custody_canary_i32: i32,
     pub(super) workflow_plan_i16: i16,
     pub(super) workflow_plan_i32: i32,
+    pub(super) workflow_runtime_policy_i16: i16,
+    pub(super) workflow_runtime_runner_feature_policy_i16: i16,
     pub(super) workflow_workspace_derivation_i16: i16,
 }
 
@@ -55,6 +58,12 @@ pub(super) fn current_durable_schemas() -> CurrentDurableSchemas {
         workflow_plan_i16: i16::try_from(WORKFLOW_PLAN_SCHEMA)
             .expect("current workflow-plan schema fits PostgreSQL SMALLINT"),
         workflow_plan_i32: i32::from(WORKFLOW_PLAN_SCHEMA),
+        workflow_runtime_policy_i16: i16::try_from(WORKFLOW_RUNTIME_POLICY_SCHEMA)
+            .expect("current workflow runtime-policy schema fits PostgreSQL SMALLINT"),
+        workflow_runtime_runner_feature_policy_i16: i16::try_from(
+            WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA,
+        )
+        .expect("current runner-feature policy schema fits PostgreSQL SMALLINT"),
         workflow_workspace_derivation_i16: i16::try_from(WORKFLOW_WORKSPACE_DERIVATION_VERSION)
             .expect("current workspace-derivation version fits PostgreSQL SMALLINT"),
     }
@@ -78,6 +87,7 @@ mod tests {
     use automata_ci_store::{
         HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA,
         LOGICAL_ORCHESTRATION_SCHEMA, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
+        WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA, WORKFLOW_RUNTIME_POLICY_SCHEMA,
         WORKFLOW_WORKSPACE_DERIVATION_VERSION, adapter_spi::secret_custody_canary_schema_version,
     };
 
@@ -128,6 +138,15 @@ mod tests {
             i16::try_from(WORKFLOW_PLAN_SCHEMA).expect("test schema fits SMALLINT")
         );
         assert_eq!(schemas.workflow_plan_i32, i32::from(WORKFLOW_PLAN_SCHEMA));
+        assert_eq!(
+            schemas.workflow_runtime_policy_i16,
+            i16::try_from(WORKFLOW_RUNTIME_POLICY_SCHEMA).expect("test schema fits SMALLINT")
+        );
+        assert_eq!(
+            schemas.workflow_runtime_runner_feature_policy_i16,
+            i16::try_from(WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA)
+                .expect("test schema fits SMALLINT")
+        );
         assert_eq!(
             schemas.workflow_workspace_derivation_i16,
             i16::try_from(WORKFLOW_WORKSPACE_DERIVATION_VERSION)

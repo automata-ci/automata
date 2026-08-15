@@ -486,12 +486,12 @@ pub use workflow_rerun::{
 };
 pub use workflow_runtime_policy::{
     MAX_WORKFLOW_RUNTIME_POLICY_BYTES, MAX_WORKFLOW_RUNTIME_POLICY_FEATURES,
-    MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS, PinnedWorkflowRuntimePolicy,
-    RegisterWorkflowRuntimePolicy, WORKFLOW_RUNTIME_POLICY_MEDIA_TYPE,
-    WORKFLOW_RUNTIME_POLICY_SCHEMA, WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
-    WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA, WORKFLOW_WORKSPACE_DERIVATION_VERSION,
-    WorkflowPermissionPolicy, WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping,
-    WorkflowRuntimePolicyPin, WorkflowRuntimePolicyReceipt, WorkflowRuntimePolicyRepository,
-    WorkflowRuntimePolicyRevision, WorkflowRuntimePolicyStoreError,
-    WorkflowRuntimePolicyValueError,
+    MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS, MAX_WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURES,
+    PinnedWorkflowRuntimePolicy, RegisterWorkflowRuntimePolicy, WORKFLOW_RUNTIME_POLICY_MEDIA_TYPE,
+    WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA, WORKFLOW_RUNTIME_POLICY_SCHEMA,
+    WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT, WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA,
+    WORKFLOW_WORKSPACE_DERIVATION_VERSION, WorkflowPermissionPolicy, WorkflowRunnerFeaturePolicy,
+    WorkflowRuntimePolicy, WorkflowRuntimePolicyMapping, WorkflowRuntimePolicyPin,
+    WorkflowRuntimePolicyReceipt, WorkflowRuntimePolicyRepository, WorkflowRuntimePolicyRevision,
+    WorkflowRuntimePolicyStoreError, WorkflowRuntimePolicyValueError,
 };

@@ -236,7 +236,10 @@ Exit criteria:
 - [x] reserved runner environment names cannot be overwritten;
 - [x] matrix and expression behavior has exact external candidate fixtures;
 - [x] official artifact/cache clients run against real product adapters;
-- [ ] unsupported jobs fail before a lease.
+- [x] unsupported jobs fail before a lease. Every runnable job must select an
+  immutable profile whose versioned feature ceiling covers all source-derived
+  requirements before Job IR publication; temporary runner absence remains
+  `NoWork` rather than a terminal failure.
 
 ### Wave 2: durable runtime interfaces
 

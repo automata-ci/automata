@@ -437,7 +437,7 @@ async fn receipt_routing_capacity_scan_and_claim_are_ordered_and_least_authority
 }
 
 #[tokio::test]
-async fn unavailable_action_runtime_requirements_never_create_a_lease() {
+async fn temporarily_no_eligible_runner_for_admitted_features_remains_no_work() {
     let mut fixture = fixture(RunnerSlotAvailability::Available, true);
     fixture.repository.candidates = vec![runnable(
         RunId::new(),
@@ -454,7 +454,7 @@ async fn unavailable_action_runtime_requirements_never_create_a_lease() {
     let outcome = service(&fixture)
         .poll(fixture.authenticated, &fixture.request)
         .await
-        .expect("unsupported runtime is a normal pre-lease no-work result");
+        .expect("temporary runner-capability absence is a normal no-work result");
 
     assert_eq!(outcome, LeasePollOutcome::NoWork { replayed: false });
     assert_eq!(

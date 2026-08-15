@@ -60,6 +60,19 @@ Tasks:
     top-level shells are concretized. Capability matching rejects runners
     missing any requirement before lease acquisition; the runner repeats
     repository preflight before custody or provider work as defense in depth.
+  - [x] Bind a schema-versioned supported `RunnerFeature` set to every immutable
+    runtime-profile mapping. Activation requires one selected policy profile and
+    rejects a source-required feature outside that exact set before runtime or
+    Job IR blob publication. Unknown feature identifiers, duplicate or excessive
+    sets, historical mappings without the feature-policy section, and Windows
+    profiles that claim action or Node execution fail closed. The current Linux
+    example claims only its configured Bash, `sh`, Python, Node 24, action, and
+    command-file/summary toolchain features; Windows claims no action or Node
+    runtime.
+  - [x] Keep temporary placement absence distinct from terminal semantic
+    admission. A job that passed its immutable profile ceiling but has no
+    currently eligible runner remains durable `NoWork`; admission never derives
+    global support from connected runner inventory.
   - [ ] Complete ACT-02 binding for mutable tag/branch resolution and private
     repository action credentials. Until then those references, along with
     repository composite shell expressions, fail closed before scheduling.

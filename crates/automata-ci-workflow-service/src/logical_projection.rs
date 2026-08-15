@@ -19,8 +19,8 @@ use automata_ci_core::{
     RunnerRequirements, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate,
     RuntimeTimeoutUnit, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
     TemplateValueMap, TrustEnvironmentAuthority, TrustPermissionAuthority, TrustSecretAuthority,
-    TrustSnapshot, ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment, WorkflowId,
-    WorkflowJobKey, WorkflowPermissions,
+    TrustSnapshot, ValueSource, ValueTemplate, ValueTemplateError, ValueTemplateSegment,
+    WorkflowId, WorkflowJobKey, WorkflowPermissions,
 };
 use automata_ci_github_permissions::github_workflow_permission;
 use automata_ci_job_executor_github::static_shell_requirement;
@@ -271,12 +271,11 @@ fn project_github_logical_job(
         request.permission_ceiling,
         trust_snapshot.authority().permissions(),
     )?;
-    let requirements = runner_requirements(runner, request.profiles)?.with_resource_allocation(
-        resource_allocation(
-            request.instance.resources().copied(),
-            request.resource_policy,
-        )?,
-    );
+    let (requirements, selected_profile) = runner_requirements(runner, request.profiles)?;
+    let requirements = requirements.with_resource_allocation(resource_allocation(
+        request.instance.resources().copied(),
+        request.resource_policy,
+    )?);
     validate_workspace_platform(&requirements, request.execution.workspace())?;
 
     let runtime_context = request.instance.runtime_context().clone();
@@ -315,6 +314,7 @@ fn project_github_logical_job(
     let outputs = project_outputs(request.job.outputs())?;
     let services = project_services(step_job.services())?;
     let requirements = service_requirements(requirements, &services);
+    validate_profile_runtime_features(selected_profile, requirements.features())?;
     let mut job = JobIr::new(
         request.job_id,
         request.run_id,
@@ -638,10 +638,10 @@ fn github_job_source(
     ))
 }
 
-fn runner_requirements(
+fn runner_requirements<'a>(
     runner: &ActivatedRunnerSelection,
-    profiles: &GithubRunnerProfileCatalog,
-) -> Result<RunnerRequirements, LogicalJobProjectionError> {
+    profiles: &'a GithubRunnerProfileCatalog,
+) -> Result<(RunnerRequirements, &'a GithubRunnerProfileMapping), LogicalJobProjectionError> {
     let mut mapped: Option<&GithubRunnerProfileMapping> = None;
     for label in runner.labels() {
         let Some(candidate) = profiles.get(label) else {
@@ -652,31 +652,28 @@ fn runner_requirements(
         }
         mapped = Some(candidate);
     }
+    let mapped = mapped.ok_or(LogicalJobProjectionError::MissingRunnerProfilePolicy)?;
 
     let mut requirements = RunnerRequirements::default().with_labels(
         runner
             .labels()
             .iter()
-            .filter(|label| mapped.is_none_or(|mapping| mapping.selector() != *label))
+            .filter(|label| mapped.selector() != *label)
             .cloned(),
     );
     if let Some(group) = runner.group() {
         requirements = requirements.with_eligible_groups([group.clone()]);
     }
 
-    let mut operating_system = mapped.map_or(MergedSelector::Unset, |mapping| {
-        MergedSelector::Value(mapping.operating_system().clone())
-    });
-    let mut architecture = mapped.map_or(MergedSelector::Unset, |mapping| {
-        MergedSelector::Value(mapping.architecture().clone())
-    });
+    let mut operating_system = MergedSelector::Value(mapped.operating_system().clone());
+    let mut architecture = MergedSelector::Value(mapped.architecture().clone());
     for label in runner.labels() {
         match label.as_str() {
-            "linux" => merge_selector(&mut operating_system, OperatingSystem::Linux),
-            "windows" => merge_selector(&mut operating_system, OperatingSystem::Windows),
-            "macos" => merge_selector(&mut operating_system, OperatingSystem::Macos),
-            "x64" | "x86_64" => merge_selector(&mut architecture, Architecture::X86_64),
-            "arm64" | "aarch64" => merge_selector(&mut architecture, Architecture::Aarch64),
+            "linux" => merge_selector(&mut operating_system, &OperatingSystem::Linux),
+            "windows" => merge_selector(&mut operating_system, &OperatingSystem::Windows),
+            "macos" => merge_selector(&mut operating_system, &OperatingSystem::Macos),
+            "x64" | "x86_64" => merge_selector(&mut architecture, &Architecture::X86_64),
+            "arm64" | "aarch64" => merge_selector(&mut architecture, &Architecture::Aarch64),
             _ => {}
         }
     }
@@ -685,11 +682,9 @@ fn runner_requirements(
     {
         return Err(LogicalJobProjectionError::ConflictingRunnerSelectors);
     }
-    if let Some(mapping) = mapped {
-        requirements = requirements
-            .with_environment_profile(mapping.environment_profile().clone())
-            .with_container_features(mapping.container_features().iter().cloned());
-    }
+    requirements = requirements
+        .with_environment_profile(mapped.environment_profile().clone())
+        .with_container_features(mapped.container_features().iter().cloned());
     if let MergedSelector::Value(value) = operating_system {
         requirements = match value {
             OperatingSystem::Windows => requirements.with_windows_hyperv_container(),
@@ -699,7 +694,22 @@ fn runner_requirements(
     if let MergedSelector::Value(value) = architecture {
         requirements = requirements.with_architecture(value);
     }
-    Ok(requirements)
+    Ok((requirements, mapped))
+}
+
+fn validate_profile_runtime_features(
+    selected: &GithubRunnerProfileMapping,
+    required: &BTreeSet<RunnerFeature>,
+) -> Result<(), LogicalJobProjectionError> {
+    let supported = selected
+        .supported_runner_features()
+        .ok_or(LogicalJobProjectionError::MissingRunnerFeaturePolicy)?;
+    if let Some(feature) = required.difference(supported).next() {
+        return Err(LogicalJobProjectionError::UnsupportedRunnerFeature {
+            feature: feature.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn resource_allocation(
@@ -742,15 +752,13 @@ fn resource_allocation(
 }
 
 enum MergedSelector<T> {
-    Unset,
     Value(T),
     Conflict,
 }
 
-fn merge_selector<T: Eq>(slot: &mut MergedSelector<T>, value: T) {
+fn merge_selector<T: Eq>(slot: &mut MergedSelector<T>, value: &T) {
     match slot {
-        MergedSelector::Unset => *slot = MergedSelector::Value(value),
-        MergedSelector::Value(current) if current == &value => {}
+        MergedSelector::Value(current) if current == value => {}
         MergedSelector::Value(_) | MergedSelector::Conflict => {
             *slot = MergedSelector::Conflict;
         }
@@ -1307,6 +1315,18 @@ pub enum LogicalJobProjectionError {
     /// More than one activated selector maps to an exact environment profile.
     #[error("runner profile selector is ambiguous")]
     AmbiguousRunnerProfile,
+    /// No activated selector named an immutable repository-pinned profile.
+    #[error("runner selection has no immutable runtime profile policy")]
+    MissingRunnerProfilePolicy,
+    /// A historical selected profile predates the current feature-policy contract.
+    #[error("selected runner profile has no current runner-feature policy")]
+    MissingRunnerFeaturePolicy,
+    /// Immutable source requirements exceed the selected profile's declared support.
+    #[error("selected runner profile does not support source-required feature {feature}")]
+    UnsupportedRunnerFeature {
+        /// Canonical, non-secret feature identity derived from immutable source semantics.
+        feature: RunnerFeature,
+    },
     /// Generic labels select mutually incompatible platforms.
     #[error("runner selectors require conflicting platforms")]
     ConflictingRunnerSelectors,

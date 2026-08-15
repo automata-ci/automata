@@ -15,8 +15,8 @@ use automata_ci_blob::{
 };
 use automata_ci_core::{
     ContextValue, JobAuthorityProfile, JobConclusion, JobPermissionRequest, JobRuntimeContext,
-    OutputSensitivity, RunId, RunIdAlias, SecretBinding, Sha256Digest, TrustActorEvidence,
-    RunnerFeature, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+    OutputSensitivity, RunId, RunIdAlias, RunnerFeature, SecretBinding, Sha256Digest,
+    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
     TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, UnixMillis,
     WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan,
 };
@@ -91,11 +91,12 @@ const FINAL_DRAIN_SUBMISSION_CAP: usize =
 const RUNTIME_POLICY: &[u8] = br#"{
   "workspace":{"derivation":1,"root":"/__w","schema":1},
   "mappings":[{
+    "runner_features":{"schema":1,"supported":["automata.core/bash-shell@v1","automata.core/command-files@v1","automata.core/composite-actions@v1","automata.core/default-posix-shell@v1","automata.core/javascript-actions@v1","automata.core/job-summaries@v1","automata.core/local-actions@v1","automata.core/node20-actions@v1","automata.core/node24-actions@v1","automata.core/python-shell@v1","automata.core/repository-actions@v1","automata.core/sh-shell@v1","automata.core/shell-steps@v1"]},
     "container_features":[],
     "architecture":"x86_64","operating_system":"linux",
     "environment_profile":{"manifest_sha256":"2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a","id":"github/ubuntu-24-04"},
     "selector":"ubuntu-latest"
-  }],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":1
+  }],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},"schema":2
 }"#;
 
 const WORKFLOW_SOURCE: &str = r"name: Autonomous CI
@@ -1528,6 +1529,23 @@ async fn new_harness_with_action_preparer(
     prerequisites: Vec<LogicalActivationPrerequisiteEvidence>,
     actions: Option<Arc<dyn ActionPreparationPort>>,
 ) -> Harness {
+    new_harness_with_action_preparer_and_policy(
+        source,
+        authority_profile,
+        prerequisites,
+        actions,
+        RUNTIME_POLICY,
+    )
+    .await
+}
+
+async fn new_harness_with_action_preparer_and_policy(
+    source: &str,
+    authority_profile: JobAuthorityProfile,
+    prerequisites: Vec<LogicalActivationPrerequisiteEvidence>,
+    actions: Option<Arc<dyn ActionPreparationPort>>,
+    runtime_policy_configuration: &[u8],
+) -> Harness {
     let trace = HarnessTrace::default();
     let blobs = Arc::new(FaultBlobStore::new(trace.clone()));
     let plan = compile_plan(source);
@@ -1555,7 +1573,8 @@ async fn new_harness_with_action_preparer(
         LogicalWorkflowJobId::from_uuid(Uuid::from_u128(13)).expect("logical job"),
     )
     .expect("preparation target");
-    let (runner_policy, runtime_policy) = put_runtime_policy(&blobs.inner, &target).await;
+    let (runner_policy, runtime_policy) =
+        put_runtime_policy(&blobs.inner, &target, runtime_policy_configuration).await;
     let descriptor = LogicalActivationPreparationDescriptor::new(
         target,
         logical_key,
@@ -1670,9 +1689,10 @@ fn materialization_worker() -> LogicalMaterializationWorkerId {
 async fn put_runtime_policy(
     blobs: &MemoryBlobStore,
     target: &LogicalActivationPreparationTarget,
+    configuration: &[u8],
 ) -> (AdmissionObject, PinnedWorkflowRuntimePolicy) {
     let runtime_policy =
-        WorkflowRuntimePolicy::decode_configuration(RUNTIME_POLICY).expect("runtime policy");
+        WorkflowRuntimePolicy::decode_configuration(configuration).expect("runtime policy");
     let canonical = runtime_policy
         .canonical_bytes()
         .expect("canonical runtime policy");
@@ -3296,6 +3316,43 @@ async fn repository_runtime_features_reach_published_job_ir() {
     ] {
         assert!(features.contains(&required), "missing {required}");
     }
+}
+
+#[tokio::test]
+async fn globally_unsupported_profile_feature_quarantines_before_job_ir_publication() {
+    let actions = Arc::new(Node20ActionPreparer::default());
+    let action_port: Arc<dyn ActionPreparationPort> = actions.clone();
+    let configuration = std::str::from_utf8(RUNTIME_POLICY)
+        .expect("UTF-8 policy")
+        .replace(",\"automata.core/node20-actions@v1\"", "");
+    let harness = new_harness_with_action_preparer_and_policy(
+        WORKFLOW_WITH_REPOSITORY_ACTION_SOURCE,
+        JobAuthorityProfile::Standard,
+        Vec::new(),
+        Some(action_port),
+        configuration.as_bytes(),
+    )
+    .await;
+    complete_preparation(&harness).await;
+    harness.blobs.reset_observation();
+
+    assert_eq!(
+        harness
+            .service
+            .run_once(CancellationToken::new())
+            .await
+            .expect("terminal capability admission"),
+        AutonomousWorkflowOutcome::Quarantined(AutonomousWorkflowQueue::Orchestration)
+    );
+    assert_eq!(*actions.calls.lock().expect("action calls"), 1);
+    assert_eq!(harness.blobs.put_outcomes(), (0, 0));
+    assert!(harness.repository.publication_attempts().is_empty());
+    assert_eq!(harness.repository.successful_publications(), 0);
+    assert_eq!(harness.repository.mutation_counts(), (1, 0, 0));
+    assert_eq!(
+        harness.repository.quarantine_kinds().0,
+        vec![LogicalWorkQuarantineKind::PayloadEvidence]
+    );
 }
 
 #[tokio::test]

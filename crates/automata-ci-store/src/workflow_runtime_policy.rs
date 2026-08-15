@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use automata_ci_core::{
     Architecture, ContainerFeature, EnvironmentProfile, EnvironmentProfileId, JobPermissionGrant,
     JobPermissionRequest, JobResourcePolicy, MAX_JOB_PERMISSION_GRANTS,
-    MAX_JOB_PERMISSION_NAME_BYTES, OperatingSystem, PermissionLevel, RunId, RunnerLabel,
-    Sha256Digest, UnixMillis,
+    MAX_JOB_PERMISSION_NAME_BYTES, OperatingSystem, PermissionLevel, RunId, RunnerFeature,
+    RunnerLabel, Sha256Digest, UnixMillis,
 };
 use automata_ci_github_permissions::{
     GITHUB_WORKFLOW_PERMISSIONS, GithubDefaultWorkflowPermission, github_workflow_permission,
@@ -29,15 +29,19 @@ use crate::{
 };
 
 /// Current immutable runner-policy schema.
-pub const WORKFLOW_RUNTIME_POLICY_SCHEMA: u16 = 1;
+pub const WORKFLOW_RUNTIME_POLICY_SCHEMA: u16 = 2;
 /// Current schema of the independently versioned workspace section.
 pub const WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA: u16 = 1;
+/// Current schema of each independently versioned runner-feature policy.
+pub const WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA: u16 = 1;
 /// Current pure workspace derivation contract.
 pub const WORKFLOW_WORKSPACE_DERIVATION_VERSION: u16 = 1;
 /// Maximum exact selector mappings retained by one policy.
 pub const MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS: usize = 64;
 /// Maximum container features retained by one exact mapping.
 pub const MAX_WORKFLOW_RUNTIME_POLICY_FEATURES: usize = 64;
+/// Maximum runner features retained by one exact profile policy.
+pub const MAX_WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURES: usize = 64;
 /// Maximum exact canonical JSON representation retained by Store and Blob.
 pub const MAX_WORKFLOW_RUNTIME_POLICY_BYTES: usize = 64 * 1_024;
 /// Exact immutable object media type for the canonical policy representation.
@@ -211,7 +215,51 @@ pub struct WorkflowRuntimePolicyMapping {
     environment: EnvironmentProfile,
     operating_system: OperatingSystem,
     architecture: Architecture,
+    runner_feature_policy: Option<WorkflowRunnerFeaturePolicy>,
     container_features: BTreeSet<ContainerFeature>,
+}
+
+/// Immutable, independently versioned runner-runtime support ceiling for one profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowRunnerFeaturePolicy {
+    supported: BTreeSet<RunnerFeature>,
+}
+
+impl WorkflowRunnerFeaturePolicy {
+    /// Constructs an exact current-schema runner-feature support set.
+    ///
+    /// # Errors
+    ///
+    /// Rejects more than 64 raw values, duplicates, and syntactically valid
+    /// feature identifiers whose semantics this control plane does not know.
+    pub fn new(
+        supported: impl IntoIterator<Item = RunnerFeature>,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
+        let raw = supported.into_iter().collect::<Vec<_>>();
+        if raw.len() > MAX_WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURES {
+            return Err(WorkflowRuntimePolicyValueError::TooManyRunnerFeatures);
+        }
+        if raw.iter().any(|feature| !known_runner_feature(feature)) {
+            return Err(WorkflowRuntimePolicyValueError::UnknownRunnerFeature);
+        }
+        let supported = raw.iter().cloned().collect::<BTreeSet<_>>();
+        if supported.len() != raw.len() {
+            return Err(WorkflowRuntimePolicyValueError::DuplicateRunnerFeature);
+        }
+        Ok(Self { supported })
+    }
+
+    /// Returns the exact canonical feature support set.
+    #[must_use]
+    pub const fn supported(&self) -> &BTreeSet<RunnerFeature> {
+        &self.supported
+    }
+
+    /// Returns the independently versioned feature-policy schema.
+    #[must_use]
+    pub const fn schema(&self) -> u16 {
+        WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA
+    }
 }
 
 impl WorkflowRuntimePolicyMapping {
@@ -226,6 +274,7 @@ impl WorkflowRuntimePolicyMapping {
         environment: EnvironmentProfile,
         operating_system: OperatingSystem,
         architecture: Architecture,
+        runner_feature_policy: WorkflowRunnerFeaturePolicy,
         container_features: impl IntoIterator<Item = ContainerFeature>,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         if matches!(operating_system, OperatingSystem::Other(_))
@@ -236,6 +285,7 @@ impl WorkflowRuntimePolicyMapping {
         if !selector.as_str().is_ascii() {
             return Err(WorkflowRuntimePolicyValueError::InvalidSelector);
         }
+        validate_profile_runner_features(&operating_system, &runner_feature_policy)?;
         let raw_features = container_features.into_iter().collect::<Vec<_>>();
         if raw_features.len() > MAX_WORKFLOW_RUNTIME_POLICY_FEATURES {
             return Err(WorkflowRuntimePolicyValueError::TooManyFeatures);
@@ -249,8 +299,28 @@ impl WorkflowRuntimePolicyMapping {
             environment,
             operating_system,
             architecture,
+            runner_feature_policy: Some(runner_feature_policy),
             container_features,
         })
+    }
+
+    fn legacy(
+        selector: RunnerLabel,
+        environment: EnvironmentProfile,
+        operating_system: OperatingSystem,
+        architecture: Architecture,
+        container_features: impl IntoIterator<Item = ContainerFeature>,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
+        let mut mapping = Self::new(
+            selector,
+            environment,
+            operating_system,
+            architecture,
+            WorkflowRunnerFeaturePolicy::new([])?,
+            container_features,
+        )?;
+        mapping.runner_feature_policy = None;
+        Ok(mapping)
     }
 
     /// Returns the sole exact runner-label selector.
@@ -277,6 +347,12 @@ impl WorkflowRuntimePolicyMapping {
         &self.architecture
     }
 
+    /// Returns the exact support policy, or `None` only for historical schema 1.
+    #[must_use]
+    pub const fn runner_feature_policy(&self) -> Option<&WorkflowRunnerFeaturePolicy> {
+        self.runner_feature_policy.as_ref()
+    }
+
     /// Returns the exact canonical container-feature set.
     #[must_use]
     pub const fn container_features(&self) -> &BTreeSet<ContainerFeature> {
@@ -287,6 +363,7 @@ impl WorkflowRuntimePolicyMapping {
 /// Complete immutable non-secret runner, permission, resource, and workspace policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowRuntimePolicy {
+    schema: u16,
     workspace_root: String,
     mappings: Vec<WorkflowRuntimePolicyMapping>,
     permission_policy: WorkflowPermissionPolicy,
@@ -305,7 +382,7 @@ impl WorkflowRuntimePolicy {
     ///
     /// Rejects empty, malformed, excessive, ambiguous, or invalid policy JSON.
     pub fn decode_configuration(encoded: &[u8]) -> Result<Self, WorkflowRuntimePolicyValueError> {
-        Self::decode(encoded, false)
+        Self::decode(encoded, false, true)
     }
 
     /// Decodes immutable object bytes and requires their byte-exact canonical
@@ -315,19 +392,21 @@ impl WorkflowRuntimePolicy {
     ///
     /// Rejects malformed, excessive, invalid, or noncanonical policy bytes.
     pub fn decode_canonical(encoded: &[u8]) -> Result<Self, WorkflowRuntimePolicyValueError> {
-        Self::decode(encoded, true)
+        Self::decode(encoded, true, false)
     }
 
     fn decode(
         encoded: &[u8],
         require_canonical: bool,
+        require_current: bool,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         if encoded.is_empty() || encoded.len() > MAX_WORKFLOW_RUNTIME_POLICY_BYTES {
             return Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy);
         }
         let raw: RawPolicy = serde_json::from_slice(encoded)
             .map_err(|_| WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)?;
-        if raw.schema != WORKFLOW_RUNTIME_POLICY_SCHEMA
+        if !matches!(raw.schema, 1 | WORKFLOW_RUNTIME_POLICY_SCHEMA)
+            || (require_current && raw.schema != WORKFLOW_RUNTIME_POLICY_SCHEMA)
             || raw.workspace.schema != WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA
             || raw.workspace.root != WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT
             || raw.workspace.derivation != WORKFLOW_WORKSPACE_DERIVATION_VERSION
@@ -336,13 +415,15 @@ impl WorkflowRuntimePolicy {
         {
             return Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy);
         }
+        let schema = raw.schema;
         let mappings = raw
             .mappings
             .into_iter()
-            .map(WorkflowRuntimePolicyMapping::try_from)
+            .map(|mapping| WorkflowRuntimePolicyMapping::try_from_raw(mapping, schema))
             .collect::<Result<Vec<_>, _>>()?;
         let permission_policy = WorkflowPermissionPolicy::try_from(raw.permissions)?;
-        let policy = Self::from_parts(
+        let policy = Self::from_decoded_parts(
+            schema,
             raw.workspace.root,
             mappings,
             permission_policy,
@@ -380,6 +461,22 @@ impl WorkflowRuntimePolicy {
         permission_policy: WorkflowPermissionPolicy,
         resource_policy: JobResourcePolicy,
     ) -> Result<Self, WorkflowRuntimePolicyValueError> {
+        Self::from_decoded_parts(
+            WORKFLOW_RUNTIME_POLICY_SCHEMA,
+            workspace_root,
+            mappings,
+            permission_policy,
+            resource_policy,
+        )
+    }
+
+    fn from_decoded_parts(
+        schema: u16,
+        workspace_root: String,
+        mappings: impl IntoIterator<Item = WorkflowRuntimePolicyMapping>,
+        permission_policy: WorkflowPermissionPolicy,
+        resource_policy: JobResourcePolicy,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         validate_workspace_root(&workspace_root)?;
         let mut mappings = mappings.into_iter().collect::<Vec<_>>();
         if mappings.is_empty() || mappings.len() > MAX_WORKFLOW_RUNTIME_POLICY_MAPPINGS {
@@ -392,7 +489,13 @@ impl WorkflowRuntimePolicy {
         {
             return Err(WorkflowRuntimePolicyValueError::DuplicateSelector);
         }
+        if mappings.iter().any(|mapping| {
+            mapping.runner_feature_policy().is_some() != (schema == WORKFLOW_RUNTIME_POLICY_SCHEMA)
+        }) {
+            return Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy);
+        }
         let mut policy = Self {
+            schema,
             workspace_root,
             mappings,
             permission_policy,
@@ -401,6 +504,7 @@ impl WorkflowRuntimePolicy {
             canonical_digest: Sha256Digest::from_bytes([0; 32]),
         };
         let canonical = encode_canonical_policy(
+            policy.schema(),
             policy.workspace_root(),
             policy.mappings(),
             policy.permission_policy(),
@@ -420,6 +524,7 @@ impl WorkflowRuntimePolicy {
     /// current canonical policy format.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, WorkflowRuntimePolicyValueError> {
         let encoded = encode_canonical_policy(
+            self.schema(),
             self.workspace_root(),
             self.mappings(),
             self.permission_policy(),
@@ -438,7 +543,7 @@ impl WorkflowRuntimePolicy {
     /// Returns the immutable policy schema represented by this value.
     #[must_use]
     pub const fn schema(&self) -> u16 {
-        WORKFLOW_RUNTIME_POLICY_SCHEMA
+        self.schema
     }
 
     /// Returns mappings in canonical selector order.
@@ -728,6 +833,18 @@ pub enum WorkflowRuntimePolicyValueError {
     /// One mapping repeated a feature before canonical set construction.
     #[error("workflow runtime policy mapping contains a duplicate feature")]
     DuplicateFeature,
+    /// One mapping exceeded the fixed runner-feature bound.
+    #[error("workflow runtime policy mapping has too many runner features")]
+    TooManyRunnerFeatures,
+    /// One mapping repeated a runner feature before canonical set construction.
+    #[error("workflow runtime policy mapping contains a duplicate runner feature")]
+    DuplicateRunnerFeature,
+    /// One mapping named a runner feature unknown to this policy schema.
+    #[error("workflow runtime policy mapping contains an unknown runner feature")]
+    UnknownRunnerFeature,
+    /// A profile runner-feature policy was missing, wrongly versioned, or platform-invalid.
+    #[error("workflow runtime policy runner feature policy is invalid")]
+    InvalidRunnerFeaturePolicy,
     /// Permission shorthand expansions were empty, malformed, or inconsistent.
     #[error("workflow runtime permission policy is invalid")]
     InvalidPermissionPolicy,
@@ -775,6 +892,77 @@ fn validate_workspace_root(value: &str) -> Result<(), WorkflowRuntimePolicyValue
         Ok(())
     } else {
         Err(WorkflowRuntimePolicyValueError::InvalidWorkspaceRoot)
+    }
+}
+
+fn known_runner_feature(feature: &RunnerFeature) -> bool {
+    matches!(
+        feature.as_str(),
+        "automata.core/shell-steps@v1"
+            | "automata.core/default-posix-shell@v1"
+            | "automata.core/default-windows-shell@v1"
+            | "automata.core/bash-shell@v1"
+            | "automata.core/sh-shell@v1"
+            | "automata.core/python-shell@v1"
+            | "automata.core/pwsh-shell@v1"
+            | "automata.core/windows-powershell-shell@v1"
+            | "automata.core/cmd-shell@v1"
+            | "automata.core/javascript-actions@v1"
+            | "automata.core/node12-actions@v1"
+            | "automata.core/node16-actions@v1"
+            | "automata.core/node20-actions@v1"
+            | "automata.core/node24-actions@v1"
+            | "automata.core/composite-actions@v1"
+            | "automata.core/repository-actions@v1"
+            | "automata.core/local-actions@v1"
+            | "automata.core/command-files@v1"
+            | "automata.core/job-summaries@v1"
+            | "automata.core/oidc-tokens@v1"
+    )
+}
+
+fn validate_profile_runner_features(
+    operating_system: &OperatingSystem,
+    policy: &WorkflowRunnerFeaturePolicy,
+) -> Result<(), WorkflowRuntimePolicyValueError> {
+    let supported = policy.supported();
+    let node = [
+        &RunnerFeature::NODE12_ACTIONS,
+        &RunnerFeature::NODE16_ACTIONS,
+        &RunnerFeature::NODE20_ACTIONS,
+        &RunnerFeature::NODE24_ACTIONS,
+    ];
+    if node.iter().any(|feature| supported.contains(*feature))
+        && !supported.contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
+    {
+        return Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy);
+    }
+    match operating_system {
+        OperatingSystem::Windows
+            if supported.contains(&RunnerFeature::DEFAULT_POSIX_SHELL)
+                || supported.iter().any(|feature| {
+                    matches!(
+                        feature.as_str(),
+                        "automata.core/javascript-actions@v1"
+                            | "automata.core/node12-actions@v1"
+                            | "automata.core/node16-actions@v1"
+                            | "automata.core/node20-actions@v1"
+                            | "automata.core/node24-actions@v1"
+                            | "automata.core/composite-actions@v1"
+                            | "automata.core/repository-actions@v1"
+                            | "automata.core/local-actions@v1"
+                    )
+                }) =>
+        {
+            Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy)
+        }
+        OperatingSystem::Linux | OperatingSystem::Macos
+            if supported.contains(&RunnerFeature::DEFAULT_WINDOWS_SHELL) =>
+        {
+            Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy)
+        }
+        OperatingSystem::Other(_) => Err(WorkflowRuntimePolicyValueError::OpenPlatform),
+        OperatingSystem::Linux | OperatingSystem::Windows | OperatingSystem::Macos => Ok(()),
     }
 }
 
@@ -938,6 +1126,18 @@ fn policy_digest(policy: &WorkflowRuntimePolicy) -> Sha256Digest {
         for feature in mapping.container_features() {
             hash_text(&mut hasher, feature.as_str());
         }
+        if let Some(feature_policy) = mapping.runner_feature_policy() {
+            hasher.update(b"runner-features\0");
+            hasher.update(feature_policy.schema().to_be_bytes());
+            hasher.update(
+                u64::try_from(feature_policy.supported().len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            for feature in feature_policy.supported() {
+                hash_text(&mut hasher, feature.as_str());
+            }
+        }
     }
     hasher.update(b"permissions\0");
     for (label, permissions) in [
@@ -987,13 +1187,14 @@ fn hash_text(hasher: &mut Sha256, value: &str) {
 }
 
 fn encode_canonical_policy(
+    schema: u16,
     workspace_root: &str,
     mappings: &[WorkflowRuntimePolicyMapping],
     permissions: &WorkflowPermissionPolicy,
     resources: JobResourcePolicy,
 ) -> Result<Vec<u8>, WorkflowRuntimePolicyValueError> {
     let canonical = CanonicalPolicy {
-        schema: WORKFLOW_RUNTIME_POLICY_SCHEMA,
+        schema,
         workspace: CanonicalWorkspace {
             schema: WORKFLOW_RUNTIME_POLICY_WORKSPACE_SCHEMA,
             root: workspace_root,
@@ -1083,7 +1284,15 @@ struct RawMapping {
     environment_profile: RawEnvironmentProfile,
     operating_system: CanonicalOperatingSystem,
     architecture: CanonicalArchitecture,
+    runner_features: Option<RawRunnerFeaturePolicy>,
     container_features: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRunnerFeaturePolicy {
+    schema: u16,
+    supported: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1093,10 +1302,11 @@ struct RawEnvironmentProfile {
     manifest_sha256: Sha256Digest,
 }
 
-impl TryFrom<RawMapping> for WorkflowRuntimePolicyMapping {
-    type Error = WorkflowRuntimePolicyValueError;
-
-    fn try_from(raw: RawMapping) -> Result<Self, Self::Error> {
+impl WorkflowRuntimePolicyMapping {
+    fn try_from_raw(
+        raw: RawMapping,
+        policy_schema: u16,
+    ) -> Result<Self, WorkflowRuntimePolicyValueError> {
         if !raw.selector.is_ascii() {
             return Err(WorkflowRuntimePolicyValueError::InvalidSelector);
         }
@@ -1115,13 +1325,39 @@ impl TryFrom<RawMapping> for WorkflowRuntimePolicyMapping {
             .map(ContainerFeature::new)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)?;
-        Self::new(
-            selector,
-            environment,
-            raw.operating_system.into(),
-            raw.architecture.into(),
-            features,
-        )
+        let operating_system = raw.operating_system.into();
+        let architecture = raw.architecture.into();
+        match (policy_schema, raw.runner_features) {
+            (1, None) => Self::legacy(
+                selector,
+                environment,
+                operating_system,
+                architecture,
+                features,
+            ),
+            (WORKFLOW_RUNTIME_POLICY_SCHEMA, Some(raw_policy))
+                if raw_policy.schema == WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURE_SCHEMA =>
+            {
+                if raw_policy.supported.len() > MAX_WORKFLOW_RUNTIME_POLICY_RUNNER_FEATURES {
+                    return Err(WorkflowRuntimePolicyValueError::TooManyRunnerFeatures);
+                }
+                let supported = raw_policy
+                    .supported
+                    .into_iter()
+                    .map(RunnerFeature::new)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy)?;
+                Self::new(
+                    selector,
+                    environment,
+                    operating_system,
+                    architecture,
+                    WorkflowRunnerFeaturePolicy::new(supported)?,
+                    features,
+                )
+            }
+            _ => Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy),
+        }
     }
 }
 
@@ -1188,7 +1424,15 @@ struct CanonicalMapping<'a> {
     environment_profile: CanonicalEnvironmentProfile<'a>,
     operating_system: CanonicalOperatingSystem,
     architecture: CanonicalArchitecture,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runner_features: Option<CanonicalRunnerFeaturePolicy<'a>>,
     container_features: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+struct CanonicalRunnerFeaturePolicy<'a> {
+    schema: u16,
+    supported: Vec<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -1222,6 +1466,16 @@ impl<'a> TryFrom<&'a WorkflowRuntimePolicyMapping> for CanonicalMapping<'a> {
                     return Err(WorkflowRuntimePolicyValueError::OpenPlatform);
                 }
             },
+            runner_features: mapping.runner_feature_policy().map(|policy| {
+                CanonicalRunnerFeaturePolicy {
+                    schema: policy.schema(),
+                    supported: policy
+                        .supported()
+                        .iter()
+                        .map(RunnerFeature::as_str)
+                        .collect(),
+                }
+            }),
             container_features: mapping
                 .container_features()
                 .iter()
@@ -1242,6 +1496,14 @@ mod tests {
       "workspace":{"derivation":1,"root":"/__w","schema":1},
       "mappings":[{
         "container_features":["automata.core/job-containers@v1"],
+        "runner_features":{"schema":1,"supported":[
+          "automata.core/shell-steps@v1",
+          "automata.core/default-posix-shell@v1",
+          "automata.core/bash-shell@v1",
+          "automata.core/sh-shell@v1",
+          "automata.core/command-files@v1",
+          "automata.core/job-summaries@v1"
+        ]},
         "architecture":"x86_64","operating_system":"linux",
         "environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},
         "selector":"Ubuntu-24.04"
@@ -1259,9 +1521,10 @@ mod tests {
           "requests":{"gpu_count":0,"ephemeral_disk_bytes":0,"memory_bytes":536870912,"cpu_millis":500}
         }
       },
-      "schema":1
+      "schema":2
     }"#;
-    const CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
+    const CANONICAL_POLICY: &[u8] = br#"{"schema":2,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","runner_features":{"schema":1,"supported":["automata.core/bash-shell@v1","automata.core/command-files@v1","automata.core/default-posix-shell@v1","automata.core/job-summaries@v1","automata.core/sh-shell@v1","automata.core/shell-steps@v1"]},"container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
+    const LEGACY_CANONICAL_POLICY: &[u8] = br#"{"schema":1,"workspace":{"schema":1,"root":"/__w","derivation":1},"mappings":[{"selector":"ubuntu-24.04","environment_profile":{"id":"automata.example/ubuntu-24-04","manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111"},"operating_system":"linux","architecture":"x86_64","container_features":["automata.core/job-containers@v1"]}],"permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},"resources":{"defaults":{"requests":{"cpu_millis":500,"memory_bytes":536870912,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":2000,"memory_bytes":2147483648,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":134217728,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":8000,"memory_bytes":17179869184,"ephemeral_disk_bytes":0,"gpu_count":0}}}"#;
 
     #[test]
     fn resource_policy_is_canonical_pinned_evidence() {
@@ -1309,7 +1572,19 @@ mod tests {
             Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
         );
 
-        for unsupported in [0, 2, 3, u16::MAX] {
+        let mut missing_runner_features = current.clone();
+        missing_runner_features["mappings"][0]
+            .as_object_mut()
+            .expect("mapping object")
+            .remove("runner_features");
+        assert_eq!(
+            WorkflowRuntimePolicy::decode_configuration(
+                &serde_json::to_vec(&missing_runner_features).expect("policy JSON")
+            ),
+            Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy)
+        );
+
+        for unsupported in [0, 3, u16::MAX] {
             let mut document = current.clone();
             document["schema"] = serde_json::json!(unsupported);
             assert_eq!(
@@ -1337,6 +1612,25 @@ mod tests {
                 Err(WorkflowRuntimePolicyValueError::InvalidCanonicalPolicy)
             );
         }
+        let mut legacy = current.clone();
+        legacy["schema"] = serde_json::json!(1);
+        assert!(
+            WorkflowRuntimePolicy::decode_configuration(
+                &serde_json::to_vec(&legacy).expect("policy JSON")
+            )
+            .is_err()
+        );
+        for unsupported in [0, 2, 3, u16::MAX] {
+            let mut feature_schema = current.clone();
+            feature_schema["mappings"][0]["runner_features"]["schema"] =
+                serde_json::json!(unsupported);
+            assert_eq!(
+                WorkflowRuntimePolicy::decode_configuration(
+                    &serde_json::to_vec(&feature_schema).expect("policy JSON")
+                ),
+                Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy)
+            );
+        }
     }
 
     #[test]
@@ -1350,17 +1644,38 @@ mod tests {
         );
         assert_eq!(
             policy.digest().to_string(),
-            "b7fabdda7258224aae1ed1fd4f015b947888ba1a0dc2f13feae11151a6ffebc2"
+            "10ccdd2216d142bd02b62003cc99eff5111e72edf9dbc39b2a4655f854078db6"
         );
         assert_eq!(
             policy.canonical_digest().to_string(),
-            "6b7d4868b6d58ae27ebfa9606419209faa17eba81542d85929008dcf3a446814"
+            "a1e2ddba7b672d9afd8ddc6ad33979e0400d2c0499b2a743143e594a77468054"
         );
         assert_ne!(policy.digest(), policy.canonical_digest());
         assert_eq!(
             WorkflowRuntimePolicy::decode_canonical(&encoded).expect("canonical object"),
             policy
         );
+    }
+
+    #[test]
+    fn historical_schema_one_replays_byte_and_digest_exactly_but_is_not_new_configuration() {
+        let legacy = WorkflowRuntimePolicy::decode_canonical(LEGACY_CANONICAL_POLICY)
+            .expect("historical canonical policy");
+        assert_eq!(legacy.schema(), 1);
+        assert!(legacy.mappings()[0].runner_feature_policy().is_none());
+        assert_eq!(
+            legacy.canonical_bytes().expect("historical bytes"),
+            LEGACY_CANONICAL_POLICY
+        );
+        assert_eq!(
+            legacy.digest().to_string(),
+            "967c02c427c4c09798377cdfdedf9a48d29bf4138b697d13fcf8a011d45b187f"
+        );
+        assert_eq!(
+            legacy.canonical_digest().to_string(),
+            "53a71408ff50d313265e4739196838c06acf9e1430957a2dfadc65f120e3abf7"
+        );
+        assert!(WorkflowRuntimePolicy::decode_configuration(LEGACY_CANONICAL_POLICY).is_err());
     }
 
     #[test]
@@ -1422,7 +1737,7 @@ mod tests {
     fn duplicate_raw_object_fields_are_rejected_even_when_values_are_equal() {
         let canonical = std::str::from_utf8(CANONICAL_POLICY).expect("UTF-8 canonical policy");
         let duplicate_top_schema =
-            canonical.replacen(r#""schema":1"#, r#""schema":1,"schema":1"#, 1);
+            canonical.replacen(r#""schema":2"#, r#""schema":2,"schema":2"#, 1);
         let duplicate_workspace_schema = canonical.replacen(
             r#""workspace":{"schema":1"#,
             r#""workspace":{"schema":1,"schema":1"#,
@@ -1438,6 +1753,16 @@ mod tests {
             r#""environment_profile":{"id":"automata.example/ubuntu-24-04","id":"automata.example/ubuntu-24-04""#,
             1,
         );
+        let duplicate_runner_features = canonical.replacen(
+            r#""runner_features":{"schema":1"#,
+            r#""runner_features":{"schema":1,"schema":1"#,
+            1,
+        );
+        let duplicate_supported = canonical.replacen(
+            r#""supported":["automata.core/bash-shell@v1""#,
+            r#""supported":["automata.core/bash-shell@v1"],"supported":["automata.core/bash-shell@v1""#,
+            1,
+        );
         let duplicate_permission = canonical.replacen(
             r#""provider_default":{"contents":"read","packages":"read"}"#,
             r#""provider_default":{"contents":"read","contents":"read","packages":"read"}"#,
@@ -1448,6 +1773,8 @@ mod tests {
             duplicate_workspace_schema,
             duplicate_selector,
             duplicate_profile_id,
+            duplicate_runner_features,
+            duplicate_supported,
             duplicate_permission,
         ] {
             assert_eq!(
@@ -1567,6 +1894,10 @@ mod tests {
                 mapping.environment().clone(),
                 mapping.operating_system().clone(),
                 mapping.architecture().clone(),
+                mapping
+                    .runner_feature_policy()
+                    .expect("current feature policy")
+                    .clone(),
                 [feature.clone(), feature],
             ),
             Err(WorkflowRuntimePolicyValueError::DuplicateFeature)
@@ -1582,9 +1913,83 @@ mod tests {
                 mapping.environment().clone(),
                 mapping.operating_system().clone(),
                 mapping.architecture().clone(),
+                mapping
+                    .runner_feature_policy()
+                    .expect("current feature policy")
+                    .clone(),
                 features,
             ),
             Err(WorkflowRuntimePolicyValueError::TooManyFeatures)
+        );
+    }
+
+    #[test]
+    fn runner_feature_policy_rejects_raw_bounds_duplicates_unknowns_and_windows_actions() {
+        assert_eq!(
+            WorkflowRunnerFeaturePolicy::new(std::iter::repeat_n(RunnerFeature::SHELL_STEPS, 65)),
+            Err(WorkflowRuntimePolicyValueError::TooManyRunnerFeatures)
+        );
+        assert_eq!(
+            WorkflowRunnerFeaturePolicy::new([
+                RunnerFeature::SHELL_STEPS,
+                RunnerFeature::SHELL_STEPS,
+            ]),
+            Err(WorkflowRuntimePolicyValueError::DuplicateRunnerFeature)
+        );
+        assert_eq!(
+            WorkflowRunnerFeaturePolicy::new([RunnerFeature::new(
+                "example.test/future-runtime@v1"
+            )
+            .expect("syntactically valid future feature")]),
+            Err(WorkflowRuntimePolicyValueError::UnknownRunnerFeature)
+        );
+
+        let current: serde_json::Value =
+            serde_json::from_slice(CANONICAL_POLICY).expect("canonical policy JSON");
+        for (supported, expected) in [
+            (
+                vec![RunnerFeature::SHELL_STEPS.as_str(); 65],
+                WorkflowRuntimePolicyValueError::TooManyRunnerFeatures,
+            ),
+            (
+                vec![
+                    RunnerFeature::SHELL_STEPS.as_str(),
+                    RunnerFeature::SHELL_STEPS.as_str(),
+                ],
+                WorkflowRuntimePolicyValueError::DuplicateRunnerFeature,
+            ),
+            (
+                vec!["example.test/future-runtime@v1"],
+                WorkflowRuntimePolicyValueError::UnknownRunnerFeature,
+            ),
+        ] {
+            let mut document = current.clone();
+            document["mappings"][0]["runner_features"]["supported"] = serde_json::json!(supported);
+            assert_eq!(
+                WorkflowRuntimePolicy::decode_configuration(
+                    &serde_json::to_vec(&document).expect("policy JSON")
+                ),
+                Err(expected)
+            );
+        }
+
+        let policy = WorkflowRuntimePolicy::decode_configuration(POLICY).expect("configuration");
+        let mapping = &policy.mappings()[0];
+        assert_eq!(
+            WorkflowRuntimePolicyMapping::new(
+                mapping.selector().clone(),
+                mapping.environment().clone(),
+                OperatingSystem::Windows,
+                Architecture::X86_64,
+                WorkflowRunnerFeaturePolicy::new([
+                    RunnerFeature::SHELL_STEPS,
+                    RunnerFeature::JAVASCRIPT_ACTIONS,
+                    RunnerFeature::NODE24_ACTIONS,
+                ])
+                .expect("known feature policy"),
+                [],
+            ),
+            Err(WorkflowRuntimePolicyValueError::InvalidRunnerFeaturePolicy)
         );
     }
 
@@ -1609,6 +2014,7 @@ mod tests {
                 mapping.environment().clone(),
                 OperatingSystem::Linux,
                 Architecture::X86_64,
+                runner_feature_policy(),
                 [],
             ),
             Err(WorkflowRuntimePolicyValueError::InvalidSelector)
@@ -1622,6 +2028,7 @@ mod tests {
         let mut padding = vec![vec![0_usize; FEATURE_COUNT]; MAPPING_COUNT];
         let base = build_boundary_mappings(&padding);
         let base_size = encode_canonical_policy(
+            WORKFLOW_RUNTIME_POLICY_SCHEMA,
             WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
             &base,
             &permission_policy(),
@@ -1645,6 +2052,7 @@ mod tests {
         let mappings = build_boundary_mappings(&padding);
         assert_eq!(
             encode_canonical_policy(
+                WORKFLOW_RUNTIME_POLICY_SCHEMA,
                 WORKFLOW_RUNTIME_POLICY_WORKSPACE_ROOT,
                 &mappings,
                 &permission_policy(),
@@ -1660,6 +2068,18 @@ mod tests {
     fn permission_policy() -> WorkflowPermissionPolicy {
         WorkflowPermissionPolicy::from_github_default(GithubDefaultWorkflowPermission::Read)
             .expect("permission policy")
+    }
+
+    fn runner_feature_policy() -> WorkflowRunnerFeaturePolicy {
+        WorkflowRunnerFeaturePolicy::new([
+            RunnerFeature::SHELL_STEPS,
+            RunnerFeature::DEFAULT_POSIX_SHELL,
+            RunnerFeature::BASH_SHELL,
+            RunnerFeature::SH_SHELL,
+            RunnerFeature::COMMAND_FILES,
+            RunnerFeature::JOB_SUMMARIES,
+        ])
+        .expect("runner feature policy")
     }
 
     fn resource_policy() -> JobResourcePolicy {
@@ -1705,6 +2125,7 @@ mod tests {
                     ),
                     OperatingSystem::Linux,
                     Architecture::X86_64,
+                    runner_feature_policy(),
                     features,
                 )
                 .expect("boundary mapping")

@@ -300,8 +300,43 @@ fn profiles() -> GithubRunnerProfileCatalog {
         OperatingSystem::Linux,
         Architecture::X86_64,
     )
-    .expect("mapping")])
+    .expect("mapping")
+    .with_supported_runner_features(linux_runner_features())])
     .expect("catalog")
+}
+
+fn linux_runner_features() -> Vec<RunnerFeature> {
+    vec![
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_POSIX_SHELL,
+        RunnerFeature::BASH_SHELL,
+        RunnerFeature::SH_SHELL,
+        RunnerFeature::PYTHON_SHELL,
+        RunnerFeature::PWSH_SHELL,
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::NODE12_ACTIONS,
+        RunnerFeature::NODE16_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+        RunnerFeature::OIDC_TOKENS,
+    ]
+}
+
+fn windows_runner_features() -> Vec<RunnerFeature> {
+    vec![
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_WINDOWS_SHELL,
+        RunnerFeature::PWSH_SHELL,
+        RunnerFeature::WINDOWS_POWERSHELL_SHELL,
+        RunnerFeature::CMD_SHELL,
+        RunnerFeature::COMMAND_FILES,
+        RunnerFeature::JOB_SUMMARIES,
+    ]
 }
 
 fn fixed_id<T>(value: u128, constructor: impl FnOnce(Uuid) -> T) -> T {
@@ -324,6 +359,15 @@ fn project_envelope_with_profiles_and_workspace(
     profiles: &GithubRunnerProfileCatalog,
     workspace: &str,
 ) -> JobIrEnvelope {
+    try_project_envelope_with_profiles_and_workspace(source, profiles, workspace)
+        .expect("projection")
+}
+
+fn try_project_envelope_with_profiles_and_workspace(
+    source: &str,
+    profiles: &GithubRunnerProfileCatalog,
+    workspace: &str,
+) -> Result<JobIrEnvelope, LogicalJobProjectionError> {
     let plan = plan(source);
     let activation = activate(&plan);
     let instance = &activation.instances()[0];
@@ -347,9 +391,91 @@ fn project_envelope_with_profiles_and_workspace(
             )
             .with_trust_snapshot(&trusted_snapshot()),
         )
-        .expect("projection")
-        .into_parts()
-        .0
+        .map(|projected| projected.into_parts().0)
+}
+
+#[test]
+fn selected_profile_rejects_source_required_feature_with_stable_sanitized_diagnostic() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: echo public
+";
+    let supported = linux_runner_features()
+        .into_iter()
+        .filter(|feature| feature != &RunnerFeature::BASH_SHELL)
+        .collect::<Vec<_>>();
+    let profiles = GithubRunnerProfileCatalog::new([GithubRunnerProfileMapping::new(
+        "ubuntu-latest",
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("github/ubuntu-24-04").expect("profile id"),
+            Sha256Digest::from_bytes([3; 32]),
+        ),
+        OperatingSystem::Linux,
+        Architecture::X86_64,
+    )
+    .expect("mapping")
+    .with_supported_runner_features(supported)])
+    .expect("catalog");
+
+    let error =
+        try_project_envelope_with_profiles_and_workspace(source, &profiles, "/workspace/synthetic")
+            .expect_err("unsupported profile feature must be terminal before publication");
+    assert!(matches!(
+        &error,
+        LogicalJobProjectionError::UnsupportedRunnerFeature { feature }
+            if feature == &RunnerFeature::BASH_SHELL
+    ));
+    assert_eq!(
+        error.to_string(),
+        "selected runner profile does not support source-required feature automata.core/bash-shell@v1"
+    );
+    assert!(!format!("{error:?}").contains("echo public"));
+}
+
+#[test]
+fn missing_or_historical_profile_feature_policy_fails_closed() {
+    let source = r"name: Synthetic CI
+on: workflow_dispatch
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps: [{run: echo public}]
+";
+    let empty = GithubRunnerProfileCatalog::default();
+    let missing =
+        try_project_envelope_with_profiles_and_workspace(source, &empty, "/workspace/synthetic")
+            .expect_err("an unmapped source selector has no global support policy");
+    assert!(matches!(
+        missing,
+        LogicalJobProjectionError::MissingRunnerProfilePolicy
+    ));
+
+    let historical = GithubRunnerProfileCatalog::new([GithubRunnerProfileMapping::new(
+        "ubuntu-latest",
+        EnvironmentProfile::new(
+            EnvironmentProfileId::new("github/ubuntu-24-04").expect("profile id"),
+            Sha256Digest::from_bytes([3; 32]),
+        ),
+        OperatingSystem::Linux,
+        Architecture::X86_64,
+    )
+    .expect("historical profile mapping")])
+    .expect("historical profile catalog");
+    let missing_feature_policy = try_project_envelope_with_profiles_and_workspace(
+        source,
+        &historical,
+        "/workspace/synthetic",
+    )
+    .expect_err("a historical profile cannot admit current source features");
+    assert!(matches!(
+        missing_feature_policy,
+        LogicalJobProjectionError::MissingRunnerFeaturePolicy
+    ));
 }
 
 #[test]
@@ -560,7 +686,8 @@ jobs:
         OperatingSystem::Windows,
         Architecture::X86_64,
     )
-    .expect("mapping")])
+    .expect("mapping")
+    .with_supported_runner_features(windows_runner_features())])
     .expect("profiles");
     let plan = plan(source);
     let activation = activate_without_secrets(&plan);
@@ -731,6 +858,7 @@ jobs:
         Architecture::X86_64,
     )
     .expect("profile mapping")
+    .with_supported_runner_features(linux_runner_features())
     .with_container_features([ContainerFeature::DOCKER_COMPATIBLE_API])])
     .expect("profile catalog");
 
@@ -790,7 +918,8 @@ jobs:
         OperatingSystem::Windows,
         Architecture::X86_64,
     )
-    .expect("Windows profile mapping")])
+    .expect("Windows profile mapping")
+    .with_supported_runner_features(windows_runner_features())])
     .expect("profile catalog");
 
     let envelope =
@@ -837,6 +966,7 @@ jobs:
                 Architecture::X86_64,
             )
             .expect("profile mapping")
+            .with_supported_runner_features(linux_runner_features())
         }),
     )
     .expect("profile catalog");
@@ -1465,7 +1595,7 @@ jobs:
 jobs:
   build:
     permissions: {id-token: write}
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, ubuntu-latest]
     steps: [{run: echo ok}]
 ",
             true,
@@ -1533,7 +1663,7 @@ fn reusable_callee_contract_does_not_block_step_job_projection() {
   workflow_dispatch:
 jobs:
   build:
-    runs-on: linux
+    runs-on: ubuntu-latest
     steps: [{run: echo ok}]
 ",
     );
