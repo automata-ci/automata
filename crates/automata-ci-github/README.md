@@ -26,13 +26,18 @@ prior/future schemas, noncanonical encodings, and external digest mismatch.
 Missing or future actor classification stays explicit and must be denied by
 AUTH-02 when a policy requires complete actor trust facts.
 
-This is the EVT-01A contract-only slice. EVT-01B must persist the canonical
-envelope bytes and envelope digest beside the existing raw-event object in one
-delivery transaction, store both schema versions and the raw-object identity,
-rehydrate through `GithubSealedEventEnvelopeV1::from_canonical_bytes`, migrate
-or explicitly quarantine pre-envelope rows, and pass the rehydrated facts to
-AUTH-02 without reparsing the raw JSON. No numbered database migration belongs
-to this crate-only slice.
+The EVT-01A/EVT-01B foundation seals the envelope at authenticated ingress and
+persists its canonical bytes, domain-separated digest, envelope schema, and
+registry schema atomically beside the provider-delivery raw-object coordinates.
+Claim rehydration validates the canonical encoding, both schema identities, the
+raw-object binding, and the provider delivery/repository identity before any
+blob or provider access. Eligible rows without a complete sealed envelope are
+terminally quarantined as `provider_delivery.legacy_unsealed`; partial envelope
+coordinates are rejected by the database. The verified envelope is carried on
+`GithubDeliveryWorkflowRequest` so AUTH-02 can reduce authority from normalized
+facts rather than guessing through raw JSON. Because the schema is still
+greenfield, the durable columns live in `0001_initial_schema.sql`; no additional
+numbered migration is introduced.
 
 - [Project documentation](https://github.com/automata-ci/automata/tree/main/docs)
 - API documentation: run `cargo doc -p automata-ci-github --open` from a source checkout.

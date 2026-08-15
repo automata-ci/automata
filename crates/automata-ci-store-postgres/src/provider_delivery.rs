@@ -9,9 +9,9 @@ use automata_ci_store::{
     CompleteProviderDelivery, GithubCheckTerminalCause, MAX_PROVIDER_DELIVERY_ATTEMPTS,
     MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey,
     ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryId, ProviderDeliveryIdentity,
-    ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
-    ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryClaimRenewalRepository, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
+    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
     ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
     ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
     ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
@@ -27,6 +27,8 @@ use super::{
 };
 
 const MAX_CALLER_DATABASE_SKEW_MILLIS: u64 = 60_000;
+const LEGACY_UNSEALED_FAILURE_KIND: &str = "provider_delivery.legacy_unsealed";
+const LEGACY_UNSEALED_QUARANTINE_BATCH: i64 = 64;
 
 #[allow(clippy::too_many_lines)]
 #[async_trait]
@@ -44,11 +46,15 @@ impl ProviderDeliveryRepository for PostgresStore {
                 repository_identity, delivery_id,
                 request_digest, raw_event_digest, raw_event_object_key,
                 raw_event_size_bytes, raw_event_media_type,
+                event_envelope_schema, event_registry_schema,
+                event_envelope_digest, event_envelope_bytes,
+                event_envelope_media_type,
                 accepted_at_ms, state_updated_at_ms
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9,
-                $10, $11, $12, $13, $14, $15, $15
+                $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $20
             )
             ON CONFLICT (provider, connection_id, delivery_id) DO NOTHING
             RETURNING
@@ -56,7 +62,10 @@ impl ProviderDeliveryRepository for PostgresStore {
                 provider_repository_id, repository_visibility,
                 repository_identity, delivery_id,
                 request_digest, raw_event_digest, raw_event_object_key,
-                raw_event_size_bytes, raw_event_media_type, state,
+                raw_event_size_bytes, raw_event_media_type,
+                event_envelope_schema, event_registry_schema,
+                event_envelope_digest, event_envelope_bytes,
+                event_envelope_media_type, state,
                 attempt_count, accepted_at_ms
             ",
         )
@@ -76,6 +85,14 @@ impl ProviderDeliveryRepository for PostgresStore {
         .bind(request.raw_event().object_key().as_str())
         .bind(object_size_i64(request.raw_event())?)
         .bind(request.raw_event().media_type())
+        .bind(i16::try_from(request.event_envelope().schema()).expect("validated schema fits"))
+        .bind(
+            i16::try_from(request.event_envelope().registry_schema())
+                .expect("validated registry schema fits"),
+        )
+        .bind(request.event_envelope().digest().as_bytes().as_slice())
+        .bind(request.event_envelope().canonical_bytes())
+        .bind(request.event_envelope().media_type())
         .bind(request.accepted_at().get())
         .fetch_optional(&self.pool)
         .await
@@ -90,7 +107,10 @@ impl ProviderDeliveryRepository for PostgresStore {
                         provider_repository_id, repository_visibility,
                         repository_identity, delivery_id,
                         request_digest, raw_event_digest, raw_event_object_key,
-                        raw_event_size_bytes, raw_event_media_type, state,
+                        raw_event_size_bytes, raw_event_media_type,
+                        event_envelope_schema, event_registry_schema,
+                        event_envelope_digest, event_envelope_bytes,
+                        event_envelope_media_type, state,
                         attempt_count, accepted_at_ms
                     FROM provider_delivery_inbox
                     WHERE provider = $1
@@ -110,6 +130,7 @@ impl ProviderDeliveryRepository for PostgresStore {
         if durable.identity != *request.identity()
             || durable.request_digest != request.request_digest()
             || durable.raw_event != *request.raw_event()
+            || durable.event_envelope != *request.event_envelope()
         {
             return Err(ProviderDeliveryStoreError::ReplayConflict);
         }
@@ -130,6 +151,8 @@ impl ProviderDeliveryRepository for PostgresStore {
         if !caller_time_is_admissible(request.observed_at(), admission_time) {
             return Err(ProviderDeliveryStoreError::ClaimRejected);
         }
+        quarantine_legacy_unsealed_deliveries(&mut transaction, request.owner(), admission_time)
+            .await?;
 
         let candidate: Option<(Uuid, i64)> = sqlx::query_as(
             r"
@@ -229,6 +252,9 @@ impl ProviderDeliveryRepository for PostgresStore {
                 inbox.delivery_id, inbox.request_digest,
                 inbox.raw_event_digest, inbox.raw_event_object_key,
                 inbox.raw_event_size_bytes, inbox.raw_event_media_type,
+                inbox.event_envelope_schema, inbox.event_registry_schema,
+                inbox.event_envelope_digest, inbox.event_envelope_bytes,
+                inbox.event_envelope_media_type,
                 inbox.state, inbox.attempt_count, inbox.accepted_at_ms,
                 inbox.claim_owner_id, inbox.claim_fence,
                 inbox.claimed_at_ms, inbox.claim_expires_at_ms
@@ -721,6 +747,70 @@ fn caller_time_is_admissible(observed_at: UnixMillis, database_time: UnixMillis)
     observed_at.get().abs_diff(database_time.get()) <= MAX_CALLER_DATABASE_SKEW_MILLIS
 }
 
+/// Terminally isolates rows accepted before sealed envelopes became mandatory.
+///
+/// A bounded, lock-skipping pass prevents legacy evidence from blocking newer
+/// work while ensuring it can never be claimed and interpreted from raw JSON.
+async fn quarantine_legacy_unsealed_deliveries(
+    transaction: &mut Transaction<'_, Postgres>,
+    owner: ProviderDeliveryClaimOwnerId,
+    observed_at: UnixMillis,
+) -> Result<(), ProviderDeliveryStoreError> {
+    sqlx::query(
+        r"
+        WITH candidates AS MATERIALIZED (
+            SELECT inbox.id
+            FROM provider_delivery_inbox AS inbox
+            WHERE inbox.event_envelope_schema IS NULL
+              AND inbox.state_updated_at_ms <= $2
+              AND inbox.claim_fence < 9223372036854775807
+              AND (
+                inbox.state = 'pending'
+                OR (
+                    inbox.state = 'retry'
+                    AND inbox.next_attempt_at_ms <= $2
+                )
+                OR (
+                    inbox.state = 'claimed'
+                    AND inbox.claim_expires_at_ms <= $2
+                )
+              )
+              AND (inbox.state = 'claimed' OR inbox.attempt_count < 16)
+            ORDER BY inbox.accepted_at_ms, inbox.id
+            FOR UPDATE OF inbox SKIP LOCKED
+            LIMIT $3
+        )
+        UPDATE provider_delivery_inbox AS inbox
+        SET state = 'rejected',
+            attempt_count = GREATEST(inbox.attempt_count, 1),
+            claim_fence = inbox.claim_fence + 1,
+            claim_owner_id = NULL,
+            claimed_at_ms = NULL,
+            claim_expires_at_ms = NULL,
+            renewal_predecessor_expires_at_ms = NULL,
+            next_attempt_at_ms = NULL,
+            last_failure_kind = $4,
+            terminal_claim_owner_id = $1,
+            terminal_claim_fence = inbox.claim_fence + 1,
+            completion_digest = NULL,
+            completion_outcome_count = NULL,
+            completed_at_ms = NULL,
+            rejected_at_ms = $2,
+            state_updated_at_ms = $2
+        FROM candidates
+        WHERE inbox.id = candidates.id
+        ",
+    )
+    .bind(owner.as_uuid())
+    .bind(observed_at.get())
+    .bind(LEGACY_UNSEALED_QUARANTINE_BATCH)
+    .bind(LEGACY_UNSEALED_FAILURE_KIND)
+    .execute(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    Ok(())
+}
+
 async fn eligible_exhausted_fence(
     transaction: &mut Transaction<'_, Postgres>,
     database_time: UnixMillis,
@@ -1021,6 +1111,7 @@ struct DurableDelivery {
     identity: ProviderDeliveryIdentity,
     request_digest: Sha256Digest,
     raw_event: AdmissionObject,
+    event_envelope: ProviderDeliveryEventEnvelope,
 }
 
 fn decode_delivery(
@@ -1083,11 +1174,33 @@ fn decode_delivery(
         raw_media_type,
     )
     .map_err(|_| ProviderDeliveryStoreError::CorruptData)?;
+    let envelope_schema: i16 = row
+        .try_get("event_envelope_schema")
+        .map_err(operation_error)?;
+    let registry_schema: i16 = row
+        .try_get("event_registry_schema")
+        .map_err(operation_error)?;
+    let envelope_digest = decode_digest(row, "event_envelope_digest")?;
+    let envelope_bytes: Vec<u8> = row
+        .try_get("event_envelope_bytes")
+        .map_err(operation_error)?;
+    let envelope_media_type: String = row
+        .try_get("event_envelope_media_type")
+        .map_err(operation_error)?;
+    let event_envelope = ProviderDeliveryEventEnvelope::new(
+        u16::try_from(envelope_schema).map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
+        u16::try_from(registry_schema).map_err(|_| ProviderDeliveryStoreError::CorruptData)?,
+        envelope_digest,
+        envelope_bytes,
+        envelope_media_type,
+    )
+    .map_err(|_| ProviderDeliveryStoreError::CorruptData)?;
     Ok(DurableDelivery {
         receipt,
         identity,
         request_digest,
         raw_event,
+        event_envelope,
     })
 }
 
@@ -1117,6 +1230,7 @@ fn decode_claimed_delivery(
         durable.identity,
         durable.request_digest,
         durable.raw_event,
+        durable.event_envelope,
         claim,
         UnixMillis::new(claimed_at),
         UnixMillis::new(expires_at),

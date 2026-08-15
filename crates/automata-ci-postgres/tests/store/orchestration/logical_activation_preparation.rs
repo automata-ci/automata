@@ -1327,6 +1327,7 @@ async fn fixture_with_visibility(
                 )?,
                 Sha256Digest::from_bytes([29; 32]),
                 crate::support::authenticated_github_event_object(&event)?,
+                crate::support::provider_delivery_event_envelope(0x83),
                 UnixMillis::new(database_now_ms(database).await?),
             )?,
             ProviderRepositoryOwnerId::new(404)?,

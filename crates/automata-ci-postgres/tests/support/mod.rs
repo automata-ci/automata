@@ -3,7 +3,7 @@ use std::{error::Error, future::Future, sync::Arc};
 use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
 use automata_ci_core::{
     Architecture, JobId, JobIrVersion, OperatingSystem, RunId, RunnerCapabilities, RunnerId,
-    RunnerPlatform, RunnerRequirements, RunnerSessionId, UnixMillis,
+    RunnerPlatform, RunnerRequirements, RunnerSessionId, Sha256Digest, UnixMillis,
 };
 use automata_ci_key_management::{
     KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
@@ -24,6 +24,20 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 pub type TestError = Box<dyn Error + Send + Sync>;
+
+#[allow(dead_code)] // Consolidated binaries consume different fixture subsets.
+pub fn provider_delivery_event_envelope(
+    digest_byte: u8,
+) -> automata_ci_store::ProviderDeliveryEventEnvelope {
+    automata_ci_store::ProviderDeliveryEventEnvelope::new(
+        1,
+        1,
+        Sha256Digest::from_bytes([digest_byte; 32]),
+        format!(r#"{{"schema":1,"fixture":{digest_byte}}}"#).into_bytes(),
+        "application/vnd.automata.provider-event-envelope.v1+json",
+    )
+    .expect("provider delivery event envelope")
+}
 
 #[allow(dead_code)]
 pub fn authenticated_github_event_object(

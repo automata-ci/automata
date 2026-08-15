@@ -2,10 +2,11 @@
 //!
 //! This boundary authenticates and normalizes an exact webhook request before
 //! it performs any write. It then persists the authenticated raw JSON in the
-//! immutable blob store and, only after that write completes, records a
-//! credential-free object descriptor in the provider-delivery inbox. Provider
-//! I/O, object reads, workflow discovery, and compilation belong to a later
-//! worker and never run in the inbox acceptance call.
+//! immutable blob store, seals a bounded facts-only event envelope against that
+//! object, and only after the blob write completes records both identities in
+//! the provider-delivery inbox. Provider I/O, object reads, workflow discovery,
+//! and compilation belong to a later worker and never run in the inbox
+//! acceptance call.
 //!
 //! # Request digest
 //!
@@ -86,8 +87,10 @@ use automata_ci_core::{Sha256Digest, UnixMillis};
 #[cfg(test)]
 use automata_ci_github::VerifiedGithubPush;
 use automata_ci_github::{
-    GithubCheckRunAction, GithubRepositoryVisibility, GithubWebhookError, GithubWebhookVerifier,
-    VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+    GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubCheckRunAction,
+    GithubRepositoryVisibility, GithubSealedEventEnvelopeV1, GithubWebhookError,
+    GithubWebhookVerifier, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
+    X_HUB_SIGNATURE_256,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
@@ -98,9 +101,9 @@ use automata_ci_store::{
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
     GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, PendingGithubRepositoryDispatchReceipt,
-    ProviderConnectionId, ProviderDeliveryIdentity, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, StoreError, TenantScope,
+    ProviderConnectionId, ProviderDeliveryEventEnvelope, ProviderDeliveryIdentity,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, StoreError, TenantScope,
 };
 use bytes::Bytes;
 use http::HeaderMap;
@@ -116,7 +119,6 @@ pub const GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE: &str =
 pub const MAX_GITHUB_DELIVERY_CONNECTIONS: usize = 256;
 
 const PROVIDER: &str = "github";
-const RAW_EVENT_OBJECT_KEY_PREFIX: &str = "provider-deliveries/github/event/sha256";
 const EVENT_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.github-delivery-ingress.event-request\0";
 const REQUEST_DIGEST_FIELD_COUNT: u16 = 13;
 const MAX_REPOSITORY_COMPONENT_BYTES: usize = 100;
@@ -821,7 +823,7 @@ impl GithubDeliveryIngress {
             selected.signed_repository_owner_id,
         )?;
         let body_digest = Sha256Digest::from_bytes(*selected.event.body_sha256().as_bytes());
-        let object_key = format!("{RAW_EVENT_OBJECT_KEY_PREFIX}/{body_digest}.json");
+        let object_key = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{body_digest}.json");
         let blob_key = BlobKey::new(object_key.clone())
             .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
         let media_type = MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE)
@@ -831,6 +833,17 @@ impl GithubDeliveryIngress {
         if payload.descriptor().digest() != body_digest {
             return Err(GithubDeliveryIngressError::InvariantViolation);
         }
+        let sealed_event =
+            GithubSealedEventEnvelopeV1::seal(&selected.event, payload.descriptor().clone())
+                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let event_envelope = ProviderDeliveryEventEnvelope::new(
+            sealed_event.schema(),
+            sealed_event.registry_schema(),
+            sealed_event.digest(),
+            sealed_event.canonical_bytes().to_vec(),
+            GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
         self.objects
             .put_if_absent(payload)
             .await
@@ -844,9 +857,14 @@ impl GithubDeliveryIngress {
             GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
         )
         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
-        let delivery =
-            AcceptProviderDelivery::new(identity, request_digest, raw_event.clone(), accepted_at)
-                .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
+        let delivery = AcceptProviderDelivery::new(
+            identity,
+            request_digest,
+            raw_event.clone(),
+            event_envelope,
+            accepted_at,
+        )
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
         Ok(PreparedAuthenticatedGithubEvent {
             delivery,
             request_digest,

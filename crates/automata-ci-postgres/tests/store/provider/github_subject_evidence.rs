@@ -1816,6 +1816,7 @@ fn repository_dispatch_acceptance(
                 "application/vnd.automata.github-authenticated-event+json",
             )
             .expect("event object"),
+            crate::support::provider_delivery_event_envelope(digest_byte.wrapping_add(2)),
             UnixMillis::new(accepted_at),
         )
         .expect("delivery"),
@@ -1868,6 +1869,7 @@ fn acceptance_for_manifest(
                 "application/vnd.automata.github-authenticated-event+json",
             )
             .expect("event object"),
+            crate::support::provider_delivery_event_envelope(digest_byte.wrapping_add(2)),
             UnixMillis::new(accepted_at),
         )
         .expect("delivery"),

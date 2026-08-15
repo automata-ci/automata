@@ -60,6 +60,11 @@ struct DurableAcceptance {
     raw_event_object_key: String,
     raw_event_size_bytes: i64,
     raw_event_media_type: String,
+    event_envelope_schema: i16,
+    event_registry_schema: i16,
+    event_envelope_digest: Sha256Digest,
+    event_envelope_bytes: Vec<u8>,
+    event_envelope_media_type: String,
 }
 
 #[derive(Debug)]
@@ -78,6 +83,11 @@ struct DurablePendingAcceptance {
     raw_event_object_key: String,
     raw_event_size_bytes: i64,
     raw_event_media_type: String,
+    event_envelope_schema: i16,
+    event_registry_schema: i16,
+    event_envelope_digest: Sha256Digest,
+    event_envelope_bytes: Vec<u8>,
+    event_envelope_media_type: String,
 }
 
 #[async_trait]
@@ -1119,10 +1129,14 @@ async fn insert_generic_inbox(
             provider_repository_id, repository_visibility,
             repository_identity, delivery_id, request_digest,
             raw_event_digest, raw_event_object_key, raw_event_size_bytes,
-            raw_event_media_type, accepted_at_ms, state_updated_at_ms
+            raw_event_media_type, event_envelope_schema,
+            event_registry_schema, event_envelope_digest,
+            event_envelope_bytes, event_envelope_media_type,
+            accepted_at_ms, state_updated_at_ms
         ) VALUES (
             $1, $2, 'github', $3, $4, $5, $6, $7, $8,
-            $9, $10, $11, $12, $13, $14, $14
+            $9, $10, $11, $12, $13, $14, $15, $16,
+            $17, $18, $19, $19
         )
         ON CONFLICT (provider, connection_id, delivery_id) DO NOTHING
         RETURNING id
@@ -1146,6 +1160,14 @@ async fn insert_generic_inbox(
             .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?,
     )
     .bind(request.raw_event().media_type())
+    .bind(i16::try_from(request.event_envelope().schema()).expect("validated schema fits"))
+    .bind(
+        i16::try_from(request.event_envelope().registry_schema())
+            .expect("validated registry schema fits"),
+    )
+    .bind(request.event_envelope().digest().as_bytes().as_slice())
+    .bind(request.event_envelope().canonical_bytes())
+    .bind(request.event_envelope().media_type())
     .bind(request.accepted_at().get())
     .fetch_optional(&mut **transaction)
     .await
@@ -1690,6 +1712,19 @@ fn decode_pending_acceptance(
         raw_event_media_type: row
             .try_get("raw_event_media_type")
             .map_err(operation_error)?,
+        event_envelope_schema: row
+            .try_get("event_envelope_schema")
+            .map_err(operation_error)?,
+        event_registry_schema: row
+            .try_get("event_registry_schema")
+            .map_err(operation_error)?,
+        event_envelope_digest: digest_column(row, "event_envelope_digest")?,
+        event_envelope_bytes: row
+            .try_get("event_envelope_bytes")
+            .map_err(operation_error)?,
+        event_envelope_media_type: row
+            .try_get("event_envelope_media_type")
+            .map_err(operation_error)?,
     })
 }
 
@@ -1714,6 +1749,13 @@ fn pending_acceptance_matches(
         && u64::try_from(durable.raw_event_size_bytes).ok()
             == Some(request.delivery().raw_event().encoded_size())
         && durable.raw_event_media_type == request.delivery().raw_event().media_type()
+        && u16::try_from(durable.event_envelope_schema).ok()
+            == Some(request.delivery().event_envelope().schema())
+        && u16::try_from(durable.event_registry_schema).ok()
+            == Some(request.delivery().event_envelope().registry_schema())
+        && durable.event_envelope_digest == request.delivery().event_envelope().digest()
+        && durable.event_envelope_bytes == request.delivery().event_envelope().canonical_bytes()
+        && durable.event_envelope_media_type == request.delivery().event_envelope().media_type()
         && evidence.accepted_at() == request.delivery().accepted_at()
         && evidence.repository_owner_id() == request.repository_owner_id()
         && evidence.event() == request.event()
@@ -1854,6 +1896,19 @@ fn decode_acceptance(row: &PgRow) -> Result<DurableAcceptance, GithubSubjectEvid
         raw_event_media_type: row
             .try_get("raw_event_media_type")
             .map_err(operation_error)?,
+        event_envelope_schema: row
+            .try_get("event_envelope_schema")
+            .map_err(operation_error)?,
+        event_registry_schema: row
+            .try_get("event_registry_schema")
+            .map_err(operation_error)?,
+        event_envelope_digest: digest_column(row, "event_envelope_digest")?,
+        event_envelope_bytes: row
+            .try_get("event_envelope_bytes")
+            .map_err(operation_error)?,
+        event_envelope_media_type: row
+            .try_get("event_envelope_media_type")
+            .map_err(operation_error)?,
     };
     Ok(durable)
 }
@@ -1878,6 +1933,13 @@ fn acceptance_matches(
         && u64::try_from(durable.raw_event_size_bytes).ok()
             == Some(request.delivery().raw_event().encoded_size())
         && durable.raw_event_media_type == request.delivery().raw_event().media_type()
+        && u16::try_from(durable.event_envelope_schema).ok()
+            == Some(request.delivery().event_envelope().schema())
+        && u16::try_from(durable.event_registry_schema).ok()
+            == Some(request.delivery().event_envelope().registry_schema())
+        && durable.event_envelope_digest == request.delivery().event_envelope().digest()
+        && durable.event_envelope_bytes == request.delivery().event_envelope().canonical_bytes()
+        && durable.event_envelope_media_type == request.delivery().event_envelope().media_type()
         && durable.receipt.accepted_at() == request.delivery().accepted_at()
         && durable.receipt.repository_owner_id() == request.repository_owner_id()
         && durable.receipt.evidence().check_head_sha() == request.head_sha()
@@ -2659,7 +2721,10 @@ const PENDING_EVIDENCE_SELECT: &str = r"
         inbox.delivery_id AS inbox_delivery_key,
         inbox.request_digest, inbox.raw_event_digest,
         inbox.raw_event_object_key, inbox.raw_event_size_bytes,
-        inbox.raw_event_media_type, inbox.accepted_at_ms,
+        inbox.raw_event_media_type, inbox.event_envelope_schema,
+        inbox.event_registry_schema, inbox.event_envelope_digest,
+        inbox.event_envelope_bytes, inbox.event_envelope_media_type,
+        inbox.accepted_at_ms,
         pending.github_repository_owner_id,
         pending.authenticated_event_envelope_version,
         pending.authenticated_event_name, pending.authenticated_event_git_ref,
@@ -2781,7 +2846,10 @@ const EVIDENCE_SELECT: &str = r"
         inbox.delivery_id AS inbox_delivery_key,
         inbox.request_digest, inbox.raw_event_digest,
         inbox.raw_event_object_key, inbox.raw_event_size_bytes,
-        inbox.raw_event_media_type, inbox.accepted_at_ms,
+        inbox.raw_event_media_type, inbox.event_envelope_schema,
+        inbox.event_registry_schema, inbox.event_envelope_digest,
+        inbox.event_envelope_bytes, inbox.event_envelope_media_type,
+        inbox.accepted_at_ms,
         evidence.github_repository_owner_id,
         evidence.authenticated_event_envelope_version,
         evidence.authenticated_event_name, evidence.authenticated_event_git_ref,

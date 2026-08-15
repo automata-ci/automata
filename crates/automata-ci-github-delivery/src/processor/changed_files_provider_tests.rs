@@ -5,16 +5,18 @@ use std::{
 };
 
 use automata_ci_auth::secret::SecretString;
+use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::{
-    GITHUB_API_VERSION, GithubHttpEndpoint, GithubHttpLimits, GithubRepositoryVisibility,
+    GITHUB_API_VERSION, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
+    GithubHttpEndpoint, GithubHttpLimits, GithubRepositoryVisibility, GithubSealedEventEnvelopeV1,
     GithubWebhookBodyDigest, StoredAuthenticatedGithubPush, VerifiedGithubPush,
-    rehydrate_stored_authenticated_github_push,
+    VerifiedGithubWebhook, rehydrate_stored_authenticated_github_push,
 };
 use automata_ci_store::{
     AdmissionObject, ClaimedProviderDelivery, ObjectKey, ProviderConnectionId,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryState,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
+    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryState,
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryVisibility, TenantScope,
 };
@@ -34,7 +36,8 @@ use super::{
     GithubPushChangedFilesRequest,
 };
 use crate::{
-    GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubRestPushChangedFilesProvider,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GITHUB_PUSH_EVENT_MEDIA_TYPE,
+    GithubRestPushChangedFilesProvider,
     service::provider_required_through,
     worker::{GithubDeliveryClaimLease, GithubDeliveryClaimSnapshot},
 };
@@ -149,18 +152,19 @@ fn delivery_fixture(visibility: ProviderRepositoryVisibility) -> DeliveryFixture
     let mut digest_bytes = [0_u8; 32];
     digest_bytes.copy_from_slice(&digest);
     let encoded_size = u64::try_from(body.len()).expect("push body size");
-    let object_suffix = match visibility {
-        ProviderRepositoryVisibility::Public => "public",
-        ProviderRepositoryVisibility::Private => "private",
-    };
-    let raw_event = AdmissionObject::new(
-        Sha256Digest::from_bytes(digest_bytes),
-        ObjectKey::new(format!(
-            "provider-deliveries/github/push/{object_suffix}.json"
-        ))
-        .expect("raw event key"),
+    let digest = Sha256Digest::from_bytes(digest_bytes);
+    let key_text = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
+    let descriptor = BlobDescriptor::new(
+        BlobKey::new(key_text.clone()).expect("raw blob key"),
+        digest,
         encoded_size,
-        GITHUB_PUSH_EVENT_MEDIA_TYPE,
+        MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("raw media type"),
+    );
+    let raw_event = AdmissionObject::new(
+        digest,
+        ObjectKey::new(key_text).expect("raw event key"),
+        encoded_size,
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
     let push = rehydrate_stored_authenticated_github_push(
@@ -179,6 +183,17 @@ fn delivery_fixture(visibility: ProviderRepositoryVisibility) -> DeliveryFixture
         ),
     )
     .expect("verified push");
+    let sealed_event =
+        GithubSealedEventEnvelopeV1::seal(&VerifiedGithubWebhook::Push(push.clone()), descriptor)
+            .expect("sealed event envelope");
+    let event_envelope = ProviderDeliveryEventEnvelope::new(
+        sealed_event.schema(),
+        sealed_event.registry_schema(),
+        sealed_event.digest(),
+        sealed_event.canonical_bytes().to_vec(),
+        GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    )
+    .expect("durable event envelope");
 
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(1)).expect("delivery ID");
     let receipt = ProviderDeliveryReceipt::from_durable_parts(
@@ -204,6 +219,7 @@ fn delivery_fixture(visibility: ProviderRepositoryVisibility) -> DeliveryFixture
         ),
         Sha256Digest::from_bytes([0x42; 32]),
         raw_event,
+        event_envelope,
         claim,
         UnixMillis::new(100),
         UnixMillis::new(10_000),

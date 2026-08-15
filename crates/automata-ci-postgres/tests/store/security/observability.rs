@@ -830,6 +830,7 @@ async fn admit_logical_metrics_fixture(
                 )?,
                 fixture.command.request_digest(),
                 crate::support::authenticated_github_event_object(fixture.command.event())?,
+                crate::support::provider_delivery_event_envelope(0x8d),
                 accepted_at,
             )?,
             ProviderRepositoryOwnerId::new(9_100_004)?,

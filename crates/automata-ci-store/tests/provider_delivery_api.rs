@@ -2,15 +2,15 @@ use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
 use automata_ci_store::{
     AcceptProviderDelivery, AdmissionObject, ClaimProviderDelivery, ClaimedProviderDelivery,
     MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES, MAX_PROVIDER_DELIVERY_ATTEMPTS,
-    MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS,
-    MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS, ObjectKey, ProviderConnectionId,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryFailureKind,
-    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
-    ProviderDeliveryRenewalTiming, ProviderDeliveryState, ProviderDeliveryValueError,
-    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowOutcome, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
-    TenantScope,
+    MAX_PROVIDER_DELIVERY_CLAIM_MILLIS, MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES,
+    MAX_PROVIDER_DELIVERY_RETRY_BACKOFF_MILLIS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
+    ObjectKey, ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRenewalTiming,
+    ProviderDeliveryState, ProviderDeliveryValueError, ProviderDeliveryWorkflowConclusion,
+    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim, TenantScope,
 };
 use std::time::Duration;
 use tokio::time::Instant;
@@ -41,6 +41,85 @@ fn raw_event() -> AdmissionObject {
         "application/json",
     )
     .expect("raw event")
+}
+
+fn event_envelope() -> ProviderDeliveryEventEnvelope {
+    ProviderDeliveryEventEnvelope::new(
+        1,
+        1,
+        Sha256Digest::from_bytes([8; 32]),
+        br#"{"schema":1}"#.to_vec(),
+        "application/vnd.automata.provider-event-envelope.v1+json",
+    )
+    .expect("event envelope")
+}
+
+#[test]
+fn durable_event_envelope_is_bounded_versioned_and_debug_redacted() {
+    let secret_marker = br#"{"schema":1,"private":"must-not-appear"}"#.to_vec();
+    let envelope = ProviderDeliveryEventEnvelope::new(
+        1,
+        2,
+        Sha256Digest::from_bytes([8; 32]),
+        secret_marker.clone(),
+        "application/vnd.automata.provider-event-envelope.v1+json",
+    )
+    .expect("event envelope");
+    assert_eq!(envelope.schema(), 1);
+    assert_eq!(envelope.registry_schema(), 2);
+    assert_eq!(envelope.canonical_bytes(), secret_marker);
+    assert_eq!(envelope.encoded_size(), secret_marker.len());
+    assert_eq!(
+        envelope.media_type(),
+        "application/vnd.automata.provider-event-envelope.v1+json"
+    );
+    let debug = format!("{envelope:?}");
+    assert!(!debug.contains("must-not-appear"));
+    assert!(!debug.contains("private"));
+
+    for (schema, registry_schema) in [(0, 1), (1, 0), (i16::MAX as u16 + 1, 1)] {
+        assert!(matches!(
+            ProviderDeliveryEventEnvelope::new(
+                schema,
+                registry_schema,
+                Sha256Digest::from_bytes([8; 32]),
+                b"x".to_vec(),
+                "application/json",
+            ),
+            Err(ProviderDeliveryValueError::InvalidDurableSchema(_))
+        ));
+    }
+    for bytes in [
+        Vec::new(),
+        vec![0_u8; MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES + 1],
+    ] {
+        assert!(matches!(
+            ProviderDeliveryEventEnvelope::new(
+                1,
+                1,
+                Sha256Digest::from_bytes([8; 32]),
+                bytes,
+                "application/json",
+            ),
+            Err(ProviderDeliveryValueError::InvalidEventEnvelopeSize)
+        ));
+    }
+    for media_type in [
+        "application json",
+        "application/json; charset=utf-8",
+        "é/json",
+    ] {
+        assert!(matches!(
+            ProviderDeliveryEventEnvelope::new(
+                1,
+                1,
+                Sha256Digest::from_bytes([8; 32]),
+                b"x".to_vec(),
+                media_type,
+            ),
+            Err(ProviderDeliveryValueError::InvalidEventEnvelopeMediaType)
+        ));
+    }
 }
 
 #[test]
@@ -143,6 +222,7 @@ fn acceptance_retains_only_bounded_immutable_object_evidence() {
         identity(),
         Sha256Digest::from_bytes([9; 32]),
         raw_event(),
+        event_envelope(),
         UnixMillis::new(100),
     )
     .expect("acceptance");
@@ -161,6 +241,7 @@ fn acceptance_retains_only_bounded_immutable_object_evidence() {
             identity(),
             Sha256Digest::from_bytes([9; 32]),
             raw_event(),
+            event_envelope(),
             UnixMillis::new(-1),
         ),
         Err(ProviderDeliveryValueError::NegativeTimestamp(
@@ -223,6 +304,7 @@ fn durable_claim_rehydration_revalidates_receipt_fence_and_time() {
         identity(),
         Sha256Digest::from_bytes([9; 32]),
         raw_event(),
+        event_envelope(),
         claim,
         UnixMillis::new(200),
         UnixMillis::new(300),
@@ -240,6 +322,7 @@ fn durable_claim_rehydration_revalidates_receipt_fence_and_time() {
             identity(),
             Sha256Digest::from_bytes([9; 32]),
             raw_event(),
+            event_envelope(),
             mismatched,
             UnixMillis::new(200),
             UnixMillis::new(300),
@@ -252,6 +335,7 @@ fn durable_claim_rehydration_revalidates_receipt_fence_and_time() {
             identity(),
             Sha256Digest::from_bytes([9; 32]),
             raw_event(),
+            event_envelope(),
             claim,
             UnixMillis::new(99),
             UnixMillis::new(300),
@@ -271,6 +355,7 @@ fn durable_claim_rehydration_revalidates_receipt_fence_and_time() {
             identity(),
             Sha256Digest::from_bytes([9; 32]),
             raw_event(),
+            event_envelope(),
             claim,
             UnixMillis::new(200),
             UnixMillis::new(300),

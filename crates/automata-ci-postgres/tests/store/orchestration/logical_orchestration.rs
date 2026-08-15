@@ -223,6 +223,7 @@ async fn stage_authenticated_admission(
                 )?,
                 command.request_digest(),
                 crate::support::authenticated_github_event_object(command.event())?,
+                crate::support::provider_delivery_event_envelope(0x87),
                 UnixMillis::new(delivery_observed_at),
             )?,
             ProviderRepositoryOwnerId::new(u64::try_from(namespace + 104)?)?,

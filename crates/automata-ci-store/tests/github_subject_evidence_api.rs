@@ -15,9 +15,9 @@ use automata_ci_store::{
     GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, ProviderConnectionId, ProviderDeliveryClaimFence,
-    ProviderDeliveryClaimOwnerId, ProviderDeliveryId, ProviderDeliveryIdentity,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
+    ProviderDeliveryIdentity, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordGithubWorkflowRunSubjectEvidence, RepositoryId, ResolveGithubRepositoryDispatch,
     TenantScope, WorkflowSnapshotId,
 };
@@ -48,6 +48,14 @@ fn delivery(provider: &str) -> AcceptProviderDelivery {
             "application/vnd.automata.github-authenticated-event+json",
         )
         .expect("event object"),
+        ProviderDeliveryEventEnvelope::new(
+            1,
+            1,
+            Sha256Digest::from_bytes([5; 32]),
+            br#"{"schema":1}"#.to_vec(),
+            "application/vnd.automata.provider-event-envelope.v1+json",
+        )
+        .expect("event envelope"),
         UnixMillis::new(100),
     )
     .expect("delivery")

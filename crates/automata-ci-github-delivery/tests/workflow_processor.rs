@@ -12,6 +12,12 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_github::{
+    GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
+    GithubRepositoryVisibility as GithubRepositoryVisibilityFact, GithubSealedEventEnvelopeV1,
+    GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
+    rehydrate_stored_authenticated_github_webhook,
+};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
     GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceAuthority,
@@ -38,12 +44,13 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, ManifestPinnedGithubDeliveryEvidence,
     ManifestPinnedGithubDeliveryReceipt, ObjectKey, ProviderConnectionId,
-    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryId,
-    ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
-    ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope,
+    ProviderDeliveryId, ProviderDeliveryIdentity, ProviderDeliveryReceipt,
+    ProviderDeliveryRepository, ProviderDeliveryState, ProviderDeliveryStoreError,
+    ProviderDeliveryWorkflowConclusion, ProviderDeliveryWorkflowInventory,
+    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
     RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
     WorkflowAdmissionIdempotency,
@@ -52,6 +59,7 @@ use automata_ci_workflow_github::GithubChangedFiles;
 use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
+use sha2::{Digest as _, Sha256};
 use tar::{Builder, EntryType, Header};
 use uuid::Uuid;
 
@@ -582,9 +590,10 @@ async fn harness_with_visibility(
 ) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
     let body = push_body(commit_count, visibility);
-    let raw_key = "provider-deliveries/github/event/fixture.json";
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
+    let raw_key = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let raw_payload = BlobPayload::from_bytes(
-        BlobKey::new(raw_key).expect("raw key"),
+        BlobKey::new(raw_key.clone()).expect("raw key"),
         MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("raw media type"),
         body.clone(),
     );
@@ -600,7 +609,8 @@ async fn harness_with_visibility(
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
-    let claimed = claimed(raw_event, visibility);
+    let event_envelope = provider_event_envelope(&body, &raw_descriptor, "push", visibility);
+    let claimed = claimed(raw_event, event_envelope, visibility);
     let logical = Arc::new(LogicalAdmissions::default());
     let admission = WorkflowAdmissionService::with_system_ports(
         blobs.clone(),
@@ -647,11 +657,12 @@ async fn pull_request_harness(
 ) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
     let body = pull_request_body();
-    let raw_key = "provider-deliveries/github/event/pull-request-fixture.json";
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
+    let raw_key = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let raw_payload = BlobPayload::from_bytes(
-        BlobKey::new(raw_key).expect("raw key"),
+        BlobKey::new(raw_key.clone()).expect("raw key"),
         MediaType::new(GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE).expect("raw media type"),
-        body,
+        body.clone(),
     );
     let raw_descriptor = raw_payload.descriptor().clone();
     blobs
@@ -665,7 +676,17 @@ async fn pull_request_harness(
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
-    let claimed = claimed(raw_event, ProviderRepositoryVisibility::Private);
+    let event_envelope = provider_event_envelope(
+        &body,
+        &raw_descriptor,
+        "pull_request",
+        ProviderRepositoryVisibility::Private,
+    );
+    let claimed = claimed(
+        raw_event,
+        event_envelope,
+        ProviderRepositoryVisibility::Private,
+    );
     let logical = Arc::new(LogicalAdmissions::default());
     let admission = WorkflowAdmissionService::with_system_ports(
         blobs.clone(),
@@ -713,8 +734,47 @@ async fn pull_request_harness(
     }
 }
 
+fn provider_event_envelope(
+    body: &Bytes,
+    descriptor: &BlobDescriptor,
+    event_name: &str,
+    visibility: ProviderRepositoryVisibility,
+) -> ProviderDeliveryEventEnvelope {
+    let visibility = match visibility {
+        ProviderRepositoryVisibility::Public => GithubRepositoryVisibilityFact::Public,
+        ProviderRepositoryVisibility::Private => GithubRepositoryVisibilityFact::Private,
+    };
+    let stored = StoredAuthenticatedGithubWebhook::from_durable_coordinates(
+        body.clone(),
+        GithubWebhookBodyDigest::from_bytes(*descriptor.digest().as_bytes()),
+        descriptor.size(),
+        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
+        event_name,
+        DELIVERY,
+        INSTALLATION_ID,
+        REPOSITORY_ID,
+        REPOSITORY_OWNER_ID,
+        visibility,
+        OWNER,
+        REPOSITORY,
+    );
+    let event =
+        rehydrate_stored_authenticated_github_webhook(stored).expect("verified webhook fixture");
+    let sealed = GithubSealedEventEnvelopeV1::seal(&event, descriptor.clone())
+        .expect("sealed event envelope fixture");
+    ProviderDeliveryEventEnvelope::new(
+        sealed.schema(),
+        sealed.registry_schema(),
+        sealed.digest(),
+        sealed.canonical_bytes().to_vec(),
+        GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
+    )
+    .expect("durable event envelope fixture")
+}
+
 fn claimed(
     raw_event: AdmissionObject,
+    event_envelope: ProviderDeliveryEventEnvelope,
     visibility: ProviderRepositoryVisibility,
 ) -> ClaimedProviderDelivery {
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(1)).expect("delivery id");
@@ -751,6 +811,7 @@ fn claimed(
         identity,
         Sha256Digest::from_bytes([0x42; 32]),
         raw_event,
+        event_envelope,
         claim,
         UnixMillis::new(100),
         UnixMillis::new(10_000),
