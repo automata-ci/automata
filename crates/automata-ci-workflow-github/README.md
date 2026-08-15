@@ -16,6 +16,22 @@ subset listed in the
 unsupported runtime semantics fail during compilation or admission instead of
 being silently dropped.
 
+## YAML anchors and aliases
+
+The frontend expands scalar, sequence, and mapping aliases in a derived YAML
+tree before semantic decoding. The original document remains available as
+source evidence; copied nodes use the alias token as their primary span and
+retain the selected definition span in expansion provenance. Duplicate anchor
+names rebind subsequent aliases without changing earlier bindings, matching the
+pinned parser's point-in-time identities. Forward and undefined aliases, cycles,
+merge keys, and custom tags fail with distinct diagnostics.
+
+Expansion is independently bounded by alias uses, nested substitutions,
+expanded nodes, decoded scalar bytes, and aggregate work. The defaults are
+1,024 alias uses, depth 64, 100,000 expanded nodes, 8 MiB of expanded scalar
+text, and 1,000,000 work units. Embedders can lower each ceiling through
+`WorkflowParseLimits`.
+
 The source model also contains an Automata-only `concurrency.queue` extension.
 It is under active implementation, has no GitHub counterpart, and is not part
 of the supported compatibility surface. Standard workflows should use GitHub's

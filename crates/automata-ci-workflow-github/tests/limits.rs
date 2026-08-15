@@ -30,7 +30,7 @@ fn excessive_nesting_is_a_resource_limit_not_a_parser_crash() {
 }
 
 #[test]
-fn aliases_have_an_independent_budget_and_are_not_expanded() {
+fn alias_uses_have_an_independent_budget() {
     let frontend = GithubWorkflowFrontend::new(WorkflowParseLimits::default().with_max_aliases(0));
     let report = frontend.parse(request(include_str!("fixtures/aliases.yml")));
     assert!(report.plan().is_none());

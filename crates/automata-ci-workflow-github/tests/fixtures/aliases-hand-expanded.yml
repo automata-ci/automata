@@ -1,0 +1,51 @@
+name: Alias equivalence
+on: workflow_dispatch
+env:
+  MODE: strict
+  RETRIES: 2
+jobs:
+  template:
+    name: Alias equivalence
+    runs-on: [self-hosted, linux]
+    env:
+      MODE: strict
+      RETRIES: 2
+    services:
+      database:
+        image: registry.example/database@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        env:
+          DATABASE_NAME: aliases
+        ports: [5432:5432]
+    steps:
+      - name: Verify
+        run: echo verify
+  repeated:
+    name: Alias equivalence
+    runs-on: [self-hosted, linux]
+    env:
+      MODE: strict
+      RETRIES: 2
+    services:
+      database:
+        image: registry.example/database@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        env:
+          DATABASE_NAME: aliases
+        ports: [5432:5432]
+    steps:
+      - name: Verify
+        run: echo verify
+  direct:
+    name: Alias equivalence
+    runs-on: [self-hosted, linux]
+    env:
+      MODE: strict
+      RETRIES: 2
+    services:
+      database:
+        image: registry.example/database@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+        env:
+          DATABASE_NAME: aliases
+        ports: [5432:5432]
+    steps:
+      - name: Verify
+        run: echo verify

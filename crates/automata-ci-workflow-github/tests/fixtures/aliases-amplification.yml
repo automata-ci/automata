@@ -1,0 +1,17 @@
+on: push
+env: &shared_env
+  A: alpha
+  B: beta
+  C: gamma
+  D: delta
+jobs:
+  template: &shared_job
+    runs-on: linux
+    env: *shared_env
+    steps:
+      - run: echo one
+      - run: echo two
+  copy_one: *shared_job
+  copy_two: *shared_job
+  copy_three: *shared_job
+  copy_four: *shared_job

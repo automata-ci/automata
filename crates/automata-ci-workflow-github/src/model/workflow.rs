@@ -86,6 +86,7 @@ impl GithubWorkflow {
 pub struct GithubWorkflowSourcePlan {
     pub(crate) source: SourceFile,
     pub(crate) document: YamlDocument,
+    pub(crate) expanded_document: YamlDocument,
     pub(crate) workflow: GithubWorkflow,
 }
 
@@ -98,6 +99,14 @@ impl GithubWorkflowSourcePlan {
     /// Returns the loss-aware YAML document retained for exact source evidence.
     pub const fn document(&self) -> &YamlDocument {
         &self.document
+    }
+
+    /// Returns the bounded alias-free YAML document used for semantic decoding.
+    ///
+    /// Primary spans in copied nodes point to alias uses while
+    /// [`crate::YamlNode::alias_expansions`] retains definition provenance.
+    pub const fn expanded_document(&self) -> &YamlDocument {
+        &self.expanded_document
     }
 
     /// Returns the semantically decoded GitHub workflow source model.

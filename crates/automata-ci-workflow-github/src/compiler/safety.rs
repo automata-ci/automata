@@ -2,18 +2,19 @@
 
 use std::collections::BTreeMap;
 
-use crate::{Diagnostic, DiagnosticKind, YamlNode, YamlNodeKind};
+use crate::{Diagnostic, DiagnosticKind, GithubWorkflowSourcePlan, YamlNode, YamlNodeKind};
 
 use super::CompileContext;
 
-pub(super) fn scan_lossy_yaml(node: &YamlNode, context: &mut CompileContext<'_>) {
-    if node.anchor().is_some() {
-        context.unsupported(
-            "github.compile.yaml_anchor",
-            "YAML anchors cannot be compiled without changing GitHub source semantics",
-            node.span().clone(),
-        );
-    }
+pub(super) fn scan_lossy_yaml(
+    source_plan: &GithubWorkflowSourcePlan,
+    context: &mut CompileContext<'_>,
+) {
+    scan_tags(source_plan.document().root(), context);
+    scan_mapping_safety(source_plan.expanded_document().root(), context);
+}
+
+fn scan_tags(node: &YamlNode, context: &mut CompileContext<'_>) {
     if node.tag().is_some() {
         context.unsupported(
             "github.compile.yaml_tag",
@@ -22,15 +23,27 @@ pub(super) fn scan_lossy_yaml(node: &YamlNode, context: &mut CompileContext<'_>)
         );
     }
     match node.kind() {
-        YamlNodeKind::Scalar(_) => {}
-        YamlNodeKind::Alias(_) => context.unsupported(
-            "github.compile.yaml_alias",
-            "YAML aliases cannot be compiled without an explicit expansion policy",
-            node.span().clone(),
-        ),
+        YamlNodeKind::Scalar(_) | YamlNodeKind::Alias(_) => {}
         YamlNodeKind::Sequence(items) => {
             for item in items {
-                scan_lossy_yaml(item, context);
+                scan_tags(item, context);
+            }
+        }
+        YamlNodeKind::Mapping(entries) => {
+            for entry in entries {
+                scan_tags(entry.key(), context);
+                scan_tags(entry.value(), context);
+            }
+        }
+    }
+}
+
+fn scan_mapping_safety(node: &YamlNode, context: &mut CompileContext<'_>) {
+    match node.kind() {
+        YamlNodeKind::Scalar(_) | YamlNodeKind::Alias(_) => {}
+        YamlNodeKind::Sequence(items) => {
+            for item in items {
+                scan_mapping_safety(item, context);
             }
         }
         YamlNodeKind::Mapping(entries) => {
@@ -59,8 +72,8 @@ pub(super) fn scan_lossy_yaml(node: &YamlNode, context: &mut CompileContext<'_>)
                         );
                     }
                 }
-                scan_lossy_yaml(entry.key(), context);
-                scan_lossy_yaml(entry.value(), context);
+                scan_mapping_safety(entry.key(), context);
+                scan_mapping_safety(entry.value(), context);
             }
         }
     }

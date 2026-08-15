@@ -1,0 +1,6 @@
+on: push
+env: *missing
+jobs:
+  build:
+    runs-on: linux
+    steps: [{run: echo build}]

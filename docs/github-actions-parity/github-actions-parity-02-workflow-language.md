@@ -31,26 +31,37 @@ frontend, and YAML tests.
 
 Tasks:
 
-- [ ] Build an anchor table from the existing anchor and alias AST nodes.
-- [ ] Expand mapping, sequence, and scalar aliases before decode.
-- [ ] Preserve alias-use span and definition provenance.
-- [ ] Match verified duplicate-anchor and forward-reference behavior.
-- [ ] Reject undefined aliases and cycles.
-- [ ] Bound alias count, recursion, expanded nodes, scalar bytes, and total
+- [x] Build an anchor table from the existing anchor and alias AST nodes.
+- [x] Expand mapping, sequence, and scalar aliases before decode.
+- [x] Preserve alias-use span and definition provenance.
+- [x] Match verified duplicate-anchor and forward-reference behavior.
+- [x] Reject undefined aliases and cycles.
+- [x] Bound alias count, recursion, expanded nodes, scalar bytes, and total
   expansion to prevent alias bombs.
-- [ ] Continue rejecting merge keys and custom tags unless separately proven
+- [x] Continue rejecting merge keys and custom tags unless separately proven
   compatible.
-- [ ] Remove the unconditional anchor rejection only when the bounded pass is
+- [x] Remove the unconditional anchor rejection only when the bounded pass is
   active.
 
 Acceptance:
 
-- [ ] Anchored and equivalent expanded workflows produce equivalent logical
+- [x] Anchored and equivalent expanded workflows produce equivalent logical
   plans.
-- [ ] Fixtures cover aliases in `env`, jobs, steps, services, and complete job
+- [x] Fixtures cover aliases in `env`, jobs, steps, services, and complete job
   definitions.
-- [ ] Chained, repeated, duplicate, undefined, cyclic, and amplification cases
+- [x] Chained, repeated, duplicate, undefined, cyclic, and amplification cases
   fail or pass at the verified phase with useful spans.
+
+Component implementation is complete. GitHub's
+[anchor reference](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#yaml-anchors-and-aliases)
+delegates detailed semantics to YAML. YAML 1.2.2 specifies that duplicate names
+bind an alias to the
+[most recent anchor event](https://yaml.org/spec/1.2.2/#3222-anchors-and-aliases)
+and that an alias without a
+[preceding definition is an error](https://yaml.org/spec/1.2.2/#71-alias-nodes).
+The pinned Saphyr identities implement those phases and focused fixtures lock
+the behavior. Live differential coverage still belongs to the shared
+conformance gates; it is not a component implementation blocker.
 
 Do not combine this security-sensitive work with general YAML cleanup.
 

@@ -1,0 +1,17 @@
+on: push
+env: &shared
+  GENERATION: first
+jobs:
+  before:
+    runs-on: linux
+    env: *shared
+    steps: [{run: echo before}]
+  redefine:
+    runs-on: linux
+    env: &shared
+      GENERATION: second
+    steps: [{run: echo redefine}]
+  after:
+    runs-on: linux
+    env: *shared
+    steps: [{run: echo after}]

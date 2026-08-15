@@ -1,0 +1,8 @@
+on: push
+env: *later
+jobs:
+  build:
+    runs-on: linux
+    env: &later
+      MODE: strict
+    steps: [{run: echo build}]

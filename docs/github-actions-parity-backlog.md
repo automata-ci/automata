@@ -358,20 +358,20 @@ inputs, and a 65,535-character input payload. See
 
 ## 5. YAML and workflow schema
 
-GitHub explicitly supports YAML anchors and aliases. Automata currently rejects
-all anchors and aliases. See
+GitHub explicitly supports YAML anchors and aliases. Automata expands them in a
+bounded derived tree while retaining the original source AST. See
 [reusable configurations and YAML anchors](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
 
-- [ ] Support YAML anchors on mappings.
-- [ ] Support YAML anchors on sequences.
-- [ ] Support YAML anchors on scalars.
-- [ ] Support aliases for environment maps.
-- [ ] Support aliases for complete step lists.
-- [ ] Support aliases for complete job definitions.
-- [ ] Support aliases for service definitions.
-- [ ] Match GitHub's handling of duplicate anchors.
-- [ ] Continue rejecting YAML merge keys if matching current GitHub behavior.
-- [ ] Distinguish aliases from unsupported merge-key syntax in diagnostics.
+- [x] Support YAML anchors on mappings.
+- [x] Support YAML anchors on sequences.
+- [x] Support YAML anchors on scalars.
+- [x] Support aliases for environment maps.
+- [x] Support aliases for complete step lists.
+- [x] Support aliases for complete job definitions.
+- [x] Support aliases for service definitions.
+- [x] Match GitHub's handling of duplicate anchors.
+- [x] Continue rejecting YAML merge keys if matching current GitHub behavior.
+- [x] Distinguish aliases from unsupported merge-key syntax in diagnostics.
 - [ ] Differential-test YAML 1.2 boolean behavior.
 - [ ] Test `.yml` and `.yaml`.
 - [ ] Test BOM and newline variants.

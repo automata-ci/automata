@@ -2,7 +2,9 @@ use std::fmt::Debug;
 
 use crate::{
     Diagnostic, DiagnosticKind, DiagnosticSeverity, GithubWorkflowSourcePlan, SourceFile,
-    SourceProvenance, WorkflowParseLimits, decode::decode_workflow, syntax::parse_yaml,
+    SourceProvenance, WorkflowParseLimits,
+    decode::decode_workflow,
+    syntax::{expand_aliases, parse_yaml},
 };
 
 /// Borrowed parse request. Provenance is explicit so diagnostics remain useful after ingestion.
@@ -170,10 +172,22 @@ impl WorkflowFrontend for GithubWorkflowFrontend {
             .into_iter()
             .next()
             .expect("document count was checked");
-        let workflow = decode_workflow(&document.root, &mut diagnostics);
+        let expanded_document = match expand_aliases(&document, self.limits) {
+            Ok(document) => document,
+            Err(diagnostic) => {
+                diagnostics.push(*diagnostic);
+                return FrontendReport {
+                    source,
+                    plan: None,
+                    diagnostics,
+                };
+            }
+        };
+        let workflow = decode_workflow(&expanded_document.root, &mut diagnostics);
         let plan = workflow.map(|workflow| GithubWorkflowSourcePlan {
             source: source.clone(),
             document,
+            expanded_document,
             workflow,
         });
 
