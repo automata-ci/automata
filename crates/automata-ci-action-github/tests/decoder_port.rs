@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_action_github::{
     ActionMetadataDecoder, GITHUB_ACTION_METADATA_BASELINE, GITHUB_ACTION_METADATA_BASELINE_COMMIT,

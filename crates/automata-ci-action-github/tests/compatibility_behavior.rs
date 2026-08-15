@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_action_github::{JavascriptRuntime, MetadataDecodeErrorKind, MetadataScalarKind};
 use support::decode;

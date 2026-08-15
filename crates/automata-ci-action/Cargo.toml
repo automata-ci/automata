@@ -10,6 +10,7 @@ homepage.workspace = true
 readme = "README.md"
 description = "Provider-neutral immutable action bundle resolver for Automata"
 publish.workspace = true
+autotests = false
 
 [dependencies]
 async-trait.workspace = true
@@ -32,3 +33,11 @@ url.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "action"
+path = "tests/action.rs"
+
+[[test]]
+name = "live_github_rustfs"
+path = "tests/live_github_rustfs.rs"

@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-mod support;
+use crate::support;
 
 #[cfg(target_os = "linux")]
 use std::sync::Arc;

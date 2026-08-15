@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use automata_ci_action_github::{CompositeStep, DockerImageKind};
 use support::decode;

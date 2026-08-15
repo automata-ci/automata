@@ -735,8 +735,7 @@ fn docker_distribution_surface_command() -> ExecutionCommand {
 }
 
 fn compile_static_http_fixture(scratch: &Path) -> PathBuf {
-    let source =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/static_http_server.rs");
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/static_http_server.rs");
     let output = scratch.join("static-http-fixture");
     let status = std::process::Command::new("rustc")
         .arg("--edition=2024")
