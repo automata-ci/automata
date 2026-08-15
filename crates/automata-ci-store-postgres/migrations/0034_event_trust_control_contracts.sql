@@ -666,6 +666,34 @@ ALTER TABLE workflow_definitions
     ADD CONSTRAINT workflow_definitions_repository_id_path_unique
         UNIQUE (repository_id, id, path);
 
+CREATE TABLE workflow_enable_state_revisions (
+    tenant_id text NOT NULL,
+    repository_id uuid NOT NULL,
+    workflow_id uuid NOT NULL,
+    workflow_path text NOT NULL COLLATE pg_catalog."C",
+    state_revision bigint NOT NULL,
+    enable_state text NOT NULL COLLATE pg_catalog."C",
+    changed_at_ms bigint NOT NULL,
+    PRIMARY KEY (tenant_id, repository_id, workflow_id, state_revision),
+    CONSTRAINT workflow_enable_state_revisions_identity CHECK ((repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid)),
+    CONSTRAINT workflow_enable_state_revisions_path CHECK ((((octet_length(workflow_path) >= 1) AND (octet_length(workflow_path) <= 1024)) AND (btrim(workflow_path) = workflow_path) AND (workflow_path !~ '[[:cntrl:]\\]'::text) AND ("left"(workflow_path, 1) <> '/'::text) AND (workflow_path !~ '(^|/)(\.|\.\.)(/|$)'::text) AND (workflow_path !~ '//'::text))),
+    CONSTRAINT workflow_enable_state_revisions_shape CHECK ((state_revision > 0) AND (enable_state = ANY (ARRAY['enabled'::text, 'disabled'::text])) AND (changed_at_ms >= 0)),
+    UNIQUE (repository_id, workflow_id, state_revision),
+    UNIQUE (repository_id, workflow_id, workflow_path, state_revision)
+);
+
+CREATE TABLE workflow_enable_state_current (
+    tenant_id text NOT NULL,
+    repository_id uuid NOT NULL,
+    workflow_id uuid NOT NULL,
+    state_revision bigint NOT NULL,
+    PRIMARY KEY (tenant_id, repository_id, workflow_id),
+    FOREIGN KEY (tenant_id, repository_id, workflow_id, state_revision)
+        REFERENCES workflow_enable_state_revisions(tenant_id, repository_id, workflow_id, state_revision)
+        ON DELETE RESTRICT,
+    CONSTRAINT workflow_enable_state_current_shape CHECK ((repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (state_revision > 0))
+);
+
 CREATE FUNCTION automata_workflow_enable_state_revision_immutable() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -789,34 +817,6 @@ BEGIN
     RETURN NEW;
 END;
 $$;
-
-CREATE TABLE workflow_enable_state_revisions (
-    tenant_id text NOT NULL,
-    repository_id uuid NOT NULL,
-    workflow_id uuid NOT NULL,
-    workflow_path text NOT NULL COLLATE pg_catalog."C",
-    state_revision bigint NOT NULL,
-    enable_state text NOT NULL COLLATE pg_catalog."C",
-    changed_at_ms bigint NOT NULL,
-    PRIMARY KEY (tenant_id, repository_id, workflow_id, state_revision),
-    CONSTRAINT workflow_enable_state_revisions_identity CHECK ((repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid)),
-    CONSTRAINT workflow_enable_state_revisions_path CHECK ((((octet_length(workflow_path) >= 1) AND (octet_length(workflow_path) <= 1024)) AND (btrim(workflow_path) = workflow_path) AND (workflow_path !~ '[[:cntrl:]\\]'::text) AND ("left"(workflow_path, 1) <> '/'::text) AND (workflow_path !~ '(^|/)(\.|\.\.)(/|$)'::text) AND (workflow_path !~ '//'::text))),
-    CONSTRAINT workflow_enable_state_revisions_shape CHECK ((state_revision > 0) AND (enable_state = ANY (ARRAY['enabled'::text, 'disabled'::text])) AND (changed_at_ms >= 0)),
-    UNIQUE (repository_id, workflow_id, state_revision),
-    UNIQUE (repository_id, workflow_id, workflow_path, state_revision)
-);
-
-CREATE TABLE workflow_enable_state_current (
-    tenant_id text NOT NULL,
-    repository_id uuid NOT NULL,
-    workflow_id uuid NOT NULL,
-    state_revision bigint NOT NULL,
-    PRIMARY KEY (tenant_id, repository_id, workflow_id),
-    FOREIGN KEY (tenant_id, repository_id, workflow_id, state_revision)
-        REFERENCES workflow_enable_state_revisions(tenant_id, repository_id, workflow_id, state_revision)
-        ON DELETE RESTRICT,
-    CONSTRAINT workflow_enable_state_current_shape CHECK ((repository_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (workflow_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (state_revision > 0))
-);
 
 CREATE FUNCTION automata_require_workflow_enable_state_revision_current() RETURNS trigger
     LANGUAGE plpgsql
