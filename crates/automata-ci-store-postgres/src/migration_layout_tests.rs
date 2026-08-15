@@ -145,6 +145,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0035_workflow_run_trust_snapshots.sql",
         "d089ea8658be480cef856ac775dae5c9612ac9bf2306d0a636938398c6f79bc88f6f11b05e23debd1d165df543fd50d7",
     ),
+    (
+        "0036_align_provider_manifest_workflow_limits.sql",
+        "d9667008f0976f9c060affbb4ec1e978eed89c7cc483d3dfebd5f6beb40eed8e11ab2906b56ff89ba211a82c7dc613ca",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -254,6 +258,42 @@ fn logical_activation_scheduling_policy_is_relationally_exact() {
         assert!(
             source.contains(required),
             "logical scheduling-policy migration lost required contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn provider_manifest_workflow_limits_preserve_closed_history() {
+    let source = include_str!("../migrations/0036_align_provider_manifest_workflow_limits.sql");
+
+    for required in [
+        "ADD CONSTRAINT github_provider_manifest_revisions_archive_limits_compat",
+        "NOT VALID",
+        "VALIDATE CONSTRAINT github_provider_manifest_revisions_archive_limits_compat",
+        "DROP CONSTRAINT github_provider_manifest_revisions_archive_limits",
+        "RENAME CONSTRAINT github_provider_manifest_revisions_archive_limits_compat",
+        "TO github_provider_manifest_revisions_archive_limits",
+        "archive_max_compressed_bytes = 268435456",
+        "archive_max_decompressed_bytes = 2147483648",
+        "archive_max_entries = 100000",
+        "archive_max_expanded_bytes = 1073741824",
+        "archive_max_entry_path_bytes = 4096",
+        "archive_max_workflows = 256",
+        "workflow_max_bytes IN (512000, 1048576)",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider-manifest limit migration lost required contract: {required}"
+        );
+    }
+    for forbidden in [
+        "UPDATE github_provider_manifest_revisions",
+        "UPDATE github_provider_manifest_current",
+        "automata_github_provider_manifest_digest",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "provider-manifest limit migration must not rewrite durable evidence: {forbidden}"
         );
     }
 }

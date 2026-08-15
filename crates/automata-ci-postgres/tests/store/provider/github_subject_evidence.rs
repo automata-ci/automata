@@ -1346,6 +1346,67 @@ async fn public_api_decodes_historical_manifest_profile_and_runner_policy() -> T
     .await
 }
 
+pub(super) async fn assert_historical_workflow_limit_evidence_round_trip(
+    database: &TestDatabase,
+    manifest: &GithubProviderManifest,
+) -> TestResult {
+    assert_eq!(manifest.limits().workflow_max_bytes(), 1_048_576);
+    let activated_at = database
+        .store()
+        .load_current_github_provider_manifest(manifest.tenant(), manifest.connection_id())
+        .await?
+        .activated_at()
+        .expect("historical manifest is current during evidence acceptance");
+    let fixture = Fixture {
+        tenant: manifest.tenant().clone(),
+        connection: manifest.connection_id(),
+        manifest: manifest.clone(),
+        activated_at,
+        checks_authority: authority(
+            manifest,
+            GithubServerServiceScope::ChecksWrite,
+            Uuid::from_u128(0x0002_0501),
+            [11; 32],
+        )?,
+        private_source_authority: None,
+    };
+    let fixture = ensure_fixture_authorities(database, fixture, activated_at.get()).await?;
+    let request = acceptance(
+        &fixture,
+        "delivery-historical-workflow-limit",
+        OWNER_ID,
+        OWNER_ID,
+        HEAD_SHA,
+        activated_at.get(),
+        0x5a,
+    );
+    let accepted = database
+        .store()
+        .accept_manifest_pinned_github_delivery(request.clone())
+        .await?;
+    assert_eq!(accepted.evidence().manifest(), manifest);
+    assert_eq!(
+        accepted.evidence().manifest().limits().workflow_max_bytes(),
+        1_048_576
+    );
+
+    let loaded = database
+        .store()
+        .load_manifest_pinned_github_delivery_evidence(manifest.tenant(), accepted.delivery_id())
+        .await?;
+    assert_eq!(loaded.manifest(), manifest);
+    assert_eq!(loaded.manifest().digest(), manifest.digest());
+    assert_eq!(loaded.manifest().limits().workflow_max_bytes(), 1_048_576);
+    assert_eq!(
+        database
+            .store()
+            .accept_manifest_pinned_github_delivery(request)
+            .await?,
+        accepted
+    );
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn concurrent_private_acceptance_pins_both_disjoint_authorities_once() -> TestResult {
@@ -1623,6 +1684,17 @@ async fn bootstrap_manifest_only_with_selection(
         [6; 32],
         selection,
     );
+    bootstrap_manifest_fixture(database, manifest, at).await
+}
+
+async fn bootstrap_manifest_fixture(
+    database: &TestDatabase,
+    manifest: GithubProviderManifest,
+    at: i64,
+) -> TestResult<Fixture> {
+    let tenant = manifest.tenant().clone();
+    let connection = manifest.connection_id();
+    let visibility = manifest.repository_visibility();
     let bootstrapped = database
         .store()
         .bootstrap_github_provider_repository(
@@ -1709,6 +1781,29 @@ fn manifest_with_selection(
     verifier: [u8; 32],
     selection: GithubProviderWorkflowSelection,
 ) -> GithubProviderManifest {
+    manifest_with_selection_and_limits(
+        tenant,
+        connection,
+        visibility,
+        revisions,
+        spki,
+        verifier,
+        selection,
+        GithubProviderManifestLimits::github_dot_com_ci(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn manifest_with_selection_and_limits(
+    tenant: TenantScope,
+    connection: ProviderConnectionId,
+    visibility: ProviderRepositoryVisibility,
+    revisions: ManifestRevisions,
+    spki: [u8; 32],
+    verifier: [u8; 32],
+    selection: GithubProviderWorkflowSelection,
+    limits: GithubProviderManifestLimits,
+) -> GithubProviderManifest {
     let runtime_policy = github_manifest_fixture::fixture_github_runtime_policy(revisions.policy);
     GithubProviderManifest::new_with_workflow_selection(
         tenant,
@@ -1733,7 +1828,7 @@ fn manifest_with_selection(
         selection,
         GithubCheckName::new("Automata CI").expect("Check name"),
         GithubProviderOrigins::github_dot_com(),
-        GithubProviderManifestLimits::github_dot_com_ci(),
+        limits,
         GithubProviderManifestRevision::new(revisions.manifest).expect("manifest revision"),
     )
     .with_repository_owner_id(ProviderRepositoryOwnerId::new(OWNER_ID).expect("repository owner"))

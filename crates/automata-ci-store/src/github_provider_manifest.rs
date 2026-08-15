@@ -89,6 +89,8 @@ pub const GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS: u64 = 256;
 /// the persistence layer does not acquire a dependency on the frontend.
 pub const GITHUB_PROVIDER_WORKFLOW_MAX_BYTES: u64 = 500 * 1_024;
 
+const GITHUB_PROVIDER_HISTORICAL_WORKFLOW_MAX_BYTES: u64 = 1_024 * 1_024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GithubProviderManifestLimitRejection {
     RunnerPolicyBytes,
@@ -436,6 +438,42 @@ impl GithubProviderManifestLimits {
         archive_max_workflows: u64,
         workflow_max_bytes: u64,
     ) -> Result<Self, GithubProviderManifestValueError> {
+        Self::from_supported_values(
+            webhook_max_body_bytes,
+            webhook_accept_timeout_millis,
+            push_webhook_max_commits,
+            path_filter_max_commits,
+            path_filter_max_changed_files,
+            archive_max_compressed_bytes,
+            archive_max_decompressed_bytes,
+            archive_max_entries,
+            archive_max_expanded_bytes,
+            archive_max_entry_path_bytes,
+            archive_max_workflows,
+            workflow_max_bytes,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    const fn from_supported_values(
+        webhook_max_body_bytes: u64,
+        webhook_accept_timeout_millis: u64,
+        push_webhook_max_commits: u64,
+        path_filter_max_commits: u64,
+        path_filter_max_changed_files: u64,
+        archive_max_compressed_bytes: u64,
+        archive_max_decompressed_bytes: u64,
+        archive_max_entries: u64,
+        archive_max_expanded_bytes: u64,
+        archive_max_entry_path_bytes: u64,
+        archive_max_workflows: u64,
+        workflow_max_bytes: u64,
+        allow_historical_workflow_limit: bool,
+    ) -> Result<Self, GithubProviderManifestValueError> {
+        let historical_workflow_limit = allow_historical_workflow_limit
+            && workflow_max_bytes == GITHUB_PROVIDER_HISTORICAL_WORKFLOW_MAX_BYTES;
+
         if webhook_max_body_bytes != GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES
             || webhook_accept_timeout_millis != GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS
             || push_webhook_max_commits != GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS
@@ -447,14 +485,16 @@ impl GithubProviderManifestLimits {
             || archive_expanded_bytes_rejection(archive_max_expanded_bytes).is_some()
             || archive_entry_path_bytes_rejection(archive_max_entry_path_bytes).is_some()
             || archive_workflows_rejection(archive_max_workflows).is_some()
-            || workflow_bytes_rejection(workflow_max_bytes).is_some()
+            || (workflow_bytes_rejection(workflow_max_bytes).is_some()
+                && !historical_workflow_limit)
             || archive_max_compressed_bytes != GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES
             || archive_max_decompressed_bytes != GITHUB_PROVIDER_ARCHIVE_MAX_DECOMPRESSED_BYTES
             || archive_max_entries != GITHUB_PROVIDER_ARCHIVE_MAX_ENTRIES
             || archive_max_expanded_bytes != GITHUB_PROVIDER_ARCHIVE_MAX_EXPANDED_BYTES
             || archive_max_entry_path_bytes != GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES
             || archive_max_workflows != GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS
-            || workflow_max_bytes != GITHUB_PROVIDER_WORKFLOW_MAX_BYTES
+            || (workflow_max_bytes != GITHUB_PROVIDER_WORKFLOW_MAX_BYTES
+                && !historical_workflow_limit)
         {
             return Err(GithubProviderManifestValueError::InvalidLimits);
         }
@@ -472,6 +512,39 @@ impl GithubProviderManifestLimits {
             archive_max_workflows,
             workflow_max_bytes,
         })
+    }
+
+    #[cfg(feature = "adapter-spi")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) const fn from_durable(
+        webhook_max_body_bytes: u64,
+        webhook_accept_timeout_millis: u64,
+        push_webhook_max_commits: u64,
+        path_filter_max_commits: u64,
+        path_filter_max_changed_files: u64,
+        archive_max_compressed_bytes: u64,
+        archive_max_decompressed_bytes: u64,
+        archive_max_entries: u64,
+        archive_max_expanded_bytes: u64,
+        archive_max_entry_path_bytes: u64,
+        archive_max_workflows: u64,
+        workflow_max_bytes: u64,
+    ) -> Result<Self, GithubProviderManifestValueError> {
+        Self::from_supported_values(
+            webhook_max_body_bytes,
+            webhook_accept_timeout_millis,
+            push_webhook_max_commits,
+            path_filter_max_commits,
+            path_filter_max_changed_files,
+            archive_max_compressed_bytes,
+            archive_max_decompressed_bytes,
+            archive_max_entries,
+            archive_max_expanded_bytes,
+            archive_max_entry_path_bytes,
+            archive_max_workflows,
+            workflow_max_bytes,
+            true,
+        )
     }
 
     /// Returns the production GitHub.com dogfood limits.

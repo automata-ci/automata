@@ -147,6 +147,24 @@ fn resource_policy_accepts_only_the_exact_supported_values() {
     assert_eq!(
         GithubProviderManifestLimits::new(
             GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES,
+            GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
+            GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS,
+            GITHUB_PROVIDER_PATH_FILTER_MAX_COMMITS,
+            GITHUB_PROVIDER_PATH_FILTER_MAX_CHANGED_FILES,
+            GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES,
+            GITHUB_PROVIDER_ARCHIVE_MAX_DECOMPRESSED_BYTES,
+            GITHUB_PROVIDER_ARCHIVE_MAX_ENTRIES,
+            GITHUB_PROVIDER_ARCHIVE_MAX_EXPANDED_BYTES,
+            GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES,
+            GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS,
+            1_048_576,
+        ),
+        Err(GithubProviderManifestValueError::InvalidLimits)
+    );
+
+    assert_eq!(
+        GithubProviderManifestLimits::new(
+            GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES,
             GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS - 1,
             GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS,
             GITHUB_PROVIDER_PATH_FILTER_MAX_COMMITS,

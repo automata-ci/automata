@@ -13,8 +13,8 @@ use super::{
 use automata_ci_store::{
     AdmissionObject, BootstrapGithubProviderRepository, GithubCheckName,
     GithubInstallationBindingGeneration, GithubProviderManifest,
-    GithubProviderManifestBootstrapReceipt, GithubProviderManifestLimits,
-    GithubProviderManifestRecord, GithubProviderManifestRepository, GithubProviderManifestRevision,
+    GithubProviderManifestBootstrapReceipt, GithubProviderManifestRecord,
+    GithubProviderManifestRepository, GithubProviderManifestRevision,
     GithubProviderManifestStoreError, GithubProviderOrigins,
     GithubProviderRepositoryBootstrapReceipt, GithubProviderRunnerPolicyObject,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
@@ -98,6 +98,11 @@ impl GithubProviderManifestRepository for PostgresStore {
         request: BootstrapGithubProviderRepository,
     ) -> Result<GithubProviderRepositoryBootstrapReceipt, GithubProviderManifestStoreError> {
         let desired = request.manifest().manifest().clone();
+        if desired.limits().workflow_max_bytes()
+            != automata_ci_store::GITHUB_PROVIDER_WORKFLOW_MAX_BYTES
+        {
+            return Err(GithubProviderManifestStoreError::ConfigurationDrift);
+        }
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
             .execute(&mut *transaction)
@@ -932,7 +937,7 @@ fn decode_manifest_record(
             .map_err(operation_error)?,
     )
     .map_err(|_| GithubProviderManifestStoreError::CorruptData)?;
-    let limits = GithubProviderManifestLimits::new(
+    let limits = automata_ci_store::adapter_spi::github_provider_manifest_limits(
         positive_u64(
             row.try_get("webhook_max_body_bytes")
                 .map_err(operation_error)?,

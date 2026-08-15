@@ -8,15 +8,14 @@ use automata_ci_store::{
     AdmissionObject, AuthenticatedGithubDeliveryClaim, EventControlSubjectId, EventSubjectId,
     EventSubjectOrigin, GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha,
     GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
-    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
-    GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
-    GithubProviderWorkflowSelection, GithubRepositoryDispatchEvidenceRepository,
-    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
-    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
-    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
+    GithubProviderManifestRevision, GithubProviderOrigins, GithubProviderRunnerPolicyObject,
+    GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
+    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
+    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
+    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
+    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubSubjectEvidenceRepository,
+    GithubSubjectEvidenceStoreError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, PendingGithubRepositoryDispatchReceipt,
     ProviderConnectionId, ProviderDeliveryClaimFence, ProviderDeliveryClaimOwnerId,
@@ -2581,7 +2580,7 @@ fn decode_manifest(row: &PgRow) -> Result<GithubProviderManifest, GithubSubjectE
             .map_err(operation_error)?,
     )
     .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-    let limits = GithubProviderManifestLimits::new(
+    let limits = automata_ci_store::adapter_spi::github_provider_manifest_limits(
         positive_column(row, "webhook_max_body_bytes")?,
         positive_column(row, "webhook_accept_timeout_ms")?,
         positive_column(row, "push_webhook_max_commits")?,

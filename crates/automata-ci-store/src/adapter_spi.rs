@@ -121,6 +121,41 @@ pub fn github_provider_manifest(
     )
 }
 
+/// Rehydrates the closed current or historical durable manifest limits.
+///
+/// The historical workflow-source ceiling is accepted only at this adapter
+/// boundary. Public construction remains pinned to the current policy.
+#[allow(clippy::too_many_arguments)]
+pub const fn github_provider_manifest_limits(
+    webhook_max_body_bytes: u64,
+    webhook_accept_timeout_millis: u64,
+    push_webhook_max_commits: u64,
+    path_filter_max_commits: u64,
+    path_filter_max_changed_files: u64,
+    archive_max_compressed_bytes: u64,
+    archive_max_decompressed_bytes: u64,
+    archive_max_entries: u64,
+    archive_max_expanded_bytes: u64,
+    archive_max_entry_path_bytes: u64,
+    archive_max_workflows: u64,
+    workflow_max_bytes: u64,
+) -> Result<crate::GithubProviderManifestLimits, crate::GithubProviderManifestValueError> {
+    crate::GithubProviderManifestLimits::from_durable(
+        webhook_max_body_bytes,
+        webhook_accept_timeout_millis,
+        push_webhook_max_commits,
+        path_filter_max_commits,
+        path_filter_max_changed_files,
+        archive_max_compressed_bytes,
+        archive_max_decompressed_bytes,
+        archive_max_entries,
+        archive_max_expanded_bytes,
+        archive_max_entry_path_bytes,
+        archive_max_workflows,
+        workflow_max_bytes,
+    )
+}
+
 /// Validates durable timing while rehydrating one manifest record.
 pub fn github_provider_manifest_record(
     manifest: crate::GithubProviderManifest,
@@ -1033,6 +1068,46 @@ mod tests {
         assert_eq!(
             secret_custody_canary_schema_version(),
             crate::secret_custody::SECRET_CUSTODY_CANARY_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn provider_manifest_limit_rehydration_accepts_only_closed_history() {
+        fn limits(
+            workflow_max_bytes: u64,
+        ) -> Result<crate::GithubProviderManifestLimits, crate::GithubProviderManifestValueError>
+        {
+            github_provider_manifest_limits(
+                crate::GITHUB_PROVIDER_WEBHOOK_MAX_BODY_BYTES,
+                crate::GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS,
+                crate::GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS,
+                crate::GITHUB_PROVIDER_PATH_FILTER_MAX_COMMITS,
+                crate::GITHUB_PROVIDER_PATH_FILTER_MAX_CHANGED_FILES,
+                crate::GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES,
+                crate::GITHUB_PROVIDER_ARCHIVE_MAX_DECOMPRESSED_BYTES,
+                crate::GITHUB_PROVIDER_ARCHIVE_MAX_ENTRIES,
+                crate::GITHUB_PROVIDER_ARCHIVE_MAX_EXPANDED_BYTES,
+                crate::GITHUB_PROVIDER_ARCHIVE_MAX_ENTRY_PATH_BYTES,
+                crate::GITHUB_PROVIDER_ARCHIVE_MAX_WORKFLOWS,
+                workflow_max_bytes,
+            )
+        }
+
+        assert_eq!(
+            limits(crate::GITHUB_PROVIDER_WORKFLOW_MAX_BYTES)
+                .expect("current durable workflow limit")
+                .workflow_max_bytes(),
+            512_000
+        );
+        assert_eq!(
+            limits(1_048_576)
+                .expect("historical durable workflow limit")
+                .workflow_max_bytes(),
+            1_048_576
+        );
+        assert_eq!(
+            limits(1_048_575),
+            Err(crate::GithubProviderManifestValueError::InvalidLimits)
         );
     }
 
