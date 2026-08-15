@@ -156,6 +156,48 @@ fn completed_step_boundary_delays_environment_and_path_but_scopes_outputs() {
 }
 
 #[test]
+fn duplicate_name_value_records_apply_in_order_with_the_last_value_winning() {
+    let invocation = ActionInvocationId::new("duplicate-action").expect("valid invocation ID");
+    let step_id = StepId::new("duplicate").expect("valid step ID");
+    let applied = GithubCompletedStepApplicator::default()
+        .apply_completed_step(
+            &JobCommandState::new(CommandFilePlatform::Unix),
+            &StepScope::new(step_id.clone(), StepPhase::ActionMain(invocation.clone())),
+            &commands(
+                b"ENVIRONMENT=first\nENVIRONMENT=second\n",
+                b"OUTPUT=first\nOUTPUT=second\n",
+                b"/first\n/second\n/first\n",
+                b"STATE=first\nSTATE=second\n",
+                b"",
+            ),
+        )
+        .expect("bounded duplicate records");
+
+    assert_eq!(
+        value(applied.next_state().environment(), "ENVIRONMENT"),
+        Some("second")
+    );
+    assert_eq!(
+        value(
+            applied.next_state().outputs(&step_id).expect("step output"),
+            "OUTPUT"
+        ),
+        Some("second")
+    );
+    assert_eq!(
+        value(
+            &applied.next_state().post_action_environment(&invocation),
+            "STATE_STATE"
+        ),
+        Some("second")
+    );
+    assert_eq!(
+        applied.next_state().prepend_path().collect::<Vec<_>>(),
+        ["/first", "/second"]
+    );
+}
+
+#[test]
 fn action_state_is_visible_only_to_the_exact_paired_post_action() {
     let invocation = ActionInvocationId::new("checkout-main-42").expect("valid invocation ID");
     let other = ActionInvocationId::new("checkout-main-43").expect("valid invocation ID");

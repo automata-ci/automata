@@ -4440,9 +4440,10 @@ impl GithubJobExecutor {
         let Some(output) = reconcile_cancelled_operation(output, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
         };
-        if cancellation.is_cancelled() || output.termination() == ExecutionTermination::Cancelled {
+        if cancellation.is_cancelled() {
             return Ok(CommandOutcome::Cancelled);
         }
+        let outcome = CommandOutcome::from_termination(output.termination());
         if output.was_truncated() {
             if emit_system_while_active(TRUNCATED_OUTPUT_DIAGNOSTIC, masker, events, cancellation)?
                 .is_none()
@@ -4453,53 +4454,67 @@ impl GithubJobExecutor {
                 ExecutorAdapterErrorKind::ResourceExhausted,
             ));
         }
-        let completed = self.collect_completed_phase(
-            endpoint,
-            attempt_id,
-            execution.phase,
-            &command_paths,
-            commands.platform(),
-            &output,
-            masker,
-            events,
-            cancellation,
-        );
-        let Some(completed) = reconcile_cancelled_operation(completed, cancellation)? else {
-            return Ok(CommandOutcome::Cancelled);
-        };
-        if cancellation.is_cancelled() {
-            return Ok(CommandOutcome::Cancelled);
+        let collected = (|| {
+            let completed = self.collect_completed_phase(
+                endpoint,
+                attempt_id,
+                execution.phase,
+                &command_paths,
+                commands.platform(),
+                &output,
+                masker,
+                events,
+                cancellation,
+            )?;
+            if cancellation.is_cancelled() {
+                return Err(cancelled());
+            }
+            let artifacts = self.resolve_artifact_subjects(
+                endpoint,
+                attempt_id,
+                execution.phase,
+                &paths.workspace,
+                command.environment(),
+                &completed.artifacts,
+                artifact_hash_timeout,
+                cancellation,
+            )?;
+            let completed_commands = completed.commands.with_artifacts(artifacts);
+            let runtime_step_id = RuntimeStepId::new(execution.step_id)
+                .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
+            let scope = StepScope::new(runtime_step_id, execution.scope);
+            let applied = self
+                .completed_steps
+                .apply_completed_step(commands, &scope, &completed_commands)
+                .map_err(|error| map_phase_application_error(&error))?;
+            if cancellation.is_cancelled() {
+                return Err(cancelled());
+            }
+            let mut next_attachments = attachments.clone();
+            next_attachments.record_phase(
+                execution.report_step_id,
+                applied.summary().markdown(),
+                &completed.annotations,
+                applied.notices(),
+                masker,
+            )?;
+            Ok((applied.into_next_state(), next_attachments))
+        })();
+
+        match collected {
+            Ok((next_commands, next_attachments)) => {
+                *commands = next_commands;
+                *attachments = next_attachments;
+            }
+            Err(_) if outcome != CommandOutcome::Success => {
+                // The runner processes command files in a finally boundary. A
+                // partial or malformed file may not replace the process's
+                // already-known failure, timeout, or cancellation outcome.
+                return Ok(outcome);
+            }
+            Err(error) => return Err(error),
         }
-        let artifacts = self.resolve_artifact_subjects(
-            endpoint,
-            attempt_id,
-            execution.phase,
-            &paths.workspace,
-            command.environment(),
-            &completed.artifacts,
-            artifact_hash_timeout,
-            cancellation,
-        )?;
-        let completed_commands = completed.commands.with_artifacts(artifacts);
-        let runtime_step_id = RuntimeStepId::new(execution.step_id)
-            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-        let scope = StepScope::new(runtime_step_id, execution.scope);
-        let applied = self
-            .completed_steps
-            .apply_completed_step(commands, &scope, &completed_commands)
-            .map_err(|error| map_phase_application_error(&error));
-        let Some(applied) = reconcile_cancelled_operation(applied, cancellation)? else {
-            return Ok(CommandOutcome::Cancelled);
-        };
-        attachments.record_phase(
-            execution.report_step_id,
-            applied.summary().markdown(),
-            &completed.annotations,
-            applied.notices(),
-            masker,
-        )?;
-        *commands = applied.into_next_state();
-        Ok(CommandOutcome::from_termination(output.termination()))
+        Ok(outcome)
     }
 
     fn build_phase_command(
@@ -4669,9 +4684,16 @@ impl GithubJobExecutor {
                 limit,
             )
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            let bytes = endpoint
-                .copy_from(&request, &CancellationBridge(cancellation))
-                .map_err(map_execution_error)?;
+            let bytes = match endpoint.copy_from(&request, &CancellationBridge(cancellation)) {
+                Ok(bytes) => bytes,
+                Err(error)
+                    if *kind == CommandFileKind::StepSummary
+                        && error.kind() == ExecutionErrorKind::NotFound =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(map_execution_error(error)),
+            };
             if cancellation.is_cancelled() {
                 return Err(ExecutorAdapterError::new(
                     ExecutorAdapterErrorKind::Cancelled,
@@ -5190,7 +5212,7 @@ struct DecodedCommandFiles {
     artifacts: ArtifactDeclarationCommandFile,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ExecutionAttachments {
     by_step: BTreeMap<String, RetainedStepAttachments>,
     annotation_count: usize,
@@ -5295,7 +5317,7 @@ impl ExecutionAttachments {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct RetainedStepAttachments {
     summary: String,
     annotations: Vec<StepAnnotation>,
@@ -7124,10 +7146,12 @@ fn provider_failure_outcome(error: &ProviderError) -> ProviderFailureOutcome {
 mod tests {
     use std::{
         cell::Cell,
+        collections::BTreeSet,
         time::{Duration, Instant},
     };
 
-    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream};
+    use automata_ci_core::AttemptId;
+    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream, TargetPath};
     use automata_ci_expression_github::GithubValue;
     use automata_ci_github_runtime::{
         CommandFileDecoder, CommandFileKind, CommandFilePlatform, GithubCommandFileDecoder,
@@ -7136,7 +7160,7 @@ mod tests {
     use automata_ci_runner_runtime::{ExecutionCancellation, ExecutionCancellationReason};
 
     use super::{
-        ActionBudgetRejection, ActionExecutionBudget, CleanupCancellation,
+        ActionBudgetRejection, ActionExecutionBudget, AttemptPaths, CleanupCancellation,
         ExecutorAdapterErrorKind, GithubStatus, JobConclusion, MAX_ACTION_INVOCATIONS,
         MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS, MAX_COMPOSITE_DERIVED_BYTES,
         MAX_EVENT_DEPTH, SecretMasker, action_invocation_count_rejection,
@@ -7144,6 +7168,44 @@ mod tests {
         event_depth_rejection, github_value_from_json, parse_output_with_cancellation,
         reconcile_cancelled_operation, reconcile_post_operation, resource_exhausted,
     };
+
+    #[test]
+    fn command_file_paths_are_stable_for_recovery_and_isolated_by_phase_and_attempt() {
+        let runner_root = TargetPath::posix("/__automata").expect("runner root");
+        let workspace = TargetPath::posix("/__w/automata/automata").expect("workspace");
+        let attempt_id = AttemptId::new();
+        let first = AttemptPaths::new(&runner_root, attempt_id, &workspace).expect("attempt paths");
+        let recovered =
+            AttemptPaths::new(&runner_root, attempt_id, &workspace).expect("recovered paths");
+        let next_attempt = AttemptPaths::new(&runner_root, AttemptId::new(), &workspace)
+            .expect("next attempt paths");
+
+        let first_phase = phase_file_path_values(&first, 7);
+        let recovered_phase = phase_file_path_values(&recovered, 7);
+        let next_phase = phase_file_path_values(&first, 8);
+        let next_attempt_phase = phase_file_path_values(&next_attempt, 7);
+
+        assert_eq!(first_phase, recovered_phase);
+        assert_eq!(first_phase.iter().collect::<BTreeSet<_>>().len(), 7);
+        assert!(first_phase.iter().all(|path| !next_phase.contains(path)));
+        assert!(
+            first_phase
+                .iter()
+                .all(|path| !next_attempt_phase.contains(path))
+        );
+    }
+
+    fn phase_file_path_values(paths: &AttemptPaths, phase: u32) -> Vec<String> {
+        let files = paths.command_files(phase).expect("command file paths");
+        let mut values = files
+            .values
+            .iter()
+            .map(|(_, path)| path.as_str().to_owned())
+            .collect::<Vec<_>>();
+        values.push(files.artifacts.as_str().to_owned());
+        values.push(files.artifacts_list.as_str().to_owned());
+        values
+    }
 
     #[test]
     fn event_json_conversion_preserves_nested_types() {

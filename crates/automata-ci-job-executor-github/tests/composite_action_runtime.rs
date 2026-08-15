@@ -21,7 +21,8 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 
 use support::{
-    Fixture, PhaseResponse, SECRET, envelope, environment_map, prepared_node24_action, run_step,
+    Fixture, PhaseResponse, SECRET, assert_fresh_isolated_phase_files, envelope, environment_map,
+    prepared_node24_action, run_step,
 };
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -92,6 +93,17 @@ runs:
       run: printf '%s\n' "$INPUT_MESSAGE"
       shell: bash
 "#;
+
+const REPEATED_LOCAL_PARENT: &str = r"
+name: Repeated local parent
+runs:
+  using: composite
+  steps:
+    - id: first
+      uses: ./actions/child
+    - id: second
+      uses: ./actions/child
+";
 
 const POST_PARENT: &str = r"
 name: Post parent
@@ -295,6 +307,63 @@ async fn checked_out_composite_nests_local_and_repository_actions() {
         "/__w/automata/automata/actions/child"
     );
     assert!(repository["GITHUB_ACTION_PATH"].contains("/actions/action-"));
+}
+
+#[tokio::test]
+async fn nested_repeated_composite_occurrences_receive_fresh_phase_file_sets() {
+    let fixture = Fixture::new(
+        Vec::new(),
+        vec![
+            PhaseResponse::success()
+                .with_file(
+                    automata_ci_github_runtime::CommandFileKind::StepSummary,
+                    b"first child\n".to_vec(),
+                )
+                .with_artifacts_list_write(b"corrupt first list".to_vec()),
+            PhaseResponse::success()
+                .with_file(
+                    automata_ci_github_runtime::CommandFileKind::StepSummary,
+                    b"second child\n".to_vec(),
+                )
+                .with_artifacts_list_write(b"corrupt second list".to_vec()),
+        ],
+    );
+    {
+        let mut state = fixture.endpoint_state.lock().expect("endpoint lock");
+        state.files.insert(
+            "/__w/automata/automata/actions/parent/action.yaml".to_owned(),
+            REPEATED_LOCAL_PARENT.as_bytes().to_vec(),
+        );
+        state.files.insert(
+            "/__w/automata/automata/actions/child/action.yml".to_owned(),
+            CHILD_COMPOSITE.as_bytes().to_vec(),
+        );
+    }
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(
+            fixture.request(envelope(vec![local_step("parent", "./actions/parent")])),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect("repeated nested composite executes");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    assert_eq!(
+        result.steps()[0].summary_markdown(),
+        Some("first child\nsecond child\n")
+    );
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let phases = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/usr/bin/bash")
+        .collect::<Vec<_>>();
+    assert_eq!(phases.len(), 2);
+    assert_fresh_isolated_phase_files(&state, &phases);
 }
 
 #[tokio::test]
