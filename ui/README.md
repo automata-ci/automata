@@ -90,14 +90,14 @@ Node 24.19.0 baseline:
 
 | Metric | Baseline | Enforced floor | Headroom |
 | --- | ---: | ---: | ---: |
-| Statements | 93.99% | 93% | 0.99 points |
-| Branches | 85.29% | 84% | 1.29 points |
-| Functions | 97.18% | 96% | 1.18 points |
-| Lines | 94.00% | 93% | 1.00 point |
+| Statements | 94.02% | 93% | 1.02 points |
+| Branches | 85.18% | 84% | 1.18 points |
+| Functions | 97.27% | 96% | 1.27 points |
+| Lines | 94.07% | 93% | 1.07 points |
 
 Each floor is a whole-number percentage below the measured result and leaves at
-least 0.99 points of margin. Branches and functions use the next lower whole
-number because truncating those baselines would leave only 0.29 and 0.18 points
+least 1.02 points of margin. Branches and functions use the next lower whole
+number because truncating those baselines would leave only 0.18 and 0.27 points
 of margin. CI runs this threshold check; raise the floors after reviewed
 coverage improvements, and lower them only with a new reproducible baseline and
 an explicit justification. These aggregate floors are a regression guard, not

@@ -27,6 +27,9 @@ automata_set_target_tmpdir \
     die "Node.js 24.19.0 is required"
 [[ "$(npm --version)" == "${expected_npm_version}" ]] || \
     die "npm 11.17.0 is required"
+embedded_runtime_input="${repository_root}/ui/embedded-runtime"
+readonly embedded_runtime_input
+node "${script_directory}/verify-embedded-ui-runtime.mjs"
 renderer_input="$(automata_third_party_license_renderer_input "${repository_root}")"
 readonly renderer_input
 renderer_input_lock="$(automata_third_party_license_lock_path "${repository_root}")"
@@ -147,7 +150,9 @@ cargo fetch \
     --manifest-path "${renderer_manifest_input}" \
     --locked \
     --target wasm32-wasip2
-npm --prefix "${repository_root}/ui" ci \
-    --ignore-scripts
+npm --prefix "${embedded_runtime_input}" ci \
+    --omit=dev \
+    --ignore-scripts \
+    --no-audit
 
 printf 'Prepared locked Cargo and npm license sources\n'

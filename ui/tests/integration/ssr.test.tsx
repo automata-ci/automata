@@ -1241,6 +1241,77 @@ describe("hydration", () => {
     await act(async () => root?.unmount());
   });
 
+  it("revalidates live logs and retries rejected snapshots with bounded backoff", async () => {
+    if (jobLogRequest.page.kind !== "job-log") {
+      throw new Error("The job-log fixture is unavailable");
+    }
+    const snapshotHref = `${jobLogRequest.page.job.href}/snapshot`;
+    const responses = [
+      () =>
+        new Response(JSON.stringify(jobLogRequest), {
+          headers: {
+            "Content-Type": "application/json; charset=utf-8",
+            ETag: '"sha256-running"',
+          },
+        }),
+      () => new Response(null, { status: 304 }),
+      () =>
+        new Response(JSON.stringify(runDetailRequest), {
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        }),
+      () => new Response(null, { status: 503 }),
+    ];
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) => {
+        const response = responses.shift();
+        if (response === undefined) {
+          throw new Error("unexpected job-log snapshot request");
+        }
+        return response();
+      },
+    );
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    document.open();
+    document.write(renderPage(jobLogRequest));
+    document.close();
+    const parsedRequest = readRenderRequest(document);
+
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    await act(async () => {
+      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(snapshotHref);
+    const firstHeaders = fetchMock.mock.calls[0]?.[1]?.headers;
+    const revalidationHeaders = fetchMock.mock.calls[1]?.[1]?.headers;
+    expect(firstHeaders).toBeInstanceOf(Headers);
+    expect(revalidationHeaders).toBeInstanceOf(Headers);
+    expect((firstHeaders as Headers).get("If-None-Match")).toBeNull();
+    expect((revalidationHeaders as Headers).get("If-None-Match")).toBe(
+      '"sha256-running"',
+    );
+
+    await act(async () => vi.advanceTimersByTimeAsync(2_000));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(3_999));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await act(async () => vi.advanceTimersByTimeAsync(7_999));
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    await act(async () => root?.unmount());
+  });
+
   it.each([
     ["run list", runListRequest, "Workflow runs"],
     ["run detail", runDetailRequest, "Build and test release candidate"],
@@ -1265,6 +1336,86 @@ describe("hydration", () => {
 
       expect(errors).toEqual([]);
       expect(document.querySelector("h1")?.textContent).toBe(heading);
+
+      await act(async () => root?.unmount());
+    },
+  );
+
+  it.each([
+    [
+      "all jobs after an HTTP rejection",
+      "Re-run all jobs",
+      "entire_workflow",
+      () => new Response(null, { status: 503 }),
+    ],
+    [
+      "failed jobs after an invalid success response",
+      "Re-run failed jobs",
+      "failed_jobs_and_dependents",
+      () =>
+        new Response(JSON.stringify({ run_id: "not-a-run-uuid" }), {
+          headers: { "Content-Type": "application/json" },
+        }),
+    ],
+  ] as const)(
+    "recovers rerun controls for %s",
+    async (_case, buttonLabel, mode, response) => {
+      if (runDetailRequest.page.kind !== "run-detail") {
+        throw new Error("The run-detail fixture is unavailable");
+      }
+      const endpoint = `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/reruns`;
+      const request: RenderRequest = {
+        ...runDetailRequest,
+        page: {
+          ...runDetailRequest.page,
+          rerun: {
+            endpoint,
+            csrfToken: SHELL_CSRF_TOKEN,
+            failedJobsAvailable: true,
+          },
+        },
+      };
+      const operationId = "11111111-1111-4111-8111-111111111111";
+      const fetchMock = vi.fn(async () => response());
+      vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(operationId);
+      vi.stubGlobal("fetch", fetchMock);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      document.open();
+      document.write(renderPage(request));
+      document.close();
+      const parsedRequest = readRenderRequest(document);
+
+      let root: ReturnType<typeof hydrateRoot> | undefined;
+      await act(async () => {
+        root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
+      });
+      const button = [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          '[aria-label="Rerun controls"] button',
+        ),
+      ].find((candidate) => candidate.textContent === buttonLabel);
+      expect(button).toBeDefined();
+
+      await act(async () => {
+        button?.click();
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+          "x-automata-csrf-token": SHELL_CSRF_TOKEN,
+        },
+        body: JSON.stringify({
+          operation_id: operationId,
+          selection: { mode },
+        }),
+      });
+      expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+        "The rerun could not be started. Refresh and try again.",
+      );
+      expect(button?.disabled).toBe(false);
 
       await act(async () => root?.unmount());
     },
