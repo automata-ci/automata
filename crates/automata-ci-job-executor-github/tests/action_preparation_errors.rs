@@ -31,7 +31,6 @@ async fn public_and_arbitrary_action_fetches_never_receive_an_ambient_credential
     ));
     let preparer = ResolvedBundleActionPreparer::new(
         resolver,
-        blobs,
         Arc::new(NoRepositoryCredentials),
         Arc::new(GithubActionMetadataDecoder::default()),
         GithubConditionCompiler::default(),
@@ -85,7 +84,6 @@ async fn resolver_failures_map_to_their_sanitized_preparation_layer() {
     ] {
         let preparer = ResolvedBundleActionPreparer::new(
             Arc::new(FailingResolver(resolution)),
-            Arc::new(MemoryBlobStore::default()),
             Arc::new(NoRepositoryCredentials),
             Arc::new(GithubActionMetadataDecoder::default()),
             GithubConditionCompiler::default(),
@@ -117,7 +115,6 @@ fn preparer_rejects_incoherent_archive_transfer_limits_before_resolution() {
     let create = |limits, maximum_archive_bytes| {
         ResolvedBundleActionPreparer::new(
             Arc::new(FailingResolver(ActionResolveErrorKind::Internal)),
-            Arc::new(MemoryBlobStore::default()),
             Arc::new(NoRepositoryCredentials),
             Arc::new(GithubActionMetadataDecoder::default()),
             GithubConditionCompiler::default(),

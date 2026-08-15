@@ -80,6 +80,7 @@ async fn resolution_validates_then_publishes_one_content_addressed_archive() {
         .await
         .unwrap();
     assert_eq!(stored.descriptor(), first.archive());
+    assert_eq!(first.archive_bytes(), stored.bytes());
 }
 
 #[tokio::test]

@@ -10,7 +10,6 @@ use automata_ci_action_github::{
     GithubActionMetadata, MetadataDecodeErrorKind, MetadataKeyValue, MetadataScalar,
     MetadataScalarKind,
 };
-use automata_ci_blob::ImmutableBlobStore;
 use automata_ci_core::{ActionReference, StepId};
 use automata_ci_execution::{TargetPath, TargetPlatform};
 use automata_ci_scm::{RepositoryId, RevisionSpec};
@@ -237,11 +236,10 @@ impl fmt::Debug for CheckedOutLocalActionPreparer {
     }
 }
 
-/// Concrete composition of immutable action resolution, blob reads, credential
-/// lookup, GitHub metadata decoding, and condition compilation.
+/// Concrete composition of immutable action resolution, credential lookup,
+/// GitHub metadata decoding, and condition compilation.
 pub struct ResolvedBundleActionPreparer {
     resolver: Arc<dyn ActionResolver>,
-    blobs: Arc<dyn ImmutableBlobStore>,
     credentials: Arc<dyn RepositoryCredentialPort>,
     decoder: Arc<dyn ActionMetadataDecoder>,
     conditions: GithubConditionCompiler,
@@ -252,8 +250,9 @@ pub struct ResolvedBundleActionPreparer {
 impl ResolvedBundleActionPreparer {
     /// Creates a repository-action preparation adapter.
     ///
-    /// `maximum_archive_bytes` must not exceed the provider-neutral endpoint
-    /// copy ceiling; larger bundles require a future streaming copy capability.
+    /// `maximum_archive_bytes` is the materialization ceiling and must not
+    /// exceed the provider-neutral endpoint copy limit. The resolver's
+    /// compressed-input ceiling must fit within it.
     ///
     /// # Errors
     ///
@@ -261,7 +260,6 @@ impl ResolvedBundleActionPreparer {
     /// the resolver's compressed-input ceiling exceeds that read bound.
     pub fn new(
         resolver: Arc<dyn ActionResolver>,
-        blobs: Arc<dyn ImmutableBlobStore>,
         credentials: Arc<dyn RepositoryCredentialPort>,
         decoder: Arc<dyn ActionMetadataDecoder>,
         conditions: GithubConditionCompiler,
@@ -278,7 +276,6 @@ impl ResolvedBundleActionPreparer {
         }
         Ok(Self {
             resolver,
-            blobs,
             credentials,
             decoder,
             conditions,
@@ -293,7 +290,6 @@ impl fmt::Debug for ResolvedBundleActionPreparer {
         formatter
             .debug_struct("ResolvedBundleActionPreparer")
             .field("resolver", &self.resolver)
-            .field("blobs", &self.blobs)
             .field("credentials", &self.credentials)
             .field("decoder", &self.decoder)
             .field("conditions", &self.conditions)
@@ -375,15 +371,10 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
             .decoder
             .decode(bundle.definition())
             .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Metadata))?;
-        let archive = self
-            .blobs
-            .get_verified(bundle.archive(), self.maximum_archive_bytes)
-            .await
-            .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Content))?;
         prepare_metadata(
             &metadata,
             bundle.archive().digest(),
-            archive.into_bytes(),
+            bundle.archive_bytes().clone(),
             bundle.subpath().as_str(),
             &self.conditions,
         )
