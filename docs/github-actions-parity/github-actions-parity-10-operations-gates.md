@@ -37,10 +37,11 @@ definition of done.
 
 Current `upstream/main` already ships bounded Prometheus/OpenMetrics endpoints,
 RED/USE families across the control plane, Results, storage, and runners, a
-logical-workflow cardinality manifest, checked recording/alert rules, dashboards, and
-runbooks. Latest main also records sanitized runner lease-request failure stages
-in logs. This package extends that base; it does not rebuild observability from
-zero, and the closed lease-stage signal still needs a bounded metric family.
+logical-workflow cardinality manifest, and protocol-level scrape verification.
+Collector configuration, rules, dashboards, and runbooks belong to the
+environment operating Automata. Latest main also records sanitized runner
+lease-request failure stages in logs. This package extends that product base;
+the closed lease-stage signal still needs a bounded metric family.
 
 Tasks:
 
@@ -50,13 +51,13 @@ Tasks:
   tombstones, and repair.
 - [ ] Define notification events and deliver webhook/email adapters through an
   outbox with bounded retry and no secret-bearing bodies.
-- [x] Maintain the existing bounded scrape contract, RED/USE families,
-  cardinality manifest, recording/alert rules, dashboards, and runbooks.
+- [x] Maintain the existing bounded scrape contract, RED/USE families, and
+  cardinality manifest.
 - [ ] Complete remaining RED/USE coverage for ingress, compilation, scheduling,
   leases, execution, Results, stores, object storage, and provider APIs.
 - [ ] Add a closed, bounded lease-request-stage-by-failure metric family for the
-  sanitized stages already logged; update the cardinality manifest, rules,
-  dashboards, and exact exposition tests together.
+  sanitized stages already logged; update the cardinality manifest and exact
+  exposition tests together.
 - [ ] Extend existing cardinality budgets as families are added and continue to
   prohibit unbounded IDs or user-controlled values in metric labels.
 - [ ] Extend operator views for stuck leases, blocked concurrency, approval

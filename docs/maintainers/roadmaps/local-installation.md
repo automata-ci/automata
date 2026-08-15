@@ -183,8 +183,7 @@ onboarding path:
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
 | `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
-| `deploy/dev/compose.yaml` | Pinned PostgreSQL and object-storage development dependencies with health checks | It does not compose the product control plane and runner |
-| Control-plane deployment guide and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
+| Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
 | Workflow service | Credential requirement discovery, admission, and orchestration boundaries | It needs local provenance as an additional source authority |
 | Runner and runner journal | Enrollment/redeem, mTLS protocol, durable slots, result delivery, `max_parallel_jobs` | There is no evaluation-only Docker Engine job provider |
@@ -231,18 +230,18 @@ The following designs are explicitly rejected:
 - one runner identity per requested job slot in the default topology;
 - a second durable workflow-secret provider or a second permanent encrypted
   vault containing the same values; and
-- generated Compose topology that unnecessarily copies the checked-in
-  development dependency definitions.
+- generated Compose topology persisted as repository infrastructure instead of
+  being owned by the product lifecycle adapter.
 
 ## Accepted local architecture
 
 ### Topology
 
-Every long-running service runs in one deterministic Compose project. The
-checked-in local Compose definition extends or reuses the existing dependency
-definition and is itself testable. Runtime rendering is limited to a small,
-value-free environment/configuration surface; it does not generate an
-unreviewable topology from scratch.
+Every long-running service runs in one deterministic Compose project generated
+and reconciled by the typed product lifecycle adapter. The source repository
+does not ship a standalone Compose stack. Runtime rendering is limited to a
+small, value-free environment/configuration surface and is covered through the
+adapter contract rather than a second operator-owned topology.
 
 ```text
 local Git worktree
@@ -336,7 +335,7 @@ PostgreSQL, object, runner, or desired-spec data look foreign.
 
 #### Replaceable topology and `down`
 
-The canonical desired spec renders a checked-in Compose configuration. Its
+The canonical desired spec renders a product-owned Compose configuration. Its
 containers, networks, initialization helpers, and generated-config volumes are
 replaceable and carry the exact plan digest plus their role in the managed
 namespace. Reconciliation refuses a mixed-digest or unknown-role topology,
@@ -787,7 +786,7 @@ signed-GitHub admission or create a GitHub Check.
 
 ### 3C. Arch secretless vertical slice
 
-Extend/reuse the checked-in dependency Compose definition with the control
+Have the product lifecycle adapter compose the external dependencies, control
 plane, initialization service, and one ordinary runner. Use existing enrollment
 issuance/redeem and configure `max_parallel_jobs=N`. Wire `LocalDocker` and
 `LocalSnapshot` through the production pipeline. Expose the smallest complete
@@ -999,7 +998,9 @@ rollback pass.
 
 ### 15. Helm/Kubernetes deployment
 
-Start with one control-plane replica, external PostgreSQL and object storage,
+Deployment assets belong in an independently owned infrastructure repository,
+not this product source tree. That repository can start with one control-plane
+replica, external PostgreSQL and object storage,
 existing secret references, ingress, runner mTLS, probes, metrics,
 NetworkPolicy, and explicit migration behavior. Kubernetes runners retain an
 independent experimental gate; the chart never mounts the local engine socket.
@@ -1010,8 +1011,9 @@ pass.
 
 ### 16. Cloud references
 
-Publish one provider-neutral validated topology, then one infrastructure PR per
-cloud. Start with AWS because PostgreSQL and S3 match existing storage
+Publish these from an independently owned infrastructure repository: one
+provider-neutral validated topology, then one infrastructure change per cloud.
+Start with AWS because PostgreSQL and S3 match existing storage
 boundaries. GCP and Azure require a proven S3-compatible store or a separately
 implemented native object-store adapter. Terraform/OpenTofu follows a real
 manual deployment.
@@ -1030,8 +1032,6 @@ ownership is:
 ```text
 docs/local/                    quickstart, lifecycle, worktree source, secrets
 docs/integrations/             optional GitHub connection and provider guides
-docs/deploy/                   chooser, Compose, systemd, Kubernetes, cloud
-docs/operations/               backup, restore, upgrade, observability
 docs/platforms/                advanced native execution-host guides
 docs/reference/                configuration and command reference
 docs/maintainers/roadmaps/     plans, audits, and conformance work
@@ -1042,12 +1042,9 @@ docs/maintainers/roadmaps/     plans, audits, and conformance work
 | Root `README.md` | Make the tested local flow its first procedure only after checkpoint 9 publishes qualified artifacts |
 | `docs/README.md` | Keep as the stable index and update categories when destinations exist |
 | `docs/getting-started.md` | Keep as a short chooser; move exact local steps to `docs/local/` |
-| `docs/deployment.md` | Keep current manual development assembly truthful, then convert it into the deployment chooser |
 | `docs/development.md` | Retain contributor build/test material; remove duplicated reader onboarding after publication |
-| `deploy/dev/README.md` | Retain contributor dependency usage; share its Compose definitions with local product composition where practical |
-| Runner host and platform guides | Retain as hardened/advanced execution references, not the portable quickstart |
 | Authentication and provider guides | Retain operator detail; move local credential custody to `docs/local/` and App setup to `docs/integrations/` |
-| Observability, inventory, and runbooks | Preserve executable operational detail under `docs/operations/` navigation |
+| Observability | Retain the product metrics contract; collector configuration and runbooks belong to infrastructure owners |
 | Compatibility and conformance docs | Update only from executable gates, never from roadmap intent |
 | Architecture, ADR, security, governance, and release docs | Preserve as reference/maintainer material and repair links during migration |
 | Parity plans and dated audits | Move under maintainer ownership when touched; archive only after remaining decisions live elsewhere |

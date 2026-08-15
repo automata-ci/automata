@@ -57,9 +57,3 @@ updates:
     ignore:
       # Base refreshes require the trusted candidate/lock/attestation workflow.
       - dependency-name: library/ubuntu
-
-  - package-ecosystem: docker-compose
-    directory: /deploy/dev
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 2

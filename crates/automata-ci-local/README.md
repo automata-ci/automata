@@ -26,7 +26,7 @@ the existing control plane. A separate `--installation` name is the explicit
 way to request another deployment/capacity domain.
 
 No product command creates, adopts, or deletes an engine resource yet. Desired
-specification persistence, the checked-in Compose topology, workers, workflow
+specification persistence, product-owned Compose rendering, workers, workflow
 execution, and GitHub connection are added only with their own tested
 contracts. There is still no host installation manifest, mirrored resource
 inventory, lifecycle state machine, or secret value in this crate.

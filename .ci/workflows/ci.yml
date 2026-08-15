@@ -67,7 +67,6 @@ jobs:
             scripts/ci/lib/*.sh \
             scripts/ci/tests/*.sh \
             scripts/dev/*.sh \
-            deploy/observability/inventory/*.sh \
             images/github-hosted-ubuntu-24.04-x64/*.sh \
             scripts/ui/*.sh \
             scripts/ui/tests/*.sh \
@@ -76,9 +75,6 @@ jobs:
           ./scripts/ui/tests/regenerate-renderer-atomicity.test.sh
           ./scripts/ui/tests/renderer-preflight.test.sh
           ./scripts/ui/tests/renderer-provenance.test.sh
-          ./deploy/observability/inventory/inventory-scratch.test.sh
-          ./scripts/dev/git-bridge-firewall.test.sh
-          ./scripts/dev/results-firewall.test.sh
           ./scripts/dev/git-http-server.test.sh
           ./scripts/ci/tests/benchmark-postgres-tests.test.sh
           python3 scripts/ci/tests/psql-test-database.test.py
@@ -92,12 +88,7 @@ jobs:
           ./scripts/ci/tests/service-proxy-image.test.sh
           python3 scripts/ci/tests/service-proxy-publication.test.py
 
-      - name: Verify Prometheus metrics contract
-        run: |
-          prometheus_bin="$(./scripts/ci/prepare-prometheus-tools.sh)"
-          PATH="$prometheus_bin:$PATH" ./scripts/ci/verify-metrics.sh
-
-      - name: Verify native Prometheus metrics contract
+      - name: Verify Prometheus metrics protocol contract
         run: |
           prometheus_bin="$(./scripts/ci/prepare-prometheus-tools.sh)"
           PATH="$prometheus_bin:$PATH" ./scripts/ci/verify-native-metrics.sh

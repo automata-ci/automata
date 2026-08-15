@@ -18,9 +18,7 @@ The bootstrap build exposes two service modes:
   PostgreSQL, S3-compatible storage, Results configuration, and runner mTLS
   identity are valid.
 
-For a copyable local server walkthrough, use
-[control-plane setup](https://github.com/automata-ci/automata/blob/main/docs/deployment.md).
-This page is the configuration reference.
+This page is the configuration reference for the complete server.
 
 ## Server listeners
 
@@ -225,9 +223,8 @@ automata server \
 ```
 
 This mode is for a firewall-constrained development bridge. It is not a
-production TLS substitute. Follow the
-[runner-host guide](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md)
-before applying the firewall policy.
+production TLS substitute. The operator must install and verify an independent
+host firewall policy before enabling the listener.
 
 ## Workflow admission and autonomous progress
 

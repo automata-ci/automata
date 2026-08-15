@@ -62,8 +62,8 @@ import sys
 repository_root = pathlib.Path(sys.argv[1])
 context = pathlib.Path(sys.argv[2]).resolve()
 containerfiles = (
-    repository_root / "deploy/container/automata.Containerfile",
-    repository_root / "deploy/container/automata-runner.Containerfile",
+    repository_root / "images/automata.Containerfile",
+    repository_root / "images/automata-runner.Containerfile",
 )
 
 for containerfile in containerfiles:

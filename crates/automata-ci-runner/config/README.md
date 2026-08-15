@@ -97,10 +97,9 @@ or kubelet verification.
 > remain planned work; account for that operational gap before a production
 > deployment.
 
-Start with the
-[control-plane setup](https://github.com/automata-ci/automata/blob/main/docs/deployment.md),
-then provision a Linux runner host with the
-[Arch Linux guide](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md).
+Configure the control plane with the
+[`automata` reference](https://github.com/automata-ci/automata/blob/main/crates/automata-ci/README.md),
+then provision the runner host according to the requirements below.
 
 ## Windows Hyper-V-isolated container example
 
@@ -218,8 +217,7 @@ layout requires `state.podman` to be exactly
 Podman state, sibling state, bind mounts, and child mounts fail closed. Mount
 each runtime before starting its runner, give it exact mode 0700 and the runner
 UID/GID, include finite `size=` and `nr_inodes=` operator bounds, and use the
-kernel's exact `noswap` option. The checked-in systemd host shape provisions
-three separate 20 GiB mounts; the equivalent instance-one mount is:
+kernel's exact `noswap` option. An equivalent instance-one mount is:
 
 ```console
 sudo install -d -m 0700 -o automata-runner-1 -g automata-runner-1 \
@@ -228,11 +226,10 @@ sudo mount -t tmpfs automata-runner-runtime-1 /run/automata_runner_1 \
   -o nodev,nosuid,noswap,size=20G,nr_inodes=349525,mode=0700,uid=1001,gid=1001
 ```
 
-Use the checked-in [three-process systemd units](../../../deploy/runner-host/README.md)
-so all mounts and services are boot-managed and correctly ordered; the manual
-command is only a development illustration. Do not bind any runtime tmpfs
-elsewhere, share it between processes, or mount anything below it. Linux before
-6.4 cannot provide this contract because tmpfs did not support `noswap`.
+The service manager must create and order each mount before its runner starts;
+the manual command is only a development illustration. Do not bind any runtime
+tmpfs elsewhere, share it between processes, or mount anything below it. Linux
+before 6.4 cannot provide this contract because tmpfs did not support `noswap`.
 
 ## 1. Check the host
 
@@ -432,14 +429,12 @@ instance path on trusted, non-group-writable ancestors, but do not make the TLS
 directory root-owned or group-writable. Never enroll as root or as an operator
 account and then copy the private key into place.
 
-Follow the host guide's
-[three-account dynamic enrollment procedure](../../../deploy/runner-host/README.md#dynamically-enroll-three-independent-identities)
-for all three configurations. It mints a separate one-use token for each
-process and starts the services only after every enrollment succeeds. If an
-enrollment is interrupted, repeat the same command as the same account with
-the same server, configuration, and runner name and with standard input from
-`/dev/null`. The private stage retains the original token and key; do not mint
-a replacement token or delete the stage.
+Mint a separate one-use token and run `automata-runner enroll` as the exact
+service account for each configuration. Start the services only after every
+enrollment succeeds. If an enrollment is interrupted, repeat the same command
+as the same account with the same server, configuration, and runner name and
+with standard input from `/dev/null`. The private stage retains the original
+token and key; do not mint a replacement token or delete the stage.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service
@@ -487,13 +482,12 @@ GitHub origins and must leave `map_github_server_to_host_gateway` disabled.
 
 ## 4. Start the runner
 
-After all three identities are enrolled, start and verify the checked-in
-systemd services as described in the
-[three-process host guide](../../../deploy/runner-host/README.md#start-and-observe-the-trio).
-Its `automata-runner run` process uses the exact service account and installed
-configuration that owned enrollment. The checked-in JSON uses conventional
-service paths; do not start it under a different account or before all of its
-host-path and mount assumptions are true.
+After all three identities are enrolled, configure the host service manager to
+run `automata-runner run` once per configuration. Each process must use the
+exact service account and installed configuration that owned enrollment. The
+checked-in JSON uses conventional service paths; do not start it under a
+different account or before all of its host-path and mount assumptions are
+true.
 
 Public source repositories and actions use anonymous access. When the exact
 GitHub provider registry is configured, a materialized Standard job may instead
