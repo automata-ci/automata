@@ -32,8 +32,8 @@ pub use model::{
     OrphanClaim, OrphanDelivery, OrphanRecord, OutboundOperationCursor, OutboundOperationSequence,
     PendingDeliveryTimestamps, ProviderFailureKind, ProviderFailureOutcome, ProviderName,
     ProviderOperation, ProviderOperationKind, ProviderOperationOutcome, RuntimeAuthorityContentRef,
-    SandboxHandle, SandboxIdentity, SessionBinding, SessionSnapshot, SlotSnapshot,
-    TerminalResultRecord,
+    RuntimeAuthorityDeliveryRecord, SandboxHandle, SandboxIdentity, SessionBinding,
+    SessionSnapshot, SlotSnapshot, TerminalResultRecord,
 };
 pub use observer::{
     JournalMutationDomain, JournalMutationObservation, JournalMutationOutcome, JournalObserver,
@@ -44,7 +44,7 @@ pub use observer::{
 ///
 /// Obsolete or future schemas fail closed rather than being interpreted by
 /// compatibility readers.
-pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 1;
+pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 2;
 
 /// Largest delivery enqueue timestamp accepted by the durable journal.
 ///

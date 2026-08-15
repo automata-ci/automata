@@ -7,7 +7,9 @@ use automata_ci_core::{
     JobSource, Lease, LeaseGuard, LeaseId, LogAck, LogChannel, LogFrame, LogSequence, LogStreamId,
     OperatingSystem, OperationId, PermissionLevel, RunId, RunValueTemplates, RunnerCapabilities,
     RunnerId, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
-    SandboxCapabilities, Sha256Digest, ShellTemplate, StepId, StepIr, StepResult, UnixMillis,
+    SandboxCapabilities, Sha256Digest, ShellTemplate, StepId, StepIr, StepResult,
+    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis,
     ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
@@ -107,7 +109,30 @@ fn job_envelope_with_profile(
         vec![step],
     )
     .with_authority_profile(authority_profile)
-    .with_permission_request(permission_request);
+    .with_permission_request(permission_request)
+    .with_trust_snapshot(
+        TrustPolicy::current()
+            .evaluate(
+                TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                    .with_original_actor(
+                        TrustActorEvidence::new(
+                            "actor-1",
+                            TrustActorKind::User,
+                            TrustAutomationKind::None,
+                        )
+                        .expect("actor evidence"),
+                    )
+                    .with_repositories(
+                        TrustRepositoryEvidence::new("42", "7").expect("source repository"),
+                        TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+                    )
+                    .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                    .with_revisions("source-sha", "target-sha", "execution-sha")
+                    .with_fork(false)
+                    .with_token_recursion(TrustTokenRecursion::Suppressed),
+            )
+            .expect("trusted snapshot"),
+    );
     JobIrEnvelope::new(
         WorkflowId::new(),
         JobSource::new(
@@ -171,9 +196,9 @@ fn authority_bundle_emptiness_must_match_the_immutable_job_profile() {
         JobRuntimeAuthorities::new(vec![authority], &credential_free, &lease),
         Err(automata_ci_protocol::RuntimeAuthorityError::AuthorityProfileMismatch)
     ));
-    let empty = JobRuntimeAuthorities::new(Vec::new(), &credential_free, &lease)
+    JobRuntimeAuthorities::new(Vec::new(), &credential_free, &lease)
         .expect("credential-free empty authority bundle");
-    let offer = LeaseOffer::new(command_header(), slot(), lease, credential_free, empty);
+    let offer = LeaseOffer::new(command_header(), slot(), lease, credential_free);
     ValidatedServerToRunner::new(
         ServerToRunner::LeaseOffer(Box::new(offer)),
         &ProtocolLimits::default(),
@@ -199,23 +224,7 @@ fn lease_offer(
     lease: Lease,
     job: JobIrEnvelope,
 ) -> LeaseOffer {
-    let authority = JobRuntimeAuthority::new(
-        RuntimeAuthorityName::new("github-actions-results").expect("valid authority name"),
-        job.job().run_id(),
-        job.job().job_id(),
-        lease.attempt_id(),
-        lease.fencing_token(),
-        RuntimeAuthorityEndpoint::new("https://results.example.test/")
-            .expect("valid authority endpoint"),
-        RuntimeAuthorityCredential::new("header.payload.signature")
-            .expect("valid authority credential"),
-        UnixMillis::new(10),
-        UnixMillis::new(3_600_010),
-    )
-    .expect("valid runtime authority");
-    let authorities =
-        JobRuntimeAuthorities::new(vec![authority], &job, &lease).expect("valid authority bundle");
-    LeaseOffer::new(header, slot, lease, job, authorities)
+    LeaseOffer::new(header, slot, lease, job)
 }
 
 fn result(attempt_id: AttemptId) -> JobResult {
@@ -515,14 +524,18 @@ fn nested_job_and_result_maps_obey_the_configured_budget() {
     });
     let job: ServerToRunner =
         serde_json::from_value(job).expect("decode oversized map fixture structurally");
-    assert!(matches!(
-        ValidatedServerToRunner::new(job, &limits),
-        Err(MessageValidationError::CollectionTooLarge {
-            field: "job environment",
-            length: 2,
-            maximum: 1
-        })
-    ));
+    let job_error = ValidatedServerToRunner::new(job, &limits).expect_err("oversized job map");
+    assert!(
+        matches!(
+            job_error,
+            MessageValidationError::CollectionTooLarge {
+                field: "job environment",
+                length: 2,
+                maximum: 1
+            }
+        ),
+        "unexpected oversized job error: {job_error:?}"
+    );
 
     let result_message =
         RunnerToServer::JobResult(JobResultMessage::new(header(), guard(), result(attempt_id)));

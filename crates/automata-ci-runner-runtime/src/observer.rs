@@ -15,6 +15,10 @@ pub enum RuntimeExchangeKind {
     LeasePoll,
     /// Lease acceptance or rejection delivery.
     LeaseResponse,
+    /// Post-accept runtime-authority request.
+    RuntimeAuthorityRequest,
+    /// Protected authority adoption acknowledgement.
+    RuntimeAuthorityAck,
     /// Active-lease heartbeat and renewal.
     Heartbeat,
     /// Non-terminal job lifecycle publication.
@@ -33,6 +37,8 @@ impl RuntimeExchangeKind {
             RunnerToServer::Hello(_) => Self::Handshake,
             RunnerToServer::LeaseRequest(_) => Self::LeasePoll,
             RunnerToServer::LeaseResponse(_) => Self::LeaseResponse,
+            RunnerToServer::RuntimeAuthorityRequest(_) => Self::RuntimeAuthorityRequest,
+            RunnerToServer::RuntimeAuthorityAck(_) => Self::RuntimeAuthorityAck,
             RunnerToServer::Heartbeat(_) => Self::Heartbeat,
             RunnerToServer::JobState(_) => Self::JobState,
             RunnerToServer::JobResult(_) => Self::JobResult,

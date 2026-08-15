@@ -11,11 +11,12 @@ use automata_ci_core::{
     UnixMillis,
 };
 use automata_ci_protocol::{
-    CancelJob, CommandAck, ErrorMessage, HandshakeErrorCode, JobRuntimeAuthorities,
-    LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason, LeaseRequest,
-    LeaseResponse, LogBatch, MessageHeader, NegotiatedSession, OperationAck, RemoteErrorCode,
-    RunnerHello, RunnerSlotOrdinal, RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerHello,
-    ServerTiming, ServerToRunner, SessionDisposition, SessionResume,
+    CancelJob, CommandAck, ErrorMessage, HandshakeErrorCode, INITIAL_RUNTIME_AUTHORITY_GENERATION,
+    JobRuntimeAuthorities, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason,
+    LeaseRequest, LeaseResponse, LogBatch, MessageHeader, NegotiatedSession, OperationAck,
+    RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck,
+    RuntimeAuthorityDeliveryBinding, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
+    ServerHello, ServerTiming, ServerToRunner, SessionDisposition, SessionResume,
 };
 use automata_ci_protocol_protobuf::{
     decode_job_ir, decode_runner_frame, decode_runtime_authorities, encode_job_ir,
@@ -25,8 +26,8 @@ use automata_ci_runner_journal::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand, JobIrContentRef,
     JournalContentRetainSet, JournalInvariantError, LeaseOfferRecord, LeaseOfferStatus,
     LeasePollCheckpoint, LogSegmentAcknowledgement, ProviderOperationKind, RunnerJournal,
-    RuntimeAuthorityContentRef, SessionBinding as JournalSessionBinding, SlotSnapshot,
-    TerminalResultRecord,
+    RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
+    SessionBinding as JournalSessionBinding, SlotSnapshot, TerminalResultRecord,
 };
 use automata_ci_runner_spool::{ContentKind, DurableContentStore};
 use automata_ci_runner_transport::PreparedRequest;
@@ -755,31 +756,13 @@ impl RunnerSessionSupervisor {
         }
         let encoded_job = encode_job_ir(offer.job(), self.inner.config.protocol_limits())
             .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
-        let authorities = offer
-            .runtime_authorities()
-            .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
-        let encoded_authorities = Zeroizing::new(
-            encode_runtime_authorities(
-                authorities,
-                offer.job(),
-                offer.lease(),
-                self.inner.config.protocol_limits(),
-            )
-            .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?,
-        );
-        let (durable, expected_job_ir, expected_authorities) = self.publish_lease_offer_content(
-            session,
-            offer,
-            command,
-            &encoded_job,
-            &encoded_authorities,
-        )?;
+        let (durable, expected_job_ir) =
+            self.publish_lease_offer_content(session, offer, command, &encoded_job)?;
         // An active idempotent replay must still bind to these exact bytes. A
         // concurrently released applied replay has no remaining slot to bind.
         match durable.slot(offer.slot()) {
             Some(slot)
                 if slot.offer().job_ir() == &expected_job_ir
-                    && slot.offer().runtime_authorities() == &expected_authorities
                     && slot.offer().managed_secret_bindings()
                         == offer.managed_secret_bindings() => {}
             None if record_plan == LeaseOfferRecordPlan::VerifyAppliedReplay => {}
@@ -802,15 +785,8 @@ impl RunnerSessionSupervisor {
         offer: &LeaseOffer,
         command: DurableCommand,
         encoded_job: &[u8],
-        encoded_authorities: &[u8],
-    ) -> Result<
-        (
-            automata_ci_runner_journal::JournalSnapshot,
-            JobIrContentRef,
-            RuntimeAuthorityContentRef,
-        ),
-        RunnerRuntimeError,
-    > {
+    ) -> Result<(automata_ci_runner_journal::JournalSnapshot, JobIrContentRef), RunnerRuntimeError>
+    {
         self.inner.content_operations.publish_reclaiming_capacity(
             self.inner.ports.journal.as_ref(),
             self.inner.ports.spool.as_ref(),
@@ -819,61 +795,38 @@ impl RunnerSessionSupervisor {
                     .inner
                     .ports
                     .spool
-                    .persist(ContentKind::JobIr, encoded_job)?;
-                // Both protected objects are payload-first durable before one
-                // journal mutation adopts their exact identities. Nested
-                // publications retain both fences until that atomic semantic
-                // commit succeeds.
+                    .persist(ContentKind::JobIr, encoded_job)
+                    .map_err(RunnerRuntimeError::from)?;
                 let committed = job_publication.commit_with(|job_content| {
-                    let authority_publication = self
-                        .inner
-                        .ports
-                        .spool
-                        .persist(ContentKind::RuntimeAuthority, encoded_authorities)
-                        .map_err(RunnerRuntimeError::Spool)?;
-                    let authority_commit = authority_publication.commit_with(|authority_content| {
-                        let job_ir = JobIrContentRef::new(
-                            session.negotiated.selected_job_ir(),
-                            job_content.clone(),
-                        )
-                        .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
-                        let runtime_authorities =
-                            RuntimeAuthorityContentRef::new(authority_content.clone())
-                                .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
-                        let mut record = LeaseOfferRecord::new(
-                            offer.slot(),
-                            offer.lease().clone(),
-                            job_ir.clone(),
-                            runtime_authorities.clone(),
-                            command,
-                        )
-                        .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
-                        if let Some(overlay) = offer.managed_secret_bindings() {
-                            record = record
-                                .with_managed_secret_bindings(overlay.clone())
-                                .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
-                        }
-                        self.inner
-                            .ports
-                            .journal
-                            .record_lease_offer(offer.header().session_id(), record)
-                            .map(|snapshot| (snapshot, job_ir, runtime_authorities))
-                    });
-                    match authority_commit {
-                        Ok(committed) => Ok(committed),
-                        Err(failure) => {
-                            let (error, publication) = failure.into_parts();
-                            publication.abort();
-                            Err(RunnerRuntimeError::Journal(error))
-                        }
+                    let job_ir = JobIrContentRef::new(
+                        session.negotiated.selected_job_ir(),
+                        job_content.clone(),
+                    )
+                    .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
+                    let mut record = LeaseOfferRecord::new(
+                        offer.slot(),
+                        offer.lease().clone(),
+                        job_ir.clone(),
+                        command,
+                    )
+                    .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
+                    if let Some(overlay) = offer.managed_secret_bindings() {
+                        record = record
+                            .with_managed_secret_bindings(overlay.clone())
+                            .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
                     }
+                    self.inner
+                        .ports
+                        .journal
+                        .record_lease_offer(offer.header().session_id(), record)
+                        .map(|snapshot| (snapshot, job_ir))
                 });
                 match committed {
-                    Ok(committed) => Ok(committed),
+                    Ok(committed) => Ok::<_, RunnerRuntimeError>(committed),
                     Err(failure) => {
                         let (error, publication) = failure.into_parts();
                         publication.abort();
-                        Err(error)
+                        Err(error.into())
                     }
                 }
             },
@@ -1100,12 +1053,7 @@ impl RunnerSessionSupervisor {
         cancellation: CancellationToken,
     ) -> Result<(), RunnerRuntimeError> {
         let job = self.load_job(durable)?;
-        let runtime_authorities = self.load_runtime_authorities(durable, &job)?;
-        let admission = if self.runtime_authorities_are_live(session, &runtime_authorities) {
-            self.admit_exact_environment(&job)
-        } else {
-            Err(AdmissionRejection::InvalidJob)
-        };
+        let admission = self.admit_exact_environment(&job);
         match admission {
             Ok(_) => {
                 self.inner.ports.journal.accept_lease(
@@ -1247,6 +1195,282 @@ impl RunnerSessionSupervisor {
         Ok(())
     }
 
+    async fn ensure_runtime_authority_delivery(
+        &self,
+        session: RuntimeSession,
+        durable: &SlotSnapshot,
+        cancellation: CancellationToken,
+    ) -> Result<automata_ci_runner_journal::JournalSnapshot, RunnerRuntimeError> {
+        if durable.cancellation().is_some() {
+            return self.inner.ports.journal.snapshot().map_err(Into::into);
+        }
+        let job = self.load_job(durable)?;
+        let binding = RuntimeAuthorityDeliveryBinding::new(
+            durable.offer().lease().attempt_id(),
+            durable.slot(),
+            durable.offer().lease().guard(),
+            durable.offer().command().operation_id(),
+            durable.offer().command().sequence(),
+            durable.offer().job_ir().content().sha256(),
+            INITIAL_RUNTIME_AUTHORITY_GENERATION,
+        );
+        if durable.runtime_authority_delivery().is_none() {
+            self.request_and_persist_runtime_authority_delivery(
+                session,
+                durable,
+                binding,
+                &job,
+                cancellation.clone(),
+            )
+            .await?;
+        }
+        let snapshot = self.inner.ports.journal.snapshot()?;
+        let slot = snapshot
+            .slot(durable.slot())
+            .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
+        if slot.cancellation().is_some() {
+            return Ok(snapshot);
+        }
+        let delivery = slot
+            .runtime_authority_delivery()
+            .cloned()
+            .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
+        if !delivery.is_acknowledged() {
+            if !self
+                .send_runtime_authority_ack(session, durable.slot(), &delivery, cancellation)
+                .await?
+            {
+                return self.inner.ports.journal.snapshot().map_err(Into::into);
+            }
+            self.inner
+                .ports
+                .journal
+                .acknowledge_runtime_authority_delivery(
+                    session.negotiated.session_id(),
+                    durable.slot(),
+                    durable.offer().lease().guard(),
+                    delivery.binding().generation(),
+                    delivery.bundle_digest(),
+                    delivery.acknowledgement_operation_id(),
+                )?;
+        }
+        self.inner.ports.journal.snapshot().map_err(Into::into)
+    }
+
+    async fn request_and_persist_runtime_authority_delivery(
+        &self,
+        session: RuntimeSession,
+        durable: &SlotSnapshot,
+        binding: RuntimeAuthorityDeliveryBinding,
+        job: &JobIrEnvelope,
+        cancellation: CancellationToken,
+    ) -> Result<(), RunnerRuntimeError> {
+        let request_operation_id = self.stable_runtime_authority_operation_id(
+            durable,
+            StableIdDomain::RuntimeAuthorityRequest,
+        );
+        let acknowledgement_operation_id = self.stable_runtime_authority_operation_id(
+            durable,
+            StableIdDomain::RuntimeAuthorityAcknowledgement,
+        );
+        let request = RuntimeAuthorityRequest::new(
+            Self::request_header(session, request_operation_id),
+            binding,
+        );
+        let prepared = PreparedRequest::for_session(
+            RunnerToServer::RuntimeAuthorityRequest(request),
+            session.negotiated,
+            self.inner.config.protocol_limits(),
+        )?;
+        loop {
+            let reply = self.exchange(&prepared, cancellation.clone()).await?;
+            match reply.message().message() {
+                ServerToRunner::RuntimeAuthorityGrant(grant) => {
+                    grant
+                        .validate_for(request, job, durable.offer().lease())
+                        .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
+                    let encoded = Zeroizing::new(
+                        encode_runtime_authorities(
+                            grant.authorities(),
+                            job,
+                            durable.offer().lease(),
+                            self.inner.config.protocol_limits(),
+                        )
+                        .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?,
+                    );
+                    let bundle_digest =
+                        Sha256Digest::from_bytes(Sha256::digest(encoded.as_slice()).into());
+                    if bundle_digest != grant.bundle_digest() {
+                        return Err(RunnerRuntimeError::InvalidDurablePayload);
+                    }
+                    return self.persist_runtime_authority_delivery(
+                        session,
+                        durable,
+                        binding,
+                        request_operation_id,
+                        acknowledgement_operation_id,
+                        bundle_digest,
+                        &encoded,
+                    );
+                }
+                ServerToRunner::LeaseOffer(_) | ServerToRunner::CancelJob(_) => {
+                    self.process_command(session, &reply, cancellation.clone())
+                        .await?;
+                    self.flush_command_ack(session, cancellation.clone())
+                        .await?;
+                    if self.has_durable_slot_cancellation(durable.slot())? {
+                        return Ok(());
+                    }
+                }
+                ServerToRunner::Error(error) => {
+                    self.handle_remote_error(
+                        error,
+                        RemotePhase::RuntimeAuthorityDelivery,
+                        RuntimeExchangeKind::RuntimeAuthorityRequest,
+                    )?;
+                    self.remote_retry_delay(
+                        RuntimeExchangeKind::RuntimeAuthorityRequest,
+                        &cancellation,
+                    )
+                    .await?;
+                }
+                _ => return Err(RunnerRuntimeError::UnexpectedSyncResponse),
+            }
+        }
+    }
+
+    async fn send_runtime_authority_ack(
+        &self,
+        session: RuntimeSession,
+        slot: RunnerSlotOrdinal,
+        delivery: &RuntimeAuthorityDeliveryRecord,
+        cancellation: CancellationToken,
+    ) -> Result<bool, RunnerRuntimeError> {
+        let acknowledgement = RuntimeAuthorityAck::new(
+            Self::request_header(session, delivery.acknowledgement_operation_id()),
+            delivery.binding(),
+            delivery.bundle_digest(),
+        );
+        let prepared = PreparedRequest::for_session(
+            RunnerToServer::RuntimeAuthorityAck(acknowledgement),
+            session.negotiated,
+            self.inner.config.protocol_limits(),
+        )?;
+        loop {
+            let reply = self.exchange(&prepared, cancellation.clone()).await?;
+            match reply.message().message() {
+                ServerToRunner::OperationAck(_) => return Ok(true),
+                ServerToRunner::LeaseOffer(_) | ServerToRunner::CancelJob(_) => {
+                    self.process_command(session, &reply, cancellation.clone())
+                        .await?;
+                    self.flush_command_ack(session, cancellation.clone())
+                        .await?;
+                    if self.has_durable_slot_cancellation(slot)? {
+                        return Ok(false);
+                    }
+                }
+                ServerToRunner::Error(error) => {
+                    self.handle_remote_error(
+                        error,
+                        RemotePhase::RuntimeAuthorityDelivery,
+                        RuntimeExchangeKind::RuntimeAuthorityAck,
+                    )?;
+                    self.remote_retry_delay(
+                        RuntimeExchangeKind::RuntimeAuthorityAck,
+                        &cancellation,
+                    )
+                    .await?;
+                }
+                _ => return Err(RunnerRuntimeError::UnexpectedSyncResponse),
+            }
+        }
+    }
+
+    fn has_durable_slot_cancellation(
+        &self,
+        slot: RunnerSlotOrdinal,
+    ) -> Result<bool, RunnerRuntimeError> {
+        Ok(self
+            .inner
+            .ports
+            .journal
+            .snapshot()?
+            .slot(slot)
+            .is_some_and(|slot| slot.cancellation().is_some()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_runtime_authority_delivery(
+        &self,
+        session: RuntimeSession,
+        durable: &SlotSnapshot,
+        binding: RuntimeAuthorityDeliveryBinding,
+        request_operation_id: OperationId,
+        acknowledgement_operation_id: OperationId,
+        bundle_digest: Sha256Digest,
+        encoded: &[u8],
+    ) -> Result<(), RunnerRuntimeError> {
+        self.inner.content_operations.publish_reclaiming_capacity(
+            self.inner.ports.journal.as_ref(),
+            self.inner.ports.spool.as_ref(),
+            || {
+                let publication = self
+                    .inner
+                    .ports
+                    .spool
+                    .persist(ContentKind::RuntimeAuthority, encoded)?;
+                let committed = publication.commit_with(|content| {
+                    let content = RuntimeAuthorityContentRef::new(content.clone())
+                        .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
+                    let delivery = RuntimeAuthorityDeliveryRecord::new(
+                        binding,
+                        request_operation_id,
+                        acknowledgement_operation_id,
+                        bundle_digest,
+                        content,
+                    )
+                    .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
+                    self.inner.ports.journal.record_runtime_authority_delivery(
+                        session.negotiated.session_id(),
+                        durable.slot(),
+                        durable.offer().lease().guard(),
+                        delivery,
+                    )?;
+                    Ok(())
+                });
+                match committed {
+                    Ok(()) => Ok(()),
+                    Err(failure) => {
+                        let (error, publication) = failure.into_parts();
+                        publication.abort();
+                        Err(RunnerRuntimeError::Journal(error))
+                    }
+                }
+            },
+        )
+    }
+
+    fn stable_runtime_authority_operation_id(
+        &self,
+        durable: &SlotSnapshot,
+        domain: StableIdDomain,
+    ) -> OperationId {
+        let binding = durable.offer();
+        let mut identity = binding
+            .command()
+            .operation_id()
+            .as_uuid()
+            .as_bytes()
+            .to_vec();
+        identity.extend_from_slice(&binding.command().sequence().get().to_be_bytes());
+        identity.extend_from_slice(binding.lease().attempt_id().as_uuid().as_bytes());
+        identity.extend_from_slice(binding.lease().lease_id().as_uuid().as_bytes());
+        identity.extend_from_slice(&binding.lease().fencing_token().get().to_be_bytes());
+        identity.extend_from_slice(binding.job_ir().content().sha256().as_bytes());
+        identity.extend_from_slice(&INITIAL_RUNTIME_AUTHORITY_GENERATION.get().to_be_bytes());
+        self.inner.ports.ids.stable_operation_id(domain, &identity)
+    }
+
     async fn send_until_operation_ack(
         &self,
         session: RuntimeSession,
@@ -1311,7 +1535,11 @@ impl RunnerSessionSupervisor {
         durable: &SlotSnapshot,
         job: &JobIrEnvelope,
     ) -> Result<JobRuntimeAuthorities, RunnerRuntimeError> {
-        let content = durable.offer().runtime_authorities().content();
+        let delivery = durable
+            .runtime_authority_delivery()
+            .filter(|delivery| delivery.is_acknowledged())
+            .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
+        let content = delivery.content().content();
         let encoded = Zeroizing::new(self.inner.ports.spool.load(content)?);
         if encoded.len() != usize::try_from(content.size()).unwrap_or(usize::MAX) {
             return Err(RunnerRuntimeError::InvalidDurablePayload);
@@ -1323,18 +1551,6 @@ impl RunnerSessionSupervisor {
             self.inner.config.protocol_limits(),
         )
         .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)
-    }
-
-    fn runtime_authorities_are_live(
-        &self,
-        session: RuntimeSession,
-        authorities: &JobRuntimeAuthorities,
-    ) -> bool {
-        let now = session.estimated_lease_database_now(self.inner.ports.clock.monotonic_now());
-        authorities
-            .as_slice()
-            .iter()
-            .all(|authority| authority.issued_at() <= now && now < authority.expires_at())
     }
 
     fn admit_exact_environment(
@@ -1440,6 +1656,18 @@ impl RunnerSessionSupervisor {
         if durable.lifecycle().is_terminal() {
             return self
                 .finish_terminal_slot(session, &durable, cancellation)
+                .await;
+        }
+        let snapshot = self
+            .ensure_runtime_authority_delivery(session, &durable, cancellation.clone())
+            .await?;
+        let durable = snapshot
+            .slot(durable.slot())
+            .cloned()
+            .ok_or(RunnerRuntimeError::ExecutorContract)?;
+        if durable.cancellation().is_some() {
+            return self
+                .finish_cancelled_before_execution(session, &durable, cancellation)
                 .await;
         }
         if !matches!(
@@ -1747,6 +1975,40 @@ impl RunnerSessionSupervisor {
         )?;
         self.observe(RunnerRuntimeEvent::JobCompleted {
             conclusion: RuntimeJobConclusion::from(conclusion),
+            duration: None,
+        });
+        let snapshot = self.inner.ports.journal.snapshot()?;
+        let terminal = snapshot
+            .slot(durable.slot())
+            .cloned()
+            .ok_or(RunnerRuntimeError::ExecutorContract)?;
+        self.finish_terminal_slot(session, &terminal, cancellation)
+            .await
+    }
+
+    async fn finish_cancelled_before_execution(
+        &self,
+        session: RuntimeSession,
+        durable: &SlotSnapshot,
+        cancellation: CancellationToken,
+    ) -> Result<(), RunnerRuntimeError> {
+        self.observe(RunnerRuntimeEvent::Cancellation {
+            reason: RuntimeCancellationReason::ServerRequest,
+        });
+        let result = JobResult::new(
+            durable.offer().lease().attempt_id(),
+            JobConclusion::Cancelled,
+            JobSecretExposure::Secretless,
+            self.inner.ports.clock.wall_now(),
+        );
+        self.commit_terminal_result(
+            session,
+            durable.slot(),
+            durable.offer().lease().guard(),
+            result,
+        )?;
+        self.observe(RunnerRuntimeEvent::JobCompleted {
+            conclusion: RuntimeJobConclusion::Cancelled,
             duration: None,
         });
         let snapshot = self.inner.ports.journal.snapshot()?;

@@ -29,10 +29,19 @@ fn disjoint_ranges_return_typed_error() {
 }
 
 #[test]
-fn current_protocol_is_exactly_v1_and_rejects_forward_skew() {
-    assert_eq!(PROTOCOL_MIN_VERSION, version(1));
-    assert_eq!(PROTOCOL_MAX_VERSION, version(1));
-    assert_eq!(SUPPORTED_PROTOCOL_RANGE, range(1, 1));
+fn current_protocol_is_exactly_v2_and_rejects_legacy_and_forward_skew() {
+    assert_eq!(PROTOCOL_MIN_VERSION, version(2));
+    assert_eq!(PROTOCOL_MAX_VERSION, version(2));
+    assert_eq!(SUPPORTED_PROTOCOL_RANGE, range(2, 2));
+
+    let legacy = range(1, 1);
+    assert_eq!(
+        negotiate_protocol(SUPPORTED_PROTOCOL_RANGE, legacy),
+        Err(ProtocolNegotiationError::NoCommonVersion {
+            local: SUPPORTED_PROTOCOL_RANGE,
+            remote: legacy,
+        })
+    );
 
     let unsupported = range(3, 3);
     assert_eq!(

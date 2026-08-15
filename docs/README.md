@@ -19,6 +19,9 @@ It does not connect to repositories or execute workflows.
 - [Authentication and authorization](authentication.md) covers login, roles,
   permissions, sessions, secrets, protected-environment reviews, and repository
   visibility.
+- [Post-accept runtime-authority delivery](runtime-authority-delivery.md)
+  defines the value-free lease offer, exact delivery binding, durable custody,
+  restart, cancellation, and fail-closed contracts for workload credentials.
 - [Workflow reruns](workflow-reruns.md) documents the authenticated CLI,
   idempotent retry identity, exact selections, and current admission limits.
 - [Prometheus and OpenMetrics](observability.md) defines the scrape endpoints,

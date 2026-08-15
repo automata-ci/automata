@@ -53,6 +53,16 @@ fn fixture_lease_offer() -> fixture_wire::ServerFrame {
     fixture_wire::ServerFrame::decode(encoded.as_slice()).expect("decode private test DTO")
 }
 
+fn fixture_runtime_authority_grant() -> fixture_wire::ServerFrame {
+    let message = common::server_messages()
+        .into_iter()
+        .find_map(|(name, message)| (name == "runtime_authority_grant").then_some(message))
+        .expect("runtime-authority grant fixture");
+    let encoded =
+        encode_server_frame(&message, &ProtocolLimits::default()).expect("encode fixture");
+    fixture_wire::ServerFrame::decode(encoded.as_slice()).expect("decode private test DTO")
+}
+
 fn fixture_lease_offer_with_managed_overlay() -> fixture_wire::ServerFrame {
     let offer = common::lease_offer_with_job(common::rich_job());
     let overlay = common::managed_secret_overlay(offer.lease());
@@ -532,16 +542,17 @@ fn missing_or_unknown_required_oneofs_are_rejected() {
         })
     ));
 
-    let mut frame = fixture_lease_offer();
-    let Some(fixture_wire::server_frame::Payload::LeaseOffer(offer)) = frame.payload.as_mut()
+    let mut frame = fixture_runtime_authority_grant();
+    let Some(fixture_wire::server_frame::Payload::RuntimeAuthorityGrant(grant)) =
+        frame.payload.as_mut()
     else {
-        panic!("lease offer fixture shape");
+        panic!("runtime-authority grant fixture shape");
     };
-    offer.runtime_authorities = None;
+    grant.authorities = None;
     assert!(matches!(
         decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
         Err(DecodeError::MissingField {
-            field: "lease_offer.runtime_authorities"
+            field: "runtime_authority_grant.authorities"
         })
     ));
 }
@@ -638,13 +649,14 @@ fn unknown_and_zero_required_enums_are_typed_errors() {
     }
 
     for endpoint_security in [0, 777] {
-        let mut frame = fixture_lease_offer();
-        let Some(fixture_wire::server_frame::Payload::LeaseOffer(offer)) = frame.payload.as_mut()
+        let mut frame = fixture_runtime_authority_grant();
+        let Some(fixture_wire::server_frame::Payload::RuntimeAuthorityGrant(grant)) =
+            frame.payload.as_mut()
         else {
-            panic!("lease offer fixture shape");
+            panic!("runtime-authority grant fixture shape");
         };
-        offer
-            .runtime_authorities
+        grant
+            .authorities
             .as_mut()
             .expect("runtime authorities")
             .authorities
@@ -998,13 +1010,11 @@ fn managed_secret_overlay_rejects_a_lease_attempt_mismatch_with_a_valid_digest()
     )
     .expect("changed attempt lease");
     let job = template.job().clone();
-    let authorities = common::runtime_authorities(&job, &changed_lease);
     let changed_offer = LeaseOffer::new(
         template.header(),
         template.slot(),
         changed_lease.clone(),
         job,
-        authorities,
     )
     .with_managed_secret_bindings(common::managed_secret_overlay(&changed_lease))
     .expect("internally valid changed-attempt overlay");

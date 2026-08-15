@@ -101,7 +101,6 @@ fn offer_with_job_content(
         fixture.slot,
         fixture.lease.clone(),
         JobIrContentRef::new(JobIrVersion::current(), job_ir).expect("JobIR reference"),
-        Fixture::runtime_authority(),
         Fixture::command(1),
     )
     .expect("lease offer")
@@ -110,13 +109,11 @@ fn offer_with_job_content(
 fn offer_with_contents(
     fixture: &Fixture,
     job_ir: automata_ci_runner_spool::DurableContentRef,
-    runtime_authority: automata_ci_runner_spool::DurableContentRef,
 ) -> LeaseOfferRecord {
     LeaseOfferRecord::new(
         fixture.slot,
         fixture.lease.clone(),
         JobIrContentRef::new(JobIrVersion::current(), job_ir).expect("JobIR reference"),
-        RuntimeAuthorityContentRef::new(runtime_authority).expect("runtime-authority reference"),
         Fixture::command(1),
     )
     .expect("lease offer")
@@ -642,7 +639,7 @@ fn log_cursor_is_bound_to_immutable_segment_content_and_payload_free_eos_ack() {
             .expect("complete retain set")
             .content_references()
             .count(),
-        4
+        3
     );
     assert_eq!(
         recovered_log
@@ -690,31 +687,51 @@ fn log_head_ack_recovers_on_both_sides_of_the_journal_rename_and_reconciles() {
             .persist(ContentKind::JobIr, b"job")
             .expect("persist JobIR")
             .commit_with(|job_content| {
-                let authority_publication = spool
-                    .persist(ContentKind::RuntimeAuthority, b"authority")
-                    .expect("persist authority");
-                match authority_publication.commit_with(|authority_content| {
-                    journal.record_lease_offer(
-                        fixture.session_id,
-                        offer_with_contents(
-                            &fixture,
-                            job_content.clone(),
-                            authority_content.clone(),
-                        ),
-                    )
-                }) {
-                    Ok(snapshot) => Ok(snapshot),
-                    Err(failure) => {
-                        let (error, publication) = failure.into_parts();
-                        publication.abort();
-                        Err(error)
-                    }
-                }
+                journal.record_lease_offer(
+                    fixture.session_id,
+                    offer_with_contents(&fixture, job_content.clone()),
+                )
             })
-            .expect("offer with durable contents");
+            .expect("offer with durable JobIR");
         journal
             .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
             .expect("accept");
+        let offer = journal
+            .snapshot()
+            .expect("snapshot")
+            .slot(fixture.slot)
+            .expect("slot")
+            .offer()
+            .clone();
+        let delivered = spool
+            .persist(ContentKind::RuntimeAuthority, b"authority")
+            .expect("persist authority")
+            .commit_with(|authority_content| {
+                let content = RuntimeAuthorityContentRef::new(authority_content.clone())
+                    .expect("runtime-authority reference");
+                journal.record_runtime_authority_delivery(
+                    fixture.session_id,
+                    fixture.slot,
+                    fixture.lease.guard(),
+                    fixture.runtime_authority_delivery_with_content(&offer, content),
+                )
+            })
+            .expect("record authority delivery");
+        let delivery = delivered
+            .slot(fixture.slot)
+            .expect("slot")
+            .runtime_authority_delivery()
+            .expect("authority delivery");
+        journal
+            .acknowledge_runtime_authority_delivery(
+                fixture.session_id,
+                fixture.slot,
+                fixture.lease.guard(),
+                delivery.binding().generation(),
+                delivery.bundle_digest(),
+                delivery.acknowledgement_operation_id(),
+            )
+            .expect("acknowledge authority delivery");
         let stream = LogStreamId::new();
         journal
             .open_log_stream(
@@ -818,28 +835,53 @@ fn reconciliation_is_fenced_until_payload_publication_is_journaled() {
 
     let snapshot = publication
         .commit_with(|job_content| {
-            let authority_publication = spool
-                .persist(ContentKind::RuntimeAuthority, b"exact protected authority")
-                .expect("persist protected authority");
-            let committed = authority_publication.commit_with(|authority_content| {
-                journal.record_lease_offer(
-                    fixture.session_id,
-                    offer_with_contents(&fixture, job_content.clone(), authority_content.clone()),
-                )
-            });
-            match committed {
-                Ok(snapshot) => Ok(snapshot),
-                Err(failure) => {
-                    let (error, publication) = failure.into_parts();
-                    publication.abort();
-                    Err(error)
-                }
-            }
+            journal.record_lease_offer(
+                fixture.session_id,
+                offer_with_contents(&fixture, job_content.clone()),
+            )
         })
         .expect("journal publication");
     let offer = snapshot.slot(fixture.slot).expect("slot").offer();
     let reference = offer.job_ir().content().clone();
-    let authority_reference = offer.runtime_authorities().content().clone();
+    let offer = offer.clone();
+    journal
+        .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
+        .expect("accept offer before authority delivery");
+    let authority_publication = spool
+        .persist(ContentKind::RuntimeAuthority, b"exact protected authority")
+        .expect("persist protected authority");
+    assert!(matches!(
+        spool.reconcile(&JournalContentRetainSet::new(&journal)),
+        Err(SpoolError::PublicationsInFlight)
+    ));
+    let snapshot = authority_publication
+        .commit_with(|authority_content| {
+            let content = RuntimeAuthorityContentRef::new(authority_content.clone())
+                .expect("runtime-authority reference");
+            journal.record_runtime_authority_delivery(
+                fixture.session_id,
+                fixture.slot,
+                fixture.lease.guard(),
+                fixture.runtime_authority_delivery_with_content(&offer, content),
+            )
+        })
+        .expect("journal protected authority delivery");
+    let delivery = snapshot
+        .slot(fixture.slot)
+        .expect("slot")
+        .runtime_authority_delivery()
+        .expect("authority delivery");
+    let authority_reference = delivery.content().content().clone();
+    journal
+        .acknowledge_runtime_authority_delivery(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            delivery.binding().generation(),
+            delivery.bundle_digest(),
+            delivery.acknowledgement_operation_id(),
+        )
+        .expect("acknowledge protected adoption");
     spool
         .reconcile(&JournalContentRetainSet::new(&journal))
         .expect("snapshot captured under publication exclusion");

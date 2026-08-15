@@ -45,8 +45,8 @@ use super::durable::{
 pub const JOB_IR_PROTOBUF_MEDIA_TYPE: &str = "application/vnd.automata.job-ir.protobuf";
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v1";
-const LEASE_OFFER_COMMAND_SCHEMA: u16 = 1;
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
+const LEASE_OFFER_COMMAND_SCHEMA: u16 = 2;
 
 #[derive(serde::Serialize)]
 struct LeaseOfferCommandPayloadRef<'a> {
@@ -54,7 +54,6 @@ struct LeaseOfferCommandPayloadRef<'a> {
     lease: &'a Lease,
     managed_secret_bindings: &'a ManagedSecretBindingOverlay,
     protocol_version: u16,
-    runtime_authorities: &'a JobRuntimeAuthorities,
     schema: u16,
     slot: u16,
 }
@@ -66,7 +65,6 @@ struct DurableLeaseOfferCommandPayload {
     lease: Lease,
     managed_secret_bindings: ManagedSecretBindingOverlay,
     protocol_version: u16,
-    runtime_authorities: JobRuntimeAuthorities,
     schema: u16,
     slot: u16,
 }
@@ -662,7 +660,6 @@ pub enum LeaseOfferClaimStatus {
 pub struct LeaseOfferCommand {
     claim: LeaseOfferClaim,
     job: JobIrEnvelope,
-    runtime_authorities: JobRuntimeAuthorities,
     managed_secret_bindings: ManagedSecretBindingOverlay,
     offer_valid_until: UnixMillis,
     created_at: UnixMillis,
@@ -680,13 +677,10 @@ pub enum LeaseOfferCommandError {
     /// The encoded `JobIR` does not match the immutable object metadata.
     #[error("lease-offer JobIR metadata does not match its payload")]
     JobIrMetadataMismatch,
-    /// Runtime authority material is not bound to the exact job and lease.
-    #[error("lease-offer runtime authorities are invalid")]
-    InvalidRuntimeAuthorities,
     /// Secret-binding metadata is not bound to the exact leased attempt.
     #[error("lease-offer managed-secret bindings are invalid")]
     InvalidManagedSecretBindings,
-    /// The command was created outside the lease or authority validity interval.
+    /// The command was created outside the lease validity interval.
     #[error("lease-offer creation time is outside its validity interval")]
     InvalidCreationTime,
 }
@@ -698,12 +692,10 @@ impl LeaseOfferCommand {
     /// # Errors
     ///
     /// Rejects cross-runner leases, unencodable or metadata-mismatched `JobIR`,
-    /// authorities not bound to the exact job and lease, and command
-    /// times outside the lease or authority validity interval.
+    /// and command times outside the lease validity interval.
     pub fn try_new(
         claim: LeaseOfferClaim,
         job: JobIrEnvelope,
-        runtime_authorities: JobRuntimeAuthorities,
         created_at: UnixMillis,
     ) -> Result<Self, LeaseOfferCommandError> {
         if claim.session().runner_id() != claim.lease().runner_id() {
@@ -712,29 +704,17 @@ impl LeaseOfferCommand {
         validate_lease_offer_payload(
             &job,
             claim.lease(),
-            &runtime_authorities,
             &ManagedSecretBindingOverlay::empty(claim.lease()),
             claim.job_ir_metadata(),
         )?;
-        if created_at < claim.lease().issued_at()
-            || created_at >= claim.lease().expires_at()
-            || runtime_authorities.as_slice().iter().any(|authority| {
-                created_at < authority.issued_at() || created_at >= authority.expires_at()
-            })
-        {
+        if created_at < claim.lease().issued_at() || created_at >= claim.lease().expires_at() {
             return Err(LeaseOfferCommandError::InvalidCreationTime);
         }
-        let offer_valid_until = runtime_authorities
-            .as_slice()
-            .iter()
-            .fold(claim.lease().expires_at(), |horizon, authority| {
-                horizon.min(authority.expires_at())
-            });
+        let offer_valid_until = claim.lease().expires_at();
         Ok(Self {
             managed_secret_bindings: ManagedSecretBindingOverlay::empty(claim.lease()),
             claim,
             job,
-            runtime_authorities,
             offer_valid_until,
             created_at,
         })
@@ -795,11 +775,6 @@ impl LeaseOfferCommand {
     #[must_use]
     pub const fn job(&self) -> &JobIrEnvelope {
         &self.job
-    }
-    /// Returns exact job-scoped authority included in the durable offer.
-    #[must_use]
-    pub const fn runtime_authorities(&self) -> &JobRuntimeAuthorities {
-        &self.runtime_authorities
     }
     /// Returns the value-free binding overlay committed to this command.
     #[must_use]
@@ -984,7 +959,6 @@ fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool 
                     lease: &payload.lease,
                     managed_secret_bindings: &payload.managed_secret_bindings,
                     protocol_version: payload.protocol_version,
-                    runtime_authorities: &payload.runtime_authorities,
                     schema: payload.schema,
                     slot: payload.slot,
                 },
@@ -998,7 +972,6 @@ fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool 
                 published,
                 &payload.job,
                 &payload.lease,
-                &payload.runtime_authorities,
                 &payload.managed_secret_bindings,
                 payload.protocol_version,
                 payload.schema,
@@ -1009,12 +982,10 @@ fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn durable_payload_matches(
     published: &PublishedLeaseOffer,
     job: &JobIrEnvelope,
     lease: &Lease,
-    runtime_authorities: &JobRuntimeAuthorities,
     managed_secret_bindings: &ManagedSecretBindingOverlay,
     protocol_version: u16,
     schema: u16,
@@ -1027,39 +998,20 @@ fn durable_payload_matches(
     {
         return false;
     }
-    if validate_lease_offer_payload(
-        job,
-        lease,
-        runtime_authorities,
-        managed_secret_bindings,
-        published.job_ir(),
-    )
-    .is_err()
+    if validate_lease_offer_payload(job, lease, managed_secret_bindings, published.job_ir())
+        .is_err()
     {
         return false;
     }
-    let payload_horizon = runtime_authorities
-        .as_slice()
-        .iter()
-        .fold(lease.expires_at(), |horizon, authority| {
-            horizon.min(authority.expires_at())
-        });
-    let payload_issued_at = runtime_authorities
-        .as_slice()
-        .iter()
-        .fold(lease.issued_at(), |issued_at, authority| {
-            issued_at.max(authority.issued_at())
-        });
     let created_at = published.command().request().created_at();
-    created_at >= payload_issued_at
-        && created_at < payload_horizon
-        && payload_horizon == published.offer_valid_until()
+    created_at >= lease.issued_at()
+        && created_at < lease.expires_at()
+        && lease.expires_at() == published.offer_valid_until()
 }
 
 fn validate_lease_offer_payload(
     job: &JobIrEnvelope,
     lease: &Lease,
-    runtime_authorities: &JobRuntimeAuthorities,
     managed_secret_bindings: &ManagedSecretBindingOverlay,
     metadata: &JobIrMetadata,
 ) -> Result<(), LeaseOfferCommandError> {
@@ -1078,9 +1030,6 @@ fn validate_lease_offer_payload(
     {
         return Err(LeaseOfferCommandError::JobIrMetadataMismatch);
     }
-    runtime_authorities
-        .validate_for(job, lease)
-        .map_err(|_| LeaseOfferCommandError::InvalidRuntimeAuthorities)?;
     managed_secret_bindings
         .validate_for(lease)
         .map_err(|_| LeaseOfferCommandError::InvalidManagedSecretBindings)
@@ -1188,7 +1137,6 @@ impl LeaseOfferCommandPublisher for StoreLeaseOfferCommandPublisher {
                 lease: command.lease(),
                 managed_secret_bindings: command.managed_secret_bindings(),
                 protocol_version: command.protocol_version().get(),
-                runtime_authorities: command.runtime_authorities(),
                 schema: LEASE_OFFER_COMMAND_SCHEMA,
                 slot: command.slot().get(),
             },
@@ -1265,10 +1213,6 @@ pub(crate) fn decode_durable_server_command(
                 || payload.protocol_version != protocol_version.get()
                 || payload.lease.runner_id() != request.session().runner_id()
                 || payload
-                    .runtime_authorities
-                    .validate_for(&payload.job, &payload.lease)
-                    .is_err()
-                || payload
                     .managed_secret_bindings
                     .validate_for(&payload.lease)
                     .is_err()
@@ -1277,15 +1221,9 @@ pub(crate) fn decode_durable_server_command(
             }
             let slot =
                 RunnerSlotOrdinal::new(payload.slot).map_err(|_| ControlPortError::Corrupt)?;
-            let offer = LeaseOffer::new(
-                header,
-                slot,
-                payload.lease,
-                payload.job,
-                payload.runtime_authorities,
-            )
-            .with_managed_secret_bindings(payload.managed_secret_bindings)
-            .map_err(|_| ControlPortError::Corrupt)?;
+            let offer = LeaseOffer::new(header, slot, payload.lease, payload.job)
+                .with_managed_secret_bindings(payload.managed_secret_bindings)
+                .map_err(|_| ControlPortError::Corrupt)?;
             ServerToRunner::LeaseOffer(Box::new(offer))
         }
         CANCEL_JOB_COMMAND_KIND => {

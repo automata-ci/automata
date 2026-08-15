@@ -334,6 +334,8 @@ impl RunnerControlClient for HyperRunnerControlClient {
                     self.transport_limits.total_request_timeout()
                 }
                 RunnerToServer::LeaseResponse(_)
+                | RunnerToServer::RuntimeAuthorityRequest(_)
+                | RunnerToServer::RuntimeAuthorityAck(_)
                 | RunnerToServer::Heartbeat(_)
                 | RunnerToServer::JobState(_)
                 | RunnerToServer::JobResult(_)
@@ -803,6 +805,9 @@ fn sync_response_matches(prepared: &PreparedRequest, response: &ServerToRunner) 
                 .is_ok()
                 && offer.job().version() == binding.job_ir_version()
         }
+        ServerToRunner::RuntimeAuthorityGrant(grant) => {
+            grant.header().validate_reply_for(request_header).is_ok()
+        }
         ServerToRunner::CancelJob(cancel) => cancel
             .header()
             .validate_for(binding.protocol_version(), binding.session_id())
@@ -826,6 +831,8 @@ fn runner_request_header(message: &RunnerToServer) -> Option<automata_ci_protoco
         RunnerToServer::Hello(_) => None,
         RunnerToServer::LeaseRequest(value) => Some(value.header()),
         RunnerToServer::LeaseResponse(value) => Some(value.header()),
+        RunnerToServer::RuntimeAuthorityRequest(value) => Some(value.header()),
+        RunnerToServer::RuntimeAuthorityAck(value) => Some(value.header()),
         RunnerToServer::Heartbeat(value) => Some(value.header()),
         RunnerToServer::JobState(value) => Some(value.header()),
         RunnerToServer::JobResult(value) => Some(value.header()),

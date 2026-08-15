@@ -232,7 +232,6 @@ impl OfferClient {
         )
         .expect("lease");
         let job = support::minimal_job();
-        let authorities = support::test_runtime_authorities(&job, &lease);
         LeaseOffer::new(
             ServerCommandHeader::new(
                 SUPPORTED_PROTOCOL_RANGE.max(),
@@ -243,7 +242,6 @@ impl OfferClient {
             RunnerSlotOrdinal::new(1).expect("offer slot"),
             lease,
             job,
-            authorities,
         )
     }
 

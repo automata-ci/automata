@@ -12,7 +12,10 @@ use automata_ci_control::runner_control::{
     ControlPortError, JobIrObjectReader, OptionalRuntimeAuthorityIssuer,
     RuntimeAuthorityIssueRequest, verify_job_ir_blob,
 };
-use automata_ci_core::{JobAuthorityProfile, JobIrVersion, TrustPermissionAuthority};
+use automata_ci_core::{
+    JobAuthorityProfile, JobIrEnvelope, JobIrVersion, JobPermissionRequest, PermissionLevel,
+    TrustPermissionAuthority,
+};
 use automata_ci_credential_github::{
     GithubRepositoryRuntimeAuthorityIssuer, GithubRuntimeAuthorityIdentityResolutionError,
     GithubRuntimeAuthorityIdentityResolver, GithubRuntimeAuthorityRequestResolver,
@@ -247,6 +250,9 @@ impl OptionalRuntimeAuthorityIssuer for GithubJobRuntimeAuthorityIssuer {
         {
             return Ok(None);
         }
+        if !github_repository_authority_is_requested(request.job()) {
+            return Ok(None);
+        }
         let resolved = self
             .identities
             .resolve_github_runtime_authority_identity(request)
@@ -300,11 +306,28 @@ impl OptionalRuntimeAuthorityIssuer for UnavailableGithubJobRuntimeAuthorityIssu
                 .authority()
                 .permissions()
                 == TrustPermissionAuthority::DenyAll
+            || !github_repository_authority_is_requested(request.job())
         {
             Ok(None)
         } else {
             Err(ControlPortError::Unavailable)
         }
+    }
+}
+
+/// Distinguishes repository-token authority from the separately served OIDC
+/// capability. An explicit empty, `none`-only, or `id-token`-only mapping is a
+/// complete denial of repository authority and must not touch installation
+/// identity resolution or token minting. Wildcard/default modes remain
+/// unresolved here and fail closed in the exact request resolver.
+fn github_repository_authority_is_requested(job: &JobIrEnvelope) -> bool {
+    match job.job().permission_request() {
+        JobPermissionRequest::Mapping(grants) => grants
+            .iter()
+            .any(|grant| grant.name() != "id-token" && grant.level() != PermissionLevel::None),
+        JobPermissionRequest::ProviderDefault
+        | JobPermissionRequest::ReadAll
+        | JobPermissionRequest::WriteAll => true,
     }
 }
 

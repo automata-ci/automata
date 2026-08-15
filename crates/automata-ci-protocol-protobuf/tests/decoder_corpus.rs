@@ -42,15 +42,10 @@ fn public_decoders_reject_a_deterministic_corpus_and_canonicalize_valid_mutation
         encode_job_ir(offer.job(), &canonical_limits).expect("canonical standalone JobIR");
     let context_bytes =
         encode_job_runtime_context(&context, &canonical_limits).expect("canonical runtime context");
-    let authority_bytes = encode_runtime_authorities(
-        offer
-            .runtime_authorities()
-            .expect("lease offer runtime authorities"),
-        offer.job(),
-        offer.lease(),
-        &canonical_limits,
-    )
-    .expect("canonical runtime authorities");
+    let authorities = common::runtime_authorities(offer.job(), offer.lease());
+    let authority_bytes =
+        encode_runtime_authorities(&authorities, offer.job(), offer.lease(), &canonical_limits)
+            .expect("canonical runtime authorities");
     let canonical_frames = [
         runner_bytes.as_slice(),
         server_bytes.as_slice(),

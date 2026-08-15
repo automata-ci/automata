@@ -105,10 +105,12 @@ Runtime JWTs bind the run, job, attempt, and fencing token. Upload and download
 URLs use separate protocol domains and derived keys. Every metadata mutation
 rechecks the attempt lifecycle and fence.
 
-`GithubResultsRuntimeAuthorityIssuer` creates the JWT while building the
-durable lease offer. Runner protocol v1 requires the authority bundle. The
-runner stores it as separately authenticated content and injects it into that
-job only; there is no runner- or fleet-wide Results credential.
+`GithubResultsRuntimeAuthorityIssuer` creates the JWT only after the runner
+durably accepts the exact lease offer. Runner protocol v2 delivers the
+per-attempt authority bundle through the separate post-accept exchange; the
+lease offer and its persisted outbox payload contain no credential values. The
+runner protects the bundle before acknowledging custody and injects it into
+that job only; there is no runner- or fleet-wide Results credential.
 
 Production uses an HTTPS public Results endpoint. Development may use literal
 loopback HTTP or one exact trusted private bind and host mapping, such as a

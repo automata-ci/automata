@@ -11,20 +11,21 @@ use automata_ci_blob::{
     BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
 use automata_ci_core::{
-    JobAuthorityProfile, JobIrVersionRange, JobLifecycle, LogAck, OperationId, Sha256Digest,
-    TrustSecretAuthority, UnixMillis,
+    JobAuthorityProfile, JobIrEnvelope, JobIrVersionRange, JobLifecycle, LogAck, OperationId,
+    Sha256Digest, TrustSecretAuthority, UnixMillis,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
     HandshakeRejected, JobRuntimeAuthorities, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
     LeaseRenewal, LogAckMessage, ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession,
     NoWork, OperationAck, OrphanDeliveryPermissions, ProtocolLimits, RemoteErrorCode, RunnerHello,
-    RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming,
-    ServerToRunner, SessionDisposition, SessionOrphanAuthorization, SessionResume,
-    ValidatedRunnerToServer, negotiate_job_ir, negotiate_protocol,
+    RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityGrant, RuntimeAuthorityRequest,
+    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
+    SessionDisposition, SessionOrphanAuthorization, SessionResume, ValidatedRunnerToServer,
+    negotiate_job_ir, negotiate_protocol,
 };
 use automata_ci_protocol_protobuf::{
-    decode_server_frame as decode_server_protobuf, encode_server_frame,
+    decode_server_frame as decode_server_protobuf, encode_runtime_authorities, encode_server_frame,
 };
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
@@ -45,9 +46,11 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use super::durable::{
+    AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
     CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-    CommitRunnerLogSegment, CommitRunnerTerminalResult, LeaseResponseAction,
-    RunnerControlTransactionRepository, RunnerLogAdmissionRequest,
+    CommitRunnerLogSegment, CommitRunnerTerminalResult, CommitRuntimeAuthorityDelivery,
+    LeaseResponseAction, PublishedLeaseOffer, RunnerControlTransactionRepository,
+    RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryRepository,
 };
 use super::observer::NoopRunnerControlObserver;
 use super::port::{
@@ -74,6 +77,8 @@ const COMMAND_ACK_KIND: &str = "automata.runner.command-ack.v1";
 const LEASE_RESPONSE_KIND: &str = "automata.runner.lease-response.v1";
 const JOB_RESULT_KIND: &str = "automata.runner.job-result.v1";
 const LOG_BATCH_KIND: &str = "automata.runner.log-batch.v1";
+const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
+const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
 
 enum PendingCommand {
     Found(ServerToRunner),
@@ -289,6 +294,7 @@ pub struct RunnerDurabilityPorts {
     receipts: Arc<dyn RunnerOperationReceiptRepository>,
     lease_requests: Arc<dyn RunnerLeaseRequestRepository>,
     commands: Arc<dyn RunnerCommandOutbox>,
+    runtime_authority_deliveries: Arc<dyn RuntimeAuthorityDeliveryRepository>,
 }
 
 impl RunnerDurabilityPorts {
@@ -300,6 +306,7 @@ impl RunnerDurabilityPorts {
         receipts: Arc<dyn RunnerOperationReceiptRepository>,
         lease_requests: Arc<dyn RunnerLeaseRequestRepository>,
         commands: Arc<dyn RunnerCommandOutbox>,
+        runtime_authority_deliveries: Arc<dyn RuntimeAuthorityDeliveryRepository>,
     ) -> Self {
         Self {
             ingress_objects,
@@ -307,6 +314,7 @@ impl RunnerDurabilityPorts {
             receipts,
             lease_requests,
             commands,
+            runtime_authority_deliveries,
         }
     }
 }
@@ -683,6 +691,12 @@ impl DurableRunnerControlHandler {
                 )
                 .await;
         }
+        if let Some(response) = self
+            .handle_runtime_authority_message(fence, runner_message, digest, cancellation)
+            .await
+        {
+            return response;
+        }
         if !is_command_ack {
             match self
                 .next_pending_command(fence, snapshot.protocol_version(), replay_after)
@@ -716,6 +730,9 @@ impl DurableRunnerControlHandler {
                 self.handle_command_ack(fence, &snapshot, *ack, digest, cancellation)
                     .await
             }
+            RunnerToServer::RuntimeAuthorityRequest(_) | RunnerToServer::RuntimeAuthorityAck(_) => {
+                Err(app(ApplicationErrorKind::Internal))
+            }
             RunnerToServer::Hello(_) => Err(app(ApplicationErrorKind::Conflict)),
             _ => Ok(self.unsupported(header)),
         }?;
@@ -726,6 +743,26 @@ impl DurableRunnerControlHandler {
             PendingCommand::Found(command) => Ok(command),
             PendingCommand::Empty => Ok(response),
             PendingCommand::Saturated => Err(app(ApplicationErrorKind::Unavailable)),
+        }
+    }
+
+    async fn handle_runtime_authority_message(
+        &self,
+        fence: RunnerSessionFence,
+        message: &RunnerToServer,
+        digest: Sha256Digest,
+        cancellation: &CancellationToken,
+    ) -> Option<Result<ServerToRunner, ApplicationError>> {
+        match message {
+            RunnerToServer::RuntimeAuthorityRequest(request) => Some(
+                self.handle_runtime_authority_request(fence, request, digest, cancellation)
+                    .await,
+            ),
+            RunnerToServer::RuntimeAuthorityAck(acknowledgement) => Some(
+                self.handle_runtime_authority_ack(fence, acknowledgement, digest, cancellation)
+                    .await,
+            ),
+            _ => None,
         }
     }
 
@@ -1294,28 +1331,6 @@ impl DurableRunnerControlHandler {
             authority_slot,
         )
         .map_err(|_| app(ApplicationErrorKind::Internal))?;
-        *stage = RunnerLeaseRequestStage::OfferRuntimeAuthorityIssue;
-        let runtime_authorities = match job.job().authority_profile() {
-            JobAuthorityProfile::CredentialFree => {
-                JobRuntimeAuthorities::new(Vec::new(), &job, claimed.lease())
-                    .map_err(|_| app(ApplicationErrorKind::Internal))?
-            }
-            JobAuthorityProfile::Standard => {
-                let authority_issuer = self
-                    .ports
-                    .runtime_authorities
-                    .as_ref()
-                    .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?;
-                authority_issuer
-                    .issue(authority_request)
-                    .await
-                    .map_err(port_application_error)?
-            }
-        };
-        *stage = RunnerLeaseRequestStage::OfferRuntimeAuthorityValidation;
-        runtime_authorities
-            .validate_for(&job, claimed.lease())
-            .map_err(|_| app(ApplicationErrorKind::Internal))?;
         *stage = RunnerLeaseRequestStage::OfferManagedSecretBindingIssue;
         let managed_secret_bindings = match (
             job.job().authority_profile(),
@@ -1345,26 +1360,13 @@ impl DurableRunnerControlHandler {
             .validate_for(claim.lease())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
         Self::not_cancelled(cancellation)?;
-        let publish_at = runtime_authorities
-            .as_slice()
-            .iter()
-            .map(automata_ci_protocol::JobRuntimeAuthority::issued_at)
-            .fold(claimed.lease().issued_at(), std::cmp::max);
-        if claimed.lease().expires_at() <= publish_at
-            || runtime_authorities
-                .as_slice()
-                .iter()
-                .any(|authority| authority.expires_at() <= publish_at)
-        {
-            return Err(app(ApplicationErrorKind::Unavailable));
-        }
+        let publish_at = claimed.lease().issued_at();
         *stage = RunnerLeaseRequestStage::OfferCommandConstruction;
-        let command =
-            LeaseOfferCommand::try_new(claim, job.clone(), runtime_authorities.clone(), publish_at)
-                .and_then(|command| {
-                    command.with_managed_secret_bindings(managed_secret_bindings.clone())
-                })
-                .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        let command = LeaseOfferCommand::try_new(claim, job.clone(), publish_at)
+            .and_then(|command| {
+                command.with_managed_secret_bindings(managed_secret_bindings.clone())
+            })
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
         *stage = RunnerLeaseRequestStage::OfferCommandPublication;
         let publication = self
             .ports
@@ -1395,11 +1397,171 @@ impl DurableRunnerControlHandler {
             claimed.slot(),
             claimed.lease().clone(),
             job,
-            runtime_authorities,
         )
         .with_managed_secret_bindings(managed_secret_bindings)
         .map_err(|_| app(ApplicationErrorKind::Internal))?;
         Ok(ServerToRunner::LeaseOffer(Box::new(offer)))
+    }
+
+    async fn handle_runtime_authority_request(
+        &self,
+        fence: RunnerSessionFence,
+        request: &RuntimeAuthorityRequest,
+        digest: Sha256Digest,
+        cancellation: &CancellationToken,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        Self::not_cancelled(cancellation)?;
+        let durable_request = receipt_request(
+            fence,
+            request.header().operation_id(),
+            RUNTIME_AUTHORITY_REQUEST_KIND,
+            digest,
+        )?;
+        let protocol_version =
+            RunnerProtocolVersion::new(request.header().protocol_version().get())
+                .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        let authorization = AuthorizeRuntimeAuthorityDelivery::new(
+            durable_request,
+            protocol_version,
+            request.binding(),
+            self.ports.clock.now(),
+        )
+        .map_err(|_| app(ApplicationErrorKind::Conflict))?;
+        let admission = self
+            .ports
+            .durability
+            .runtime_authority_deliveries
+            .authorize_runtime_authority_delivery(authorization)
+            .await
+            .map_err(store_application_error)?;
+        Self::not_cancelled(cancellation)?;
+
+        let metadata = admission.offer().job_ir();
+        let bytes = self
+            .ports
+            .lease
+            .job_ir_objects
+            .read_job_ir(metadata, metadata.encoded_size())
+            .await
+            .map_err(port_application_error)?;
+        let job = verify_job_ir_blob(
+            metadata,
+            &bytes,
+            automata_ci_core::JobIrVersion::current(),
+            &self.config.protocol_limits,
+        )
+        .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        Self::not_cancelled(cancellation)?;
+        let offer = admission.offer();
+        let authorities = self.issue_runtime_authorities(&job, offer).await?;
+        authorities
+            .validate_for(&job, offer.lease())
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        let encoded = Zeroizing::new(
+            encode_runtime_authorities(
+                &authorities,
+                &job,
+                offer.lease(),
+                &self.config.protocol_limits,
+            )
+            .map_err(|_| app(ApplicationErrorKind::Internal))?,
+        );
+        let bundle_digest = sha256(&encoded);
+        if admission
+            .committed_bundle_digest()
+            .is_some_and(|committed| committed != bundle_digest)
+        {
+            return Err(app(ApplicationErrorKind::Internal));
+        }
+        let commit =
+            CommitRuntimeAuthorityDelivery::new(admission, bundle_digest, self.ports.clock.now())
+                .map_err(|_| app(ApplicationErrorKind::Conflict))?;
+        Self::not_cancelled(cancellation)?;
+        self.ports
+            .durability
+            .runtime_authority_deliveries
+            .commit_runtime_authority_delivery(commit)
+            .await
+            .map_err(store_application_error)?;
+        Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
+            RuntimeAuthorityGrant::new(
+                self.reply_header(request.header()),
+                request.binding(),
+                bundle_digest,
+                authorities,
+            ),
+        )))
+    }
+
+    async fn issue_runtime_authorities(
+        &self,
+        job: &JobIrEnvelope,
+        offer: &PublishedLeaseOffer,
+    ) -> Result<JobRuntimeAuthorities, ApplicationError> {
+        let issuance = RuntimeAuthorityIssueRequest::new(
+            job,
+            offer.job_ir(),
+            offer.lease(),
+            offer.lease().issued_at(),
+            offer.request().session(),
+            offer.slot(),
+        )
+        .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        match (
+            job.job().authority_profile(),
+            job.job().trust_snapshot().authority().permissions(),
+        ) {
+            (JobAuthorityProfile::CredentialFree, _)
+            | (
+                JobAuthorityProfile::Standard,
+                automata_ci_core::TrustPermissionAuthority::DenyAll,
+            ) => JobRuntimeAuthorities::new(Vec::new(), job, offer.lease())
+                .map_err(|_| app(ApplicationErrorKind::Internal)),
+            (JobAuthorityProfile::Standard, _) => self
+                .ports
+                .runtime_authorities
+                .as_ref()
+                .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?
+                .issue(issuance)
+                .await
+                .map_err(port_application_error),
+        }
+    }
+
+    async fn handle_runtime_authority_ack(
+        &self,
+        fence: RunnerSessionFence,
+        acknowledgement: &RuntimeAuthorityAck,
+        digest: Sha256Digest,
+        cancellation: &CancellationToken,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        let header = acknowledgement.header();
+        let request = receipt_request(
+            fence,
+            header.operation_id(),
+            RUNTIME_AUTHORITY_ACK_KIND,
+            digest,
+        )?;
+        let protocol_version = RunnerProtocolVersion::new(header.protocol_version().get())
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        let acknowledgement = AcknowledgeRuntimeAuthorityDelivery::new(
+            request,
+            protocol_version,
+            acknowledgement.binding(),
+            acknowledgement.bundle_digest(),
+            self.ports.clock.now(),
+        )
+        .map_err(|_| app(ApplicationErrorKind::Conflict))?;
+        Self::not_cancelled(cancellation)?;
+        self.ports
+            .durability
+            .runtime_authority_deliveries
+            .acknowledge_runtime_authority_delivery(acknowledgement)
+            .await
+            .map_err(store_application_error)?;
+        Ok(ServerToRunner::OperationAck(OperationAck::new(
+            self.reply_header(header),
+        )))
     }
 
     async fn handle_heartbeat(
@@ -2100,6 +2262,12 @@ const fn message_kind(message: &RunnerToServer) -> Option<RunnerControlMessageKi
     match message {
         RunnerToServer::LeaseRequest(_) => Some(RunnerControlMessageKind::LeaseRequest),
         RunnerToServer::LeaseResponse(_) => Some(RunnerControlMessageKind::LeaseResponse),
+        RunnerToServer::RuntimeAuthorityRequest(_) => {
+            Some(RunnerControlMessageKind::RuntimeAuthorityRequest)
+        }
+        RunnerToServer::RuntimeAuthorityAck(_) => {
+            Some(RunnerControlMessageKind::RuntimeAuthorityAck)
+        }
         RunnerToServer::Heartbeat(_) => Some(RunnerControlMessageKind::Heartbeat),
         RunnerToServer::JobState(_) => Some(RunnerControlMessageKind::JobState),
         RunnerToServer::JobResult(_) => Some(RunnerControlMessageKind::JobResult),
@@ -2122,6 +2290,8 @@ fn runner_header(message: &RunnerToServer) -> Option<MessageHeader> {
         RunnerToServer::Hello(_) => None,
         RunnerToServer::LeaseRequest(value) => Some(value.header()),
         RunnerToServer::LeaseResponse(value) => Some(value.header()),
+        RunnerToServer::RuntimeAuthorityRequest(value) => Some(value.header()),
+        RunnerToServer::RuntimeAuthorityAck(value) => Some(value.header()),
         RunnerToServer::Heartbeat(value) => Some(value.header()),
         RunnerToServer::JobState(value) => Some(value.header()),
         RunnerToServer::JobResult(value) => Some(value.header()),
@@ -2202,6 +2372,9 @@ fn response_correlates(response: &ServerToRunner, request: MessageHeader) -> boo
             .header()
             .validate_for(request.protocol_version(), request.session_id())
             .is_ok(),
+        ServerToRunner::RuntimeAuthorityGrant(value) => {
+            value.header().validate_reply_for(request).is_ok()
+        }
         ServerToRunner::CancelJob(value) => value
             .header()
             .validate_for(request.protocol_version(), request.session_id())

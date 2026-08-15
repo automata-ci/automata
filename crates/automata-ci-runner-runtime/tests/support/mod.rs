@@ -17,7 +17,9 @@ use automata_ci_core::{
     JobIrEnvelope, JobLifecycle, JobPermissionRequest, JobResult, JobSecretExposure, JobSource,
     Lease, LeaseId, LogAck, LogChannel, LogFrame, OperationId, RunId, RunValueTemplates,
     RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements, RuntimeBoolean,
-    SandboxCapabilities, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, UnixMillis,
+    SandboxCapabilities, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis,
     ValueTemplate, WorkflowId,
 };
 use automata_ci_execution::{
@@ -25,18 +27,20 @@ use automata_ci_execution::{
 };
 use automata_ci_protocol::{
     CancelJob, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode, HandshakeRejected,
-    JobResultMessage, JobRuntimeAuthorities, JobRuntimeAuthority, LeaseOffer, LeaseRenewal,
-    LogAckMessage, MessageHeader, NegotiatedSession, NoWork, OperationAck, RemoteErrorCode,
-    RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential, RuntimeAuthorityEndpoint,
-    RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming,
-    ServerToRunner, SessionDisposition,
+    INITIAL_RUNTIME_AUTHORITY_GENERATION, JobResultMessage, JobRuntimeAuthorities,
+    JobRuntimeAuthority, LeaseOffer, LeaseRenewal, LogAckMessage, MessageHeader, NegotiatedSession,
+    NoWork, OperationAck, RemoteErrorCode, RunnerSlotOrdinal, RunnerToServer,
+    RuntimeAuthorityCredential, RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint,
+    RuntimeAuthorityGrant, RuntimeAuthorityName, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
+    ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
 };
-use automata_ci_protocol_protobuf::{encode_job_ir, encode_runtime_authorities};
+use automata_ci_protocol_protobuf::{decode_job_ir, encode_job_ir, encode_runtime_authorities};
 use automata_ci_runner_journal::{
     DurableCommand, FileJournal, JobIrContentRef, LeaseOfferRecord, ProviderFailureKind,
     ProviderFailureOutcome, ProviderName, ProviderOperationKind, RunnerJournal,
-    RuntimeAuthorityContentRef, SandboxHandle as JournalSandboxHandle, SandboxIdentity,
-    SessionBinding, StateRoot, TerminalResultRecord,
+    RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
+    SandboxHandle as JournalSandboxHandle, SandboxIdentity, SessionBinding, StateRoot,
+    TerminalResultRecord,
 };
 use automata_ci_runner_runtime::{
     AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
@@ -2550,6 +2554,7 @@ pub struct CrossSlotReplayClient {
     shutdown: CancellationToken,
     limits: automata_ci_protocol::ProtocolLimits,
     offer: LeaseOffer,
+    complete_authority_delivery: bool,
     delivery_barrier: tokio::sync::Barrier,
     acknowledgement_calls: AtomicUsize,
 }
@@ -2560,7 +2565,15 @@ impl CrossSlotReplayClient {
         session_id: automata_ci_core::RunnerSessionId,
         shutdown: CancellationToken,
     ) -> Self {
-        Self::with_target_slot(runner_id, session_id, shutdown, 1)
+        Self::with_target_slot(runner_id, session_id, shutdown, 1, false)
+    }
+
+    pub fn with_authority_delivery(
+        runner_id: RunnerId,
+        session_id: automata_ci_core::RunnerSessionId,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self::with_target_slot(runner_id, session_id, shutdown, 1, true)
     }
 
     pub fn with_out_of_range_target(
@@ -2568,7 +2581,7 @@ impl CrossSlotReplayClient {
         session_id: automata_ci_core::RunnerSessionId,
         shutdown: CancellationToken,
     ) -> Self {
-        Self::with_target_slot(runner_id, session_id, shutdown, 3)
+        Self::with_target_slot(runner_id, session_id, shutdown, 3, false)
     }
 
     fn with_target_slot(
@@ -2576,6 +2589,7 @@ impl CrossSlotReplayClient {
         session_id: automata_ci_core::RunnerSessionId,
         shutdown: CancellationToken,
         target_slot: u16,
+        complete_authority_delivery: bool,
     ) -> Self {
         let lease = Lease::new(
             LeaseId::new(),
@@ -2587,7 +2601,6 @@ impl CrossSlotReplayClient {
         )
         .expect("lease");
         let job = minimal_job();
-        let authorities = test_runtime_authorities(&job, &lease);
         let offer = LeaseOffer::new(
             ServerCommandHeader::new(
                 SUPPORTED_PROTOCOL_RANGE.max(),
@@ -2598,13 +2611,13 @@ impl CrossSlotReplayClient {
             RunnerSlotOrdinal::new(target_slot).expect("target slot"),
             lease,
             job,
-            authorities,
         );
         Self {
             session_id,
             shutdown,
             limits: automata_ci_protocol::ProtocolLimits::default(),
             offer,
+            complete_authority_delivery,
             delivery_barrier: tokio::sync::Barrier::new(2),
             acknowledgement_calls: AtomicUsize::new(0),
         }
@@ -2664,11 +2677,50 @@ impl RunnerRuntimeControlClient for CrossSlotReplayClient {
                     // The handler commits the ACK before selecting an
                     // unacknowledged command for its correlated response.
                     tokio::task::yield_now().await;
-                    self.shutdown.cancel();
+                    if !self.complete_authority_delivery {
+                        self.shutdown.cancel();
+                    }
                     control_reply(
                         ServerToRunner::LeaseOffer(Box::new(self.offer.clone())),
                         &self.limits,
                     )
+                }
+                RunnerToServer::LeaseResponse(response) => {
+                    let reply = control_reply(
+                        ServerToRunner::OperationAck(OperationAck::new(reply_header(
+                            response.header(),
+                        ))),
+                        &self.limits,
+                    );
+                    if response.disposition() != &automata_ci_protocol::LeaseDisposition::Accepted {
+                        self.shutdown.cancel();
+                    }
+                    reply
+                }
+                RunnerToServer::Heartbeat(heartbeat) => control_reply(
+                    ServerToRunner::LeaseRenewal(LeaseRenewal::new(
+                        reply_header(heartbeat.header()),
+                        heartbeat.attempt_id(),
+                        heartbeat.guard(),
+                        UnixMillis::new(40_000),
+                    )),
+                    &self.limits,
+                ),
+                RunnerToServer::RuntimeAuthorityRequest(authority_request) => control_reply(
+                    runtime_authority_grant_for(
+                        authority_request,
+                        std::slice::from_ref(&self.offer),
+                        &self.limits,
+                    ),
+                    &self.limits,
+                ),
+                RunnerToServer::RuntimeAuthorityAck(ack) => {
+                    let reply = control_reply(
+                        ServerToRunner::OperationAck(OperationAck::new(reply_header(ack.header()))),
+                        &self.limits,
+                    );
+                    self.shutdown.cancel();
+                    reply
                 }
                 _ => Err(invalid_control_response()),
             }
@@ -2730,7 +2782,6 @@ impl CommandDuringAckClient {
         )
         .expect("lease");
         let job = minimal_job();
-        let authorities = test_runtime_authorities(&job, &lease);
         LeaseOffer::new(
             ServerCommandHeader::new(
                 SUPPORTED_PROTOCOL_RANGE.max(),
@@ -2741,7 +2792,6 @@ impl CommandDuringAckClient {
             RunnerSlotOrdinal::new(slot).expect("runner slot"),
             lease,
             job,
-            authorities,
         )
     }
 
@@ -2846,6 +2896,12 @@ impl RunnerRuntimeControlClient for CommandDuringAckClient {
                         == &automata_ci_protocol::LeaseDisposition::Accepted =>
                 {
                     ServerToRunner::OperationAck(OperationAck::new(reply_header(response.header())))
+                }
+                RunnerToServer::RuntimeAuthorityRequest(authority_request) => {
+                    runtime_authority_grant_for(authority_request, &self.offers, &self.limits)
+                }
+                RunnerToServer::RuntimeAuthorityAck(ack) => {
+                    ServerToRunner::OperationAck(OperationAck::new(reply_header(ack.header())))
                 }
                 RunnerToServer::Heartbeat(heartbeat) => {
                     tokio::task::yield_now().await;
@@ -2984,6 +3040,12 @@ impl RunnerRuntimeControlClient for DelayedPredecessorClient {
                 RunnerToServer::LeaseResponse(response) => {
                     ServerToRunner::OperationAck(OperationAck::new(reply_header(response.header())))
                 }
+                RunnerToServer::RuntimeAuthorityRequest(authority_request) => {
+                    runtime_authority_grant_for(authority_request, &self.offers, &self.limits)
+                }
+                RunnerToServer::RuntimeAuthorityAck(ack) => {
+                    ServerToRunner::OperationAck(OperationAck::new(reply_header(ack.header())))
+                }
                 _ => return Err(invalid_control_response()),
             };
             control_reply(response, &self.limits)
@@ -3086,6 +3148,12 @@ impl RunnerRuntimeControlClient for IgnoredOfferReplayClient {
                 }
                 RunnerToServer::LeaseResponse(response) => {
                     ServerToRunner::OperationAck(OperationAck::new(reply_header(response.header())))
+                }
+                RunnerToServer::RuntimeAuthorityRequest(authority_request) => {
+                    runtime_authority_grant_for(authority_request, &self.offers, &self.limits)
+                }
+                RunnerToServer::RuntimeAuthorityAck(ack) => {
+                    ServerToRunner::OperationAck(OperationAck::new(reply_header(ack.header())))
                 }
                 _ => return Err(invalid_control_response()),
             };
@@ -3305,6 +3373,164 @@ impl RunnerRuntimeControlClient for AcceptanceClient {
                     RuntimeControlRetry::Never,
                 )
             })
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorityDeliveryReply {
+    Acknowledge,
+    CancelRequest,
+    CancelAcknowledgement,
+}
+
+#[derive(Debug)]
+pub struct AuthorityDeliveryClient {
+    session_id: automata_ci_core::RunnerSessionId,
+    attempt_id: AttemptId,
+    guard: automata_ci_core::LeaseGuard,
+    reply: AuthorityDeliveryReply,
+    shutdown: CancellationToken,
+    limits: automata_ci_protocol::ProtocolLimits,
+    authority_requests: AtomicUsize,
+    authority_acknowledgements:
+        Mutex<Vec<(RuntimeAuthorityDeliveryBinding, Sha256Digest, OperationId)>>,
+    command_acknowledged: AtomicBool,
+}
+
+impl AuthorityDeliveryClient {
+    pub fn new(
+        fixture: &AcceptedFixture,
+        reply: AuthorityDeliveryReply,
+        shutdown: CancellationToken,
+    ) -> Self {
+        Self {
+            session_id: fixture.session_id,
+            attempt_id: fixture.lease.attempt_id(),
+            guard: fixture.lease.guard(),
+            reply,
+            shutdown,
+            limits: automata_ci_protocol::ProtocolLimits::default(),
+            authority_requests: AtomicUsize::new(0),
+            authority_acknowledgements: Mutex::new(Vec::new()),
+            command_acknowledged: AtomicBool::new(false),
+        }
+    }
+
+    pub fn authority_requests(&self) -> usize {
+        self.authority_requests.load(Ordering::SeqCst)
+    }
+
+    pub fn authority_acknowledgements(
+        &self,
+    ) -> Vec<(RuntimeAuthorityDeliveryBinding, Sha256Digest, OperationId)> {
+        self.authority_acknowledgements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn command_acknowledged(&self) -> bool {
+        self.command_acknowledged.load(Ordering::SeqCst)
+    }
+
+    fn cancellation(&self) -> ServerToRunner {
+        ServerToRunner::CancelJob(CancelJob::new(
+            ServerCommandHeader::new(
+                SUPPORTED_PROTOCOL_RANGE.max(),
+                self.session_id,
+                OperationId::new(),
+                CommandSequence::new(2).expect("cancellation command sequence"),
+            ),
+            self.attempt_id,
+            self.guard,
+            "cancel authority delivery before user code",
+            UnixMillis::new(10_000),
+        ))
+    }
+}
+
+impl RunnerRuntimeControlClient for AuthorityDeliveryClient {
+    fn exchange<'a>(
+        &'a self,
+        request: &'a PreparedRequest,
+        _cancellation: CancellationToken,
+    ) -> RuntimeControlFuture<'a> {
+        Box::pin(async move {
+            let response = match request.message() {
+                RunnerToServer::Hello(hello) => {
+                    let resume = hello.resume().expect("authority recovery hello");
+                    assert_eq!(resume.session_id(), self.session_id);
+                    ServerToRunner::Hello(ServerHello::new(
+                        OperationId::new(),
+                        hello.operation_id(),
+                        NegotiatedSession::new(
+                            SUPPORTED_PROTOCOL_RANGE.max(),
+                            automata_ci_core::JobIrVersion::current(),
+                            self.session_id,
+                            SessionDisposition::Resumed,
+                            resume.command_cursor(),
+                        ),
+                        ServerTiming::new(UnixMillis::new(10_000), 1_000, 30_000),
+                    ))
+                }
+                RunnerToServer::LeaseResponse(response)
+                    if response.disposition()
+                        == &automata_ci_protocol::LeaseDisposition::Accepted =>
+                {
+                    ServerToRunner::OperationAck(OperationAck::new(reply_header(response.header())))
+                }
+                RunnerToServer::RuntimeAuthorityRequest(authority_request) => {
+                    self.authority_requests.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(self.reply, AuthorityDeliveryReply::CancelRequest);
+                    assert_eq!(authority_request.binding().attempt_id(), self.attempt_id);
+                    self.cancellation()
+                }
+                RunnerToServer::RuntimeAuthorityAck(ack) => {
+                    self.authority_acknowledgements
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push((
+                            ack.binding(),
+                            ack.bundle_digest(),
+                            ack.header().operation_id(),
+                        ));
+                    match self.reply {
+                        AuthorityDeliveryReply::Acknowledge => ServerToRunner::OperationAck(
+                            OperationAck::new(reply_header(ack.header())),
+                        ),
+                        AuthorityDeliveryReply::CancelAcknowledgement => self.cancellation(),
+                        AuthorityDeliveryReply::CancelRequest => {
+                            panic!("request-stage cancellation must not reach authority ACK")
+                        }
+                    }
+                }
+                RunnerToServer::CommandAck(ack) => {
+                    assert_eq!(
+                        ack.command_cursor(),
+                        CommandCursor::through(
+                            CommandSequence::new(2).expect("cancellation command sequence")
+                        )
+                    );
+                    self.command_acknowledged.store(true, Ordering::SeqCst);
+                    self.shutdown.cancel();
+                    ServerToRunner::OperationAck(OperationAck::new(reply_header(ack.header())))
+                }
+                RunnerToServer::Heartbeat(heartbeat) => {
+                    ServerToRunner::LeaseRenewal(LeaseRenewal::new(
+                        reply_header(heartbeat.header()),
+                        heartbeat.attempt_id(),
+                        heartbeat.guard(),
+                        UnixMillis::new(40_000),
+                    ))
+                }
+                RunnerToServer::JobResult(result) => {
+                    self.shutdown.cancel();
+                    ServerToRunner::OperationAck(OperationAck::new(reply_header(result.header())))
+                }
+                _ => return Err(invalid_control_response()),
+            };
+            control_reply(response, &self.limits)
         })
     }
 }
@@ -5149,6 +5375,35 @@ pub fn seed_accepted_offer(
     journal
         .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
         .expect("accept offer locally");
+    record_test_authority_delivery_with_expiries(journal, spool, &fixture, &[60_000]);
+    fixture
+}
+
+pub fn seed_accepted_offer_without_runtime_authority(
+    journal: &dyn RunnerJournal,
+    spool: &dyn DurableContentStore,
+    runner_id: RunnerId,
+) -> AcceptedFixture {
+    let fixture = seed_recorded_offer(journal, spool, runner_id);
+    journal
+        .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
+        .expect("accept offer without runtime authority");
+    fixture
+}
+
+pub fn seed_accepted_offer_with_unacknowledged_runtime_authority(
+    journal: &dyn RunnerJournal,
+    spool: &dyn DurableContentStore,
+    runner_id: RunnerId,
+) -> AcceptedFixture {
+    let fixture = seed_accepted_offer_without_runtime_authority(journal, spool, runner_id);
+    record_test_authority_delivery_with_expiries_and_acknowledgement(
+        journal,
+        spool,
+        &fixture,
+        &[60_000],
+        false,
+    );
     fixture
 }
 
@@ -5176,16 +5431,13 @@ pub fn seed_accepted_credential_free_offer(
         ))
         .expect("begin session");
     let job = credential_free_job();
-    let authorities =
-        JobRuntimeAuthorities::new(Vec::new(), &job, &lease).expect("empty authority bundle");
-    record_test_offer_with_authorities(
+    record_test_offer(
         journal,
         spool,
         session_id,
         slot,
         &lease,
         &job,
-        &authorities,
         DurableCommand::new(
             CommandSequence::new(1).expect("sequence"),
             OperationId::new(),
@@ -5195,11 +5447,13 @@ pub fn seed_accepted_credential_free_offer(
     journal
         .accept_lease(session_id, slot, lease.guard())
         .expect("accept credential-free offer locally");
-    AcceptedFixture {
+    let fixture = AcceptedFixture {
         session_id,
         slot,
         lease,
-    }
+    };
+    record_test_authority_delivery_with_expiries(journal, spool, &fixture, &[]);
+    fixture
 }
 
 pub fn seed_accepted_offer_expiring_at(
@@ -5212,6 +5466,7 @@ pub fn seed_accepted_offer_expiring_at(
     journal
         .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
         .expect("accept short offer locally");
+    record_test_authority_delivery_with_expiries(journal, spool, &fixture, &[60_000]);
     fixture
 }
 
@@ -5232,6 +5487,7 @@ pub fn seed_accepted_offer_with_authority_expiries(
     journal
         .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
         .expect("accept authority-bounded offer locally");
+    record_test_authority_delivery_with_expiries(journal, spool, &fixture, authority_expires_at);
     fixture
 }
 
@@ -5330,11 +5586,13 @@ pub fn seed_additional_accepted_offer(
     journal
         .accept_lease(session_id, slot, lease.guard())
         .expect("accept additional offer locally");
-    AcceptedFixture {
+    let fixture = AcceptedFixture {
         session_id,
         slot,
         lease,
-    }
+    };
+    record_test_authority_delivery_with_expiries(journal, spool, &fixture, &[60_000]);
+    fixture
 }
 
 pub fn seed_recorded_offer(
@@ -5359,7 +5617,7 @@ fn seed_recorded_offer_with_authority_expiries(
     spool: &dyn DurableContentStore,
     runner_id: RunnerId,
     lease_expires_at: i64,
-    authority_expires_at: &[i64],
+    _authority_expires_at: &[i64],
 ) -> AcceptedFixture {
     let session_id = automata_ci_core::RunnerSessionId::new();
     let slot = RunnerSlotOrdinal::new(1).expect("slot one");
@@ -5380,15 +5638,13 @@ fn seed_recorded_offer_with_authority_expiries(
         ))
         .expect("begin session");
     let job = minimal_job();
-    let authorities = test_runtime_authorities_with_expiries(&job, &lease, authority_expires_at);
-    record_test_offer_with_authorities(
+    record_test_offer(
         journal,
         spool,
         session_id,
         slot,
         &lease,
         &job,
-        &authorities,
         DurableCommand::new(
             CommandSequence::new(1).expect("sequence"),
             OperationId::new(),
@@ -5412,63 +5668,15 @@ fn record_test_offer(
     job: &JobIrEnvelope,
     command: DurableCommand,
 ) {
-    let authorities = test_runtime_authorities(job, lease);
-    record_test_offer_with_authorities(
-        journal,
-        spool,
-        session_id,
-        slot,
-        lease,
-        job,
-        &authorities,
-        command,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_test_offer_with_authorities(
-    journal: &dyn RunnerJournal,
-    spool: &dyn DurableContentStore,
-    session_id: automata_ci_core::RunnerSessionId,
-    slot: RunnerSlotOrdinal,
-    lease: &Lease,
-    job: &JobIrEnvelope,
-    authorities: &JobRuntimeAuthorities,
-    command: DurableCommand,
-) {
     let limits = automata_ci_protocol::ProtocolLimits::default();
     let encoded_job = encode_job_ir(job, &limits).expect("encode JobIR");
-    let encoded_authorities = Zeroizing::new(
-        encode_runtime_authorities(authorities, job, lease, &limits)
-            .expect("encode runtime authorities"),
-    );
     let job_publication = spool
         .persist(ContentKind::JobIr, &encoded_job)
         .expect("persist JobIR");
     let adopted = job_publication.commit_with(|job_content| {
-        let authority_publication = spool
-            .persist(ContentKind::RuntimeAuthority, &encoded_authorities)
-            .expect("persist runtime authorities");
-        let authority_adopted = authority_publication.commit_with(|authority_content| {
-            let job_reference = JobIrContentRef::new(job.version(), job_content.clone())?;
-            let authority_reference = RuntimeAuthorityContentRef::new(authority_content.clone())?;
-            let offer = LeaseOfferRecord::new(
-                slot,
-                lease.clone(),
-                job_reference,
-                authority_reference,
-                command,
-            )?;
-            journal.record_lease_offer(session_id, offer)
-        });
-        match authority_adopted {
-            Ok(snapshot) => Ok(snapshot),
-            Err(failure) => {
-                let (error, publication) = failure.into_parts();
-                publication.abort();
-                Err(error)
-            }
-        }
+        let job_reference = JobIrContentRef::new(job.version(), job_content.clone())?;
+        let offer = LeaseOfferRecord::new(slot, lease.clone(), job_reference, command)?;
+        journal.record_lease_offer(session_id, offer)
     });
     if let Err(failure) = adopted {
         let (error, publication) = failure.into_parts();
@@ -5477,8 +5685,124 @@ fn record_test_offer_with_authorities(
     }
 }
 
+fn record_test_authority_delivery_with_expiries(
+    journal: &dyn RunnerJournal,
+    spool: &dyn DurableContentStore,
+    fixture: &AcceptedFixture,
+    authority_expiries: &[i64],
+) {
+    record_test_authority_delivery_with_expiries_and_acknowledgement(
+        journal,
+        spool,
+        fixture,
+        authority_expiries,
+        true,
+    );
+}
+
+fn record_test_authority_delivery_with_expiries_and_acknowledgement(
+    journal: &dyn RunnerJournal,
+    spool: &dyn DurableContentStore,
+    fixture: &AcceptedFixture,
+    authority_expiries: &[i64],
+    acknowledge: bool,
+) {
+    let snapshot = journal.snapshot().expect("snapshot accepted offer");
+    let offer = snapshot
+        .slot(fixture.slot)
+        .expect("accepted slot")
+        .offer()
+        .clone();
+    let limits = automata_ci_protocol::ProtocolLimits::default();
+    let encoded_job = spool
+        .load(offer.job_ir().content())
+        .expect("load accepted JobIR");
+    let job = decode_job_ir(&encoded_job, &limits).expect("decode accepted JobIR");
+    let authorities = if job.job().authority_profile() == JobAuthorityProfile::CredentialFree {
+        JobRuntimeAuthorities::new(Vec::new(), &job, &fixture.lease)
+            .expect("credential-free authority bundle")
+    } else {
+        test_runtime_authorities_with_expiries(&job, &fixture.lease, authority_expiries)
+    };
+    let encoded_authorities = Zeroizing::new(
+        encode_runtime_authorities(&authorities, &job, &fixture.lease, &limits)
+            .expect("encode runtime authorities"),
+    );
+    let bundle_digest = Sha256Digest::from_bytes(Sha256::digest(&encoded_authorities).into());
+    let request_operation_id = OperationId::new();
+    let acknowledgement_operation_id = OperationId::new();
+    let publication = spool
+        .persist(ContentKind::RuntimeAuthority, &encoded_authorities)
+        .expect("persist post-accept runtime authorities");
+    let adopted = publication.commit_with(|authority_content| {
+        let content = RuntimeAuthorityContentRef::new(authority_content.clone())?;
+        let delivery = RuntimeAuthorityDeliveryRecord::new(
+            RuntimeAuthorityDeliveryBinding::new(
+                fixture.lease.attempt_id(),
+                fixture.slot,
+                fixture.lease.guard(),
+                offer.command().operation_id(),
+                offer.command().sequence(),
+                offer.job_ir().content().sha256(),
+                INITIAL_RUNTIME_AUTHORITY_GENERATION,
+            ),
+            request_operation_id,
+            acknowledgement_operation_id,
+            bundle_digest,
+            content,
+        )?;
+        journal.record_runtime_authority_delivery(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            delivery,
+        )
+    });
+    if let Err(failure) = adopted {
+        let (error, publication) = failure.into_parts();
+        publication.abort();
+        panic!("journal test authority delivery: {error}");
+    }
+    if acknowledge {
+        journal
+            .acknowledge_runtime_authority_delivery(
+                fixture.session_id,
+                fixture.slot,
+                fixture.lease.guard(),
+                INITIAL_RUNTIME_AUTHORITY_GENERATION,
+                bundle_digest,
+                acknowledgement_operation_id,
+            )
+            .expect("acknowledge test authority delivery");
+    }
+}
+
 pub fn test_runtime_authorities(job: &JobIrEnvelope, lease: &Lease) -> JobRuntimeAuthorities {
     test_runtime_authorities_with_expiries(job, lease, &[60_000])
+}
+
+fn runtime_authority_grant_for(
+    request: &RuntimeAuthorityRequest,
+    offers: &[LeaseOffer],
+    limits: &automata_ci_protocol::ProtocolLimits,
+) -> ServerToRunner {
+    let binding = request.binding();
+    let offer = offers
+        .iter()
+        .find(|offer| offer.lease().attempt_id() == binding.attempt_id())
+        .expect("authority request names a scripted offer");
+    binding
+        .validate_for_offer(offer)
+        .expect("authority request matches exact offer");
+    let authorities = test_runtime_authorities(offer.job(), offer.lease());
+    let encoded = encode_runtime_authorities(&authorities, offer.job(), offer.lease(), limits)
+        .expect("encode scripted runtime authorities");
+    ServerToRunner::RuntimeAuthorityGrant(Box::new(RuntimeAuthorityGrant::new(
+        reply_header(request.header()),
+        binding,
+        Sha256Digest::from_bytes(Sha256::digest(&encoded).into()),
+        authorities,
+    )))
 }
 
 fn test_runtime_authorities_with_expiries(
@@ -5575,9 +5899,32 @@ fn minimal_job_with_profile(authority_profile: JobAuthorityProfile) -> JobIrEnve
         )
         .with_authority_profile(authority_profile)
         .with_permission_request(match authority_profile {
-            JobAuthorityProfile::Standard => JobPermissionRequest::ProviderDefault,
+            JobAuthorityProfile::Standard => JobPermissionRequest::WriteAll,
             JobAuthorityProfile::CredentialFree => JobPermissionRequest::Mapping(Vec::new()),
-        }),
+        })
+        .with_trust_snapshot(
+            TrustPolicy::current()
+                .evaluate(
+                    TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                        .with_original_actor(
+                            TrustActorEvidence::new(
+                                "actor-1",
+                                TrustActorKind::User,
+                                TrustAutomationKind::None,
+                            )
+                            .expect("actor evidence"),
+                        )
+                        .with_repositories(
+                            TrustRepositoryEvidence::new("42", "7").expect("source repository"),
+                            TrustRepositoryEvidence::new("42", "7").expect("target repository"),
+                        )
+                        .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                        .with_revisions("source-sha", "target-sha", "execution-sha")
+                        .with_fork(false)
+                        .with_token_recursion(TrustTokenRecursion::Suppressed),
+                )
+                .expect("trusted snapshot"),
+        ),
     )
 }
 

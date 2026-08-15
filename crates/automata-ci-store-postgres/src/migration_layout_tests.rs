@@ -149,6 +149,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0036_align_github_workflow_limit.sql",
         "91ad604671bb15fa5ae6d593161a443427bfa77e8f50cb6267290f919742d15793659c94318044371d5e6bf22b51a9e7",
     ),
+    (
+        "0037_runtime_authority_deliveries.sql",
+        "bf752f9a883c773e4f1ea10f9290f2b41a0ab44db50f7b7d68874014f88c0343fc223ac9948ed11c64b7748deb3a26a0",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -282,6 +286,73 @@ fn github_workflow_limit_matches_the_product_manifest_contract() {
         512_000,
         "product and durable GitHub workflow byte limits diverged"
     );
+}
+
+#[test]
+fn runtime_authority_delivery_is_post_accept_exact_and_value_free() {
+    let source = include_str!("../migrations/0037_runtime_authority_deliveries.sql");
+
+    for required in [
+        "CREATE TABLE runner_runtime_authority_deliveries",
+        "DROP CONSTRAINT runner_sessions_protocol_current",
+        "ADD CONSTRAINT runner_sessions_protocol_known",
+        "CHECK (protocol_version IN (1, 2))",
+        "PRIMARY KEY (attempt_id, fencing_token, delivery_generation)",
+        "UNIQUE (runner_session_id, request_operation_id)",
+        "CHECK (delivery_generation = 1)",
+        "CHECK (protocol_version = 2)",
+        "job_id uuid NOT NULL",
+        "run_id uuid NOT NULL",
+        "job_ir_schema integer NOT NULL",
+        "job_ir_size_bytes bigint NOT NULL",
+        "octet_length(job_ir_digest) = 32",
+        "job_ir_object_key text NOT NULL",
+        "octet_length(request_digest) = 32",
+        "octet_length(bundle_digest) = 32",
+        "acknowledgement_operation_id IS NULL",
+        "acknowledgement_digest IS NULL",
+        "acknowledged_at_ms IS NULL",
+        "acknowledged_at_ms >= committed_at_ms",
+        "lease_offer_publications_runtime_authority_binding_unique",
+        "runner_command_outbox_authority_binding_unique",
+        "runtime_authority_deliveries_exact_offer_publication",
+        "runtime_authority_deliveries_exact_offer_command",
+        "REFERENCES runner_lease_offer_publications",
+        "REFERENCES runner_command_outbox",
+    ] {
+        assert!(
+            source.contains(required),
+            "runtime-authority migration lost required contract: {required}"
+        );
+    }
+
+    for forbidden in [
+        "runner_runtime_authority_deliveries_attempt_fkey",
+        "runner_runtime_authority_deliveries_session_fence",
+        "runner_runtime_authority_deliveries_offer_publication",
+        "runner_runtime_authority_deliveries_offer_command",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "runtime-authority migration must not use independent existence-only binding: {forbidden}"
+        );
+    }
+
+    for forbidden in [
+        "credential bytea",
+        "token bytea",
+        "secret bytea",
+        "payload bytea",
+        "response bytea",
+        "ciphertext bytea",
+        "wrapped_data_key",
+        "nonce bytea",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "runtime-authority migration must not persist grant material: {forbidden}"
+        );
+    }
 }
 
 fn migration_paths() -> Vec<PathBuf> {

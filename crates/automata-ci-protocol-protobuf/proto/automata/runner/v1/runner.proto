@@ -20,6 +20,8 @@ message RunnerFrame {
     JobResultMessage job_result = 6;
     LogBatch log_batch = 7;
     CommandAck command_ack = 8;
+    RuntimeAuthorityRequest runtime_authority_request = 9;
+    RuntimeAuthorityAck runtime_authority_ack = 10;
   }
 }
 
@@ -34,6 +36,7 @@ message ServerFrame {
     OperationAck operation_ack = 7;
     NoWork no_work = 8;
     ErrorMessage error = 9;
+    RuntimeAuthorityGrant runtime_authority_grant = 10;
   }
 }
 
@@ -274,7 +277,7 @@ message LeaseOffer {
   uint32 slot = 2;
   Lease lease = 3;
   JobIrEnvelope job = 4;
-  JobRuntimeAuthorities runtime_authorities = 5;
+  reserved 5;
   ManagedSecretBindingOverlay managed_secret_bindings = 6;
 }
 
@@ -297,7 +300,8 @@ message ManagedSecretBindingOverlay {
 }
 
 // Short-lived bearer material is sent only over the authenticated runner
-// transport and must be protected in the runner spool before lease acceptance.
+// transport after lease acceptance and must be protected in the runner spool
+// before the grant is acknowledged or user code can start.
 message JobRuntimeAuthority {
   string name = 1;
   bytes run_id = 2;
@@ -782,6 +786,34 @@ message JobIr {
   bytes trust_snapshot = 16;
   // Required domain-separated digest of trust_snapshot.
   bytes trust_snapshot_digest = 17;
+}
+
+message RuntimeAuthorityDeliveryBinding {
+  bytes attempt_id = 1;
+  uint32 slot = 2;
+  LeaseGuard guard = 3;
+  bytes offer_operation_id = 4;
+  uint64 offer_sequence = 5;
+  bytes job_ir_sha256 = 6;
+  uint32 generation = 7;
+}
+
+message RuntimeAuthorityRequest {
+  MessageHeader header = 1;
+  RuntimeAuthorityDeliveryBinding binding = 2;
+}
+
+message RuntimeAuthorityGrant {
+  MessageHeader header = 1;
+  RuntimeAuthorityDeliveryBinding binding = 2;
+  bytes bundle_sha256 = 3;
+  JobRuntimeAuthorities authorities = 4;
+}
+
+message RuntimeAuthorityAck {
+  MessageHeader header = 1;
+  RuntimeAuthorityDeliveryBinding binding = 2;
+  bytes bundle_sha256 = 3;
 }
 
 message JobIrEnvelope {

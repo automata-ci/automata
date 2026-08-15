@@ -46,7 +46,6 @@ fn a_sparse_slot_ordinal_cannot_bypass_the_registration_clamp() {
         fixture.lease.clone(),
         JobIrContentRef::new(JobIrVersion::current(), reference(ContentKind::JobIr, 64))
             .expect("JobIR reference"),
-        Fixture::runtime_authority(),
         Fixture::command(1),
     )
     .expect("offer model");

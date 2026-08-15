@@ -2152,10 +2152,12 @@ const fn handshake_outcomes() -> [&'static str; 9] {
     ]
 }
 
-const fn runner_message_kinds() -> [&'static str; 7] {
+const fn runner_message_kinds() -> [&'static str; 9] {
     [
         "lease_request",
         "lease_response",
+        "runtime_authority_request",
+        "runtime_authority_ack",
         "heartbeat",
         "job_state",
         "job_result",
@@ -2274,6 +2276,8 @@ const fn runner_message_kind(kind: RunnerControlMessageKind) -> &'static str {
     match kind {
         RunnerControlMessageKind::LeaseRequest => "lease_request",
         RunnerControlMessageKind::LeaseResponse => "lease_response",
+        RunnerControlMessageKind::RuntimeAuthorityRequest => "runtime_authority_request",
+        RunnerControlMessageKind::RuntimeAuthorityAck => "runtime_authority_ack",
         RunnerControlMessageKind::Heartbeat => "heartbeat",
         RunnerControlMessageKind::JobState => "job_state",
         RunnerControlMessageKind::JobResult => "job_result",

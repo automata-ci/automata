@@ -21,11 +21,14 @@ use automata_ci_control::{
     },
     runner_control::{
         durable::{
+            AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
             CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-            CommitRunnerLogSegment, CommitRunnerTerminalResult, CurrentRunnerSession,
-            CurrentRunnerSessionRepository as _, LeaseOfferClaimStatus, LeaseResponseAction,
-            PublishLeaseOffer, RawLogDisposition, RunnerControlTransactionRepository as _,
-            RunnerLeaseOfferRepository as _, RunnerLogAdmission, RunnerLogAdmissionRequest,
+            CommitRunnerLogSegment, CommitRunnerTerminalResult, CommitRuntimeAuthorityDelivery,
+            CurrentRunnerSession, CurrentRunnerSessionRepository as _, LeaseOfferClaimStatus,
+            LeaseResponseAction, PublishLeaseOffer, RawLogDisposition,
+            RunnerControlTransactionRepository as _, RunnerLeaseOfferRepository as _,
+            RunnerLogAdmission, RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryDisposition,
+            RuntimeAuthorityDeliveryRepository as _,
         },
         repository::{
             RunnerCommandOutbox as _, RunnerOperationReceiptRepository as _,
@@ -38,6 +41,10 @@ use automata_ci_core::{
     LeaseId, LogSequence, LogStreamId, OperationId, Sha256Digest, UnixMillis,
 };
 use automata_ci_postgres::store::PostgresLogCommitListener;
+use automata_ci_protocol::{
+    CommandSequence as ProtocolCommandSequence, INITIAL_RUNTIME_AUTHORITY_GENERATION,
+    RunnerSlotOrdinal, RuntimeAuthorityDeliveryBinding,
+};
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CloseRunnerSession, CommandCursor, CommandSequence, DocumentSchema,
     EnqueueRunnerCommand, HumanLogCommitHint, HumanLogCommitNotificationSource as _, JobIrMetadata,
@@ -53,6 +60,9 @@ use crate::support::{
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
 const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
+const RUNTIME_AUTHORITY_PROTOCOL_VERSION: u16 = 2;
+const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
+const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
 const ACTIVE_LEASE_DURATION_MILLIS: i64 = 300_000;
 const EXPIRING_LEASE_DURATION_MILLIS: i64 = 2_000;
 
@@ -200,6 +210,9 @@ async fn superseded_unpublished_claim_becomes_one_terminal_replay() -> TestResul
     })
     .await
 }
+type RuntimeAuthorityDeliveryAuditRow =
+    (Vec<u8>, Vec<u8>, Vec<u8>, Option<uuid::Uuid>, Option<i64>);
+
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn lease_request_chains_bound_retry_state_per_live_slot() -> TestResult {
@@ -1780,6 +1793,300 @@ async fn lease_response_and_reported_lifecycle_are_atomic_fenced_and_replayed() 
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the delivery, replay, acknowledgement, revocation, and schema assertions form one custody transaction"
+)]
+async fn runtime_authority_delivery_is_post_accept_value_free_exact_and_replayable() -> TestResult {
+    run_with_database(|database| async move {
+        let (seed, lease, metadata, slot, request_operation_id, request_digest) =
+            active_runtime_authority_lease(&database).await?;
+        let fence = seed.session_fences[0];
+
+        let command_operation_id = OperationId::new();
+        let published = database
+            .store()
+            .publish_lease_offer(runtime_authority_offer(
+                fence,
+                &lease,
+                &metadata,
+                slot,
+                request_operation_id,
+                request_digest,
+                command_operation_id,
+            )?)
+            .await
+            .map_err(|error| std::io::Error::other(format!("publish v2 offer: {error}")))?;
+        let binding = RuntimeAuthorityDeliveryBinding::new(
+            lease.attempt_id(),
+            RunnerSlotOrdinal::new(slot.ordinal())?,
+            lease.guard(),
+            published.command().request().operation_id(),
+            ProtocolCommandSequence::new(published.command().sequence().get())?,
+            published.job_ir().digest(),
+            INITIAL_RUNTIME_AUTHORITY_GENERATION,
+        );
+        let authorization_operation_id = OperationId::new();
+        let authorization = AuthorizeRuntimeAuthorityDelivery::new(
+            operation_request(
+                fence,
+                authorization_operation_id,
+                RUNTIME_AUTHORITY_REQUEST_KIND,
+                [81; 32],
+            )?,
+            RunnerProtocolVersion::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
+            binding,
+            database_now(&database).await?,
+        )?;
+
+        assert!(matches!(
+            database
+                .store()
+                .authorize_runtime_authority_delivery(authorization.clone())
+                .await,
+            Err(StoreError::AttemptFenceRejected(id)) if id == lease.attempt_id()
+        ));
+        let acceptance_operation_id = OperationId::new();
+        database
+            .store()
+            .commit_lease_response(CommitLeaseResponse::new(
+                operation_request(
+                    fence,
+                    acceptance_operation_id,
+                    "automata.runner.lease-response.v1",
+                    [82; 32],
+                )?,
+                CommandCursor::initial(),
+                lease.attempt_id(),
+                slot,
+                lease.guard(),
+                LeaseResponseAction::Accept,
+                database_now(&database).await?,
+                response(b"accepted without authority values")?,
+            ))
+            .await?;
+
+        let mismatched_job_ir_digest = [86_u8; 32];
+        let mismatched_request_digest = [87_u8; 32];
+        let mismatched_bundle_digest = [88_u8; 32];
+        let mismatched_insert = sqlx::query(
+            r"
+            INSERT INTO runner_runtime_authority_deliveries (
+                attempt_id, fencing_token, delivery_generation,
+                runner_id, runner_session_id, runner_session_epoch,
+                runner_generation, protocol_version, runner_slot, lease_id,
+                offer_operation_id, offer_command_sequence,
+                job_id, run_id, job_ir_schema, job_ir_size_bytes,
+                job_ir_digest, job_ir_object_key,
+                request_operation_id, request_digest, bundle_digest, committed_at_ms
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+            )
+            ",
+        )
+        .bind(lease.attempt_id().as_uuid())
+        .bind(i64::try_from(lease.fencing_token().get())?)
+        .bind(i32::try_from(INITIAL_RUNTIME_AUTHORITY_GENERATION.get())?)
+        .bind(fence.runner_id().as_uuid())
+        .bind(fence.session_id().as_uuid())
+        .bind(i64::try_from(fence.session_epoch().get())?)
+        .bind(i64::try_from(fence.runner_generation().get())?)
+        .bind(i32::from(RUNTIME_AUTHORITY_PROTOCOL_VERSION))
+        .bind(i32::from(slot.ordinal()))
+        .bind(lease.lease_id().as_uuid())
+        .bind(published.command().request().operation_id().as_uuid())
+        .bind(i64::try_from(published.command().sequence().get())?)
+        .bind(published.job_ir().job_id().as_uuid())
+        .bind(published.job_ir().run_id().as_uuid())
+        .bind(i32::from(published.job_ir().version().get()))
+        .bind(i64::try_from(published.job_ir().encoded_size())?)
+        .bind(mismatched_job_ir_digest.as_slice())
+        .bind(published.job_ir().object_key().as_str())
+        .bind(OperationId::new().as_uuid())
+        .bind(mismatched_request_digest.as_slice())
+        .bind(mismatched_bundle_digest.as_slice())
+        .bind(database_now(&database).await?.get())
+        .execute(database.pool())
+        .await
+        .expect_err("a delivery with JobIR evidence from outside the exact publication must fail");
+        assert_eq!(
+            mismatched_insert
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("runtime_authority_deliveries_exact_offer_publication")
+        );
+
+        let admission = database
+            .store()
+            .authorize_runtime_authority_delivery(authorization.clone())
+            .await?;
+        assert_eq!(admission.offer().request(), published.request());
+        assert_eq!(
+            admission.offer().protocol_version(),
+            published.protocol_version()
+        );
+        assert_eq!(admission.offer().slot(), published.slot());
+        assert_eq!(admission.offer().lease(), published.lease());
+        assert_eq!(admission.offer().job_ir(), published.job_ir());
+        assert_eq!(
+            admission.offer().offer_valid_until(),
+            published.offer_valid_until()
+        );
+        assert_eq!(
+            admission.offer().command().request(),
+            published.command().request()
+        );
+        assert_eq!(
+            admission.offer().command().sequence(),
+            published.command().sequence()
+        );
+        assert!(admission.offer().was_replayed());
+        assert_eq!(admission.committed_bundle_digest(), None);
+        let bundle_digest = Sha256Digest::from_bytes([83; 32]);
+        let commit = CommitRuntimeAuthorityDelivery::new(
+            admission,
+            bundle_digest,
+            database_now(&database).await?,
+        )?;
+        assert_eq!(
+            database
+                .store()
+                .commit_runtime_authority_delivery(commit)
+                .await?,
+            RuntimeAuthorityDeliveryDisposition::Committed
+        );
+
+        let replay_admission = database
+            .store()
+            .authorize_runtime_authority_delivery(authorization.clone())
+            .await?;
+        assert_eq!(
+            replay_admission.committed_bundle_digest(),
+            Some(bundle_digest)
+        );
+        assert_eq!(
+            database
+                .store()
+                .commit_runtime_authority_delivery(CommitRuntimeAuthorityDelivery::new(
+                    replay_admission,
+                    bundle_digest,
+                    database_now(&database).await?,
+                )?)
+                .await?,
+            RuntimeAuthorityDeliveryDisposition::Replayed
+        );
+
+        let acknowledgement_operation_id = OperationId::new();
+        let acknowledgement_request = operation_request(
+            fence,
+            acknowledgement_operation_id,
+            RUNTIME_AUTHORITY_ACK_KIND,
+            [84; 32],
+        )?;
+        let wrong_acknowledgement = AcknowledgeRuntimeAuthorityDelivery::new(
+            acknowledgement_request.clone(),
+            RunnerProtocolVersion::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
+            binding,
+            Sha256Digest::from_bytes([85; 32]),
+            database_now(&database).await?,
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .acknowledge_runtime_authority_delivery(wrong_acknowledgement)
+                .await,
+            Err(StoreError::OperationConflict { operation_id, .. })
+                if operation_id == acknowledgement_operation_id
+        ));
+        let exact_acknowledgement = AcknowledgeRuntimeAuthorityDelivery::new(
+            acknowledgement_request,
+            RunnerProtocolVersion::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
+            binding,
+            bundle_digest,
+            database_now(&database).await?,
+        )?;
+        assert_eq!(
+            database
+                .store()
+                .acknowledge_runtime_authority_delivery(exact_acknowledgement.clone())
+                .await?,
+            RuntimeAuthorityDeliveryDisposition::Committed
+        );
+        assert_eq!(
+            database
+                .store()
+                .acknowledge_runtime_authority_delivery(exact_acknowledgement)
+                .await?,
+            RuntimeAuthorityDeliveryDisposition::Replayed
+        );
+
+        let row: RuntimeAuthorityDeliveryAuditRow = sqlx::query_as(
+                r"
+                SELECT request_digest, bundle_digest, acknowledgement_digest,
+                       acknowledgement_operation_id, acknowledged_at_ms
+                FROM runner_runtime_authority_deliveries
+                WHERE attempt_id = $1 AND fencing_token = $2
+                ",
+            )
+            .bind(lease.attempt_id().as_uuid())
+            .bind(i64::try_from(lease.fencing_token().get())?)
+            .fetch_one(database.pool())
+            .await?;
+        assert_eq!(row.0, vec![81; 32]);
+        assert_eq!(row.1, bundle_digest.as_bytes());
+        assert_eq!(row.2, vec![84; 32]);
+        assert_eq!(row.3, Some(acknowledgement_operation_id.as_uuid()));
+        assert!(row.4.is_some());
+
+        let columns: Vec<String> = sqlx::query_scalar(
+            r"
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'runner_runtime_authority_deliveries'
+            ORDER BY ordinal_position
+            ",
+        )
+        .fetch_all(database.pool())
+        .await?;
+        for forbidden in [
+            "credential",
+            "token",
+            "secret",
+            "payload",
+            "response",
+            "ciphertext",
+            "wrapped",
+            "nonce",
+        ] {
+            assert!(
+                columns.iter().all(|column| {
+                    (forbidden == "token" && column == "fencing_token")
+                        || !column.contains(forbidden)
+                }),
+                "runtime-authority metadata table contains forbidden value-bearing column {forbidden}"
+            );
+        }
+
+        sqlx::query("UPDATE job_attempts SET lifecycle = 'cancelling' WHERE id = $1")
+            .bind(lease.attempt_id().as_uuid())
+            .execute(database.pool())
+            .await?;
+        assert!(matches!(
+            database
+                .store()
+                .authorize_runtime_authority_delivery(authorization)
+                .await,
+            Err(StoreError::AttemptFenceRejected(id)) if id == lease.attempt_id()
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(clippy::too_many_lines)]
 async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipts() -> TestResult {
     run_with_database(|database| async move {
@@ -2234,6 +2541,24 @@ async fn active_lease(
     active_lease_with_duration(database, ACTIVE_LEASE_DURATION_MILLIS).await
 }
 
+async fn active_runtime_authority_lease(
+    database: &TestDatabase,
+) -> TestResult<(
+    SeedData,
+    Lease,
+    JobIrMetadata,
+    StableRunnerSlot,
+    OperationId,
+    Sha256Digest,
+)> {
+    active_lease_with_duration_and_protocol(
+        database,
+        ACTIVE_LEASE_DURATION_MILLIS,
+        Some(RUNTIME_AUTHORITY_PROTOCOL_VERSION),
+    )
+    .await
+}
+
 async fn active_lease_with_duration(
     database: &TestDatabase,
     duration_millis: i64,
@@ -2245,7 +2570,32 @@ async fn active_lease_with_duration(
     OperationId,
     Sha256Digest,
 )> {
+    active_lease_with_duration_and_protocol(database, duration_millis, None).await
+}
+
+async fn active_lease_with_duration_and_protocol(
+    database: &TestDatabase,
+    duration_millis: i64,
+    protocol_version: Option<u16>,
+) -> TestResult<(
+    SeedData,
+    Lease,
+    JobIrMetadata,
+    StableRunnerSlot,
+    OperationId,
+    Sha256Digest,
+)> {
     let seed = seed_control_plane(database.pool(), 1).await?;
+    if let Some(protocol_version) = protocol_version {
+        let updated = sqlx::query("UPDATE runner_sessions SET protocol_version = $2 WHERE id = $1")
+            .bind(seed.session_fences[0].session_id().as_uuid())
+            .bind(i32::from(protocol_version))
+            .execute(database.pool())
+            .await?;
+        if updated.rows_affected() != 1 {
+            return Err("runtime-authority fixture did not update its exact session".into());
+        }
+    }
     let attempt_id = AttemptId::new();
     database
         .store()
@@ -2333,6 +2683,43 @@ fn offer(
     Ok(PublishLeaseOffer::new(
         request,
         RunnerProtocolVersion::new(1)?,
+        slot,
+        lease.clone(),
+        metadata.clone(),
+        lease.expires_at(),
+        command,
+    )?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn runtime_authority_offer(
+    fence: automata_ci_store::RunnerSessionFence,
+    lease: &Lease,
+    metadata: &JobIrMetadata,
+    slot: StableRunnerSlot,
+    request_operation_id: OperationId,
+    request_digest: Sha256Digest,
+    command_operation_id: OperationId,
+) -> TestResult<PublishLeaseOffer> {
+    let request = RunnerOperationRequest::new(
+        fence,
+        request_operation_id,
+        RunnerOperationKind::new(LEASE_REQUEST_KIND)?,
+        request_digest,
+    );
+    let command = EnqueueRunnerCommand::new(
+        fence,
+        command_operation_id,
+        RunnerOperationKind::new("automata.runner.lease-offer.v2")?,
+        RunnerCommandPayload::new(
+            DocumentSchema::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
+            b"value-free lease offer body".to_vec(),
+        )?,
+        lease.issued_at(),
+    );
+    Ok(PublishLeaseOffer::new(
+        request,
+        RunnerProtocolVersion::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
         slot,
         lease.clone(),
         metadata.clone(),

@@ -4,8 +4,8 @@ use std::{fmt, sync::Arc};
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{
-    AttemptId, FencingToken, JobAuthorityProfile, JobId, JobIrEnvelope, Lease, RunId,
-    TrustPermissionAuthority, UnixMillis,
+    AttemptId, FencingToken, JobAuthorityProfile, JobId, JobIrEnvelope, Lease, LeaseGuard,
+    OperationId, RunId, Sha256Digest, TrustPermissionAuthority, UnixMillis,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -446,6 +446,26 @@ pub struct JobRuntimeAuthorities {
 }
 
 impl JobRuntimeAuthorities {
+    /// Creates a structurally validated bundle before its `JobIR` and lease
+    /// are available at the frame-decoding boundary.
+    ///
+    /// Callers must invoke [`Self::validate_for`] before adopting or exposing
+    /// the credential material.
+    ///
+    /// # Errors
+    ///
+    /// Rejects oversized, duplicate, or non-canonical material.
+    pub fn from_unbound(
+        authorities: Vec<JobRuntimeAuthority>,
+    ) -> Result<Self, RuntimeAuthorityError> {
+        let bundle = Self {
+            schema_version: RUNTIME_AUTHORITY_SCHEMA_VERSION,
+            authorities,
+        };
+        bundle.validate_structure()?;
+        Ok(bundle)
+    }
+
     /// Creates a canonical authority bundle matching the job's immutable profile.
     ///
     /// # Errors
@@ -498,12 +518,7 @@ impl JobRuntimeAuthorities {
         job: &JobIrEnvelope,
         lease: &Lease,
     ) -> Result<(), RuntimeAuthorityError> {
-        if self.schema_version != RUNTIME_AUTHORITY_SCHEMA_VERSION {
-            return Err(RuntimeAuthorityError::UnsupportedSchema);
-        }
-        if self.authorities.len() > MAX_RUNTIME_AUTHORITIES {
-            return Err(RuntimeAuthorityError::InvalidCount);
-        }
+        self.validate_structure()?;
         let trust_denies_all = !job.job().trust_snapshot().is_construction_placeholder()
             && job.job().trust_snapshot().authority().permissions()
                 == TrustPermissionAuthority::DenyAll;
@@ -519,12 +534,24 @@ impl JobRuntimeAuthorities {
             }
             JobAuthorityProfile::Standard | JobAuthorityProfile::CredentialFree => {}
         }
+        for authority in &self.authorities {
+            authority.validate_for(job, lease)?;
+        }
+        Ok(())
+    }
+
+    fn validate_structure(&self) -> Result<(), RuntimeAuthorityError> {
+        if self.schema_version != RUNTIME_AUTHORITY_SCHEMA_VERSION {
+            return Err(RuntimeAuthorityError::UnsupportedSchema);
+        }
+        if self.authorities.len() > MAX_RUNTIME_AUTHORITIES {
+            return Err(RuntimeAuthorityError::InvalidCount);
+        }
         let mut previous: Option<&RuntimeAuthorityName> = None;
         for authority in &self.authorities {
             if previous.is_some_and(|name| name >= authority.name()) {
                 return Err(RuntimeAuthorityError::NonCanonicalOrder);
             }
-            authority.validate_for(job, lease)?;
             previous = Some(authority.name());
         }
         Ok(())
@@ -561,4 +588,344 @@ pub enum RuntimeAuthorityError {
     /// Cleartext delivery binding contradicts `JobIR` or lease identity.
     #[error("runtime authority execution binding does not match the lease offer")]
     ExecutionBindingMismatch,
+}
+
+/// First and only initial runtime-authority delivery generation.
+pub const INITIAL_RUNTIME_AUTHORITY_GENERATION: RuntimeAuthorityGeneration =
+    RuntimeAuthorityGeneration(1);
+
+/// Positive, monotonically assigned runtime-authority delivery generation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct RuntimeAuthorityGeneration(u32);
+
+impl RuntimeAuthorityGeneration {
+    /// Creates a positive delivery generation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the reserved zero value.
+    pub const fn new(value: u32) -> Result<Self, RuntimeAuthorityDeliveryError> {
+        if value == 0 {
+            Err(RuntimeAuthorityDeliveryError::ZeroGeneration)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the numeric generation.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Exact, value-free coordinates shared by authority request, grant, and ACK.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthorityDeliveryBinding {
+    attempt_id: AttemptId,
+    slot: super::RunnerSlotOrdinal,
+    guard: LeaseGuard,
+    offer_operation_id: OperationId,
+    offer_sequence: super::CommandSequence,
+    job_ir_digest: Sha256Digest,
+    generation: RuntimeAuthorityGeneration,
+}
+
+impl RuntimeAuthorityDeliveryBinding {
+    /// Binds a delivery to the exact accepted offer and immutable `JobIR`.
+    #[must_use]
+    pub const fn new(
+        attempt_id: AttemptId,
+        slot: super::RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        offer_operation_id: OperationId,
+        offer_sequence: super::CommandSequence,
+        job_ir_digest: Sha256Digest,
+        generation: RuntimeAuthorityGeneration,
+    ) -> Self {
+        Self {
+            attempt_id,
+            slot,
+            guard,
+            offer_operation_id,
+            offer_sequence,
+            job_ir_digest,
+            generation,
+        }
+    }
+
+    /// Returns the exact attempt identity.
+    #[must_use]
+    pub const fn attempt_id(self) -> AttemptId {
+        self.attempt_id
+    }
+
+    /// Returns the stable runner slot.
+    #[must_use]
+    pub const fn slot(self) -> super::RunnerSlotOrdinal {
+        self.slot
+    }
+
+    /// Returns the accepted lease guard.
+    #[must_use]
+    pub const fn guard(self) -> LeaseGuard {
+        self.guard
+    }
+
+    /// Returns the durable lease-offer operation identity.
+    #[must_use]
+    pub const fn offer_operation_id(self) -> OperationId {
+        self.offer_operation_id
+    }
+
+    /// Returns the durable lease-offer command sequence.
+    #[must_use]
+    pub const fn offer_sequence(self) -> super::CommandSequence {
+        self.offer_sequence
+    }
+
+    /// Returns the canonical immutable `JobIR` digest.
+    #[must_use]
+    pub const fn job_ir_digest(self) -> Sha256Digest {
+        self.job_ir_digest
+    }
+
+    /// Returns the requested authority generation.
+    #[must_use]
+    pub const fn generation(self) -> RuntimeAuthorityGeneration {
+        self.generation
+    }
+
+    /// Checks the binding against an exact offer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any attempt, slot, lease, offer-command, or generation mismatch.
+    pub fn validate_for_offer(
+        self,
+        offer: &super::LeaseOffer,
+    ) -> Result<(), RuntimeAuthorityDeliveryError> {
+        if self.generation.get() == 0 {
+            return Err(RuntimeAuthorityDeliveryError::ZeroGeneration);
+        }
+        if self.attempt_id != offer.lease().attempt_id()
+            || self.slot != offer.slot()
+            || self.guard != offer.lease().guard()
+            || self.offer_operation_id != offer.header().operation_id()
+            || self.offer_sequence != offer.header().sequence()
+        {
+            return Err(RuntimeAuthorityDeliveryError::BindingMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Runner request for one post-accept runtime-authority generation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthorityRequest {
+    header: super::MessageHeader,
+    binding: RuntimeAuthorityDeliveryBinding,
+}
+
+impl RuntimeAuthorityRequest {
+    /// Creates a request bound to one exact accepted offer.
+    #[must_use]
+    pub const fn new(
+        header: super::MessageHeader,
+        binding: RuntimeAuthorityDeliveryBinding,
+    ) -> Self {
+        Self { header, binding }
+    }
+
+    /// Returns the idempotent request header.
+    #[must_use]
+    pub const fn header(self) -> super::MessageHeader {
+        self.header
+    }
+
+    /// Returns the value-free exact delivery binding.
+    #[must_use]
+    pub const fn binding(self) -> RuntimeAuthorityDeliveryBinding {
+        self.binding
+    }
+
+    /// Validates locally provable request invariants.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-request header or zero generation.
+    pub fn validate(self) -> Result<(), super::MessageValidationError> {
+        self.header.validate_request()?;
+        if self.binding.generation.get() == 0 {
+            return Err(RuntimeAuthorityDeliveryError::ZeroGeneration.into());
+        }
+        Ok(())
+    }
+}
+
+/// Server response carrying one exact authority generation after acceptance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthorityGrant {
+    header: super::MessageHeader,
+    binding: RuntimeAuthorityDeliveryBinding,
+    bundle_digest: Sha256Digest,
+    authorities: JobRuntimeAuthorities,
+}
+
+impl RuntimeAuthorityGrant {
+    /// Creates a post-accept authority response.
+    #[must_use]
+    pub const fn new(
+        header: super::MessageHeader,
+        binding: RuntimeAuthorityDeliveryBinding,
+        bundle_digest: Sha256Digest,
+        authorities: JobRuntimeAuthorities,
+    ) -> Self {
+        Self {
+            header,
+            binding,
+            bundle_digest,
+            authorities,
+        }
+    }
+
+    /// Returns the correlated reply header.
+    #[must_use]
+    pub const fn header(&self) -> super::MessageHeader {
+        self.header
+    }
+
+    /// Returns the exact delivery binding.
+    #[must_use]
+    pub const fn binding(&self) -> RuntimeAuthorityDeliveryBinding {
+        self.binding
+    }
+
+    /// Returns the digest of canonical protected authority bytes.
+    #[must_use]
+    pub const fn bundle_digest(&self) -> Sha256Digest {
+        self.bundle_digest
+    }
+
+    /// Borrows the plaintext bundle for immediate protected-spool adoption.
+    #[must_use]
+    pub const fn authorities(&self) -> &JobRuntimeAuthorities {
+        &self.authorities
+    }
+
+    /// Validates locally provable response invariants.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-reply header or zero generation.
+    pub fn validate(&self) -> Result<(), super::MessageValidationError> {
+        self.header.validate_reply()?;
+        if self.binding.generation.get() == 0 {
+            return Err(RuntimeAuthorityDeliveryError::ZeroGeneration.into());
+        }
+        self.authorities.validate_structure()?;
+        Ok(())
+    }
+
+    /// Validates the grant against its request, immutable job, and lease.
+    ///
+    /// # Errors
+    ///
+    /// Rejects correlation, binding, schema, profile, or execution mismatches.
+    pub fn validate_for(
+        &self,
+        request: RuntimeAuthorityRequest,
+        job: &JobIrEnvelope,
+        lease: &Lease,
+    ) -> Result<(), RuntimeAuthorityDeliveryError> {
+        self.header
+            .validate_reply_for(request.header)
+            .map_err(|_| RuntimeAuthorityDeliveryError::CorrelationMismatch)?;
+        if self.binding != request.binding
+            || self.binding.attempt_id != lease.attempt_id()
+            || self.binding.guard != lease.guard()
+        {
+            return Err(RuntimeAuthorityDeliveryError::BindingMismatch);
+        }
+        self.authorities
+            .validate_for(job, lease)
+            .map_err(|_| RuntimeAuthorityDeliveryError::InvalidAuthorities)
+    }
+}
+
+/// Runner acknowledgement after an exact grant is protected and journaled.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthorityAck {
+    header: super::MessageHeader,
+    binding: RuntimeAuthorityDeliveryBinding,
+    bundle_digest: Sha256Digest,
+}
+
+impl RuntimeAuthorityAck {
+    /// Creates a durable-adoption acknowledgement.
+    #[must_use]
+    pub const fn new(
+        header: super::MessageHeader,
+        binding: RuntimeAuthorityDeliveryBinding,
+        bundle_digest: Sha256Digest,
+    ) -> Self {
+        Self {
+            header,
+            binding,
+            bundle_digest,
+        }
+    }
+
+    /// Returns the idempotent request header.
+    #[must_use]
+    pub const fn header(self) -> super::MessageHeader {
+        self.header
+    }
+
+    /// Returns the exact delivery binding.
+    #[must_use]
+    pub const fn binding(self) -> RuntimeAuthorityDeliveryBinding {
+        self.binding
+    }
+
+    /// Returns the digest acknowledged by the runner.
+    #[must_use]
+    pub const fn bundle_digest(self) -> Sha256Digest {
+        self.bundle_digest
+    }
+
+    /// Validates locally provable acknowledgement invariants.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-request header or zero generation.
+    pub fn validate(self) -> Result<(), super::MessageValidationError> {
+        self.header.validate_request()?;
+        if self.binding.generation.get() == 0 {
+            return Err(RuntimeAuthorityDeliveryError::ZeroGeneration.into());
+        }
+        Ok(())
+    }
+}
+
+/// Invalid post-accept runtime-authority delivery metadata.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RuntimeAuthorityDeliveryError {
+    /// Generation zero is reserved and invalid.
+    #[error("runtime-authority delivery generation must be nonzero")]
+    ZeroGeneration,
+    /// Request, grant, or offer coordinates differ.
+    #[error("runtime-authority delivery binding mismatch")]
+    BindingMismatch,
+    /// A grant does not answer the exact request.
+    #[error("runtime-authority delivery correlation mismatch")]
+    CorrelationMismatch,
+    /// Delivered authority material does not match the exact job and lease.
+    #[error("runtime-authority grant is invalid for the job and lease")]
+    InvalidAuthorities,
 }

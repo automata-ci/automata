@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use super::{
     CancelJob, CommandAck, ErrorMessage, HandshakeRejected, JobResultMessage, JobStateUpdate,
     LeaseHeartbeat, LeaseOffer, LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch,
-    NoWork, OperationAck, ProtocolLimits, RunnerHello, ServerHello,
+    NoWork, OperationAck, ProtocolLimits, RunnerHello, RuntimeAuthorityAck, RuntimeAuthorityGrant,
+    RuntimeAuthorityRequest, ServerHello,
     validation::{validate_runner_message, validate_server_message},
 };
 
@@ -23,6 +24,10 @@ pub enum RunnerToServer {
     LeaseRequest(LeaseRequest),
     /// Accepts or rejects a previously offered lease.
     LeaseResponse(LeaseResponse),
+    /// Requests an exact runtime-authority generation after lease acceptance.
+    RuntimeAuthorityRequest(RuntimeAuthorityRequest),
+    /// Confirms protected persistence of an exact authority generation.
+    RuntimeAuthorityAck(RuntimeAuthorityAck),
     /// Reports liveness and progress under an active lease fence.
     Heartbeat(LeaseHeartbeat),
     /// Reports a fenced non-terminal job lifecycle transition.
@@ -59,8 +64,10 @@ pub enum ServerToRunner {
     Hello(ServerHello),
     /// Rejects a pre-negotiation hello with a stable reason code.
     HandshakeRejected(HandshakeRejected),
-    /// Offers one immutable job, lease fence, and authority bundle.
+    /// Offers one immutable job and lease fence without credential values.
     LeaseOffer(Box<LeaseOffer>),
+    /// Delivers one exact post-accept runtime-authority generation.
+    RuntimeAuthorityGrant(Box<RuntimeAuthorityGrant>),
     /// Extends the lease associated with a correlated heartbeat.
     LeaseRenewal(LeaseRenewal),
     /// Requests cancellation through the durable command stream.

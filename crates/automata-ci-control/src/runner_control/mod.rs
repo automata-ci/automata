@@ -25,6 +25,14 @@ mod port;
 pub mod repository;
 mod verify;
 
+pub use automata_ci_protocol::{
+    INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding,
+};
+pub use durable::{
+    AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
+    CommitRuntimeAuthorityDelivery, RuntimeAuthorityDeliveryAdmission,
+    RuntimeAuthorityDeliveryDisposition, RuntimeAuthorityDeliveryRepository,
+};
 pub use handler::{
     DurableRunnerControlHandler, LOG_SEGMENT_MEDIA_TYPE, MAX_HEARTBEAT_INTERVAL_MILLIS,
     MAX_LEASE_DURATION_MILLIS, MAX_NO_WORK_RETRY_AFTER_MILLIS, RunnerControlConfig,

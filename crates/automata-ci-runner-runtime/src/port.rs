@@ -637,6 +637,10 @@ pub enum StableIdDomain {
     LeaseAcceptance,
     /// Rejected lease response.
     LeaseRejection,
+    /// Post-accept runtime-authority request.
+    RuntimeAuthorityRequest,
+    /// Protected runtime-authority adoption acknowledgement.
+    RuntimeAuthorityAcknowledgement,
     /// Durable server-command cursor acknowledgement.
     CommandAcknowledgement,
     /// One ordered log frame request.
@@ -654,6 +658,8 @@ impl StableIdDomain {
         match self {
             Self::LeaseAcceptance => b"automata.runtime.lease-acceptance.v1",
             Self::LeaseRejection => b"automata.runtime.lease-rejection.v1",
+            Self::RuntimeAuthorityRequest => b"automata.runtime.authority-request.v2",
+            Self::RuntimeAuthorityAcknowledgement => b"automata.runtime.authority-ack.v2",
             Self::CommandAcknowledgement => b"automata.runtime.command-ack.v1",
             Self::LogFrame => b"automata.runtime.log-frame.v1",
             Self::LogBatch => b"automata.runtime.log-batch.v1",

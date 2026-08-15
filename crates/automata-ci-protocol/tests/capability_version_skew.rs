@@ -93,26 +93,11 @@ fn lease_offer(requirements: RunnerRequirements) -> ServerToRunner {
         OperationId::new(),
         CommandSequence::new(1).expect("valid command sequence"),
     );
-    let authority = JobRuntimeAuthority::new(
-        RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
-        envelope.job().run_id(),
-        envelope.job().job_id(),
-        lease.attempt_id(),
-        lease.fencing_token(),
-        RuntimeAuthorityEndpoint::new("https://results.example.test/").expect("endpoint"),
-        RuntimeAuthorityCredential::new("header.payload.signature").expect("credential"),
-        UnixMillis::new(10),
-        UnixMillis::new(3_600_010),
-    )
-    .expect("runtime authority");
-    let authorities = JobRuntimeAuthorities::new(vec![authority], &envelope, &lease)
-        .expect("runtime authorities");
     ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
         header,
         RunnerSlotOrdinal::new(1).expect("valid runner slot"),
         lease,
         envelope,
-        authorities,
     )))
 }
 
@@ -258,19 +243,34 @@ fn capability_identifiers_obey_the_negotiated_text_budget() {
 
 #[test]
 fn runtime_authority_bundle_rejects_forward_schema() {
-    let message = lease_offer(RunnerRequirements::default());
-    let mut value = serde_json::to_value(message).expect("serialize lease offer");
-    value["payload"]["runtime_authorities"]["schema_version"] = serde_json::json!(
+    let ServerToRunner::LeaseOffer(offer) = lease_offer(RunnerRequirements::default()) else {
+        panic!("fixture produced a different server message")
+    };
+    let authority = JobRuntimeAuthority::new(
+        RuntimeAuthorityName::new("github-actions-results").expect("authority name"),
+        offer.job().job().run_id(),
+        offer.job().job().job_id(),
+        offer.lease().attempt_id(),
+        offer.lease().fencing_token(),
+        RuntimeAuthorityEndpoint::new("https://results.example.test/").expect("endpoint"),
+        RuntimeAuthorityCredential::new("header.payload.signature").expect("credential"),
+        UnixMillis::new(10),
+        UnixMillis::new(3_600_010),
+    )
+    .expect("runtime authority");
+    let authorities = JobRuntimeAuthorities::new(vec![authority], offer.job(), offer.lease())
+        .expect("runtime authorities");
+    let mut value = serde_json::to_value(authorities).expect("serialize authority bundle");
+    value["schema_version"] = serde_json::json!(
         RUNTIME_AUTHORITY_SCHEMA_VERSION
             .checked_add(1)
             .expect("test schema")
     );
-    let decoded = serde_json::from_value::<ServerToRunner>(value).expect("decode future bundle");
+    let decoded =
+        serde_json::from_value::<JobRuntimeAuthorities>(value).expect("decode future bundle");
 
     assert!(matches!(
-        ValidatedServerToRunner::new(decoded, &ProtocolLimits::default()),
-        Err(MessageValidationError::RuntimeAuthority(
-            RuntimeAuthorityError::UnsupportedSchema
-        ))
+        decoded.validate_for(offer.job(), offer.lease()),
+        Err(RuntimeAuthorityError::UnsupportedSchema)
     ));
 }

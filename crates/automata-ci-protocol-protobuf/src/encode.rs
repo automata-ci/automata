@@ -133,6 +133,12 @@ fn runner_frame(message: &protocol::RunnerToServer) -> wire::RunnerFrame {
         Domain::Hello(value) => Payload::Hello(runner_hello(value)),
         Domain::LeaseRequest(value) => Payload::LeaseRequest(lease_request(value)),
         Domain::LeaseResponse(value) => Payload::LeaseResponse(lease_response(value)),
+        Domain::RuntimeAuthorityRequest(value) => {
+            Payload::RuntimeAuthorityRequest(runtime_authority_request(*value))
+        }
+        Domain::RuntimeAuthorityAck(value) => {
+            Payload::RuntimeAuthorityAck(runtime_authority_ack(*value))
+        }
         Domain::Heartbeat(value) => Payload::Heartbeat(lease_heartbeat(value)),
         Domain::JobState(value) => Payload::JobState(job_state_update(value)),
         Domain::JobResult(value) => Payload::JobResult(job_result_message(value)),
@@ -152,6 +158,9 @@ fn server_frame(message: &protocol::ServerToRunner) -> wire::ServerFrame {
         Domain::Hello(value) => Payload::Hello(server_hello(value)),
         Domain::HandshakeRejected(value) => Payload::HandshakeRejected(handshake_rejected(value)),
         Domain::LeaseOffer(value) => Payload::LeaseOffer(lease_offer(value)),
+        Domain::RuntimeAuthorityGrant(value) => {
+            Payload::RuntimeAuthorityGrant(runtime_authority_grant(value))
+        }
         Domain::LeaseRenewal(value) => Payload::LeaseRenewal(lease_renewal(value)),
         Domain::CancelJob(value) => Payload::CancelJob(cancel_job(value)),
         Domain::LogAck(value) => Payload::LogAck(log_ack_message(value)),
@@ -474,10 +483,49 @@ fn lease_offer(value: &protocol::LeaseOffer) -> wire::LeaseOffer {
         slot: u32::from(value.slot().get()),
         lease: Some(lease(value.lease())),
         job: Some(job_ir_envelope(value.job())),
-        runtime_authorities: value.runtime_authorities().map(runtime_authorities),
         managed_secret_bindings: value
             .managed_secret_bindings()
             .map(managed_secret_binding_overlay),
+    }
+}
+
+fn runtime_authority_delivery_binding(
+    value: protocol::RuntimeAuthorityDeliveryBinding,
+) -> wire::RuntimeAuthorityDeliveryBinding {
+    wire::RuntimeAuthorityDeliveryBinding {
+        attempt_id: uuid_bytes(value.attempt_id().as_uuid()),
+        slot: u32::from(value.slot().get()),
+        guard: Some(lease_guard(value.guard())),
+        offer_operation_id: uuid_bytes(value.offer_operation_id().as_uuid()),
+        offer_sequence: value.offer_sequence().get(),
+        job_ir_sha256: value.job_ir_digest().as_bytes().to_vec(),
+        generation: value.generation().get(),
+    }
+}
+
+fn runtime_authority_request(
+    value: protocol::RuntimeAuthorityRequest,
+) -> wire::RuntimeAuthorityRequest {
+    wire::RuntimeAuthorityRequest {
+        header: Some(message_header(value.header())),
+        binding: Some(runtime_authority_delivery_binding(value.binding())),
+    }
+}
+
+fn runtime_authority_grant(value: &protocol::RuntimeAuthorityGrant) -> wire::RuntimeAuthorityGrant {
+    wire::RuntimeAuthorityGrant {
+        header: Some(message_header(value.header())),
+        binding: Some(runtime_authority_delivery_binding(value.binding())),
+        bundle_sha256: value.bundle_digest().as_bytes().to_vec(),
+        authorities: Some(runtime_authorities(value.authorities())),
+    }
+}
+
+fn runtime_authority_ack(value: protocol::RuntimeAuthorityAck) -> wire::RuntimeAuthorityAck {
+    wire::RuntimeAuthorityAck {
+        header: Some(message_header(value.header())),
+        binding: Some(runtime_authority_delivery_binding(value.binding())),
+        bundle_sha256: value.bundle_digest().as_bytes().to_vec(),
     }
 }
 
@@ -539,8 +587,8 @@ fn runtime_authority(value: &protocol::JobRuntimeAuthority) -> wire::JobRuntimeA
 }
 
 fn zeroize_server_authorities(frame: &mut wire::ServerFrame) {
-    if let Some(wire::server_frame::Payload::LeaseOffer(offer)) = frame.payload.as_mut()
-        && let Some(authorities) = offer.runtime_authorities.as_mut()
+    if let Some(wire::server_frame::Payload::RuntimeAuthorityGrant(grant)) = frame.payload.as_mut()
+        && let Some(authorities) = grant.authorities.as_mut()
     {
         zeroize_runtime_authorities(authorities);
     }

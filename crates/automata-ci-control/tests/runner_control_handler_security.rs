@@ -16,15 +16,18 @@ use automata_ci_control::lease::{
     BeginLeaseRequest, ClaimedLeasePoll, LeasePollOutcome, LeaseRequestCompletion, LeaseRequestKey,
     RevokedLeaseOfferFallback,
 };
+use automata_ci_control::runner_control::durable::{
+    LeaseResponseAction, PublishedLeaseOffer, RunnerControlValueError,
+};
 use automata_ci_control::runner_control::{
-    AuthorizedRunnerRegistration, ControlPortError, DesiredRunnerState,
-    DurableRunnerControlHandler, LeaseOfferClaimStatus, LeaseOfferObservation,
+    AuthorizeRuntimeAuthorityDelivery, AuthorizedRunnerRegistration, ControlPortError,
+    DesiredRunnerState, DurableRunnerControlHandler, LeaseOfferClaimStatus, LeaseOfferObservation,
     LeaseOfferPublishOutcome, LeaseOfferReplayResolution, PublishedCommand, RunnerControlConfig,
     RunnerControlFailure, RunnerControlMessageKind, RunnerControlMessageOutcome,
     RunnerControlObserver, RunnerControlPorts, RunnerDurabilityPorts, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerIdentityPorts, RunnerLeasePorts, RunnerLeaseRequestStage, durable::LeaseResponseAction,
-    repository::RunnerCommandOutbox as _,
+    RunnerIdentityPorts, RunnerLeasePorts, RunnerLeaseRequestStage,
+    RuntimeAuthorityDeliveryAdmission, repository::RunnerCommandOutbox as _,
 };
 use automata_ci_core::{
     Architecture, AttemptId, FencingToken, JobAuthorityProfile, JobConclusion, JobId,
@@ -36,12 +39,14 @@ use automata_ci_core::{
     ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
-    CommandAck, CommandCursor, CommandSequence, HandshakeErrorCode, JobRuntimeAuthorities,
-    JobRuntimeAuthority, JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
-    LeaseRejectionReason, LeaseRequest, LeaseResponse, LogBatch, ManagedSecretBindingOverlay,
-    MessageHeader, NoWork, ProtocolLimits, ProtocolRange, ProtocolVersion, RemoteErrorCode,
-    RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityCredential,
-    RuntimeAuthorityEndpoint, RuntimeAuthorityName, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
+    CommandAck, CommandCursor, CommandSequence, HandshakeErrorCode,
+    INITIAL_RUNTIME_AUTHORITY_GENERATION, JobRuntimeAuthorities, JobRuntimeAuthority,
+    JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason,
+    LeaseRequest, LeaseResponse, LogBatch, ManagedSecretBindingOverlay, MessageHeader, NoWork,
+    ProtocolLimits, ProtocolRange, ProtocolVersion, RemoteErrorCode, RunnerHello,
+    RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityCredential,
+    RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint, RuntimeAuthorityGeneration,
+    RuntimeAuthorityName, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
     ServerToRunner, SessionDisposition, SessionResume, ValidatedRunnerToServer,
 };
 use automata_ci_protocol_protobuf::{encode_job_ir, encode_runner_frame, encode_server_frame};
@@ -50,9 +55,9 @@ use automata_ci_store::{
     CommandCursor as StoreCommandCursor, CommandReplayDisposition,
     CommandSequence as StoreCommandSequence, DocumentSchema, DurableRunnerCommand,
     EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, ObjectKey, RoutingDocument,
-    RunnerCommandPayload, RunnerGeneration, RunnerOperationKind, RunnerOperationResponse,
-    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot, SessionEpoch,
-    StableRunnerSlot,
+    RunnerCommandPayload, RunnerGeneration, RunnerOperationKind, RunnerOperationRequest,
+    RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot,
+    SessionEpoch, StableRunnerSlot,
 };
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -202,6 +207,7 @@ fn harness(
             receipts.clone(),
             receipts.clone(),
             commands.clone(),
+            transactions.clone(),
         ),
         Arc::new(Clock(UnixMillis::new(2_000))),
         Arc::new(Ids),
@@ -328,6 +334,7 @@ fn handler_with_retry(harness: &Harness, retry_after_millis: u32) -> DurableRunn
             harness.receipts.clone(),
             harness.receipts.clone(),
             harness.commands.clone(),
+            harness.transactions.clone(),
         ),
         Arc::new(Clock(UnixMillis::new(2_000))),
         Arc::new(Ids),
@@ -505,27 +512,14 @@ fn test_offer_command(
     job: &JobIrEnvelope,
     lease: &Lease,
 ) -> DurableRunnerCommand {
-    let payload = serde_json::to_vec(&serde_json::json!({
-        "job": job,
-        "lease": lease,
-        "managed_secret_bindings": ManagedSecretBindingOverlay::empty(lease),
-        "protocol_version": SUPPORTED_PROTOCOL_RANGE.max().get(),
-        "runtime_authorities": claimed_runtime_authorities(job, lease),
-        "schema": 1,
-        "slot": slot.get(),
-    }))
-    .expect("offer payload");
-    DurableRunnerCommand::new(
-        EnqueueRunnerCommand::new(
-            fence,
-            operation_id,
-            RunnerOperationKind::new("automata.runner.lease-offer.v1").expect("offer kind"),
-            RunnerCommandPayload::new(DocumentSchema::new(1).expect("schema"), payload)
-                .expect("offer payload"),
-            UnixMillis::new(2_000),
-        ),
-        StoreCommandSequence::new(sequence.get()).expect("sequence"),
-        true,
+    test_offer_command_with_bindings(
+        fence,
+        operation_id,
+        sequence,
+        slot,
+        job,
+        lease,
+        &ManagedSecretBindingOverlay::empty(lease),
     )
 }
 
@@ -543,8 +537,7 @@ fn test_offer_command_with_bindings(
         "lease": lease,
         "managed_secret_bindings": managed_secret_bindings,
         "protocol_version": SUPPORTED_PROTOCOL_RANGE.max().get(),
-        "runtime_authorities": claimed_runtime_authorities(job, lease),
-        "schema": 1,
+        "schema": 2,
         "slot": slot.get(),
     }))
     .expect("offer payload");
@@ -552,8 +545,8 @@ fn test_offer_command_with_bindings(
         EnqueueRunnerCommand::new(
             fence,
             operation_id,
-            RunnerOperationKind::new("automata.runner.lease-offer.v1").expect("offer kind"),
-            RunnerCommandPayload::new(DocumentSchema::new(1).expect("schema"), payload)
+            RunnerOperationKind::new("automata.runner.lease-offer.v2").expect("offer kind"),
+            RunnerCommandPayload::new(DocumentSchema::new(2).expect("schema"), payload)
                 .expect("offer payload"),
             UnixMillis::new(2_000),
         ),
@@ -570,7 +563,6 @@ fn test_offer_response(
     job: JobIrEnvelope,
     lease: Lease,
 ) -> ServerToRunner {
-    let authorities = claimed_runtime_authorities(&job, &lease);
     let empty_overlay = ManagedSecretBindingOverlay::empty(&lease);
     let offer = LeaseOffer::new(
         ServerCommandHeader::new(
@@ -582,11 +574,423 @@ fn test_offer_response(
         slot,
         lease,
         job,
-        authorities,
     )
     .with_managed_secret_bindings(empty_overlay)
     .expect("canonical managed-secret overlay");
     ServerToRunner::LeaseOffer(Box::new(offer))
+}
+
+struct RuntimeAuthorityExchangeFixture {
+    request: RunnerToServer,
+    binding: RuntimeAuthorityDeliveryBinding,
+    job: JobIrEnvelope,
+    lease: Lease,
+}
+
+fn install_runtime_authority_exchange(
+    harness: &Harness,
+    fence: RunnerSessionFence,
+    runner_id: RunnerId,
+    job: JobIrEnvelope,
+) -> RuntimeAuthorityExchangeFixture {
+    let encoded = encode_job_ir(&job, &ProtocolLimits::default()).expect("JobIR");
+    let metadata = JobIrMetadata::new(
+        job.job().job_id(),
+        job.job().run_id(),
+        job.version(),
+        u64::try_from(encoded.len()).expect("size"),
+        Sha256Digest::from_bytes(Sha256::digest(&encoded).into()),
+        ObjectKey::new("job-ir/post-accept-authority.pb").expect("object key"),
+    )
+    .expect("metadata");
+    let lease = Lease::new(
+        LeaseId::new(),
+        AttemptId::new(),
+        runner_id,
+        FencingToken::new(5).expect("fencing token"),
+        UnixMillis::new(1_500),
+        UnixMillis::new(10_000),
+    )
+    .expect("lease");
+    let slot = RunnerSlotOrdinal::new(1).expect("slot");
+    let offer_operation_id = OperationId::new();
+    let offer_sequence = CommandSequence::new(1).expect("sequence");
+    let command = test_offer_command(
+        fence,
+        offer_operation_id,
+        offer_sequence,
+        slot,
+        &job,
+        &lease,
+    );
+    let offer_request = RunnerOperationRequest::new(
+        fence,
+        OperationId::new(),
+        RunnerOperationKind::new("automata.runner.lease-request.v2").expect("request kind"),
+        Sha256Digest::from_bytes([0x31; 32]),
+    );
+    let published = PublishedLeaseOffer::new(
+        offer_request,
+        RunnerProtocolVersion::new(SUPPORTED_PROTOCOL_RANGE.max().get()).expect("protocol"),
+        StableRunnerSlot::new(slot.get()).expect("stable slot"),
+        lease.clone(),
+        metadata,
+        lease.expires_at(),
+        command,
+    )
+    .expect("published offer");
+    let binding = RuntimeAuthorityDeliveryBinding::new(
+        lease.attempt_id(),
+        slot,
+        lease.guard(),
+        offer_operation_id,
+        offer_sequence,
+        published.job_ir().digest(),
+        INITIAL_RUNTIME_AUTHORITY_GENERATION,
+    );
+    let header = MessageHeader::request(
+        SUPPORTED_PROTOCOL_RANGE.max(),
+        fence.session_id(),
+        OperationId::new(),
+    );
+    let request =
+        RunnerToServer::RuntimeAuthorityRequest(RuntimeAuthorityRequest::new(header, binding));
+    let canonical =
+        encode_runner_frame(&request, &ProtocolLimits::default()).expect("request frame");
+    let durable_request = RunnerOperationRequest::new(
+        fence,
+        header.operation_id(),
+        RunnerOperationKind::new("automata.runner.runtime-authority-request.v2")
+            .expect("request kind"),
+        Sha256Digest::from_bytes(Sha256::digest(canonical).into()),
+    );
+    let authorization = AuthorizeRuntimeAuthorityDelivery::new(
+        durable_request,
+        RunnerProtocolVersion::new(header.protocol_version().get()).expect("protocol"),
+        binding,
+        UnixMillis::new(2_000),
+    )
+    .expect("authorization");
+    *harness
+        .transactions
+        .runtime_authority_admission
+        .lock()
+        .expect("runtime-authority admission lock") = Some(
+        RuntimeAuthorityDeliveryAdmission::new(authorization, published, None)
+            .expect("delivery admission"),
+    );
+    *harness.objects.bytes.lock().expect("object bytes lock") = Some(encoded);
+    *harness
+        .authority_issuer
+        .result
+        .lock()
+        .expect("authority result lock") = Some(Ok(claimed_runtime_authorities(&job, &lease)));
+    RuntimeAuthorityExchangeFixture {
+        request,
+        binding,
+        job,
+        lease,
+    }
+}
+
+const TRUTH_SESSION: u16 = 1 << 0;
+const TRUTH_PROTOCOL: u16 = 1 << 1;
+const TRUTH_ATTEMPT: u16 = 1 << 2;
+const TRUTH_SLOT: u16 = 1 << 3;
+const TRUTH_GUARD: u16 = 1 << 4;
+const TRUTH_OFFER_OPERATION: u16 = 1 << 5;
+const TRUTH_OFFER_SEQUENCE: u16 = 1 << 6;
+const TRUTH_JOB_IR: u16 = 1 << 7;
+const TRUTH_GENERATION: u16 = 1 << 8;
+
+fn runtime_authority_truth_table_admission(
+    mismatches: u16,
+    exact: &RuntimeAuthorityDeliveryAdmission,
+) -> Result<RuntimeAuthorityDeliveryAdmission, RunnerControlValueError> {
+    let exact_request = exact.request();
+    let request_identity = exact_request.request();
+    let exact_binding = exact_request.binding();
+    let session = if mismatches & TRUTH_SESSION == 0 {
+        request_identity.session()
+    } else {
+        let exact_session = request_identity.session();
+        RunnerSessionFence::new(
+            RunnerSessionId::new(),
+            exact_session.runner_id(),
+            exact_session.runner_generation(),
+            exact_session.session_epoch(),
+        )
+    };
+    let durable_request = RunnerOperationRequest::new(
+        session,
+        request_identity.operation_id(),
+        request_identity.kind().clone(),
+        request_identity.request_digest(),
+    );
+    let protocol = if mismatches & TRUTH_PROTOCOL == 0 {
+        exact_request.protocol_version()
+    } else {
+        RunnerProtocolVersion::new(1).expect("legacy protocol")
+    };
+    let binding = RuntimeAuthorityDeliveryBinding::new(
+        if mismatches & TRUTH_ATTEMPT == 0 {
+            exact_binding.attempt_id()
+        } else {
+            AttemptId::new()
+        },
+        if mismatches & TRUTH_SLOT == 0 {
+            exact_binding.slot()
+        } else {
+            RunnerSlotOrdinal::new(2).expect("different slot")
+        },
+        if mismatches & TRUTH_GUARD == 0 {
+            exact_binding.guard()
+        } else {
+            LeaseGuard::new(
+                LeaseId::new(),
+                FencingToken::new(77).expect("different fencing token"),
+            )
+        },
+        if mismatches & TRUTH_OFFER_OPERATION == 0 {
+            exact_binding.offer_operation_id()
+        } else {
+            OperationId::new()
+        },
+        if mismatches & TRUTH_OFFER_SEQUENCE == 0 {
+            exact_binding.offer_sequence()
+        } else {
+            CommandSequence::new(9).expect("different offer sequence")
+        },
+        if mismatches & TRUTH_JOB_IR == 0 {
+            exact_binding.job_ir_digest()
+        } else {
+            Sha256Digest::from_bytes([0x99; 32])
+        },
+        if mismatches & TRUTH_GENERATION == 0 {
+            exact_binding.generation()
+        } else {
+            RuntimeAuthorityGeneration::new(2).expect("unsupported next generation")
+        },
+    );
+    let authorization = AuthorizeRuntimeAuthorityDelivery::new(
+        durable_request,
+        protocol,
+        binding,
+        exact_request.observed_at(),
+    )?;
+    RuntimeAuthorityDeliveryAdmission::new(authorization, exact.offer().clone(), None)
+}
+
+#[test]
+fn runtime_authority_admission_truth_table_requires_every_exact_coordinate() {
+    let (harness, _identity, runner_id, runner_generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, runner_generation);
+    let _fixture = install_runtime_authority_exchange(&harness, fence, runner_id, claimed_job());
+    let exact = harness
+        .transactions
+        .runtime_authority_admission
+        .lock()
+        .expect("runtime-authority admission lock")
+        .clone()
+        .expect("runtime-authority admission");
+
+    for mismatches in 0..(1 << 9) {
+        let admission = runtime_authority_truth_table_admission(mismatches, &exact);
+
+        if mismatches & TRUTH_GENERATION != 0 {
+            assert_eq!(
+                admission.expect_err("future generation must fail before admission"),
+                RunnerControlValueError::UnsupportedRuntimeAuthorityGeneration,
+                "truth-table row {mismatches:09b}",
+            );
+            continue;
+        }
+
+        if mismatches == 0 {
+            admission.expect("the all-exact truth-table row must be admitted");
+        } else {
+            assert_eq!(
+                admission.expect_err("every mismatched coordinate must fail closed"),
+                RunnerControlValueError::RuntimeAuthorityBindingMismatch,
+                "truth-table row {mismatches:09b}",
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn post_accept_authority_delivery_replays_by_digest_and_acknowledges_custody() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let fixture = install_runtime_authority_exchange(&harness, fence, runner_id, claimed_job());
+
+    let first = exchange(&harness, &identity, &fixture.request).await;
+    let ServerToRunner::RuntimeAuthorityGrant(first_grant) = first else {
+        panic!("post-accept request must return an authority grant")
+    };
+    assert_eq!(first_grant.binding(), fixture.binding);
+    assert_eq!(first_grant.authorities().as_slice().len(), 1);
+    assert_eq!(
+        first_grant.authorities().as_slice()[0]
+            .credential()
+            .expose_secret(),
+        "fixture-results-token"
+    );
+    let bundle_digest = first_grant.bundle_digest();
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.objects.calls.load(Ordering::SeqCst), 1);
+    {
+        let commits = harness
+            .transactions
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock");
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].bundle_digest(), bundle_digest);
+        assert!(!format!("{commits:?}").contains("fixture-results-token"));
+    }
+
+    let replay = exchange(&harness, &identity, &fixture.request).await;
+    let ServerToRunner::RuntimeAuthorityGrant(replayed_grant) = replay else {
+        panic!("exact request replay must return an authority grant")
+    };
+    assert_eq!(replayed_grant.binding(), fixture.binding);
+    assert_eq!(replayed_grant.bundle_digest(), bundle_digest);
+    assert_eq!(replayed_grant.authorities(), first_grant.authorities());
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        harness
+            .transactions
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock")
+            .len(),
+        1
+    );
+
+    let acknowledgement = RunnerToServer::RuntimeAuthorityAck(RuntimeAuthorityAck::new(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        fixture.binding,
+        bundle_digest,
+    ));
+    assert!(matches!(
+        exchange(&harness, &identity, &acknowledgement).await,
+        ServerToRunner::OperationAck(_)
+    ));
+    assert!(matches!(
+        exchange(&harness, &identity, &acknowledgement).await,
+        ServerToRunner::OperationAck(_)
+    ));
+    let acknowledgements = harness
+        .transactions
+        .runtime_authority_acknowledgements
+        .lock()
+        .expect("runtime-authority acknowledgement lock");
+    assert_eq!(acknowledgements.len(), 1);
+    assert_eq!(acknowledgements[0].binding(), fixture.binding);
+    assert_eq!(acknowledgements[0].bundle_digest(), bundle_digest);
+    assert!(!format!("{acknowledgements:?}").contains("fixture-results-token"));
+}
+
+#[tokio::test]
+async fn authority_ack_before_commit_or_for_a_different_digest_fails_closed() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let fixture = install_runtime_authority_exchange(&harness, fence, runner_id, claimed_job());
+    let premature = RunnerToServer::RuntimeAuthorityAck(RuntimeAuthorityAck::new(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        fixture.binding,
+        Sha256Digest::from_bytes([0x55; 32]),
+    ));
+    assert_eq!(
+        exchange_result(&harness, &identity, &premature)
+            .await
+            .expect_err("acknowledgement without a delivery")
+            .kind(),
+        ApplicationErrorKind::Internal
+    );
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+
+    let grant = exchange(&harness, &identity, &fixture.request).await;
+    let ServerToRunner::RuntimeAuthorityGrant(grant) = grant else {
+        panic!("post-accept request must return an authority grant")
+    };
+    let wrong_digest = RunnerToServer::RuntimeAuthorityAck(RuntimeAuthorityAck::new(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        fixture.binding,
+        Sha256Digest::from_bytes([0x56; 32]),
+    ));
+    assert_eq!(
+        exchange_result(&harness, &identity, &wrong_digest)
+            .await
+            .expect_err("acknowledgement for a different protected bundle")
+            .kind(),
+        ApplicationErrorKind::Conflict
+    );
+    assert!(
+        harness
+            .transactions
+            .runtime_authority_acknowledgements
+            .lock()
+            .expect("runtime-authority acknowledgement lock")
+            .is_empty()
+    );
+
+    let exact = RunnerToServer::RuntimeAuthorityAck(RuntimeAuthorityAck::new(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        fixture.binding,
+        grant.bundle_digest(),
+    ));
+    assert!(matches!(
+        exchange(&harness, &identity, &exact).await,
+        ServerToRunner::OperationAck(_)
+    ));
+}
+
+#[tokio::test]
+async fn credential_free_post_accept_delivery_is_empty_without_invoking_an_issuer() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let fixture = install_runtime_authority_exchange(
+        &harness,
+        fence,
+        runner_id,
+        claimed_credential_free_job(),
+    );
+
+    let response = exchange(&harness, &identity, &fixture.request).await;
+    let ServerToRunner::RuntimeAuthorityGrant(grant) = response else {
+        panic!("credential-free post-accept request must return an empty grant")
+    };
+    assert!(grant.authorities().as_slice().is_empty());
+    assert_eq!(grant.binding(), fixture.binding);
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.job.job().authority_profile(),
+        JobAuthorityProfile::CredentialFree
+    );
+    let RunnerToServer::RuntimeAuthorityRequest(request) = &fixture.request else {
+        panic!("fixture must contain a runtime-authority request")
+    };
+    grant
+        .validate_for(*request, &fixture.job, &fixture.lease)
+        .expect("credential-free grant remains exactly bound to the accepted attempt");
 }
 
 fn durable_test_response(response: &ServerToRunner) -> RunnerOperationResponse {
@@ -862,27 +1266,15 @@ async fn retryable_claim_offer_failures_leave_the_current_poll_head_incomplete()
             }
             ClaimedFailureStage::Publish => {
                 assert_eq!(harness.objects.calls.load(Ordering::SeqCst), 2);
-                assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 2);
-                let requests = harness
-                    .authority_issuer
-                    .requests
-                    .lock()
-                    .expect("authority request lock");
-                assert_eq!(requests.len(), 2);
-                for observed in requests.iter() {
-                    assert_eq!(observed.job_id, job.job().job_id());
-                    assert_eq!(observed.run_id, job.job().run_id());
-                    assert_eq!(observed.job_ir_version, job.version());
-                    assert_eq!(observed.job_ir_metadata, metadata);
-                    assert_eq!(observed.lease, lease);
-                    assert_eq!(observed.issued_at, lease.issued_at());
-                    assert_eq!(observed.session, fence);
-                    assert_eq!(
-                        observed.slot,
-                        StableRunnerSlot::new(slot.get()).expect("stable slot")
-                    );
-                }
-                drop(requests);
+                assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+                assert!(
+                    harness
+                        .authority_issuer
+                        .requests
+                        .lock()
+                        .expect("authority request lock")
+                        .is_empty()
+                );
                 assert_eq!(harness.publisher.publications.load(Ordering::SeqCst), 2);
             }
         }
@@ -1118,7 +1510,7 @@ async fn exact_pending_offer_provenance_completes_without_rebuilding_work() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn post_kms_offer_revocation_commits_no_work_before_admitting_successor() {
+async fn post_publication_offer_revocation_commits_no_work_before_admitting_successor() {
     let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&harness, runner_id, generation);
     let slot = RunnerSlotOrdinal::new(1).expect("slot");
@@ -1200,7 +1592,7 @@ async fn post_kms_offer_revocation_commits_no_work_before_admitting_successor() 
     assert_eq!(harness.publisher.replays.load(Ordering::SeqCst), 1);
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.objects.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.publisher.publications.load(Ordering::SeqCst), 1);
     assert_eq!(harness.receipts.lease_completions.load(Ordering::SeqCst), 1);
     assert_eq!(
@@ -1598,13 +1990,8 @@ async fn credential_free_offer_bypasses_every_runtime_authority_issuer() {
         offer.job().job().authority_profile(),
         JobAuthorityProfile::CredentialFree
     );
-    assert!(
-        offer
-            .runtime_authorities()
-            .expect("protected empty bundle")
-            .as_slice()
-            .is_empty()
-    );
+    // Lease offers are deliberately value-free; even credential-free bundle
+    // delivery is acknowledged through the post-accept protocol.
     assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
     assert!(
         harness
@@ -2897,7 +3284,7 @@ async fn sync_fences_cross_session_and_cross_protocol_claims() {
         ApplicationErrorKind::StaleSession,
     );
 
-    *harness.sessions.snapshot.lock().expect("session lock") = Some(snapshot(fence, 2));
+    *harness.sessions.snapshot.lock().expect("session lock") = Some(snapshot(fence, 1));
     let cross_protocol = RunnerToServer::LeaseRequest(LeaseRequest::first(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),

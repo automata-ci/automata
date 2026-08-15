@@ -155,15 +155,15 @@ behavior.
 
 Tasks:
 
-- [ ] Accept every exact safe mapping, not only nonempty mappings.
-- [ ] Implement deny-all safely without falling back to provider defaults.
-- [ ] Support OIDC-only jobs.
-- [ ] Validate returned App permissions do not exceed the request.
-- [ ] Populate and mask both token aliases before user code.
+- [x] Accept every exact safe mapping, not only nonempty mappings.
+- [x] Implement deny-all safely without falling back to provider defaults.
+- [x] Support OIDC-only jobs.
+- [x] Validate returned App permissions do not exceed the request.
+- [x] Populate and mask both token aliases before user code.
 - [ ] Bind issue/refresh/revoke to tenant, repository, run, job, attempt,
   lease, fence, session, policy, and JobIR digest.
-- [ ] Preserve indeterminate-mint handling.
-- [ ] Revoke or retain for safe revocation after cancellation, completion,
+- [x] Preserve indeterminate-mint handling.
+- [x] Revoke or retain for safe revocation after cancellation, completion,
   fence loss, or failed finalization.
 - [ ] Add real allow/deny API probes by scope.
 
@@ -171,8 +171,13 @@ Acceptance:
 
 - [ ] Deny-all, OIDC-only, read, write, fork, Dependabot, and reusable cases
   pass.
-- [ ] Values never enter logs, JobIR, offers, or diagnostics.
-- [ ] Expired or fenced authority cannot refresh.
+- [x] Values never enter logs, JobIR, `LeaseOffer`, persisted offer/outbox
+  payloads, or diagnostics.
+- [x] Expired or fenced authority cannot refresh.
+
+The checked scope is the code- and test-backed post-accept generation-1
+delivery contract. Refresh/rotation and live allow/deny API probes remain open;
+see [Post-accept runtime-authority delivery](../runtime-authority-delivery.md).
 
 ### CFG-01 — Scoped secret and variable domain/storage
 

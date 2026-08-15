@@ -19,16 +19,16 @@ only in focused component tests, work only on Linux, lack production ingress or
 credentials, or deliberately diverge from GitHub.
 
 The 2026-08-12 refresh includes the runtime restoration merged in PR #29:
-runner protocol v1, message schema v1, JobIR schema v1, runner-requirements
-schema v1, one canonical greenfield `0001_initial_schema.sql`, three isolated
+runner protocol v2, message schema v1, JobIR schema v1, runner-requirements
+schema v1, a frozen additive PostgreSQL migration lineage, three isolated
 single-slot Linux runner processes, the Kubernetes product configuration path,
 durable rerun and protected-environment authority,
 value-safe managed-secret delivery, and immutable multi-workflow fanout. The
-baseline has no supported database or mixed-version upgrade source. These are
-component or experimental foundations unless a later item records product
-acceptance. Hosted Windows CI was removed from `main`; the replacement
-Hyper-V-container component is source-tested but is not a release gate until
-the dedicated-host acceptance suite returns.
+lineage is gap-free, checksum-verified, and extended only through a new
+migration. These are component or experimental foundations unless a later item
+records product acceptance. Hosted Windows CI was removed from `main`; the
+replacement Hyper-V-container component is source-tested but is not a release
+gate until the dedicated-host acceptance suite returns.
 
 The final baseline retains exact cleanup custody when sandbox creation has an
 uncertain outcome and the provider returns a recovery handle. Missing custody
@@ -1113,7 +1113,7 @@ runner.
 - [x] Remove privileged static fleet bootstrap rather than retaining a
   migration or break-glass compatibility path.
 - [x] Negotiate the runner protocol and JobIR ranges before a session or lease;
-  the current baseline admits protocol v1 only.
+  the current baseline admits protocol v2 only.
 - [x] Add a runner enrollment and registration API.
 - [ ] Add credential rotation.
 - [ ] Add disable and enable.

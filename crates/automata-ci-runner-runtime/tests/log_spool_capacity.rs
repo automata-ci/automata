@@ -152,7 +152,13 @@ async fn capacity_reclamation_terminalizes_missing_eos_without_stopping_sibling(
         .load(sibling.offer().job_ir().content())
         .expect("reconciliation retains sibling JobIR");
     spool
-        .load(sibling.offer().runtime_authorities().content())
+        .load(
+            sibling
+                .runtime_authority_delivery()
+                .expect("sibling post-accept authority delivery")
+                .content()
+                .content(),
+        )
         .expect("reconciliation retains sibling runtime authorities");
 
     shutdown.cancel();

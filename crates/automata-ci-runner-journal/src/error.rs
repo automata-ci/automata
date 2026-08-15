@@ -100,6 +100,12 @@ pub enum JournalInvariantError {
     /// Runtime-authority content is empty, oversized, or has the wrong kind.
     #[error("protected runtime authority has the wrong kind or exceeds its size limit")]
     InvalidRuntimeAuthorityContent,
+    /// Post-accept delivery metadata or its protected content digest is invalid.
+    #[error("runtime-authority delivery metadata is invalid")]
+    InvalidRuntimeAuthorityDelivery,
+    /// A repeated grant or acknowledgement disagrees with durable delivery state.
+    #[error("runtime-authority delivery conflicts with its durable replay state")]
+    RuntimeAuthorityDeliveryReplayConflict,
     /// A value-free secret overlay is malformed or names another lease fence.
     #[error("managed-secret binding overlay is invalid for the offered lease")]
     InvalidManagedSecretBindings,

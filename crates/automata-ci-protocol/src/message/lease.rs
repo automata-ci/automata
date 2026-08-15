@@ -80,13 +80,16 @@ impl LeaseRequest {
 }
 
 /// Server offer containing an immutable job and its exclusive lease.
+///
+/// Runtime credentials are deliberately absent. Protocol v2 delivers them
+/// only after the runner has durably accepted this exact offer.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeaseOffer {
     header: ServerCommandHeader,
     slot: RunnerSlotOrdinal,
     lease: Lease,
     job: JobIrEnvelope,
-    runtime_authorities: Option<super::JobRuntimeAuthorities>,
     #[serde(deserialize_with = "deserialize_required_option")]
     managed_secret_bindings: Option<super::ManagedSecretBindingOverlay>,
 }
@@ -100,21 +103,19 @@ where
 }
 
 impl LeaseOffer {
-    /// Creates an offer with required, execution-bound authority.
+    /// Creates a value-free offer.
     #[must_use]
     pub const fn new(
         header: ServerCommandHeader,
         slot: RunnerSlotOrdinal,
         lease: Lease,
         job: JobIrEnvelope,
-        runtime_authorities: super::JobRuntimeAuthorities,
     ) -> Self {
         Self {
             header,
             slot,
             lease,
             job,
-            runtime_authorities: Some(runtime_authorities),
             managed_secret_bindings: None,
         }
     }
@@ -155,12 +156,6 @@ impl LeaseOffer {
     /// Borrows the immutable, versioned job description.
     pub const fn job(&self) -> &JobIrEnvelope {
         &self.job
-    }
-
-    /// Returns the protected per-job runtime authority, when present.
-    #[must_use]
-    pub const fn runtime_authorities(&self) -> Option<&super::JobRuntimeAuthorities> {
-        self.runtime_authorities.as_ref()
     }
 
     /// Returns the lease-scoped, value-free secret-binding overlay, if this

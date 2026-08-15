@@ -5,6 +5,7 @@ use automata_ci_core::{
     AttemptId, JobConclusion, JobIrVersion, JobLifecycle, Lease, LeaseGuard, LogSequence,
     LogStreamId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
+use automata_ci_protocol::{INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding};
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CommandCursor, DocumentSchema, DurableRunnerCommand,
     EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, MAX_LOG_SEGMENT_BYTES,
@@ -362,6 +363,276 @@ pub trait RunnerLeaseOfferRepository: Send + Sync {
         &self,
         request: PublishLeaseOffer,
     ) -> Result<PublishedLeaseOffer, StoreError>;
+}
+
+/// Value-free request for one post-accept authority delivery generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizeRuntimeAuthorityDelivery {
+    request: RunnerOperationRequest,
+    protocol_version: RunnerProtocolVersion,
+    binding: RuntimeAuthorityDeliveryBinding,
+    observed_at: UnixMillis,
+}
+
+impl AuthorizeRuntimeAuthorityDelivery {
+    /// Creates an exact durable delivery authorization request.
+    ///
+    /// # Errors
+    ///
+    /// The first protocol generation intentionally supports only the initial
+    /// authority generation. A future refresh protocol must add its own
+    /// issuance-anchor and predecessor rules before accepting later values.
+    pub fn new(
+        request: RunnerOperationRequest,
+        protocol_version: RunnerProtocolVersion,
+        binding: RuntimeAuthorityDeliveryBinding,
+        observed_at: UnixMillis,
+    ) -> Result<Self, RunnerControlValueError> {
+        if binding.generation() != INITIAL_RUNTIME_AUTHORITY_GENERATION {
+            return Err(RunnerControlValueError::UnsupportedRuntimeAuthorityGeneration);
+        }
+        Ok(Self {
+            request,
+            protocol_version,
+            binding,
+            observed_at,
+        })
+    }
+
+    /// Returns the idempotent request identity and digest.
+    #[must_use]
+    pub const fn request(&self) -> &RunnerOperationRequest {
+        &self.request
+    }
+
+    /// Returns the negotiated protocol generation.
+    #[must_use]
+    pub const fn protocol_version(&self) -> RunnerProtocolVersion {
+        self.protocol_version
+    }
+
+    /// Returns the value-free attempt, offer, and `JobIR` binding.
+    #[must_use]
+    pub const fn binding(&self) -> RuntimeAuthorityDeliveryBinding {
+        self.binding
+    }
+
+    /// Returns the trusted server observation time.
+    #[must_use]
+    pub const fn observed_at(&self) -> UnixMillis {
+        self.observed_at
+    }
+}
+
+/// Authoritative accepted offer admitted for post-accept authority issuance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeAuthorityDeliveryAdmission {
+    request: AuthorizeRuntimeAuthorityDelivery,
+    offer: PublishedLeaseOffer,
+    committed_bundle_digest: Option<Sha256Digest>,
+}
+
+impl RuntimeAuthorityDeliveryAdmission {
+    /// Binds one delivery request to an exact, accepted durable offer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any session, protocol, attempt, slot, fence, offer-command,
+    /// `JobIR`, or generation mismatch.
+    pub fn new(
+        request: AuthorizeRuntimeAuthorityDelivery,
+        offer: PublishedLeaseOffer,
+        committed_bundle_digest: Option<Sha256Digest>,
+    ) -> Result<Self, RunnerControlValueError> {
+        let binding = request.binding();
+        if request.request().session() != offer.request().session()
+            || request.protocol_version() != offer.protocol_version()
+            || binding.attempt_id() != offer.lease().attempt_id()
+            || binding.slot().get() != offer.slot().ordinal()
+            || binding.guard() != offer.lease().guard()
+            || binding.offer_operation_id() != offer.command().request().operation_id()
+            || binding.offer_sequence().get() != offer.command().sequence().get()
+            || binding.job_ir_digest() != offer.job_ir().digest()
+            || binding.generation() != INITIAL_RUNTIME_AUTHORITY_GENERATION
+        {
+            return Err(RunnerControlValueError::RuntimeAuthorityBindingMismatch);
+        }
+        Ok(Self {
+            request,
+            offer,
+            committed_bundle_digest,
+        })
+    }
+
+    /// Returns the exact durable delivery request.
+    #[must_use]
+    pub const fn request(&self) -> &AuthorizeRuntimeAuthorityDelivery {
+        &self.request
+    }
+
+    /// Returns the accepted, value-free offer publication.
+    #[must_use]
+    pub const fn offer(&self) -> &PublishedLeaseOffer {
+        &self.offer
+    }
+
+    /// Returns the digest committed by an earlier identical delivery, if any.
+    #[must_use]
+    pub const fn committed_bundle_digest(&self) -> Option<Sha256Digest> {
+        self.committed_bundle_digest
+    }
+}
+
+/// Metadata-only commit for one authority bundle already held in provider custody.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitRuntimeAuthorityDelivery {
+    admission: RuntimeAuthorityDeliveryAdmission,
+    bundle_digest: Sha256Digest,
+    committed_at: UnixMillis,
+}
+
+impl CommitRuntimeAuthorityDelivery {
+    /// Creates a commit without taking ownership of plaintext authority bytes.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a timestamp outside the accepted offer's authority horizon.
+    pub fn new(
+        admission: RuntimeAuthorityDeliveryAdmission,
+        bundle_digest: Sha256Digest,
+        committed_at: UnixMillis,
+    ) -> Result<Self, RunnerControlValueError> {
+        if committed_at < admission.offer().command().request().created_at()
+            || committed_at >= admission.offer().offer_valid_until()
+        {
+            return Err(RunnerControlValueError::RuntimeAuthorityCommitOutsideHorizon);
+        }
+        Ok(Self {
+            admission,
+            bundle_digest,
+            committed_at,
+        })
+    }
+
+    /// Returns the authoritative issuance admission.
+    #[must_use]
+    pub const fn admission(&self) -> &RuntimeAuthorityDeliveryAdmission {
+        &self.admission
+    }
+
+    /// Returns the canonical protected-bundle digest.
+    #[must_use]
+    pub const fn bundle_digest(&self) -> Sha256Digest {
+        self.bundle_digest
+    }
+
+    /// Returns the trusted commit time.
+    #[must_use]
+    pub const fn committed_at(&self) -> UnixMillis {
+        self.committed_at
+    }
+}
+
+/// Value-free acknowledgement after the runner protected and journaled a grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcknowledgeRuntimeAuthorityDelivery {
+    request: RunnerOperationRequest,
+    protocol_version: RunnerProtocolVersion,
+    binding: RuntimeAuthorityDeliveryBinding,
+    bundle_digest: Sha256Digest,
+    observed_at: UnixMillis,
+}
+
+impl AcknowledgeRuntimeAuthorityDelivery {
+    /// Creates an exact delivery acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unsupported delivery generations.
+    pub fn new(
+        request: RunnerOperationRequest,
+        protocol_version: RunnerProtocolVersion,
+        binding: RuntimeAuthorityDeliveryBinding,
+        bundle_digest: Sha256Digest,
+        observed_at: UnixMillis,
+    ) -> Result<Self, RunnerControlValueError> {
+        if binding.generation() != INITIAL_RUNTIME_AUTHORITY_GENERATION {
+            return Err(RunnerControlValueError::UnsupportedRuntimeAuthorityGeneration);
+        }
+        Ok(Self {
+            request,
+            protocol_version,
+            binding,
+            bundle_digest,
+            observed_at,
+        })
+    }
+
+    /// Returns the idempotent acknowledgement request.
+    #[must_use]
+    pub const fn request(&self) -> &RunnerOperationRequest {
+        &self.request
+    }
+
+    /// Returns the negotiated protocol generation.
+    #[must_use]
+    pub const fn protocol_version(&self) -> RunnerProtocolVersion {
+        self.protocol_version
+    }
+
+    /// Returns the exact delivery binding.
+    #[must_use]
+    pub const fn binding(&self) -> RuntimeAuthorityDeliveryBinding {
+        self.binding
+    }
+
+    /// Returns the protected bundle digest adopted by the runner.
+    #[must_use]
+    pub const fn bundle_digest(&self) -> Sha256Digest {
+        self.bundle_digest
+    }
+
+    /// Returns the trusted server observation time.
+    #[must_use]
+    pub const fn observed_at(&self) -> UnixMillis {
+        self.observed_at
+    }
+}
+
+/// Whether a metadata-only delivery or acknowledgement was newly committed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeAuthorityDeliveryDisposition {
+    /// The exact operation committed for the first time.
+    Committed,
+    /// The exact operation and digest were already durably committed.
+    Replayed,
+}
+
+/// Durable, metadata-only boundary for post-accept authority delivery.
+///
+/// Implementations must never persist a grant response or plaintext
+/// credential. Provider-specific custody remains the only durable secret
+/// authority; this repository stores exact request, offer, bundle-digest, and
+/// acknowledgement evidence.
+#[async_trait]
+pub trait RuntimeAuthorityDeliveryRepository: Send + Sync {
+    /// Authorizes issuance only for an accepted, live, exact offer.
+    async fn authorize_runtime_authority_delivery(
+        &self,
+        request: AuthorizeRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryAdmission, StoreError>;
+
+    /// Commits only the digest of a bundle issued from the exact admission.
+    async fn commit_runtime_authority_delivery(
+        &self,
+        request: CommitRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError>;
+
+    /// Records exact runner custody after protected-spool adoption.
+    async fn acknowledge_runtime_authority_delivery(
+        &self,
+        request: AcknowledgeRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError>;
 }
 
 /// Lease heartbeat mutation and exact response proposed for one atomic commit.
@@ -1085,4 +1356,13 @@ pub enum RunnerControlValueError {
     /// Raw-log handling disagrees with the immutable secret-exposure ceiling.
     #[error("runner log safety policy is inconsistent")]
     InconsistentLogSafetyPolicy,
+    /// This protocol generation does not define refresh/predecessor semantics.
+    #[error("runtime-authority delivery generation is unsupported")]
+    UnsupportedRuntimeAuthorityGeneration,
+    /// Delivery evidence disagrees with the accepted durable offer.
+    #[error("runtime-authority delivery does not match the accepted offer")]
+    RuntimeAuthorityBindingMismatch,
+    /// Metadata commit occurred outside the accepted offer's authority horizon.
+    #[error("runtime-authority delivery commit is outside the offer horizon")]
+    RuntimeAuthorityCommitOutsideHorizon,
 }
