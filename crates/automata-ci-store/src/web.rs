@@ -1,3 +1,9 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard, Weak},
+    time::Duration,
+};
+
 use async_trait::async_trait;
 use automata_ci_auth::authorization::{
     AuthorizationContext, AuthorizationRequest, OutputVisibility, Permission,
@@ -9,6 +15,7 @@ use automata_ci_core::{
     RunnerId, Sha256Digest, UnixMillis, WorkflowId,
 };
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::{DocumentSchema, JobIrMetadata, RepositoryId, StoreError, TenantScope};
 
@@ -730,6 +737,217 @@ pub struct HumanLogStream {
     pub publication: HumanOutputPublication,
 }
 
+/// Bounded advisory high-water mark emitted after one durable log-segment commit.
+///
+/// Notifications never carry log bytes and are not a durability boundary. Consumers
+/// must use this value only to wake a read from the authoritative segment store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HumanLogCommitHint {
+    stream_id: LogStreamId,
+    committed_through: LogSequence,
+    stream_closed: bool,
+}
+
+impl HumanLogCommitHint {
+    /// Creates one exact committed-segment high-water mark.
+    #[must_use]
+    pub const fn new(
+        stream_id: LogStreamId,
+        committed_through: LogSequence,
+        stream_closed: bool,
+    ) -> Self {
+        Self {
+            stream_id,
+            committed_through,
+            stream_closed,
+        }
+    }
+
+    /// Returns the durable log stream that changed.
+    #[must_use]
+    pub const fn stream_id(self) -> LogStreamId {
+        self.stream_id
+    }
+
+    /// Returns the inclusive last sequence known committed by the producer.
+    #[must_use]
+    pub const fn committed_through(self) -> LogSequence {
+        self.committed_through
+    }
+
+    /// Reports whether this commit durably closed the stream.
+    #[must_use]
+    pub const fn stream_closed(self) -> bool {
+        self.stream_closed
+    }
+}
+
+/// Replica-local source of advisory durable log-commit notifications.
+///
+/// Sources may lose or coalesce notifications during disconnection. Callers must
+/// pair this port with periodic reads from [`HumanWorkflowReadRepository`].
+#[async_trait]
+pub trait HumanLogCommitNotificationSource: Send {
+    /// Waits for the next bounded commit hint.
+    async fn receive(&mut self) -> Result<HumanLogCommitHint, StoreError>;
+}
+
+/// Forwards one replica-level source into the bounded local fan-out hub.
+///
+/// This future normally runs until its owner cancels it. Source failures are
+/// returned so the control-plane supervisor can apply its lifecycle policy.
+///
+/// # Errors
+///
+/// Returns the first notification-source failure.
+pub async fn forward_human_log_commit_notifications(
+    source: &mut dyn HumanLogCommitNotificationSource,
+    hub: &HumanLogCommitNotificationHub,
+) -> Result<(), StoreError> {
+    loop {
+        hub.publish(source.receive().await?);
+    }
+}
+
+#[derive(Debug)]
+struct HumanLogCommitSignal {
+    sender: watch::Sender<Option<HumanLogCommitHint>>,
+}
+
+/// Constant-memory replica-local fan-out for advisory log-commit hints.
+///
+/// The hub retains only weak references to streams with active subscriptions.
+/// Each active stream retains one coalesced high-water mark regardless of the
+/// number or rate of `PostgreSQL` notifications.
+#[derive(Debug, Default)]
+pub struct HumanLogCommitNotificationHub {
+    streams: Mutex<HashMap<LogStreamId, Weak<HumanLogCommitSignal>>>,
+}
+
+impl HumanLogCommitNotificationHub {
+    /// Subscribes before the caller performs its authoritative durable read.
+    ///
+    /// A hint arriving after this call remains observable even if it arrives
+    /// before the durable read completes, closing the read-then-wait race.
+    #[must_use]
+    pub fn subscribe(&self, stream_id: LogStreamId) -> HumanLogCommitSubscription {
+        let mut streams = self.lock_streams();
+        let signal = streams
+            .get(&stream_id)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let (sender, _) = watch::channel(None);
+                let signal = Arc::new(HumanLogCommitSignal { sender });
+                streams.insert(stream_id, Arc::downgrade(&signal));
+                signal
+            });
+        HumanLogCommitSubscription {
+            stream_id,
+            receiver: signal.sender.subscribe(),
+            _signal: signal,
+        }
+    }
+
+    /// Publishes a newer high-water mark to local subscribers.
+    ///
+    /// Returns `true` only when an active stream advanced. Hints for streams
+    /// without subscribers, exact duplicates, and older out-of-order hints are
+    /// discarded.
+    pub fn publish(&self, hint: HumanLogCommitHint) -> bool {
+        let stream_id = hint.stream_id();
+        let signal = {
+            let mut streams = self.lock_streams();
+            let Some(signal) = streams.get(&stream_id).and_then(Weak::upgrade) else {
+                streams.remove(&stream_id);
+                return false;
+            };
+            signal
+        };
+        let current = *signal.sender.borrow();
+        if !hint_advances(current, hint) {
+            return false;
+        }
+        signal.sender.send_replace(Some(hint));
+        true
+    }
+
+    fn lock_streams(&self) -> MutexGuard<'_, HashMap<LogStreamId, Weak<HumanLogCommitSignal>>> {
+        self.streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Race-free subscription to one stream's coalesced commit high-water mark.
+#[derive(Debug)]
+pub struct HumanLogCommitSubscription {
+    stream_id: LogStreamId,
+    receiver: watch::Receiver<Option<HumanLogCommitHint>>,
+    _signal: Arc<HumanLogCommitSignal>,
+}
+
+/// Reason a live tail should reread authoritative durable segment storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HumanLogTailWake {
+    /// A coalesced committed-segment high-water mark advanced.
+    Commit(HumanLogCommitHint),
+    /// The bounded periodic fallback elapsed without an observed hint.
+    Periodic,
+}
+
+impl HumanLogCommitSubscription {
+    /// Returns the exact stream this subscription follows.
+    #[must_use]
+    pub const fn stream_id(&self) -> LogStreamId {
+        self.stream_id
+    }
+
+    /// Waits until this stream advances and returns its latest coalesced hint.
+    ///
+    /// Callers should race this future with their periodic durable-read timer
+    /// and shutdown signal. The hub-owned sender remains live for the lifetime
+    /// of the subscription.
+    pub async fn changed(&mut self) -> HumanLogCommitHint {
+        loop {
+            if self.receiver.changed().await.is_err() {
+                // `signal` owns the sender for this subscription's lifetime.
+                std::future::pending::<()>().await;
+            }
+            if let Some(hint) = *self.receiver.borrow_and_update() {
+                return hint;
+            }
+        }
+    }
+
+    /// Waits for either a commit hint or the periodic durable-read fallback.
+    ///
+    /// Transport adapters should additionally race this future with their
+    /// request/session cancellation signal. Either outcome means "read from
+    /// the durable checkpoint again"; the hint is never treated as log data.
+    pub async fn wait_or_recheck(&mut self, maximum_wait: Duration) -> HumanLogTailWake {
+        tokio::select! {
+            hint = self.changed() => HumanLogTailWake::Commit(hint),
+            () = tokio::time::sleep(maximum_wait) => HumanLogTailWake::Periodic,
+        }
+    }
+
+    /// Returns the latest hint without marking it observed.
+    #[must_use]
+    pub fn latest(&self) -> Option<HumanLogCommitHint> {
+        *self.receiver.borrow()
+    }
+}
+
+fn hint_advances(current: Option<HumanLogCommitHint>, next: HumanLogCommitHint) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    next.committed_through() > current.committed_through()
+        || (next.committed_through() == current.committed_through()
+            && next.stream_closed()
+            && !current.stream_closed())
+}
+
 /// Selected job plus same-run navigation and at most one latest-attempt log stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HumanJobDetail {
@@ -1031,5 +1249,84 @@ mod tests {
         assert!(HumanPageSize::new(MAX_HUMAN_PAGE_SIZE).is_ok());
         assert!(HumanPageSize::new(0).is_err());
         assert!(HumanPageSize::new(MAX_HUMAN_PAGE_SIZE + 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn log_commit_hub_closes_the_subscribe_then_read_race() {
+        let hub = HumanLogCommitNotificationHub::default();
+        let stream_id = LogStreamId::new();
+        let mut subscription = hub.subscribe(stream_id);
+        let committed = HumanLogCommitHint::new(stream_id, LogSequence::new(4), false);
+
+        assert!(hub.publish(committed));
+        assert_eq!(subscription.changed().await, committed);
+        assert_eq!(subscription.latest(), Some(committed));
+        assert_eq!(subscription.stream_id(), stream_id);
+    }
+
+    #[tokio::test]
+    async fn log_commit_subscription_periodically_rechecks_durable_storage() {
+        let hub = HumanLogCommitNotificationHub::default();
+        let mut subscription = hub.subscribe(LogStreamId::new());
+
+        assert_eq!(
+            subscription.wait_or_recheck(Duration::ZERO).await,
+            HumanLogTailWake::Periodic
+        );
+    }
+
+    #[tokio::test]
+    async fn log_commit_hub_coalesces_bursts_and_ignores_stale_hints() {
+        let hub = HumanLogCommitNotificationHub::default();
+        let stream_id = LogStreamId::new();
+        let mut subscription = hub.subscribe(stream_id);
+
+        assert!(hub.publish(HumanLogCommitHint::new(
+            stream_id,
+            LogSequence::new(1),
+            false,
+        )));
+        assert!(hub.publish(HumanLogCommitHint::new(
+            stream_id,
+            LogSequence::new(3),
+            false,
+        )));
+        assert!(!hub.publish(HumanLogCommitHint::new(
+            stream_id,
+            LogSequence::new(2),
+            false,
+        )));
+        assert!(!hub.publish(HumanLogCommitHint::new(
+            stream_id,
+            LogSequence::new(3),
+            false,
+        )));
+        assert_eq!(
+            subscription.changed().await,
+            HumanLogCommitHint::new(stream_id, LogSequence::new(3), false)
+        );
+
+        assert!(hub.publish(HumanLogCommitHint::new(
+            stream_id,
+            LogSequence::new(3),
+            true,
+        )));
+        assert_eq!(
+            subscription.changed().await,
+            HumanLogCommitHint::new(stream_id, LogSequence::new(3), true)
+        );
+    }
+
+    #[test]
+    fn log_commit_hub_drops_unobserved_streams_without_retaining_hints() {
+        let hub = HumanLogCommitNotificationHub::default();
+        let stream_id = LogStreamId::new();
+        let hint = HumanLogCommitHint::new(stream_id, LogSequence::new(1), false);
+
+        assert!(!hub.publish(hint));
+        let subscription = hub.subscribe(stream_id);
+        drop(subscription);
+        assert!(!hub.publish(hint));
+        assert!(hub.subscribe(stream_id).latest().is_none());
     }
 }

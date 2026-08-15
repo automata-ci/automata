@@ -53,18 +53,21 @@ use sha2::{Digest as _, Sha256};
 use sqlx::{Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
-use super::{PostgresStore, RunnerPayloadEncryption, lifecycle_name, parse_lifecycle};
+use super::{
+    PostgresStore, RunnerPayloadEncryption, lifecycle_name,
+    log_notifications::publish_log_commit_notification, parse_lifecycle,
+};
 use automata_ci_store::{
     AcknowledgeRunnerCommands, AttemptAssignment, AttemptStoreError, CloseRunnerSession,
     CommandCursor, CommandReplayDisposition, CommandReplayLimit, CommandReplayPage,
     CommandSequence, DocumentSchema, DurableRunnerCommand, EnqueueRunnerCommand,
-    HeartbeatRunnerSession, JobDependency, JobIrMetadata, LeaseOfferCommandIdentity,
-    MAX_COMMAND_REPLAY_BYTES, MAX_COMMAND_REPLAY_LIMIT, ObjectKey, OpenRunnerSession,
-    ResumeRunnerSession, RoutingDocument, RoutingLabel, RunnerCommandPayload, RunnerGeneration,
-    RunnerOperationKind, RunnerOperationReceipt, RunnerOperationRequest, RunnerOperationResponse,
-    RunnerPayloadTombstone, RunnerPayloadTombstoneReason, RunnerProtocolVersion,
-    RunnerSessionFence, RunnerSessionSnapshot, RunnerSlotCount, SessionEpoch, StableRunnerSlot,
-    StoreError, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
+    HeartbeatRunnerSession, HumanLogCommitHint, JobDependency, JobIrMetadata,
+    LeaseOfferCommandIdentity, MAX_COMMAND_REPLAY_BYTES, MAX_COMMAND_REPLAY_LIMIT, ObjectKey,
+    OpenRunnerSession, ResumeRunnerSession, RoutingDocument, RoutingLabel, RunnerCommandPayload,
+    RunnerGeneration, RunnerOperationKind, RunnerOperationReceipt, RunnerOperationRequest,
+    RunnerOperationResponse, RunnerPayloadTombstone, RunnerPayloadTombstoneReason,
+    RunnerProtocolVersion, RunnerSessionFence, RunnerSessionSnapshot, RunnerSlotCount,
+    SessionEpoch, StableRunnerSlot, StoreError, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository,
 };
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
@@ -2152,6 +2155,15 @@ impl RunnerControlTransactionRepository for PostgresStore {
             decision_at,
             None,
             None,
+        )
+        .await?;
+        publish_log_commit_notification(
+            &mut transaction,
+            HumanLogCommitHint::new(
+                request.stream_id(),
+                request.last_sequence(),
+                request.is_end_of_stream(),
+            ),
         )
         .await?;
         transaction.commit().await.map_err(operation_error)?;
