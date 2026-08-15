@@ -495,6 +495,8 @@ const fn observe_outcome(outcome: &LeasePollOutcome) -> LeasePollObservation {
 
 const fn observe_rejection(reason: ClaimRejection) -> super::LeaseClaimRejection {
     match reason {
+        ClaimRejection::ClaimExpired => super::LeaseClaimRejection::ClaimExpired,
+        ClaimRejection::ClaimSuperseded => super::LeaseClaimRejection::ClaimSuperseded,
         ClaimRejection::AttemptNotFound => super::LeaseClaimRejection::AttemptNotFound,
         ClaimRejection::AttemptNotQueued(_) => super::LeaseClaimRejection::AttemptNotQueued,
         ClaimRejection::NoLongerRunnable => super::LeaseClaimRejection::NoLongerRunnable,

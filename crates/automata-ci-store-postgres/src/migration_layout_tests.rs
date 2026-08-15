@@ -121,6 +121,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0029_align_artifact_protocol_version.sql",
         "00d51644b2bed927c55fbd7bfa6ba84efe66526d59adb0accd3ab2b4b27d11fec73a62e6d4ae7af159a0b2c522e2eea2",
     ),
+    (
+        "0030_finalize_expired_lease_claims.sql",
+        "68a3755eb8e238649342c7e19a99c467351a6f735cd01a55846e3451e6eabf812ddd922192a3c2a4b9f6fcb3c65cb8a5",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

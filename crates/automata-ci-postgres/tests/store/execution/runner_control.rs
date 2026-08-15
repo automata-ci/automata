@@ -7,8 +7,9 @@ use automata_ci_control::{
         CancellationActor, CancellationReason, CancellationRepository as _, RequestCancellation,
     },
     lease::{
-        BeginLeaseRequest, CompleteLeaseRequest, LeaseRequestKey, NoWorkLeaseRequest,
-        RunnableScanLimit, RunnableScanRequest, TryClaimAttempt, TryClaimOutcome,
+        BeginLeaseRequest, ClaimRejection, CompleteLeaseRequest, LeaseRequestKey,
+        NoWorkLeaseRequest, RunnableScanLimit, RunnableScanRequest, TryClaimAttempt,
+        TryClaimOutcome,
         repository::{
             RunnableAttemptRepository as _, RunnerClaimRepository as _,
             RunnerLeaseRequestRepository as _,
@@ -54,6 +55,151 @@ const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
 const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
 const ACTIVE_LEASE_DURATION_MILLIS: i64 = 300_000;
 const EXPIRING_LEASE_DURATION_MILLIS: i64 = 2_000;
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn expired_unpublished_claim_becomes_one_terminal_replay_without_maintenance() -> TestResult {
+    run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
+        let (seed, lease, _metadata, slot, operation_id, _request_digest) =
+            active_lease_with_duration(&database, EXPIRING_LEASE_DURATION_MILLIS).await?;
+        let request = LeaseRequestKey::first(seed.session_fences[0], operation_id, slot);
+
+        wait_until_database_time(&clock, lease.expires_at()).await?;
+
+        let first = database
+            .store()
+            .lookup_lease_request(request)
+            .await?
+            .expect("the admitted request retains one terminal receipt");
+        assert!(matches!(
+            first.outcome(),
+            TryClaimOutcome::Rejected(ClaimRejection::ClaimExpired)
+        ));
+        assert!(first.was_replayed());
+
+        let second = database
+            .store()
+            .lookup_lease_request(request)
+            .await?
+            .expect("the terminal receipt replays exactly");
+        assert_eq!(second.outcome(), first.outcome());
+        assert!(second.was_replayed());
+
+        let stored: (String, Option<i64>, Option<uuid::Uuid>, Option<i32>) = sqlx::query_as(
+            r"
+            SELECT outcome, claimed_fencing_token, claimed_job_id,
+                   claimed_job_ir_schema
+            FROM runner_operation_receipts
+            WHERE runner_session_id = $1 AND operation_id = $2
+            ",
+        )
+        .bind(seed.session_fences[0].session_id().as_uuid())
+        .bind(operation_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(stored, ("claim_expired".to_owned(), None, None, None));
+
+        let lifecycle: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(lease.attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(
+            lifecycle, "leased",
+            "request finalization is independent from bounded attempt maintenance"
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn superseded_unpublished_claim_becomes_one_terminal_replay() -> TestResult {
+    run_with_database(|database| async move {
+        let (seed, lease, _metadata, slot, operation_id, _request_digest) =
+            active_lease_with_duration(&database, ACTIVE_LEASE_DURATION_MILLIS).await?;
+        let fence = seed.session_fences[0];
+        let request = LeaseRequestKey::first(fence, operation_id, slot);
+        let requested_at = database_now(&database).await?;
+        let cancellation_operation = OperationId::new();
+        let reason = CancellationReason::new("supersede unpublished claim")?;
+        let cancellation_payload = CancelJobCommandPayload::new(
+            lease.attempt_id(),
+            lease.guard(),
+            RunnerProtocolVersion::new(1)?,
+            reason.as_str(),
+            requested_at,
+        )?
+        .encode_json()?;
+        database
+            .store()
+            .request_cancellation(
+                RequestCancellation::new(
+                    cancellation_operation,
+                    lease.attempt_id(),
+                    CancellationActor::new("test scheduler")?,
+                    Some(reason),
+                    requested_at,
+                )
+                .with_delivery(EnqueueRunnerCommand::new(
+                    fence,
+                    cancellation_operation,
+                    RunnerOperationKind::new(CANCEL_JOB_COMMAND_KIND)?,
+                    RunnerCommandPayload::new(
+                        DocumentSchema::new(CANCEL_JOB_COMMAND_SCHEMA)?,
+                        cancellation_payload,
+                    )?,
+                    requested_at,
+                )),
+            )
+            .await?;
+        let completed_at = database_now(&database).await?;
+        database
+            .store()
+            .commit_runner_terminal_result(CommitRunnerTerminalResult::new(
+                operation_request(
+                    fence,
+                    OperationId::new(),
+                    "automata.runner.job-result.v1",
+                    [91; 32],
+                )?,
+                lease.attempt_id(),
+                lease.guard(),
+                DocumentSchema::new(1)?,
+                80,
+                Sha256Digest::from_bytes([92; 32]),
+                ObjectKey::new("results/superseded-claim.json")?,
+                JobConclusion::Success,
+                completed_at,
+                completed_at,
+                response(b"terminal result committed")?,
+            )?)
+            .await?;
+
+        let first = database
+            .store()
+            .lookup_lease_request(request)
+            .await?
+            .expect("the admitted request retains one terminal receipt");
+        assert!(matches!(
+            first.outcome(),
+            TryClaimOutcome::Rejected(ClaimRejection::ClaimSuperseded)
+        ));
+        assert!(first.was_replayed());
+
+        let second = database
+            .store()
+            .lookup_lease_request(request)
+            .await?
+            .expect("the terminal receipt replays exactly");
+        assert_eq!(second.outcome(), first.outcome());
+        assert!(second.was_replayed());
+        Ok(())
+    })
+    .await
+}
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn lease_request_chains_bound_retry_state_per_live_slot() -> TestResult {
