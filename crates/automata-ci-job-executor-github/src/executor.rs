@@ -5006,6 +5006,7 @@ impl GithubJobExecutor {
                 applied.summary().markdown(),
                 &completed.annotations,
                 applied.notices(),
+                completed.command_file_notice,
                 masker,
             )?;
             Ok((applied.into_next_state(), next_attachments))
@@ -5107,6 +5108,7 @@ impl GithubJobExecutor {
             commands: completed.commands.with_legacy_mutations(&legacy),
             artifacts: completed.artifacts,
             annotations,
+            command_file_notice: completed.command_file_notice,
         })
     }
 
@@ -5174,6 +5176,7 @@ impl GithubJobExecutor {
         cancellation: &dyn ExecutorCancellation,
     ) -> Result<DecodedCommandFiles, ExecutorAdapterError> {
         let mut parsed = Vec::with_capacity(COMMAND_FILE_KINDS.len());
+        let mut command_file_notice = None;
         for (index, (kind, path)) in paths.values.iter().enumerate() {
             if cancellation.is_cancelled() {
                 return Err(ExecutorAdapterError::new(
@@ -5184,10 +5187,17 @@ impl GithubJobExecutor {
                 .checked_mul(5)
                 .and_then(|value| value.checked_add(u32::try_from(index).ok()?))
                 .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-            let limit = if *kind == CommandFileKind::StepSummary {
+            let configured_limit = if *kind == CommandFileKind::StepSummary {
                 self.command_files.limits().maximum_summary_bytes()
             } else {
                 self.command_files.limits().maximum_file_bytes()
+            };
+            let transfer_limit = if *kind == CommandFileKind::StepSummary {
+                configured_limit
+                    .checked_add(1)
+                    .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?
+            } else {
+                configured_limit
             };
             let request = CopyFromRequest::new(
                 self.ports.operation_ids.operation_id(
@@ -5196,25 +5206,42 @@ impl GithubJobExecutor {
                     ordinal,
                 ),
                 path.clone(),
-                limit,
+                transfer_limit,
             )
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            let bytes =
-                match endpoint.copy_from(&request, &ProviderCancellationBridge(cancellation)) {
-                    Ok(bytes) => bytes,
-                    Err(error)
-                        if *kind == CommandFileKind::StepSummary
-                            && error.kind() == ExecutionErrorKind::NotFound =>
-                    {
-                        Vec::new()
-                    }
-                    Err(error) => return Err(map_execution_error(error)),
-                };
+            let copied = endpoint.copy_from(&request, &ProviderCancellationBridge(cancellation));
             if cancellation.is_cancelled() {
                 return Err(ExecutorAdapterError::new(
                     ExecutorAdapterErrorKind::Cancelled,
                 ));
             }
+            let bytes = match copied {
+                Ok(bytes)
+                    if *kind == CommandFileKind::StepSummary && bytes.len() > configured_limit =>
+                {
+                    command_file_notice = Some(CommandFileNotice::SummaryTooLarge {
+                        maximum_bytes: configured_limit,
+                    });
+                    Vec::new()
+                }
+                Ok(bytes) => bytes,
+                Err(error)
+                    if *kind == CommandFileKind::StepSummary
+                        && error.kind() == ExecutionErrorKind::NotFound =>
+                {
+                    Vec::new()
+                }
+                Err(error)
+                    if *kind == CommandFileKind::StepSummary
+                        && error.kind() == ExecutionErrorKind::OutputLimitExceeded =>
+                {
+                    command_file_notice = Some(CommandFileNotice::SummaryTooLarge {
+                        maximum_bytes: configured_limit,
+                    });
+                    Vec::new()
+                }
+                Err(error) => return Err(map_execution_error(error)),
+            };
             parsed.push(
                 self.command_files
                     .decode(*kind, &bytes, platform)
@@ -5269,6 +5296,7 @@ impl GithubJobExecutor {
         Ok(DecodedCommandFiles {
             commands,
             artifacts,
+            command_file_notice,
         })
     }
 
@@ -5735,11 +5763,18 @@ struct CollectedPhase {
     commands: CompletedStepCommands,
     artifacts: ArtifactDeclarationCommandFile,
     annotations: Vec<automata_ci_github_runtime::Annotation>,
+    command_file_notice: Option<CommandFileNotice>,
 }
 
 struct DecodedCommandFiles {
     commands: CompletedStepCommands,
     artifacts: ArtifactDeclarationCommandFile,
+    command_file_notice: Option<CommandFileNotice>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandFileNotice {
+    SummaryTooLarge { maximum_bytes: usize },
 }
 
 #[derive(Clone, Default)]
@@ -5756,6 +5791,7 @@ impl ExecutionAttachments {
         summary: &str,
         annotations: &[automata_ci_github_runtime::Annotation],
         notices: &[PhaseApplicationNotice],
+        command_file_notice: Option<CommandFileNotice>,
         masker: &mut SecretMasker,
     ) -> Result<(), ExecutorAdapterError> {
         let summary = masked_attachment_text(summary, masker)?;
@@ -5835,6 +5871,22 @@ impl ExecutionAttachments {
                 .ok_or_else(resource_exhausted)?;
             retained.annotations.push(StepAnnotation::new(
                 StepAnnotationLevel::Notice,
+                message,
+                Vec::new(),
+            ));
+        }
+        if let Some(CommandFileNotice::SummaryTooLarge { maximum_bytes }) = command_file_notice {
+            let message = format!(
+                "$GITHUB_STEP_SUMMARY upload aborted: content exceeds the {maximum_bytes}-byte limit"
+            );
+            charge_attachment_bytes(&mut self.aggregate_bytes, message.len())?;
+            self.annotation_count = self
+                .annotation_count
+                .checked_add(1)
+                .filter(|count| *count <= MAX_JOB_RESULT_ANNOTATIONS)
+                .ok_or_else(resource_exhausted)?;
+            retained.annotations.push(StepAnnotation::new(
+                StepAnnotationLevel::Error,
                 message,
                 Vec::new(),
             ));

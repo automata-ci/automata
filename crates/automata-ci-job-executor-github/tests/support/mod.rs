@@ -516,6 +516,7 @@ impl Fixture {
             scripts: Vec::new(),
             copy_from_calls: 0,
             copy_from_calls_since_exec: 0,
+            copy_from_requests: Vec::new(),
             cancellation_before_copy_from: None,
             responses: responses.into(),
         }));
@@ -1331,6 +1332,7 @@ pub struct EndpointState {
     pub scripts: Vec<Vec<u8>>,
     pub copy_from_calls: usize,
     pub copy_from_calls_since_exec: usize,
+    pub copy_from_requests: Vec<CopyFromRequest>,
     cancellation_before_copy_from: Option<ExecutionCancellation>,
     responses: VecDeque<PhaseResponse>,
 }
@@ -1571,17 +1573,23 @@ impl ExecutionEndpoint for FakeEndpoint {
         }
         state.copy_from_calls += 1;
         state.copy_from_calls_since_exec += 1;
+        state.copy_from_requests.push(request.clone());
         if state.missing_files.contains(request.source().as_str()) {
             return Err(ExecutionError::new(
                 ExecutionErrorKind::NotFound,
                 ExecutionStage::CopyFrom,
             ));
         }
-        Ok(state
-            .files
-            .get(request.source().as_str())
-            .cloned()
-            .unwrap_or_default())
+        let Some(bytes) = state.files.get(request.source().as_str()) else {
+            return Ok(Vec::new());
+        };
+        if bytes.len() > request.byte_limit() {
+            return Err(ExecutionError::new(
+                ExecutionErrorKind::OutputLimitExceeded,
+                ExecutionStage::CopyFrom,
+            ));
+        }
+        Ok(bytes.clone())
     }
 }
 

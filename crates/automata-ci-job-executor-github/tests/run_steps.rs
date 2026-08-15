@@ -220,6 +220,85 @@ async fn summaries_and_structured_annotations_are_masked_and_retained() {
 }
 
 #[tokio::test]
+async fn step_summary_boundary_is_bounded_and_oversized_content_is_diagnostic_only() {
+    const MAXIMUM_SUMMARY_BYTES: usize = 1_024 * 1_024;
+    const OVERSIZED_DIAGNOSTIC: &str =
+        "$GITHUB_STEP_SUMMARY upload aborted: content exceeds the 1048576-byte limit";
+
+    for (label, size, expected_summary_bytes, expects_diagnostic) in [
+        (
+            "exact boundary",
+            MAXIMUM_SUMMARY_BYTES,
+            Some(MAXIMUM_SUMMARY_BYTES),
+            false,
+        ),
+        ("one-byte sentinel", MAXIMUM_SUMMARY_BYTES + 1, None, true),
+        (
+            "endpoint limit rejection",
+            MAXIMUM_SUMMARY_BYTES + 2,
+            None,
+            true,
+        ),
+    ] {
+        let fixture = Fixture::secretless(
+            Vec::new(),
+            vec![
+                PhaseResponse::success().with_file(CommandFileKind::StepSummary, vec![b'x'; size]),
+            ],
+        );
+        let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+        let result = fixture
+            .executor
+            .execute(
+                fixture.request(support::envelope(vec![run_step(
+                    "summary", "Summary", "true",
+                )])),
+                events,
+                ExecutionCancellation::new(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} must not fail the job: {error:?}"));
+
+        assert_eq!(result.conclusion(), JobConclusion::Success, "{label}");
+        let step = &result.steps()[0];
+        assert_eq!(
+            step.summary_markdown().map(str::len),
+            expected_summary_bytes,
+            "{label}"
+        );
+        if expects_diagnostic {
+            assert_eq!(step.annotations().len(), 1, "{label}");
+            assert_eq!(
+                step.annotations()[0].level(),
+                StepAnnotationLevel::Error,
+                "{label}"
+            );
+            assert_eq!(
+                step.annotations()[0].message(),
+                OVERSIZED_DIAGNOSTIC,
+                "{label}"
+            );
+            assert!(step.annotations()[0].properties().is_empty(), "{label}");
+        } else {
+            assert!(step.annotations().is_empty(), "{label}");
+        }
+
+        let state = fixture.endpoint_state.lock().expect("endpoint lock");
+        let summary_requests = state
+            .copy_from_requests
+            .iter()
+            .filter(|request| request.source().as_str().ends_with("-summary"))
+            .collect::<Vec<_>>();
+        assert_eq!(summary_requests.len(), 1, "{label}");
+        assert_eq!(
+            summary_requests[0].byte_limit(),
+            MAXIMUM_SUMMARY_BYTES + 1,
+            "{label}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn phase_files_are_collected_after_failure_timeout_and_cancelled_termination() {
     for (termination, expected, summary) in [
         (
