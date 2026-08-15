@@ -2530,16 +2530,6 @@ pub trait GithubServerServiceAuthorityRepository: Send + Sync {
         repository_id: RepositoryId,
         connection_id: ProviderConnectionId,
     ) -> Result<Vec<GithubServerServiceAuthorityDescriptor>, GithubServerServiceStoreError>;
-    /// Creates and claims the sole initial/refresh generation.
-    async fn claim_github_server_service_mint(
-        &self,
-        request: ClaimGithubServerServiceMint,
-    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError>;
-    /// Reclaims a definitively unissued retry generation.
-    async fn reclaim_github_server_service_mint(
-        &self,
-        request: ReclaimGithubServerServiceMint,
-    ) -> Result<ClaimedGithubServerServiceMint, GithubServerServiceStoreError>;
     /// Persists the irreversible provider-call cutoff.
     async fn begin_github_server_service_mint(
         &self,

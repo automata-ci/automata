@@ -837,7 +837,7 @@ async fn sql_canonical_functions_match_rust_golden_and_reject_direct_forgery() -
         assert_eq!(sql_digest, desired.digest().as_bytes().as_slice());
         assert_eq!(
             desired.digest().to_string(),
-            "0000000000000000000000000000000000000000000000000000000000000000"
+            "43c053f02ca6ec9d5fbd2226c608e8eb1b40597f366933d3b5a7a93d997ab4aa"
         );
 
         let forged_repository = sqlx::query(

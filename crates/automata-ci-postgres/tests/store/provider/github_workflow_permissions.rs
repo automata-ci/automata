@@ -7,8 +7,8 @@ use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_store::{
     AcquireGithubServerServiceHandoff, BeginGithubServerServiceMint,
-    BootstrapGithubProviderRepository, ClaimGithubServerServiceMint,
-    ClaimGithubServerServiceRevocation, EnsureGithubServerServiceAuthority,
+    BootstrapGithubProviderRepository, ClaimGithubServerServiceRevocation,
+    ClaimNextGithubServerServiceMaintenance, EnsureGithubServerServiceAuthority,
     FinalizeGithubWorkflowPermissionObservation, FinishGithubServerServiceMint,
     FinishGithubServerServiceRevocation, GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
     GithubCheckName, GithubProviderManifest, GithubProviderManifestLimits,
@@ -18,9 +18,9 @@ use automata_ci_store::{
     GithubServerServiceAuthorityRepository as _, GithubServerServiceAuthoritySelector,
     GithubServerServiceAuthorityState, GithubServerServiceEnvelopeMetadata,
     GithubServerServiceGeneration, GithubServerServiceHandoffId, GithubServerServiceIssuanceKey,
-    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubServerServiceScope,
-    GithubServerServiceWorkerId, GithubWorkflowPermissionDefaultsObservation,
-    GithubWorkflowPermissionDefaultsObservationError,
+    GithubServerServiceJwtIssuer, GithubServerServiceMaintenanceOutcome,
+    GithubServerServiceRevision, GithubServerServiceScope, GithubServerServiceWorkerId,
+    GithubWorkflowPermissionDefaultsObservation, GithubWorkflowPermissionDefaultsObservationError,
     GithubWorkflowPermissionDefaultsObservationRepository as _,
     GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
     ProtectedGithubServerServiceCredential, ProviderConnectionId, ProviderInstallationId,
@@ -991,21 +991,25 @@ async fn mint_ready(
     authority: &GithubServerServiceAuthorityIdentity,
     requested_at: i64,
 ) -> TestResult {
-    let generation = GithubServerServiceGeneration::new(1)?;
-    let request_deadline = requested_at + 20_000;
-    let claim_expires_at = request_deadline - 1;
+    let claim_expires_at = requested_at + 20_000;
     set_database_test_clock(database, requested_at).await?;
-    let claimed = database
+    let outcome = database
         .store()
-        .claim_github_server_service_mint(ClaimGithubServerServiceMint::new(
-            selector(authority),
-            generation,
-            GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
-            UnixMillis::new(requested_at),
-            UnixMillis::new(request_deadline),
-            UnixMillis::new(claim_expires_at),
-        )?)
+        .claim_next_github_server_service_maintenance(
+            ClaimNextGithubServerServiceMaintenance::for_authority(
+                selector(authority),
+                GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())?,
+                UnixMillis::new(requested_at),
+                UnixMillis::new(claim_expires_at),
+            )?,
+        )
         .await?;
+    let Some(GithubServerServiceMaintenanceOutcome::Mint(claimed)) = outcome else {
+        panic!("expected exact authority mint maintenance claim");
+    };
+    let claimed = *claimed;
+    let generation = claimed.receipt().key().generation();
+    let request_deadline = claimed.receipt().request_deadline().get();
     set_database_test_clock(database, requested_at + 1).await?;
     database
         .store()

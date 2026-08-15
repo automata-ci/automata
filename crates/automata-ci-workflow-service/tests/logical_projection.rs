@@ -6,9 +6,9 @@ use automata_ci_core::{
     JobIrEnvelope, JobPermissionGrant, JobPermissionRequest, JobResourceAllocation,
     JobResourcePolicy, JobValidationError, OperatingSystem, OutputSensitivity, PermissionLevel,
     ResourceCapacity, RunnerFeature, RuntimePositiveInteger, RuntimeTimeoutUnit, SandboxFeature,
-    SemanticStep, Sha256Digest, ShellTemplate, TransportProtocol, ValueSource,
-    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
-    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, ValueTemplateSegment,
+    SemanticStep, Sha256Digest, ShellTemplate, TransportProtocol, TrustActorEvidence,
+    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
+    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, ValueSource, ValueTemplateSegment,
     WorkflowEventProvenance, WorkflowId, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};

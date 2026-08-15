@@ -1,9 +1,9 @@
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_key_management::{EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_store::{
-    AcquireGithubServerServiceHandoff, ClaimGithubServerServiceMint,
-    ClaimNextGithubServerServiceMaintenance, FinishGithubServerServiceMint, GithubRepositoryName,
-    GithubServerServiceAction, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    AcquireGithubServerServiceHandoff, ClaimNextGithubServerServiceMaintenance,
+    FinishGithubServerServiceMint, GithubRepositoryName, GithubServerServiceAction,
+    GithubServerServiceAppClientId, GithubServerServiceAppId,
     GithubServerServiceAuthorityDescriptor, GithubServerServiceAuthorityId,
     GithubServerServiceAuthorityIdentity, GithubServerServiceAuthorityRepository,
     GithubServerServiceAuthoritySelector, GithubServerServiceAuthorityState,
