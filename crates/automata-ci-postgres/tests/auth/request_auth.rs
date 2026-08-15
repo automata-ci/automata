@@ -25,7 +25,7 @@ use automata_ci_auth::{
 use automata_ci_postgres::auth::{
     PostgresGithubMembershipRepository, PostgresRequestAuthenticationResolver,
 };
-use automata_ci_postgres_test_support::TestClock;
+use automata_ci_postgres::test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 

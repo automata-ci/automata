@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use automata_ci_blob::{BlobDescriptor, BlobKey, BlobPayload, MediaType};
 use automata_ci_core::{AttemptId, AttemptNumber, LeaseId, Sha256Digest, UnixMillis};
-use automata_ci_postgres_test_support::TestClock;
+use automata_ci_postgres::test_support::TestClock;
 use automata_ci_results_github::{
     ARTIFACT_MANIFEST_MEDIA_TYPE, ArtifactBlock, ArtifactBlockReservation,
     ArtifactFinalizationReservation, ArtifactFinalizationWork, ArtifactManifest, ArtifactName,

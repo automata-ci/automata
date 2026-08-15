@@ -8,9 +8,9 @@ use std::{
     time::Duration,
 };
 
-use automata_ci_postgres_test_support::{
-    DATABASE_URL_ENVIRONMENT, NamespaceCleanup, PostgresTestHarness, TestClock, TestNamespace,
-    TestResult,
+use super::{
+    DATABASE_URL_ENVIRONMENT, TestClock, TestResult,
+    database::{NamespaceCleanup, PostgresTestHarness, PreparedTemplate, TestNamespace},
 };
 use sqlx::{AssertSqlSafe, Connection as _, PgConnection, PgPool, postgres::PgConnectOptions};
 use tokio::{task::JoinError, time::Instant};
@@ -78,9 +78,7 @@ fn report_secondary_cleanup_failure(cleanup_outcome: &NamespaceCleanupOutcome) {
     }
 }
 
-async fn marker_template(
-    harness: &PostgresTestHarness,
-) -> TestResult<automata_ci_postgres_test_support::PreparedTemplate> {
+async fn marker_template(harness: &PostgresTestHarness) -> TestResult<PreparedTemplate> {
     harness
         .prepare_template(|pool| async move {
             sqlx::query(

@@ -7,9 +7,9 @@ crate groups concrete adapters behind five domain namespaces:
   authority, installation state, RBAC management, and runner enrollment;
 - `provisioning` atomically creates a workspace and its initial owner, applies
   entitlement snapshots, and reads authority-scoped immutable usage feeds;
-- `runner_auth` resolves server-owned runner-machine authority; and
+- `runner_auth` resolves server-owned runner-machine authority;
 - `secret` stores the built-in provider's envelope-encrypted secret values;
-- `store` implements the durable workflow, runner, publication, and managed
+- and `store` implements the durable workflow, runner, publication, and managed
   secret-metadata repositories and owns the embedded schema migrations.
 
 The Automata server composes one pool and applies the embedded migrations before
@@ -56,6 +56,9 @@ from runner-supplied identity.
 
 All PostgreSQL integration suites compile into the explicit `postgres` target.
 Run the database-backed lane through `./scripts/ci/run-postgres-tests.sh`.
+First-party test crates share the process-safe database and clock fixtures
+behind the non-default, unstable `test-support` feature. Production consumers
+must not enable it.
 
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
 - API documentation: run `cargo doc -p automata-ci-postgres --open` from a source checkout.

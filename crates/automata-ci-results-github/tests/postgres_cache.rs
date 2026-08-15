@@ -6,7 +6,7 @@ use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{
     AttemptId, AttemptNumber, JobLifecycle, LeaseGuard, LeaseId, Sha256Digest, UnixMillis,
 };
-use automata_ci_postgres_test_support::TestClock;
+use automata_ci_postgres::test_support::TestClock;
 use automata_ci_results_github::{
     CacheAccessScope, CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation,
     CacheKey, CachePermission, CacheRepository as _, CacheRepositoryErrorKind, CacheVersion,

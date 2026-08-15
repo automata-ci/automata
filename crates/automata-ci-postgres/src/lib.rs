@@ -4,6 +4,12 @@
 
 mod migration;
 
+#[cfg(all(test, not(feature = "test-support")))]
+mod test_support;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support;
+
 /// Human authentication, authorization, and runner-enrollment adapters.
 pub mod auth;
 /// Atomic external workspace-management adapters.

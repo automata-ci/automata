@@ -105,11 +105,12 @@ run_bounded_tests cargo test \
 
 printf 'PostgreSQL lane: fixture self-tests\n' >&2
 run_bounded_tests cargo test \
-  -p automata-ci-postgres-test-support \
-  --test postgres_18 \
+  -p automata-ci-postgres \
+  --lib \
   --all-features \
   --locked \
   -- \
+  test_support::tests:: \
   --ignored \
   --test-threads=1
 

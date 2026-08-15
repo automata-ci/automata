@@ -230,7 +230,6 @@ dependencies = [
  "automata-ci-metrics",
  "automata-ci-oidc-github",
  "automata-ci-postgres",
- "automata-ci-postgres-test-support",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-provisioning",
@@ -623,7 +622,6 @@ dependencies = [
  "automata-ci-core",
  "automata-ci-key-management",
  "automata-ci-oidc-github",
- "automata-ci-postgres-test-support",
  "automata-ci-protocol",
  "automata-ci-provisioning",
  "automata-ci-schedule",
@@ -640,15 +638,6 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "automata-ci-postgres-test-support"
-version = "0.1.0"
-dependencies = [
- "sqlx",
- "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -720,7 +709,6 @@ dependencies = [
  "automata-ci-control",
  "automata-ci-core",
  "automata-ci-postgres",
- "automata-ci-postgres-test-support",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-store",

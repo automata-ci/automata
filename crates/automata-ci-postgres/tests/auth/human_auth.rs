@@ -26,7 +26,7 @@ use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial,
 use automata_ci_postgres::auth::{
     PostgresHumanSessionRepository, PostgresLoginTransactionRepository,
 };
-use automata_ci_postgres_test_support::TestClock;
+use automata_ci_postgres::test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;
 

@@ -12,9 +12,18 @@ homepage.workspace = true
 readme = "README.md"
 autotests = false
 
+[features]
+default = []
+test-support = []
+
 [[test]]
 name = "postgres"
 path = "tests/postgres.rs"
+
+[[example]]
+name = "postgres-test-cleanup"
+path = "examples/postgres-test-cleanup.rs"
+required-features = ["test-support"]
 
 [dependencies]
 async-trait.workspace = true
@@ -40,7 +49,6 @@ uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-automata-ci-postgres-test-support.workspace = true
 automata-ci-protocol.workspace = true
 static_assertions.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
