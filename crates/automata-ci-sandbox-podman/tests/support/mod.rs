@@ -504,7 +504,7 @@ impl PodmanCommandExecutor for FakePodman {
         environment: &PodmanProcessEnvironment,
         cancellation: &dyn automata_ci_execution::Cancellation,
     ) -> CommandOutput {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return interrupted_before_input(request, CommandTermination::Cancelled);
         }
         let arguments = request

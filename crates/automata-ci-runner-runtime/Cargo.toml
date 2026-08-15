@@ -28,6 +28,7 @@ automata-ci-runner-journal.workspace = true
 automata-ci-runner-spool.workspace = true
 automata-ci-runner-transport.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

@@ -4,7 +4,8 @@ use automata_ci_core::{
 use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal, RuntimeAuthorityGeneration};
 
 use crate::{
-    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef, JournalError,
+    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef,
+    EndpointCancellationCompletion, EndpointOperation, EndpointResultContentRef, JournalError,
     JournalSnapshot, LeaseOfferRecord, LogSegmentAcknowledgement, LogSegmentPublication,
     OrphanAbandonmentReason, OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanDelivery,
     OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation,
@@ -202,7 +203,8 @@ pub trait RunnerJournal: Send + Sync {
         expires_at: UnixMillis,
     ) -> Result<JournalSnapshot, JournalError>;
 
-    /// Durably records a cancellation command and advances the command cursor.
+    /// Durably records a cancellation command, advances the command cursor,
+    /// and atomically lets cancellation win any unresolved endpoint operation.
     ///
     /// # Errors
     ///
@@ -261,6 +263,100 @@ pub trait RunnerJournal: Send + Sync {
         slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
         operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Accepts one exact endpoint request after its protected commitment is durable.
+    ///
+    /// Capacity, ordering, request-reference, and result-byte reservations are
+    /// checked before this operation can be committed for backend invocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] for stale fences, conflicting replay, a pending
+    /// predecessor, exhausted per-slot capacity, or a failed durable commit.
+    fn accept_endpoint_operation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation: EndpointOperation,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Commits permission to expose an accepted operation to the backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] for a missing/cancelled operation, stale fence,
+    /// or failed durable commit.
+    fn commit_endpoint_invocation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Lets cancellation win unless an exact result was already durable.
+    ///
+    /// Result-first cancellation is an idempotent no-op. A durable cancellation
+    /// prevents backend invocation and later result adoption.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] for a missing operation, stale fence, or failed
+    /// commit.
+    fn record_endpoint_cancellation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Completes a cancellation only after the backend returned or exact
+    /// sandbox absence was proven.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] if cancellation did not previously win, the
+    /// operation is missing, the fence is stale, or persistence fails.
+    fn complete_endpoint_cancellation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+        completion: EndpointCancellationCompletion,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Resolves an uncertain invocation after exact sandbox absence is durable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] while the sandbox identity remains present, if
+    /// the operation is not ambiguous, the fence is stale, or persistence fails.
+    fn abandon_endpoint_operation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError>;
+
+    /// Adopts a payload-first protected endpoint result after invocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] when cancellation already won, invocation was
+    /// not committed, the result exceeds its reservation, replay conflicts, or
+    /// the durable commit fails.
+    fn record_endpoint_result(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+        result: EndpointResultContentRef,
     ) -> Result<JournalSnapshot, JournalError>;
 
     /// Records an idempotent provider mutation intent before the mutation.

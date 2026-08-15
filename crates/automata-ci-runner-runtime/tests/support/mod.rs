@@ -51,14 +51,37 @@ use automata_ci_runner_runtime::{
     RuntimeControlRetry, RuntimeSleeper, SleepFuture,
 };
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentPublication,
-    DurableContentRef, DurableContentStore, FileSpool, ProtectionId, RetainedContentError,
-    RetainedContentSource, SpoolError, SpoolRoot,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentPublication, DurableContentRef, DurableContentStore, FileSpool,
+    KeyedContentCommitment, ProtectionId, RetainedContentError, RetainedContentSource, SpoolError,
+    SpoolRoot,
 };
 use automata_ci_runner_transport::PreparedRequest;
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
+
+macro_rules! forward_keyed_commitments {
+    () => {
+        fn create_keyed_commitment(
+            &self,
+            domain: ContentCommitmentDomain,
+            material_digest: &[u8; 32],
+        ) -> Result<KeyedContentCommitment, SpoolError> {
+            self.inner.create_keyed_commitment(domain, material_digest)
+        }
+
+        fn recreate_keyed_commitment(
+            &self,
+            protection_id: &ProtectionId,
+            domain: ContentCommitmentDomain,
+            material_digest: &[u8; 32],
+        ) -> Result<KeyedContentCommitment, SpoolError> {
+            self.inner
+                .recreate_keyed_commitment(protection_id, domain, material_digest)
+        }
+    };
+}
 
 /// Deadlock guard for event-driven asynchronous tests.
 pub const TEST_WATCHDOG: Duration = Duration::from_secs(15);
@@ -143,6 +166,8 @@ impl AckCapacitySpool {
 }
 
 impl DurableContentStore for AckCapacitySpool {
+    forward_keyed_commitments!();
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -202,6 +227,8 @@ impl TerminalCapacityProbeSpool {
 }
 
 impl DurableContentStore for TerminalCapacityProbeSpool {
+    forward_keyed_commitments!();
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -288,6 +315,8 @@ impl NestedOfferCapacityProbeSpool {
 }
 
 impl DurableContentStore for NestedOfferCapacityProbeSpool {
+    forward_keyed_commitments!();
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -376,6 +405,8 @@ impl BlockingEosSpool {
 }
 
 impl DurableContentStore for BlockingEosSpool {
+    forward_keyed_commitments!();
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -472,6 +503,8 @@ impl BlockingSegmentLoadSpool {
 }
 
 impl DurableContentStore for BlockingSegmentLoadSpool {
+    forward_keyed_commitments!();
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -543,6 +576,22 @@ impl fmt::Debug for TestProtector {
 impl ContentProtector for TestProtector {
     fn protection_id(&self) -> &ProtectionId {
         &self.id
+    }
+
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        if protection_id != &self.id {
+            return Err(ContentProtectionError::KeyUnavailable);
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.key);
+        digest.update(domain.separator());
+        digest.update(material_digest);
+        Ok(digest.finalize().into())
     }
 
     fn protect(
@@ -843,6 +892,8 @@ impl ContentRaceSpool {
 }
 
 impl DurableContentStore for ContentRaceSpool {
+    forward_keyed_commitments!();
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -1492,6 +1543,65 @@ impl JobExecutor for CancellationContentRaceExecutor {
 #[derive(Debug, Default)]
 pub struct FailureIsolationExecutor {
     survivor_started: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+pub struct EndpointRecoveryExecutor {
+    execute_calls: AtomicUsize,
+    cleanup_calls: AtomicUsize,
+}
+
+impl EndpointRecoveryExecutor {
+    pub fn execute_calls(&self) -> usize {
+        self.execute_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn cleanup_calls(&self) -> usize {
+        self.cleanup_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl JobExecutor for EndpointRecoveryExecutor {
+    fn admit(&self, _job: &JobIrEnvelope) -> Result<ExecutionAdmission, AdmissionRejection> {
+        Ok(ExecutionAdmission::new(sandbox_environment()))
+    }
+
+    fn execute(
+        &self,
+        request: ExecutionRequest,
+        events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> ExecutorFuture<'_> {
+        Box::pin(async move {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            events
+                .transition(JobLifecycle::Running)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            Ok(JobResult::new(
+                request.lease().attempt_id(),
+                JobConclusion::Failure,
+                JobSecretExposure::Secretless,
+                UnixMillis::new(10_001),
+            ))
+        })
+    }
+
+    fn cleanup(
+        &self,
+        _request: CleanupRequest,
+        events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> CleanupFuture<'_> {
+        Box::pin(async move {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            let destroy = events
+                .begin_provider_operation(ProviderOperationKind::DestroySandbox)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            events
+                .provider_operation_completed(destroy)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))
+        })
+    }
 }
 
 pub const FAILURE_ISOLATION_LOG_COUNT: usize = 64;

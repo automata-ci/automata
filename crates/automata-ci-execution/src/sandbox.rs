@@ -409,6 +409,11 @@ pub enum DestroyDisposition {
 }
 
 /// Provider-neutral, object-safe whole-job isolation port.
+///
+/// Calls are synchronous and caller-owned. Providers must not detach backend
+/// work; after cancellation authorizes termination they must stop starting new
+/// phases, quiesce caller-owned work, and return within a bounded internal
+/// termination grace.
 pub trait SandboxProvider: fmt::Debug + Send + Sync {
     /// Returns the stable identifier for this provider implementation.
     fn provider_id(&self) -> &ProviderId;

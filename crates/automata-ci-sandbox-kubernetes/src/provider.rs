@@ -129,7 +129,7 @@ impl SandboxProvider for KubernetesSandboxProvider {
                 operation_timeout,
             )
             .await?;
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 return Err(ProviderErrorKind::Cancelled);
             }
             create_or_verify_pod(&pods, objects.pod, &fingerprint, operation_timeout).await?;
@@ -150,7 +150,7 @@ impl SandboxProvider for KubernetesSandboxProvider {
                 Some(handle.clone()),
             )
         })?;
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(ProviderError::new(
                 ProviderErrorKind::Cancelled,
                 ProviderStage::Start,
@@ -537,7 +537,7 @@ async fn wait_until_ready(
 ) -> Result<SandboxState, ProviderErrorKind> {
     let started = Instant::now();
     loop {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(ProviderErrorKind::Cancelled);
         }
         let remaining = deadline.saturating_sub(started.elapsed());
@@ -707,7 +707,7 @@ fn ensure_not_cancelled(
     cancellation: &dyn Cancellation,
     stage: ProviderStage,
 ) -> Result<(), ProviderError> {
-    if cancellation.is_cancelled() {
+    if cancellation.disposition().requires_termination() {
         return Err(provider_error(ProviderErrorKind::Cancelled, stage));
     }
     Ok(())

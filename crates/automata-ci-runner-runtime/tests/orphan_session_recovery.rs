@@ -18,7 +18,8 @@ use automata_ci_protocol::{
     ServerToRunner, SessionDisposition, SessionOrphanAuthorization,
 };
 use automata_ci_runner_journal::{
-    LogSegment, LogSegmentPublication, ProviderFailureKind, ProviderFailureOutcome, ProviderName,
+    EndpointOperation, EndpointOperationKind, EndpointRequestContentRef, LogSegment,
+    LogSegmentPublication, ProviderFailureKind, ProviderFailureOutcome, ProviderName,
     ProviderOperation, ProviderOperationKind, RunnerJournal, SandboxHandle, SandboxIdentity,
     TerminalResultRecord,
 };
@@ -31,7 +32,7 @@ use automata_ci_runner_runtime::{
     RuntimeControlFuture, RuntimeControlReply, RuntimeControlRetry, RuntimeOperationOutcome,
     SystemRuntimeIds,
 };
-use automata_ci_runner_spool::{ContentKind, DurableContentStore};
+use automata_ci_runner_spool::{ContentCommitmentDomain, ContentKind, DurableContentStore};
 use automata_ci_runner_transport::PreparedRequest;
 use tokio_util::sync::CancellationToken;
 
@@ -335,6 +336,34 @@ fn seed_terminal_sandbox(
     spool: &dyn DurableContentStore,
     fixture: &support::AcceptedFixture,
 ) {
+    seed_running_sandbox(journal, fixture);
+    seed_undelivered_log(journal, spool, fixture);
+    let guard = fixture.lease.guard();
+    journal
+        .transition_lifecycle(
+            fixture.session_id,
+            fixture.slot,
+            guard,
+            JobLifecycle::Finalizing,
+        )
+        .expect("finalizing");
+    let result = spool
+        .persist(ContentKind::TerminalResult, b"undelivered terminal result")
+        .expect("persist result")
+        .commit_with(|content| {
+            journal.record_terminal_result(
+                fixture.session_id,
+                fixture.slot,
+                guard,
+                JobLifecycle::Failed,
+                TerminalResultRecord::new(OperationId::new(), content.clone())?,
+                UnixMillis::new(10_000),
+            )
+        });
+    assert!(result.is_ok(), "adopt terminal result");
+}
+
+fn seed_running_sandbox(journal: &dyn RunnerJournal, fixture: &support::AcceptedFixture) {
     let guard = fixture.lease.guard();
     journal
         .transition_lifecycle(
@@ -386,29 +415,56 @@ fn seed_terminal_sandbox(
             JobLifecycle::Running,
         )
         .expect("running");
-    seed_undelivered_log(journal, spool, fixture);
-    journal
-        .transition_lifecycle(
+}
+
+fn seed_ambiguous_endpoint(
+    journal: &dyn RunnerJournal,
+    spool: &dyn DurableContentStore,
+    fixture: &support::AcceptedFixture,
+    cancellation_requested: bool,
+) {
+    seed_running_sandbox(journal, fixture);
+    let operation_id = OperationId::new();
+    let commitment = spool
+        .create_keyed_commitment(ContentCommitmentDomain::EndpointRequest, &[0x57; 32])
+        .expect("keyed request commitment");
+    let publication = spool
+        .persist(ContentKind::EndpointRequest, commitment.as_bytes())
+        .expect("persist request commitment");
+    let adopted = publication.commit_with(|content| {
+        let request = EndpointRequestContentRef::new(content.clone())?;
+        let operation =
+            EndpointOperation::accepted(operation_id, EndpointOperationKind::Wait, request, 64)?;
+        journal.accept_endpoint_operation(
             fixture.session_id,
             fixture.slot,
-            guard,
-            JobLifecycle::Finalizing,
+            fixture.lease.guard(),
+            operation,
         )
-        .expect("finalizing");
-    let result = spool
-        .persist(ContentKind::TerminalResult, b"undelivered terminal result")
-        .expect("persist result")
-        .commit_with(|content| {
-            journal.record_terminal_result(
+    });
+    if let Err(failure) = adopted {
+        let (error, publication) = failure.into_parts();
+        publication.abort();
+        panic!("accept endpoint operation: {error}");
+    }
+    journal
+        .commit_endpoint_invocation(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            operation_id,
+        )
+        .expect("commit ambiguous invocation");
+    if cancellation_requested {
+        journal
+            .record_endpoint_cancellation(
                 fixture.session_id,
                 fixture.slot,
-                guard,
-                JobLifecycle::Failed,
-                TerminalResultRecord::new(OperationId::new(), content.clone())?,
-                UnixMillis::new(10_000),
+                fixture.lease.guard(),
+                operation_id,
             )
-        });
-    assert!(result.is_ok(), "adopt terminal result");
+            .expect("request ambiguous cancellation");
+    }
 }
 
 fn seed_undelivered_log(
@@ -551,6 +607,58 @@ async fn exact_authority_abandons_two_slots_cleans_sandboxes_and_opens_once() {
     assert_eq!(operations.len(), 4);
     assert_eq!(operations[0].0, ProviderOperationKind::StopSandbox);
     assert_eq!(operations[1].0, ProviderOperationKind::DestroySandbox);
+}
+
+#[tokio::test]
+async fn authorized_orphan_restart_resolves_endpoint_ambiguity_after_exact_cleanup() {
+    for cancellation_requested in [false, true] {
+        let scratch = support::Scratch::new(if cancellation_requested {
+            "orphan-endpoint-cancellation"
+        } else {
+            "orphan-endpoint-abandonment"
+        });
+        let runner_id = RunnerId::new();
+        let old_session;
+        {
+            let (journal, spool) = support::durable_ports(&scratch, runner_id);
+            let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
+            old_session = fixture.session_id;
+            seed_ambiguous_endpoint(
+                journal.as_ref(),
+                spool.as_ref(),
+                &fixture,
+                cancellation_requested,
+            );
+        }
+
+        let (journal, spool) = support::durable_ports(&scratch, runner_id);
+        let shutdown = CancellationToken::new();
+        let client = Arc::new(OrphanControlClient::new(
+            old_session,
+            RunnerSessionId::new(),
+            AuthorityResponse::Exact(OrphanDeliveryPermissions::new(true, true, true)),
+            shutdown.clone(),
+        ));
+        let executor = Arc::new(OrphanExecutor::new(CleanupBehavior::Destroy));
+        runtime(
+            runner_id,
+            client.clone(),
+            journal.clone(),
+            spool,
+            executor.clone(),
+        )
+        .run(shutdown)
+        .await
+        .expect("authorized endpoint recovery and fresh session");
+
+        assert_eq!(client.hello_calls(), 2);
+        assert_released(journal.as_ref());
+        assert_eq!(executor.operations().len(), 1);
+        assert_eq!(
+            executor.operations()[0].0,
+            ProviderOperationKind::DestroySandbox
+        );
+    }
 }
 
 #[tokio::test]

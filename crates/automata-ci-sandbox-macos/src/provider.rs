@@ -818,7 +818,7 @@ fn resume_create(
     {
         return entry.record();
     }
-    if cancellation.is_cancelled() {
+    if cancellation.disposition().requires_termination() {
         return Err(uncertain(
             ProviderErrorKind::Cancelled,
             ProviderStage::CreateWorkspace,
@@ -1687,7 +1687,7 @@ fn require_not_cancelled(
     cancellation: &dyn Cancellation,
     stage: ProviderStage,
 ) -> Result<(), ProviderError> {
-    if cancellation.is_cancelled() {
+    if cancellation.disposition().requires_termination() {
         Err(known(ProviderErrorKind::Cancelled, stage))
     } else {
         Ok(())

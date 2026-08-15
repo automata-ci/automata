@@ -1,17 +1,23 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use automata_ci_execution::{
-    EnvironmentName, EnvironmentProfile, EnvironmentProfileId, EnvironmentValue,
-    EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment, ExecutionOutput,
-    ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination, ImmutableImage,
-    MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES, MAX_EXECUTION_OUTPUT_RECORDS,
-    NetworkPolicy, OperationId, ProviderCapabilities, ProviderId, ResourceLimits,
-    RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody, SandboxEnvironment,
-    SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBinding,
-    ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides,
-    ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding, ServiceTransportProtocol,
-    Sha256Digest, TargetPath, ValueError,
+    CancellationDisposition, EnvironmentName, EnvironmentProfile, EnvironmentProfileId,
+    EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
+    ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination,
+    ImmutableImage, MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
+    MAX_EXECUTION_OUTPUT_RECORDS, NetworkPolicy, OperationId, ProviderCapabilities, ProviderId,
+    ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody,
+    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxSpec,
+    ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs,
+    ServiceHealthOverrides, ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding,
+    ServiceTransportProtocol, Sha256Digest, TargetPath, ValueError,
 };
+
+#[test]
+fn only_termination_authorizes_backend_quiescence() {
+    assert!(!CancellationDisposition::Active.requires_termination());
+    assert!(CancellationDisposition::Terminate.requires_termination());
+}
 
 const IMAGE: &str = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 

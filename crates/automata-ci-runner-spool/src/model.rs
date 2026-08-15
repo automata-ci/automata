@@ -10,6 +10,61 @@ use crate::{
 const MAX_PROTECTION_ID_BYTES: usize = 64;
 const MAX_CACHE_KEY_BYTES: usize = 192;
 
+/// Closed domain for commitments computed by the protected-content authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentCommitmentDomain {
+    /// Exact execution-endpoint request replay identity.
+    EndpointRequest,
+}
+
+impl ContentCommitmentDomain {
+    /// Returns the fixed cryptographic domain separator.
+    #[must_use]
+    pub const fn separator(self) -> &'static [u8] {
+        match self {
+            Self::EndpointRequest => b"automata.runner.endpoint-request.commitment.v1\0",
+        }
+    }
+}
+
+/// Keyed, fixed-size commitment produced by an exact spool protection key.
+#[derive(Clone, Eq, PartialEq)]
+pub struct KeyedContentCommitment {
+    protection_id: ProtectionId,
+    bytes: [u8; 32],
+}
+
+impl KeyedContentCommitment {
+    pub(crate) const fn new(protection_id: ProtectionId, bytes: [u8; 32]) -> Self {
+        Self {
+            protection_id,
+            bytes,
+        }
+    }
+
+    /// Returns the exact non-secret protection-key identifier used.
+    #[must_use]
+    pub const fn protection_id(&self) -> &ProtectionId {
+        &self.protection_id
+    }
+
+    /// Borrows commitment bytes for protected persistence or constant-time comparison.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
+}
+
+impl fmt::Debug for KeyedContentCommitment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KeyedContentCommitment")
+            .field("protection_id", &self.protection_id)
+            .field("bytes", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Semantic role of immutable recovery content.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +77,10 @@ pub enum ContentKind {
     TerminalResult,
     /// Buffered log content awaiting replay or upload.
     LogSpool,
+    /// Fixed-size commitment to one exact execution-endpoint request.
+    EndpointRequest,
+    /// Protected replay result from one execution-endpoint operation.
+    EndpointResult,
 }
 
 impl ContentKind {
@@ -31,6 +90,8 @@ impl ContentKind {
             Self::RuntimeAuthority => "runtime-authority",
             Self::TerminalResult => "terminal-result",
             Self::LogSpool => "log-spool",
+            Self::EndpointRequest => "endpoint-request",
+            Self::EndpointResult => "endpoint-result",
         }
     }
 }
@@ -353,7 +414,7 @@ impl Default for SpoolLimits {
         Self {
             object_bytes: MAX_CONTENT_OBJECT_BYTES,
             total_bytes: 1024 * 1024 * 1024,
-            objects: 4_096,
+            objects: MAX_CONTENT_OBJECTS,
             protection_overhead_bytes: 1024 * 1024,
         }
     }

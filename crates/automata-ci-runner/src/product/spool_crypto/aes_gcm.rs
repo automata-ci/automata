@@ -1,11 +1,12 @@
 use std::fmt;
 
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentRef,
-    MAX_CONTENT_OBJECT_BYTES, ProtectionId,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentRef, MAX_CONTENT_OBJECT_BYTES, ProtectionId,
 };
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey},
+    hmac,
     rand::{SecureRandom as _, SystemRandom},
 };
 use sha2::{Digest as _, Sha256};
@@ -20,6 +21,7 @@ const TAG_BYTES: usize = 16;
 const HEADER: &[u8; 4] = b"ASP1";
 const ENCODED_OVERHEAD: usize = HEADER.len() + NONCE_BYTES + TAG_BYTES;
 const AAD_DOMAIN: &[u8] = b"automata.runner.spool.aes256gcm.v1\0";
+const COMMITMENT_KEY_DOMAIN: &[u8] = b"automata.runner.spool.commitment-key.v1\0";
 
 /// AES-256-GCM implementation of the runner spool protection boundary.
 ///
@@ -29,6 +31,7 @@ const AAD_DOMAIN: &[u8] = b"automata.runner.spool.aes256gcm.v1\0";
 pub(in crate::product) struct Aes256GcmContentProtector {
     id: ProtectionId,
     key: LessSafeKey,
+    commitment_key: hmac::Key,
     random: SystemRandom,
 }
 
@@ -53,6 +56,9 @@ impl Aes256GcmContentProtector {
         if key_material.len() != AES_256_GCM_KEY_BYTES {
             return Err(ContentProtectorConfigurationError::InvalidKeyLength);
         }
+        let root_key = hmac::Key::new(hmac::HMAC_SHA256, &key_material);
+        let derived = hmac::sign(&root_key, COMMITMENT_KEY_DOMAIN);
+        let commitment_key = hmac::Key::new(hmac::HMAC_SHA256, derived.as_ref());
         let key = UnboundKey::new(&AES_256_GCM, &key_material)
             .map(LessSafeKey::new)
             .map_err(|_| ContentProtectorConfigurationError::InvalidKey)?;
@@ -60,6 +66,7 @@ impl Aes256GcmContentProtector {
         Ok(Self {
             id,
             key,
+            commitment_key,
             random: SystemRandom::new(),
         })
     }
@@ -80,6 +87,8 @@ impl Aes256GcmContentProtector {
             ContentKind::TerminalResult => 2,
             ContentKind::LogSpool => 3,
             ContentKind::RuntimeAuthority => 4,
+            ContentKind::EndpointRequest => 5,
+            ContentKind::EndpointResult => 6,
         });
         data.extend_from_slice(&reference.size().to_be_bytes());
         data.extend_from_slice(reference.sha256().as_bytes());
@@ -114,6 +123,25 @@ impl fmt::Debug for Aes256GcmContentProtector {
 impl ContentProtector for Aes256GcmContentProtector {
     fn protection_id(&self) -> &ProtectionId {
         &self.id
+    }
+
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        if protection_id != &self.id {
+            return Err(ContentProtectionError::KeyUnavailable);
+        }
+        let mut context = hmac::Context::with_key(&self.commitment_key);
+        context.update(domain.separator());
+        context.update(material_digest);
+        let signature = context.sign();
+        signature
+            .as_ref()
+            .try_into()
+            .map_err(|_| ContentProtectionError::Failed)
     }
 
     fn protect(

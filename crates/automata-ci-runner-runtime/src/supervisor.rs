@@ -23,7 +23,8 @@ use automata_ci_protocol_protobuf::{
     encode_runtime_authorities,
 };
 use automata_ci_runner_journal::{
-    CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand, JobIrContentRef,
+    CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand,
+    EndpointCancellationCompletion, EndpointOperationState, JobIrContentRef,
     JournalContentRetainSet, JournalInvariantError, LeaseOfferRecord, LeaseOfferStatus,
     LeasePollCheckpoint, LogSegmentAcknowledgement, ProviderOperationKind, RunnerJournal,
     RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
@@ -518,7 +519,7 @@ impl RunnerSessionSupervisor {
         );
         if let Some(sandbox) = durable.sandbox().cloned()
             && let Err(_error) = self
-                .cleanup_terminal_sandbox(session, &durable, sandbox, cancellation.clone())
+                .cleanup_sandbox(session, &durable, sandbox, cancellation.clone())
                 .await
         {
             warn!(
@@ -1981,6 +1982,13 @@ impl RunnerSessionSupervisor {
         });
         let conclusion = RuntimeJobConclusion::from(result.conclusion());
         let finished = async {
+            self.resolve_endpoint_recovery_before_terminal(
+                session,
+                durable.slot(),
+                lease.guard(),
+                cancellation.clone(),
+            )
+            .await?;
             let finalization_lifecycle = self.finalization_heartbeat_lifecycle(durable.slot())?;
             self.commit_terminal_result(session, durable.slot(), lease.guard(), result)?;
             self.observe(RunnerRuntimeEvent::JobCompleted {
@@ -2038,6 +2046,13 @@ impl RunnerSessionSupervisor {
             JobSecretExposure::Secretless,
             self.inner.ports.clock.wall_now(),
         );
+        self.resolve_endpoint_recovery_before_terminal(
+            session,
+            durable.slot(),
+            durable.offer().lease().guard(),
+            cancellation.clone(),
+        )
+        .await?;
         self.commit_terminal_result(
             session,
             durable.slot(),
@@ -2072,6 +2087,13 @@ impl RunnerSessionSupervisor {
             JobSecretExposure::Secretless,
             self.inner.ports.clock.wall_now(),
         );
+        self.resolve_endpoint_recovery_before_terminal(
+            session,
+            durable.slot(),
+            durable.offer().lease().guard(),
+            cancellation.clone(),
+        )
+        .await?;
         self.commit_terminal_result(
             session,
             durable.slot(),
@@ -2809,6 +2831,85 @@ impl RunnerSessionSupervisor {
         Ok(())
     }
 
+    async fn resolve_endpoint_recovery_before_terminal(
+        &self,
+        session: RuntimeSession,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        cancellation: CancellationToken,
+    ) -> Result<(), RunnerRuntimeError> {
+        loop {
+            let snapshot = self.inner.ports.journal.snapshot()?;
+            let durable = snapshot
+                .slot(slot)
+                .cloned()
+                .ok_or(RunnerRuntimeError::ExecutorContract)?;
+            if durable.offer().lease().guard() != guard {
+                return Err(RunnerRuntimeError::RecoveryIdentityMismatch {
+                    attempt_id: durable.offer().lease().attempt_id(),
+                    guard,
+                    session_id: session.negotiated.session_id(),
+                    slot,
+                });
+            }
+            let Some(operation) = durable.endpoint_recovery_pending() else {
+                return Ok(());
+            };
+            let operation_id = operation.operation_id();
+            match operation.state() {
+                EndpointOperationState::Accepted => {
+                    self.inner.ports.journal.record_endpoint_cancellation(
+                        session.negotiated.session_id(),
+                        slot,
+                        guard,
+                        operation_id,
+                    )?;
+                }
+                EndpointOperationState::InvocationCommitted
+                | EndpointOperationState::CancellationRequested => {
+                    let cancellation_requested = matches!(
+                        operation.state(),
+                        EndpointOperationState::CancellationRequested
+                    );
+                    if durable.sandbox().is_some() {
+                        self.reconcile_sandbox_absence(session, slot, guard, cancellation.clone())
+                            .await?;
+                    }
+                    let proven = self.inner.ports.journal.snapshot()?;
+                    let proven_slot = proven
+                        .slot(slot)
+                        .ok_or(RunnerRuntimeError::ExecutorContract)?;
+                    if proven_slot.offer().lease().guard() != guard
+                        || proven_slot.sandbox().is_some()
+                    {
+                        return Err(RunnerRuntimeError::ExecutorContract);
+                    }
+                    if cancellation_requested {
+                        self.inner.ports.journal.complete_endpoint_cancellation(
+                            session.negotiated.session_id(),
+                            slot,
+                            guard,
+                            operation_id,
+                            EndpointCancellationCompletion::SandboxAbsent,
+                        )?;
+                    } else {
+                        self.inner.ports.journal.abandon_endpoint_operation(
+                            session.negotiated.session_id(),
+                            slot,
+                            guard,
+                            operation_id,
+                        )?;
+                    }
+                }
+                EndpointOperationState::Cancelled
+                | EndpointOperationState::Abandoned
+                | EndpointOperationState::Completed { .. } => {
+                    return Err(RunnerRuntimeError::ExecutorContract);
+                }
+            }
+        }
+    }
+
     async fn finish_terminal_slot(
         &self,
         session: RuntimeSession,
@@ -2951,7 +3052,7 @@ impl RunnerSessionSupervisor {
             .cloned()
             .ok_or(RunnerRuntimeError::ExecutorContract)?;
         if current.sandbox().is_some() {
-            self.reconcile_terminal_sandbox(session, slot, guard, cancellation.clone())
+            self.reconcile_sandbox_absence(session, slot, guard, cancellation.clone())
                 .await?;
             current = self
                 .inner
@@ -2979,7 +3080,7 @@ impl RunnerSessionSupervisor {
         Ok(())
     }
 
-    async fn reconcile_terminal_sandbox(
+    async fn reconcile_sandbox_absence(
         &self,
         session: RuntimeSession,
         slot: RunnerSlotOrdinal,
@@ -3006,7 +3107,7 @@ impl RunnerSessionSupervisor {
                 return Ok(());
             };
             match self
-                .cleanup_terminal_sandbox(session, &current, sandbox, cancellation.clone())
+                .cleanup_sandbox(session, &current, sandbox, cancellation.clone())
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -3026,7 +3127,7 @@ impl RunnerSessionSupervisor {
                         .filter(|operation| operation.is_pending())
                         .map(|operation| operation.operation_id());
                     warn!(
-                        stage = "terminal_cleanup",
+                        stage = "sandbox_cleanup",
                         runner_id = %self.inner.config.capabilities().runner_id(),
                         session_id = %session.negotiated.session_id(),
                         attempt_id = %current.offer().lease().attempt_id(),
@@ -3200,7 +3301,7 @@ impl RunnerSessionSupervisor {
         Ok(())
     }
 
-    async fn cleanup_terminal_sandbox(
+    async fn cleanup_sandbox(
         &self,
         session: RuntimeSession,
         durable: &SlotSnapshot,
@@ -3209,7 +3310,7 @@ impl RunnerSessionSupervisor {
     ) -> Result<(), RunnerRuntimeError> {
         let started = self.inner.ports.clock.monotonic_now();
         let result = self
-            .cleanup_terminal_sandbox_inner(session, durable, sandbox, cancellation)
+            .cleanup_sandbox_inner(session, durable, sandbox, cancellation)
             .await;
         let outcome = match &result {
             Ok(()) => RuntimeOperationOutcome::Success,
@@ -3223,7 +3324,7 @@ impl RunnerSessionSupervisor {
         result
     }
 
-    async fn cleanup_terminal_sandbox_inner(
+    async fn cleanup_sandbox_inner(
         &self,
         session: RuntimeSession,
         durable: &SlotSnapshot,

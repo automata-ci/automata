@@ -1,6 +1,7 @@
 use automata_ci_core::Sha256Digest;
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentRef, ProtectionId,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentRef, ProtectionId,
 };
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
@@ -45,6 +46,24 @@ fn rotation_reads_exact_old_id_but_all_new_writes_use_active_id() {
             .unprotect(&old_reference, &old_ciphertext)
             .expect("old key remains readable"),
         old_plaintext
+    );
+    let digest = [0x51; 32];
+    let old_commitment = keyring
+        .keyed_commitment(
+            old_reference.protection_id(),
+            ContentCommitmentDomain::EndpointRequest,
+            &digest,
+        )
+        .expect("old exact key commitment");
+    assert_eq!(
+        old_commitment,
+        protector("spool-v1", 0x11)
+            .keyed_commitment(
+                old_reference.protection_id(),
+                ContentCommitmentDomain::EndpointRequest,
+                &digest,
+            )
+            .expect("standalone old commitment")
     );
     assert_eq!(
         keyring

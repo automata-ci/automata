@@ -29,6 +29,8 @@ pub enum SpoolOperationOutcome {
 /// Closed cryptographic operation domain.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SpoolProtectionOperation {
+    /// Compute a domain-separated keyed commitment without exposing its key.
+    Commitment,
     /// Convert plaintext to authenticated protected bytes before storage.
     Protect,
     /// Authenticate protected bytes and recover plaintext after reading.

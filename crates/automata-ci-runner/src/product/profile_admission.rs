@@ -952,7 +952,10 @@ impl ProfileAdmissionContext<'_> {
                     &self.cleanup_cancellation,
                 );
                 if output.termination() == ExecutionTermination::Cancelled
-                    && self.provisioning_cancellation.is_cancelled()
+                    && self
+                        .provisioning_cancellation
+                        .disposition()
+                        .requires_termination()
                 {
                     return Err(ProfileAdmissionError::execution(
                         ProfileAdmissionErrorKind::ExecutionFailed,
@@ -1230,16 +1233,24 @@ fn operation_id(
 struct ProvisioningCancellation<'cancellation>(&'cancellation ProbeCancellation);
 
 impl Cancellation for ProvisioningCancellation<'_> {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
+    fn disposition(&self) -> automata_ci_execution::CancellationDisposition {
+        if self.0.is_cancelled() {
+            automata_ci_execution::CancellationDisposition::Terminate
+        } else {
+            automata_ci_execution::CancellationDisposition::Active
+        }
     }
 }
 
 struct CleanupCancellation<'cancellation>(&'cancellation ProbeCancellation);
 
 impl Cancellation for CleanupCancellation<'_> {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_forced()
+    fn disposition(&self) -> automata_ci_execution::CancellationDisposition {
+        if self.0.is_forced() {
+            automata_ci_execution::CancellationDisposition::Terminate
+        } else {
+            automata_ci_execution::CancellationDisposition::Active
+        }
     }
 }
 
@@ -1362,7 +1373,7 @@ mod tests {
             spec: &SandboxSpec,
             cancellation: &dyn Cancellation,
         ) -> Result<SandboxRecord, ProviderError> {
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 return Err(cancelled(ProviderStage::CreateSandbox));
             }
             let handle =
@@ -1410,7 +1421,7 @@ mod tests {
             handle: &SandboxHandle,
             cancellation: &dyn Cancellation,
         ) -> Result<Box<dyn ExecutionEndpoint>, ProviderError> {
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 return Err(cancelled(ProviderStage::Attach));
             }
             let mut state = self.state.lock().expect("fake state");
@@ -1440,7 +1451,7 @@ mod tests {
                 .expect("fake state")
                 .calls
                 .push(Call::Inspect(handle.clone()));
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 return Err(cancelled(ProviderStage::Inspect));
             }
             if self.behavior == FakeBehavior::InspectAndDestroyFailure {
@@ -1475,7 +1486,7 @@ mod tests {
             request: &DestroySandbox,
             cancellation: &dyn Cancellation,
         ) -> Result<DestroyDisposition, ProviderError> {
-            let cancelled = cancellation.is_cancelled();
+            let cancelled = cancellation.disposition().requires_termination();
             let mut state = self.state.lock().expect("fake state");
             let first_destroy = !state
                 .calls
@@ -1584,7 +1595,7 @@ mod tests {
                 .expect("fake state")
                 .calls
                 .push(Call::Exec(Box::new(request.clone())));
-            let termination = if cancellation.is_cancelled() {
+            let termination = if cancellation.disposition().requires_termination() {
                 ExecutionTermination::Cancelled
             } else if let FakeBehavior::ExecTermination(termination) = self.behavior {
                 termination
@@ -1664,7 +1675,7 @@ mod tests {
                 .expect("fake state")
                 .calls
                 .push(Call::CopyTo(request.clone()));
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 Err(ExecutionError::new(
                     ExecutionErrorKind::Cancelled,
                     ExecutionStage::CopyTo,

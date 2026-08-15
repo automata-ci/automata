@@ -4,6 +4,7 @@ use automata_ci_core::{
     JobIrVersion, JobIrVersionRange, JobLifecycle, LeaseGuard, LogStreamId, OperationId, RunnerId,
     RunnerSessionId, UnixMillis,
 };
+use automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB;
 use automata_ci_protocol::{
     CommandCursor, CommandSequence, LeaseRejectionReason, ProtocolVersion, RunnerSlotOrdinal,
     SUPPORTED_PROTOCOL_RANGE,
@@ -13,16 +14,17 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CancellationRecord, CommandDisposition, CommandTombstone, DiskSchemaVersion, DurableCommand,
-    LeaseOfferRecord, LeaseRejectionRecord, LogDeliveryCursor, LogSegment,
-    LogSegmentAcknowledgement, LogSegmentPublication, OrphanAbandonmentReason,
-    OrphanAuthorityGrant, OrphanDelivery, OrphanRecord, OutboundOperationCursor,
-    OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation, ProviderOperationKind,
-    ProviderOperationOutcome, RuntimeAuthorityDeliveryRecord, SandboxIdentity,
-    TerminalResultRecord,
+    EndpointCancellationCompletion, EndpointOperation, EndpointResultContentRef, LeaseOfferRecord,
+    LeaseRejectionRecord, LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement,
+    LogSegmentPublication, OrphanAbandonmentReason, OrphanAuthorityGrant, OrphanDelivery,
+    OrphanRecord, OutboundOperationCursor, OutboundOperationSequence, ProviderFailureOutcome,
+    ProviderOperation, ProviderOperationKind, ProviderOperationOutcome,
+    RuntimeAuthorityDeliveryRecord, SandboxIdentity, TerminalResultRecord,
 };
 use crate::{
-    JournalInvariantError, MAX_COMMAND_TOMBSTONES, MAX_JOURNALED_SLOTS,
-    MAX_PROVIDER_OPERATIONS_PER_SLOT, RUNNER_JOURNAL_SCHEMA_VERSION,
+    JournalInvariantError, MAX_COMMAND_TOMBSTONES, MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT,
+    MAX_ENDPOINT_CONTENT_REFS_PER_SLOT, MAX_JOURNALED_SLOTS, MAX_PROVIDER_OPERATIONS_PER_SLOT,
+    RUNNER_JOURNAL_SCHEMA_VERSION,
 };
 
 /// Whether a durably recorded offer is awaiting or has received local
@@ -215,6 +217,7 @@ pub struct SlotSnapshot {
     terminal_result_enqueued_at: Option<UnixMillis>,
     provider_checkpoint: ProviderRecoveryState,
     provider_operations: Vec<ProviderOperation>,
+    endpoint_operations: Vec<EndpointOperation>,
     sandbox: Option<SandboxIdentity>,
     outbound_operations: OutboundOperationCursor,
     log_delivery: Option<LogDeliveryCursor>,
@@ -298,6 +301,7 @@ impl SlotSnapshot {
             terminal_result_enqueued_at: None,
             provider_checkpoint: ProviderRecoveryState::default(),
             provider_operations: Vec::new(),
+            endpoint_operations: Vec::new(),
             sandbox: None,
             outbound_operations: OutboundOperationCursor::initial(),
             log_delivery: None,
@@ -372,6 +376,20 @@ impl SlotSnapshot {
         &self.provider_operations
     }
 
+    /// Returns every non-evicting endpoint operation in acceptance order.
+    #[must_use]
+    pub fn endpoint_operations(&self) -> &[EndpointOperation] {
+        &self.endpoint_operations
+    }
+
+    /// Returns the sole endpoint operation that still requires recovery.
+    #[must_use]
+    pub fn endpoint_recovery_pending(&self) -> Option<&EndpointOperation> {
+        self.endpoint_operations
+            .last()
+            .filter(|operation| operation.is_recovery_pending())
+    }
+
     /// Returns the recoverable provider and opaque sandbox identity, if live.
     #[must_use]
     pub const fn sandbox(&self) -> Option<&SandboxIdentity> {
@@ -428,6 +446,7 @@ impl SlotSnapshot {
         if self.provider_operations.len() > MAX_PROVIDER_OPERATIONS_PER_SLOT {
             return Err(JournalInvariantError::DecodedCollectionLimit);
         }
+        self.validate_endpoint_operations()?;
         self.validate_provider_state()?;
         let rejection_consistent = matches!(
             (self.offer_status, self.rejection.as_ref()),
@@ -477,7 +496,7 @@ impl SlotSnapshot {
         if let Some(orphan) = self.orphan
             && (orphan.session_id() != session.session_id()
                 || orphan.guard() != self.guard()
-                || !self.lifecycle.is_terminal()
+                || (!self.lifecycle.is_terminal() && self.endpoint_recovery_pending().is_none())
                 || (orphan.is_abandoned(OrphanDelivery::TerminalResult)
                     && self.terminal_result.is_none())
                 || (orphan.is_abandoned(OrphanDelivery::LogStream) && self.log_delivery.is_none())
@@ -524,6 +543,49 @@ impl SlotSnapshot {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
         }
         Ok(())
+    }
+
+    fn validate_endpoint_operations(&self) -> Result<(), JournalInvariantError> {
+        if self.endpoint_operations.len() > MAX_ENDPOINT_OPERATIONS_PER_JOB {
+            return Err(JournalInvariantError::DecodedCollectionLimit);
+        }
+        if !self.endpoint_operations.is_empty() && self.offer_status != LeaseOfferStatus::Accepted {
+            return Err(JournalInvariantError::DecodedStateInvalid);
+        }
+        let mut ids = HashSet::with_capacity(self.endpoint_operations.len());
+        let mut content_bytes = 0_u64;
+        let mut content_refs = 0_usize;
+        for (index, operation) in self.endpoint_operations.iter().enumerate() {
+            operation.validate()?;
+            content_refs = content_refs
+                .checked_add(operation.accounted_content_refs())
+                .ok_or(JournalInvariantError::DecodedStateInvalid)?;
+            content_bytes = content_bytes
+                .checked_add(operation.accounted_content_bytes())
+                .ok_or(JournalInvariantError::DecodedStateInvalid)?;
+            if !ids.insert(operation.operation_id())
+                || operation.is_recovery_pending() && index + 1 != self.endpoint_operations.len()
+            {
+                return Err(JournalInvariantError::DecodedStateInvalid);
+            }
+        }
+        if content_refs > MAX_ENDPOINT_CONTENT_REFS_PER_SLOT
+            || content_bytes > MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT
+            || (self.lifecycle == JobLifecycle::Finalizing || self.lifecycle.is_terminal())
+                && self.endpoint_recovery_pending().is_some()
+        {
+            return Err(JournalInvariantError::DecodedCollectionLimit);
+        }
+        Ok(())
+    }
+
+    fn terminalize_orphan_after_endpoint_resolution(&mut self) {
+        if self.orphan.is_some()
+            && !self.lifecycle.is_terminal()
+            && self.endpoint_recovery_pending().is_none()
+        {
+            self.lifecycle = JobLifecycle::Lost;
+        }
     }
 
     fn validate_delivery_timestamps(&self) -> Result<(), JournalInvariantError> {
@@ -813,6 +875,10 @@ impl JournalSnapshot {
                         .iter()
                         .flat_map(|delivery| delivery.segments().iter().map(LogSegment::content)),
                 )
+                .chain(slot.endpoint_operations.iter().flat_map(|operation| {
+                    std::iter::once(operation.request().content())
+                        .chain(operation.result().map(EndpointResultContentRef::content))
+                }))
         })
     }
 }
@@ -1352,6 +1418,13 @@ impl StoredJournal {
         }
         self.slots[index].cancellation = Some(cancellation);
         self.slots[index].lifecycle = JobLifecycle::Cancelling;
+        if let Some(operation) = self.slots[index]
+            .endpoint_operations
+            .last_mut()
+            .filter(|operation| operation.is_recovery_pending())
+        {
+            operation.request_cancellation();
+        }
         Ok(true)
     }
 
@@ -1374,6 +1447,9 @@ impl StoredJournal {
         }
         if next.is_terminal() {
             return Err(JournalInvariantError::TerminalResultRequired);
+        }
+        if next == JobLifecycle::Finalizing && slot.endpoint_recovery_pending().is_some() {
+            return Err(JournalInvariantError::EndpointRecoveryPending);
         }
         slot.lifecycle
             .validate_transition(next)
@@ -1404,6 +1480,9 @@ impl StoredJournal {
         }
         if !terminal.is_terminal() {
             return Err(JournalInvariantError::InvalidLifecycleTransition);
+        }
+        if slot.endpoint_recovery_pending().is_some() {
+            return Err(JournalInvariantError::EndpointRecoveryPending);
         }
         if let Some(existing) = &slot.terminal_result {
             return if existing.matches_unacknowledged(&result) && slot.lifecycle == terminal {
@@ -1442,6 +1521,165 @@ impl StoredJournal {
         }
         result.acknowledge();
         Ok(true)
+    }
+
+    pub(crate) fn accept_endpoint_operation(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation: EndpointOperation,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        if slot.offer_status != LeaseOfferStatus::Accepted {
+            return Err(JournalInvariantError::OfferNotAccepted);
+        }
+        if slot.lifecycle.is_terminal() {
+            return Err(JournalInvariantError::LeaseTerminal);
+        }
+        if slot.orphan.is_some() {
+            return Err(JournalInvariantError::OrphanNotAuthorized);
+        }
+        operation.validate()?;
+        if let Some(existing) = slot
+            .endpoint_operations
+            .iter()
+            .find(|existing| existing.operation_id() == operation.operation_id())
+        {
+            return if existing.matches_acceptance(&operation) {
+                Ok(false)
+            } else {
+                Err(JournalInvariantError::EndpointOperationReplayConflict)
+            };
+        }
+        if slot.cancellation.is_some() {
+            return Err(JournalInvariantError::EndpointOperationsClosed);
+        }
+        if slot
+            .endpoint_operations
+            .last()
+            .is_some_and(EndpointOperation::is_recovery_pending)
+        {
+            return Err(JournalInvariantError::EndpointOperationPending);
+        }
+        if slot.endpoint_operations.len() >= MAX_ENDPOINT_OPERATIONS_PER_JOB {
+            return Err(JournalInvariantError::EndpointOperationLimit);
+        }
+        let prospective_refs = slot
+            .endpoint_operations
+            .iter()
+            .try_fold(operation.accounted_content_refs(), |refs, current| {
+                refs.checked_add(current.accounted_content_refs())
+            })
+            .ok_or(JournalInvariantError::EndpointContentRefLimit)?;
+        if prospective_refs > MAX_ENDPOINT_CONTENT_REFS_PER_SLOT {
+            return Err(JournalInvariantError::EndpointContentRefLimit);
+        }
+        let content_bytes = slot
+            .endpoint_operations
+            .iter()
+            .try_fold(operation.accounted_content_bytes(), |total, current| {
+                total.checked_add(current.accounted_content_bytes())
+            });
+        if content_bytes.is_none_or(|bytes| bytes > MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT) {
+            return Err(JournalInvariantError::EndpointContentBytesLimit);
+        }
+        slot.endpoint_operations.push(operation);
+        Ok(true)
+    }
+
+    pub(crate) fn commit_endpoint_invocation(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        let operation = slot
+            .endpoint_operations
+            .iter_mut()
+            .find(|operation| operation.operation_id() == operation_id)
+            .ok_or(JournalInvariantError::EndpointOperationMissing)?;
+        operation.commit_invocation()
+    }
+
+    pub(crate) fn record_endpoint_cancellation(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        let changed = slot
+            .endpoint_operations
+            .iter_mut()
+            .find(|operation| operation.operation_id() == operation_id)
+            .ok_or(JournalInvariantError::EndpointOperationMissing)?
+            .request_cancellation();
+        slot.terminalize_orphan_after_endpoint_resolution();
+        Ok(changed)
+    }
+
+    pub(crate) fn complete_endpoint_cancellation(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+        completion: EndpointCancellationCompletion,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        if completion == EndpointCancellationCompletion::SandboxAbsent && slot.sandbox.is_some() {
+            return Err(JournalInvariantError::EndpointSandboxStillPresent);
+        }
+        let changed = slot
+            .endpoint_operations
+            .iter_mut()
+            .find(|operation| operation.operation_id() == operation_id)
+            .ok_or(JournalInvariantError::EndpointOperationMissing)?
+            .complete_cancellation()?;
+        slot.terminalize_orphan_after_endpoint_resolution();
+        Ok(changed)
+    }
+
+    pub(crate) fn abandon_endpoint_operation(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        if slot.sandbox.is_some() {
+            return Err(JournalInvariantError::EndpointSandboxStillPresent);
+        }
+        let changed = slot
+            .endpoint_operations
+            .iter_mut()
+            .find(|operation| operation.operation_id() == operation_id)
+            .ok_or(JournalInvariantError::EndpointOperationMissing)?
+            .abandon()?;
+        slot.terminalize_orphan_after_endpoint_resolution();
+        Ok(changed)
+    }
+
+    pub(crate) fn record_endpoint_result(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+        result: EndpointResultContentRef,
+    ) -> Result<bool, JournalInvariantError> {
+        let slot = self.slot_mut(session_id, slot, guard)?;
+        let operation = slot
+            .endpoint_operations
+            .iter_mut()
+            .find(|operation| operation.operation_id() == operation_id)
+            .ok_or(JournalInvariantError::EndpointOperationMissing)?;
+        operation.record_result(result)
     }
 
     pub(crate) fn record_provider_intent(
@@ -1739,7 +1977,9 @@ impl StoredJournal {
             };
         }
         self.slots[index].orphan = Some(OrphanRecord::from_grant(grant));
-        if !self.slots[index].lifecycle.is_terminal() {
+        if !self.slots[index].lifecycle.is_terminal()
+            && self.slots[index].endpoint_recovery_pending().is_none()
+        {
             self.slots[index].lifecycle = JobLifecycle::Lost;
         }
         Ok(true)
@@ -1788,6 +2028,10 @@ impl StoredJournal {
                 .last()
                 .is_some_and(|operation| operation.is_pending())
             || self.slots[index].sandbox.is_some()
+            || self.slots[index]
+                .endpoint_operations
+                .iter()
+                .any(EndpointOperation::is_recovery_pending)
         {
             return Err(JournalInvariantError::SlotNotTerminal);
         }

@@ -1436,7 +1436,7 @@ impl ExecutionEndpoint for FakeEndpoint {
         let program = request.argv().program().as_str();
         let mut state = self.state.lock().expect("endpoint lock");
         state.commands.push(request.clone());
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return execution_output(ExecutionTermination::Cancelled, Vec::new(), false)
                 .map_err(|_| execution_error(ExecutionStage::Exec));
         }
@@ -2369,6 +2369,7 @@ struct EventState {
     provider_operation_begins: Vec<(OperationId, ProviderOperationKind)>,
     provider_operation_failures: Vec<(OperationId, ProviderFailureOutcome)>,
     pending_provider_operation: Option<(OperationId, ProviderOperationKind)>,
+    endpoint_bindings: usize,
     provider_event_failures: BTreeSet<ProviderEventFailurePoint>,
     cancellation_on_log: Option<ExecutionCancellation>,
     fail_log_after_cancellation: bool,
@@ -2416,6 +2417,10 @@ impl FakeEvents {
             .expect("events lock")
             .provider_operation_failures
             .clone()
+    }
+
+    pub fn endpoint_bindings(&self) -> usize {
+        self.state.lock().expect("events lock").endpoint_bindings
     }
 
     pub fn fail_next_begin_provider_operation(&self) {
@@ -2468,6 +2473,16 @@ impl fmt::Debug for FakeEvents {
 }
 
 impl ExecutionEvents for FakeEvents {
+    fn bind_endpoint(
+        &self,
+        _provider: Arc<dyn SandboxProvider>,
+        _inspection: SandboxInspection,
+        endpoint: Box<dyn ExecutionEndpoint>,
+    ) -> Result<Box<dyn ExecutionEndpoint>, ExecutionEventError> {
+        self.state.lock().expect("events lock").endpoint_bindings += 1;
+        Ok(endpoint)
+    }
+
     fn transition(
         &self,
         next: JobLifecycle,

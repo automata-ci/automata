@@ -12,15 +12,33 @@ const MAX_ENVIRONMENT_NAME_BYTES: usize = 128;
 const MAX_ENVIRONMENT_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Meaning of a cooperative cancellation observation at a provider boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancellationDisposition {
+    /// No cancellation has been requested.
+    Active,
+    /// Stop backend work; the caller is durably abandoning the operation.
+    Terminate,
+}
+
+impl CancellationDisposition {
+    /// Reports whether the provider is authorized to terminate backend work.
+    ///
+    #[must_use]
+    pub const fn requires_termination(self) -> bool {
+        matches!(self, Self::Terminate)
+    }
+}
+
 /// Cooperative cancellation source shared across provider boundaries.
 pub trait Cancellation: Send + Sync {
-    /// Returns whether the caller has requested cancellation.
+    /// Returns the current cancellation meaning.
     ///
-    /// Adapters should check this between bounded backend phases. A `true`
-    /// result requests prompt termination; it does not prove that an in-flight
-    /// backend mutation was rolled back.
+    /// Adapters must check this between bounded backend phases. Termination
+    /// requests prompt quiescence but does not prove that an in-flight backend
+    /// mutation was rolled back.
     #[must_use]
-    fn is_cancelled(&self) -> bool;
+    fn disposition(&self) -> CancellationDisposition;
 }
 
 /// Cancellation source that never requests cancellation.
@@ -28,10 +46,18 @@ pub trait Cancellation: Send + Sync {
 pub struct NeverCancelled;
 
 impl Cancellation for NeverCancelled {
-    fn is_cancelled(&self) -> bool {
-        false
+    fn disposition(&self) -> CancellationDisposition {
+        CancellationDisposition::Active
     }
 }
+
+/// Maximum endpoint calls one admitted job may expose to a provider.
+///
+/// The durable replay journal and protected spool size their non-evicting
+/// operation/reference budgets from this execution boundary. The bound is
+/// deliberately shared rather than independently approximated from workflow
+/// steps or nested action invocations.
+pub const MAX_ENDPOINT_OPERATIONS_PER_JOB: usize = 10_000;
 
 /// Validated executable plus literal arguments. No shell command string exists
 /// in the execution contract.
@@ -797,7 +823,11 @@ impl CopyFromRequest {
 }
 
 /// Attached execution port. Capabilities are explicit; unsupported operations
-/// return [`crate::ExecutionErrorKind::UnsupportedCapability`].
+/// return [`crate::ExecutionErrorKind::UnsupportedCapability`]. Calls are
+/// synchronous and caller-owned: implementations must not detach backend work.
+/// Once cancellation authorizes termination, implementations must stop starting
+/// new backend phases, terminate and reap caller-owned work, and return within
+/// their bounded termination grace.
 pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
     /// Returns the exact opaque sandbox handle to which this endpoint is bound.
     fn handle(&self) -> &SandboxHandle;
@@ -872,8 +902,9 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
     /// [`CopyFromRequest::byte_limit`]. A trusted native provider serving a
     /// `HostFilesystem` capability may resolve the target against the host
     /// only after proving that it remains within the sandbox-owned workspace
-    /// or scratch root. Returned bytes may contain secrets and must not pass
-    /// through durable host-side staging.
+    /// or scratch root. Returned bytes may contain secrets. A durable replay
+    /// layer must protect and authenticate them before storage and may journal
+    /// only their opaque protected-content identity.
     ///
     /// # Errors
     ///

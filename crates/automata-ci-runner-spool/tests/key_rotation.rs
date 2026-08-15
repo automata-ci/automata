@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use automata_ci_core::Sha256Digest;
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentRef, DurableContentStore,
-    FileSpool, ProtectionId, SpoolError,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentRef, DurableContentStore, FileSpool, ProtectionId, SpoolError,
 };
 use sha2::{Digest as _, Sha256};
 use support::{Scratch, StaticRetainSet, TestProtector, adopt};
@@ -45,6 +45,17 @@ impl ContentProtector for TestKeyring {
         self.exact(protection_id).is_some()
     }
 
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        self.exact(protection_id)
+            .ok_or(ContentProtectionError::KeyUnavailable)?
+            .keyed_commitment(protection_id, domain, material_digest)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,
@@ -66,6 +77,35 @@ impl ContentProtector for TestKeyring {
 
 fn keyring(active: (&str, u8), decrypt_only: &[(&str, u8)]) -> Arc<TestKeyring> {
     Arc::new(TestKeyring::new(active, decrypt_only))
+}
+
+#[test]
+fn keyed_commitments_replay_with_the_exact_old_key_and_rotate_for_new_requests() {
+    let scratch = Scratch::new("keyed-commitment-rotation");
+    let root = scratch.spool_root();
+    let digest = [0x31; 32];
+    let before =
+        FileSpool::open(root.clone(), keyring(("spool-v1", 0x11), &[])).expect("open old spool");
+    let old = before
+        .create_keyed_commitment(ContentCommitmentDomain::EndpointRequest, &digest)
+        .expect("old commitment");
+    drop(before);
+
+    let rotated = FileSpool::open(root, keyring(("spool-v2", 0x22), &[("spool-v1", 0x11)]))
+        .expect("open rotated spool");
+    let replay = rotated
+        .recreate_keyed_commitment(
+            old.protection_id(),
+            ContentCommitmentDomain::EndpointRequest,
+            &digest,
+        )
+        .expect("recreate old commitment");
+    let current = rotated
+        .create_keyed_commitment(ContentCommitmentDomain::EndpointRequest, &digest)
+        .expect("create current commitment");
+    assert_eq!(replay, old);
+    assert_ne!(current, old);
+    assert_eq!(current.protection_id().as_str(), "spool-v2");
 }
 
 fn reference(id: &str, plaintext: &[u8]) -> DurableContentRef {

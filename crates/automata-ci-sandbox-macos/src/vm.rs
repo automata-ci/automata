@@ -354,7 +354,9 @@ fn read_frame_controlled(
             match receiver.recv_timeout(CONTROL_POLL_INTERVAL) {
                 Ok(result) => return result,
                 Err(RecvTimeoutError::Disconnected) => return Err(io_failure()),
-                Err(RecvTimeoutError::Timeout) if cancellation.is_cancelled() => {
+                Err(RecvTimeoutError::Timeout)
+                    if cancellation.disposition().requires_termination() =>
+                {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(io::Error::from(io::ErrorKind::Interrupted));

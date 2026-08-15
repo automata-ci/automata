@@ -887,6 +887,7 @@ name = "automata-ci-runner-journal"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "automata-ci-execution",
  "automata-ci-protocol",
  "automata-ci-runner-spool",
  "rustix",
@@ -910,6 +911,7 @@ dependencies = [
  "automata-ci-runner-transport",
  "sha2 0.11.0",
  "static_assertions",
+ "subtle",
  "thiserror",
  "tokio",
  "tokio-util",

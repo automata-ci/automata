@@ -1,6 +1,7 @@
 use automata_ci_core::Sha256Digest;
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentRef, ProtectionId,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentRef, ProtectionId,
 };
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
@@ -20,6 +21,38 @@ fn make_reference(id: &str, kind: ContentKind, plaintext: &[u8]) -> DurableConte
         ProtectionId::new(id).expect("valid ID"),
     )
     .expect("valid reference")
+}
+
+#[test]
+fn endpoint_commitment_is_a_domain_separated_keyed_prf_and_debug_is_redacted() {
+    let digest = [0x09; 32];
+    let first = make_protector("key-a", 0x42);
+    let same = make_protector("key-a", 0x42);
+    let other = make_protector("key-b", 0x43);
+    let id_a = ProtectionId::new("key-a").expect("key id");
+    let id_b = ProtectionId::new("key-b").expect("key id");
+    let commitment = first
+        .keyed_commitment(&id_a, ContentCommitmentDomain::EndpointRequest, &digest)
+        .expect("commitment");
+    assert_eq!(
+        commitment,
+        same.keyed_commitment(&id_a, ContentCommitmentDomain::EndpointRequest, &digest)
+            .expect("same key commitment")
+    );
+    assert_ne!(
+        commitment,
+        other
+            .keyed_commitment(&id_b, ContentCommitmentDomain::EndpointRequest, &digest)
+            .expect("other key commitment")
+    );
+    assert_ne!(commitment, digest);
+    assert_eq!(
+        first
+            .keyed_commitment(&id_b, ContentCommitmentDomain::EndpointRequest, &digest)
+            .expect_err("wrong key id"),
+        ContentProtectionError::KeyUnavailable
+    );
+    assert!(!format!("{first:?}").contains("090909"));
 }
 
 #[test]
@@ -152,6 +185,30 @@ fn runtime_authority_has_a_distinct_authenticated_domain() {
         protector
             .unprotect(&authority, &protected)
             .expect("authority kind authenticates"),
+        plaintext
+    );
+}
+
+#[test]
+fn endpoint_request_and_result_have_distinct_authenticated_domains() {
+    let plaintext = b"endpoint replay bytes";
+    let protector = make_protector("key-a", 0x32);
+    let request = make_reference("key-a", ContentKind::EndpointRequest, plaintext);
+    let result = make_reference("key-a", ContentKind::EndpointResult, plaintext);
+
+    let protected = protector
+        .protect(&request, plaintext)
+        .expect("protect endpoint request");
+    assert_eq!(
+        protector
+            .unprotect(&result, &protected)
+            .expect_err("request/result substitution rejected"),
+        ContentProtectionError::AuthenticationFailed
+    );
+    assert_eq!(
+        protector
+            .unprotect(&request, &protected)
+            .expect("endpoint request authenticates"),
         plaintext
     );
 }

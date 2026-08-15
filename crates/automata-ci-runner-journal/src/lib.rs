@@ -25,11 +25,13 @@ pub use file::{
 pub use journal::RunnerJournal;
 pub use model::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, CommandTombstone, DurableCommand,
-    JobIrContentRef, JournalSnapshot, LeaseOfferRecord, LeaseOfferStatus, LeasePollCheckpoint,
-    LeaseRejectionRecord, LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement,
-    LogSegmentPublication, OrphanAbandonmentPermissions, OrphanAbandonmentReason,
-    OrphanAuthorityError, OrphanAuthorityGrant, OrphanAuthorityProof, OrphanAuthorityVerifier,
-    OrphanClaim, OrphanDelivery, OrphanRecord, OutboundOperationCursor, OutboundOperationSequence,
+    EndpointCancellationCompletion, EndpointOperation, EndpointOperationKind,
+    EndpointOperationState, EndpointRequestContentRef, EndpointResultContentRef, JobIrContentRef,
+    JournalSnapshot, LeaseOfferRecord, LeaseOfferStatus, LeasePollCheckpoint, LeaseRejectionRecord,
+    LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement, LogSegmentPublication,
+    OrphanAbandonmentPermissions, OrphanAbandonmentReason, OrphanAuthorityError,
+    OrphanAuthorityGrant, OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanClaim,
+    OrphanDelivery, OrphanRecord, OutboundOperationCursor, OutboundOperationSequence,
     PendingDeliveryTimestamps, ProviderFailureKind, ProviderFailureOutcome, ProviderName,
     ProviderOperation, ProviderOperationKind, ProviderOperationOutcome, RuntimeAuthorityContentRef,
     RuntimeAuthorityDeliveryRecord, SandboxHandle, SandboxIdentity, SessionBinding,
@@ -44,7 +46,7 @@ pub use observer::{
 ///
 /// Obsolete or future schemas fail closed rather than being interpreted by
 /// compatibility readers.
-pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 2;
+pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 4;
 
 /// Largest delivery enqueue timestamp accepted by the durable journal.
 ///
@@ -61,6 +63,19 @@ pub const MAX_JOURNALED_SLOTS: usize = 256;
 
 /// Maximum recent provider operations retained for exact replay.
 pub const MAX_PROVIDER_OPERATIONS_PER_SLOT: usize = 32;
+
+/// Maximum protected execution-endpoint request/result references per slot.
+pub const MAX_ENDPOINT_CONTENT_REFS_PER_SLOT: usize =
+    automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB * 2;
+
+/// Maximum aggregate request-commitment and result bytes reserved by one slot.
+pub const MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT: u64 = 1024 * 1024 * 1024;
+
+/// Maximum protected result object for one execution-endpoint operation.
+pub const MAX_ENDPOINT_RESULT_CONTENT_BYTES: u64 = 17 * 1024 * 1024;
+
+/// Exact protected request commitment retained for every endpoint operation.
+pub const ENDPOINT_REQUEST_COMMITMENT_BYTES: u64 = 32;
 
 /// Maximum recent server-command digest tombstones retained per session.
 pub const MAX_COMMAND_TOMBSTONES: usize = 256;

@@ -39,10 +39,11 @@ pub use automata_ci_core::{
 };
 pub use capability::{ProviderCapabilities, SandboxCapability};
 pub use endpoint::{
-    Cancellation, CopyFromRequest, CopyToRequest, EnvironmentName, EnvironmentValue,
-    EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionEnvironment,
-    ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream, ExecutionSignal,
-    ExecutionTermination, NeverCancelled, SignalRequest, WaitRequest,
+    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, EnvironmentName,
+    EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint,
+    ExecutionEnvironment, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
+    ExecutionSignal, ExecutionTermination, MAX_ENDPOINT_OPERATIONS_PER_JOB, NeverCancelled,
+    SignalRequest, WaitRequest,
 };
 pub use error::{
     ExecutionError, ExecutionErrorKind, ExecutionStage, OperationOutcome, ProviderError,

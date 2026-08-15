@@ -2,10 +2,12 @@ use crate::support;
 
 use std::{fs, sync::Arc};
 
+use automata_ci_core::Sha256Digest;
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, DurableContentStore, FileSpool, FileSpoolOptions,
-    SpoolError, SpoolInvariantError, SpoolLimits,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, DurableContentStore, FileSpool,
+    FileSpoolOptions, SpoolError, SpoolInvariantError, SpoolLimits,
 };
+use sha2::{Digest as _, Sha256};
 use static_assertions::assert_obj_safe;
 use support::{Scratch, StaticRetainSet, TestProtector, adopt, content_path};
 
@@ -13,6 +15,35 @@ assert_obj_safe!(DurableContentStore);
 
 fn protector() -> Arc<TestProtector> {
     Arc::new(TestProtector::new("test-aead-v1", 0xa7))
+}
+
+#[test]
+fn plaintext_reference_and_cache_key_cannot_validate_low_entropy_commitment_guesses() {
+    let scratch = Scratch::new("keyed-commitment");
+    let spool = FileSpool::open(scratch.spool_root(), protector()).expect("open spool");
+    let material_digest: [u8; 32] = Sha256::digest(b"0427").into();
+    let commitment = spool
+        .create_keyed_commitment(ContentCommitmentDomain::EndpointRequest, &material_digest)
+        .expect("keyed commitment");
+    assert!(format!("{commitment:?}").contains("[REDACTED]"));
+    assert!(!format!("{commitment:?}").contains("0427"));
+    let reference = adopt(
+        spool
+            .persist(ContentKind::EndpointRequest, commitment.as_bytes())
+            .expect("persist protected commitment"),
+    );
+    for candidate in [b"0000".as_slice(), b"0427", b"9999"] {
+        let candidate_digest: [u8; 32] = Sha256::digest(candidate).into();
+        let vulnerable_reference_digest =
+            Sha256Digest::from_bytes(Sha256::digest(candidate_digest).into());
+        assert_ne!(reference.sha256(), vulnerable_reference_digest);
+        assert!(
+            !reference
+                .cache_key()
+                .as_str()
+                .contains(&vulnerable_reference_digest.to_string())
+        );
+    }
 }
 
 #[test]

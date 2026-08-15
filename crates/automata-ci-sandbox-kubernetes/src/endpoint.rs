@@ -63,7 +63,7 @@ impl KubernetesExecutionEndpoint {
         cancellation: &dyn Cancellation,
         stage: ExecutionStage,
     ) -> Result<GuestResponse, ExecutionError> {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
         }
         let frame = encode_frame(request)
@@ -158,7 +158,7 @@ impl KubernetesExecutionEndpoint {
             }
         })
         .map_err(|kind| execution_error(map_provider_error(kind), stage))?;
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
         }
         let response = decode_frame(&response)
@@ -171,7 +171,7 @@ impl KubernetesExecutionEndpoint {
 }
 
 async fn cancellation_requested(cancellation: &dyn Cancellation) {
-    while !cancellation.is_cancelled() {
+    while !cancellation.disposition().requires_termination() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

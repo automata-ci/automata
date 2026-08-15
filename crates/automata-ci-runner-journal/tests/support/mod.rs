@@ -19,7 +19,9 @@ use automata_ci_runner_journal::{
     RuntimeAuthorityDeliveryRecord, SessionBinding, StateRoot, TerminalResultRecord,
 };
 use automata_ci_runner_spool::ProtectionId;
-use automata_ci_runner_spool::{ContentProtectionError, ContentProtector, SpoolRoot};
+use automata_ci_runner_spool::{
+    ContentCommitmentDomain, ContentProtectionError, ContentProtector, SpoolRoot,
+};
 use sha2::{Digest as _, Sha256};
 
 pub struct Scratch {
@@ -88,6 +90,22 @@ impl fmt::Debug for TestProtector {
 impl ContentProtector for TestProtector {
     fn protection_id(&self) -> &ProtectionId {
         &self.id
+    }
+
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        if protection_id != &self.id {
+            return Err(ContentProtectionError::KeyUnavailable);
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.key);
+        digest.update(domain.separator());
+        digest.update(material_digest);
+        Ok(digest.finalize().into())
     }
 
     fn protect(

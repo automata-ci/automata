@@ -38,6 +38,7 @@ async fn credential_free_execution_has_no_authority_or_secret_and_emits_public_o
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
     assert_eq!(result.secret_exposure(), JobSecretExposure::Secretless);
+    assert_eq!(fixture.events.endpoint_bindings(), 1);
     assert!(
         fixture
             .events

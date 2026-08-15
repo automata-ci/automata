@@ -22,7 +22,10 @@ mod store;
 pub use error::{
     ContentProtectionError, RetainedContentError, SpoolError, SpoolInvariantError, SpoolRootError,
 };
-pub use model::{ContentCacheKey, ContentKind, DurableContentRef, ProtectionId, SpoolLimits};
+pub use model::{
+    ContentCacheKey, ContentCommitmentDomain, ContentKind, DurableContentRef,
+    KeyedContentCommitment, ProtectionId, SpoolLimits,
+};
 pub use observer::{
     NoopSpoolObserver, SpoolCapacityResource, SpoolEvent, SpoolFailureKind, SpoolObserver,
     SpoolOperation, SpoolOperationOutcome, SpoolProtectionOperation, SpoolProtectionOutcome,

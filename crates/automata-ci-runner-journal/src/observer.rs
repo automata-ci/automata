@@ -20,6 +20,8 @@ pub enum JournalMutationDomain {
     Result,
     /// Provider mutation intent or recovery outcome.
     Provider,
+    /// Execution-endpoint acceptance, invocation, result, or cancellation.
+    Endpoint,
     /// Runner-to-control-plane operation cursor state.
     Outbound,
     /// Durable log stream, segment, seal, or acknowledgement state.

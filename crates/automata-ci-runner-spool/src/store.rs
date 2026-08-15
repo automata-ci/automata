@@ -9,10 +9,11 @@ use automata_ci_core::Sha256Digest;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    ContentKind, ContentProtectionError, DurableContentRef, NoopSpoolObserver, ProtectionId,
-    RetainedContentError, SpoolCapacityResource, SpoolError, SpoolEvent, SpoolFailureKind,
-    SpoolInvariantError, SpoolLimits, SpoolObserver, SpoolOperation, SpoolOperationOutcome,
-    SpoolProtectionOperation, SpoolProtectionOutcome, SpoolRoot,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, DurableContentRef,
+    KeyedContentCommitment, NoopSpoolObserver, ProtectionId, RetainedContentError,
+    SpoolCapacityResource, SpoolError, SpoolEvent, SpoolFailureKind, SpoolInvariantError,
+    SpoolLimits, SpoolObserver, SpoolOperation, SpoolOperationOutcome, SpoolProtectionOperation,
+    SpoolProtectionOutcome, SpoolRoot,
     platform::{PlatformDirectory, SpoolUsage},
 };
 
@@ -74,6 +75,23 @@ pub trait ContentProtector: Send + Sync {
     fn supports_protection_id(&self, protection_id: &ProtectionId) -> bool {
         protection_id == self.protection_id()
     }
+
+    /// Computes a domain-separated PRF commitment with the exact named key.
+    ///
+    /// The implementation must use secret key material unavailable to a reader
+    /// of spool files or journal metadata. Errors must not contain commitment
+    /// input or key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContentProtectionError`] when the exact key is unavailable or
+    /// the protected commitment operation fails.
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError>;
 
     /// Protects plaintext before any filesystem write.
     ///
@@ -253,6 +271,29 @@ impl<'a, E> PublicationCommitFailure<'a, E> {
 
 /// Object-safe protected content-store port.
 pub trait DurableContentStore: Send + Sync {
+    /// Computes a new commitment under the active protection key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpoolError`] when the protection authority is unavailable.
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError>;
+
+    /// Recomputes a commitment under the exact key named by durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpoolError`] when that exact key is unavailable or protection fails.
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError>;
+
     /// Protects, verifies, and durably commits immutable content.
     ///
     /// A successful return occurs only after file and directory synchronization.
@@ -565,6 +606,40 @@ impl FileSpool {
 }
 
 impl DurableContentStore for FileSpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.recreate_keyed_commitment(self.protector.protection_id(), domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        if !self.protector.supports_protection_id(protection_id) {
+            return Err(ContentProtectionError::KeyUnavailable.into());
+        }
+        let commitment = self
+            .protector
+            .keyed_commitment(protection_id, domain, material_digest);
+        self.options.observer.observe(SpoolEvent::Protection {
+            operation: SpoolProtectionOperation::Commitment,
+            outcome: if commitment.is_ok() {
+                SpoolProtectionOutcome::Success
+            } else {
+                SpoolProtectionOutcome::Error
+            },
+        });
+        Ok(KeyedContentCommitment::new(
+            protection_id.clone(),
+            commitment?,
+        ))
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
