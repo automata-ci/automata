@@ -2,7 +2,6 @@
 
 use std::{
     fmt,
-    future::Future,
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
@@ -29,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     secret_custody::SecretCustodyVerifier,
+    secret_loop_support::{LoopAction, OperationWait, exact_millis, wait_for_operation},
     secret_management::{exact_provider, valid_builtin_registry},
 };
 
@@ -474,39 +474,6 @@ pub(crate) enum SecretCleanupLoopConfigError {
     /// The adapter is not the encrypted built-in exact-version provider.
     #[error("secret cleanup provider contract is invalid")]
     InvalidProvider,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LoopAction {
-    Stop,
-    Drain,
-    Poll,
-}
-
-enum OperationWait<T> {
-    Completed(T),
-    Cancelled,
-    TimedOut,
-}
-
-async fn wait_for_operation<T>(
-    cancellation: &CancellationToken,
-    timeout: Duration,
-    operation: impl Future<Output = T>,
-) -> OperationWait<T> {
-    tokio::select! {
-        biased;
-        () = cancellation.cancelled() => OperationWait::Cancelled,
-        outcome = tokio::time::timeout(timeout, operation) => match outcome {
-            Ok(value) => OperationWait::Completed(value),
-            Err(_) => OperationWait::TimedOut,
-        },
-    }
-}
-
-fn exact_millis(duration: Duration) -> Option<u64> {
-    let millis = u64::try_from(duration.as_millis()).ok()?;
-    (millis != 0 && Duration::from_millis(millis) == duration).then_some(millis)
 }
 
 fn destroy_request(task: &BuiltinSecretCleanupTask) -> Result<DestroySecretVersionRequest, ()> {
