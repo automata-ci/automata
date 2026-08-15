@@ -1,0 +1,17 @@
+name: Matrix differential include only
+on: workflow_dispatch
+jobs:
+  build:
+    name: Include ${{ matrix.target }}-${{ matrix.ordinal }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: duplicate
+            ordinal: same
+          - target: duplicate
+            ordinal: same
+          - target: distinct
+            ordinal: last
+    steps:
+      - run: printf '%s\n' '${{ toJSON(matrix) }}'

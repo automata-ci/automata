@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "evidenceClass": "candidate",
+  "liveGithubObservation": null,
+  "equivalentRows": [
+    {
+      "runtime": "stable",
+      "platform": "linux",
+      "experimental": false,
+      "channel": "stable"
+    },
+    {
+      "runtime": "stable",
+      "platform": "windows",
+      "experimental": false,
+      "channel": "stable"
+    },
+    {
+      "runtime": "next",
+      "platform": "linux",
+      "experimental": false,
+      "channel": "general"
+    },
+    {
+      "runtime": "edge",
+      "platform": "linux",
+      "experimental": true,
+      "channel": "edge"
+    }
+  ],
+  "includeOnlyRows": [
+    { "target": "duplicate", "ordinal": "same" },
+    { "target": "duplicate", "ordinal": "same" },
+    { "target": "distinct", "ordinal": "last" }
+  ]
+}

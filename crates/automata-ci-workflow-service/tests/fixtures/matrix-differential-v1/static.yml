@@ -1,0 +1,30 @@
+name: Matrix differential static
+on: workflow_dispatch
+jobs:
+  build:
+    name: Matrix ${{ matrix.runtime }}-${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      matrix:
+        runtime: [stable, next]
+        platform: [linux, windows]
+        experimental: [false]
+        exclude:
+          - runtime: next
+            platform: windows
+        include:
+          - channel: general
+          - runtime: stable
+            channel: stable
+          - runtime: edge
+            platform: linux
+            experimental: true
+            channel: edge
+    env:
+      MATRIX_RUNTIME: ${{ matrix.runtime }}
+      MATRIX_PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Emit canonical observation
+        if: ${{ matrix.platform == 'linux' }}
+        run: printf '%s\n' '${{ toJSON(matrix) }}'

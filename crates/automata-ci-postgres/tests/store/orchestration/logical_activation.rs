@@ -1055,6 +1055,146 @@ async fn concurrent_publication_replays_exact_descriptors_and_nothing_runnable()
     .await
 }
 
+async fn install_matrix_publication_fault(database: &TestDatabase) -> TestResult {
+    sqlx::query(
+        r"
+        CREATE FUNCTION reject_matrix_boundary_insert() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.matrix_index = 128 THEN
+                RAISE EXCEPTION 'injected matrix publication failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        ",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        r"
+        CREATE TRIGGER reject_matrix_boundary_insert
+        BEFORE INSERT ON logical_workflow_instances
+        FOR EACH ROW EXECUTE FUNCTION reject_matrix_boundary_insert()
+        ",
+    )
+    .execute(database.pool())
+    .await?;
+    Ok(())
+}
+
+async fn remove_matrix_publication_fault(database: &TestDatabase) -> TestResult {
+    sqlx::query("DROP TRIGGER reject_matrix_boundary_insert ON logical_workflow_instances")
+        .execute(database.pool())
+        .await?;
+    sqlx::query("DROP FUNCTION reject_matrix_boundary_insert()")
+        .execute(database.pool())
+        .await?;
+    Ok(())
+}
+
+async fn assert_matrix_publication_rolled_back(
+    database: &TestDatabase,
+    fixture: &Fixture,
+) -> TestResult {
+    let publication_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM logical_workflow_activation_publications WHERE logical_job_id = $1",
+    )
+    .bind(fixture.first_job.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    let instance_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM logical_workflow_instances WHERE logical_job_id = $1",
+    )
+    .bind(fixture.first_job.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    let state: String = sqlx::query_scalar("SELECT state FROM logical_workflow_jobs WHERE id = $1")
+        .bind(fixture.first_job.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+    assert_eq!(
+        (publication_count, instance_count, state.as_str()),
+        (0, 0, "activating")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn maximum_matrix_publication_rolls_back_atomically_and_replays_exactly() -> TestResult {
+    run_with_database(|database| async move {
+        let mut fixture = fixture(&database, "activation-matrix-boundary", 3_000).await?;
+        seed_tenant(&database, &fixture.tenant).await?;
+        admit_authenticated_fixture(&database, &mut fixture).await?;
+        let preparation = prepare_job(&database, &fixture, fixture.first_job, 3_000).await?;
+        let selected = select_orchestration(&database, 3_091, 191, 60_000).await?;
+        let claimed = match selected.authority() {
+            ConsumedLogicalJobOrchestrationAuthority::Activation(claimed) => claimed.clone(),
+            authority @ ConsumedLogicalJobOrchestrationAuthority::Preparation(_) => {
+                return Err(format!("expected activation, got {authority:?}").into());
+            }
+        };
+        assert_eq!(claimed.claim().input_digest(), preparation.input_digest());
+
+        let total = u32::try_from(automata_ci_store::MAX_LOGICAL_ACTIVATED_INSTANCES)?;
+        let instances = (0..total)
+            .map(|index| {
+                instance(
+                    &claimed,
+                    index,
+                    total,
+                    3_000,
+                    u8::try_from(index).expect("the 256-instance boundary fits one byte"),
+                )
+            })
+            .collect();
+        let publication = PublishLogicalJobActivation::new(
+            claimed.claim().clone(),
+            true,
+            instances,
+            UnixMillis::new(database_now_ms(&database).await?),
+        )
+        .expect("maximum-size publication");
+        assert_eq!(publication.instances().len(), 256);
+
+        install_matrix_publication_fault(&database).await?;
+        assert!(
+            database
+                .store()
+                .publish_logical_job_activation(publication.clone())
+                .await
+                .is_err(),
+            "the injected 129th descriptor must abort publication"
+        );
+        assert_matrix_publication_rolled_back(&database, &fixture).await?;
+        remove_matrix_publication_fault(&database).await?;
+
+        let first = database
+            .store()
+            .publish_logical_job_activation(publication.clone())
+            .await?;
+        assert!(!first.is_replay());
+        assert_eq!(first.instance_count(), 256);
+        let replay = database
+            .store()
+            .publish_logical_job_activation(publication)
+            .await?;
+        assert!(replay.is_replay());
+        assert_eq!(first.output_digest(), replay.output_digest());
+
+        let instance_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM logical_workflow_instances WHERE logical_job_id = $1",
+        )
+        .bind(fixture.first_job.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(instance_count, 256);
+        Ok(())
+    })
+    .await
+}
+
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn zero_instance_publications_preserve_condition_distinction() -> TestResult {

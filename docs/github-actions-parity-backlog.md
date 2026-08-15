@@ -519,18 +519,19 @@ ID, but the corresponding runtime context/default variables remain missing.
 - [ ] Test queued, leased, running, and completed cells.
 - [ ] Test fail-fast while a sibling lease is being accepted.
 - [ ] Test fail-fast during runner loss.
-- [ ] Test dynamic matrices from previous job outputs.
-- [ ] Test invalid `fromJSON`.
-- [ ] Test empty matrices.
-- [ ] Test include-only matrices.
-- [ ] Test duplicate matrix combinations.
-- [ ] Test `include` object merging.
-- [ ] Test combinations introduced solely by `include`.
-- [ ] Test `exclude` matching.
+- [x] Test dynamic matrices from previous job outputs.
+- [x] Test invalid `fromJSON`.
+- [x] Test empty matrices and empty axes.
+- [x] Test include-only matrices.
+- [x] Test duplicate matrix combinations without digest-based deduplication.
+- [x] Test `include` object merging.
+- [x] Test combinations introduced solely by `include`.
+- [x] Test `exclude` matching and include-after-exclude ordering.
 - [ ] Support expressions nested inside matrix array or object values if GitHub
   accepts them.
-- [ ] Enforce the 256-job matrix limit exactly.
-- [ ] Match matrix numbering and strategy context.
+- [x] Enforce the 256-job matrix limit exactly before activation publication.
+- [x] Match deterministic zero-based matrix numbering, totals, and strategy
+  context at activation.
 - [ ] Support matrices on reusable-workflow call jobs.
 - [ ] Implement exact matrix-output merge behavior.
 - [ ] Test completion-order effects on matrix outputs.
