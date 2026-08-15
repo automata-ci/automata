@@ -145,6 +145,30 @@ job.
 Additional provider work remains listed in the
 [implementation plan](https://github.com/automata-ci/automata/blob/main/docs/implementation-plan.md#provider-scope).
 
+## Repository action cache
+
+Linux runners resolve credential-free repository actions pinned to one
+canonical lowercase 40-character Git commit without consuming the GitHub REST
+API quota. The first resolution downloads the immutable GitHub archive,
+performs the normal bounded archive inspection, and publishes the verified
+content-addressed bytes to the configured shared object store. Each runner also
+retains a verified local copy under its private journal state root. A warm job
+therefore reads local disk first and falls back to the shared object store; it
+does not contact GitHub again.
+
+The local archive cache is bounded to 256 entries, 512 MiB total, and 16 MiB per
+compressed archive. Its sibling reference index is crash-durable and retains at
+most 4,096 exact references. Both are recreated automatically and require no
+separate operator configuration or migration. Removing either cache directory
+only discards acceleration data; the next exact public resolution repopulates
+it from shared storage or GitHub.
+
+This fast path is deliberately narrower than general repository action
+resolution. Tags, branches, noncanonical commit spellings, and every request
+carrying a repository credential bypass both reference reuse and the public
+archive cache. Private and internal actions therefore cannot inherit authority
+from an older cache entry.
+
 ## Configure a host
 
 The complete configuration, certificate, spool, object-storage, network, and
