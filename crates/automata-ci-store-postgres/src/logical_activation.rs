@@ -23,11 +23,12 @@ use automata_ci_store::{
     LogicalActivationExecutionContext, LogicalActivationGeneration,
     LogicalActivationPreparationStoreError, LogicalActivationPreparationTarget,
     LogicalActivationPublicationReceipt, LogicalActivationRepository, LogicalActivationStoreError,
-    LogicalWorkflowInvocationId, MIN_LOGICAL_WORK_SELECTION_HANDOFF_MILLIS, ObjectKey,
-    PublishLogicalJobActivation, RenewLogicalJobActivation, RenewedLogicalJobActivation,
-    RepositoryId, ReusableWorkflowPermissionSnapshot, ReusableWorkflowRuntimeStoreError,
-    SelectedLogicalJobOrchestration, StoreError, TenantScope, WorkflowRuntimePolicyPin,
-    WorkflowRuntimePolicyRevision,
+    LogicalJobSchedulingPolicyScope, LogicalWorkflowInvocationId,
+    MIN_LOGICAL_WORK_SELECTION_HANDOFF_MILLIS, ObjectKey, PublishLogicalJobActivation,
+    RenewLogicalJobActivation, RenewedLogicalJobActivation, RepositoryId,
+    ResolvedLogicalJobSchedulingPolicy, ReusableWorkflowPermissionSnapshot,
+    ReusableWorkflowRuntimeStoreError, SelectedLogicalJobOrchestration, StoreError, TenantScope,
+    WorkflowRuntimePolicyPin, WorkflowRuntimePolicyRevision,
 };
 
 #[allow(clippy::too_many_lines)] // The trait transaction keeps its security-relevant lock order visible.
@@ -54,6 +55,38 @@ impl LogicalActivationRepository for PostgresStore {
                 "reusable permission lookup returned an invalid state",
             )),
         })
+    }
+
+    async fn resolved_logical_job_scheduling_policy(
+        &self,
+        scope: &LogicalJobSchedulingPolicyScope,
+    ) -> Result<Option<ResolvedLogicalJobSchedulingPolicy>, LogicalActivationStoreError> {
+        let row = sqlx::query(
+            r"
+            SELECT publication.scheduling_policy_schema,
+                   publication.requested_max_parallel,
+                   publication.effective_max_parallel,
+                   publication.instance_count
+            FROM logical_workflow_activation_publications AS publication
+            JOIN logical_workflow_runs AS run
+              ON run.run_id = publication.run_id
+            WHERE run.tenant_id = $1
+              AND publication.run_id = $2
+              AND publication.invocation_id = $3
+              AND publication.logical_job_id = $4
+            ",
+        )
+        .bind(scope.tenant().as_str())
+        .bind(scope.run_id().as_uuid())
+        .bind(scope.invocation_id().as_uuid())
+        .bind(scope.logical_job_id().as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(operation_error)?;
+        row.as_ref()
+            .map(|row| decode_scheduling_policy(row, scope))
+            .transpose()
+            .map_err(LogicalActivationStoreError::from)
     }
 
     async fn renew_logical_job_activation(
@@ -1333,8 +1366,13 @@ async fn insert_publication(
             activation_claimed_at_ms, activation_expires_at_ms,
             condition_matched, instance_count, job_ir_version,
             runtime_context_schema, published_at_ms,
-            runtime_policy_revision, runtime_policy_digest
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            runtime_policy_revision, runtime_policy_digest,
+            scheduling_policy_schema, requested_max_parallel,
+            effective_max_parallel
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+            $18,$19,$20
+        )
         ",
     )
     .bind(request.claim().run_id().as_uuid())
@@ -1364,10 +1402,54 @@ async fn insert_publication(
             .as_bytes()
             .as_slice(),
     )
+    .bind(current_durable_schemas().logical_job_scheduling_policy_i16)
+    .bind(
+        request
+            .scheduling_policy()
+            .requested_max_parallel()
+            .map(i64::from),
+    )
+    .bind(i32::from(
+        request.scheduling_policy().effective_max_parallel(),
+    ))
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
     Ok(())
+}
+
+pub(super) fn decode_scheduling_policy(
+    row: &PgRow,
+    scope: &LogicalJobSchedulingPolicyScope,
+) -> Result<ResolvedLogicalJobSchedulingPolicy, StoreError> {
+    let corrupt = || StoreError::corrupt_data("invalid durable logical-job scheduling policy");
+    let schema = row
+        .try_get::<i16, _>("scheduling_policy_schema")
+        .map_err(StoreError::operation)?;
+    if schema != current_durable_schemas().logical_job_scheduling_policy_i16 {
+        return Err(corrupt());
+    }
+    let requested = row
+        .try_get::<Option<i64>, _>("requested_max_parallel")
+        .map_err(StoreError::operation)?
+        .map(|value| u32::try_from(value).map_err(|_| corrupt()))
+        .transpose()?;
+    let instance_count = usize::try_from(
+        row.try_get::<i32, _>("instance_count")
+            .map_err(StoreError::operation)?,
+    )
+    .map_err(|_| corrupt())?;
+    let effective = u16::try_from(
+        row.try_get::<i32, _>("effective_max_parallel")
+            .map_err(StoreError::operation)?,
+    )
+    .map_err(|_| corrupt())?;
+    let policy = ResolvedLogicalJobSchedulingPolicy::new(scope.clone(), requested, instance_count)
+        .map_err(|_| corrupt())?;
+    if policy.effective_max_parallel() != effective {
+        return Err(corrupt());
+    }
+    Ok(policy)
 }
 
 async fn insert_instance(
@@ -1464,7 +1546,9 @@ async fn verify_exact_publication(
                activation_claimed_at_ms, activation_expires_at_ms,
                condition_matched, instance_count, job_ir_version,
                runtime_context_schema, published_at_ms,
-               runtime_policy_revision, runtime_policy_digest
+               runtime_policy_revision, runtime_policy_digest,
+               scheduling_policy_schema, requested_max_parallel,
+               effective_max_parallel
         FROM logical_workflow_activation_publications
         WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
         ",
@@ -1531,7 +1615,9 @@ async fn verify_exact_publication(
         && row
             .try_get::<i64, _>("published_at_ms")
             .map_err(operation_error)?
-            == request.published_at().get();
+            == request.published_at().get()
+        && decode_scheduling_policy(&row, request.scheduling_policy().scope())?
+            == *request.scheduling_policy();
     if !exact_output {
         return Err(LogicalActivationStoreError::PublicationConflict);
     }

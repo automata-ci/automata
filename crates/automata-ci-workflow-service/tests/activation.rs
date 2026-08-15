@@ -485,6 +485,7 @@ fn static_matrix_expands_in_axis_order_with_github_include_exclude_semantics() {
 
     assert!(activation.condition_matched());
     assert_eq!(activation.instances().len(), 4);
+    assert_eq!(activation.requested_max_parallel(), Some(2));
     let matrices = activation
         .instances()
         .iter()
@@ -622,6 +623,7 @@ fn implicit_success_skips_failed_needs_but_explicit_status_condition_can_activat
         .expect("skip");
     assert!(!activation.condition_matched());
     assert!(activation.instances().is_empty());
+    assert_eq!(activation.requested_max_parallel(), None);
 
     let condition = expression("${{ always() }}", vec![ExpressionContext::Needs]);
     let explicit_job = job(None, &["prepare"], Some(condition), None);
@@ -641,6 +643,7 @@ fn implicit_success_skips_failed_needs_but_explicit_status_condition_can_activat
         .expect("explicit condition");
     assert!(activation.condition_matched());
     assert_eq!(activation.instances().len(), 1);
+    assert_eq!(activation.requested_max_parallel(), None);
     assert_eq!(
         activation.instances()[0].runtime_context().matrix(),
         &ContextValue::empty_object()
@@ -707,6 +710,7 @@ fn whole_dynamic_matrix_preserves_object_axis_order_and_is_deterministic() {
         .expect("second");
     assert_eq!(first, second);
     assert_eq!(first.instances().len(), 3);
+    assert_eq!(first.requested_max_parallel(), None);
     assert_eq!(
         string_property(first.instances()[0].runtime_context().matrix(), "runtime"),
         Some("stable")

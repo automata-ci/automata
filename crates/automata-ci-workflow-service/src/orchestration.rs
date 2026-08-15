@@ -20,7 +20,7 @@ use automata_ci_store::{
     LogicalActivationStoreError, LogicalActivationValueError, LogicalActivationWorkerId,
     LogicalWorkQuarantineKind, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, PinnedWorkflowRuntimePolicy, PublishLogicalJobActivation,
-    ReusableSecretPermission, StoreError, TenantScope,
+    ResolvedLogicalJobSchedulingPolicy, ReusableSecretPermission, StoreError, TenantScope,
 };
 use automata_ci_workflow_github::{GithubRunnerProfileCatalog, GithubRunnerProfileMapping};
 use bytes::Bytes;
@@ -728,10 +728,18 @@ impl GithubLogicalJobOrchestrationService {
         if published_at >= claim.expires_at() {
             return Err(AutonomousWorkflowLeaseError::DeadlineElapsed);
         }
-        let Ok(publication) = PublishLogicalJobActivation::new(
+        let Ok(scheduling_policy) = ResolvedLogicalJobSchedulingPolicy::for_claim(
+            &claim,
+            activation.requested_max_parallel(),
+            descriptors.len(),
+        ) else {
+            return Ok(activation_relational_failure());
+        };
+        let Ok(publication) = PublishLogicalJobActivation::new_with_scheduling_policy(
             claim,
             activation.condition_matched(),
             descriptors,
+            scheduling_policy,
             published_at,
         ) else {
             return Ok(activation_relational_failure());

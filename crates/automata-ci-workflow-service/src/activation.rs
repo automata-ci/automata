@@ -797,6 +797,7 @@ impl ActivatedJobResources {
 pub struct LogicalJobActivation {
     condition_matched: bool,
     instances: Vec<ActivatedJobInstance>,
+    requested_max_parallel: Option<u32>,
 }
 
 impl LogicalJobActivation {
@@ -810,6 +811,14 @@ impl LogicalJobActivation {
     #[must_use]
     pub fn instances(&self) -> &[ActivatedJobInstance] {
         &self.instances
+    }
+
+    /// Returns the exact positive `strategy.max-parallel` value resolved at
+    /// activation, or `None` when the option was omitted or strategy
+    /// evaluation was short-circuited by a false job condition.
+    #[must_use]
+    pub const fn requested_max_parallel(&self) -> Option<u32> {
+        self.requested_max_parallel
     }
 }
 
@@ -867,6 +876,7 @@ where
             return Ok(LogicalJobActivation {
                 condition_matched: false,
                 instances: Vec::new(),
+                requested_max_parallel: None,
             });
         }
         let strategy = Self::resolve_strategy(request, &base_context, &session)?;
@@ -874,6 +884,7 @@ where
             return Ok(LogicalJobActivation {
                 condition_matched: true,
                 instances: Vec::new(),
+                requested_max_parallel: strategy.max_parallel,
             });
         }
         if strategy.matrices.len() > strategy.expansion_limit {
@@ -915,7 +926,7 @@ where
             return Ok(ResolvedActivationStrategy {
                 matrices: vec![MatrixCombination::default()],
                 fail_fast: true,
-                max_parallel: Some(1),
+                max_parallel: None,
                 expansion_limit: 1,
                 has_strategy: false,
             });
@@ -961,6 +972,8 @@ where
             expansion_limit,
             has_strategy,
         } = resolved;
+
+        let requested_max_parallel = max_parallel;
 
         let total = u32::try_from(matrices.len()).map_err(|_| {
             LogicalActivationError::MatrixExpansionLimitExceeded {
@@ -1057,6 +1070,7 @@ where
         Ok(LogicalJobActivation {
             condition_matched: true,
             instances,
+            requested_max_parallel,
         })
     }
 }

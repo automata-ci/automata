@@ -21,13 +21,14 @@ use automata_ci_store::{
     JobEnvironmentActivationEvidence, JobEventTrust, JobSourceKind, LogicalActivationObject,
     LogicalActivationPreparationStore as _, LogicalActivationPreparationTarget,
     LogicalActivationRepository as _, LogicalActivationStoreError, LogicalActivationWorkerId,
-    LogicalJobOrchestrationSelectionOutcome, LogicalWorkSelectionId,
-    LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
-    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
-    ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, RenewLogicalJobActivation, ReusableSecretPermission, TenantScope,
+    LogicalJobOrchestrationSelectionOutcome, LogicalJobSchedulingPolicyScope,
+    LogicalWorkSelectionId, LogicalWorkSelectionRepository as _,
+    LogicalWorkflowAdmissionRepository as _, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
+    LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, PublishLogicalJobActivation, RenewLogicalJobActivation,
+    ResolvedLogicalJobSchedulingPolicy, ReusableSecretPermission, TenantScope,
     WORKFLOW_ADMISSION_EPOCH, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use uuid::Uuid;
@@ -839,10 +840,11 @@ fn publication_with_changed_environment_evidence(
                 original_evidence.source_kind(),
                 original_evidence.reusable_secret_permission(),
             ));
-    PublishLogicalJobActivation::new(
+    PublishLogicalJobActivation::new_with_scheduling_policy(
         publication.claim().clone(),
         publication.condition_matched(),
         instances,
+        publication.scheduling_policy().clone(),
         publication.published_at(),
     )
     .expect("evidence-only publication change")
@@ -880,13 +882,92 @@ fn publication_with_changed_job_ir_reference(
     .expect("content-reference-only publication change");
     let mut instances = publication.instances().to_vec();
     instances[0] = changed_descriptor;
-    PublishLogicalJobActivation::new(
+    PublishLogicalJobActivation::new_with_scheduling_policy(
         publication.claim().clone(),
         publication.condition_matched(),
         instances,
+        publication.scheduling_policy().clone(),
         publication.published_at(),
     )
     .expect("changed content reference publication")
+}
+
+async fn assert_scheduling_policy_roundtrip_and_conflict(
+    database: &TestDatabase,
+    claimed: &ClaimedLogicalJobActivation,
+    publication: &PublishLogicalJobActivation,
+    scheduling_policy: &ResolvedLogicalJobSchedulingPolicy,
+) -> TestResult<LogicalJobSchedulingPolicyScope> {
+    let scheduling_scope = LogicalJobSchedulingPolicyScope::for_claim(claimed.claim());
+    assert_eq!(
+        database
+            .store()
+            .resolved_logical_job_scheduling_policy(&scheduling_scope)
+            .await?,
+        Some(scheduling_policy.clone())
+    );
+
+    let changed_policy = ResolvedLogicalJobSchedulingPolicy::for_claim(
+        claimed.claim(),
+        Some(2),
+        publication.instances().len(),
+    )
+    .expect("changed scheduling policy");
+    let changed_policy_publication = PublishLogicalJobActivation::new_with_scheduling_policy(
+        claimed.claim().clone(),
+        true,
+        publication.instances().to_vec(),
+        changed_policy,
+        publication.published_at(),
+    )
+    .expect("changed-policy publication");
+    assert_ne!(
+        changed_policy_publication.output_digest(),
+        publication.output_digest(),
+        "the resolved scheduling policy must authenticate the publication root"
+    );
+    assert!(matches!(
+        database
+            .store()
+            .publish_logical_job_activation(changed_policy_publication)
+            .await,
+        Err(LogicalActivationStoreError::PublicationConflict)
+    ));
+    Ok(scheduling_scope)
+}
+
+async fn corrupt_scheduling_policy_and_assert_read_fails(
+    database: &TestDatabase,
+    logical_job_id: LogicalWorkflowJobId,
+    scheduling_scope: &LogicalJobSchedulingPolicyScope,
+) -> TestResult {
+    sqlx::query(
+        "ALTER TABLE logical_workflow_activation_publications DISABLE TRIGGER \
+         logical_workflow_activation_publications_reject_update",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "ALTER TABLE logical_workflow_activation_publications DROP CONSTRAINT \
+         logical_workflow_activation_publications_parallel_resolution_exact",
+    )
+    .execute(database.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE logical_workflow_activation_publications \
+         SET effective_max_parallel = 2 WHERE logical_job_id = $1",
+    )
+    .bind(logical_job_id.as_uuid())
+    .execute(database.pool())
+    .await?;
+    assert!(matches!(
+        database
+            .store()
+            .resolved_logical_job_scheduling_policy(scheduling_scope)
+            .await,
+        Err(LogicalActivationStoreError::Store(_))
+    ));
+    Ok(())
 }
 
 #[tokio::test]
@@ -1011,10 +1092,17 @@ async fn concurrent_publication_replays_exact_descriptors_and_nothing_runnable()
             instance(&claimed, 0, 2, 2_000, 100).with_environment_gate(gate_evidence.clone()),
             instance(&claimed, 1, 2, 2_000, 110).with_environment_gate(gate_evidence),
         ];
-        let publication = PublishLogicalJobActivation::new(
+        let scheduling_policy = ResolvedLogicalJobSchedulingPolicy::for_claim(
+            claimed.claim(),
+            Some(1),
+            instances.len(),
+        )
+        .expect("resolved scheduling policy");
+        let publication = PublishLogicalJobActivation::new_with_scheduling_policy(
             claimed.claim().clone(),
             true,
             instances,
+            scheduling_policy.clone(),
             UnixMillis::new(database_now_ms(&database).await?),
         )
         .expect("publication");
@@ -1029,6 +1117,16 @@ async fn concurrent_publication_replays_exact_descriptors_and_nothing_runnable()
         assert_ne!(left.is_replay(), right.is_replay());
         assert_eq!(left.output_digest(), right.output_digest());
         assert_eq!(left.instance_count(), 2);
+        assert_eq!(left.scheduling_policy(), &scheduling_policy);
+        assert_eq!(right.scheduling_policy(), &scheduling_policy);
+
+        let scheduling_scope = assert_scheduling_policy_roundtrip_and_conflict(
+            &database,
+            &claimed,
+            &publication,
+            &scheduling_policy,
+        )
+        .await?;
 
         assert_environment_evidence_contract(&database, &publication).await?;
 
@@ -1050,6 +1148,13 @@ async fn concurrent_publication_replays_exact_descriptors_and_nothing_runnable()
             Err(LogicalActivationStoreError::PublicationConflict)
         ));
         assert_published_instances(&database, &fixture, left.output_digest()).await?;
+
+        corrupt_scheduling_policy_and_assert_read_fails(
+            &database,
+            fixture.first_job,
+            &scheduling_scope,
+        )
+        .await?;
         Ok(())
     })
     .await

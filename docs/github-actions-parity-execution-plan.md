@@ -224,6 +224,11 @@ Run in parallel:
   contract-first sequence.
 - X: `RES-01` and `CHECK-01` contract work.
 
+Scheduling status: `MAT-01` and the Wave 1 contract portion of `MAT-02` are
+complete. The resolved `max-parallel` policy now survives activation
+publication, restart-readable PostgreSQL storage, and exact replay; enforcing
+that capacity during selection remains in Wave 2.
+
 Exit criteria:
 
 - [ ] fork and Dependabot authority is reduced correctly;

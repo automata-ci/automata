@@ -169,7 +169,8 @@ product path.
   expression extension provider.
 - [ ] Enforce `strategy.fail-fast`; it is evaluated but not consumed by
   scheduling.
-- [ ] Enforce `strategy.max-parallel`; it is evaluated but does not throttle
+- [ ] Enforce `strategy.max-parallel`; its resolved requested/effective policy
+  is now digest-bound and persisted relationally, but it does not throttle
   leases.
 - [x] Resolve status-function parser/evaluator inconsistencies:
   - [x] accept only pinned-runner arities, including lazy nonzero arguments for
@@ -512,6 +513,8 @@ ID, but the corresponding runtime context/default variables remain missing.
 
 - [ ] Enforce `strategy.fail-fast`.
 - [ ] Enforce `strategy.max-parallel`.
+- [x] Persist the resolved requested/effective `max-parallel` contract with an
+  exact logical-job scope and a restart-readable store seam.
 - [ ] Cancel remaining matrix siblings after a non-tolerated failure.
 - [ ] Respect per-cell `continue-on-error` during fail-fast decisions.
 - [ ] Persist throttling state across orchestrator restarts.

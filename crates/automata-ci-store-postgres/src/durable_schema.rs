@@ -4,9 +4,9 @@ use automata_ci_core::{
 };
 
 use automata_ci_store::{
-    HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, LOGICAL_ORCHESTRATION_SCHEMA, WORKFLOW_ADMISSION_EPOCH,
-    WORKFLOW_PLAN_SCHEMA, WORKFLOW_WORKSPACE_DERIVATION_VERSION,
-    adapter_spi::secret_custody_canary_schema_version,
+    HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA,
+    LOGICAL_ORCHESTRATION_SCHEMA, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
+    WORKFLOW_WORKSPACE_DERIVATION_VERSION, adapter_spi::secret_custody_canary_schema_version,
 };
 
 /// Database-width values for the durable formats accepted by current Store readers.
@@ -20,6 +20,7 @@ pub(super) struct CurrentDurableSchemas {
     pub(super) core_i32: i32,
     pub(super) job_ir_i16: i16,
     pub(super) job_ir_i32: i32,
+    pub(super) logical_job_scheduling_policy_i16: i16,
     pub(super) logical_orchestration_i16: i16,
     pub(super) runtime_context_i16: i16,
     pub(super) runner_requirements_i16: i16,
@@ -41,6 +42,8 @@ pub(super) fn current_durable_schemas() -> CurrentDurableSchemas {
         job_ir_i16: i16::try_from(JOB_IR_SCHEMA_VERSION)
             .expect("current JobIR schema fits PostgreSQL SMALLINT"),
         job_ir_i32: i32::from(JOB_IR_SCHEMA_VERSION),
+        logical_job_scheduling_policy_i16: i16::try_from(LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA)
+            .expect("current logical-job scheduling-policy schema fits PostgreSQL SMALLINT"),
         logical_orchestration_i16: i16::try_from(LOGICAL_ORCHESTRATION_SCHEMA)
             .expect("current logical-orchestration schema fits PostgreSQL SMALLINT"),
         runtime_context_i16: i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION)
@@ -73,9 +76,9 @@ mod tests {
 
     use super::{current_durable_schemas, is_current_secret_custody_canary_schema};
     use automata_ci_store::{
-        HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, LOGICAL_ORCHESTRATION_SCHEMA,
-        WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA, WORKFLOW_WORKSPACE_DERIVATION_VERSION,
-        adapter_spi::secret_custody_canary_schema_version,
+        HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA,
+        LOGICAL_ORCHESTRATION_SCHEMA, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
+        WORKFLOW_WORKSPACE_DERIVATION_VERSION, adapter_spi::secret_custody_canary_schema_version,
     };
 
     #[test]
@@ -96,6 +99,10 @@ mod tests {
             i16::try_from(JOB_IR_SCHEMA_VERSION).expect("test schema fits SMALLINT")
         );
         assert_eq!(schemas.job_ir_i32, i32::from(JOB_IR_SCHEMA_VERSION));
+        assert_eq!(
+            schemas.logical_job_scheduling_policy_i16,
+            i16::try_from(LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA).expect("test schema fits SMALLINT")
+        );
         assert_eq!(
             schemas.logical_orchestration_i16,
             i16::try_from(LOGICAL_ORCHESTRATION_SCHEMA).expect("test schema fits SMALLINT")

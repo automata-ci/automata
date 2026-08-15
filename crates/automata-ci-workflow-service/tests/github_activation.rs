@@ -422,12 +422,25 @@ fn positive_integer_strategy_values_require_typed_nonzero_integers() {
     let activation =
         activate(&job, &valid, &BTreeMap::new(), ActivationStatus::Success).expect("integer");
     assert_eq!(activation.instances().len(), 3);
+    assert_eq!(activation.requested_max_parallel(), Some(2));
     assert!(
         activation
             .instances()
             .iter()
             .all(|instance| { instance.runtime_context().strategy().max_parallel() == 2 })
     );
+
+    let empty = inputs(&[
+        ("parallel", ContextValue::string("7")),
+        (
+            "matrix",
+            ContextValue::string(r#"{"item":[1],"exclude":[{"item":1}]}"#),
+        ),
+    ]);
+    let empty_activation = activate(&job, &empty, &BTreeMap::new(), ActivationStatus::Success)
+        .expect("empty dynamic matrix");
+    assert!(empty_activation.instances().is_empty());
+    assert_eq!(empty_activation.requested_max_parallel(), Some(7));
 
     for invalid in ["0", "2.5", "\"2\""] {
         let inputs = inputs(&[
@@ -623,6 +636,7 @@ fn github_matrix_matching_is_case_insensitive_loose_and_directional() {
     )
     .expect("case-insensitive exclude");
     assert!(activation.instances().is_empty());
+    assert_eq!(activation.requested_max_parallel(), None);
 
     let included = inputs(&[(
         "matrix",

@@ -198,12 +198,13 @@ pub use live_log_ticket::{
 pub use logical_activation::{
     ActivatedLogicalInstanceDescriptor, ClaimLogicalJobActivation, ClaimedLogicalJobActivation,
     LOGICAL_ACTIVATION_JOB_IR_MEDIA_TYPE, LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE,
-    LogicalActivationClaimFence, LogicalActivationExecutionContext, LogicalActivationGeneration,
-    LogicalActivationObject, LogicalActivationPublicationReceipt, LogicalActivationRepository,
-    LogicalActivationStoreError, LogicalActivationValueError, LogicalActivationWorkerId,
+    LOGICAL_JOB_SCHEDULING_POLICY_SCHEMA, LogicalActivationClaimFence,
+    LogicalActivationExecutionContext, LogicalActivationGeneration, LogicalActivationObject,
+    LogicalActivationPublicationReceipt, LogicalActivationRepository, LogicalActivationStoreError,
+    LogicalActivationValueError, LogicalActivationWorkerId, LogicalJobSchedulingPolicyScope,
     LogicalWorkflowInstanceId, MAX_LOGICAL_ACTIVATED_INSTANCES,
     MAX_LOGICAL_ACTIVATION_CLAIM_MILLIS, PublishLogicalJobActivation, RenewLogicalJobActivation,
-    RenewedLogicalJobActivation,
+    RenewedLogicalJobActivation, ResolvedLogicalJobSchedulingPolicy,
 };
 pub use logical_activation_preparation::{
     BindLogicalActivationPreparation, ClaimLogicalActivationPreparation,
