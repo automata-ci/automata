@@ -430,7 +430,7 @@ async fn artifact_create_replay_rejects_schema_valid_safety_tampering() -> TestR
                     requested_visibility, effective_visibility,
                     publication_safety_reason, publication_safety_schema
                 ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7, $8, 1, 'application/zip',
+                    $1, $2, $3, $4, $5, $6, $7, $8, 7, 'application/zip',
                     1000, 'secretless', 'public', $9, $10, 1
                 )
                 ",
@@ -479,6 +479,11 @@ async fn artifact_create_replay_rejects_noncurrent_publication_safety_schema() -
         )
         .execute(database.pool())
         .await?;
+        sqlx::query(
+            "ALTER TABLE workflow_artifacts DISABLE TRIGGER workflow_artifacts_output_safety_immutable",
+        )
+        .execute(database.pool())
+        .await?;
 
         for schema in [0_i32, 2_i32] {
             sqlx::query(
@@ -497,6 +502,11 @@ async fn artifact_create_replay_rejects_noncurrent_publication_safety_schema() -
                 .expect_err("noncurrent publication-safety schema must fail closed");
             assert_eq!(error.kind(), ArtifactRepositoryErrorKind::CorruptData);
         }
+        sqlx::query(
+            "ALTER TABLE workflow_artifacts ENABLE TRIGGER workflow_artifacts_output_safety_immutable",
+        )
+        .execute(database.pool())
+        .await?;
         Ok(())
     })
     .await
@@ -1516,7 +1526,9 @@ fn create_named_request(
         authority,
         upload_id,
         name: ArtifactName::new(name, 255).expect("artifact name"),
-        version: 1,
+        // Keep the PostgreSQL adapter fixture on the exact protocol accepted by
+        // the production artifact service. This catches schema/service drift.
+        version: 7,
         mime_type: "application/zip".to_owned(),
         expires_at_seconds: None,
         observed_at_seconds: 1_000,
