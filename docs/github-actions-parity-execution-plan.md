@@ -229,6 +229,15 @@ complete. The resolved `max-parallel` policy now survives activation
 publication, restart-readable PostgreSQL storage, and exact replay; enforcing
 that capacity during selection remains in Wave 2.
 
+Provider status: the local `WIN-ISO-01` pre-lease seam now combines the exact
+Hyper-V-container requirement with canonical AUTH-02 trust and a one-use,
+generation-bound server grant that PostgreSQL re-derives under the claim lock.
+It rejects missing or stale evidence and grant-free direct claims without an
+alternate Windows fallback. This is not the signed broker credential or real
+Hyper-V/HCS acceptance evidence. The `PLAT-01` schema/probe foundation is also
+present, while signed image publication, compatibility workload evidence, and
+production-provider enforcement remain open.
+
 Exit criteria:
 
 - [x] fork and Dependabot authority is reduced correctly;
