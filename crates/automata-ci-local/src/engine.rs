@@ -1,20 +1,20 @@
-//! Exact-endpoint Docker Engine adapter for immutable installation identity.
+//! Exact-endpoint Docker Engine adapters for local installation resources.
 
-use std::{collections::BTreeMap, fmt, future::Future, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use bollard::{
-    ClientVersion, Docker, errors::Error as BollardError, models::VolumeCreateRequest,
-    query_parameters::ListContainersOptionsBuilder,
-};
 use thiserror::Error;
 
 use crate::{
-    ApiVersion, DoctorReport, EngineEndpoint, EngineSelection, Installation, InstallationId,
-    InstallationName, capped_adapter_api, normalize_architecture,
+    ApiVersion, DoctorReport, EngineSelection, Installation, InstallationId, InstallationName,
+    capped_adapter_api, normalize_architecture,
 };
 
-const ENGINE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+mod http_engine;
+mod transport;
+
+use http_engine::HttpEngine;
+
 const MANAGED_LABEL_PREFIX: &str = "io.automata.local.";
 const LABEL_MANAGED: &str = "io.automata.local.managed";
 const LABEL_IDENTITY_SCHEMA: &str = "io.automata.local.identity-schema";
@@ -31,8 +31,6 @@ const IDENTITY_ANCHOR_KIND: &str = "identity-anchor";
 pub enum LocalEngineErrorCode {
     /// The supplied doctor report did not pass every mandatory preflight gate.
     PreflightRequired,
-    /// The exact validated local endpoint could not be opened.
-    ConnectionUnavailable,
     /// An Engine API request failed or timed out.
     EngineRequestFailed,
     /// The endpoint no longer identifies the engine selected by preflight.
@@ -54,9 +52,6 @@ impl LocalEngineErrorCode {
         match self {
             Self::PreflightRequired => {
                 "local Docker preflight must be ready before engine mutation"
-            }
-            Self::ConnectionUnavailable => {
-                "the exact Docker endpoint selected by preflight is unavailable"
             }
             Self::EngineRequestFailed => "the Docker Engine request failed",
             Self::EngineIdentityChanged => {
@@ -133,8 +128,8 @@ impl DockerInstallationAdapter {
     ///
     /// # Errors
     ///
-    /// Returns [`LocalEngineError`] when the exact endpoint cannot be opened or
-    /// no longer reports the selected engine facts.
+    /// Returns [`LocalEngineError`] when the first bounded request to the exact
+    /// endpoint fails or it no longer reports the selected engine facts.
     pub async fn connect(report: &DoctorReport) -> Result<Self, LocalEngineError> {
         if !report.ready() {
             return Err(LocalEngineError::new(
@@ -143,12 +138,13 @@ impl DockerInstallationAdapter {
         }
         let selection = report
             .selected_engine()
+            .cloned()
             .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::PreflightRequired))?;
-        let engine = Arc::new(BollardEngine::connect(selection)?);
-        let adapter = Self {
-            engine,
-            selection: selection.clone(),
-        };
+        let api = adapter_api_version(selection.api_version())?;
+        let engine = Arc::new(HttpEngine::connect(selection.connection(), api).map_err(
+            |_error| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse),
+        )?);
+        let adapter = Self { engine, selection };
         adapter.verify_engine().await?;
         Ok(adapter)
     }
@@ -242,44 +238,48 @@ impl DockerInstallationAdapter {
         &self,
         name: &InstallationName,
     ) -> Result<Option<Installation>, LocalEngineError> {
-        let expected = Installation::expected(name);
-        let Some(volume) = self
-            .engine
-            .inspect_volume(&expected.anchor_volume_name)
-            .await
-            .map_err(map_engine_call)?
-        else {
-            return Ok(None);
-        };
-        if volume.name != expected.anchor_volume_name {
-            return Err(LocalEngineError::new(
-                LocalEngineErrorCode::IdentityCollision,
-            ));
-        }
-        if volume.driver != "local" || volume.scope != "local" || !volume.options.is_empty() {
-            return Err(LocalEngineError::new(
-                LocalEngineErrorCode::IdentityCollision,
-            ));
-        }
-        let id = validate_identity_labels(&volume.labels, &expected)?;
-        if self
-            .engine
-            .volume_attachments(&expected.anchor_volume_name)
-            .await
-            .map_err(map_engine_call)?
-            .is_empty()
-        {
-            Ok(Some(Installation::verified(name.clone(), id)))
-        } else {
-            Err(LocalEngineError::new(
-                LocalEngineErrorCode::IdentityAnchorAttached,
-            ))
-        }
+        inspect_verified_identity(self.engine.as_ref(), name).await
     }
 
     #[cfg(test)]
     fn with_test_engine(selection: EngineSelection, engine: Arc<dyn EngineApi>) -> Self {
         Self { engine, selection }
+    }
+}
+
+async fn inspect_verified_identity(
+    engine: &dyn EngineApi,
+    name: &InstallationName,
+) -> Result<Option<Installation>, LocalEngineError> {
+    let expected = Installation::expected(name);
+    let Some(volume) = engine
+        .inspect_volume(&expected.anchor_volume_name)
+        .await
+        .map_err(map_engine_call)?
+    else {
+        return Ok(None);
+    };
+    if volume.name != expected.anchor_volume_name
+        || volume.driver != "local"
+        || volume.scope != "local"
+        || !volume.options.is_empty()
+    {
+        return Err(LocalEngineError::new(
+            LocalEngineErrorCode::IdentityCollision,
+        ));
+    }
+    let id = validate_identity_labels(&volume.labels, &expected)?;
+    if engine
+        .volume_attachments(&expected.anchor_volume_name)
+        .await
+        .map_err(map_engine_call)?
+        .is_empty()
+    {
+        Ok(Some(Installation::verified(name.clone(), id)))
+    } else {
+        Err(LocalEngineError::new(
+            LocalEngineErrorCode::IdentityAnchorAttached,
+        ))
     }
 }
 
@@ -397,154 +397,10 @@ trait EngineApi: Send + Sync {
     async fn volume_attachments(&self, name: &str) -> Result<Vec<String>, EngineApiError>;
 }
 
-struct BollardEngine {
-    docker: Docker,
-}
-
-impl BollardEngine {
-    fn connect(selection: &EngineSelection) -> Result<Self, LocalEngineError> {
-        let api = adapter_api_version(selection.api_version())?;
-        let version = ClientVersion {
-            major_version: usize::from(api.major),
-            minor_version: usize::from(api.minor),
-        };
-        let connection = selection.connection();
-        let docker = connect_exact_endpoint(connection.endpoint(), connection.host(), &version)
-            .map_err(|_error| LocalEngineError::new(LocalEngineErrorCode::ConnectionUnavailable))?;
-        Ok(Self { docker })
-    }
-}
-
-#[cfg(unix)]
-fn connect_exact_endpoint(
-    endpoint: EngineEndpoint,
-    host: &str,
-    version: &ClientVersion,
-) -> Result<Docker, BollardError> {
-    if endpoint != EngineEndpoint::UnixSocket {
-        return Err(BollardError::SocketNotFoundError(host.to_owned()));
-    }
-    Docker::connect_with_unix(host, ENGINE_REQUEST_TIMEOUT.as_secs(), version)
-}
-
-#[cfg(windows)]
-fn connect_exact_endpoint(
-    endpoint: EngineEndpoint,
-    host: &str,
-    version: &ClientVersion,
-) -> Result<Docker, BollardError> {
-    if endpoint != EngineEndpoint::WindowsNamedPipe {
-        return Err(BollardError::SocketNotFoundError(host.to_owned()));
-    }
-    Docker::connect_with_named_pipe(host, ENGINE_REQUEST_TIMEOUT.as_secs(), version)
-}
-
 fn adapter_api_version(selected: &str) -> Result<ApiVersion, LocalEngineError> {
     let selected = ApiVersion::parse(selected)
         .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse))?;
-    capped_adapter_api(selected)
-        .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse))
-}
-
-#[derive(Debug)]
-enum CompleteRequestError {
-    Docker(BollardError),
-    TimedOut,
-}
-
-async fn complete_request<T>(
-    request: impl Future<Output = Result<T, BollardError>>,
-    deadline: Duration,
-) -> Result<T, CompleteRequestError> {
-    tokio::time::timeout(deadline, request)
-        .await
-        .map_err(|_elapsed| CompleteRequestError::TimedOut)?
-        .map_err(CompleteRequestError::Docker)
-}
-
-#[async_trait]
-impl EngineApi for BollardEngine {
-    async fn engine_facts(&self) -> Result<EngineFacts, EngineApiError> {
-        let (info, version) = complete_request(
-            async { tokio::try_join!(self.docker.info(), self.docker.version()) },
-            ENGINE_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(|_error| EngineApiError::RequestFailed)?;
-        let info_version = info.server_version.ok_or(EngineApiError::InvalidResponse)?;
-        let server_version = version.version.ok_or(EngineApiError::InvalidResponse)?;
-        let info_architecture = info.architecture.ok_or(EngineApiError::InvalidResponse)?;
-        let server_architecture = version.arch.ok_or(EngineApiError::InvalidResponse)?;
-        let info_operating_system = info.os_type.ok_or(EngineApiError::InvalidResponse)?;
-        let server_operating_system = version.os.ok_or(EngineApiError::InvalidResponse)?;
-        if info_version != server_version
-            || normalize_architecture(&info_architecture)
-                != normalize_architecture(&server_architecture)
-            || info_operating_system != server_operating_system
-        {
-            return Err(EngineApiError::InvalidResponse);
-        }
-        Ok(EngineFacts {
-            engine_id: info.id.ok_or(EngineApiError::InvalidResponse)?,
-            server_version,
-            minimum_api_version: version
-                .min_api_version
-                .ok_or(EngineApiError::InvalidResponse)?,
-            maximum_api_version: version.api_version.ok_or(EngineApiError::InvalidResponse)?,
-            operating_system: server_operating_system,
-            architecture: server_architecture,
-        })
-    }
-
-    async fn inspect_volume(&self, name: &str) -> Result<Option<InspectedVolume>, EngineApiError> {
-        match complete_request(self.docker.inspect_volume(name), ENGINE_REQUEST_TIMEOUT).await {
-            Ok(volume) => Ok(Some(InspectedVolume {
-                name: volume.name,
-                driver: volume.driver,
-                scope: volume
-                    .scope
-                    .map_or_else(String::new, |scope| scope.to_string()),
-                options: volume.options.into_iter().collect(),
-                labels: volume.labels.into_iter().collect(),
-            })),
-            Err(CompleteRequestError::Docker(BollardError::DockerResponseServerError {
-                status_code: 404,
-                ..
-            })) => Ok(None),
-            Err(_error) => Err(EngineApiError::RequestFailed),
-        }
-    }
-
-    async fn create_volume(&self, request: CreateVolume) -> Result<(), EngineApiError> {
-        let request = VolumeCreateRequest {
-            name: Some(request.name),
-            driver: Some("local".to_owned()),
-            driver_opts: Some(std::collections::HashMap::new()),
-            labels: Some(request.labels.into_iter().collect()),
-            cluster_volume_spec: None,
-        };
-        complete_request(self.docker.create_volume(request), ENGINE_REQUEST_TIMEOUT)
-            .await
-            .map(|_untrusted_response| ())
-            .map_err(|_error| EngineApiError::RequestFailed)
-    }
-
-    async fn volume_attachments(&self, name: &str) -> Result<Vec<String>, EngineApiError> {
-        let filters = std::collections::HashMap::from([("volume", vec![name])]);
-        let options = ListContainersOptionsBuilder::new()
-            .all(true)
-            .filters(&filters)
-            .build();
-        complete_request(
-            self.docker.list_containers(Some(options)),
-            ENGINE_REQUEST_TIMEOUT,
-        )
-        .await
-        .map_err(|_error| EngineApiError::RequestFailed)?
-        .into_iter()
-        .map(|container| container.id.ok_or(EngineApiError::InvalidResponse))
-        .collect()
-    }
+    Ok(capped_adapter_api(selected))
 }
 
 #[cfg(test)]

@@ -1,9 +1,9 @@
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, num::NonZeroU16, time::Duration};
 
 use automata_ci_core::JobIrEnvelope;
 use automata_ci_execution::{
     ExecutionEnvironment, ImmutableImage, NetworkPolicy, ProviderCapabilities, ResourceLimits,
-    RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxLaunch,
+    RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxGeneration, SandboxLaunch,
     SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBindings, ServiceContainerSpec,
     ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
     ServiceTransportProtocol, TargetPath,
@@ -144,6 +144,11 @@ pub(super) fn sandbox_spec(
     let mut spec = SandboxSpec::new(
         operation_id,
         generation,
+        SandboxCustody::Job {
+            runner_id: request.lease().runner_id(),
+            slot_ordinal: NonZeroU16::new(request.slot().get())
+                .expect("runner slot ordinals are non-zero"),
+        },
         request.environment().clone(),
         workspace.clone(),
         config.network(),

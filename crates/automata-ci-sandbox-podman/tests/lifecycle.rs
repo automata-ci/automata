@@ -3,6 +3,7 @@
 use crate::support;
 
 use std::{
+    num::NonZeroU16,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -14,9 +15,9 @@ use automata_ci_execution::{
     CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox, EnvironmentName,
     EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
     ExecutionErrorKind, ExecutionSignal, NetworkPolicy, NeverCancelled, OperationId,
-    ProviderErrorKind, RootFilesystemPolicy, SandboxCapability, SandboxGeneration,
-    SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState, SignalRequest, TargetPath,
-    WaitRequest,
+    ProviderErrorKind, RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody,
+    SandboxGeneration, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState,
+    SignalRequest, TargetPath, WaitRequest,
 };
 use automata_ci_sandbox_podman::{
     CommandOutput, PodmanCommandExecutor, PodmanHostGatewayAlias, PodmanLaunchTrust,
@@ -581,6 +582,7 @@ fn writable_ephemeral_rootfs_is_explicit_and_retains_isolation_controls() {
     let spec = SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(1).expect("generation"),
+        baseline.custody(),
         baseline.profile().clone(),
         baseline.workspace().clone(),
         NetworkPolicy::PrivateEgress,
@@ -723,6 +725,95 @@ fn conflicting_spec_and_foreign_ownership_fail_closed() {
             .all(|command| !semantic(command).iter().any(|value| value == "rm"))
     );
     assert!(!fixture.fake.is_empty());
+}
+
+#[test]
+fn recovery_reports_custody_and_rejects_wrong_runner_slot_and_old_resource_schema() {
+    let fixture = Fixture::new("custody-runner");
+    let spec = sample_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create current custody resources");
+    assert_eq!(
+        fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("inspect current custody")
+            .custody(),
+        spec.custody()
+    );
+
+    let wrong_runner = RunnerId::new();
+    fixture
+        .fake
+        .replace_custody("profile-admission", wrong_runner, 0);
+    assert_eq!(
+        fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("custody remains directly inspectable")
+            .custody(),
+        SandboxCustody::ProfileAdmission {
+            runner_id: wrong_runner,
+        }
+    );
+    let wrong_runner = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("create replay must reject a wrong runner label");
+    assert_eq!(wrong_runner.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let fixture = Fixture::new("custody-slot");
+    let baseline = sample_spec(OperationId::new());
+    let runner_id = RunnerId::new();
+    let spec = SandboxSpec::new(
+        baseline.operation_id(),
+        baseline.generation(),
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        },
+        baseline.profile().clone(),
+        baseline.workspace().clone(),
+        baseline.network(),
+        baseline.root_filesystem(),
+        baseline.resources(),
+    );
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create slot test resources");
+    fixture.fake.replace_custody("job", runner_id, 1);
+    assert_eq!(
+        fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("wrong slot remains explicit recovery evidence")
+            .custody(),
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+        }
+    );
+    let wrong_slot = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("create replay must reject a wrong slot label");
+    assert_eq!(wrong_slot.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let fixture = Fixture::new("custody-schema");
+    let spec = sample_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create schema test resources");
+    fixture.fake.replace_resource_schema("1");
+    let old_schema = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("schema-1 Podman resources must not recover");
+    assert_eq!(old_schema.kind(), ProviderErrorKind::InvalidState);
 }
 
 #[test]

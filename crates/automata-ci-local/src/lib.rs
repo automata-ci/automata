@@ -1045,8 +1045,7 @@ fn validate_version(
         .get("MinAPIVersion")
         .and_then(|value| ApiVersion::parse(value))
         .ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
-    let adapter_api =
-        capped_adapter_api(client_api).ok_or(DoctorIssueCode::UnsupportedDockerApi)?;
+    let adapter_api = capped_adapter_api(client_api);
     if client_api < MIN_DOCKER_API
         || adapter_api < MIN_DOCKER_API
         || server_api < client_api
@@ -1086,12 +1085,14 @@ impl ApiVersion {
     }
 }
 
-fn capped_adapter_api(selected: ApiVersion) -> Option<ApiVersion> {
+fn capped_adapter_api(selected: ApiVersion) -> ApiVersion {
+    // Keep this in lockstep with the bounded request/response models in
+    // `engine::transport`; raising it requires extending those models first.
     let supported = ApiVersion {
-        major: u16::try_from(bollard::API_DEFAULT_VERSION.major_version).ok()?,
-        minor: u16::try_from(bollard::API_DEFAULT_VERSION.minor_version).ok()?,
+        major: 1,
+        minor: 53,
     };
-    Some(selected.min(supported))
+    selected.min(supported)
 }
 
 const fn normalize_architecture(value: &str) -> Option<EngineArchitecture> {

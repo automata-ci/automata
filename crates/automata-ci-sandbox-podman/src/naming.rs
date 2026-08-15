@@ -1,14 +1,16 @@
-use std::{fmt::Write as _, str::FromStr as _};
+use std::{fmt::Write as _, num::NonZeroU16, str::FromStr as _};
 
 use automata_ci_execution::{
-    EnvironmentProfile, EnvironmentProfileId, OperationId, ProviderId, SandboxGeneration,
-    SandboxHandle, Sha256Digest,
+    EnvironmentProfile, EnvironmentProfileId, OperationId, ProviderId, RunnerId, SandboxCustody,
+    SandboxGeneration, SandboxHandle, Sha256Digest,
 };
 
 use crate::{PODMAN_PROVIDER_ID, provider_error};
 use sha2::{Digest as _, Sha256};
 
-const HANDLE_VERSION: &str = "p1";
+const HANDLE_VERSION: &str = "p2";
+const RESOURCE_SCHEMA_LABEL_KEY: &str = "io.automata.sandbox-schema";
+const RESOURCE_SCHEMA: &str = "2";
 const OWNER_LABEL_KEY: &str = "io.automata.owner";
 const OWNER_LABEL_VALUE: &str = "automata-runner";
 const SANDBOX_LABEL_KEY: &str = "io.automata.sandbox";
@@ -16,6 +18,9 @@ const GENERATION_LABEL_KEY: &str = "io.automata.generation";
 const PROFILE_LABEL_KEY: &str = "io.automata.profile";
 const PROFILE_DIGEST_LABEL_KEY: &str = "io.automata.profile-sha256";
 const SPEC_LABEL_KEY: &str = "io.automata.spec-sha256";
+const CUSTODY_KIND_LABEL_KEY: &str = "io.automata.custody-kind";
+const CUSTODY_RUNNER_LABEL_KEY: &str = "io.automata.custody-runner";
+const CUSTODY_SLOT_LABEL_KEY: &str = "io.automata.custody-slot";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceNames {
@@ -139,14 +144,28 @@ impl ResourceNames {
         &self,
         profile: &EnvironmentProfile,
         spec_fingerprint: &str,
+        custody: SandboxCustody,
     ) -> Vec<String> {
+        let (custody_kind, custody_runner, custody_slot) = match custody {
+            SandboxCustody::ProfileAdmission { runner_id } => {
+                ("profile-admission", runner_id.to_string(), "0".to_owned())
+            }
+            SandboxCustody::Job {
+                runner_id,
+                slot_ordinal,
+            } => ("job", runner_id.to_string(), slot_ordinal.get().to_string()),
+        };
         vec![
             format!("{OWNER_LABEL_KEY}={OWNER_LABEL_VALUE}"),
+            format!("{RESOURCE_SCHEMA_LABEL_KEY}={RESOURCE_SCHEMA}"),
             format!("{SANDBOX_LABEL_KEY}={}", self.identifier),
             format!("{GENERATION_LABEL_KEY}={}", self.generation.get()),
             format!("{PROFILE_LABEL_KEY}={}", profile.id().as_str()),
             format!("{PROFILE_DIGEST_LABEL_KEY}={}", profile.digest()),
             format!("{SPEC_LABEL_KEY}={spec_fingerprint}"),
+            format!("{CUSTODY_KIND_LABEL_KEY}={custody_kind}"),
+            format!("{CUSTODY_RUNNER_LABEL_KEY}={custody_runner}"),
+            format!("{CUSTODY_SLOT_LABEL_KEY}={custody_slot}"),
         ]
     }
 
@@ -167,6 +186,7 @@ pub(crate) struct OwnershipLabels {
 impl OwnershipLabels {
     pub(crate) fn matches(&self, inspection: &InspectedLabels) -> bool {
         inspection.owner == OWNER_LABEL_VALUE
+            && inspection.schema == RESOURCE_SCHEMA
             && inspection.sandbox == self.sandbox
             && inspection.generation == self.generation
     }
@@ -175,11 +195,13 @@ impl OwnershipLabels {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InspectedLabels {
     owner: String,
+    schema: String,
     sandbox: String,
     generation: String,
     profile: String,
     profile_digest: String,
     spec_fingerprint: String,
+    custody: SandboxCustody,
     state: Option<String>,
 }
 
@@ -188,16 +210,21 @@ impl InspectedLabels {
         let value = std::str::from_utf8(bytes).ok()?;
         let mut lines = value.lines();
         let owner = lines.next()?.to_owned();
+        let schema = lines.next()?.to_owned();
         let sandbox = lines.next()?.to_owned();
         let generation = lines.next()?.to_owned();
         let profile = lines.next()?.to_owned();
         let profile_digest = lines.next()?.to_owned();
         let spec_fingerprint = lines.next()?.to_owned();
+        let custody_kind = lines.next()?;
+        let custody_runner = lines.next()?;
+        let custody_slot = lines.next()?;
         let state = includes_state
             .then(|| lines.next().map(str::to_owned))
             .flatten();
         if lines.next().is_some()
             || owner.len() > 64
+            || schema != RESOURCE_SCHEMA
             || sandbox.len() > 64
             || generation.len() > 32
             || profile.len() > 128
@@ -213,13 +240,25 @@ impl InspectedLabels {
         {
             return None;
         }
+        let runner_id = RunnerId::from_str(custody_runner).ok()?;
+        let slot = custody_slot.parse::<u16>().ok()?;
+        let custody = match custody_kind {
+            "profile-admission" if slot == 0 => SandboxCustody::ProfileAdmission { runner_id },
+            "job" => SandboxCustody::Job {
+                runner_id,
+                slot_ordinal: NonZeroU16::new(slot)?,
+            },
+            _ => return None,
+        };
         Some(Self {
             owner,
+            schema,
             sandbox,
             generation,
             profile,
             profile_digest,
             spec_fingerprint,
+            custody,
             state,
         })
     }
@@ -237,6 +276,10 @@ impl InspectedLabels {
     pub(crate) fn spec_fingerprint(&self) -> &str {
         &self.spec_fingerprint
     }
+
+    pub(crate) const fn custody(&self) -> SandboxCustody {
+        self.custody
+    }
 }
 
 pub(crate) fn label_format(container: bool, include_state: bool) -> String {
@@ -247,11 +290,15 @@ pub(crate) fn label_format(container: bool, include_state: bool) -> String {
     };
     let mut format = format!(
         "{{{{ index {prefix} \"{OWNER_LABEL_KEY}\" }}}}\n\
+         {{{{ index {prefix} \"{RESOURCE_SCHEMA_LABEL_KEY}\" }}}}\n\
          {{{{ index {prefix} \"{SANDBOX_LABEL_KEY}\" }}}}\n\
          {{{{ index {prefix} \"{GENERATION_LABEL_KEY}\" }}}}\n\
          {{{{ index {prefix} \"{PROFILE_LABEL_KEY}\" }}}}\n\
          {{{{ index {prefix} \"{PROFILE_DIGEST_LABEL_KEY}\" }}}}\n\
-         {{{{ index {prefix} \"{SPEC_LABEL_KEY}\" }}}}"
+         {{{{ index {prefix} \"{SPEC_LABEL_KEY}\" }}}}\n\
+         {{{{ index {prefix} \"{CUSTODY_KIND_LABEL_KEY}\" }}}}\n\
+         {{{{ index {prefix} \"{CUSTODY_RUNNER_LABEL_KEY}\" }}}}\n\
+         {{{{ index {prefix} \"{CUSTODY_SLOT_LABEL_KEY}\" }}}}"
     );
     if include_state {
         format.push_str("\n{{.State.Status}}");
@@ -272,7 +319,7 @@ mod tests {
         )
         .handle();
 
-        for version in ["p0", "p2"] {
+        for version in ["p0", "p1", "p3"] {
             let opaque = current.opaque().replacen(HANDLE_VERSION, version, 1);
             let handle = SandboxHandle::new(provider.clone(), opaque).expect("well-formed handle");
             assert!(

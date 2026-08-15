@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     future::Future,
+    num::NonZeroU16,
     ops::Deref,
     pin::Pin,
     sync::{
@@ -25,8 +26,9 @@ use automata_ci_execution::{
     Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
     ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionTermination,
     NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind, RootFilesystemPolicy,
-    SandboxCapability, SandboxGeneration, SandboxHandle, SandboxLaunch, SandboxProvider,
-    SandboxState, ServiceContainerBindings, ServiceContainerSpecs, TargetPath, TargetPlatform,
+    SandboxCapability, SandboxCustody, SandboxGeneration, SandboxHandle, SandboxLaunch,
+    SandboxProvider, SandboxState, ServiceContainerBindings, ServiceContainerSpecs, TargetPath,
+    TargetPlatform,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -4705,6 +4707,11 @@ impl GithubJobExecutor {
         let cancellation = CancellationBridge(cancellation);
         let generation = SandboxGeneration::new(request.lease().fencing_token().get())
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
+        let expected_custody = SandboxCustody::Job {
+            runner_id: request.lease().runner_id(),
+            slot_ordinal: NonZeroU16::new(request.slot().get())
+                .expect("runner slot ordinals are non-zero"),
+        };
         let handle = if let Some(recovered) = request.recovered_sandbox() {
             if recovered.provider().as_str() != self.ports.provider.provider_id().as_str() {
                 return Err(ExecutorAdapterError::new(
@@ -4722,6 +4729,7 @@ impl GithubJobExecutor {
                 .inspect(&handle, &cancellation)
                 .map_err(|error| map_provider_error(&error))?;
             if inspection.generation() != generation
+                || inspection.custody() != expected_custody
                 || inspection.profile() != request.environment().attestation()
                 || inspection.state() != SandboxState::Running
             {

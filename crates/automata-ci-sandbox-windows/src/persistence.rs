@@ -6,13 +6,17 @@ use std::{
     path::Path,
 };
 
-use automata_ci_execution::{EnvironmentProfile, OperationId};
+use automata_ci_execution::{EnvironmentProfile, OperationId, SandboxCustody};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-const LOCK_FILE_NAME: &str = ".automata-windows-hyperv-v1.lock";
-const JOURNAL_FILE_NAME: &str = ".automata-windows-hyperv-v1.events";
-const DURABLE_SCHEMA: u32 = 1;
+const LOCK_FILE_NAME: &str = ".automata-windows-hyperv-v2.lock";
+const JOURNAL_FILE_NAME: &str = ".automata-windows-hyperv-v2.events";
+const LEGACY_STATE_NAMES: [&str; 2] = [
+    ".automata-windows-hyperv-v1.lock",
+    ".automata-windows-hyperv-v1.events",
+];
+const DURABLE_SCHEMA: u32 = 2;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -33,6 +37,7 @@ pub(crate) struct DurableCreate {
     pub(crate) operation_id: OperationId,
     pub(crate) fingerprint: String,
     pub(crate) handle: String,
+    pub(crate) custody: SandboxCustody,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -52,6 +57,7 @@ pub(crate) struct DurableDestroyRequest {
     pub(crate) handle: String,
     pub(crate) generation: u64,
     pub(crate) profile: EnvironmentProfile,
+    pub(crate) custody: SandboxCustody,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -67,6 +73,7 @@ pub(crate) struct DurableEntry {
     pub(crate) handle: String,
     pub(crate) generation: u64,
     pub(crate) profile: EnvironmentProfile,
+    pub(crate) custody: SandboxCustody,
     pub(crate) container: String,
     pub(crate) fingerprint: String,
     pub(crate) phase: DurableEntryPhase,
@@ -86,6 +93,7 @@ pub(crate) struct DurableTombstone {
     pub(crate) handle: String,
     pub(crate) generation: u64,
     pub(crate) profile: EnvironmentProfile,
+    pub(crate) custody: SandboxCustody,
     pub(crate) completed_sequence: u64,
 }
 
@@ -128,6 +136,13 @@ pub(crate) struct LifecycleJournal {
 
 impl LifecycleJournal {
     pub(crate) fn open(root: &Path) -> io::Result<(Self, DurableSnapshot)> {
+        for name in LEGACY_STATE_NAMES {
+            match std::fs::symlink_metadata(root.join(name)) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidData)),
+                Err(error) => return Err(error),
+            }
+        }
         let lock = open_exclusive_regular(&root.join(LOCK_FILE_NAME), true, false)?;
         let mut journal = open_exclusive_regular(&root.join(JOURNAL_FILE_NAME), true, false)?;
         if journal.metadata()?.len() > MAX_JOURNAL_BYTES {
@@ -325,6 +340,7 @@ fn apply_create(
 ) -> io::Result<()> {
     if create.handle != entry.handle
         || create.fingerprint != entry.fingerprint
+        || create.custody != entry.custody
         || entry.phase != DurableEntryPhase::Intent
         || snapshot.creates.contains_key(&create.operation_id)
         || snapshot.entries.contains_key(&entry.handle)
@@ -371,6 +387,7 @@ fn apply_destroy_intent(
         )
         || entry.generation != request.generation
         || entry.profile != request.profile
+        || entry.custody != request.custody
     {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
@@ -397,6 +414,7 @@ fn apply_destroy_complete(
     if entry.phase != DurableEntryPhase::Destroying
         || entry.generation != request.generation
         || entry.profile != request.profile
+        || entry.custody != request.custody
         || snapshot.tombstones.contains_key(&request.handle)
     {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
@@ -407,6 +425,7 @@ fn apply_destroy_complete(
             handle: request.handle.clone(),
             generation: request.generation,
             profile: request.profile,
+            custody: request.custody,
             completed_sequence: sequence,
         },
     );
@@ -438,6 +457,7 @@ fn apply_destroy_absent(
         || snapshot.destroys.contains_key(&request.operation_id)
         || tombstone.generation != request.generation
         || tombstone.profile != request.profile
+        || tombstone.custody != request.custody
     {
         return Err(io::Error::from(io::ErrorKind::InvalidData));
     }
@@ -462,9 +482,11 @@ fn event_checksum(sequence: u64, event: &DurableEvent) -> io::Result<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs, io::Write as _, path::PathBuf};
+    use std::{env, fs, io::Write as _, num::NonZeroU16, path::PathBuf};
 
-    use automata_ci_execution::{EnvironmentProfileId, SandboxGeneration, Sha256Digest};
+    use automata_ci_execution::{
+        EnvironmentProfileId, RunnerId, SandboxCustody, SandboxGeneration, Sha256Digest,
+    };
 
     use super::*;
 
@@ -473,21 +495,85 @@ mod tests {
         let root = TestRoot::new("schema");
         let (journal, _) = LifecycleJournal::open(&root.0).expect("initialize journal");
         drop(journal);
-        let event = create_event();
-        let sequence = 1;
-        let mut bytes = serde_json::to_vec(&EventRecord {
-            schema: DURABLE_SCHEMA.checked_add(1).expect("next schema"),
-            sequence,
-            checksum: event_checksum(sequence, &event).expect("checksum"),
-            event,
-        })
-        .expect("record");
-        bytes.push(b'\n');
-        fs::write(root.0.join(JOURNAL_FILE_NAME), bytes).expect("replace journal");
-        assert!(matches!(
-            LifecycleJournal::open(&root.0),
-            Err(error) if error.kind() == io::ErrorKind::InvalidData
-        ));
+        for schema in [DURABLE_SCHEMA - 1, DURABLE_SCHEMA + 1] {
+            let event = create_event();
+            let sequence = 1;
+            let mut bytes = serde_json::to_vec(&EventRecord {
+                schema,
+                sequence,
+                checksum: event_checksum(sequence, &event).expect("checksum"),
+                event,
+            })
+            .expect("record");
+            bytes.push(b'\n');
+            fs::write(root.0.join(JOURNAL_FILE_NAME), bytes).expect("replace journal");
+            assert!(matches!(
+                LifecycleJournal::open(&root.0),
+                Err(error) if error.kind() == io::ErrorKind::InvalidData
+            ));
+        }
+    }
+
+    #[test]
+    fn prior_generation_state_files_are_rejected_without_migration() {
+        for (ordinal, legacy_name) in LEGACY_STATE_NAMES.iter().enumerate() {
+            let root = TestRoot::new(&format!("legacy-file-{ordinal}"));
+            fs::write(root.0.join(legacy_name), b"schema-1 state\n")
+                .expect("write prior state file");
+            assert!(matches!(
+                LifecycleJournal::open(&root.0),
+                Err(error) if error.kind() == io::ErrorKind::InvalidData
+            ));
+            assert!(!root.0.join(JOURNAL_FILE_NAME).exists());
+        }
+    }
+
+    #[test]
+    fn lifecycle_reopen_rejects_wrong_runner_and_slot_custody() {
+        let runner_id = RunnerId::new();
+        let expected = SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        };
+        for (label, observed) in [
+            (
+                "runner",
+                SandboxCustody::Job {
+                    runner_id: RunnerId::new(),
+                    slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+                },
+            ),
+            (
+                "slot",
+                SandboxCustody::Job {
+                    runner_id,
+                    slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+                },
+            ),
+        ] {
+            let root = TestRoot::new(&format!("custody-{label}"));
+            let mut event = create_event();
+            let DurableEvent::CreateIntent { create, entry } = &mut event else {
+                panic!("create fixture event");
+            };
+            create.custody = expected;
+            entry.custody = observed;
+            let sequence = 1;
+            let mut bytes = serde_json::to_vec(&EventRecord {
+                schema: DURABLE_SCHEMA,
+                sequence,
+                checksum: event_checksum(sequence, &event).expect("event checksum"),
+                event,
+            })
+            .expect("event record");
+            bytes.push(b'\n');
+            fs::write(root.0.join(JOURNAL_FILE_NAME), bytes).expect("write journal");
+
+            assert!(matches!(
+                LifecycleJournal::open(&root.0),
+                Err(error) if error.kind() == io::ErrorKind::InvalidData
+            ));
+        }
     }
 
     #[test]
@@ -534,7 +620,7 @@ mod tests {
         let operation_id = OperationId::new();
         let generation = SandboxGeneration::new(1).expect("generation");
         let handle = format!(
-            "wh1_{}_{}",
+            "wh2_{}_{}",
             operation_id.as_uuid().simple(),
             generation.get()
         );
@@ -542,16 +628,21 @@ mod tests {
             EnvironmentProfileId::new("automata.dev/windows-wal-test-v1").expect("profile"),
             Sha256Digest::from_bytes([0x57; 32]),
         );
+        let custody = SandboxCustody::ProfileAdmission {
+            runner_id: RunnerId::new(),
+        };
         DurableEvent::CreateIntent {
             create: DurableCreate {
                 operation_id,
                 fingerprint: "11".repeat(32),
                 handle: handle.clone(),
+                custody,
             },
             entry: DurableEntry {
                 handle,
                 generation: generation.get(),
                 profile,
+                custody,
                 container: format!(
                     "automata-windows-hyperv-{}",
                     operation_id.as_uuid().simple()

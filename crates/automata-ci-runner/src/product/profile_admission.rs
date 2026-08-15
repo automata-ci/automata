@@ -5,14 +5,14 @@ use std::{
     time::Duration,
 };
 
-use automata_ci_core::JobResourceAllocation;
+use automata_ci_core::{JobResourceAllocation, RunnerId};
 use automata_ci_execution::{
     Cancellation, CopyToRequest, DestroyDisposition, DestroySandbox, EnvironmentProfile,
     ExecutionArgv, ExecutionCommand, ExecutionError, ExecutionErrorKind, ExecutionStage,
     ExecutionTermination, NetworkPolicy, OperationId, OperationOutcome, ProviderError,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
-    SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState, TargetPath,
-    TargetPlatform,
+    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxEnvironment,
+    SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec,
+    SandboxState, TargetPath, TargetPlatform,
 };
 use automata_ci_job_executor_github::{WindowsScriptShell, windows_script_arguments};
 use uuid::Uuid;
@@ -523,6 +523,7 @@ impl Error for ProfileAdmissionError {
 
 pub(super) fn admit_environment_profiles(
     provider: &dyn SandboxProvider,
+    runner_id: RunnerId,
     environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
     policy: ProfileAdmissionPolicy,
     cancellation: &ProbeCancellation,
@@ -539,6 +540,7 @@ pub(super) fn admit_environment_profiles(
     })?;
     let context = ProfileAdmissionContext {
         provider,
+        runner_id,
         policy,
         generation,
         probe_attempt,
@@ -567,6 +569,7 @@ pub(super) fn admit_environment_profiles(
 
 struct ProfileAdmissionContext<'context> {
     provider: &'context dyn SandboxProvider,
+    runner_id: RunnerId,
     policy: ProfileAdmissionPolicy,
     generation: SandboxGeneration,
     probe_attempt: Option<OperationId>,
@@ -601,6 +604,9 @@ impl ProfileAdmissionContext<'_> {
         let mut spec = SandboxSpec::new(
             operation_ids.create,
             self.generation,
+            SandboxCustody::ProfileAdmission {
+                runner_id: self.runner_id,
+            },
             environment.clone(),
             workspace.clone(),
             self.policy.network,
@@ -739,6 +745,10 @@ impl ProfileAdmissionContext<'_> {
         if inspection.handle() != record.handle()
             || inspection.handle().provider() != self.provider.provider_id()
             || inspection.generation() != self.generation
+            || inspection.custody()
+                != (SandboxCustody::ProfileAdmission {
+                    runner_id: self.runner_id,
+                })
             || inspection.profile() != environment.attestation()
             || inspection.state() != SandboxState::Running
         {
@@ -1235,7 +1245,10 @@ impl Cancellation for CleanupCancellation<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        num::NonZeroU16,
+        sync::{Arc, Mutex},
+    };
 
     use automata_ci_execution::{
         CopyFromRequest, ExecutionEndpoint, ExecutionEnvironment, ExecutionOutput,
@@ -1246,6 +1259,10 @@ mod tests {
 
     use super::*;
 
+    fn runner_id() -> RunnerId {
+        RunnerId::from_uuid(Uuid::from_u128(0x8fe5_8afb_3922_4299_a540_4da9_bfa4_25d6))
+    }
+
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     enum FakeBehavior {
         #[default]
@@ -1253,6 +1270,7 @@ mod tests {
         CreateFailureWithRecovery,
         CreateState(SandboxState),
         InspectState(SandboxState),
+        InspectCustody(SandboxCustody),
         DestroyInitiallyAbsent,
         DestroyUncertainOnce,
         CancelAfterCreate(u8),
@@ -1276,7 +1294,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeState {
         calls: Vec<Call>,
-        resources: BTreeMap<SandboxHandle, (SandboxGeneration, EnvironmentProfile)>,
+        resources: BTreeMap<SandboxHandle, (SandboxGeneration, SandboxCustody, EnvironmentProfile)>,
     }
 
     #[derive(Debug)]
@@ -1354,7 +1372,11 @@ mod tests {
             state.calls.push(Call::Create(Box::new(spec.clone())));
             state.resources.insert(
                 handle.clone(),
-                (spec.generation(), spec.profile().attestation().clone()),
+                (
+                    spec.generation(),
+                    spec.custody(),
+                    spec.profile().attestation().clone(),
+                ),
             );
             drop(state);
             let cancel_after_create = match self.behavior {
@@ -1430,10 +1452,16 @@ mod tests {
                 ));
             }
             let state = self.state.lock().expect("fake state");
-            let (generation, profile) = state.resources.get(handle).expect("owned resource");
+            let (generation, custody, profile) =
+                state.resources.get(handle).expect("owned resource");
+            let custody = match self.behavior {
+                FakeBehavior::InspectCustody(custody) => custody,
+                _ => *custody,
+            };
             Ok(SandboxInspection::new(
                 handle.clone(),
                 *generation,
+                custody,
                 profile.clone(),
                 match self.behavior {
                     FakeBehavior::InspectState(state) => state,
@@ -1811,7 +1839,13 @@ mod tests {
         let profiles = BTreeMap::from([(attestation, environment)]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, linux_tool_policy(), &signals),
+            admit_environment_profiles(
+                &provider,
+                runner_id(),
+                &profiles,
+                linux_tool_policy(),
+                &signals,
+            ),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         let calls = provider.calls();
@@ -1933,9 +1967,14 @@ mod tests {
             let (profile, sandbox) = environment("linux-tools", profile_digest(0x57), 0x68);
             let profiles = BTreeMap::from([(profile, sandbox)]);
 
-            let error =
-                admit_environment_profiles(&provider, &profiles, linux_tool_policy(), &signals)
-                    .expect_err("Linux profile tools require the complete sandbox boundary");
+            let error = admit_environment_profiles(
+                &provider,
+                runner_id(),
+                &profiles,
+                linux_tool_policy(),
+                &signals,
+            )
+            .expect_err("Linux profile tools require the complete sandbox boundary");
             assert_eq!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidProviderEvidence
@@ -1997,7 +2036,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         assert_eq!(provider.resource_count(), 0);
@@ -2014,6 +2053,12 @@ mod tests {
             assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Administrator);
             assert_eq!(spec.resources(), policy().resources);
             assert_eq!(spec.generation().get(), ADMISSION_GENERATION);
+            assert_eq!(
+                spec.custody(),
+                SandboxCustody::ProfileAdmission {
+                    runner_id: runner_id(),
+                }
+            );
             let Call::Inspect(inspected) = &calls[1] else {
                 panic!("profile create must be inspected")
             };
@@ -2035,7 +2080,7 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         let second_ids: Vec<_> = provider.calls()[calls.len()..]
@@ -2103,7 +2148,7 @@ mod tests {
         .expect("Hyper-V container admission policy");
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy, &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         let calls = provider.calls();
@@ -2256,8 +2301,9 @@ mod tests {
             .expect("capabilities with one required boundary omitted");
             let (profiles, policy) = windows_hyperv_fixture();
 
-            let error = admit_environment_profiles(&provider, &profiles, policy, &signals)
-                .expect_err("every isolated boundary must be explicitly advertised");
+            let error =
+                admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals)
+                    .expect_err("every isolated boundary must be explicitly advertised");
             assert_eq!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidProviderEvidence
@@ -2282,8 +2328,9 @@ mod tests {
             let provider = FakeProvider::new(behavior, signals.clone());
             let (profiles, policy) = windows_hyperv_fixture();
 
-            let error = admit_environment_profiles(&provider, &profiles, policy, &signals)
-                .expect_err("invalid shell evidence must reject admission");
+            let error =
+                admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals)
+                    .expect_err("invalid shell evidence must reject admission");
             assert_eq!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidExecutionEvidence
@@ -2338,8 +2385,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::CreateFailureWithRecovery, signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0x31), 0x41)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("create failure cannot admit profile");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("create failure cannot admit profile");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::CreateFailed);
         assert_eq!(
             error.cleanup_status(),
@@ -2354,15 +2402,29 @@ mod tests {
 
     #[test]
     fn invalid_create_and_inspection_evidence_are_cleaned() {
+        let expected_runner = runner_id();
         for behavior in [
             FakeBehavior::CreateState(SandboxState::Created),
             FakeBehavior::InspectState(SandboxState::Degraded),
+            FakeBehavior::InspectCustody(SandboxCustody::ProfileAdmission {
+                runner_id: RunnerId::new(),
+            }),
+            FakeBehavior::InspectCustody(SandboxCustody::Job {
+                runner_id: expected_runner,
+                slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+            }),
         ] {
             let signals = ProbeCancellation::default();
             let provider = FakeProvider::new(behavior, signals.clone());
             let profiles = BTreeMap::from([environment("linux", profile_digest(0x51), 0x61)]);
-            let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-                .expect_err("invalid lifecycle evidence cannot admit profile");
+            let error = admit_environment_profiles(
+                &provider,
+                expected_runner,
+                &profiles,
+                policy(),
+                &signals,
+            )
+            .expect_err("invalid lifecycle evidence cannot admit profile");
             assert!(matches!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidCreateEvidence
@@ -2383,7 +2445,7 @@ mod tests {
         let profiles = BTreeMap::from([environment("linux", profile_digest(0x71), 0x81)]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Cancelled)
         );
         assert_eq!(provider.resource_count(), 0);
@@ -2399,8 +2461,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::CancelAfterCreate(2), signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0x91), 0xa1)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("forced cancellation may interrupt cleanup but cannot hide it");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("forced cancellation may interrupt cleanup but cannot hide it");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::InspectFailed);
         assert_eq!(
             error.cleanup_status(),
@@ -2419,8 +2482,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::InspectAndDestroyFailure, signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0xb1), 0xc1)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("cleanup failure cannot admit profile");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("cleanup failure cannot admit profile");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::InspectFailed);
         assert_eq!(
             error.cleanup_status(),
@@ -2442,8 +2506,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::DestroyInitiallyAbsent, signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0xc1), 0xd1)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("an initially absent destroy target invalidates lifecycle evidence");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("an initially absent destroy target invalidates lifecycle evidence");
         assert_eq!(
             error.kind(),
             ProfileAdmissionErrorKind::InvalidDestroyEvidence
@@ -2462,7 +2527,7 @@ mod tests {
         let profiles = BTreeMap::from([environment("linux", profile_digest(0xc7), 0xd7)]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         assert_eq!(provider.resource_count(), 0);
@@ -2487,8 +2552,9 @@ mod tests {
             environment("linux", colliding_digest, 0xf1),
         ]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("colliding replay coordinates must fail before create");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("colliding replay coordinates must fail before create");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::InvalidCatalog);
         assert_eq!(
             error.cleanup_status(),

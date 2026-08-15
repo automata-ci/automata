@@ -14,10 +14,10 @@ use automata_ci_execution::{
     Cancellation, ContainerHandle, DestroyDisposition, DestroySandbox, EnvironmentProfile,
     ExecutionEnvironment, NetworkPolicy, NeverCancelled, OperationOutcome, ProviderCapabilities,
     ProviderError, ProviderErrorKind, ProviderId, ProviderStage, RootFilesystemPolicy,
-    SandboxCapability, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider,
-    SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings,
-    ServiceContainerSpec, ServiceHealthPolicy, ServiceNetwork, ServicePortBinding,
-    ServiceTransportProtocol,
+    SandboxCapability, SandboxCustody, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy,
+    SandboxProvider, SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding,
+    ServiceContainerBindings, ServiceContainerSpec, ServiceHealthPolicy, ServiceNetwork,
+    ServicePortBinding, ServiceTransportProtocol,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -433,7 +433,7 @@ impl PodmanInner {
             self.options.service_proxy_image(),
             self.options.buildkit_runtime(),
         );
-        let labels = names.labels(spec.profile().attestation(), &fingerprint);
+        let labels = names.labels(spec.profile().attestation(), &fingerprint, spec.custody());
         let labels = ProvisionLabels {
             arguments: &labels,
             fingerprint: &fingerprint,
@@ -520,6 +520,11 @@ impl PodmanInner {
             cancellation,
         )?;
         let inspection = self.inspect_with_deadline(&handle, deadline, cancellation)?;
+        if inspection.custody() != spec.custody() {
+            return Err(provider_error::ownership_mismatch(
+                ProviderStage::VerifyOwnership,
+            ));
+        }
         finish_create(&inspection, handle)
     }
 
@@ -2123,6 +2128,7 @@ impl PodmanInner {
         }
         let labels = [network.as_deref(), pod.as_deref(), container.as_deref()];
         let profile = consistent_profile(labels)?;
+        let custody = consistent_custody(labels)?;
         let core_fingerprint = ensure_consistent_fingerprint(labels)?;
         let workspace = self
             .state
@@ -2174,6 +2180,7 @@ impl PodmanInner {
         Ok(SandboxInspection::new(
             handle.clone(),
             names.generation(),
+            custody,
             profile,
             state,
         ))
@@ -4280,6 +4287,19 @@ fn consistent_profile(
     Ok(profile)
 }
 
+fn consistent_custody(
+    present: [Option<&InspectedLabels>; 3],
+) -> Result<SandboxCustody, ProviderError> {
+    let mut observed = present.iter().flatten().map(|labels| labels.custody());
+    let custody = observed
+        .next()
+        .ok_or_else(|| provider_error::invalid_state(ProviderStage::Inspect))?;
+    if observed.any(|other| other != custody) {
+        return Err(provider_error::ownership_mismatch(ProviderStage::Inspect));
+    }
+    Ok(custody)
+}
+
 fn ensure_consistent_fingerprint(
     present: [Option<&InspectedLabels>; 3],
 ) -> Result<String, ProviderError> {
@@ -4380,6 +4400,8 @@ fn spec_fingerprint(
     buildkit_runtime: Option<&crate::BuildKitRuntime>,
 ) -> String {
     let mut hasher = Sha256::new();
+    hash_field(&mut hasher, b"automata-podman-sandbox-spec-v2");
+    hash_custody(&mut hasher, spec.custody());
     hash_field(&mut hasher, spec.profile().id().as_str().as_bytes());
     hash_field(&mut hasher, spec.profile().digest().as_bytes());
     hash_field(
@@ -4457,7 +4479,7 @@ fn spec_fingerprint(
     hash_field(
         &mut hasher,
         &u64::try_from(spec.services().len())
-            .unwrap_or(u64::MAX)
+            .expect("service count fits in u64")
             .to_be_bytes(),
     );
     for (alias, service) in spec.services().iter() {
@@ -4466,7 +4488,7 @@ fn spec_fingerprint(
         hash_field(
             &mut hasher,
             &u64::try_from(service.environment().values().len())
-                .unwrap_or(u64::MAX)
+                .expect("service environment count fits in u64")
                 .to_be_bytes(),
         );
         for variable in service.environment().values() {
@@ -4477,7 +4499,7 @@ fn spec_fingerprint(
         hash_field(
             &mut hasher,
             &u64::try_from(service.ports().len())
-                .unwrap_or(u64::MAX)
+                .expect("service port count fits in u64")
                 .to_be_bytes(),
         );
         for port in service.ports() {
@@ -4494,6 +4516,23 @@ fn spec_fingerprint(
         hash_service_health(&mut hasher, service.health());
     }
     Sha256Digest::from_bytes(hasher.finalize().into()).to_string()
+}
+
+fn hash_custody(hasher: &mut Sha256, custody: SandboxCustody) {
+    match custody {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            hash_field(hasher, b"profile-admission");
+            hash_field(hasher, runner_id.as_uuid().as_bytes());
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => {
+            hash_field(hasher, b"job");
+            hash_field(hasher, runner_id.as_uuid().as_bytes());
+            hash_field(hasher, &slot_ordinal.get().to_be_bytes());
+        }
+    }
 }
 
 fn hash_service_health(hasher: &mut Sha256, health: &ServiceHealthPolicy) {
@@ -4966,7 +5005,11 @@ fn parse_engine_identifiers(bytes: &[u8]) -> Option<Vec<String>> {
 }
 
 fn hash_field(hasher: &mut Sha256, value: &[u8]) {
-    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(
+        u64::try_from(value.len())
+            .expect("sandbox fingerprint fields fit in u64")
+            .to_be_bytes(),
+    );
     hasher.update(value);
 }
 

@@ -51,6 +51,8 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   `.github/workflows` or `.ci/workflows` namespace, and exposes no partial
   product command, admission, execution, GitHub authentication, or Check Run
   path.
+- Sandbox specifications now require one closed runner-custody variant across
+  every provider; job custody includes a mandatory non-zero durable slot.
 
 ### Known limitations
 

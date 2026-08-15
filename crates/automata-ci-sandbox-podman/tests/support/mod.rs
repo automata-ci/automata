@@ -15,8 +15,8 @@ use std::{
 
 use automata_ci_execution::{
     EnvironmentProfile, EnvironmentProfileId, ExecutionArgv, ExecutionEnvironment, ImmutableImage,
-    NetworkPolicy, OperationId, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
-    SandboxGeneration, SandboxSpec, Sha256Digest, TargetPath,
+    NetworkPolicy, OperationId, ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCustody,
+    SandboxEnvironment, SandboxGeneration, SandboxSpec, Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_podman::{
     CommandOutput, CommandRequest, CommandTermination, PodmanBinary, PodmanCommandExecutor,
@@ -24,11 +24,15 @@ use automata_ci_sandbox_podman::{
 };
 
 const OWNER: &str = "io.automata.owner";
+const RESOURCE_SCHEMA: &str = "io.automata.sandbox-schema";
 const SANDBOX: &str = "io.automata.sandbox";
 const GENERATION: &str = "io.automata.generation";
 const PROFILE: &str = "io.automata.profile";
 const PROFILE_DIGEST: &str = "io.automata.profile-sha256";
 const SPEC: &str = "io.automata.spec-sha256";
+const CUSTODY_KIND: &str = "io.automata.custody-kind";
+const CUSTODY_RUNNER: &str = "io.automata.custody-runner";
+const CUSTODY_SLOT: &str = "io.automata.custody-slot";
 const FAKE_INFRA_ID: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
 #[derive(Debug)]
@@ -204,6 +208,49 @@ impl FakePodman {
         }
         for resource in state.containers.values_mut() {
             resource.labels.insert(OWNER.to_owned(), owner.to_owned());
+        }
+    }
+
+    pub(crate) fn replace_custody(&self, kind: &str, runner: RunnerId, slot: u16) {
+        let mut state = self.state.lock().expect("fake lock");
+        let replace = |resource: &mut Resource| {
+            resource
+                .labels
+                .insert(CUSTODY_KIND.to_owned(), kind.to_owned());
+            resource
+                .labels
+                .insert(CUSTODY_RUNNER.to_owned(), runner.to_string());
+            resource
+                .labels
+                .insert(CUSTODY_SLOT.to_owned(), slot.to_string());
+        };
+        if let Some(resource) = state.network.as_mut() {
+            replace(resource);
+        }
+        if let Some(resource) = state.pod.as_mut() {
+            replace(resource);
+        }
+        for resource in state.containers.values_mut() {
+            replace(resource);
+        }
+    }
+
+    pub(crate) fn replace_resource_schema(&self, schema: &str) {
+        let mut state = self.state.lock().expect("fake lock");
+        if let Some(resource) = state.network.as_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
+        }
+        if let Some(resource) = state.pod.as_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
+        }
+        for resource in state.containers.values_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
         }
     }
 
@@ -1367,9 +1414,20 @@ fn option_values<'a>(arguments: &'a [String], option: &'a str) -> impl Iterator<
 }
 
 fn inspect_bytes(resource: &Resource) -> Vec<u8> {
-    let mut values = [OWNER, SANDBOX, GENERATION, PROFILE, PROFILE_DIGEST, SPEC]
-        .map(|key| resource.labels.get(key).cloned().unwrap_or_default())
-        .to_vec();
+    let mut values = [
+        OWNER,
+        RESOURCE_SCHEMA,
+        SANDBOX,
+        GENERATION,
+        PROFILE,
+        PROFILE_DIGEST,
+        SPEC,
+        CUSTODY_KIND,
+        CUSTODY_RUNNER,
+        CUSTODY_SLOT,
+    ]
+    .map(|key| resource.labels.get(key).cloned().unwrap_or_default())
+    .to_vec();
     if let Some(state) = &resource.state {
         values.push(state.clone());
     }
@@ -1511,6 +1569,9 @@ pub(crate) fn sample_spec_with_digest(
     SandboxSpec::new(
         operation_id,
         SandboxGeneration::new(1).expect("generation"),
+        SandboxCustody::ProfileAdmission {
+            runner_id: RunnerId::new(),
+        },
         profile,
         TargetPath::posix("/__w").expect("workspace"),
         network,

@@ -14,9 +14,9 @@ use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, EnvironmentProfile, ExecutionEndpoint,
     NetworkPolicy, OperationId, OperationOutcome, ProviderCapabilities, ProviderError,
     ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy,
-    SandboxCapability, SandboxGeneration, SandboxHandle, SandboxInspection, SandboxLaunch,
-    SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
-    Sha256Digest, TargetPath, TargetPlatform,
+    SandboxCapability, SandboxCustody, SandboxGeneration, SandboxHandle, SandboxInspection,
+    SandboxLaunch, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec,
+    SandboxState, Sha256Digest, TargetPath, TargetPlatform,
 };
 use serde::de::DeserializeOwned;
 use sha2::{Digest as _, Sha256};
@@ -365,6 +365,7 @@ pub(crate) struct SandboxEntry {
     pub(crate) handle: SandboxHandle,
     pub(crate) generation: SandboxGeneration,
     pub(crate) profile: EnvironmentProfile,
+    pub(crate) custody: SandboxCustody,
     pub(crate) workspace: TargetPath,
     pub(crate) scratch: TargetPath,
     pub(crate) operation_lock: Mutex<()>,
@@ -404,6 +405,7 @@ impl SandboxEntry {
         Ok(SandboxInspection::new(
             self.handle.clone(),
             self.generation,
+            self.custody,
             self.profile.clone(),
             self.state().map_err(|()| local(ProviderStage::Inspect))?,
         ))
@@ -447,7 +449,7 @@ impl ProviderInner {
         let fingerprint = spec_fingerprint(spec)?;
         let mut state = self.lock_state(ProviderStage::CreateSandbox)?;
         if let Some(replay) = state.create_operations.get(&spec.operation_id()) {
-            if replay.fingerprint != fingerprint {
+            if replay.fingerprint != fingerprint || replay.custody != spec.custody() {
                 return Err(known(ProviderErrorKind::Conflict, ProviderStage::Validate));
             }
             if let Some(entry) = state.entries.get(&replay.handle).cloned() {
@@ -491,6 +493,7 @@ impl ProviderInner {
             handle: handle.clone(),
             generation: spec.generation(),
             profile: spec.profile().attestation().clone(),
+            custody: spec.custody(),
             workspace: spec.workspace().clone(),
             scratch: scratch.clone(),
             operation_lock: Mutex::new(()),
@@ -504,6 +507,7 @@ impl ProviderInner {
                 operation_id: spec.operation_id(),
                 fingerprint,
                 handle: handle.opaque().to_owned(),
+                custody: spec.custody(),
             },
             entry: durable_entry(&entry, DurableEntryPhase::Intent),
         };
@@ -519,6 +523,7 @@ impl ProviderInner {
             CreateReplay {
                 fingerprint,
                 handle: handle.clone(),
+                custody: spec.custody(),
             },
         );
         state.entries.insert(handle, Arc::clone(&entry));
@@ -621,7 +626,7 @@ impl ProviderInner {
                 ));
             }
             let event = DurableEvent::DestroyAbsent {
-                request: durable_destroy_request(request, &tombstone.profile),
+                request: durable_destroy_request(request, &tombstone.profile, tombstone.custody),
             };
             state.journal.append(event).map_err(|_| {
                 uncertain(
@@ -650,7 +655,7 @@ impl ProviderInner {
                 ProviderStage::VerifyOwnership,
             ));
         }
-        let durable = durable_destroy_request(request, &entry.profile);
+        let durable = durable_destroy_request(request, &entry.profile, entry.custody);
         state
             .journal
             .append(DurableEvent::DestroyIntent { request: durable })
@@ -741,6 +746,7 @@ fn complete_destroy(
             handle: entry.handle.clone(),
             generation: entry.generation,
             profile: entry.profile.clone(),
+            custody: entry.custody,
         },
     );
     state.destroy_operations.insert(
@@ -766,6 +772,7 @@ struct ProviderState {
 struct CreateReplay {
     fingerprint: [u8; 32],
     handle: SandboxHandle,
+    custody: SandboxCustody,
 }
 
 #[derive(Clone)]
@@ -783,6 +790,7 @@ struct Tombstone {
     handle: SandboxHandle,
     generation: SandboxGeneration,
     profile: EnvironmentProfile,
+    custody: SandboxCustody,
 }
 
 impl Tombstone {
@@ -790,6 +798,7 @@ impl Tombstone {
         SandboxInspection::new(
             self.handle.clone(),
             self.generation,
+            self.custody,
             self.profile.clone(),
             SandboxState::Absent,
         )
@@ -926,7 +935,8 @@ fn validate_spec(
 
 fn spec_fingerprint(spec: &SandboxSpec) -> Result<[u8; 32], ProviderError> {
     let mut digest = Sha256::new();
-    fingerprint_field(&mut digest, b"automata-macos-virtualization-spec-v1");
+    fingerprint_field(&mut digest, b"automata-macos-virtualization-spec-v2");
+    fingerprint_custody(&mut digest, spec.custody());
     fingerprint_field(&mut digest, &spec.generation().get().to_le_bytes());
     fingerprint_field(
         &mut digest,
@@ -971,8 +981,29 @@ fn spec_fingerprint(spec: &SandboxSpec) -> Result<[u8; 32], ProviderError> {
     Ok(digest.finalize().into())
 }
 
+fn fingerprint_custody(digest: &mut Sha256, custody: SandboxCustody) {
+    match custody {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            fingerprint_field(digest, b"profile-admission");
+            fingerprint_field(digest, runner_id.as_uuid().as_bytes());
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => {
+            fingerprint_field(digest, b"job");
+            fingerprint_field(digest, runner_id.as_uuid().as_bytes());
+            fingerprint_field(digest, &slot_ordinal.get().to_be_bytes());
+        }
+    }
+}
+
 fn fingerprint_field(digest: &mut Sha256, value: &[u8]) {
-    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    digest.update(
+        u64::try_from(value.len())
+            .expect("sandbox fingerprint fields fit in u64")
+            .to_le_bytes(),
+    );
     digest.update(value);
 }
 
@@ -981,6 +1012,7 @@ fn durable_entry(entry: &SandboxEntry, phase: DurableEntryPhase) -> DurableEntry
         handle: entry.handle.opaque().to_owned(),
         generation: entry.generation.get(),
         profile: entry.profile.clone(),
+        custody: entry.custody,
         workspace: entry.workspace.as_str().to_owned(),
         scratch: entry.scratch.as_str().to_owned(),
         phase,
@@ -990,12 +1022,14 @@ fn durable_entry(entry: &SandboxEntry, phase: DurableEntryPhase) -> DurableEntry
 fn durable_destroy_request(
     request: &DestroySandbox,
     profile: &EnvironmentProfile,
+    custody: SandboxCustody,
 ) -> DurableDestroyRequest {
     DurableDestroyRequest {
         operation_id: request.operation_id(),
         handle: request.handle().opaque().to_owned(),
         generation: request.generation().get(),
         profile: profile.clone(),
+        custody,
     }
 }
 
@@ -1027,7 +1061,17 @@ fn restore_state(
     }
     for durable in snapshot.creates.into_values() {
         let handle = recovered_handle(provider_id, &durable.handle)?;
-        if !(state.entries.contains_key(&handle) || state.tombstones.contains_key(&handle))
+        let observed_custody = state
+            .entries
+            .get(&handle)
+            .map(|entry| entry.custody)
+            .or_else(|| {
+                state
+                    .tombstones
+                    .get(&handle)
+                    .map(|tombstone| tombstone.custody)
+            });
+        if observed_custody != Some(durable.custody)
             || state
                 .create_operations
                 .insert(
@@ -1035,6 +1079,7 @@ fn restore_state(
                     CreateReplay {
                         fingerprint: durable.fingerprint,
                         handle,
+                        custody: durable.custody,
                     },
                 )
                 .is_some()
@@ -1110,6 +1155,7 @@ fn reconcile_orphans(
                 handle: entry.handle.clone(),
                 generation: entry.generation,
                 profile: entry.profile.clone(),
+                custody: entry.custody,
             };
             journal
                 .append_to_snapshot(
@@ -1146,6 +1192,7 @@ fn restored_tombstone(
         handle: recovered_handle(provider_id, &durable.handle)?,
         generation: recovered_generation(durable.generation).map_err(|_| invalid_journal())?,
         profile: durable.profile,
+        custody: durable.custody,
     })
 }
 

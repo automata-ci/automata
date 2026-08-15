@@ -1,18 +1,15 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    future,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
 
 use super::{
-    CompleteRequestError, CreateVolume, DockerInstallationAdapter, EngineApi, EngineApiError,
-    EngineFacts, IDENTITY_ANCHOR_KIND, IDENTITY_SCHEMA, InspectedVolume, LABEL_COMPOSE_PROJECT,
+    CreateVolume, DockerInstallationAdapter, EngineApi, EngineApiError, EngineFacts,
+    IDENTITY_ANCHOR_KIND, IDENTITY_SCHEMA, InspectedVolume, LABEL_COMPOSE_PROJECT,
     LABEL_IDENTITY_SCHEMA, LABEL_INSTALLATION_ID, LABEL_INSTALLATION_KEY, LABEL_MANAGED,
-    LABEL_RESOURCE_KIND, LocalEngineErrorCode, MANAGED_VALUE, adapter_api_version,
-    complete_request, identity_labels,
+    LABEL_RESOURCE_KIND, LocalEngineErrorCode, MANAGED_VALUE, adapter_api_version, identity_labels,
 };
 use crate::{
     ComposeFrontend, DockerConnection, Engine, EngineArchitecture, EngineEndpoint, EngineSelection,
@@ -84,7 +81,6 @@ impl EngineApi for FakeEngine {
             Ok(state.facts.clone())
         }
     }
-
     async fn inspect_volume(&self, name: &str) -> Result<Option<InspectedVolume>, EngineApiError> {
         let mut state = self.state.lock().expect("fake engine lock");
         state.calls.push(Call::Inspect(name.to_owned()));
@@ -164,22 +160,12 @@ fn test_adapter() -> (DockerInstallationAdapter, Arc<FakeEngine>) {
 }
 
 #[test]
-fn adapter_api_is_capped_to_the_bollard_model_ceiling() {
+fn adapter_api_is_capped_to_the_bounded_model_ceiling() {
     let capped = adapter_api_version("1.55").expect("supported selected API");
     assert_eq!((capped.major, capped.minor), (1, 53));
 
     let older = adapter_api_version("1.44").expect("older supported API");
     assert_eq!((older.major, older.minor), (1, 44));
-}
-
-#[tokio::test]
-async fn complete_request_deadline_covers_the_entire_response_future() {
-    let result = complete_request(
-        future::pending::<Result<(), bollard::errors::Error>>(),
-        Duration::ZERO,
-    )
-    .await;
-    assert!(matches!(result, Err(CompleteRequestError::TimedOut)));
 }
 
 #[tokio::test]
@@ -190,7 +176,7 @@ async fn engine_verification_uses_the_capped_adapter_api() {
         adapter
             .inspect_identity(&InstallationName::default())
             .await
-            .expect("Bollard-supported API remains in the daemon range"),
+            .expect("bounded transport API remains in the daemon range"),
         None
     );
 
@@ -500,8 +486,6 @@ fn identity_label_constants_are_not_accidentally_changed() {
 #[tokio::test]
 #[ignore = "requires an explicitly selected live local Docker Engine and removes its exact fixture"]
 async fn live_docker_public_adapter_creates_and_re_adopts_one_exact_anchor() {
-    use bollard::query_parameters::RemoveVolumeOptionsBuilder;
-
     assert_eq!(
         std::env::var("AUTOMATA_TEST_LOCAL_DOCKER").as_deref(),
         Ok("1"),
@@ -533,7 +517,11 @@ async fn live_docker_public_adapter_creates_and_re_adopts_one_exact_anchor() {
     assert_eq!(second.id(), first.id());
 
     let selection = report.selected_engine().expect("ready engine selection");
-    let cleanup_engine = super::BollardEngine::connect(selection).expect("cleanup connection");
+    let cleanup_engine = super::HttpEngine::connect(
+        selection.connection(),
+        adapter_api_version(selection.api_version()).expect("bounded API version"),
+    )
+    .expect("cleanup connection");
     let verified = adapter
         .inspect_identity(&name)
         .await
@@ -541,11 +529,7 @@ async fn live_docker_public_adapter_creates_and_re_adopts_one_exact_anchor() {
         .expect("live anchor exists before cleanup");
     assert_eq!(verified, first);
     cleanup_engine
-        .docker
-        .remove_volume(
-            verified.anchor_volume_name(),
-            Some(RemoveVolumeOptionsBuilder::new().force(false).build()),
-        )
+        .remove_volume_for_test(verified.anchor_volume_name())
         .await
         .expect("remove the exact unattached live fixture");
     assert_eq!(

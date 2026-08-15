@@ -1,4 +1,7 @@
-use std::fmt;
+use std::{fmt, num::NonZeroU16};
+
+use automata_ci_core::{JobResourceAllocation, RunnerId};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     Cancellation, EnvironmentProfile, ExecutionEndpoint, NetworkPolicy, OperationId,
@@ -6,7 +9,39 @@ use crate::{
     SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy,
     ServiceContainerBindings, ServiceContainerSpecs, TargetPath,
 };
-use automata_ci_core::JobResourceAllocation;
+
+/// Runner custody coordinates for one sandbox request.
+///
+/// Environment-profile admission runs before a runner session exists and is
+/// therefore deliberately distinct from a job assigned to one durable slot.
+/// Job custody always carries the exact server-correlated, one-based slot
+/// ordinal; providers must not reconstruct it from configured capacity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SandboxCustody {
+    /// Pre-session lifecycle evidence for one configured runner identity.
+    ProfileAdmission {
+        /// Runner identity whose configured profiles are being admitted.
+        runner_id: RunnerId,
+    },
+    /// One fenced job assigned to an exact stable runner slot.
+    Job {
+        /// Runner identity bound by the accepted lease.
+        runner_id: RunnerId,
+        /// Exact one-based slot from the durable execution request.
+        slot_ordinal: NonZeroU16,
+    },
+}
+
+impl SandboxCustody {
+    /// Returns the exact runner identity that owns the sandbox request.
+    #[must_use]
+    pub const fn runner_id(self) -> RunnerId {
+        match self {
+            Self::ProfileAdmission { runner_id } | Self::Job { runner_id, .. } => runner_id,
+        }
+    }
+}
 
 /// Immutable whole-job sandbox request. The profile is exact and contains no
 /// hosted-label resolution or mutable image reference.
@@ -14,6 +49,7 @@ use automata_ci_core::JobResourceAllocation;
 pub struct SandboxSpec {
     operation_id: OperationId,
     generation: SandboxGeneration,
+    custody: SandboxCustody,
     profile: SandboxEnvironment,
     workspace: TargetPath,
     scratch: Option<TargetPath>,
@@ -33,9 +69,11 @@ impl SandboxSpec {
     /// attested profile, target workspace, network, root-filesystem policy,
     /// and hard resource limits as one request.
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // One constructor binds the complete mandatory sandbox contract.
     pub const fn new(
         operation_id: OperationId,
         generation: SandboxGeneration,
+        custody: SandboxCustody,
         profile: SandboxEnvironment,
         workspace: TargetPath,
         network: NetworkPolicy,
@@ -45,6 +83,7 @@ impl SandboxSpec {
         Self {
             operation_id,
             generation,
+            custody,
             profile,
             workspace,
             scratch: None,
@@ -91,6 +130,12 @@ impl SandboxSpec {
     #[must_use]
     pub const fn generation(&self) -> SandboxGeneration {
         self.generation
+    }
+
+    /// Returns the exact runner and admission-or-job custody coordinates.
+    #[must_use]
+    pub const fn custody(&self) -> SandboxCustody {
+        self.custody
     }
 
     /// Returns the exact content-attested launch environment.
@@ -253,6 +298,7 @@ impl SandboxRecord {
 pub struct SandboxInspection {
     handle: SandboxHandle,
     generation: SandboxGeneration,
+    custody: SandboxCustody,
     profile: EnvironmentProfile,
     state: SandboxState,
 }
@@ -263,12 +309,14 @@ impl SandboxInspection {
     pub const fn new(
         handle: SandboxHandle,
         generation: SandboxGeneration,
+        custody: SandboxCustody,
         profile: EnvironmentProfile,
         state: SandboxState,
     ) -> Self {
         Self {
             handle,
             generation,
+            custody,
             profile,
             state,
         }
@@ -284,6 +332,13 @@ impl SandboxInspection {
     #[must_use]
     pub const fn generation(&self) -> SandboxGeneration {
         self.generation
+    }
+
+    /// Returns the exact runner and admission-or-job custody observed on the
+    /// provider-owned recovery evidence.
+    #[must_use]
+    pub const fn custody(&self) -> SandboxCustody {
+        self.custody
     }
 
     /// Returns the exact environment-profile attestation on the resource.

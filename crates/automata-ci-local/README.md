@@ -37,7 +37,7 @@ exhaustion, special files, and concurrent mutation are rejected.
 worktree containing both namespaces is ambiguous and fails rather than
 preferring or falling back to either one.
 
-The first engine adapter can inspect or create-and-adopt one immutable external
+The installation adapter can inspect or create-and-adopt one immutable external
 identity volume for a named installation. It always post-inspects Docker's
 deterministic volume name, exact Automata-managed labels, local driver/scope,
 empty driver options, and container attachments. It exposes no generic Docker

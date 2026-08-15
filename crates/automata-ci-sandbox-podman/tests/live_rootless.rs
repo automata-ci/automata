@@ -18,10 +18,10 @@ use automata_ci_execution::{
     EnvironmentProfile, EnvironmentProfileId, EnvironmentValue, EnvironmentVariable, ExecutionArgv,
     ExecutionCommand, ExecutionEnvironment, ExecutionErrorKind, ExecutionTermination,
     ImmutableImage, NetworkPolicy, NeverCancelled, OperationId, ProviderErrorKind, ResourceLimits,
-    RootFilesystemPolicy, SandboxEnvironment, SandboxGeneration, SandboxPrivilegePolicy,
-    SandboxProvider, SandboxSpec, ServiceContainerSpec, ServiceContainerSpecs,
-    ServiceHealthOverrides, ServiceHealthPolicy, ServicePort, ServiceTransportProtocol,
-    Sha256Digest, TargetPath,
+    RootFilesystemPolicy, RunnerId, SandboxCustody, SandboxEnvironment, SandboxGeneration,
+    SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, ServiceContainerSpec,
+    ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
+    ServiceTransportProtocol, Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_podman::{
     BuildKitRuntime, CommandRequest, CommandTermination, JobContainerEngine, PodmanBinary,
@@ -940,6 +940,9 @@ fn live_spec_with_network(
     SandboxSpec::new(
         operation_id,
         generation,
+        SandboxCustody::ProfileAdmission {
+            runner_id: RunnerId::new(),
+        },
         profile,
         TargetPath::posix("/__w").expect("workspace"),
         network,

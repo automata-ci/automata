@@ -870,6 +870,11 @@ sandbox/provider interfaces. Reuse executor requests, operation identity,
 runner custody, copy/exec/attach/output bounds, cancellation, and result
 delivery. Add fake-daemon conformance and an ignored live Docker suite.
 
+Foundation status: the shared sandbox contract now carries mandatory exact
+runner custody and durable slot identity. `LocalDocker` product exposure stays
+closed until a host-owned, bounded, non-evicting operation journal can preserve
+accepted/committed/result/cancellation linearization for the sandbox lifetime.
+
 Gate: shell and JavaScript-action sandboxes execute; restart attach and exact
 cancellation work; realized configuration is inspected; foreign collisions
 fail without mutation; prohibited privilege, namespace, bind, device, socket,
