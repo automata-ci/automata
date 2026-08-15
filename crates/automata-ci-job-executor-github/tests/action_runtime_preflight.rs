@@ -145,6 +145,23 @@ async fn nested_container_actions_fail_closed_during_repository_preflight() {
 }
 
 #[tokio::test]
+async fn unresolved_repository_local_child_fails_before_provider_work() {
+    let parent = prepared_metadata(
+        "runs:\n  using: composite\n  steps:\n    - uses: ./mutable-workspace-child\n",
+    );
+    let fixture = Fixture::new(vec![parent], Vec::new());
+
+    assert_eq!(
+        execute_preflight_failure(&fixture).await,
+        JobConclusion::Failure
+    );
+    assert_eq!(
+        system_log(&fixture),
+        "Action preparation failed (Metadata)\n"
+    );
+}
+
+#[tokio::test]
 async fn recursive_repository_graph_fails_before_a_second_resolution_or_provider_work() {
     let recursive = prepared_metadata(&format!(
         "runs:\n  using: composite\n  steps:\n    - uses: actions/example@{REVISION}\n"
