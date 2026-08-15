@@ -7,8 +7,8 @@ use std::{
 
 use automata_ci_action_github::GithubActionMetadataDecoder;
 use automata_ci_core::{
-    ActionReference, JobConclusion, RuntimeBoolean, SemanticStep, Sha256Digest, StepId, StepIr,
-    ValueSource, ValueTemplate,
+    ActionReference, JobConclusion, MAX_STEP_ATTACHMENT_TEXT_BYTES, RuntimeBoolean, SemanticStep,
+    Sha256Digest, StepAnnotationLevel, StepId, StepIr, ValueSource, ValueTemplate,
 };
 use automata_ci_job_executor_github::{
     CheckedOutLocalActionPreparer, LocalActionPreparationRequest, PreparedAction,
@@ -363,6 +363,66 @@ async fn nested_repeated_composite_occurrences_receive_fresh_phase_file_sets() {
         .filter(|command| command.argv().program().as_str() == "/usr/bin/bash")
         .collect::<Vec<_>>();
     assert_eq!(phases.len(), 2);
+    assert_fresh_isolated_phase_files(&state, &phases);
+}
+
+#[tokio::test]
+async fn repeated_composite_summaries_crossing_one_mib_are_diagnostic_only() {
+    const CUMULATIVE_DIAGNOSTIC: &str = "$GITHUB_STEP_SUMMARY content was omitted after the cumulative step summary limit was reached";
+    let fixture = Fixture::new(
+        Vec::new(),
+        vec![
+            PhaseResponse::success().with_file(
+                automata_ci_github_runtime::CommandFileKind::StepSummary,
+                vec![b'c'; MAX_STEP_ATTACHMENT_TEXT_BYTES],
+            ),
+            PhaseResponse::success().with_file(
+                automata_ci_github_runtime::CommandFileKind::StepSummary,
+                vec![b'd'],
+            ),
+        ],
+    );
+    {
+        let mut state = fixture.endpoint_state.lock().expect("endpoint lock");
+        state.files.insert(
+            "/__w/automata/automata/actions/parent/action.yaml".to_owned(),
+            REPEATED_LOCAL_PARENT.as_bytes().to_vec(),
+        );
+        state.files.insert(
+            "/__w/automata/automata/actions/child/action.yml".to_owned(),
+            CHILD_COMPOSITE.as_bytes().to_vec(),
+        );
+    }
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(
+            fixture.request(envelope(vec![local_step("parent", "./actions/parent")])),
+            events,
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect("composite summary overflow must not fail the parent step");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let step = &result.steps()[0];
+    assert_eq!(step.conclusion(), JobConclusion::Success);
+    assert_eq!(
+        step.summary_markdown().map(str::len),
+        Some(MAX_STEP_ATTACHMENT_TEXT_BYTES)
+    );
+    assert_eq!(step.annotations().len(), 1);
+    assert_eq!(step.annotations()[0].level(), StepAnnotationLevel::Warning);
+    assert_eq!(step.annotations()[0].message(), CUMULATIVE_DIAGNOSTIC);
+
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let phases = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/usr/bin/bash")
+        .collect::<Vec<_>>();
+    assert_eq!(phases.len(), 2, "both repeated composite children execute");
     assert_fresh_isolated_phase_files(&state, &phases);
 }
 
