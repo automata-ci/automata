@@ -177,6 +177,26 @@ impl GithubHttpEndpoint {
         validate_content_length(&response, maximum_bytes)?;
         read_archive(response, maximum_bytes).await
     }
+
+    fn exact_public_archive_location(
+        &self,
+        repository: &automata_ci_scm::RepositoryId,
+        revision: &ExactRevision,
+    ) -> Result<Url, ScmError> {
+        let (owner, name) = repository_path::split(repository.as_str())
+            .ok_or_else(|| ScmError::new(ScmErrorKind::InvalidResponse))?;
+        let mut location = self.archive_origin.clone();
+        let mut segments = location
+            .path_segments_mut()
+            .map_err(|()| ScmError::new(ScmErrorKind::InvalidResponse))?;
+        segments.pop_if_empty();
+        segments.push(owner);
+        segments.push(name);
+        segments.push("legacy.tar.gz");
+        segments.push(revision.as_str());
+        drop(segments);
+        self.validate_archive_location(location)
+    }
 }
 
 #[async_trait::async_trait]
@@ -189,6 +209,24 @@ impl ScmProvider for GithubHttpEndpoint {
         &self,
         request: SnapshotRequest<'_>,
     ) -> Result<RepositorySnapshot, ScmError> {
+        if request.credential().is_none()
+            && let Ok(exact) = ExactRevision::new(request.revision().as_str().to_owned())
+        {
+            let location = self.exact_public_archive_location(request.repository(), &exact)?;
+            let bytes = self
+                .download_archive(location, request.limits().maximum_bytes())
+                .await?;
+            let resolved_revision = ResolvedRevision::new(exact.as_str().to_owned())
+                .map_err(|_| ScmError::new(ScmErrorKind::InvalidResponse))?;
+            return Ok(RepositorySnapshot::from_bytes(
+                self.scm_provider_id.clone(),
+                request.repository().clone(),
+                request.revision().clone(),
+                resolved_revision,
+                ArchiveFormat::TarGzip,
+                bytes,
+            ));
+        }
         let resolved = self.resolve_revision(&request).await?;
         let location = self.archive_redirect(&request, &resolved).await?;
         let bytes = self

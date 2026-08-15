@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/automata-ci-action",
+    "crates/automata-ci-action-cache-file",
     "crates/automata-ci-action-github",
     "crates/automata-ci",
     "crates/automata-ci-auth",
@@ -76,6 +77,7 @@ aws-sdk-s3 = { version = "=1.141.0", default-features = false, features = ["beha
 aws-smithy-http-client = { version = "=1.2.0", default-features = false, features = ["rustls-ring"] }
 automata-ci-auth = { path = "crates/automata-ci-auth", version = "0.1.0" }
 automata-ci-action = { path = "crates/automata-ci-action", version = "0.1.0" }
+automata-ci-action-cache-file = { path = "crates/automata-ci-action-cache-file", version = "0.1.0" }
 automata-ci-action-github = { path = "crates/automata-ci-action-github", version = "0.1.0" }
 automata-ci-blob = { path = "crates/automata-ci-blob", version = "0.1.0" }
 automata-ci-blob-s3 = { path = "crates/automata-ci-blob-s3", version = "0.1.0" }
@@ -136,6 +138,7 @@ hyper-util = { version = "=0.1.20", default-features = false, features = ["clien
 jiff = "0.2.35"
 k8s-openapi = { version = "0.28.0", features = ["v1_34"] }
 kube = { version = "4.2.0", default-features = false, features = ["client", "ring", "rustls-tls", "ws"] }
+libc = "0.2.189"
 pem-rfc7468 = { version = "1.0.0", default-features = false, features = ["std"] }
 processkit = { version = "=3.3.1", default-features = false, features = ["limits"] }
 prometheus-client = "=0.25.0"

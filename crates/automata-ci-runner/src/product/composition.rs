@@ -1,6 +1,11 @@
 use std::{future::Future, path::Path, pin::Pin, sync::Arc};
 
 use automata_ci_action::{ActionBundleLimits, ActionResolver, ImmutableActionResolver};
+#[cfg(unix)]
+use automata_ci_action_cache_file::{
+    ActionArchiveCacheLimits, ActionArchiveCacheRoot, ActionReferenceIndexLimits,
+    ActionReferenceIndexRoot, FileActionArchiveCache, FileActionReferenceIndex,
+};
 use automata_ci_action_github::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
@@ -1025,13 +1030,26 @@ fn build_action_preparer(
 ) -> Result<Arc<dyn ActionPreparationPort>, RunnerProductError> {
     let github_endpoint = config.github().http_endpoint()?;
     let scm: Arc<dyn ScmProvider> = Arc::new(github_endpoint);
-    // Do not consult the legacy durable reference index here. Older runner
-    // builds could populate it through an ambient repository credential, so a
-    // warm hit is not proof that this job may read a private action archive.
-    // Anonymous SCM resolution is the authority check until the server supplies
-    // a job- and repository-scoped credential with cacheable provenance.
-    let resolver: Arc<dyn ActionResolver> =
-        Arc::new(ImmutableActionResolver::new(scm, Arc::clone(&blobs)));
+    let resolver = ImmutableActionResolver::new(scm, Arc::clone(&blobs));
+    #[cfg(unix)]
+    let resolver = {
+        let state_root = config.state().journal().as_path();
+        let references = Arc::new(FileActionReferenceIndex::open(
+            ActionReferenceIndexRoot::explicit(state_root.join("action-reference-cache"))?,
+            ActionReferenceIndexLimits::default(),
+        )?);
+        let archives = Arc::new(FileActionArchiveCache::open(
+            ActionArchiveCacheRoot::explicit(state_root.join("action-archive-cache"))?,
+            ActionArchiveCacheLimits::default(),
+        )?);
+        // The resolver itself enforces that only credential-free, canonical
+        // exact commits can consult or populate these caches. Private and
+        // mutable references always re-authorize through SCM.
+        resolver
+            .with_reference_index(references)
+            .with_local_blob_cache(archives)
+    };
+    let resolver: Arc<dyn ActionResolver> = Arc::new(resolver);
     Ok(Arc::new(ResolvedBundleActionPreparer::new(
         resolver,
         blobs,
@@ -1275,6 +1293,14 @@ pub enum RunnerProductError {
     /// Crash-durable journal initialization failed.
     #[error("runner durable journal initialization failed")]
     Journal(#[from] automata_ci_runner_journal::JournalError),
+    /// Local immutable action-reference cache initialization failed.
+    #[cfg(unix)]
+    #[error("runner action reference cache initialization failed")]
+    ActionReferenceCache(#[from] automata_ci_action::ActionReferenceIndexError),
+    /// Local immutable action archive cache initialization failed.
+    #[cfg(unix)]
+    #[error("runner action archive cache initialization failed")]
+    ActionArchiveCache(#[from] automata_ci_blob::BlobStoreError),
     /// Protected spool initialization failed.
     #[error("runner protected spool initialization failed")]
     Spool(#[from] automata_ci_runner_spool::SpoolError),

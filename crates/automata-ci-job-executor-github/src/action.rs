@@ -356,20 +356,21 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
                 )
             },
         );
-        let bundle = self
-            .resolver
-            .resolve(action_request)
-            .await
-            .map_err(|error| {
-                let kind = match error.kind() {
-                    ActionResolveErrorKind::Scm => ActionPreparationErrorKind::Resolution,
-                    ActionResolveErrorKind::Archive | ActionResolveErrorKind::BlobStore => {
-                        ActionPreparationErrorKind::Content
-                    }
-                    ActionResolveErrorKind::Internal => ActionPreparationErrorKind::Internal,
-                };
-                ActionPreparationError::new(kind)
-            })?;
+        let bundle =
+            self.resolver
+                .resolve(action_request)
+                .await
+                .map_err(|error| {
+                    let kind = match error.kind() {
+                        ActionResolveErrorKind::Scm => ActionPreparationErrorKind::Resolution,
+                        ActionResolveErrorKind::Archive | ActionResolveErrorKind::BlobStore => {
+                            ActionPreparationErrorKind::Content
+                        }
+                        ActionResolveErrorKind::ReferenceCache
+                        | ActionResolveErrorKind::Internal => ActionPreparationErrorKind::Internal,
+                    };
+                    ActionPreparationError::new(kind)
+                })?;
         let metadata = self
             .decoder
             .decode(bundle.definition())

@@ -13,10 +13,16 @@
 #![deny(missing_docs)]
 
 mod archive;
+mod cache;
 mod model;
 mod resolver;
 
 pub use archive::inspect_archive;
+pub use cache::{
+    ActionReferenceIndex, ActionReferenceIndexError, ActionReferenceIndexErrorKind,
+    ImmutableActionReference, ImmutableActionReferenceError, IndexedActionBundle,
+    MemoryActionReferenceIndex, PutActionReferenceOutcome,
+};
 pub use model::{
     ActionArchiveError, ActionBundleLimits, ActionBundleLimitsError, ActionDefinitionDocument,
     ActionDefinitionKind, ActionResolveError, ActionResolveErrorKind, ActionSubpath,

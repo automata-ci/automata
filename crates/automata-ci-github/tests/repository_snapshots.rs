@@ -209,6 +209,38 @@ fn request_values() -> (RepositoryId, RevisionSpec) {
 }
 
 #[tokio::test]
+async fn public_exact_revision_uses_the_immutable_archive_origin_without_api_requests() {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(ResponseSpec::binary(
+        StatusCode::OK,
+        "application/x-gzip",
+        vec![0x1f, 0x8b, 0x08, 0x00, 1, 2, 3, 4],
+    ));
+    let endpoint = fixture.endpoint();
+    let repository = RepositoryId::new("actions/checkout").unwrap();
+    let revision = RevisionSpec::new(SHA).unwrap();
+
+    let snapshot = endpoint
+        .fetch_snapshot(SnapshotRequest::public(
+            &repository,
+            &revision,
+            ArchiveLimits::new(1024).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(snapshot.resolved_revision().as_str(), SHA);
+    assert_eq!(snapshot.size(), 8);
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].uri,
+        format!("/actions/checkout/legacy.tar.gz/{SHA}")
+    );
+    assert!(!requests[0].headers.contains_key("authorization"));
+}
+
+#[tokio::test]
 async fn resolves_then_downloads_without_forwarding_the_credential() {
     let fixture = FixtureServer::spawn().await;
     fixture.enqueue(ResponseSpec::json(
