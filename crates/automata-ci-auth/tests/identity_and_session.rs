@@ -1,16 +1,14 @@
 mod support;
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::sync::Arc;
 
 use automata_ci_auth::{
-    authorization::RoleName,
     github::{GithubAppAuthenticationProvider, GithubUser},
     human::{
         AuthenticatedHuman, AuthenticationProvider, AuthenticationProviderError, PrincipalId,
-        ProviderCredential, ProviderId, ProviderSubject, TenantId,
+        ProviderCredential, ProviderId, ProviderSubject,
     },
     machine::{ExternalRunnerIdentity, MachineAuthenticationEvidence},
-    session::{AutomataSessionClaims, AutomataSessionIdentity, SessionId, SessionValidationError},
     time::UnixTimestamp,
 };
 use futures::executor::block_on;
@@ -94,51 +92,6 @@ fn malformed_provider_identity_is_rejected() {
         block_on(provider.authenticate(&credential)),
         Err(AuthenticationProviderError::InvalidResponse)
     );
-}
-
-fn claims() -> AutomataSessionClaims {
-    AutomataSessionClaims::builder(
-        AutomataSessionIdentity::new(
-            SessionId::new("session-1").expect("session ID"),
-            TenantId::new("tenant-1").expect("tenant ID"),
-            PrincipalId::new("github:42").expect("principal ID"),
-            ProviderId::new("github").expect("provider ID"),
-            ProviderSubject::new("42").expect("provider subject"),
-        ),
-        "automata-api",
-        UnixTimestamp::from_seconds(100),
-        UnixTimestamp::from_seconds(200),
-    )
-    .roles(BTreeSet::from([RoleName::new("viewer").expect("role")]))
-    .authorization_revision(7)
-    .build()
-    .expect("valid claims")
-}
-
-#[test]
-fn sessions_validate_audience_and_half_open_lifetime() {
-    let claims = claims();
-    assert!(
-        claims
-            .validate(UnixTimestamp::from_seconds(199), "automata-api")
-            .is_ok()
-    );
-    assert_eq!(
-        claims.validate(UnixTimestamp::from_seconds(200), "automata-api"),
-        Err(SessionValidationError::Expired)
-    );
-    assert_eq!(
-        claims.validate(UnixTimestamp::from_seconds(150), "another-service"),
-        Err(SessionValidationError::WrongAudience)
-    );
-}
-
-#[test]
-fn safe_session_claims_are_serializable_without_a_bearer_token() {
-    let serialized = serde_json::to_value(claims()).expect("serialize claims");
-    assert_eq!(serialized["principal_id"], "github:42");
-    assert!(serialized.get("token").is_none());
-    assert!(serialized.get("access_token").is_none());
 }
 
 #[test]

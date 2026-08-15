@@ -5,7 +5,7 @@ use automata_ci_auth::{
     installation::InstallationRepository,
     login::LoginTransactionRepository,
     machine::MachineIdentityVerifier,
-    session::{HumanSessionRepository, SessionIssuer},
+    session::HumanSessionRepository,
     vault::ProviderTokenVault,
 };
 use static_assertions::assert_obj_safe;
@@ -15,7 +15,6 @@ assert_obj_safe!(InstallationRepository);
 assert_obj_safe!(Authorizer);
 assert_obj_safe!(ResourceAuthorizer);
 assert_obj_safe!(MachineIdentityVerifier);
-assert_obj_safe!(SessionIssuer);
 assert_obj_safe!(HumanSessionRepository);
 assert_obj_safe!(LoginTransactionRepository);
 assert_obj_safe!(GithubEndpoint);

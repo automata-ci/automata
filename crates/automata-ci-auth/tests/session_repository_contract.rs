@@ -1,5 +1,3 @@
-mod support;
-
 use automata_ci_auth::{
     human::{PrincipalId, ProviderId, ProviderSubject, TenantId},
     login::{
@@ -7,7 +5,7 @@ use automata_ci_auth::{
         LoginTransactionBinding, LoginTransactionFlow, LoginTransactionId, LoginTransactionPurpose,
         LoginTransactionState, LoginTransactionValueError, LoginTransactionVersion,
     },
-    secret::{SecretBytes, SecretString, SessionToken},
+    secret::{SecretBytes, SecretString},
     session::{
         ActivateCliSession, BROWSER_SESSION_AUDIENCE, CLI_SESSION_ACTIVATION_LIFETIME_SECONDS,
         CLI_SESSION_AUDIENCE, DurableSession, DurableSessionIdentity, SessionId, SessionKind,
@@ -17,9 +15,6 @@ use automata_ci_auth::{
 };
 use static_assertions::assert_not_impl_any;
 
-use support::secret;
-
-assert_not_impl_any!(SessionToken: serde::Serialize, Clone);
 assert_not_impl_any!(LoginTransactionState: serde::Serialize, Clone);
 assert_not_impl_any!(LoginTransaction: serde::Serialize, Clone);
 assert_not_impl_any!(ActivateCliSession: serde::Serialize);
@@ -62,15 +57,13 @@ fn binding(key: &str, byte: u8) -> LoginTransactionBinding {
 }
 
 #[test]
-fn raw_bearers_never_enter_serializable_session_lookup_material() {
-    let raw = SessionToken::from_secret(secret("raw-session-bearer"));
+fn session_lookup_material_round_trips_and_redacts_digest() {
     let lookup = SessionTokenLookup::new(
         SessionTokenDigestKeyId::new("session-hmac-v1").expect("digest key ID"),
         SessionTokenDigest::new([9; 32]),
     );
 
     let encoded = serde_json::to_string(&lookup).expect("serialize safe lookup");
-    assert!(!encoded.contains(raw.expose_secret()));
     assert!(!format!("{lookup:?}").contains("9, 9"));
     assert_eq!(
         serde_json::from_str::<SessionTokenLookup>(&encoded).expect("deserialize lookup"),

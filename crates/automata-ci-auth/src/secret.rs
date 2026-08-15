@@ -316,7 +316,6 @@ macro_rules! opaque_token {
 
 opaque_token!(CsrfToken);
 opaque_token!(OAuthState);
-opaque_token!(SessionToken);
 
 /// Validation failures for persisted opaque credentials.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]

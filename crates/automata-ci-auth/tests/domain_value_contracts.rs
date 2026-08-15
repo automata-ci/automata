@@ -3,16 +3,10 @@ mod support;
 use std::collections::BTreeSet;
 
 use automata_ci_auth::{
-    authorization::RoleName,
     human::{
         AuthenticatedHuman, PrincipalId, ProviderCredential, ProviderId, ProviderSubject, TenantId,
     },
     machine::{AuthenticatedMachine, ExternalRunnerIdentity, MachineIdentityError},
-    secret::SessionToken,
-    session::{
-        AutomataSessionClaims, AutomataSessionIdentity, IssuedSession, SessionId,
-        SessionValidationError,
-    },
     time::UnixTimestamp,
     vault::{
         ProviderAccessToken, ProviderGrantKind, ProviderRefreshToken, ProviderTokenKey,
@@ -120,65 +114,6 @@ fn machine_identity_requires_a_non_empty_certificate_lifetime() {
         serde_json::from_value(encoded).expect("deserialize machine identity");
     assert_eq!(decoded, machine);
     assert_eq!(machine.certificate_sha256(), &[7; 32]);
-}
-
-#[test]
-fn session_claims_reject_invalid_audiences_and_lifetimes_on_every_path() {
-    let make_claims = |audience: &str, issued_at: u64, expires_at: u64| {
-        AutomataSessionClaims::builder(
-            AutomataSessionIdentity::new(
-                SessionId::new("session-1").expect("session ID"),
-                TenantId::new("tenant-1").expect("tenant ID"),
-                PrincipalId::new("github:42").expect("principal ID"),
-                provider_id(),
-                provider_subject(),
-            ),
-            audience,
-            UnixTimestamp::from_seconds(issued_at),
-            UnixTimestamp::from_seconds(expires_at),
-        )
-        .roles(BTreeSet::from([RoleName::new("viewer").expect("role")]))
-        .authorization_revision(9)
-        .build()
-    };
-
-    assert_eq!(
-        make_claims("", 100, 200),
-        Err(SessionValidationError::InvalidAudience)
-    );
-    assert_eq!(
-        make_claims("automata-api", 200, 200),
-        Err(SessionValidationError::InvalidLifetime)
-    );
-
-    let claims = make_claims("automata-api", 100, 200).expect("valid claims");
-    let encoded = serde_json::to_value(&claims).expect("serialize claims");
-    assert_eq!(encoded["authorization_revision"], 9);
-    assert_eq!(encoded["audience"], "automata-api");
-    assert_eq!(
-        serde_json::from_value::<AutomataSessionClaims>(encoded).expect("deserialize claims"),
-        claims
-    );
-    let issued = IssuedSession::new(
-        SessionToken::from_secret(secret("automata-session-secret")),
-        claims,
-    );
-    assert_eq!(issued.claims().audience(), "automata-api");
-    assert!(!format!("{issued:?}").contains("automata-session-secret"));
-
-    let invalid_wire = json!({
-        "session_id": "session-1",
-        "tenant_id": "tenant-1",
-        "principal_id": "github:42",
-        "provider_id": "github",
-        "provider_subject": "42",
-        "roles": ["viewer"],
-        "audience": "automata-api",
-        "issued_at": 200,
-        "expires_at": 100,
-        "authorization_revision": 9
-    });
-    assert!(serde_json::from_value::<AutomataSessionClaims>(invalid_wire).is_err());
 }
 
 #[test]
