@@ -145,9 +145,26 @@ POSTGRES_TEST_SUPPORT_MODULES = frozenset({
     ("crates/automata-ci-postgres/tests/secret/mod.rs", "provider_replay"),
     ("crates/automata-ci-postgres/tests/runner_auth/mod.rs", "directory"),
 })
+
+# Control's adapter contract tests remain unavailable unless the package's
+# deliberately narrow adapter SPI is enabled.
+CONTROL_ADAPTER_SPI_MODULES = frozenset({
+    (
+        "crates/automata-ci-control/tests/control.rs",
+        "attempt_adapter_port",
+    ),
+    ("crates/automata-ci-control/tests/control.rs", "attempt_api"),
+    (
+        "crates/automata-ci-control/tests/control.rs",
+        "attempt_snapshot_api",
+    ),
+})
 REVIEWED_OUTER_ATTRIBUTES = {
     module: ('#[cfg(feature = "test-support")]',)
     for module in POSTGRES_TEST_SUPPORT_MODULES
+} | {
+    module: ('#[cfg(feature = "adapter-spi")]',)
+    for module in CONTROL_ADAPTER_SPI_MODULES
 }
 
 ASCII_RUST_WHITESPACE = " \t\n\r\x0b\x0c"
