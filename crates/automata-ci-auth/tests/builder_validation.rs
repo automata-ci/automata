@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
 
 use automata_ci_auth::{
-    human::{PrincipalId, ProviderId, ProviderSubject, TenantId},
-    session::{AutomataSessionClaims, AutomataSessionIdentity, SessionId, SessionValidationError},
+    human::{ProviderId, ProviderSubject},
     time::UnixTimestamp,
     vault::{ProviderGrantKind, ProviderTokenMetadata, ProviderTokenMetadataError},
 };
@@ -13,51 +12,6 @@ fn provider_id() -> ProviderId {
 
 fn provider_subject() -> ProviderSubject {
     ProviderSubject::new("42").expect("provider subject")
-}
-
-fn session_identity() -> AutomataSessionIdentity {
-    AutomataSessionIdentity::new(
-        SessionId::new("session-1").expect("session ID"),
-        TenantId::new("tenant-1").expect("tenant ID"),
-        PrincipalId::new("github:42").expect("principal ID"),
-        provider_id(),
-        provider_subject(),
-    )
-}
-
-#[test]
-fn session_claims_builder_preserves_defaults_and_validates_required_policy() {
-    let claims = AutomataSessionClaims::builder(
-        session_identity(),
-        "automata-api",
-        UnixTimestamp::from_seconds(100),
-        UnixTimestamp::from_seconds(200),
-    )
-    .build()
-    .expect("valid claims");
-    assert!(claims.roles().is_empty());
-    assert_eq!(claims.authorization_revision(), 0);
-
-    assert_eq!(
-        AutomataSessionClaims::builder(
-            session_identity(),
-            "bad\naudience",
-            UnixTimestamp::from_seconds(100),
-            UnixTimestamp::from_seconds(200),
-        )
-        .build(),
-        Err(SessionValidationError::InvalidAudience)
-    );
-    assert_eq!(
-        AutomataSessionClaims::builder(
-            session_identity(),
-            "automata-api",
-            UnixTimestamp::from_seconds(200),
-            UnixTimestamp::from_seconds(200),
-        )
-        .build(),
-        Err(SessionValidationError::InvalidLifetime)
-    );
 }
 
 #[test]

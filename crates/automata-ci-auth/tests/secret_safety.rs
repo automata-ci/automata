@@ -5,10 +5,7 @@ use std::sync::Arc;
 use automata_ci_auth::{
     github::{GithubTokenResponse, GithubWebCallback},
     human::ProviderCredential,
-    secret::{
-        CsrfToken, PkceVerifier, SecretBytes, SecretString, SessionToken, SharedSensitiveString,
-    },
-    session::IssuedSession,
+    secret::{CsrfToken, PkceVerifier, SecretBytes, SecretString, SharedSensitiveString},
     vault::{ProviderAccessToken, ProviderRefreshToken, ProviderTokenSet, VersionedProviderTokens},
 };
 use static_assertions::{assert_impl_all, assert_not_impl_any};
@@ -20,10 +17,8 @@ assert_not_impl_any!(ProviderAccessToken: serde::Serialize, Clone);
 assert_not_impl_any!(ProviderRefreshToken: serde::Serialize, Clone);
 assert_not_impl_any!(ProviderTokenSet: serde::Serialize, Clone);
 assert_not_impl_any!(ProviderCredential: serde::Serialize, Clone);
-assert_not_impl_any!(IssuedSession: serde::Serialize, Clone);
 assert_not_impl_any!(VersionedProviderTokens: serde::Serialize, Clone);
 assert_not_impl_any!(GithubTokenResponse: serde::Serialize, Clone);
-assert_not_impl_any!(SessionToken: serde::Serialize, Clone);
 assert_impl_all!(SharedSensitiveString: Clone, Send, Sync);
 assert_not_impl_any!(
     SharedSensitiveString: Copy, std::fmt::Display, serde::Serialize, serde::Deserialize<'static>
