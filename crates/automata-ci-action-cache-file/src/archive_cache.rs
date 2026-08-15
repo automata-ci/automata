@@ -34,9 +34,9 @@ pub const DEFAULT_MAXIMUM_SINGLE_ARCHIVE_BYTES: u64 = 16 * 1_024 * 1_024;
 /// Explicit bounds for one runner-local immutable archive cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ActionArchiveCacheLimits {
-    maximum_entries: usize,
-    maximum_bytes: u64,
-    maximum_single_archive_bytes: u64,
+    entries: usize,
+    bytes: u64,
+    single_archive_bytes: u64,
 }
 
 impl ActionArchiveCacheLimits {
@@ -61,37 +61,37 @@ impl ActionArchiveCacheLimits {
             return Err(BlobStoreError::new(BlobStoreErrorKind::InvalidResponse));
         }
         Ok(Self {
-            maximum_entries,
-            maximum_bytes,
-            maximum_single_archive_bytes,
+            entries: maximum_entries,
+            bytes: maximum_bytes,
+            single_archive_bytes: maximum_single_archive_bytes,
         })
     }
 
     /// Returns the retained archive count ceiling.
     #[must_use]
     pub const fn maximum_entries(self) -> usize {
-        self.maximum_entries
+        self.entries
     }
 
     /// Returns the aggregate encoded byte ceiling.
     #[must_use]
     pub const fn maximum_bytes(self) -> u64 {
-        self.maximum_bytes
+        self.bytes
     }
 
     /// Returns the per-archive encoded byte ceiling.
     #[must_use]
     pub const fn maximum_single_archive_bytes(self) -> u64 {
-        self.maximum_single_archive_bytes
+        self.single_archive_bytes
     }
 }
 
 impl Default for ActionArchiveCacheLimits {
     fn default() -> Self {
         Self {
-            maximum_entries: DEFAULT_MAXIMUM_ARCHIVE_ENTRIES,
-            maximum_bytes: DEFAULT_MAXIMUM_ARCHIVE_BYTES,
-            maximum_single_archive_bytes: DEFAULT_MAXIMUM_SINGLE_ARCHIVE_BYTES,
+            entries: DEFAULT_MAXIMUM_ARCHIVE_ENTRIES,
+            bytes: DEFAULT_MAXIMUM_ARCHIVE_BYTES,
+            single_archive_bytes: DEFAULT_MAXIMUM_SINGLE_ARCHIVE_BYTES,
         }
     }
 }
@@ -175,7 +175,7 @@ impl FileActionArchiveCache {
         read_verified(self.inner.root.as_path(), descriptor)
     }
 
-    fn put_sync(&self, payload: BlobPayload) -> Result<PutBlobOutcome, BlobStoreError> {
+    fn put_sync(&self, payload: &BlobPayload) -> Result<PutBlobOutcome, BlobStoreError> {
         let _guard = self.inner.gate.lock().map_err(|_| unavailable())?;
         let descriptor = payload.descriptor();
         validate_descriptor(
@@ -217,7 +217,7 @@ impl FileActionArchiveCache {
 impl ImmutableBlobStore for FileActionArchiveCache {
     async fn put_if_absent(&self, payload: BlobPayload) -> Result<PutBlobOutcome, BlobStoreError> {
         let cache = self.clone();
-        tokio::task::spawn_blocking(move || cache.put_sync(payload))
+        tokio::task::spawn_blocking(move || cache.put_sync(&payload))
             .await
             .map_err(|_| unavailable())?
     }

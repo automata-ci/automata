@@ -2093,6 +2093,7 @@ fn decode_delivery_event_evidence(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod schema_tests {
     use super::{
         AUTHENTICATED_EVENT_ENVELOPE_SCHEMA_VERSION, authenticated_event_envelope_schema_is_current,

@@ -439,6 +439,7 @@ async fn repository_dispatch_resolution_is_claim_fenced_atomic_and_exactly_repla
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)]
 async fn authenticated_event_readers_reject_forward_envelope_schemas() -> TestResult {
     run_with_database(|database| async move {
         let fixture = bootstrap(
