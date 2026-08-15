@@ -25,7 +25,6 @@ AGGREGATES = {
     "automata-ci-postgres": "postgres",
     "automata-ci-protocol": "protocol",
     "automata-ci-runner": "runner",
-    "automata-ci-runner-crypto": "runner_crypto",
     "automata-ci-sandbox-kubernetes": "sandbox_kubernetes",
     "automata-ci-secret": "secret",
     "automata-ci-store": "store_contracts",

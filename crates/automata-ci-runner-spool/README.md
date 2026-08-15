@@ -5,7 +5,7 @@ storage for Automata runner recovery payloads. Construction requires an
 explicit protection adapter, and publication is coordinated with the runner
 journal so payload-first crash leftovers can be reclaimed safely.
 
-`automata-ci-runner-crypto` supplies the current at-rest protector;
+`automata-ci-runner` supplies its private production at-rest protector;
 `automata-ci-runner-runtime` consumes durable content references during
 recovery.
 

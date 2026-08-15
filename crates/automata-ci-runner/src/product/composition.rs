@@ -15,15 +15,12 @@ use automata_ci_job_executor_github::{
     SystemExecutionClock,
 };
 use automata_ci_protocol::ProtocolLimits;
-use automata_ci_runner_crypto::{
-    AES_256_GCM_KEY_BYTES, Aes256GcmContentKeyring, Aes256GcmContentProtector,
-};
 use automata_ci_runner_journal::{FileJournal, FileJournalOptions};
 use automata_ci_runner_runtime::{
     JobExecutor, RunnerRuntimeConfig, RunnerRuntimePorts, RunnerSessionSupervisor,
     SystemRuntimeClock, SystemRuntimeIds, TokioRuntimeSleeper, TransportControlClientAdapter,
 };
-use automata_ci_runner_spool::{FileSpool, FileSpoolOptions};
+use automata_ci_runner_spool::{ContentProtector, FileSpool, FileSpoolOptions};
 use automata_ci_runner_transport::{
     HyperRunnerControlClient, HyperRunnerEphemeralClient, RunnerControlClient,
     RunnerEphemeralClient, TransportLimits,
@@ -71,6 +68,7 @@ use super::{
     profile_admission::{
         ProfileAdmissionOutcome, ProfileAdmissionPolicy, admit_environment_profiles,
     },
+    spool_crypto::{AES_256_GCM_KEY_BYTES, Aes256GcmContentKeyring, Aes256GcmContentProtector},
     state::{capture_dedicated_runtime_mount, ensure_private_directory},
     tls::load_client_tls,
 };
@@ -572,7 +570,7 @@ fn compose_with_provider(
         config.runner_id(),
         journal_options,
     )?);
-    let protector = Arc::new(load_spool_keyring(config.spool())?);
+    let protector = load_spool_keyring(config.spool())?;
     let spool_options = metrics
         .as_ref()
         .map_or_else(FileSpoolOptions::default, |metrics| {
@@ -1213,17 +1211,20 @@ pub fn load_spool_key(source: &SecretSource) -> Result<Zeroizing<Vec<u8>>, Runne
 /// loaded keyring is never returned.
 pub fn load_spool_keyring(
     config: &super::SpoolProtectionConfig,
-) -> Result<Aes256GcmContentKeyring, RunnerProductError> {
+) -> Result<Arc<dyn ContentProtector>, RunnerProductError> {
     let active =
-        Aes256GcmContentProtector::new(config.protection_id(), load_spool_key(config.key_hex())?)?;
+        Aes256GcmContentProtector::new(config.protection_id(), load_spool_key(config.key_hex())?)
+            .map_err(|_| RunnerProductError::Protector)?;
     let decrypt_only = config
         .decrypt_only_keys()
         .map(|(protection_id, source)| {
             Aes256GcmContentProtector::new(protection_id, load_spool_key(source)?)
-                .map_err(RunnerProductError::Protector)
+                .map_err(|_| RunnerProductError::Protector)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Aes256GcmContentKeyring::new(active, decrypt_only).map_err(RunnerProductError::Protector)
+    let keyring = Aes256GcmContentKeyring::new(active, decrypt_only)
+        .map_err(|_| RunnerProductError::Protector)?;
+    Ok(Arc::new(keyring))
 }
 
 const fn hex_nibble(value: u8) -> Option<u8> {
@@ -1305,7 +1306,7 @@ pub enum RunnerProductError {
     Spool(#[from] automata_ci_runner_spool::SpoolError),
     /// At-rest content protector initialization failed.
     #[error("runner content protector initialization failed")]
-    Protector(#[from] automata_ci_runner_crypto::ContentProtectorConfigurationError),
+    Protector,
     /// Provider state-root preparation failed.
     #[error("runner provider state-root initialization failed")]
     StateRoot(#[from] ProductStateRootError),

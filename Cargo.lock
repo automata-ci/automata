@@ -753,7 +753,6 @@ dependencies = [
  "automata-ci-metrics",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
- "automata-ci-runner-crypto",
  "automata-ci-runner-journal",
  "automata-ci-runner-runtime",
  "automata-ci-runner-spool",
@@ -775,12 +774,14 @@ dependencies = [
  "prometheus-client",
  "rcgen",
  "reqwest",
+ "ring",
  "rustix",
  "rustls",
  "security-framework",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "static_assertions",
  "tar",
  "thiserror",
  "time",
@@ -791,19 +792,6 @@ dependencies = [
  "url",
  "uuid",
  "x509-parser",
- "zeroize",
-]
-
-[[package]]
-name = "automata-ci-runner-crypto"
-version = "0.1.0"
-dependencies = [
- "automata-ci-core",
- "automata-ci-runner-spool",
- "ring",
- "sha2 0.11.0",
- "static_assertions",
- "thiserror",
  "zeroize",
 ]
 

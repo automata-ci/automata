@@ -1,13 +1,14 @@
 use automata_ci_core::Sha256Digest;
-use automata_ci_runner_crypto::{
-    AES_256_GCM_KEY_BYTES, Aes256GcmContentKeyring, Aes256GcmContentProtector,
-    ContentProtectorConfigurationError, MAX_DECRYPT_ONLY_CONTENT_KEYS,
-};
 use automata_ci_runner_spool::{
     ContentKind, ContentProtectionError, ContentProtector, DurableContentRef, ProtectionId,
 };
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
+
+use super::super::{
+    AES_256_GCM_KEY_BYTES, Aes256GcmContentKeyring, Aes256GcmContentProtector,
+    MAX_DECRYPT_ONLY_CONTENT_KEYS, error::ContentProtectorConfigurationError,
+};
 
 fn protector(id: &str, marker: u8) -> Aes256GcmContentProtector {
     Aes256GcmContentProtector::new(id, Zeroizing::new(vec![marker; AES_256_GCM_KEY_BYTES]))
