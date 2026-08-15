@@ -87,6 +87,20 @@ impl Fixture {
         Self::with_default_environment(actions, responses, ExecutionEnvironment::empty())
     }
 
+    pub fn without_node(actions: Vec<PreparedAction>, responses: Vec<PhaseResponse>) -> Self {
+        Self::with_platform_components_and_timeout_and_node(
+            actions,
+            responses,
+            ExecutionEnvironment::empty(),
+            true,
+            Arc::new(FakeJobContent::default()),
+            Arc::new(FakeContexts::readable_secret()),
+            Duration::from_mins(5),
+            TargetPlatform::Posix,
+            false,
+        )
+    }
+
     pub fn windows(responses: Vec<PhaseResponse>) -> Self {
         Self::windows_with_default_environment(responses, ExecutionEnvironment::empty())
     }
@@ -405,6 +419,31 @@ impl Fixture {
         timeout: Duration,
         platform: TargetPlatform,
     ) -> Self {
+        Self::with_platform_components_and_timeout_and_node(
+            actions,
+            responses,
+            default_environment,
+            service_containers,
+            content,
+            contexts,
+            timeout,
+            platform,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn with_platform_components_and_timeout_and_node(
+        actions: Vec<PreparedAction>,
+        responses: Vec<PhaseResponse>,
+        default_environment: ExecutionEnvironment,
+        service_containers: bool,
+        content: Arc<dyn JobContentPort>,
+        contexts: Arc<dyn GithubContextPort>,
+        timeout: Duration,
+        platform: TargetPlatform,
+        configure_node: bool,
+    ) -> Self {
         let environment = match platform {
             TargetPlatform::Posix => sandbox_environment(default_environment),
             TargetPlatform::Windows => windows_sandbox_environment(default_environment),
@@ -429,20 +468,27 @@ impl Fixture {
             ImmutableSandboxEnvironmentCatalog::new([environment.clone()]).expect("valid catalog"),
         );
         let toolchain = match platform {
-            TargetPlatform::Posix => StaticGithubToolchain::new(
-                target("/usr/bin/bash"),
-                target("/usr/bin/sh"),
-                target("/usr/bin/install"),
-                target("/usr/bin/tar"),
-                target("/usr/bin/sha256sum"),
-            )
-            .expect("valid tools")
-            .with_python(target("/usr/bin/python3"))
-            .expect("valid python")
-            .with_pwsh(target("/usr/bin/pwsh"))
-            .expect("valid pwsh")
-            .with_node(JavascriptRuntime::Node24, target("/opt/node24/bin/node"))
-            .expect("valid node"),
+            TargetPlatform::Posix => {
+                let toolchain = StaticGithubToolchain::new(
+                    target("/usr/bin/bash"),
+                    target("/usr/bin/sh"),
+                    target("/usr/bin/install"),
+                    target("/usr/bin/tar"),
+                    target("/usr/bin/sha256sum"),
+                )
+                .expect("valid tools")
+                .with_python(target("/usr/bin/python3"))
+                .expect("valid python")
+                .with_pwsh(target("/usr/bin/pwsh"))
+                .expect("valid pwsh");
+                if configure_node {
+                    toolchain
+                        .with_node(JavascriptRuntime::Node24, target("/opt/node24/bin/node"))
+                        .expect("valid node")
+                } else {
+                    toolchain
+                }
+            }
             TargetPlatform::Windows => StaticGithubToolchain::windows(
                 windows_target(r"C:\Program Files\PowerShell\7\pwsh.exe"),
                 windows_target(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),

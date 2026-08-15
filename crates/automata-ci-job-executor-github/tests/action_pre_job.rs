@@ -163,6 +163,52 @@ runs:
 }
 
 #[tokio::test]
+async fn checked_out_local_action_with_unprovided_runtime_fails_before_action_code() {
+    let fixture = Fixture::new(Vec::new(), Vec::new());
+    fixture
+        .endpoint_state
+        .lock()
+        .expect("endpoint lock")
+        .files
+        .insert(
+            "/__w/automata/automata/actions/legacy/action.yml".to_owned(),
+            b"runs:\n  using: node20\n  main: dist/index.js\n".to_vec(),
+        );
+    let request = fixture.request(envelope(vec![local_action_step(
+        "legacy",
+        "./actions/legacy",
+    )]));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("local runtime rejection is a terminal action failure");
+
+    assert_eq!(result.conclusion(), JobConclusion::Failure);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    assert!(state.commands.iter().all(|command| {
+        !matches!(
+            command.argv().program().as_str(),
+            "/opt/node12/bin/node" | "/opt/node16/bin/node" | "/opt/node20/bin/node"
+        )
+    }));
+    drop(state);
+    let diagnostics = fixture
+        .events
+        .logs()
+        .into_iter()
+        .filter(|event| event.channel() == LogChannel::System)
+        .flat_map(|event| event.payload().to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        String::from_utf8(diagnostics).expect("UTF-8 diagnostics"),
+        "Action preparation failed (RuntimeUnavailable)\n"
+    );
+}
+
+#[tokio::test]
 async fn a_pre_that_ran_registers_post_even_when_main_is_skipped() {
     let fixture = Fixture::new(
         vec![prepared_node24_action_with_pre()],

@@ -12,6 +12,8 @@ const MAX_PREPARED_OUTPUTS: usize = 1_024;
 const MAX_COMPOSITE_STEPS: usize = 1_024;
 const MAX_COMPOSITE_VALUES: usize = 1_024;
 const MAX_ACTION_PATH_BYTES: usize = 4_096;
+const MAX_INPUT_REQUIRED_BYTES: usize = 64;
+const MAX_INPUT_DEPRECATION_BYTES: usize = 4_096;
 
 /// One already-compiled action input default.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,11 +35,13 @@ pub enum PreparedValueSegment {
     Expression(ExpressionProgram),
 }
 
-/// One metadata-declared action input and its optional default.
+/// One metadata-declared action input and its compatibility metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedInput {
     name: String,
     default: Option<PreparedValue>,
+    required: Option<String>,
+    deprecation_message: Option<String>,
 }
 
 /// One metadata-declared action output and its optional value expression.
@@ -457,11 +461,43 @@ impl PreparedInput {
         name: impl Into<String>,
         default: Option<PreparedValue>,
     ) -> Result<Self, PreparedActionError> {
+        Self::with_metadata(name, default, None, None)
+    }
+
+    /// Creates an action input declaration with the exact ignored `required`
+    /// marker and an optional safe deprecation message.
+    ///
+    /// GitHub records `required` but does not reject a missing action input;
+    /// callers must not reinterpret the retained scalar as validation policy.
+    /// Deprecation messages are static metadata, never expression-evaluated.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid names and control-containing or oversized compatibility
+    /// metadata that could forge runner diagnostics.
+    pub fn with_metadata(
+        name: impl Into<String>,
+        default: Option<PreparedValue>,
+        required: Option<String>,
+        deprecation_message: Option<String>,
+    ) -> Result<Self, PreparedActionError> {
         let name = name.into();
         if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
             return Err(PreparedActionError::InvalidInput);
         }
-        Ok(Self { name, default })
+        if required.as_ref().is_some_and(|value| {
+            value.len() > MAX_INPUT_REQUIRED_BYTES || value.chars().any(char::is_control)
+        }) || deprecation_message.as_ref().is_some_and(|value| {
+            value.len() > MAX_INPUT_DEPRECATION_BYTES || value.chars().any(char::is_control)
+        }) {
+            return Err(PreparedActionError::InvalidInput);
+        }
+        Ok(Self {
+            name,
+            default,
+            required,
+            deprecation_message,
+        })
     }
 
     /// Returns the metadata input name.
@@ -474,6 +510,21 @@ impl PreparedInput {
     #[must_use]
     pub const fn default(&self) -> Option<&PreparedValue> {
         self.default.as_ref()
+    }
+
+    /// Returns the exact metadata `required` scalar, when declared.
+    ///
+    /// This marker is informational. In particular, `true` does not make the
+    /// executor invent missing-input validation that GitHub does not perform.
+    #[must_use]
+    pub fn required(&self) -> Option<&str> {
+        self.required.as_deref()
+    }
+
+    /// Returns the bounded static deprecation message, when declared.
+    #[must_use]
+    pub fn deprecation_message(&self) -> Option<&str> {
+        self.deprecation_message.as_deref()
     }
 }
 

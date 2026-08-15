@@ -414,7 +414,15 @@ fn prepare_definition(
                 .default()
                 .map(|value| prepare_value(value, conditions))
                 .transpose()?;
-            PreparedInput::new(input.name(), default).map_err(|_| metadata_error())
+            PreparedInput::with_metadata(
+                input.name(),
+                default,
+                input.required().map(|value| value.text().to_owned()),
+                input
+                    .deprecation_message()
+                    .map(|value| value.text().to_owned()),
+            )
+            .map_err(|_| metadata_error())
         })
         .collect::<Result<Vec<_>, _>>()?;
     let outputs = metadata

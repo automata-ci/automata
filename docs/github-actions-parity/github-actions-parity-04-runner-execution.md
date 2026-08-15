@@ -29,24 +29,47 @@ definition of done.
 
 Tasks:
 
-- [ ] Differential-test action default inputs and scalar coercion.
-- [ ] Match `INPUT_*` normalization, declaration order, and
+- [ ] Differential-test action default inputs and scalar coercion against a
+  live pinned runner.
+  - [x] Component fixtures cover missing, null, boolean, numeric-looking,
+    literal, template, and expression defaults through metadata preparation
+    and executor resolution.
+- [x] Match `INPUT_*` normalization, declaration order, and
   case-insensitive lookup.
-- [ ] Preserve safe deprecation messages.
-- [ ] Match metadata `required: true` behavior without inventing validation.
-- [ ] Verify output expressions and absent outputs.
-- [ ] Populate invocation-specific action, path, ref, and repository context.
+- [x] Preserve safe deprecation messages.
+- [x] Match metadata `required: true` behavior without inventing validation.
+- [x] Verify output expressions and absent outputs.
+- [x] Populate invocation-specific action, path, ref, and repository context.
 - [ ] Approve supported Node generations and reject unavailable runtimes at
   admission.
-- [ ] Pin Node patch versions in profile manifests.
-- [ ] Decide whether `runs.plugin` is supported; if not, retain an explicit
+  - [x] The closed metadata set is `node12`, `node16`, `node20`, and `node24`;
+    execution requires an exact same-generation toolchain entry and never
+    falls back. The current Ubuntu profile provides only Node 24.
+  - [x] Recursively preflight repository action runtimes after runtime-context
+    masking but before custody acknowledgement, provider create/attach,
+    archive extraction, or user code. Nested containers, cycles, and missing
+    runtimes fail closed with zero provider operations.
+  - [x] Check JIT-prepared local action runtimes before their first action
+    phase. Local metadata cannot exist before the preceding checkout/user step
+    and therefore cannot be preflighted before provider creation.
+  - [ ] Carry prepared repository runtime requirements across the scheduling
+    boundary so the synchronous `JobExecutor::admit` path can reject them
+    literally before lease acquisition. Job IR currently carries only action
+    references, while metadata resolution is an async executor port.
+- [x] Pin Node patch versions in profile manifests. The current Ubuntu profile
+  records Node 24.19.0; no legacy runtime is advertised by that profile.
+- [x] Decide whether `runs.plugin` is supported; retain an explicit
   source-spanned publication rejection and document it as unsupported.
 
 Acceptance:
 
-- [ ] Checkout, setup, and artifact metadata fixtures match the pinned runner.
-- [ ] Missing, default, boolean, and numeric-looking inputs pass differential
-  tests.
+- [x] Checkout, setup, and artifact metadata fixtures pass the complete
+  decoder-to-prepared-action contract against the reviewed pinned metadata.
+- [ ] Missing, default, boolean, and numeric-looking inputs pass live
+  differential tests.
+  - [x] The executor component suite covers all four shapes, declaration order,
+    case-insensitive overlays, empty missing values, deprecations, and ignored
+    `required: true` markers.
 
 ### RUN-02 — Shell and script dispatch parity
 

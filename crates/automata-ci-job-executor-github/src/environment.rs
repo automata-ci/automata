@@ -21,17 +21,22 @@ use crate::{
     output::SecretMasker,
 };
 
-/// Resolved action inputs retained in canonical case-insensitive order.
+/// Resolved action inputs retained in metadata declaration order.
 ///
 /// Values can contain secrets, so this type deliberately has no `Debug`
 /// implementation.
 pub(crate) struct ResolvedActionInputs {
     values: Vec<(String, ResolvedEnvironmentValue)>,
+    deprecations: Vec<(String, String)>,
 }
 
 impl ResolvedActionInputs {
     pub(crate) fn values(&self) -> &[(String, ResolvedEnvironmentValue)] {
         &self.values
+    }
+
+    pub(crate) fn deprecations(&self) -> &[(String, String)] {
+        &self.deprecations
     }
 
     pub(crate) fn environment(
@@ -252,18 +257,8 @@ impl<'a> EnvironmentBuilder<'a> {
         supplied: &BTreeMap<String, ResolvedEnvironmentValue>,
         context: &dyn GithubEvaluationContext,
     ) -> Result<ResolvedActionInputs, ExecutorAdapterError> {
-        let mut inputs = BTreeMap::<String, (String, ResolvedEnvironmentValue)>::new();
-        for input in definition.inputs() {
-            let Some(default) = input.default() else {
-                continue;
-            };
-            let value = self.resolve_prepared_value(default, context)?;
-            inputs.insert(
-                input.name().to_ascii_lowercase(),
-                (input.name().to_owned(), value),
-            );
-        }
         let mut supplied_names = std::collections::BTreeSet::new();
+        let mut supplied_by_name = BTreeMap::new();
         for (name, value) in supplied {
             let normalized = name.to_ascii_lowercase();
             if !supplied_names.insert(normalized.clone()) {
@@ -271,10 +266,37 @@ impl<'a> EnvironmentBuilder<'a> {
                     ExecutorAdapterErrorKind::InvalidJob,
                 ));
             }
-            inputs.insert(normalized, (name.clone(), value.clone()));
+            supplied_by_name.insert(normalized, (name, value));
+        }
+
+        let mut values = Vec::with_capacity(definition.inputs().len() + supplied.len());
+        let mut deprecations = Vec::new();
+        for input in definition.inputs() {
+            let normalized = input.name().to_ascii_lowercase();
+            let explicitly_supplied = supplied_by_name.remove(&normalized);
+            let value = if let Some((_, value)) = explicitly_supplied {
+                if let Some(message) = input.deprecation_message() {
+                    deprecations.push((input.name().to_owned(), message.to_owned()));
+                }
+                value.clone()
+            } else if let Some(default) = input.default() {
+                self.resolve_prepared_value(default, context)?
+            } else {
+                ResolvedEnvironmentValue::plain(String::new())
+            };
+            values.push((input.name().to_owned(), value));
+        }
+
+        // Job IR stores `with` values in a map, so undeclared inputs no longer
+        // carry source order at this boundary. Retain its deterministic map
+        // order after every metadata declaration rather than pretending that
+        // alphabetical order was the action's declaration order.
+        for (_, (name, value)) in supplied_by_name {
+            values.push((name.clone(), value.clone()));
         }
         Ok(ResolvedActionInputs {
-            values: inputs.into_values().collect(),
+            values,
+            deprecations,
         })
     }
 
@@ -701,6 +723,7 @@ fn into_execution_environment(
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
+    use automata_ci_action_github::JavascriptRuntime;
     use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
     use automata_ci_core::{
         ExpressionDialect, ExpressionInstruction, ExpressionLiteral, ValueTemplate,
@@ -708,10 +731,14 @@ mod tests {
     use automata_ci_execution::{EnvironmentName, EnvironmentValue, EnvironmentVariable};
     use automata_ci_expression_github::{GithubObject, GithubStatus, GithubValue, MapContext};
     use automata_ci_github_runtime::{CommandFilePlatform, JobCommandState};
+    use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
     use static_assertions::assert_not_impl_any;
 
     use super::*;
-    use crate::{ContextEnvironmentVariable, PortError};
+    use crate::{
+        ContextEnvironmentVariable, PortError, PreparedActionDefinition, PreparedActionExecution,
+        PreparedInput, PreparedJavascriptAction,
+    };
 
     assert_not_impl_any!(ResolvedEnvironmentValue: std::fmt::Debug, std::fmt::Display);
 
@@ -838,6 +865,116 @@ mod tests {
         .expect("expression context")
     }
 
+    fn input_definition(inputs: Vec<PreparedInput>) -> PreparedActionDefinition {
+        let condition = GithubConditionCompiler::default()
+            .compile_condition(Some("always()"), GithubConditionPhase::Step)
+            .expect("condition");
+        let javascript = PreparedJavascriptAction::new(
+            JavascriptRuntime::Node24,
+            "index.js",
+            None,
+            condition.clone(),
+            None,
+            condition,
+        )
+        .expect("JavaScript action");
+        PreparedActionDefinition::new(
+            inputs,
+            Vec::new(),
+            PreparedActionExecution::Javascript(Box::new(javascript)),
+        )
+        .expect("action definition")
+    }
+
+    #[test]
+    fn action_inputs_keep_declaration_order_empty_missing_values_and_case_insensitive_overlay() {
+        let definition = input_definition(vec![
+            PreparedInput::new("zeta", Some(PreparedValue::Literal("false".to_owned())))
+                .expect("zeta"),
+            PreparedInput::with_metadata(
+                "Alpha Name",
+                None,
+                Some("true".to_owned()),
+                Some("Use replacement instead".to_owned()),
+            )
+            .expect("alpha"),
+            PreparedInput::new("middle", None).expect("middle"),
+        ]);
+        let supplied = BTreeMap::from([
+            (
+                "ALPHA NAME".to_owned(),
+                ResolvedEnvironmentValue::plain("42"),
+            ),
+            (
+                "unexpected".to_owned(),
+                ResolvedEnvironmentValue::plain("caller"),
+            ),
+        ]);
+        let defaults = ExecutionEnvironment::empty();
+        let evaluator = GithubExpressionEvaluator::default();
+        let builder = EnvironmentBuilder::new(&evaluator, &TestSecrets, &defaults);
+        let context = MapContext::without_extensions(BTreeMap::new(), GithubStatus::Success)
+            .expect("context");
+
+        let inputs = builder
+            .resolve_action_inputs(&definition, &supplied, &context)
+            .expect("inputs resolve");
+        assert_eq!(
+            inputs
+                .values()
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.expose()))
+                .collect::<Vec<_>>(),
+            [
+                ("zeta", "false"),
+                ("Alpha Name", "42"),
+                ("middle", ""),
+                ("unexpected", "caller"),
+            ]
+        );
+        assert_eq!(
+            inputs.deprecations(),
+            &[(
+                "Alpha Name".to_owned(),
+                "Use replacement instead".to_owned()
+            )]
+        );
+        assert_eq!(definition.inputs()[1].required(), Some("true"));
+        assert_eq!(
+            inputs
+                .environment()
+                .expect("input environment")
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            [
+                "INPUT_ZETA",
+                "INPUT_ALPHA_NAME",
+                "INPUT_MIDDLE",
+                "INPUT_UNEXPECTED"
+            ]
+        );
+    }
+
+    #[test]
+    fn case_colliding_supplied_action_inputs_fail_closed() {
+        let definition = input_definition(vec![PreparedInput::new("value", None).expect("input")]);
+        let supplied = BTreeMap::from([
+            ("VALUE".to_owned(), ResolvedEnvironmentValue::plain("one")),
+            ("value".to_owned(), ResolvedEnvironmentValue::plain("two")),
+        ]);
+        let defaults = ExecutionEnvironment::empty();
+        let evaluator = GithubExpressionEvaluator::default();
+        let builder = EnvironmentBuilder::new(&evaluator, &TestSecrets, &defaults);
+        let context = MapContext::without_extensions(BTreeMap::new(), GithubStatus::Success)
+            .expect("context");
+
+        let Err(error) = builder.resolve_action_inputs(&definition, &supplied, &context) else {
+            panic!("case collision is invalid");
+        };
+        assert_eq!(error.kind(), ExecutorAdapterErrorKind::InvalidJob);
+    }
+
     #[test]
     fn resolved_secret_sources_retain_ephemeral_transport_sensitivity() {
         let defaults = ExecutionEnvironment::new(vec![EnvironmentVariable::secret(
@@ -920,6 +1057,7 @@ mod tests {
 
         let inputs = ResolvedActionInputs {
             values: vec![("token".to_owned(), resolved.clone())],
+            deprecations: Vec::new(),
         };
         assert_eq!(Arc::strong_count(&secret), 4);
         let input_environment = inputs.environment().expect("input environment");

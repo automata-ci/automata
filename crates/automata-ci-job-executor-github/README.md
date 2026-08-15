@@ -94,6 +94,40 @@ default in the job IR. A step-local directory overrides it; otherwise the
 resolved default applies, then the workspace. Every resulting path remains
 confined to the workspace.
 
+## Action metadata and runtime contract
+
+Repository action metadata is recursively prepared and cached after runtime
+secret masks are installed but before secret-custody acknowledgement, provider
+create/attach, action archive extraction, or user code. Repository cycles,
+nested container actions, malformed metadata, and a JavaScript generation that
+has no exact executable in the selected toolchain all produce a terminal,
+sanitized job failure without sandbox work. The metadata decoder has a closed
+`node12`/`node16`/`node20`/`node24` enum; availability is narrower and comes
+only from the immutable profile toolchain. There is no fallback between Node
+generations and no `PATH` probe. The current Ubuntu profile advertises only its
+pinned Node 24 executable. Container-action execution and `runs.plugin` remain
+unsupported.
+
+`JobExecutor::admit` is synchronous and Job IR contains immutable action
+references rather than resolved `action.yml` bytes. Consequently repository
+runtime discovery cannot literally precede the lease in this component. A
+future cross-layer materialization/admission contract must carry the prepared
+action graph or its runtime requirements into Job IR to close that boundary.
+Checked-out local action metadata is created by preceding workflow code and is
+necessarily read from the isolated workspace after provider creation; it is
+still validated before any local action phase executes.
+
+Prepared inputs retain metadata declaration order and use case-insensitive
+caller lookup. Every declared input is present: an omitted input uses its
+evaluated default or the empty string. Boolean, numeric-looking, and null YAML
+scalars retain the pinned runner's string behavior. The `required` scalar is
+retained for compatibility but deliberately does not invent missing-input
+validation. Static deprecation messages are bounded and control-free, are never
+expression-evaluated, and are emitted only when that input was explicitly
+supplied. Action-phase identity supplies invocation-specific
+`GITHUB_ACTION`, `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REF`, and
+`GITHUB_ACTION_REPOSITORY` values and their corresponding expression context.
+
 - [Compatibility documentation](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md)
 - API documentation: run `cargo doc -p automata-ci-job-executor-github --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)
