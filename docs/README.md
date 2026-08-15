@@ -9,7 +9,6 @@ The quickest ways in are:
 | --- | --- |
 | Build from source and inspect the interface | [Getting started](getting-started.md) |
 | Check support for a workflow feature | [Compatibility](compatibility.md) |
-| Follow the current manual Arch development assembly | [Control-plane setup](deployment.md) |
 | Prepare a Linux execution host | [Runner bootstrap](../crates/automata-ci-runner/config/README.md) |
 
 The [hosted UI demo](https://automata-ci.github.io/automata/) uses sample data.
@@ -23,17 +22,13 @@ It does not connect to repositories or execute workflows.
 - [Workflow reruns](workflow-reruns.md) documents the authenticated CLI,
   idempotent retry identity, exact selections, and current admission limits.
 - [Prometheus and OpenMetrics](observability.md) defines the scrape endpoints,
-  metrics, recording rules, alerts, and cardinality limits.
-- [Arch Linux runner host](platforms/arch-linux.md) prepares a host for the
-  current rootless Podman execution profile.
+  metrics, protocol, and cardinality limits.
 - [macOS runner guide](platforms/macos.md) documents the disposable
   Virtualization.framework implementation and its deployment gates.
 - [Windows runner isolation plan](platforms/windows.md) defines the
   Hyper-V-isolated Windows container-only direction, current component scope,
   threat model, Windows API choices, implementation phases, and release gates
   that still block hostile Windows workloads.
-- [Local durable services](../deploy/dev/README.md) starts PostgreSQL and RustFS
-  for development and integration tests.
 - [`automata` control plane](../crates/automata-ci/README.md) documents listener
   configuration and secret references.
 
@@ -64,7 +59,7 @@ It does not connect to repositories or execute workflows.
 ## Work on the project
 
 - [Development](development.md) covers builds, tests, fixtures, frontend work,
-  and local services.
+  and external integration-test services.
 - [Contributing](../CONTRIBUTING.md) explains the change and review workflow.
 - [Documentation style](documentation-style.md) defines status labels,
   terminology, and review checks for these pages.

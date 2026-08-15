@@ -99,7 +99,6 @@ and trust boundaries.
 | --- | --- |
 | Build from source and inspect the interface | [Getting started](docs/getting-started.md) |
 | Check support for a workflow feature | [Compatibility](docs/compatibility.md) |
-| Start the durable development composition | [Control-plane setup](docs/deployment.md) |
 | Configure the control-plane command | [`automata` configuration](crates/automata-ci/README.md) |
 | Enroll and configure an execution host | [Runner bootstrap](crates/automata-ci-runner/config/README.md) |
 | Configure login, authorization, secrets, and repository visibility | [Authentication and authorization](docs/authentication.md) |
@@ -109,9 +108,8 @@ and trust boundaries.
 | Build, test, or change the code | [Development](docs/development.md) |
 | Find every document | [Documentation index](docs/README.md) |
 
-Platform-specific guides document the current host contracts for
-[Arch Linux and rootless Podman](docs/platforms/arch-linux.md),
-[macOS VMs](docs/platforms/macos.md), and
+Platform-specific guides document the current implementation contracts for
+[macOS VMs](docs/platforms/macos.md) and
 [Windows Hyper-V containers](docs/platforms/windows.md).
 
 ## Contributing

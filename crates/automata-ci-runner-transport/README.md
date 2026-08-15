@@ -9,6 +9,6 @@ The `automata` control plane uses the server adapter, while `automata-runner`
 uses the client. Reverse-proxy certificate headers are not trusted by this
 implementation.
 
-- [Deployment documentation](https://github.com/automata-ci/automata/blob/main/docs/deployment.md)
+- [Control-plane configuration](https://github.com/automata-ci/automata/blob/main/crates/automata-ci/README.md)
 - API documentation: run `cargo doc -p automata-ci-runner-transport --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

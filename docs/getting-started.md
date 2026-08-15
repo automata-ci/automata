@@ -176,12 +176,13 @@ returns an error instead of attempting Linux isolation; `run` requires the
 explicit `windows_hyperv` configuration, engine, image, and laboratory
 provisioning described above.
 
-## Start the durable composition
+## Configure the complete server
 
 The preview is deliberately small. To use PostgreSQL, object storage,
-scheduling, provider ingress, and runner sessions, continue with
-[Control-plane setup](deployment.md). Configure an execution host with the
-[runner bootstrap guide](../crates/automata-ci-runner/config/README.md).
+scheduling, provider ingress, and runner sessions, provide the required
+external services and follow the [`automata` configuration
+reference](../crates/automata-ci/README.md). Configure an execution host with
+the [runner bootstrap guide](../crates/automata-ci-runner/config/README.md).
 
 Read [Compatibility](compatibility.md) before evaluating a workflow. Successful
 parsing does not mean that every action or workflow feature is supported.
@@ -246,10 +247,10 @@ automata admin --server-url http://127.0.0.1:8180 status
 
 ### Runner diagnostics report missing Podman capabilities
 
-On Linux, use the
-[Arch Linux host guide](platforms/arch-linux.md) and rerun the active probe only
-after the documented kernel, cgroup, and rootless-networking prerequisites are
-in place. That Podman diagnostic does not apply to Windows. Windows startup
+On Linux, review the host requirements in the [runner bootstrap
+guide](../crates/automata-ci-runner/config/README.md) and rerun the active probe
+only after its kernel, cgroup, and rootless-networking prerequisites are in
+place. That Podman diagnostic does not apply to Windows. Windows startup
 instead performs create, inspect, guest-probe, shell-probe, and destroy
 admission through the Hyper-V-container provider. Do not deploy it until the
 physical Windows end-to-end gate is accepted.

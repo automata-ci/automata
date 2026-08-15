@@ -1,6 +1,0 @@
-groups:
-  - name: automata-ci-metrics-contract
-    interval: 1s
-    rules:
-      - record: automata_ci_metrics_contract_fixture_probe
-        expr: max(automata_ci_fixture_probe{job="metrics-contract"})

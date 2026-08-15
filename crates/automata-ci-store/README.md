@@ -15,6 +15,6 @@ schema tests run from `automata-ci-postgres`; use
 `./scripts/ci/run-postgres-tests.sh` with `AUTOMATA_TEST_DATABASE_URL` for the
 database-backed lane.
 
-- [Deployment documentation](https://github.com/automata-ci/automata/blob/main/docs/deployment.md)
+- [Control-plane configuration](https://github.com/automata-ci/automata/blob/main/crates/automata-ci/README.md)
 - API documentation: run `cargo doc -p automata-ci-store --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

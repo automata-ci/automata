@@ -8,6 +8,6 @@ state for coordination.
 The control plane and runner compose this adapter behind `automata-ci-blob`.
 PostgreSQL remains the coordination authority for the product.
 
-- [Deployment documentation](https://github.com/automata-ci/automata/blob/main/docs/deployment.md)
+- [Control-plane configuration](https://github.com/automata-ci/automata/blob/main/crates/automata-ci/README.md)
 - API documentation: run `cargo doc -p automata-ci-blob-s3 --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

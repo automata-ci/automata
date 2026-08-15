@@ -26,6 +26,6 @@ need an embargo, use the public issue templates instead.
 ## Security boundary
 
 The current support and isolation claims are documented in
-[Compatibility](docs/compatibility.md), [Architecture](docs/architecture.md),
-and the [deployment warning](docs/deployment.md). A successful build, workflow
+[Compatibility](docs/compatibility.md) and [Architecture](docs/architecture.md).
+A successful build, workflow
 parse, or runner diagnostic is not a production-safety claim.

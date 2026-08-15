@@ -175,5 +175,3 @@ from an older cache entry.
 The complete configuration, certificate, spool, object-storage, network, and
 startup procedure is in the
 [runner bootstrap guide](https://github.com/automata-ci/automata/blob/main/crates/automata-ci-runner/config/README.md).
-Arch-specific kernel, cgroup, mount, and firewall requirements are in the
-[Arch Linux host guide](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md).

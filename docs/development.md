@@ -224,11 +224,10 @@ restart. A successful lifecycle probe proves that the configured provider can
 create, inspect, and destroy its test sandbox. It does not prove profile-image
 conformance, resource enforcement, or service-container support.
 
-The complete filesystem, Podman, nftables, and provider checks are maintained
-in the [runner bootstrap guide](../crates/automata-ci-runner/config/README.md)
-and [Arch Linux host guide](platforms/arch-linux.md). Update those operator
-contracts with any admission change; do not duplicate their configuration in
-this contributor guide.
+The complete filesystem, Podman, networking, and provider checks are maintained
+in the [runner bootstrap guide](../crates/automata-ci-runner/config/README.md).
+Update that product contract with any admission change; do not duplicate its
+configuration in this contributor guide.
 
 ## Frontend
 
@@ -292,16 +291,11 @@ AUTOMATA_TEST_LOCAL_DOCKER=1 cargo test --locked -p automata-ci-local \
   -- --ignored --exact
 ```
 
-## Local PostgreSQL and RustFS
+## External integration-test services
 
-Start the pinned development services:
-
-```console
-podman-compose --file deploy/dev/compose.yaml up --detach
-podman-compose --file deploy/dev/compose.yaml ps
-```
-
-Set the integration-test environment:
+Database and object-storage integration lanes use services managed outside the
+repository. Automata does not provide or mutate a local infrastructure stack.
+Provision compatible PostgreSQL and S3 endpoints, then set the test environment:
 
 ```console
 export AUTOMATA_TEST_DATABASE_URL='postgresql://automata:automata-local-only@127.0.0.1:5432/automata'
@@ -327,14 +321,8 @@ for every invocation when a PostgreSQL service is reused. Individual tests may
 install the shared schema-local `TestClock` to advance lease and retry horizons
 without sleeping for wall time.
 
-These credentials are local-only. Stop the services with:
-
-```console
-podman-compose --file deploy/dev/compose.yaml down
-```
-
-Named volumes survive `down`; see the [local infrastructure guide](../deploy/dev/README.md)
-before removing development data.
+The example credentials are local-only. Service lifecycle and data cleanup
+remain the responsibility of the external test environment.
 
 ## Static Linux distribution
 
@@ -375,9 +363,8 @@ one-time registry setup.
 
 ```text
 crates/       Rust libraries and the two product executables
-deploy/       Local durable-service definitions and firewall examples
 docs/         User, operator, architecture, and compatibility documentation
-images/       Immutable runner environment profiles
+images/       Product packaging, helper images, and execution profiles
 scripts/      CI, development, and renderer tooling
 ui/           React/Vite source and the embedded renderer build
 ```

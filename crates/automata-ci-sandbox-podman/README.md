@@ -73,6 +73,6 @@ a descendant and that the boundary has both `memory.swap.max=0` and
 `memory.swap.current=0`. Missing delegation, a different cgroup layout, or a
 swappable boundary stops the owned workload and rejects the operation.
 
-- [Runner host guide](https://github.com/automata-ci/automata/blob/main/docs/platforms/arch-linux.md)
+- [Runner configuration](https://github.com/automata-ci/automata/blob/main/crates/automata-ci-runner/config/README.md)
 - API documentation: run `cargo doc -p automata-ci-sandbox-podman --open` from a source checkout.
 - [Issues and support](https://github.com/automata-ci/automata/issues)

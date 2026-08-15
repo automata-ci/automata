@@ -2,45 +2,23 @@
 
 Automata exposes Prometheus-compatible metrics from the control plane and each
 runner. This page is the metric reference: it defines the listeners, protocol,
-families, allowed labels, cardinality budget, recording rules, alerts, and
-verification.
+families, allowed labels, cardinality budget, and verification.
 
 When a metric changes, update this reference, the finite label definitions,
-the recording and alert rules, and the protocol tests in the same change.
+and the protocol tests in the same change.
 
-## Collection topology
+## Listener model
 
 The control plane and runner each expose a dedicated operations listener. The
 listener is disabled when its configuration is absent and accepts only the
 fixed `GET /metrics` resource. It is not mounted on the human, Results, or
 runner-control listener.
 
-The first supported deployment binds the listener to a loopback address. A
-control-plane host may be scraped directly by a co-located collector. An
-outbound-only Linux runner host starts three independent single-slot processes
-on ports 9464 through 9466. One node-local Prometheus Agent scrapes all three
-and sends their samples to central storage with remote write.
-
-Each target carries a stable globally unique process `instance`, its fixed
-`runner_slot`, and one stable `host` identity shared by the trio. Reusing an
-instance or leaving any checked-in placeholder causes remote-write label
-collisions and fails deployment validation. These inventory identities are
-scrape target labels, not application metric labels.
-
-Node-local `up == 0` remains visible when the exporter fails but the Agent can
-remote write. It cannot detect disappearance of the whole host or Agent because
-that time series becomes stale. Production monitoring therefore also needs an
-independent central inventory series,
-`automata_ci_runner_inventory_expected{job="automata-runner",instance="...",
-host="...",runner_slot="..."} 1`, and the supplied rules alert when an
-expected identity has no current `up`. Inventory schema 3 accepts a host only
-when it contains exactly slots 1, 2, and 3.
-
-Do not use Pushgateway for runners and do not carry telemetry through the
-runner-control protocol. Non-loopback exposure is unsupported by the current
-products; any such design requires a private management network and independent
-TLS or mTLS scraper credentials. Runner client certificates must not authorize
-metrics access.
+Both products require a literal loopback address. Collector configuration,
+target inventory, remote write, dashboards, recording rules, alerts, and
+runbooks belong to the environment operating Automata and are intentionally not
+shipped by this repository. Do not carry telemetry through the runner-control
+protocol or use runner client certificates to authorize metrics access.
 
 The metrics listener remains available while application readiness is false.
 Prometheus `up` reports scrape health; `automata_ci_control_plane_ready` or
@@ -666,57 +644,9 @@ OpenMetrics 1.0 text remains the fallback and contains the classic form only.
 Keeping both forms preserves existing classic recording rules while operators
 evaluate native-histogram storage cost and queries.
 
-The runner Agent also sets `send_native_histograms: true`; Prometheus 3.x does
-not remote-write them by default. Production metrics currently attach no
-exemplars, and the selected client cannot encode a native histogram's exemplar
-list, so the example intentionally does not enable exemplar remote write.
-
-## Recording and alerting rules
-
-Recording rules apply `rate()` before replica aggregation. Classic histogram
-quantiles preserve `le`:
-
-```promql
-histogram_quantile(
-  0.95,
-  sum by (le, route) (
-    rate(automata_ci_control_plane_http_request_duration_seconds_bucket[5m])
-  )
-)
-```
-
-Duplicated control-plane durable snapshots use `max without(instance)`. Queue,
-blocked-capacity, logical-activation, and runner pending-delivery ages are
-derived from absolute timestamps and guarded by both a positive timestamp and
-their corresponding positive demand. The queue-to-claim p99 warning
-additionally requires more than 0.01 observed claims per second over five
-minutes, so an isolated slow claim cannot fire it. The compatible-capacity
-page covers eligible work that is never claimed.
-
-Alert on symptoms and correctness threats:
-
-- missing scrape targets or desired-active runner sessions;
-- sustained platform request-error budget burn or queue-to-claim latency
-  objective misses, each with a traffic floor;
-- oldest eligible queue work above objective while compatible capacity is
-  insufficient;
-- stale logical workflow activation backlog or unrecovered expired claims;
-- lease expiration or lost attempts;
-- stale maintenance, durable-state sampling, command/cancellation delivery,
-  restart-correct runner outbound delivery, or artifact-reservation progress;
-- blob-integrity, journal-poison, spool-protection, or capacity failures; and
-- process or aggregate sandbox resource exhaustion threatening forward
-  progress.
-
-User-job failures and runner saturation alone do not page the platform team.
-Retries, churn, RSS/fd pressure, scrape size/cardinality growth, clock skew,
-OOM, and output truncation are warning or ticket signals unless they cause a
-user-visible SLO burn.
-
-Initial SLO hypotheses are 99.9% valid platform-request availability and 99%
-of eligible work claimed within 60 seconds. Establish a production baseline
-before ratifying them. Use minimum traffic guards, `for` durations, and
-multi-window burn-rate alerts.
+Prometheus 3.x does not remote-write native histograms by default. Production
+metrics currently attach no exemplars, and the selected client cannot encode a
+native histogram's exemplar list.
 
 ## Verification requirements
 
@@ -734,11 +664,7 @@ The metrics gate combines independent checks:
 4. Privacy tests feed adversarial IDs, URLs, paths, image references, errors,
    payloads, and secret sentinels and assert that neither the series set nor
    exposition gains those values.
-5. `promtool check metrics --extended`, configuration and rule checks, and rule
-   unit tests lint the operator artifacts.
-6. An ephemeral pinned Prometheus performs a real HTTP scrape and verifies
-   `Accept`, response headers, EOF, `up`, ingestion, resets, and recording-rule
-   queries. `promtool check metrics` alone is not a protocol test.
-
-The example collector configuration, rules, dashboards, and runbooks live in
-[`deploy/observability`](../deploy/observability/README.md).
+5. A pinned `promtool` lints the product exposition, and an ephemeral pinned
+   Prometheus performs a real HTTP scrape that verifies protobuf negotiation,
+   OpenMetrics fallback, native and classic histogram ingestion, and `up`.
+   Parser-only linting is not a protocol test.
