@@ -853,6 +853,29 @@ fn workflow_permission_refresh_budget_covers_the_maximum_topology() {
     assert!(workflow_permission_refresh_budgets(0).is_err());
 }
 
+#[test]
+fn workflow_permission_startup_distinguishes_existing_and_new_failed_generations() {
+    let existing_failure = WorkflowPermissionAuthorityReadiness {
+        ready: false,
+        failed_generations: 7,
+    };
+    assert!(!existing_failure.observed_new_failure_since(existing_failure));
+    assert!(
+        WorkflowPermissionAuthorityReadiness {
+            ready: false,
+            failed_generations: 8,
+        }
+        .observed_new_failure_since(existing_failure)
+    );
+    assert!(
+        !WorkflowPermissionAuthorityReadiness {
+            ready: true,
+            failed_generations: 0,
+        }
+        .observed_new_failure_since(existing_failure)
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn workflow_permission_convergence_contention_is_rate_limited_and_cancellable() {
     let sleeper = tokio::spawn(sleep_workflow_permission_convergence_retry(

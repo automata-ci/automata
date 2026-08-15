@@ -2170,7 +2170,7 @@ async fn converge_workflow_permission_authorities(
     // non-current or too close to expiry while another target converged.
     let required_use_through = required_workflow_permission_use_horizon(clock.as_ref())?;
     let mut validation = futures::stream::iter(targets.iter().map(|authority| {
-        workflow_permission_authority_is_ready(
+        inspect_workflow_permission_authority_readiness(
             authority_repository.as_ref(),
             authority,
             required_use_through,
@@ -2179,7 +2179,7 @@ async fn converge_workflow_permission_authorities(
     }))
     .buffer_unordered(MAX_WORKFLOW_PERMISSION_OBSERVATION_CONCURRENCY);
     while let Some(result) = validation.next().await {
-        if !result? {
+        if !result?.ready {
             return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
         }
     }
@@ -2232,12 +2232,24 @@ fn workflow_permission_refresh_budgets(
     Ok((round_budget, attempt_budget))
 }
 
-async fn workflow_permission_authority_is_ready(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkflowPermissionAuthorityReadiness {
+    ready: bool,
+    failed_generations: u16,
+}
+
+impl WorkflowPermissionAuthorityReadiness {
+    const fn observed_new_failure_since(self, previous: Self) -> bool {
+        self.failed_generations > previous.failed_generations
+    }
+}
+
+async fn inspect_workflow_permission_authority_readiness(
     repository: &dyn GithubServerServiceAuthorityRepository,
     authority: &automata_ci_store::GithubServerServiceAuthorityIdentity,
     required_use_through: UnixMillis,
     deadline: Instant,
-) -> Result<bool, GithubProviderRuntimeBuildError> {
+) -> Result<WorkflowPermissionAuthorityReadiness, GithubProviderRuntimeBuildError> {
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
@@ -2258,7 +2270,7 @@ async fn workflow_permission_authority_is_ready(
             )
             .await
             .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
-        Ok(descriptor.current_generation().is_some_and(|generation| {
+        let ready = descriptor.current_generation().is_some_and(|generation| {
             issuance.is_some_and(|receipt| {
                 receipt.key().authority_id() == authority.authority_id()
                     && receipt.key().generation() == generation
@@ -2267,7 +2279,11 @@ async fn workflow_permission_authority_is_ready(
                         .usable_until()
                         .is_some_and(|usable_until| usable_until >= required_use_through)
             })
-        }))
+        });
+        Ok(WorkflowPermissionAuthorityReadiness {
+            ready,
+            failed_generations: descriptor.consecutive_generation_failures(),
+        })
     })
     .await
     .map_err(|_| GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?
@@ -2286,14 +2302,14 @@ async fn converge_workflow_permission_authority(
     let selector = GithubServerServiceAuthoritySelector::from_identity(&authority);
     loop {
         let required_use_through = required_workflow_permission_use_horizon(clock.as_ref())?;
-        if workflow_permission_authority_is_ready(
+        let readiness_before = inspect_workflow_permission_authority_readiness(
             authority_repository.as_ref(),
             &authority,
             required_use_through,
             deadline,
         )
-        .await?
-        {
+        .await?;
+        if readiness_before.ready {
             return Ok(());
         }
         let reservation = commit_supervisor
@@ -2328,13 +2344,25 @@ async fn converge_workflow_permission_authority(
             | Err(
                 GithubServerServiceCoordinatorError::Repository
                 | GithubServerServiceCoordinatorError::EnvelopePreparation,
-            ) => {
-                sleep_workflow_permission_convergence_retry(deadline).await?;
-            }
+            ) => {}
             Err(_) => {
                 return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
             }
         }
+        let readiness_after = inspect_workflow_permission_authority_readiness(
+            authority_repository.as_ref(),
+            &authority,
+            required_workflow_permission_use_horizon(clock.as_ref())?,
+            deadline,
+        )
+        .await?;
+        if readiness_after.ready {
+            return Ok(());
+        }
+        if readiness_after.observed_new_failure_since(readiness_before) {
+            return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);
+        }
+        sleep_workflow_permission_convergence_retry(deadline).await?;
     }
 }
 
