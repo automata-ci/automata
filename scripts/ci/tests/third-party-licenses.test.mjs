@@ -404,6 +404,61 @@ test("npm traversal inventories only reachable production packages", () => {
   assert.deepEqual([...components.keys()], ["npm:runtime@1.0.0"]);
 });
 
+test("npm traversal inventories explicit embedded dev roots and their runtime graph", () => {
+  const root = scratch();
+  const ui = path.join(root, "ui");
+  for (const [name, version] of [
+    ["embedded", "1.0.0"],
+    ["transitive", "1.1.0"],
+    ["unrelated", "2.0.0"],
+  ]) {
+    const directory = path.join(ui, "node_modules", name);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path.join(directory, "package.json"), JSON.stringify({ name, version }));
+    writeFileSync(path.join(directory, "LICENSE"), `${name} license\n`);
+  }
+  const lock = {
+    lockfileVersion: 3,
+    packages: {
+      "": {
+        devDependencies: {
+          embedded: "1.0.0",
+          unrelated: "2.0.0",
+        },
+      },
+      "node_modules/embedded": {
+        version: "1.0.0",
+        integrity: "sha512-embedded",
+        license: "MIT",
+        dev: true,
+        dependencies: { transitive: "1.1.0" },
+      },
+      "node_modules/transitive": {
+        version: "1.1.0",
+        integrity: "sha512-transitive",
+        license: "MIT",
+        dev: true,
+      },
+      "node_modules/unrelated": {
+        version: "2.0.0",
+        integrity: "sha512-unrelated",
+        license: "MIT",
+        dev: true,
+      },
+    },
+  };
+  const components = collectNpmComponents({
+    lock,
+    uiDirectory: ui,
+    artifact: "ui",
+    embeddedRuntimeRoots: ["embedded"],
+  });
+  assert.deepEqual(
+    [...components.keys()],
+    ["npm:embedded@1.0.0", "npm:transitive@1.1.0"],
+  );
+});
+
 test("bundles are deterministic, deduplicate texts, and expose notices", () => {
   const root = scratch();
   const primary = path.join(root, "primary");

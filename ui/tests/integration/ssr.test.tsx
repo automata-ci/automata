@@ -1120,6 +1120,58 @@ describe("hydration", () => {
     vi.unstubAllGlobals();
   });
 
+  it("disables rerun controls while submitting and recovers from rejection", async () => {
+    if (runDetailRequest.page.kind !== "run-detail") {
+      throw new Error("The run-detail fixture is unavailable");
+    }
+    const endpoint = `/automata-ci/automata/actions/runs/${PRIMARY_RUN_ID}/reruns`;
+    const request: RenderRequest = {
+      ...runDetailRequest,
+      page: {
+        ...runDetailRequest.page,
+        rerun: {
+          endpoint,
+          csrfToken: SHELL_CSRF_TOKEN,
+          failedJobsAvailable: true,
+        },
+      },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    document.open();
+    document.write(renderPage(request));
+    document.close();
+    const parsedRequest = readRenderRequest(document);
+
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    await act(async () => {
+      root = hydrateRoot(document, <HtmlDocument request={parsedRequest} />);
+    });
+    const rerun = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Rerun controls"] .button--primary',
+    );
+    await act(async () => rerun?.click());
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(endpoint, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
+        "x-automata-csrf-token": SHELL_CSRF_TOKEN,
+      },
+      body: expect.stringContaining('"selection":{"mode":"entire_workflow"}'),
+    });
+    expect(rerun?.disabled).toBe(false);
+    expect(rerun?.textContent).toContain("Re-run all jobs");
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "The rerun could not be started",
+    );
+
+    await act(async () => root?.unmount());
+  });
+
   it("polls a running job in place and stops after its terminal snapshot", async () => {
     if (jobLogRequest.page.kind !== "job-log") {
       throw new Error("The job-log fixture is unavailable");

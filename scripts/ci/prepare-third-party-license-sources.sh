@@ -148,7 +148,6 @@ cargo fetch \
     --locked \
     --target wasm32-wasip2
 npm --prefix "${repository_root}/ui" ci \
-    --omit=dev \
     --ignore-scripts
 
 printf 'Prepared locked Cargo and npm license sources\n'
