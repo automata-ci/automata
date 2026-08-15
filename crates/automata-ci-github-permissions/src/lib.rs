@@ -58,6 +58,7 @@ pub const GITHUB_WORKFLOW_PERMISSIONS: &[GithubWorkflowPermission] = &[
     GithubWorkflowPermission::new("discussions", true, true),
     GithubWorkflowPermission::new("id-token", false, true),
     GithubWorkflowPermission::new("issues", true, true),
+    GithubWorkflowPermission::new("models", true, false),
     GithubWorkflowPermission::new("packages", true, true),
     GithubWorkflowPermission::new("pages", true, true),
     GithubWorkflowPermission::new("pull-requests", true, true),
@@ -121,7 +122,7 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].name() < pair[1].name())
         );
-        assert_eq!(GITHUB_WORKFLOW_PERMISSIONS.len(), 16);
+        assert_eq!(GITHUB_WORKFLOW_PERMISSIONS.len(), 17);
 
         let id_token = github_workflow_permission("id-token").expect("id-token");
         assert!(!id_token.allows_read());
@@ -131,6 +132,10 @@ mod tests {
             github_workflow_permission("vulnerability-alerts").expect("vulnerability alerts");
         assert!(alerts.allows_read());
         assert!(!alerts.allows_write());
+
+        let models = github_workflow_permission("models").expect("models");
+        assert!(models.allows_read());
+        assert!(!models.allows_write());
     }
 
     #[test]
@@ -150,9 +155,9 @@ mod tests {
         assert_eq!(
             github_workflow_permission_catalog_sha256(),
             [
-                0xf4, 0x0e, 0xa2, 0xdc, 0x05, 0x21, 0xf2, 0x77, 0xb0, 0xec, 0x00, 0xb7, 0x0a, 0x6a,
-                0x31, 0x49, 0xbe, 0xf5, 0x97, 0x5c, 0xf3, 0xf5, 0x59, 0x87, 0xf7, 0x94, 0x7d, 0xe7,
-                0x99, 0xf4, 0xec, 0x26,
+                0xc6, 0xdf, 0x0d, 0xed, 0xf0, 0x7f, 0x24, 0x82, 0xbc, 0x19, 0x3f, 0x2c, 0xb4, 0xfd,
+                0x46, 0xcd, 0x7b, 0x5d, 0xd9, 0xe7, 0x8c, 0xd9, 0x14, 0x86, 0x04, 0x0b, 0xa0, 0x9f,
+                0xce, 0x1a, 0x48, 0x5e,
             ]
         );
     }
