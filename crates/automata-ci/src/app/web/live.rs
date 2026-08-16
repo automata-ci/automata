@@ -273,18 +273,14 @@ impl LiveWebData {
         repository: &HumanRepository,
         publication: Option<&HumanOutputPublication>,
     ) -> Result<bool, WebDataError> {
-        let (visibility, exposure) =
-            publication.map_or((None, SecretExposureClass::ReadableSecret), |publication| {
-                let (visibility, exposure) = publication_target(publication);
-                (Some(visibility), exposure)
-            });
+        let visibility = publication.map(|publication| publication.effective_visibility);
         self.allowed(
             context,
             tenant,
             repository,
             repository_read_permissions::LOG_READ,
             visibility,
-            exposure,
+            SecretExposureClass::Secretless,
         )
         .await
     }
@@ -4229,6 +4225,48 @@ mod tests {
 
         assert_eq!(page.lines.len(), 1);
         assert_eq!(page.lines[0].text, "checkout ok");
+    }
+
+    #[tokio::test]
+    async fn public_runner_redacted_logs_ignore_runtime_secret_exposure() {
+        let policy = FakeLivePolicy {
+            dashboard_visibility: OutputVisibility::Public,
+            log_visibility: OutputVisibility::Public,
+            log_exposure: SecretExposureClass::ReadableSecret,
+            raw_log_disposition: HumanRawLogDisposition::Persist,
+            allow_dashboard: true,
+            allow_logs: true,
+            allow_settings_read: false,
+            allow_settings_update: false,
+        };
+        let (data, anonymous, repository, run_id, job_id, calls) =
+            fake_live_data_with_policy(policy).await;
+        let page = WebData::job_log(
+            &data,
+            &anonymous,
+            &repository,
+            run_id,
+            job_id,
+            &first_log_page_request(),
+        )
+        .await
+        .expect("anonymous public runner-redacted log lookup")
+        .expect("public runner-redacted log page");
+
+        assert_eq!(page.log_visibility, CollectionVisibility::Full);
+        assert_eq!(page.lines.len(), 1);
+        assert_eq!(page.lines[0].text, "checkout ok");
+        assert!(
+            calls
+                .lock()
+                .expect("authorization calls")
+                .iter()
+                .any(|target| {
+                    target.request.permission().as_str() == repository_read_permissions::LOG_READ
+                        && target.request.secret_exposure() == SecretExposureClass::Secretless
+                        && target.durable_visibility == Some(OutputVisibility::Public)
+                })
+        );
     }
 
     #[tokio::test]
