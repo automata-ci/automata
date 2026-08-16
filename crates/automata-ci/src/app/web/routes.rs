@@ -2052,7 +2052,8 @@ fn html_response(html: String, csp_nonce: &str) -> Response<Body> {
     let mut response = Html(html).into_response();
     let csp = format!(
         "default-src 'none'; base-uri 'none'; connect-src 'self'; font-src data:; \
-         form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; \
+         form-action 'self' {GITHUB_AUTHORIZATION_ORIGIN}; frame-ancestors 'none'; \
+         img-src 'self' data:; \
          script-src 'self' 'nonce-{csp_nonce}'; style-src 'self'"
     );
     let Ok(csp) = HeaderValue::from_str(&csp) else {
@@ -2060,6 +2061,13 @@ fn html_response(html: String, csp_nonce: &str) -> Response<Body> {
         return internal_server_error();
     };
     apply_page_headers(response.headers_mut(), csp);
+    // Signed-out pages post to the same-origin login receiver, which redirects
+    // the browser to GitHub. Browsers enforce `form-action` across that entire
+    // redirect chain, and the login receiver requires an exact Origin header.
+    response.headers_mut().insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
     response
 }
 
@@ -3618,7 +3626,7 @@ mod tests {
     }
 
     fn assert_page_headers(response: &Response<Body>, page: &Value) {
-        assert_page_headers_with_referrer(response, page, "no-referrer");
+        assert_page_headers_with_referrer(response, page, "same-origin");
     }
 
     fn assert_page_headers_with_referrer(
@@ -3643,13 +3651,8 @@ mod tests {
             .expect("CSP must be valid text");
         assert!(csp.contains(&format!("'nonce-{nonce}'")));
         assert!(csp.contains("frame-ancestors 'none'"));
-        if page["page"]["kind"] == "setup" {
-            assert!(csp.contains("form-action 'self' https://github.com"));
-            assert!(!csp.contains("form-action *"));
-        } else {
-            assert!(csp.contains("form-action 'self';"));
-            assert!(!csp.contains(GITHUB_AUTHORIZATION_ORIGIN));
-        }
+        assert!(csp.contains("form-action 'self' https://github.com"));
+        assert!(!csp.contains("form-action *"));
     }
 
     fn assert_error_page_headers(response: &Response<Body>, status: StatusCode) {
@@ -4863,7 +4866,10 @@ mod tests {
         assert_eq!(page["page"]["job"]["attempt"], 3);
         assert!(page["page"]["job"]["runnerLabel"].is_null());
         assert!(page["page"]["job"]["durationLabel"].is_null());
-        assert!(page["page"]["jobs"][1]["href"].is_null());
+        assert_eq!(
+            page["page"]["jobs"][1]["href"],
+            format!("/acme-labs/payments-api/actions/runs/{RUN_ID}/jobs/{OTHER_JOB_ID}")
+        );
         assert_eq!(page["page"]["search"]["query"], "retry warning");
         assert_eq!(page["page"]["search"]["action"], path);
         assert!(page["page"]["search"].get("refreshHref").is_none());
