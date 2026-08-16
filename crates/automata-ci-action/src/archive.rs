@@ -4,7 +4,10 @@ use std::{
     str,
 };
 
-use automata_ci_core::valid_windows_action_path_component;
+use automata_ci_core::{
+    MAX_WINDOWS_ACTION_ARCHIVE_DEPTH, MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES,
+    valid_windows_action_path_component,
+};
 use automata_ci_scm::RepositorySnapshot;
 use bytes::Bytes;
 use flate2::read::MultiGzDecoder;
@@ -20,8 +23,6 @@ const DOCKERFILE: &[u8] = b"Dockerfile";
 const DOCKERFILE_LOWER: &[u8] = b"dockerfile";
 const TAR_BLOCK_BYTES: usize = 512;
 const TAR_BLOCK_BYTES_U64: u64 = TAR_BLOCK_BYTES as u64;
-const WINDOWS_MAX_ENTRY_DEPTH: usize = 64;
-const WINDOWS_MAX_REGULAR_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Exact bounded expansion facts reproduced while validating a Windows action
 /// archive before scheduling and again by the privileged materializer.
@@ -96,9 +97,9 @@ pub fn inspect_archive(
 /// This is deliberately narrower than the provider-neutral archive contract.
 /// Windows materialization rejects every link, reparse-capable entry type,
 /// case-insensitive collision, alternate-data-stream separator, reserved DOS
-/// name, trailing space or dot, and non-ASCII member name. The initial Windows
-/// profile therefore fails closed instead of guessing about Unicode
-/// normalization or link-creation privileges.
+/// name, leading/trailing space or trailing dot, and non-ASCII member name.
+/// The initial Windows profile therefore fails closed instead of guessing
+/// about Unicode normalization or link-creation privileges.
 ///
 /// Callers must invoke this before creating or attaching a sandbox. The
 /// archive is decoded independently so a prepared-action object cannot bypass
@@ -176,7 +177,7 @@ pub fn validate_windows_materialization_archive(
         let (archive_root, relative) = components
             .split_first()
             .ok_or(ActionArchiveError::UnsafePath)?;
-        if relative.len() > WINDOWS_MAX_ENTRY_DEPTH {
+        if relative.len() > usize::from(MAX_WINDOWS_ACTION_ARCHIVE_DEPTH) {
             return Err(ActionArchiveError::ResourceLimit);
         }
         maximum_depth = maximum_depth
@@ -197,7 +198,7 @@ pub fn validate_windows_materialization_archive(
         )?;
 
         let declared_size = declared_size(&entry)?;
-        if entry_type.is_file() && declared_size > WINDOWS_MAX_REGULAR_FILE_BYTES {
+        if entry_type.is_file() && declared_size > MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES {
             return Err(ActionArchiveError::ResourceLimit);
         }
         if entry_type.is_file() {

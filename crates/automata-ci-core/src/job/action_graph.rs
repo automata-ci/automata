@@ -10,9 +10,17 @@ use super::{ActionReference, JobContentReference};
 use crate::Sha256Digest;
 
 /// Schema version of the sealed Windows repository-action graph.
-pub const WINDOWS_ACTION_GRAPH_SCHEMA_VERSION: u16 = 1;
+pub const WINDOWS_ACTION_GRAPH_SCHEMA_VERSION: u16 = 2;
+/// Version of the exact Windows action-path namespace policy.
+///
+/// Version 2 rejects leading and trailing ASCII-space aliases in addition to
+/// the device-name, short-name, stream, case, and path-shape aliases enforced
+/// by the original policy.
+pub const WINDOWS_ACTION_NAMESPACE_POLICY_VERSION: u16 = 2;
 /// Media type of one immutable gzip-compressed repository snapshot.
 pub const WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE: &str = "application/vnd.automata.action-archive+gzip";
+/// Maximum encoded bytes in one repository-action subdirectory.
+pub const MAX_WINDOWS_ACTION_SUBPATH_BYTES: usize = 1_024;
 /// Maximum distinct immutable action archives in one job graph.
 pub const MAX_WINDOWS_ACTION_GRAPH_ARCHIVES: usize = 256;
 /// Maximum aggregate compressed bytes fetched for one job graph.
@@ -27,13 +35,17 @@ pub const MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES: u32 = 10_000;
 pub const MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum expanded bytes in one action archive.
 pub const MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum bytes retained while decoding an action definition or global PAX record.
+pub const MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES: u64 = 1024 * 1024;
 /// Maximum path depth below a repository archive root.
 pub const MAX_WINDOWS_ACTION_ARCHIVE_DEPTH: u16 = 64;
 /// Maximum encoded bytes in one archive member path.
 pub const MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES: u16 = 4_096;
+/// Maximum aggregate bytes retained by the case-folded archive path index.
+pub const MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES: usize = 16 * 1024 * 1024;
 
-const GRAPH_DOMAIN: &[u8] = b"automata.windows-action-graph.v1\0";
-const POLICY_DOMAIN: &[u8] = b"automata.windows-action-archive-policy.v1\0";
+const GRAPH_DOMAIN: &[u8] = b"automata.windows-action-graph.v2\0";
+const POLICY_DOMAIN: &[u8] = b"automata.windows-action-archive-policy.v2\0";
 const ACTION_KEY_DOMAIN: &[u8] = b"automata.repository-action-key.v1\0";
 
 /// Expansion facts reproduced by pre-scheduling and broker validation.
@@ -304,11 +316,17 @@ impl WindowsRepositoryActionGraph {
     }
 }
 
-/// Returns the exact fixed archive/graph expansion-policy digest.
+/// Returns the exact fixed archive/graph namespace and expansion-policy digest.
 #[must_use]
 pub fn windows_action_archive_policy_sha256() -> Sha256Digest {
     let mut digest = Sha256::new();
     digest.update(POLICY_DOMAIN);
+    digest.update(WINDOWS_ACTION_NAMESPACE_POLICY_VERSION.to_be_bytes());
+    digest.update(
+        u64::try_from(MAX_WINDOWS_ACTION_SUBPATH_BYTES)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
     digest.update(
         u64::try_from(MAX_WINDOWS_ACTION_GRAPH_ARCHIVES)
             .unwrap_or(u64::MAX)
@@ -320,8 +338,14 @@ pub fn windows_action_archive_policy_sha256() -> Sha256Digest {
     digest.update(MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES.to_be_bytes());
     digest.update(MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES.to_be_bytes());
     digest.update(MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES.to_be_bytes());
+    digest.update(MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES.to_be_bytes());
     digest.update(MAX_WINDOWS_ACTION_ARCHIVE_DEPTH.to_be_bytes());
     digest.update(MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES.to_be_bytes());
+    digest.update(
+        u64::try_from(MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES)
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
     Sha256Digest::from_bytes(digest.finalize().into())
 }
 
@@ -429,7 +453,7 @@ fn valid_subpath(value: &str) -> bool {
     if value.is_empty() {
         return true;
     }
-    if value.len() > usize::from(MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES)
+    if value.len() > MAX_WINDOWS_ACTION_SUBPATH_BYTES
         || value.starts_with('/')
         || value.ends_with('/')
         || value.contains('\\')
@@ -444,13 +468,15 @@ fn valid_subpath(value: &str) -> bool {
 /// filesystem identity under the sealed action archive policy.
 ///
 /// This deliberately rejects DOS device names, 8.3 aliases, alternate-stream
-/// syntax, path separators, controls, and trailing-dot/space aliases. Callers
-/// remain responsible for splitting and bounding the complete path.
+/// syntax, path separators, controls, leading/trailing ASCII-space aliases,
+/// and trailing-dot aliases. Callers remain responsible for splitting and
+/// bounding the complete path.
 #[must_use]
 pub fn valid_windows_action_path_component(component: &str) -> bool {
     if component.is_empty()
         || matches!(component, "." | "..")
         || !component.is_ascii()
+        || component.starts_with(' ')
         || component.ends_with([' ', '.'])
         || component.bytes().any(|byte| {
             byte.is_ascii_control()
@@ -503,7 +529,18 @@ fn zero_digest(digest: Sha256Digest) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::valid_windows_action_path_component;
+    use sha2::{Digest as _, Sha256};
+
+    use super::{
+        MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_DEPTH,
+        MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES, MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES,
+        MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES,
+        MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES, MAX_WINDOWS_ACTION_GRAPH_ARCHIVES,
+        MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES, MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES,
+        MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, MAX_WINDOWS_ACTION_SUBPATH_BYTES,
+        WINDOWS_ACTION_GRAPH_SCHEMA_VERSION, WINDOWS_ACTION_NAMESPACE_POLICY_VERSION,
+        valid_windows_action_path_component, windows_action_archive_policy_sha256,
+    };
 
     #[test]
     fn windows_action_components_reject_every_namespace_alias() {
@@ -518,6 +555,7 @@ mod tests {
             "LONGFI~1.JS",
             "A~999.txt",
             "name:stream",
+            " leading.js",
             "trailing.",
             "trailing ",
             ".",
@@ -547,5 +585,35 @@ mod tests {
                 "unexpectedly rejected {component:?}"
             );
         }
+    }
+
+    #[test]
+    fn namespace_policy_v2_has_a_distinct_mixed_fleet_identity() {
+        let mut legacy = Sha256::new();
+        legacy.update(b"automata.windows-action-archive-policy.v1\0");
+        legacy.update(
+            u64::try_from(MAX_WINDOWS_ACTION_GRAPH_ARCHIVES)
+                .expect("archive ceiling fits u64")
+                .to_be_bytes(),
+        );
+        legacy.update(MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES.to_be_bytes());
+        legacy.update(MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES.to_be_bytes());
+        legacy.update(MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES.to_be_bytes());
+        legacy.update(MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES.to_be_bytes());
+        legacy.update(MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES.to_be_bytes());
+        legacy.update(MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES.to_be_bytes());
+        legacy.update(MAX_WINDOWS_ACTION_ARCHIVE_DEPTH.to_be_bytes());
+        legacy.update(MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES.to_be_bytes());
+
+        assert_eq!(WINDOWS_ACTION_GRAPH_SCHEMA_VERSION, 2);
+        assert_eq!(WINDOWS_ACTION_NAMESPACE_POLICY_VERSION, 2);
+        let legacy: [u8; 32] = legacy.finalize().into();
+        assert_ne!(windows_action_archive_policy_sha256().as_bytes(), &legacy);
+        assert_eq!(MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES, 1024 * 1024);
+        assert_eq!(MAX_WINDOWS_ACTION_SUBPATH_BYTES, 1024);
+        assert_eq!(
+            MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES,
+            16 * 1024 * 1024
+        );
     }
 }

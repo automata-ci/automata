@@ -1,12 +1,15 @@
 use std::{collections::BTreeSet, fmt, time::Duration};
 
 use automata_ci_core::{
-    MAX_WINDOWS_ACTION_ARCHIVE_DEPTH, MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES,
-    MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES,
-    MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES, MAX_WINDOWS_ACTION_GRAPH_ARCHIVES,
+    MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_DEPTH,
+    MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES, MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES,
+    MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES,
+    MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES, MAX_WINDOWS_ACTION_GRAPH_ARCHIVES,
     MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES, MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES,
-    MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, WindowsActionArchiveFacts,
-    valid_windows_action_path_component,
+    MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, MAX_WINDOWS_ACTION_SUBPATH_BYTES,
+    WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE, WINDOWS_ACTION_NAMESPACE_POLICY_VERSION,
+    WindowsActionArchiveFacts, WindowsRepositoryActionArchive, WindowsRepositoryActionGraph,
+    valid_windows_action_path_component, windows_action_archive_policy_sha256,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -808,34 +811,73 @@ impl fmt::Debug for CopyToRequest {
 /// One immutable archive in a complete, ordered action graph.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ActionArchiveMaterialization {
-    ordinal: u32,
-    action_key_sha256: crate::Sha256Digest,
+    planned: WindowsRepositoryActionArchive,
     subpath: String,
     destination: TargetPath,
     content: Vec<u8>,
-    sha256: crate::Sha256Digest,
-    facts: WindowsActionArchiveFacts,
 }
 
 /// Fixed expansion and namespace policy independently enforced by the broker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_field_names)]
 pub struct SealedActionArchivePolicy {
+    schema_version: u16,
+    policy_sha256: crate::Sha256Digest,
+    maximum_action_subpath_bytes: u64,
     maximum_entries: u32,
     maximum_file_bytes: u64,
     maximum_expanded_bytes: u64,
+    maximum_definition_bytes: u64,
     maximum_depth: u16,
     maximum_path_bytes: u16,
+    maximum_path_index_bytes: u64,
 }
 
 impl SealedActionArchivePolicy {
-    const WINDOWS_V1: Self = Self {
-        maximum_entries: MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES,
-        maximum_file_bytes: MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES,
-        maximum_expanded_bytes: MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES,
-        maximum_depth: MAX_WINDOWS_ACTION_ARCHIVE_DEPTH,
-        maximum_path_bytes: MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES,
-    };
+    /// Returns the exact current Windows archive namespace and expansion
+    /// policy. Providers must reject requests whose version, digest, or fixed
+    /// ceilings differ from this value before mutating a sandbox.
+    #[must_use]
+    pub fn windows_v2() -> Self {
+        Self {
+            schema_version: WINDOWS_ACTION_NAMESPACE_POLICY_VERSION,
+            policy_sha256: windows_action_archive_policy_sha256(),
+            maximum_action_subpath_bytes: u64::try_from(MAX_WINDOWS_ACTION_SUBPATH_BYTES)
+                .unwrap_or(u64::MAX),
+            maximum_entries: MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES,
+            maximum_file_bytes: MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES,
+            maximum_expanded_bytes: MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES,
+            maximum_definition_bytes: MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES,
+            maximum_depth: MAX_WINDOWS_ACTION_ARCHIVE_DEPTH,
+            maximum_path_bytes: MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES,
+            maximum_path_index_bytes: u64::try_from(MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES)
+                .unwrap_or(u64::MAX),
+        }
+    }
+
+    /// Returns the exact namespace-policy schema version.
+    #[must_use]
+    pub const fn schema_version(self) -> u16 {
+        self.schema_version
+    }
+
+    /// Returns the canonical namespace and expansion-policy digest.
+    #[must_use]
+    pub const fn policy_sha256(self) -> crate::Sha256Digest {
+        self.policy_sha256
+    }
+
+    /// Returns whether this is the complete current Windows policy.
+    #[must_use]
+    pub fn is_current_windows(self) -> bool {
+        self == Self::windows_v2()
+    }
+
+    /// Returns the maximum encoded bytes in one repository-action subdirectory.
+    #[must_use]
+    pub const fn maximum_action_subpath_bytes(self) -> u64 {
+        self.maximum_action_subpath_bytes
+    }
 
     /// Returns the maximum tar-entry count, including metadata entries.
     #[must_use]
@@ -855,6 +897,12 @@ impl SealedActionArchivePolicy {
         self.maximum_expanded_bytes
     }
 
+    /// Returns the maximum bytes retained for one definition or global PAX record.
+    #[must_use]
+    pub const fn maximum_definition_bytes(self) -> u64 {
+        self.maximum_definition_bytes
+    }
+
     /// Returns the maximum materialized component depth below the archive root.
     #[must_use]
     pub const fn maximum_depth(self) -> u16 {
@@ -866,6 +914,12 @@ impl SealedActionArchivePolicy {
     pub const fn maximum_path_bytes(self) -> u16 {
         self.maximum_path_bytes
     }
+
+    /// Returns the maximum aggregate bytes retained by the path index.
+    #[must_use]
+    pub const fn maximum_path_index_bytes(self) -> u64 {
+        self.maximum_path_index_bytes
+    }
 }
 
 impl ActionArchiveMaterialization {
@@ -873,51 +927,51 @@ impl ActionArchiveMaterialization {
     ///
     /// # Errors
     ///
-    /// Rejects non-Windows destinations, empty/oversized archives, and zero
-    /// digest placeholders.
+    /// Rejects non-Windows destinations, empty/oversized archives, or content
+    /// which differs from the complete pre-scheduling descriptor.
     pub fn new(
-        ordinal: u32,
-        action_key_sha256: crate::Sha256Digest,
-        subpath: impl Into<String>,
+        planned: WindowsRepositoryActionArchive,
         destination: TargetPath,
         content: Vec<u8>,
-        sha256: crate::Sha256Digest,
-        facts: WindowsActionArchiveFacts,
     ) -> Result<Self, ValueError> {
-        let subpath = subpath.into();
+        let subpath = planned.subpath().replace('/', "\\");
         let content_digest = crate::Sha256Digest::from_bytes(Sha256::digest(&content).into());
+        let content_len = u64::try_from(content.len()).ok();
         if destination.platform() != crate::TargetPlatform::Windows
             || !valid_sealed_absolute_path(destination.as_str())
             || content.is_empty()
             || content.len() > MAX_COPY_BYTES
-            || action_key_sha256.as_bytes().iter().all(|byte| *byte == 0)
-            || sha256.as_bytes().iter().all(|byte| *byte == 0)
-            || content_digest != sha256
+            || planned.archive().media_type() != WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE
+            || content_len != Some(planned.archive().encoded_size())
+            || content_digest != planned.archive().digest()
             || (!subpath.is_empty() && !valid_sealed_relative_path(&subpath))
         {
             return Err(ValueError::InvalidByteLimit);
         }
         Ok(Self {
-            ordinal,
-            action_key_sha256,
+            planned,
             subpath,
             destination,
             content,
-            sha256,
-            facts,
         })
+    }
+
+    /// Returns the complete descriptor committed into the admitted `JobIR`.
+    #[must_use]
+    pub const fn planned(&self) -> &WindowsRepositoryActionArchive {
+        &self.planned
     }
 
     /// Returns this entry's exact zero-based graph ordinal.
     #[must_use]
     pub const fn ordinal(&self) -> u32 {
-        self.ordinal
+        self.planned.ordinal()
     }
 
     /// Returns the digest of the canonical action reference key.
     #[must_use]
     pub const fn action_key_sha256(&self) -> crate::Sha256Digest {
-        self.action_key_sha256
+        self.planned.action_key_sha256()
     }
 
     /// Returns the validated subpath selected within this immutable archive.
@@ -941,13 +995,13 @@ impl ActionArchiveMaterialization {
     /// Returns the archive digest the provider must reproduce before writing.
     #[must_use]
     pub const fn sha256(&self) -> crate::Sha256Digest {
-        self.sha256
+        self.planned.archive().digest()
     }
 
     /// Returns the expansion facts independently reproduced before scheduling.
     #[must_use]
     pub const fn facts(&self) -> WindowsActionArchiveFacts {
-        self.facts
+        self.planned.facts()
     }
 }
 
@@ -955,13 +1009,14 @@ impl fmt::Debug for ActionArchiveMaterialization {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ActionArchiveMaterialization")
-            .field("ordinal", &self.ordinal)
-            .field("action_key_sha256", &self.action_key_sha256)
+            .field("planned", &self.planned)
+            .field("ordinal", &self.ordinal())
+            .field("action_key_sha256", &self.action_key_sha256())
             .field("subpath", &self.subpath)
             .field("destination", &self.destination)
             .field("content_bytes", &self.content.len())
-            .field("sha256", &self.sha256)
-            .field("facts", &self.facts)
+            .field("sha256", &self.sha256())
+            .field("facts", &self.facts())
             .field("content", &"[REDACTED]")
             .finish()
     }
@@ -984,8 +1039,9 @@ impl ActionGraphMaterializationRequest {
     ///
     /// # Errors
     ///
-    /// Rejects an empty/oversized graph, a zero graph digest, non-contiguous
-    /// ordinals, repeated destinations, or an aggregate archive over 16 MiB.
+    /// Rejects an empty/oversized graph, a graph which does not reconstruct to
+    /// the pre-scheduling digest, non-contiguous ordinals, repeated
+    /// destinations, or aggregate archive content over 16 MiB.
     pub fn new(
         operation_id: OperationId,
         sandbox: SandboxHandle,
@@ -993,13 +1049,23 @@ impl ActionGraphMaterializationRequest {
         plan_sha256: crate::Sha256Digest,
         archives: Vec<ActionArchiveMaterialization>,
     ) -> Result<Self, ValueError> {
+        let archive_policy = SealedActionArchivePolicy::windows_v2();
+        let planned_graph = WindowsRepositoryActionGraph::new(
+            archives
+                .iter()
+                .map(|archive| archive.planned().clone())
+                .collect(),
+        )
+        .map_err(|_| ValueError::InvalidByteLimit)?;
         if archives.is_empty()
             || archives.len() > MAX_WINDOWS_ACTION_GRAPH_ARCHIVES
             || plan_sha256.as_bytes().iter().all(|byte| *byte == 0)
+            || planned_graph.graph_sha256() != plan_sha256
+            || planned_graph.policy_sha256() != archive_policy.policy_sha256()
             || archives
                 .iter()
                 .enumerate()
-                .any(|(index, archive)| usize::try_from(archive.ordinal) != Ok(index))
+                .any(|(index, archive)| usize::try_from(archive.ordinal()) != Ok(index))
             || archives
                 .iter()
                 .map(|archive| archive.content.len())
@@ -1011,12 +1077,12 @@ impl ActionGraphMaterializationRequest {
                 })
             || archives
                 .iter()
-                .map(|archive| archive.facts.expanded_bytes())
+                .map(|archive| archive.facts().expanded_bytes())
                 .try_fold(0_u64, u64::checked_add)
                 .is_none_or(|bytes| bytes > MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES)
             || archives
                 .iter()
-                .map(|archive| u64::from(archive.facts.regular_file_count()))
+                .map(|archive| u64::from(archive.facts().regular_file_count()))
                 .try_fold(0_u64, u64::checked_add)
                 .is_none_or(|files| files > MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES)
         {
@@ -1036,7 +1102,6 @@ impl ActionGraphMaterializationRequest {
                 return Err(ValueError::InvalidTargetPath);
             }
         }
-        let archive_policy = SealedActionArchivePolicy::WINDOWS_V1;
         let graph_sha256 = action_graph_sha256(archive_policy, plan_sha256, &archives);
         Ok(Self {
             operation_id,
@@ -1098,12 +1163,17 @@ fn action_graph_sha256(
     archives: &[ActionArchiveMaterialization],
 ) -> crate::Sha256Digest {
     let mut hasher = Sha256::new();
-    hasher.update(b"automata.windows.sealed-action-graph.v1\0");
+    hasher.update(b"automata.windows.sealed-action-graph.v2\0");
+    hasher.update(policy.schema_version.to_le_bytes());
+    hasher.update(policy.policy_sha256.as_bytes());
+    hasher.update(policy.maximum_action_subpath_bytes.to_le_bytes());
     hasher.update(policy.maximum_entries.to_le_bytes());
     hasher.update(policy.maximum_file_bytes.to_le_bytes());
     hasher.update(policy.maximum_expanded_bytes.to_le_bytes());
+    hasher.update(policy.maximum_definition_bytes.to_le_bytes());
     hasher.update(policy.maximum_depth.to_le_bytes());
     hasher.update(policy.maximum_path_bytes.to_le_bytes());
+    hasher.update(policy.maximum_path_index_bytes.to_le_bytes());
     hasher.update(plan_sha256.as_bytes());
     hasher.update(
         u64::try_from(archives.len())
@@ -1111,14 +1181,17 @@ fn action_graph_sha256(
             .to_le_bytes(),
     );
     for archive in archives {
-        hasher.update(archive.ordinal.to_le_bytes());
-        hasher.update(archive.action_key_sha256.as_bytes());
-        hasher.update(archive.sha256.as_bytes());
-        hasher.update(archive.facts.entry_count().to_le_bytes());
-        hasher.update(archive.facts.regular_file_count().to_le_bytes());
-        hasher.update(archive.facts.expanded_bytes().to_le_bytes());
-        hasher.update(archive.facts.maximum_regular_file_bytes().to_le_bytes());
-        hasher.update(archive.facts.maximum_depth().to_le_bytes());
+        hasher.update(archive.ordinal().to_le_bytes());
+        hasher.update(archive.action_key_sha256().as_bytes());
+        hasher.update(archive.sha256().as_bytes());
+        hasher.update(archive.facts().entry_count().to_le_bytes());
+        hasher.update(archive.facts().regular_file_count().to_le_bytes());
+        hasher.update(archive.facts().expanded_bytes().to_le_bytes());
+        hasher.update(archive.facts().maximum_regular_file_bytes().to_le_bytes());
+        hasher.update(archive.facts().maximum_depth().to_le_bytes());
+        update_graph_string(&mut hasher, archive.planned().archive().object_key());
+        hasher.update(archive.planned().archive().encoded_size().to_le_bytes());
+        update_graph_string(&mut hasher, archive.planned().archive().media_type());
         update_graph_string(&mut hasher, &archive.subpath);
         update_graph_string(&mut hasher, archive.destination.as_str());
     }
@@ -1680,15 +1753,32 @@ mod sealed_action_tests {
         subpath: &str,
     ) -> Result<ActionArchiveMaterialization, ValueError> {
         let content = format!("archive-{ordinal}").into_bytes();
-        ActionArchiveMaterialization::new(
+        let content_sha256 = digest(&content);
+        let planned = WindowsRepositoryActionArchive::new(
             ordinal,
             crate::Sha256Digest::from_bytes([ordinal.to_le_bytes()[0].saturating_add(1); 32]),
             subpath,
-            TargetPath::windows(destination)?,
-            content.clone(),
-            digest(&content),
+            automata_ci_core::JobContentReference::new(
+                format!("windows-actions/{ordinal}.tar.gz"),
+                content_sha256,
+                u64::try_from(content.len()).expect("fixture size"),
+                WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+            ),
             WindowsActionArchiveFacts::new(1, 1, 1, 1, 1).expect("facts"),
         )
+        .map_err(|_| ValueError::InvalidByteLimit)?;
+        ActionArchiveMaterialization::new(planned, TargetPath::windows(destination)?, content)
+    }
+
+    fn plan_sha256(archives: &[ActionArchiveMaterialization]) -> crate::Sha256Digest {
+        WindowsRepositoryActionGraph::new(
+            archives
+                .iter()
+                .map(|archive| archive.planned().clone())
+                .collect(),
+        )
+        .expect("valid planned graph")
+        .graph_sha256()
     }
 
     fn graph_request(operation_id: OperationId) -> ActionGraphMaterializationRequest {
@@ -1795,15 +1885,74 @@ mod sealed_action_tests {
             archive(0, r"C:\actions\Foo", "").expect("first"),
             archive(1, r"C:\actions\foo\child", "").expect("second"),
         ];
+        let plan_sha256 = plan_sha256(&archives);
         assert_eq!(
             ActionGraphMaterializationRequest::new(
                 OperationId::new(),
                 sandbox("sandbox-a"),
                 SandboxGeneration::new(7).expect("generation"),
-                crate::Sha256Digest::from_bytes([0x31; 32]),
+                plan_sha256,
                 archives,
             ),
             Err(ValueError::InvalidTargetPath)
+        );
+    }
+
+    #[test]
+    fn materialization_binds_the_exact_v2_namespace_policy() {
+        let archives = vec![archive(0, r"C:\actions\safe", "").expect("archive")];
+        let plan_sha256 = plan_sha256(&archives);
+        let request = ActionGraphMaterializationRequest::new(
+            OperationId::new(),
+            sandbox("sandbox-policy"),
+            SandboxGeneration::new(7).expect("generation"),
+            plan_sha256,
+            archives.clone(),
+        )
+        .expect("current materialization request");
+        let current = request.archive_policy();
+        let legacy = SealedActionArchivePolicy {
+            schema_version: 1,
+            policy_sha256: current.policy_sha256(),
+            maximum_action_subpath_bytes: current.maximum_action_subpath_bytes(),
+            maximum_entries: current.maximum_entries(),
+            maximum_file_bytes: current.maximum_file_bytes(),
+            maximum_expanded_bytes: current.maximum_expanded_bytes(),
+            maximum_definition_bytes: current.maximum_definition_bytes(),
+            maximum_depth: current.maximum_depth(),
+            maximum_path_bytes: current.maximum_path_bytes(),
+            maximum_path_index_bytes: current.maximum_path_index_bytes(),
+        };
+
+        assert_eq!(current.schema_version(), 2);
+        assert_eq!(
+            current.policy_sha256(),
+            windows_action_archive_policy_sha256()
+        );
+        assert!(current.is_current_windows());
+        assert!(!legacy.is_current_windows());
+        assert_ne!(
+            request.graph_sha256(),
+            action_graph_sha256(legacy, plan_sha256, &archives)
+        );
+    }
+
+    #[test]
+    fn materialization_rejects_correct_plan_hash_with_substituted_archive() {
+        let admitted = vec![archive(0, r"C:\actions\safe", "").expect("admitted")];
+        let plan_sha256 = plan_sha256(&admitted);
+        let substituted =
+            vec![archive(0, r"C:\actions\safe", "nested").expect("substituted descriptor")];
+
+        assert_eq!(
+            ActionGraphMaterializationRequest::new(
+                OperationId::new(),
+                sandbox("sandbox-substitution"),
+                SandboxGeneration::new(7).expect("generation"),
+                plan_sha256,
+                substituted,
+            ),
+            Err(ValueError::InvalidByteLimit)
         );
     }
 
@@ -1816,6 +1965,7 @@ mod sealed_action_tests {
             r"C:\actions\file.js:evil",
             r"C:\actions\LONGFI~1.JS",
             r"C:\actions\CLOCK$",
+            r"C:\actions\ leading.js",
         ] {
             assert!(archive(0, destination, "").is_err(), "{destination}");
         }
@@ -1825,6 +1975,7 @@ mod sealed_action_tests {
             "CONOUT$.js",
             r"folder\file.js:evil",
             "LONGFI~1.JS",
+            " leading.js",
             r"\\server\share",
             r"\??\C:\device",
         ] {

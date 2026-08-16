@@ -514,6 +514,7 @@ fn windows_materialization_rejects_links_ambiguous_names_and_case_collisions() {
         "root/CONOUT$.txt",
         "root/LONGFI~1.JS",
         "root/name:stream",
+        "root/ leading.js",
         "root/trailing. ",
         "root/naïve.txt",
     ] {
@@ -574,6 +575,20 @@ fn windows_materialization_rejects_links_ambiguous_names_and_case_collisions() {
             "file/directory prefix conflict must be order-independent"
         );
     }
+}
+
+#[test]
+fn windows_materialization_rejects_leading_space_alias_collision() {
+    let collision = build_archive(&[
+        TestEntry::File("root/action.yml", ACTION_DEFINITION),
+        TestEntry::File("root/dist/index.js", b"first"),
+        TestEntry::File("root/dist/ index.js", b"second"),
+    ]);
+
+    assert_eq!(
+        validate_windows_materialization_archive(&collision, ActionBundleLimits::default()),
+        Err(ActionArchiveError::UnsafePath)
+    );
 }
 
 #[test]

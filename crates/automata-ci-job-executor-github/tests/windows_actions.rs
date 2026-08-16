@@ -120,8 +120,21 @@ fn windows_repository_action_without_complete_graph_is_rejected_before_lease() {
 async fn windows_namespace_aliased_entrypoints_fail_before_provider_mutation() {
     for (phase, main, pre, post) in [
         ("main", "CONOUT$.js", None, None),
+        ("main-leading-space", " dist/index.js", None, None),
         ("pre", "dist/index.js", Some("LONGFI~1.JS"), None),
+        (
+            "pre-leading-space",
+            "dist/index.js",
+            Some(" dist/pre.js"),
+            None,
+        ),
         ("post", "dist/index.js", None, Some("CON .txt")),
+        (
+            "post-leading-space",
+            "dist/index.js",
+            None,
+            Some(" dist/post.js"),
+        ),
     ] {
         let action = prepared_windows_namespace_unsafe_node24_action(main, pre, post);
         let graph = windows_repository_action_graph("actions/example", &action);

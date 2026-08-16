@@ -2,7 +2,12 @@ use std::fmt;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::BlobDescriptor;
-use automata_ci_core::Sha256Digest;
+use automata_ci_core::{
+    MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES,
+    MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES,
+    MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES, MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES,
+    MAX_WINDOWS_ACTION_SUBPATH_BYTES, Sha256Digest,
+};
 use automata_ci_scm::{
     ArchiveLimits, RepositoryId, ResolvedRevision, RevisionSpec, ScmProviderId, SnapshotRequest,
 };
@@ -10,13 +15,13 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-const MAX_SUBPATH_BYTES: usize = 1_024;
-const MAX_COMPRESSED_BYTES: u64 = 16_777_216;
-const MAX_ENTRY_COUNT: usize = 10_000;
-const MAX_EXPANDED_BYTES: u64 = 268_435_456;
-const MAX_DEFINITION_BYTES: u64 = 1_048_576;
-const MAX_ENTRY_PATH_BYTES: usize = 4_096;
-const MAX_PATH_INDEX_BYTES: usize = 16_777_216;
+const MAX_SUBPATH_BYTES: usize = MAX_WINDOWS_ACTION_SUBPATH_BYTES;
+const MAX_COMPRESSED_BYTES: u64 = MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES;
+const MAX_ENTRY_COUNT: usize = MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES as usize;
+const MAX_EXPANDED_BYTES: u64 = MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES;
+const MAX_DEFINITION_BYTES: u64 = MAX_WINDOWS_ACTION_ARCHIVE_DEFINITION_BYTES;
+const MAX_ENTRY_PATH_BYTES: usize = MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES as usize;
+const MAX_PATH_INDEX_BYTES: usize = MAX_WINDOWS_ACTION_ARCHIVE_PATH_INDEX_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActionModelLimitRejection {

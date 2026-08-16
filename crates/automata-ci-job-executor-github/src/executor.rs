@@ -4197,16 +4197,11 @@ impl GithubJobExecutor {
                 return Err(invalid_job());
             }
             let action_paths = paths.action(ordinal, action.subpath())?;
-            let subpath = action.subpath().replace('/', "\\");
             archives.push(
                 ActionArchiveMaterialization::new(
-                    ordinal,
-                    declared.action_key_sha256(),
-                    subpath,
+                    declared.clone(),
                     action_paths.extracted.clone(),
                     action.archive().to_vec(),
-                    action.archive_digest(),
-                    declared.facts(),
                 )
                 .map_err(|_| invalid_job())?,
             );
