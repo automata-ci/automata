@@ -15,5 +15,6 @@ mod log_contract;
 mod logical_workflow_plan;
 mod resource_allocation;
 mod sha256_digest;
+mod support;
 mod trust_snapshot;
 mod value_template;

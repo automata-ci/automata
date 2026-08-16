@@ -6,11 +6,11 @@ use automata_ci_core::{
     JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant, JobPermissionRequest, JobSource,
     JobValidationError, OutputSensitivity, PermissionLevel, RunId, RunValueTemplates,
     RunnerRequirements, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate,
-    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TrustActorEvidence, TrustActorKind,
-    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
-    TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, ValueSource, ValueTemplate,
+    SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, ValueSource, ValueTemplate,
     WorkflowId,
 };
+
+use crate::support::trusted_push_snapshot;
 
 fn expression(source: &str, root: &str) -> ExpressionProgram {
     ExpressionProgram::new(
@@ -103,25 +103,6 @@ fn current_job(outputs: Vec<JobOutputDefinition>) -> JobIr {
         ])
         .expect("job working-directory template"),
     )
-}
-
-fn trusted_push_snapshot() -> TrustSnapshot {
-    let repository =
-        TrustRepositoryEvidence::new("100", "10").expect("stable repository trust evidence");
-    TrustPolicy::current()
-        .evaluate(
-            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
-                .with_original_actor(
-                    TrustActorEvidence::new("200", TrustActorKind::User, TrustAutomationKind::None)
-                        .expect("stable actor trust evidence"),
-                )
-                .with_repositories(repository.clone(), repository)
-                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
-                .with_revisions("0123456789abcdef", "0123456789abcdef", "0123456789abcdef")
-                .with_fork(false)
-                .with_token_recursion(TrustTokenRecursion::Suppressed),
-        )
-        .expect("complete same-repository trust snapshot")
 }
 
 fn current_envelope(outputs: Vec<JobOutputDefinition>) -> JobIrEnvelope {
