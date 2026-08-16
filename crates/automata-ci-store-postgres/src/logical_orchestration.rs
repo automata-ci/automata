@@ -59,6 +59,8 @@ const WORKFLOW_DISPATCH_PERMISSION: &str = "runs:dispatch";
 const WORKFLOW_DISPATCH_AUDIT_ACTION: &str = "workflow.dispatch";
 const WORKFLOW_DISPATCH_AUDIT_RESOURCE_KIND: &str = "workflow_run";
 const WORKFLOW_DISPATCH_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-dispatch.audit.v1\0";
+// SHA-256 prefix for `automata.logical-admission.idempotency-lock.v1`.
+const LOGICAL_ADMISSION_IDEMPOTENCY_LOCK_NAMESPACE: i64 = 0x2fee_1fa8_b154_7857;
 
 const fn logical_workflow_job_kind_name(kind: LogicalWorkflowJobKind) -> &'static str {
     match kind {
@@ -338,6 +340,15 @@ async fn admit_logical_workflow_transaction(
 ) -> Result<LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionStoreError> {
     validate_subject_evidence_boundary(&command, &subject_evidence)?;
     let mut transaction = store.pool.begin().await.map_err(operation_error)?;
+    // A waiter must observe the leader's commit in its next statement even
+    // when the pool or session default uses a persistent snapshot.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *transaction)
+        .await
+        .map_err(operation_error)?;
+    // Disabled admissions intentionally have no receipt, so serialize the key
+    // before deciding whether this transaction is a new admission or a replay.
+    lock_logical_admission_idempotency(&mut transaction, &command).await?;
     let dispatch_actor =
         authorize_dispatch_subject(&mut transaction, &command, &subject_evidence).await?;
     let github_subject_evidence_required = matches!(
@@ -1366,6 +1377,30 @@ fn subject_evidence_error(
             StoreError::corrupt_data("signed GitHub subject evidence rejected admission").into()
         }
     }
+}
+
+async fn lock_logical_admission_idempotency(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+) -> Result<(), LogicalWorkflowAdmissionStoreError> {
+    let tenant = command.tenant().as_str();
+    let kind = command.idempotency().kind();
+    let key = command.idempotency().key();
+    // Byte-length framing keeps delimiter-bearing identities distinct. A hash
+    // collision can only serialize unrelated admissions; it cannot split one key.
+    let lock_identity = format!(
+        "{}:{tenant}|{}:{kind}|{}:{key}",
+        tenant.len(),
+        kind.len(),
+        key.len(),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, $2))")
+        .bind(lock_identity)
+        .bind(LOGICAL_ADMISSION_IDEMPOTENCY_LOCK_NAMESPACE)
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+    Ok(())
 }
 
 async fn admission_receipt_exists(
