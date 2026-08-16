@@ -1281,7 +1281,7 @@ fn target_query() -> &'static str {
       AND (
           (terminal.terminal_authority = 'runner'
            AND terminal.result_schema = $5)
-          OR terminal.terminal_authority = 'server_cancellation'
+          OR terminal.terminal_authority IN ('server_cancellation', 'server_lease_expiry')
       )
       AND terminal.logical_workflow_logical_job_id = concrete.logical_job_id
       AND terminal.logical_workflow_terminal_ordinal > 0
@@ -1293,6 +1293,7 @@ fn target_query() -> &'static str {
           OR (terminal.conclusion = 'cancelled' AND attempt.lifecycle = 'cancelled')
           OR (terminal.conclusion = 'timed_out' AND attempt.lifecycle = 'timed_out')
           OR (terminal.conclusion = 'skipped' AND attempt.lifecycle = 'skipped')
+          OR (terminal.conclusion = 'failure' AND attempt.lifecycle = 'lost')
       )
       AND logical_job.execution_kind = 'steps'
       AND invocation.plan_schema = $6
@@ -1587,6 +1588,53 @@ fn decode_descriptor(
             )
             .map_err(corrupt_value)
         }
+        "server_lease_expiry" => {
+            let result_fields_absent = decode_optional_digest(row, "result_digest")?.is_none()
+                && row
+                    .try_get::<Option<String>, _>("result_object_key")
+                    .map_err(operation_error)?
+                    .is_none()
+                && row
+                    .try_get::<Option<i64>, _>("result_size_bytes")
+                    .map_err(operation_error)?
+                    .is_none()
+                && row
+                    .try_get::<Option<i32>, _>("result_schema")
+                    .map_err(operation_error)?
+                    .is_none();
+            let server_fields_absent = row
+                .try_get::<Option<Uuid>, _>("server_cancellation_operation_id")
+                .map_err(operation_error)?
+                .is_none()
+                && decode_optional_digest(row, "server_cancellation_digest")?.is_none();
+            if !result_fields_absent
+                || !server_fields_absent
+                || raw_conclusion != JobConclusion::Failure
+            {
+                return Err(StoreError::corrupt_data(
+                    "server lease-expiry terminal has an invalid tagged shape",
+                )
+                .into());
+            }
+            LogicalInstanceResultDescriptor::new_server_lease_expiry(
+                target,
+                run_id,
+                invocation_id,
+                logical_job_id,
+                instance_id,
+                job_id,
+                logical_key,
+                matrix_index,
+                matrix_total,
+                matrix_digest,
+                terminal_ordinal,
+                job_ir_object,
+                maximum_secret_exposure,
+                result_completed_at,
+                result_committed_at,
+            )
+            .map_err(corrupt_value)
+        }
         _ => Err(StoreError::corrupt_data("unknown terminal authority").into()),
     }
 }
@@ -1632,6 +1680,7 @@ fn claimed_from_durable(
     ClaimedLogicalInstanceResult::new(descriptor, claim, replayed).map_err(corrupt_value)
 }
 
+#[allow(clippy::too_many_lines)] // One insert binds every closed terminal-authority shape.
 async fn insert_instance_result(
     transaction: &mut Transaction<'_, Postgres>,
     request: &CommitLogicalInstanceResult,
@@ -1666,6 +1715,16 @@ async fn insert_instance_result(
             None,
             Some(cancellation.operation_id().as_uuid()),
             Some(cancellation.digest().as_bytes().to_vec()),
+        ),
+        automata_ci_store::LogicalInstanceTerminalAuthority::ServerLeaseExpiry => (
+            "server_lease_expiry",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ),
     };
     sqlx::query(
@@ -1873,6 +1932,30 @@ fn terminal_projection_evidence_matches(
                 && decode_optional_digest(row, "server_cancellation_digest")?
                     == Some(cancellation.digest()))
         }
+        automata_ci_store::LogicalInstanceTerminalAuthority::ServerLeaseExpiry => Ok(authority
+            == "server_lease_expiry"
+            && decode_optional_digest(row, "result_digest")?.is_none()
+            && row
+                .try_get::<Option<String>, _>("result_object_key")
+                .map_err(operation_error)?
+                .is_none()
+            && row
+                .try_get::<Option<i64>, _>("result_size_bytes")
+                .map_err(operation_error)?
+                .is_none()
+            && row
+                .try_get::<Option<String>, _>("result_media_type")
+                .map_err(operation_error)?
+                .is_none()
+            && row
+                .try_get::<Option<i16>, _>("result_schema")
+                .map_err(operation_error)?
+                .is_none()
+            && row
+                .try_get::<Option<Uuid>, _>("server_cancellation_operation_id")
+                .map_err(operation_error)?
+                .is_none()
+            && decode_optional_digest(row, "server_cancellation_digest")?.is_none()),
     }
 }
 
@@ -1948,6 +2031,12 @@ fn decode_receipt(
             }
             automata_ci_store::LogicalInstanceTerminalAuthority::ServerCancellation(_) => {
                 secret_exposure == JobSecretExposure::Secretless && output_count == 0
+            }
+            automata_ci_store::LogicalInstanceTerminalAuthority::ServerLeaseExpiry => {
+                automata_ci_store::adapter_spi::logical_instance_accepts_terminal_secret_exposure(
+                    descriptor,
+                    secret_exposure,
+                ) && output_count == 0
             }
         }
         && row

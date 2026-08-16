@@ -184,6 +184,7 @@ impl LogicalResultProjectionService {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // Keeps the three closed terminal-authority paths together.
     async fn project_instance(
         &self,
         claimed: ClaimedLogicalInstanceResult,
@@ -223,7 +224,8 @@ impl LogicalResultProjectionService {
                 };
                 Some((encoded_result, result))
             }
-            LogicalInstanceTerminalAuthority::ServerCancellation(_) => None,
+            LogicalInstanceTerminalAuthority::ServerCancellation(_)
+            | LogicalInstanceTerminalAuthority::ServerLeaseExpiry => None,
         };
         let job_ir_object = claimed.descriptor().job_ir();
         let protocol_maximum = u64::try_from(self.protocol_limits.max_frame_bytes())
@@ -256,21 +258,34 @@ impl LogicalResultProjectionService {
                 .await;
         };
         let finalized_at = self.clock.now();
-        let commit_result = match runner_result {
-            Some((encoded_result, result)) => CommitLogicalInstanceResult::new(
-                &claimed,
-                &encoded_result,
-                &result,
-                &encoded_job_ir,
-                &job_ir,
-                finalized_at,
-            ),
-            None => CommitLogicalInstanceResult::new_server_cancellation(
-                &claimed,
-                &encoded_job_ir,
-                &job_ir,
-                finalized_at,
-            ),
+        let commit_result = match (runner_result, claimed.descriptor().terminal_authority()) {
+            (Some((encoded_result, result)), LogicalInstanceTerminalAuthority::Runner(_)) => {
+                CommitLogicalInstanceResult::new(
+                    &claimed,
+                    &encoded_result,
+                    &result,
+                    &encoded_job_ir,
+                    &job_ir,
+                    finalized_at,
+                )
+            }
+            (None, LogicalInstanceTerminalAuthority::ServerCancellation(_)) => {
+                CommitLogicalInstanceResult::new_server_cancellation(
+                    &claimed,
+                    &encoded_job_ir,
+                    &job_ir,
+                    finalized_at,
+                )
+            }
+            (None, LogicalInstanceTerminalAuthority::ServerLeaseExpiry) => {
+                CommitLogicalInstanceResult::new_server_lease_expiry(
+                    &claimed,
+                    &encoded_job_ir,
+                    &job_ir,
+                    finalized_at,
+                )
+            }
+            _ => Err(LogicalInstanceResultValueError::TerminalAuthorityMismatch),
         };
         let commit = match commit_result {
             Ok(commit) => commit,

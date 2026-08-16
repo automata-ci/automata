@@ -163,6 +163,97 @@ async fn queued_cancellation_accepts_released_lease_fencing_history() -> TestRes
     .await
 }
 
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn lease_expiry_projects_blob_free_failure_even_with_continue_on_error() -> TestResult {
+    run_with_database(|database| async move {
+        let (fixture, prepared, attempt_id) =
+            seed_materialized_instance_for_cancellation(&database).await?;
+        let lost_at = database_now_ms(&database).await?;
+        let updated = sqlx::query(
+            r"
+            UPDATE job_attempts
+            SET lifecycle = 'lost', lease_failures = 1, changed_at_ms = $2
+            WHERE id = $1 AND lifecycle = 'queued'
+            ",
+        )
+        .bind(attempt_id.as_uuid())
+        .bind(lost_at)
+        .execute(database.pool())
+        .await?
+        .rows_affected();
+        assert_eq!(updated, 1);
+        sqlx::query(
+            r"
+            INSERT INTO attempt_terminal_results (
+                attempt_id, terminal_authority, conclusion,
+                completed_at_ms, committed_at_ms
+            ) VALUES ($1, 'server_lease_expiry', 'failure', $2, $2)
+            ",
+        )
+        .bind(attempt_id.as_uuid())
+        .bind(lost_at)
+        .execute(database.pool())
+        .await?;
+
+        let observed_at = database_now_ms(&database).await?;
+        let claimed = expect_result_claimed(
+            database
+                .store()
+                .claim_logical_instance_result(result_claim(
+                    LogicalInstanceResultTarget::new(
+                        TenantScope::from_authenticated_tenant_id(&fixture.tenant)?,
+                        attempt_id,
+                    )?,
+                    29_350,
+                    observed_at,
+                    observed_at + 3_000,
+                ))
+                .await?,
+        );
+        assert!(claimed.descriptor().is_server_lease_expiry());
+        assert!(claimed.descriptor().terminal_result().is_none());
+        let commit = CommitLogicalInstanceResult::new_server_lease_expiry(
+            &claimed,
+            &prepared.encoded,
+            &prepared.envelope,
+            UnixMillis::new(observed_at + 100),
+        )?;
+        assert_eq!(commit.raw_conclusion(), JobConclusion::Failure);
+        assert_eq!(commit.effective_conclusion(), JobConclusion::Failure);
+        assert!(!commit.continue_on_error());
+        assert!(commit.outputs().is_empty());
+        let receipt = database
+            .store()
+            .commit_logical_instance_result(commit)
+            .await?;
+        assert_eq!(receipt.effective_conclusion(), JobConclusion::Failure);
+
+        let projected: (String, String, String, i32) = sqlx::query_as(
+            r"
+            SELECT terminal_authority, raw_conclusion,
+                   effective_conclusion, output_count
+            FROM logical_workflow_instance_results
+            WHERE attempt_id = $1
+            ",
+        )
+        .bind(attempt_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            projected,
+            (
+                "server_lease_expiry".to_owned(),
+                "failure".to_owned(),
+                "failure".to_owned(),
+                0,
+            )
+        );
+        Ok(())
+    })
+    .await
+}
+
 async fn seed_materialized_instance_for_cancellation(
     database: &TestDatabase,
 ) -> TestResult<(Fixture, PreparedInstance, automata_ci_core::AttemptId)> {

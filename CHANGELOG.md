@@ -71,6 +71,9 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   termination handling when an adapter reaches a cancellation checkpoint; it
   does not prove remote work quiesced or a durable operation cancelled. That
   requires proving the exact sandbox absent.
+- Expired active runner leases now commit blob-free, database-authoritative
+  failure evidence. Logical jobs, workflow runs, concurrency groups, and
+  provider checks therefore always reach a terminal state after runner loss.
 - PostgreSQL product connections now accept one exact `postgresql://` TCP URL
   with explicit host, port, user, non-empty password, and database. Query and
   fragment options, socket paths, `.pgpass`, ambient `PG*` configuration, and

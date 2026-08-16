@@ -87,6 +87,20 @@ async fn concurrent_maintenance_requeues_unstarted_and_loses_started_work_once()
         assert_eq!(lost.lifecycle(), JobLifecycle::Lost);
         assert_eq!(lost.lease_failures(), 1);
         assert_database_time_bound(lost.changed_at(), lower_bound, upper_bound);
+        let terminal: (String, String, i64, i64) = sqlx::query_as(
+            r"
+            SELECT terminal_authority, conclusion, completed_at_ms, committed_at_ms
+            FROM attempt_terminal_results
+            WHERE attempt_id = $1
+            ",
+        )
+        .bind(lost_attempt.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(terminal.0, "server_lease_expiry");
+        assert_eq!(terminal.1, "failure");
+        assert_eq!(terminal.2, lost.changed_at().get());
+        assert_eq!(terminal.3, lost.changed_at().get());
         assert_eq!(
             started_at(&database, retry_attempt).await?,
             retry_started_at
