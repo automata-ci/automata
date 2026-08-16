@@ -98,6 +98,14 @@ pub const MAX_LEASE_DURATION_MILLIS: u32 = 30 * 60 * 1_000;
 /// Largest supported no-work backoff: five minutes.
 pub const MAX_NO_WORK_RETRY_AFTER_MILLIS: u32 = 5 * 60 * 1_000;
 
+const DEFAULT_HEARTBEAT_INTERVAL_MILLIS: u32 = 15_000;
+// Runtime-authority renewal is deliberately gated on a ready, exact durable
+// authority. The initial lease therefore owns authority acquisition itself and
+// needs a bounded window that remains useful during provider and database
+// contention; subsequent heartbeats retain the same five-minute runway.
+const DEFAULT_LEASE_DURATION_MILLIS: u32 = 5 * 60 * 1_000;
+const DEFAULT_NO_WORK_RETRY_AFTER_MILLIS: u32 = 1_000;
+
 /// Validated server timing and response limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunnerControlConfig {
@@ -181,8 +189,13 @@ impl RunnerControlConfig {
 
 impl Default for RunnerControlConfig {
     fn default() -> Self {
-        Self::new(15_000, 60_000, 1_000, ProtocolLimits::default())
-            .expect("default runner-control timing policy is valid")
+        Self::new(
+            DEFAULT_HEARTBEAT_INTERVAL_MILLIS,
+            DEFAULT_LEASE_DURATION_MILLIS,
+            DEFAULT_NO_WORK_RETRY_AFTER_MILLIS,
+            ProtocolLimits::default(),
+        )
+        .expect("default runner-control timing policy is valid")
     }
 }
 

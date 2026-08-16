@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     fmt,
-    future::Future,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -1659,16 +1658,8 @@ impl RunnerSessionSupervisor {
                 .finish_terminal_slot(session, &durable, cancellation)
                 .await;
         }
-        let authority_delivery =
-            self.ensure_runtime_authority_delivery(session, &durable, cancellation.clone());
         let snapshot = self
-            .maintain_lease_during(
-                session,
-                &durable,
-                JobLifecycle::Preparing,
-                cancellation.clone(),
-                authority_delivery,
-            )
+            .ensure_runtime_authority_delivery(session, &durable, cancellation.clone())
             .await?;
         let durable = snapshot
             .slot(durable.slot())
@@ -2094,78 +2085,6 @@ impl RunnerSessionSupervisor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&attempt_id);
-    }
-
-    async fn maintain_lease_during<T, F>(
-        &self,
-        session: RuntimeSession,
-        durable: &SlotSnapshot,
-        reported_lifecycle: JobLifecycle,
-        cancellation: CancellationToken,
-        operation: F,
-    ) -> Result<T, RunnerRuntimeError>
-    where
-        F: Future<Output = Result<T, RunnerRuntimeError>>,
-    {
-        let watchdog = Arc::new(LeaseWatchdog::new(self.local_lease_deadline(
-            session,
-            durable.offer().lease(),
-            durable.expires_at(),
-        )));
-        if watchdog.is_expired_at(self.inner.ports.clock.monotonic_now()) {
-            return Err(RunnerRuntimeError::LeaseExpired);
-        }
-        let lease_expired = CancellationToken::new();
-        let watchdog_stop = CancellationToken::new();
-        let watchdog_task = self.spawn_watchdog(
-            Arc::clone(&watchdog),
-            lease_expired.clone(),
-            watchdog_stop.clone(),
-        );
-        tokio::pin!(operation);
-        let heartbeat_interval =
-            Duration::from_millis(u64::from(session.timing.heartbeat_interval_millis()));
-        let mut heartbeat_schedule = HeartbeatSchedule::new(
-            self.inner.ports.clock.monotonic_now(),
-            heartbeat_interval,
-            watchdog.deadline(),
-        );
-        let result = loop {
-            heartbeat_schedule
-                .cap_to_lease(self.inner.ports.clock.monotonic_now(), watchdog.deadline());
-            let heartbeat_delay =
-                heartbeat_schedule.remaining_from(self.inner.ports.clock.monotonic_now());
-            let heartbeat = async {
-                sleep_or_shutdown(&self.inner.ports.sleeper, heartbeat_delay, &cancellation)
-                    .await?;
-                self.heartbeat_once(
-                    session,
-                    durable.slot(),
-                    durable.offer().lease().guard(),
-                    Arc::clone(&watchdog),
-                    Some(reported_lifecycle),
-                    cancellation.clone(),
-                )
-                .await
-            };
-            tokio::pin!(heartbeat);
-            tokio::select! {
-                biased;
-                result = &mut operation => break result,
-                () = cancellation.cancelled() => break Err(RunnerRuntimeError::Shutdown),
-                () = lease_expired.cancelled() => break Err(RunnerRuntimeError::LeaseExpired),
-                result = &mut heartbeat => {
-                    result?;
-                    heartbeat_schedule.renewed(
-                        self.inner.ports.clock.monotonic_now(),
-                        watchdog.deadline(),
-                    );
-                }
-            }
-        };
-        watchdog_stop.cancel();
-        let _ = watchdog_task.await;
-        result
     }
 
     async fn await_cancelled_executor(

@@ -23,7 +23,7 @@ use automata_ci_runner_runtime::{
     ExecutionCancellationReason, MonotonicMillis, RetryPolicy, RunnerRuntimeControlClient,
     RunnerRuntimeError, RunnerRuntimePorts, RunnerSessionSupervisor, RuntimeClock,
     RuntimeControlError, RuntimeControlErrorKind, RuntimeControlFuture, RuntimeControlReply,
-    RuntimeControlRetry, SystemRuntimeClock, SystemRuntimeIds, TokioRuntimeSleeper,
+    RuntimeControlRetry, SystemRuntimeIds,
 };
 use automata_ci_runner_spool::{DurableContentStore, FileSpool};
 use automata_ci_runner_transport::PreparedRequest;
@@ -1177,56 +1177,6 @@ async fn cancellation_during_authority_request_or_ack_never_reaches_user_code() 
             support::AuthorityDeliveryReply::Acknowledge => unreachable!("cancellation cases"),
         }
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn blocked_runtime_authority_request_cannot_withhold_lease_renewal() {
-    let scratch = support::Scratch::new("blocked-authority-heartbeat");
-    let runner_id = RunnerId::new();
-    let (journal, spool) = support::durable_ports(&scratch, runner_id);
-    let fixture = support::seed_accepted_offer_without_runtime_authority(
-        journal.as_ref(),
-        spool.as_ref(),
-        runner_id,
-    );
-    let client = Arc::new(support::BlockedAuthorityClient::new(&fixture));
-    let runtime = RunnerSessionSupervisor::new(
-        support::config(runner_id),
-        RunnerRuntimePorts::new(
-            client.clone(),
-            journal,
-            spool,
-            Arc::new(support::NeverExecutor),
-            Arc::new(SystemRuntimeClock::new()),
-            Arc::new(TokioRuntimeSleeper),
-            Arc::new(SystemRuntimeIds),
-        ),
-    );
-    let shutdown = CancellationToken::new();
-    let task_shutdown = shutdown.clone();
-    let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
-
-    tokio::time::timeout(Duration::from_secs(1), client.wait_for_request())
-        .await
-        .expect("runtime-authority request remains in flight");
-    for minimum in 1..=4 {
-        let progressed =
-            tokio::time::timeout(Duration::from_secs(1), client.wait_for_heartbeats(minimum)).await;
-        assert!(
-            progressed.is_ok(),
-            "lease renewal {minimum} stalled during runtime authority delivery; observed {:?}",
-            client.heartbeat_times(),
-        );
-    }
-    assert_eq!(client.heartbeat_times(), vec![1, 2, 3, 4]);
-    assert!(!task.is_finished(), "blocked authority remains slot-local");
-
-    shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("blocked-authority runner shuts down")
-        .expect("runtime task")
-        .expect("clean shutdown");
 }
 
 #[tokio::test]
