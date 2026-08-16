@@ -1,218 +1,47 @@
 use crate::support;
 
 use std::{
-    fmt,
     io::ErrorKind,
-    net::{Ipv4Addr, SocketAddr},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use automata_ci_auth::machine::MachineIdentityVerifier;
-use automata_ci_protocol::ProtocolLimits;
 use automata_ci_runner_transport::{
-    ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HANDSHAKE_PATH,
-    HandlerFuture, PROTOBUF_CONTENT_TYPE, RunnerControlHandler, RunnerControlServer,
-    RunnerTransportConnectionEvent, RunnerTransportObserver, RunnerTransportTlsOutcome, ServeError,
+    ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, HandlerFuture,
+    RunnerControlHandler, RunnerTransportConnectionEvent, RunnerTransportTlsOutcome,
     TransportLimits,
 };
-use http::{Method, Request, StatusCode, Version, header::CONTENT_TYPE};
-use http_body_util::{BodyExt as _, Full};
+use http::StatusCode;
+use http_body_util::BodyExt as _;
 use tokio::{
     io::AsyncReadExt as _,
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::Notify,
-    task::JoinHandle,
     time::{advance, timeout},
 };
-use tokio_util::sync::CancellationToken;
 
 use support::{
-    HandlerMode, RawBody, RecordingVerifier, TestHandler, TestPki, hello_request, raw_h2_sender,
+    HandlerMode, Http2Terminal, RecordingTransportObserver, RecordingVerifier, TEST_WATCHDOG,
+    TestHandler, TestPki, raw_h2_sender, raw_hello_request, spawn_server_with_observer,
 };
-
-const TEST_WATCHDOG: Duration = Duration::from_secs(5);
-
-#[derive(Default)]
-struct LifecycleObserver {
-    connections: Mutex<Vec<RunnerTransportConnectionEvent>>,
-    tls: Mutex<Vec<RunnerTransportTlsOutcome>>,
-    changed: Notify,
-}
-
-impl fmt::Debug for LifecycleObserver {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("LifecycleObserver").finish()
-    }
-}
-
-impl LifecycleObserver {
-    fn connection_events(&self) -> Vec<RunnerTransportConnectionEvent> {
-        self.connections
-            .lock()
-            .expect("connection event lock")
-            .clone()
-    }
-
-    fn tls_outcomes(&self) -> Vec<RunnerTransportTlsOutcome> {
-        self.tls.lock().expect("TLS outcome lock").clone()
-    }
-
-    async fn wait_for_connection(&self, expected: RunnerTransportConnectionEvent, count: usize) {
-        timeout(TEST_WATCHDOG, async {
-            loop {
-                let changed = self.changed.notified();
-                let observed = self
-                    .connections
-                    .lock()
-                    .expect("connection event lock")
-                    .iter()
-                    .filter(|event| **event == expected)
-                    .count();
-                if observed >= count {
-                    return;
-                }
-                changed.await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!("connection observer did not record {count} {expected:?} events")
-        });
-    }
-
-    async fn wait_for_http2_terminal_count(&self, count: usize) {
-        timeout(TEST_WATCHDOG, async {
-            loop {
-                let changed = self.changed.notified();
-                let observed = self
-                    .connections
-                    .lock()
-                    .expect("connection event lock")
-                    .iter()
-                    .filter(|event| {
-                        matches!(
-                            event,
-                            RunnerTransportConnectionEvent::Http2Closed
-                                | RunnerTransportConnectionEvent::Http2Error
-                        )
-                    })
-                    .count();
-                if observed >= count {
-                    return;
-                }
-                changed.await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("connection observer did not record {count} HTTP/2 terminals"));
-    }
-
-    async fn wait_for_tls(&self, expected: RunnerTransportTlsOutcome, count: usize) {
-        timeout(TEST_WATCHDOG, async {
-            loop {
-                let changed = self.changed.notified();
-                let observed = self
-                    .tls
-                    .lock()
-                    .expect("TLS outcome lock")
-                    .iter()
-                    .filter(|outcome| **outcome == expected)
-                    .count();
-                if observed >= count {
-                    return;
-                }
-                changed.await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("TLS observer did not record {count} {expected:?} outcomes"));
-    }
-}
-
-impl RunnerTransportObserver for LifecycleObserver {
-    fn observe_connection(&self, event: RunnerTransportConnectionEvent) {
-        self.connections
-            .lock()
-            .expect("connection event lock")
-            .push(event);
-        self.changed.notify_waiters();
-    }
-
-    fn observe_tls(&self, outcome: RunnerTransportTlsOutcome, _duration: Duration) {
-        self.tls.lock().expect("TLS outcome lock").push(outcome);
-        self.changed.notify_waiters();
-    }
-}
-
-struct LifecycleServer {
-    address: SocketAddr,
-    shutdown: CancellationToken,
-    task: JoinHandle<Result<(), ServeError>>,
-}
-
-impl LifecycleServer {
-    async fn finish(self) {
-        timeout(TEST_WATCHDOG, self.task)
-            .await
-            .expect("server task watchdog")
-            .expect("server task")
-            .expect("server serve result");
-    }
-
-    async fn stop(self) {
-        self.shutdown.cancel();
-        self.finish().await;
-    }
-}
-
-async fn spawn_lifecycle_server(
-    pki: &TestPki,
-    verifier: Arc<dyn MachineIdentityVerifier>,
-    handler: Arc<dyn RunnerControlHandler>,
-    limits: &TransportLimits,
-    observer: Arc<LifecycleObserver>,
-) -> LifecycleServer {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .await
-        .expect("bind lifecycle server");
-    let address = listener.local_addr().expect("lifecycle server address");
-    let server = RunnerControlServer::new(
-        listener,
-        &pki.server_tls(),
-        verifier,
-        handler,
-        ProtocolLimits::default(),
-        *limits,
-    )
-    .expect("lifecycle server")
-    .with_observer(observer);
-    let shutdown = CancellationToken::new();
-    let task = tokio::spawn(server.serve(shutdown.clone()));
-    LifecycleServer {
-        address,
-        shutdown,
-        task,
-    }
-}
 
 #[tokio::test]
 async fn connection_limit_rejects_excess_and_reuses_released_permit() {
     let pki = TestPki::new();
-    let observer = Arc::new(LifecycleObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = TestHandler::new(HandlerMode::Reply);
     let limits = TransportLimits::default()
         .with_concurrency_limits(1, 16, 16)
         .expect("one concurrent connection");
-    let running = spawn_lifecycle_server(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
         &limits,
-        Arc::clone(&observer),
+        observer.clone(),
     )
     .await;
 
@@ -221,10 +50,10 @@ async fn connection_limit_rejects_excess_and_reuses_released_permit() {
             .await
             .expect("first admitted H2 connection");
     observer
-        .wait_for_connection(RunnerTransportConnectionEvent::Admitted, 1)
+        .wait_for(RunnerTransportConnectionEvent::Admitted, 1, TEST_WATCHDOG)
         .await;
     observer
-        .wait_for_tls(RunnerTransportTlsOutcome::Accepted, 1)
+        .wait_for(RunnerTransportTlsOutcome::Accepted, 1, TEST_WATCHDOG)
         .await;
 
     let rejected = raw_h2_sender(running.address, pki.raw_client_config(Some(&pki.client)));
@@ -236,7 +65,7 @@ async fn connection_limit_rejects_excess_and_reuses_released_permit() {
         "the excess TCP connection must be closed before TLS/H2 admission"
     );
     observer
-        .wait_for_connection(RunnerTransportConnectionEvent::Overloaded, 1)
+        .wait_for(RunnerTransportConnectionEvent::Overloaded, 1, TEST_WATCHDOG)
         .await;
     assert_eq!(
         observer.tls_outcomes(),
@@ -247,7 +76,7 @@ async fn connection_limit_rejects_excess_and_reuses_released_permit() {
     drop(first_sender);
     first_connection.abort();
     let _ = first_connection.await;
-    observer.wait_for_http2_terminal_count(1).await;
+    observer.wait_for(Http2Terminal, 1, TEST_WATCHDOG).await;
 
     let (mut reused_sender, reused_connection) =
         raw_h2_sender(running.address, pki.raw_client_config(Some(&pki.client)))
@@ -271,7 +100,7 @@ async fn connection_limit_rejects_excess_and_reuses_released_permit() {
     drop(reused_sender);
     reused_connection.abort();
     let _ = reused_connection.await;
-    observer.wait_for_http2_terminal_count(2).await;
+    observer.wait_for(Http2Terminal, 2, TEST_WATCHDOG).await;
     running.stop().await;
 
     let events = observer.connection_events();
@@ -296,7 +125,7 @@ async fn fixed_connection_lifetime_emits_one_terminal_and_reuses_the_permit() {
     const LIFETIME: Duration = Duration::from_secs(5);
 
     let pki = TestPki::new();
-    let observer = Arc::new(LifecycleObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = TestHandler::new(HandlerMode::Reply);
     let limits = TransportLimits::default()
         .with_server_request_timeouts(
@@ -312,12 +141,12 @@ async fn fixed_connection_lifetime_emits_one_terminal_and_reuses_the_permit() {
         .expect("bounded lifetime drain")
         .with_concurrency_limits(1, 16, 16)
         .expect("one concurrent connection");
-    let running = spawn_lifecycle_server(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
         &limits,
-        Arc::clone(&observer),
+        observer.clone(),
     )
     .await;
 
@@ -326,10 +155,10 @@ async fn fixed_connection_lifetime_emits_one_terminal_and_reuses_the_permit() {
             .await
             .expect("first H2 connection");
     observer
-        .wait_for_connection(RunnerTransportConnectionEvent::Admitted, 1)
+        .wait_for(RunnerTransportConnectionEvent::Admitted, 1, TEST_WATCHDOG)
         .await;
     observer
-        .wait_for_tls(RunnerTransportTlsOutcome::Accepted, 1)
+        .wait_for(RunnerTransportTlsOutcome::Accepted, 1, TEST_WATCHDOG)
         .await;
     assert_eq!(
         observer.tls_outcomes(),
@@ -340,7 +169,11 @@ async fn fixed_connection_lifetime_emits_one_terminal_and_reuses_the_permit() {
     yield_to_connection_lifetime().await;
     advance(LIFETIME + Duration::from_millis(1)).await;
     observer
-        .wait_for_connection(RunnerTransportConnectionEvent::LifetimeExpired, 1)
+        .wait_for(
+            RunnerTransportConnectionEvent::LifetimeExpired,
+            1,
+            TEST_WATCHDOG,
+        )
         .await;
     assert_eq!(
         observer.connection_events(),
@@ -399,17 +232,17 @@ async fn fixed_connection_lifetime_emits_one_terminal_and_reuses_the_permit() {
 #[tokio::test]
 async fn shutdown_cancels_in_flight_handler_and_drains_its_response() {
     let pki = TestPki::new();
-    let observer = Arc::new(LifecycleObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = CancellationCompletingHandler::new();
     let limits = TransportLimits::default()
         .with_graceful_shutdown_timeout(Duration::from_hours(1))
         .expect("long graceful shutdown watchdog");
-    let running = spawn_lifecycle_server(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
         &limits,
-        Arc::clone(&observer),
+        observer.clone(),
     )
     .await;
     let (sender, connection) =
@@ -433,7 +266,7 @@ async fn shutdown_cancels_in_flight_handler_and_drains_its_response() {
     });
     handler.wait_until_started().await;
 
-    running.shutdown.cancel();
+    running.request_shutdown();
     handler.wait_until_completed().await;
     assert_eq!(
         timeout(TEST_WATCHDOG, response_task)
@@ -463,19 +296,19 @@ async fn stalled_h2_shutdown_is_aborted_once_by_the_listener_deadline() {
     const GRACE: Duration = Duration::from_secs(1);
 
     let pki = TestPki::new();
-    let observer = Arc::new(LifecycleObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = TestHandler::new(HandlerMode::WaitForCancellation);
     let limits = TransportLimits::default()
         .with_graceful_shutdown_timeout(GRACE)
         .expect("one-second grace period")
         .with_concurrency_limits(1, 16, 16)
         .expect("one concurrent connection");
-    let running = spawn_lifecycle_server(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
         &limits,
-        Arc::clone(&observer),
+        observer.clone(),
     )
     .await;
     let (mut sender, connection) =
@@ -488,7 +321,7 @@ async fn stalled_h2_shutdown_is_aborted_once_by_the_listener_deadline() {
 
     tokio::time::pause();
     let shutdown_started = tokio::time::Instant::now();
-    running.shutdown.cancel();
+    running.request_shutdown();
     yield_to_shutdown_drain().await;
     wait_for_handler_cancellation(&handler).await;
     assert_eq!(
@@ -502,7 +335,7 @@ async fn stalled_h2_shutdown_is_aborted_once_by_the_listener_deadline() {
             .expect("grace exceeds one millisecond"),
     )
     .await;
-    assert!(!running.task.is_finished());
+    assert!(!running.is_finished());
     assert_eq!(
         observer.connection_events(),
         [RunnerTransportConnectionEvent::Admitted]
@@ -510,13 +343,13 @@ async fn stalled_h2_shutdown_is_aborted_once_by_the_listener_deadline() {
 
     advance(Duration::from_millis(2)).await;
     for _ in 0..8 {
-        if running.task.is_finished() {
+        if running.is_finished() {
             break;
         }
         tokio::task::yield_now().await;
     }
     assert!(
-        running.task.is_finished(),
+        running.is_finished(),
         "the listener must abort an H2 stream that exceeds its drain deadline"
     );
     assert_eq!(
@@ -553,29 +386,29 @@ async fn grace_timeout_aborts_a_connection_stalled_before_tls() {
     const GRACE: Duration = Duration::from_secs(1);
 
     let pki = TestPki::new();
-    let observer = Arc::new(LifecycleObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = TestHandler::new(HandlerMode::Reply);
     let limits = TransportLimits::default()
         .with_graceful_shutdown_timeout(GRACE)
         .expect("one-second grace period");
-    let running = spawn_lifecycle_server(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
         &limits,
-        Arc::clone(&observer),
+        observer.clone(),
     )
     .await;
     let mut stalled = TcpStream::connect(running.address)
         .await
         .expect("stalled TCP connection");
     observer
-        .wait_for_connection(RunnerTransportConnectionEvent::Admitted, 1)
+        .wait_for(RunnerTransportConnectionEvent::Admitted, 1, TEST_WATCHDOG)
         .await;
 
     tokio::time::pause();
     let shutdown_started = tokio::time::Instant::now();
-    running.shutdown.cancel();
+    running.request_shutdown();
     yield_to_shutdown_drain().await;
 
     advance(
@@ -584,18 +417,18 @@ async fn grace_timeout_aborts_a_connection_stalled_before_tls() {
             .expect("grace exceeds one millisecond"),
     )
     .await;
-    assert!(!running.task.is_finished());
+    assert!(!running.is_finished());
     assert!(observer.tls_outcomes().is_empty());
 
     advance(Duration::from_millis(2)).await;
     for _ in 0..8 {
-        if running.task.is_finished() {
+        if running.is_finished() {
             break;
         }
         tokio::task::yield_now().await;
     }
     assert!(
-        running.task.is_finished(),
+        running.is_finished(),
         "the listener must abort a connection that exceeds its grace period"
     );
     assert_eq!(
@@ -613,25 +446,6 @@ async fn grace_timeout_aborts_a_connection_stalled_before_tls() {
             RunnerTransportConnectionEvent::DrainAborted,
         ]
     );
-}
-
-fn raw_hello_request(address: SocketAddr) -> Request<RawBody> {
-    let body = hello_request().canonical_bytes().clone();
-    let body_length = body.len();
-    let mut request = Request::new(Full::new(body).boxed_unsync());
-    *request.method_mut() = Method::POST;
-    *request.version_mut() = Version::HTTP_2;
-    *request.uri_mut() = format!("https://{address}{HANDSHAKE_PATH}")
-        .parse()
-        .expect("hello request URI");
-    request.headers_mut().insert(
-        CONTENT_TYPE,
-        PROTOBUF_CONTENT_TYPE.parse().expect("protobuf media type"),
-    );
-    request
-        .headers_mut()
-        .insert(http::header::CONTENT_LENGTH, body_length.into());
-    request
 }
 
 #[derive(Debug)]

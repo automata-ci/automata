@@ -1,97 +1,35 @@
 use crate::support;
 
-use std::{
-    convert::Infallible,
-    fmt,
-    net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{convert::Infallible, sync::Arc, time::Duration};
 
-use automata_ci_auth::machine::{MachineAuthenticationError, MachineIdentityVerifier};
+use automata_ci_auth::machine::MachineAuthenticationError;
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_runner_transport::{
     HANDSHAKE_PATH, HyperRunnerControlClient, PROTOBUF_CONTENT_TYPE, RunnerControlClient,
-    RunnerControlHandler, RunnerControlServer, RunnerTransportAuthenticationRejection,
-    RunnerTransportByteDirection, RunnerTransportConnectionEvent, RunnerTransportDecodeRejection,
-    RunnerTransportHeadRejection, RunnerTransportObserver, RunnerTransportRequestObservation,
-    RunnerTransportRoute, RunnerTransportTlsOutcome, ServeError, TransportLimits,
+    RunnerTransportAuthenticationRejection, RunnerTransportByteDirection,
+    RunnerTransportDecodeRejection, RunnerTransportHeadRejection,
+    RunnerTransportRequestObservation, RunnerTransportRoute, RunnerTransportTlsOutcome,
+    TransportLimits,
 };
 use bytes::Bytes;
-use http::{Method, Request, StatusCode, Version, header::CONTENT_TYPE};
+use http::{HeaderValue, Method, StatusCode, Version};
 use http_body_util::{BodyExt as _, Channel, Full};
-use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use support::{
-    HandlerMode, RawBody, RecordingVerifier, TestHandler, TestPki, hello_request, raw_h2_sender,
+    HandlerMode, RecordingTransportObserver, RecordingVerifier, TestHandler, TestPki,
+    hello_request, raw_h2_sender, raw_hello_request, raw_request, spawn_server_with_observer,
 };
-
-#[derive(Default)]
-struct RecordingObserver {
-    connections: Mutex<Vec<RunnerTransportConnectionEvent>>,
-    tls: Mutex<Vec<RunnerTransportTlsOutcome>>,
-    requests: Mutex<Vec<RunnerTransportRequestObservation>>,
-    starts: Mutex<Vec<RunnerTransportRoute>>,
-    finishes: Mutex<Vec<RunnerTransportRoute>>,
-    bytes: Mutex<Vec<(RunnerTransportRoute, RunnerTransportByteDirection, u64)>>,
-}
-
-impl fmt::Debug for RecordingObserver {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("RecordingObserver").finish()
-    }
-}
-
-impl RunnerTransportObserver for RecordingObserver {
-    fn observe_connection(&self, event: RunnerTransportConnectionEvent) {
-        self.connections
-            .lock()
-            .expect("connection lock")
-            .push(event);
-    }
-
-    fn observe_tls(&self, outcome: RunnerTransportTlsOutcome, _duration: Duration) {
-        self.tls.lock().expect("TLS lock").push(outcome);
-    }
-
-    fn observe_request(&self, observation: RunnerTransportRequestObservation, _duration: Duration) {
-        self.requests
-            .lock()
-            .expect("request lock")
-            .push(observation);
-    }
-
-    fn request_started(&self, route: RunnerTransportRoute) {
-        self.starts.lock().expect("start lock").push(route);
-    }
-
-    fn request_finished(&self, route: RunnerTransportRoute) {
-        self.finishes.lock().expect("finish lock").push(route);
-    }
-
-    fn observe_bytes(
-        &self,
-        route: RunnerTransportRoute,
-        direction: RunnerTransportByteDirection,
-        bytes: u64,
-    ) {
-        self.bytes
-            .lock()
-            .expect("byte lock")
-            .push((route, direction, bytes));
-    }
-}
 
 #[tokio::test]
 async fn observer_covers_head_decode_success_and_balanced_in_flight() {
     let pki = TestPki::new();
-    let observer = Arc::new(RecordingObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = TestHandler::new(HandlerMode::Reply);
     let limits = TransportLimits::default()
         .with_body_limits(512, 512)
         .expect("small bounded bodies");
-    let running = spawn_observed(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
@@ -105,7 +43,15 @@ async fn observer_covers_head_decode_success_and_balanced_in_flight() {
             .expect("valid HTTP/2 client");
 
     let (_oversized_sender, oversized_body) = Channel::<Bytes, Infallible>::new(1);
-    let oversized = request(running.address, oversized_body.boxed_unsync(), 513);
+    let oversized = raw_request(
+        running.address,
+        Method::POST,
+        HANDSHAKE_PATH,
+        Version::HTTP_2,
+        oversized_body.boxed_unsync(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(513_usize.into()),
+    );
     assert_eq!(
         sender
             .send_request(oversized)
@@ -116,10 +62,14 @@ async fn observer_covers_head_decode_success_and_balanced_in_flight() {
     );
 
     let malformed_bytes = Bytes::from_static(&[0xff, 0xff, 0xff]);
-    let malformed = request(
+    let malformed = raw_request(
         running.address,
+        Method::POST,
+        HANDSHAKE_PATH,
+        Version::HTTP_2,
         Full::new(malformed_bytes.clone()).boxed_unsync(),
-        malformed_bytes.len(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(malformed_bytes.len().into()),
     );
     assert_eq!(
         sender
@@ -131,10 +81,14 @@ async fn observer_covers_head_decode_success_and_balanced_in_flight() {
     );
 
     let hello_bytes = hello_request().canonical_bytes().clone();
-    let valid = request(
+    let valid = raw_request(
         running.address,
+        Method::POST,
+        HANDSHAKE_PATH,
+        Version::HTTP_2,
         Full::new(hello_bytes.clone()).boxed_unsync(),
-        hello_bytes.len(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(hello_bytes.len().into()),
     );
     assert_eq!(
         sender
@@ -152,12 +106,12 @@ async fn observer_covers_head_decode_success_and_balanced_in_flight() {
 }
 
 fn assert_primary_request_observations(
-    observer: &RecordingObserver,
+    observer: &RecordingTransportObserver,
     malformed_length: usize,
     hello_length: usize,
 ) {
     assert_eq!(
-        *observer.requests.lock().expect("request lock"),
+        observer.request_observations(),
         [
             RunnerTransportRequestObservation::HeadRejected {
                 route: RunnerTransportRoute::Handshake,
@@ -173,24 +127,24 @@ fn assert_primary_request_observations(
         ]
     );
     assert_eq!(
-        *observer.starts.lock().expect("start lock"),
+        observer.request_starts(),
         [
             RunnerTransportRoute::Handshake,
             RunnerTransportRoute::Handshake
         ]
     );
     assert_eq!(
-        *observer.finishes.lock().expect("finish lock"),
+        observer.request_finishes(),
         [
             RunnerTransportRoute::Handshake,
             RunnerTransportRoute::Handshake
         ]
     );
     assert_eq!(
-        *observer.tls.lock().expect("TLS lock"),
+        observer.tls_outcomes(),
         [RunnerTransportTlsOutcome::Accepted]
     );
-    let bytes = observer.bytes.lock().expect("byte lock");
+    let bytes = observer.bytes();
     assert!(bytes.contains(&(
         RunnerTransportRoute::Handshake,
         RunnerTransportByteDirection::Request,
@@ -211,9 +165,9 @@ fn assert_primary_request_observations(
 #[tokio::test]
 async fn observer_records_authentication_rejection() {
     let pki = TestPki::new();
-    let auth_observer = Arc::new(RecordingObserver::default());
+    let auth_observer = Arc::new(RecordingTransportObserver::default());
     let auth_handler = TestHandler::new(HandlerMode::Reply);
-    let auth_running = spawn_observed(
+    let auth_running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::rejecting(MachineAuthenticationError::Untrusted),
         auth_handler.clone(),
@@ -227,13 +181,8 @@ async fn observer_records_authentication_rejection() {
     )
     .await
     .expect("valid HTTP/2 client");
-    let body = hello_request().canonical_bytes().clone();
     let response = auth_sender
-        .send_request(request(
-            auth_running.address,
-            Full::new(body.clone()).boxed_unsync(),
-            body.len(),
-        ))
+        .send_request(raw_hello_request(auth_running.address))
         .await
         .expect("authentication response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -241,7 +190,7 @@ async fn observer_records_authentication_rejection() {
     auth_connection.abort();
     auth_running.stop().await;
     assert_eq!(
-        *auth_observer.requests.lock().expect("auth request lock"),
+        auth_observer.request_observations(),
         [RunnerTransportRequestObservation::AuthenticationRejected {
             route: RunnerTransportRoute::Handshake,
             reason: RunnerTransportAuthenticationRejection::Untrusted,
@@ -252,8 +201,8 @@ async fn observer_records_authentication_rejection() {
 #[tokio::test]
 async fn observer_records_tls_rejection() {
     let pki = TestPki::new();
-    let tls_observer = Arc::new(RecordingObserver::default());
-    let tls_running = spawn_observed(
+    let tls_observer = Arc::new(RecordingTransportObserver::default());
+    let tls_running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         TestHandler::new(HandlerMode::Reply),
@@ -269,14 +218,9 @@ async fn observer_records_tls_rejection() {
     {
         Err(()) => true,
         Ok((mut sender, connection)) => {
-            let body = hello_request().canonical_bytes().clone();
             let rejected = tokio::time::timeout(
                 Duration::from_secs(1),
-                sender.send_request(request(
-                    tls_running.address,
-                    Full::new(body.clone()).boxed_unsync(),
-                    body.len(),
-                )),
+                sender.send_request(raw_hello_request(tls_running.address)),
             )
             .await
             .expect("TLS rejection request deadline")
@@ -286,19 +230,16 @@ async fn observer_records_tls_rejection() {
         }
     };
     assert!(rejected);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if !tls_observer.tls.lock().expect("TLS lock").is_empty() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("TLS rejection observation");
+    tls_observer
+        .wait_for(
+            RunnerTransportTlsOutcome::Rejected,
+            1,
+            Duration::from_secs(1),
+        )
+        .await;
     tls_running.stop().await;
     assert_eq!(
-        *tls_observer.tls.lock().expect("TLS lock"),
+        tls_observer.tls_outcomes(),
         [RunnerTransportTlsOutcome::Rejected]
     );
 }
@@ -306,7 +247,7 @@ async fn observer_records_tls_rejection() {
 #[tokio::test]
 async fn observer_records_bounded_request_admission_overload() {
     let pki = TestPki::new();
-    let observer = Arc::new(RecordingObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = TestHandler::new(HandlerMode::Delay(Duration::from_millis(100)));
     let limits = TransportLimits::default()
         .with_concurrency_limits(8, 1, 8)
@@ -318,7 +259,7 @@ async fn observer_records_bounded_request_admission_overload() {
             Duration::from_millis(300),
         )
         .expect("short admission timeout");
-    let running = spawn_observed(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
@@ -331,21 +272,11 @@ async fn observer_records_bounded_request_admission_overload() {
             .await
             .expect("valid HTTP/2 client");
     let mut first_sender = sender.clone();
-    let first_body = hello_request().canonical_bytes().clone();
-    let first = request(
-        running.address,
-        Full::new(first_body.clone()).boxed_unsync(),
-        first_body.len(),
-    );
+    let first = raw_hello_request(running.address);
     let first_task = tokio::spawn(async move { first_sender.send_request(first).await });
     handler.wait_until_started().await;
 
-    let second_body = hello_request().canonical_bytes().clone();
-    let second = request(
-        running.address,
-        Full::new(second_body.clone()).boxed_unsync(),
-        second_body.len(),
-    );
+    let second = raw_hello_request(running.address);
     assert_eq!(
         sender
             .send_request(second)
@@ -364,7 +295,7 @@ async fn observer_records_bounded_request_admission_overload() {
     );
     connection.abort();
     running.stop().await;
-    let requests = observer.requests.lock().expect("request lock");
+    let requests = observer.request_observations();
     assert!(requests.contains(&RunnerTransportRequestObservation::AdmissionOverloaded));
     assert!(
         requests.contains(&RunnerTransportRequestObservation::Succeeded {
@@ -376,9 +307,9 @@ async fn observer_records_bounded_request_admission_overload() {
 #[tokio::test]
 async fn dropped_stream_records_cancelled_and_balances_in_flight() {
     let pki = TestPki::new();
-    let observer = Arc::new(RecordingObserver::default());
+    let observer = Arc::new(RecordingTransportObserver::default());
     let handler = TestHandler::new(HandlerMode::WaitForCancellation);
-    let running = spawn_observed(
+    let running = spawn_server_with_observer(
         &pki,
         RecordingVerifier::accepting(),
         handler.clone(),
@@ -405,15 +336,18 @@ async fn dropped_stream_records_cancelled_and_balances_in_flight() {
     handler.wait_until_started().await;
     cancellation.cancel();
     let _ = task.await.expect("client task");
+    observer
+        .wait_for(
+            RunnerTransportRequestObservation::Cancelled {
+                route: RunnerTransportRoute::Handshake,
+            },
+            1,
+            Duration::from_secs(1),
+        )
+        .await;
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if handler.cancellation_seen()
-                && observer.requests.lock().expect("request lock").contains(
-                    &RunnerTransportRequestObservation::Cancelled {
-                        route: RunnerTransportRoute::Handshake,
-                    },
-                )
-            {
+            if handler.cancellation_seen() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -422,71 +356,5 @@ async fn dropped_stream_records_cancelled_and_balances_in_flight() {
     .await
     .expect("server cancellation observation");
     running.stop().await;
-    assert_eq!(
-        *observer.starts.lock().expect("start lock"),
-        *observer.finishes.lock().expect("finish lock")
-    );
-}
-
-struct ObservedServer {
-    address: SocketAddr,
-    shutdown: CancellationToken,
-    task: JoinHandle<Result<(), ServeError>>,
-}
-
-impl ObservedServer {
-    async fn stop(self) {
-        self.shutdown.cancel();
-        self.task
-            .await
-            .expect("server task")
-            .expect("server result");
-    }
-}
-
-async fn spawn_observed(
-    pki: &TestPki,
-    verifier: Arc<dyn MachineIdentityVerifier>,
-    handler: Arc<dyn RunnerControlHandler>,
-    limits: &TransportLimits,
-    observer: Arc<RecordingObserver>,
-) -> ObservedServer {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .await
-        .expect("bind observer server");
-    let address = listener.local_addr().expect("observer server address");
-    let server = RunnerControlServer::new(
-        listener,
-        &pki.server_tls(),
-        verifier,
-        handler,
-        ProtocolLimits::default(),
-        *limits,
-    )
-    .expect("observer server")
-    .with_observer(observer);
-    let shutdown = CancellationToken::new();
-    let task = tokio::spawn(server.serve(shutdown.clone()));
-    ObservedServer {
-        address,
-        shutdown,
-        task,
-    }
-}
-
-fn request(address: SocketAddr, body: RawBody, content_length: usize) -> Request<RawBody> {
-    let mut request = Request::new(body);
-    *request.method_mut() = Method::POST;
-    *request.version_mut() = Version::HTTP_2;
-    *request.uri_mut() = format!("https://{address}{HANDSHAKE_PATH}")
-        .parse()
-        .expect("request URI");
-    request.headers_mut().insert(
-        CONTENT_TYPE,
-        PROTOBUF_CONTENT_TYPE.parse().expect("media type"),
-    );
-    request
-        .headers_mut()
-        .insert(http::header::CONTENT_LENGTH, content_length.into());
-    request
+    assert_eq!(observer.request_starts(), observer.request_finishes());
 }
