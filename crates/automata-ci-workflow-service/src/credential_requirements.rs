@@ -25,24 +25,20 @@ pub enum BuiltInCredentialRequirement {
     GithubToken,
 }
 
-/// Static external and provider-built-in requirements for one logical job.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DiscoveredJobCredentials {
+pub(crate) struct DiscoveredJobCredentials {
     external: JobCredentialRequirements,
     built_in: Vec<BuiltInCredentialRequirement>,
 }
 
 impl DiscoveredJobCredentials {
-    /// Returns secret, variable, and protected-environment requirements that
-    /// must be resolved outside provider-built-in runtime authority.
     #[must_use]
-    pub const fn external(&self) -> &JobCredentialRequirements {
+    pub(crate) const fn external(&self) -> &JobCredentialRequirements {
         &self.external
     }
 
-    /// Returns provider-built-in credentials in stable order.
     #[must_use]
-    pub fn built_in(&self) -> &[BuiltInCredentialRequirement] {
+    pub(crate) fn built_in(&self) -> &[BuiltInCredentialRequirement] {
         &self.built_in
     }
 }
@@ -52,18 +48,7 @@ pub(crate) fn built_in_secret_requirement(name: &str) -> Option<BuiltInCredentia
         .then_some(BuiltInCredentialRequirement::GithubToken)
 }
 
-/// Discovers exact static `secrets.<name>`, `vars.<name>`, and provider
-/// built-in credential uses, including name-only caller sources in
-/// reusable-workflow secret mappings.
-///
-/// The complete serialized logical job is walked so new template-bearing fields
-/// fail into the same analysis without a second hand-maintained field list.
-///
-/// # Errors
-///
-/// Rejects whole-context and dynamic-name access, malformed durable programs,
-/// or invalid canonical names.
-pub fn discover_job_credentials(
+pub(crate) fn discover_job_credentials(
     workflow: &LogicalWorkflowPlan,
     job: &LogicalJobTemplate,
 ) -> Result<DiscoveredJobCredentials, CredentialDiscoveryError> {

@@ -264,13 +264,7 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
             &mut context,
         )
     });
-    if !workflow_references.is_empty() {
-        context.semantic(
-            "github.compile.workflow_needs_reference",
-            "workflow-level fields cannot reference job results",
-            workflow.span().clone(),
-        );
-    }
+    reject_workflow_need_references(&workflow_references, workflow.span(), &mut context);
 
     let mut pending = workflow
         .jobs()
@@ -321,6 +315,20 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
         _ => None,
     };
     finish_compilation(event, plan, context.diagnostics)
+}
+
+fn reject_workflow_need_references(
+    references: &BTreeMap<ParsedNeedReference, SourceSpan>,
+    workflow_span: &SourceSpan,
+    context: &mut CompileContext<'_>,
+) {
+    if !references.is_empty() {
+        context.semantic(
+            "github.compile.workflow_needs_reference",
+            "workflow-level fields cannot reference job results",
+            workflow_span.clone(),
+        );
+    }
 }
 
 fn finish_compilation(

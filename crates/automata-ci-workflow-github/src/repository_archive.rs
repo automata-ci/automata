@@ -327,7 +327,7 @@ impl RepositoryWorkflowDiscoveryOutcome {
     /// Returns the exact accepted bytes or the closed path-local failure.
     ///
     /// Archive-wide integrity and resource failures are returned by
-    /// [`discover_repository_workflows`] instead of appearing here.
+    /// [`discover_github_delivery_workflows`] instead of appearing here.
     ///
     /// # Errors
     ///
