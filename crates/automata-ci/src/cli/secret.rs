@@ -33,6 +33,7 @@ use super::{
         discard_bounded_response, retry_after_seconds,
     },
     credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
+    output::escaped_table_value,
 };
 use crate::app::secret_api::{
     BUILTIN_SECRET_PROVIDER_ACTIVATION_PATH, BUILTIN_SECRET_PROVIDER_PATH, MAX_SECRET_INGRESS_BYTES,
@@ -1018,10 +1019,6 @@ fn print_provider(output: OutputFormat, provider: &ProviderInspectionDocument) -
         }
     }
     Ok(())
-}
-
-fn escaped_table_value(value: &str) -> String {
-    value.chars().flat_map(char::escape_default).collect()
 }
 
 #[derive(Debug)]

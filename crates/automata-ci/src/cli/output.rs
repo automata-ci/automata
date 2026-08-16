@@ -12,3 +12,7 @@ pub enum OutputFormat {
     /// One JSON document per line, suitable for streaming watches.
     JsonLines,
 }
+
+pub(super) fn escaped_table_value(value: &str) -> String {
+    value.chars().flat_map(char::escape_default).collect()
+}
