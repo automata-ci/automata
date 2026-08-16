@@ -12,7 +12,7 @@ use automata_ci_auth::{
         GithubEndpointError, GithubEndpointFuture, GithubEndpoints, GithubMembershipSnapshot,
         GithubTokenResponse, GithubUser, RefreshTokenRequest, WebTokenExchangeRequest,
     },
-    human::ProviderId,
+    human::{ProviderId, ProviderSubject},
     secret::{RandomnessError, SecretString, SecureRandom},
     time::{Clock, UnixTimestamp},
 };
@@ -212,6 +212,14 @@ impl GithubEndpoint for MockGithubEndpoint {
         let response = next_or_unavailable(&self.memberships);
         Box::pin(async move { response })
     }
+}
+
+pub(crate) fn provider_id() -> ProviderId {
+    ProviderId::new("github").expect("provider ID")
+}
+
+pub(crate) fn provider_subject() -> ProviderSubject {
+    ProviderSubject::new("42").expect("provider subject")
 }
 
 pub fn config() -> GithubAppConfig {

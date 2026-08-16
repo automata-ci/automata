@@ -1,18 +1,13 @@
+mod support;
+
 use std::collections::BTreeSet;
 
 use automata_ci_auth::{
-    human::{ProviderId, ProviderSubject},
     time::UnixTimestamp,
     vault::{ProviderGrantKind, ProviderTokenMetadata, ProviderTokenMetadataError},
 };
 
-fn provider_id() -> ProviderId {
-    ProviderId::new("github").expect("provider ID")
-}
-
-fn provider_subject() -> ProviderSubject {
-    ProviderSubject::new("42").expect("provider subject")
-}
+use support::{provider_id, provider_subject};
 
 #[test]
 fn token_metadata_builder_validates_each_optional_collection_and_lifetime() {
