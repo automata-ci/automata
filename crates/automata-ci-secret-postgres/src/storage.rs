@@ -8,11 +8,10 @@ use automata_ci_store::SECRET_MUTATION_CONFIRMATION_TTL_MILLIS;
 use sqlx::{Error as SqlxError, FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
-use super::support::ValidatedSecretDescriptor;
+use super::support::{VERSION_MUTATION_REQUEST_PREFIX, ValidatedSecretDescriptor};
 
 const BUILTIN_ADAPTER_KIND: &str = "builtin_postgres";
 const BUILTIN_STORAGE_KIND: &str = "built_in_ciphertext";
-const VERSION_MUTATION_REQUEST_PREFIX: &str = "secret-version:";
 const MAX_DATABASE_CIPHERTEXT_BYTES: usize = 131_072;
 const MAX_DATABASE_WRAPPED_KEY_BYTES: usize = 4_096;
 
