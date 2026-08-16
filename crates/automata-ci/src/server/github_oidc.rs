@@ -816,10 +816,13 @@ mod tests {
 
     use automata_ci_control::runner_control::RuntimeAuthorityIssueRequest;
     use automata_ci_core::{
-        AttemptId, FencingToken, JobContentReference, JobExecutionContext, JobId,
-        JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobSource, Lease, LeaseId,
-        PermissionLevel, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
-        RuntimeBoolean, SemanticStep, ShellTemplate, StepId, StepIr, ValueTemplate, WorkflowId,
+        AttemptId, FencingToken, JobAuthorityProfile, JobContentReference, JobExecutionContext,
+        JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobPermissionRequest, JobSource, Lease,
+        LeaseId, PermissionLevel, RunId, RunValueTemplates, RunnerId, RunnerRequirements,
+        RunnerSessionId, RuntimeBoolean, SemanticStep, ShellTemplate, StepId, StepIr,
+        TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+        TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
+        ValueTemplate, WorkflowId,
     };
     use automata_ci_oidc_github::{
         AuthorizedOidcIssuance, OidcAuthorityId, OidcRepositoryError, ReserveOidcIssuance,
@@ -1326,6 +1329,8 @@ norlX3KEHNe7cTke5cP4OA==";
                 )],
             )
             .with_permission_request(permission)
+            .with_trust_snapshot(trusted_push_snapshot())
+            .with_authority_profile(JobAuthorityProfile::Standard)
             .with_timeout_seconds(120);
             let execution = JobExecutionContext::new(
                 "CI",
@@ -1405,6 +1410,33 @@ norlX3KEHNe7cTke5cP4OA==";
             )
             .expect("runtime authority request")
         }
+    }
+
+    fn trusted_push_snapshot() -> TrustSnapshot {
+        let repository =
+            TrustRepositoryEvidence::new("90210", "731").expect("stable repository trust evidence");
+        TrustPolicy::current()
+            .evaluate(
+                TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                    .with_original_actor(
+                        TrustActorEvidence::new(
+                            "4242",
+                            TrustActorKind::User,
+                            TrustAutomationKind::None,
+                        )
+                        .expect("stable actor trust evidence"),
+                    )
+                    .with_repositories(repository.clone(), repository)
+                    .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                    .with_revisions(
+                        "0123456789abcdef0123456789abcdef01234567",
+                        "0123456789abcdef0123456789abcdef01234567",
+                        "0123456789abcdef0123456789abcdef01234567",
+                    )
+                    .with_fork(false)
+                    .with_token_recursion(TrustTokenRecursion::Suppressed),
+            )
+            .expect("complete same-repository trust snapshot")
     }
 
     fn current_policy() -> GithubOidcCurrentPolicy {
@@ -1663,8 +1695,22 @@ norlX3KEHNe7cTke5cP4OA==";
         assert_eq!(authorities.as_slice().len(), 1);
         assert_eq!(authorities.as_slice()[0].name().as_str(), "github-results");
 
-        let provider_entitled =
+        let provider_without_authority =
             RuntimeFixture::new("github", JobPermissionRequest::mapping([]), "push");
+        let authorities = composite
+            .issue(provider_without_authority.request())
+            .await
+            .expect("an explicit empty permission mapping keeps only Results");
+        assert_eq!(authorities.as_slice().len(), 1);
+
+        let provider_entitled = RuntimeFixture::new(
+            "github",
+            JobPermissionRequest::mapping([automata_ci_core::JobPermissionGrant::new(
+                "contents",
+                PermissionLevel::Read,
+            )]),
+            "push",
+        );
         assert_eq!(
             composite.issue(provider_entitled.request()).await,
             Err(ControlPortError::Unavailable)

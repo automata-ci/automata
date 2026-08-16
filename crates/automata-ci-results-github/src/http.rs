@@ -1,9 +1,6 @@
 use std::{
     str::FromStr as _,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, OnceLock},
 };
 
 use automata_ci_core::{JobId, RunId, Sha256Digest};
@@ -19,6 +16,7 @@ use axum::{
 use futures::{StreamExt as _, stream};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use crate::{
@@ -43,49 +41,29 @@ const DEFAULT_MIME_TYPE: &str = "application/octet-stream";
 const MAXIMUM_SIGNATURE_BYTES: usize = 256;
 /// Four maximum-size cache blocks bound upload buffering to 512 MiB per process.
 const MAXIMUM_CONCURRENT_RESULTS_UPLOADS: usize = 4;
-const RESULTS_UPLOAD_RETRY_AFTER_SECONDS: &str = "1";
 const RESULTS_UPLOAD_OVERLOAD_BODY: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?><Error><Code>ServerBusy</Code><Message>The Results upload service is temporarily unavailable.</Message></Error>";
 const X_CONTENT_TYPE_OPTIONS: header::HeaderName =
     header::HeaderName::from_static("x-content-type-options");
 
 #[derive(Debug)]
 pub(crate) struct ResultsUploadAdmission {
-    in_flight: AtomicUsize,
+    permits: Arc<Semaphore>,
 }
 
 impl ResultsUploadAdmission {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
-            in_flight: AtomicUsize::new(0),
+            permits: Arc::new(Semaphore::new(MAXIMUM_CONCURRENT_RESULTS_UPLOADS)),
         }
     }
 
-    fn try_acquire(self: &Arc<Self>) -> Option<ResultsUploadPermit> {
-        self.in_flight
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |in_flight| {
-                (in_flight < MAXIMUM_CONCURRENT_RESULTS_UPLOADS).then_some(in_flight + 1)
-            })
-            .ok()
-            .map(|_| ResultsUploadPermit {
-                admission: Arc::clone(self),
-            })
+    async fn acquire(&self) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        Arc::clone(&self.permits).acquire_owned().await
     }
 
     #[cfg(test)]
     fn in_flight(&self) -> usize {
-        self.in_flight.load(Ordering::Acquire)
-    }
-}
-
-#[derive(Debug)]
-struct ResultsUploadPermit {
-    admission: Arc<ResultsUploadAdmission>,
-}
-
-impl Drop for ResultsUploadPermit {
-    fn drop(&mut self) {
-        let previous = self.admission.in_flight.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "Results upload admission underflow");
+        MAXIMUM_CONCURRENT_RESULTS_UPLOADS - self.permits.available_permits()
     }
 }
 
@@ -99,7 +77,10 @@ pub(crate) async fn admit_results_upload(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(_permit) = admission.try_acquire() else {
+    // Waiting here applies bounded, FIFO backpressure before Axum starts buffering
+    // another request body. Cache traffic therefore cannot turn a valid artifact
+    // upload into a transient protocol failure when the shared memory budget is full.
+    let Ok(_permit) = admission.acquire().await else {
         return results_upload_overloaded();
     };
     next.run(request).await
@@ -108,10 +89,7 @@ pub(crate) async fn admit_results_upload(
 fn results_upload_overloaded() -> Response {
     let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
-        [
-            (header::CONTENT_TYPE, "application/xml; charset=utf-8"),
-            (header::RETRY_AFTER, RESULTS_UPLOAD_RETRY_AFTER_SECONDS),
-        ],
+        [(header::CONTENT_TYPE, "application/xml; charset=utf-8")],
         RESULTS_UPLOAD_OVERLOAD_BODY,
     )
         .into_response();
@@ -997,7 +975,6 @@ mod tests {
     use std::{convert::Infallible, sync::Mutex, time::Duration};
 
     use axum::{body::Bytes, routing::put};
-    use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
 
     use super::*;
@@ -1053,7 +1030,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn artifact_and_cache_uploads_share_budget_and_cancelled_request_releases_it() {
+    async fn artifact_and_cache_uploads_share_fifo_backpressure_and_release_cancelled_requests() {
         let artifact_admission = results_upload_admission();
         let cache_admission = results_upload_admission();
         assert!(Arc::ptr_eq(&artifact_admission, &cache_admission));
@@ -1087,32 +1064,22 @@ mod tests {
         }
         wait_for_uploads(&artifact_admission, MAXIMUM_CONCURRENT_RESULTS_UPLOADS).await;
 
-        let rejected = tokio::time::timeout(
-            Duration::from_secs(1),
+        let queued = tokio::spawn(
             router
                 .clone()
                 .oneshot(pending_upload(ARTIFACT_UPLOAD_TEST_PATH)),
-        )
-        .await
-        .expect("overload response must not wait for request body")
-        .expect("overload response");
-        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(rejected.headers()[header::RETRY_AFTER], "1");
-        assert_eq!(rejected.headers()[header::CACHE_CONTROL], "no-store");
-        assert_eq!(rejected.headers()[X_CONTENT_TYPE_OPTIONS], "nosniff");
-        let body = rejected
-            .into_body()
-            .collect()
-            .await
-            .expect("overload body")
-            .to_bytes();
-        assert_eq!(body.as_ref(), RESULTS_UPLOAD_OVERLOAD_BODY.as_bytes());
-        assert_eq!(
-            *observer.completed.lock().expect("completed observations"),
-            vec![(
-                ResultsHttpRoute::Upload,
-                crate::ResultsHttpStatusClass::ServerError,
-            )]
+        );
+        tokio::task::yield_now().await;
+        assert!(
+            !queued.is_finished(),
+            "the fifth upload must wait for capacity"
+        );
+        assert!(
+            observer
+                .completed
+                .lock()
+                .expect("completed observations")
+                .is_empty()
         );
 
         let cancelled = requests.remove(0);
@@ -1123,17 +1090,14 @@ mod tests {
                 .expect_err("admitted upload must be cancelled")
                 .is_cancelled()
         );
-        wait_for_uploads(&artifact_admission, MAXIMUM_CONCURRENT_RESULTS_UPLOADS - 1).await;
-
-        let replacement = tokio::spawn(router.oneshot(pending_upload(CACHE_UPLOAD_TEST_PATH)));
         wait_for_uploads(&artifact_admission, MAXIMUM_CONCURRENT_RESULTS_UPLOADS).await;
 
         for request in requests {
             request.abort();
             let _ = request.await;
         }
-        replacement.abort();
-        let _ = replacement.await;
+        queued.abort();
+        let _ = queued.await;
         wait_for_uploads(&artifact_admission, 0).await;
     }
 }

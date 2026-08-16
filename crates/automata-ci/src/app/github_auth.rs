@@ -3024,6 +3024,7 @@ mod tests {
         let (setup_app, setup_probe) = setup_begin_harness_with_admission(admission);
 
         let mut invalid_origin = browser_begin_request();
+        invalid_origin.headers_mut().remove(SEC_FETCH_SITE);
         invalid_origin
             .headers_mut()
             .insert(ORIGIN, HeaderValue::from_static("https://attacker.example"));

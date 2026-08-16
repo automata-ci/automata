@@ -30,6 +30,7 @@ sha2.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
+tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
 xmlparser.workspace = true
@@ -43,7 +44,6 @@ automata-ci-protocol-protobuf.workspace = true
 automata-ci-store.workspace = true
 automata-ci-store-postgres = { workspace = true, features = ["test-support"] }
 http-body-util.workspace = true
-tokio.workspace = true
 tower.workspace = true
 
 [lints]
