@@ -65,20 +65,20 @@ pub const MAX_JOURNALED_SLOTS: usize = 256;
 pub const MAX_PROVIDER_OPERATIONS_PER_SLOT: usize = 32;
 
 /// Maximum protected execution-endpoint request/result references per slot.
-pub const MAX_ENDPOINT_CONTENT_REFS_PER_SLOT: usize =
+pub(crate) const MAX_ENDPOINT_CONTENT_REFS_PER_SLOT: usize =
     automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB * 2;
 
 /// Maximum protected result object for one execution-endpoint operation.
-pub const MAX_ENDPOINT_RESULT_CONTENT_BYTES: u64 = 17 * 1024 * 1024;
+pub(crate) const MAX_ENDPOINT_RESULT_CONTENT_BYTES: u64 = 17 * 1024 * 1024;
 
 /// Exact protected request commitment retained for every endpoint operation.
-pub const ENDPOINT_REQUEST_COMMITMENT_BYTES: u64 = 32;
+pub(crate) const ENDPOINT_REQUEST_COMMITMENT_BYTES: u64 = 32;
 
 /// Smallest opaque protected allocation retained by an endpoint result.
-pub const MIN_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 = endpoint_result_allocation_or_panic(1);
+pub(crate) const MIN_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 = endpoint_result_allocation_or_panic(1);
 
 /// Largest opaque protected allocation retained by an endpoint result.
-pub const MAX_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 =
+pub(crate) const MAX_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 =
     endpoint_result_allocation_or_panic(MAX_ENDPOINT_RESULT_CONTENT_BYTES);
 
 /// Maximum aggregate endpoint content charged to one slot.
@@ -88,7 +88,7 @@ pub const MAX_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 =
 /// the largest result class for the sole operation allowed to be in flight.
 /// Larger cumulative retained output fails closed before a successor backend
 /// invocation.
-pub const MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT: u64 = ENDPOINT_REQUEST_COMMITMENT_BYTES
+pub(crate) const MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT: u64 = ENDPOINT_REQUEST_COMMITMENT_BYTES
     * automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB as u64
     + MIN_ENDPOINT_RESULT_ALLOCATION_BYTES
         * (automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB as u64 - 1)

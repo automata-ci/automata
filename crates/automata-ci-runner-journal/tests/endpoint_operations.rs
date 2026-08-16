@@ -4,16 +4,32 @@ use automata_ci_core::{JobLifecycle, LeaseGuard, OperationId, UnixMillis};
 use automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB;
 use automata_ci_runner_journal::{
     CancellationRecord, CommitFault, CommitFaultInjector, CommitStage, ContentKind,
-    ENDPOINT_REQUEST_COMMITMENT_BYTES, EndpointOperation, EndpointOperationKind,
-    EndpointOperationState, EndpointRequestContentRef, EndpointResultContentRef, FileJournal,
-    FileJournalOptions, JournalError, JournalInvariantError, JournalSnapshot,
-    MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT, MAX_ENDPOINT_CONTENT_REFS_PER_SLOT,
-    MAX_ENDPOINT_RESULT_ALLOCATION_BYTES, MAX_ENDPOINT_RESULT_CONTENT_BYTES, MAX_JOURNAL_BYTES,
-    MIN_ENDPOINT_RESULT_ALLOCATION_BYTES, ProviderName, ProviderOperation, ProviderOperationKind,
+    EndpointOperation, EndpointOperationKind, EndpointOperationState, EndpointRequestContentRef,
+    EndpointResultContentRef, FileJournal, FileJournalOptions, JournalError, JournalInvariantError,
+    JournalSnapshot, MAX_JOURNAL_BYTES, ProviderName, ProviderOperation, ProviderOperationKind,
     RunnerJournal, SandboxHandle, SandboxIdentity,
 };
+use automata_ci_runner_spool::endpoint_result_allocation;
 
 use crate::support::{Fixture, Scratch, record_and_ack_runtime_authority, record_and_ack_terminal};
+
+const ENDPOINT_REQUEST_COMMITMENT_BYTES: u64 = 32;
+const MAX_ENDPOINT_RESULT_CONTENT_BYTES: u64 = 17 * 1024 * 1024;
+const MIN_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 = endpoint_result_allocation_or_panic(1);
+const MAX_ENDPOINT_RESULT_ALLOCATION_BYTES: u64 =
+    endpoint_result_allocation_or_panic(MAX_ENDPOINT_RESULT_CONTENT_BYTES);
+const MAX_ENDPOINT_CONTENT_REFS_PER_SLOT: usize = MAX_ENDPOINT_OPERATIONS_PER_JOB * 2;
+const MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT: u64 = ENDPOINT_REQUEST_COMMITMENT_BYTES
+    * MAX_ENDPOINT_OPERATIONS_PER_JOB as u64
+    + MIN_ENDPOINT_RESULT_ALLOCATION_BYTES * (MAX_ENDPOINT_OPERATIONS_PER_JOB as u64 - 1)
+    + MAX_ENDPOINT_RESULT_ALLOCATION_BYTES;
+
+const fn endpoint_result_allocation_or_panic(plaintext_bytes: u64) -> u64 {
+    match endpoint_result_allocation(plaintext_bytes) {
+        Ok(bytes) => bytes,
+        Err(_) => panic!("endpoint result bound must fit the protected spool"),
+    }
+}
 
 fn accepted_operation(
     operation_id: OperationId,
