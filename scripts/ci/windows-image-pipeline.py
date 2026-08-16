@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime
 import hashlib
 import json
@@ -17,7 +18,7 @@ import subprocess
 import tempfile
 import urllib.parse
 import urllib.request
-from typing import NoReturn
+from typing import BinaryIO, Iterator, NoReturn
 
 
 PROFILE_ID = "automata.dev/windows-2025-x64-hyperv-v1"
@@ -123,22 +124,18 @@ def invalid_constant(value: str) -> NoReturn:
     raise ValueError(f"invalid JSON constant: {value}")
 
 
-def read_regular(path: pathlib.Path, maximum: int = MAX_JSON_BYTES) -> bytes:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+def read_open_regular(
+    stream: BinaryIO, path: pathlib.Path, maximum: int = MAX_JSON_BYTES
+) -> bytes:
     try:
-        descriptor = os.open(path, flags)
-    except OSError:
-        fail(f"input must be an accessible regular file: {path}")
-    with os.fdopen(descriptor, "rb") as stream:
+        stream.seek(0)
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
             fail(f"input is not a bounded regular file: {path}")
         contents = stream.read(maximum + 1)
         after = os.fstat(stream.fileno())
+    except OSError:
+        fail(f"input must be an accessible regular file: {path}")
     identity = lambda item: (
         item.st_dev,
         item.st_ino,
@@ -153,6 +150,151 @@ def read_regular(path: pathlib.Path, maximum: int = MAX_JSON_BYTES) -> bytes:
     ):
         fail(f"input changed or exceeded its size limit: {path}")
     return contents
+
+
+def read_regular(path: pathlib.Path, maximum: int = MAX_JSON_BYTES) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        fail(f"input must be an accessible regular file: {path}")
+    with os.fdopen(descriptor, "rb") as stream:
+        return read_open_regular(stream, path, maximum)
+
+
+def windows_file_descriptor(
+    path: pathlib.Path,
+    desired_access: int,
+    share_mode: int,
+    creation_disposition: int,
+    flags_and_attributes: int,
+    descriptor_flags: int,
+) -> int:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    handle = create_file(
+        str(path),
+        desired_access,
+        share_mode,
+        None,
+        creation_disposition,
+        flags_and_attributes,
+        None,
+    )
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(int(handle), descriptor_flags)
+    except OSError:
+        close_handle(handle)
+        raise
+
+
+def open_retained_regular(path: pathlib.Path) -> int:
+    if os.name == "nt":
+        generic_read = 0x8000_0000
+        file_share_read = 0x0000_0001
+        open_existing = 3
+        file_attribute_normal = 0x0000_0080
+        file_flag_open_reparse_point = 0x0020_0000
+        return windows_file_descriptor(
+            path,
+            generic_read,
+            file_share_read,
+            open_existing,
+            file_attribute_normal | file_flag_open_reparse_point,
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(path, flags)
+
+
+@contextlib.contextmanager
+def retain_exact_regular(
+    path: pathlib.Path, expected: bytes, maximum: int
+) -> Iterator[BinaryIO]:
+    try:
+        descriptor = open_retained_regular(path)
+    except OSError:
+        fail(f"could not retain signing snapshot: {path}")
+    with os.fdopen(descriptor, "rb") as stream:
+        if read_open_regular(stream, path, maximum) != expected:
+            fail(f"signing snapshot differs after custody: {path}")
+        yield stream
+
+
+def open_new_regular(path: pathlib.Path, mode: int) -> int:
+    if os.name == "nt":
+        generic_read = 0x8000_0000
+        generic_write = 0x4000_0000
+        file_share_read = 0x0000_0001
+        create_new = 1
+        file_attribute_normal = 0x0000_0080
+        file_flag_open_reparse_point = 0x0020_0000
+        return windows_file_descriptor(
+            path,
+            generic_read | generic_write,
+            file_share_read,
+            create_new,
+            file_attribute_normal | file_flag_open_reparse_point,
+            os.O_RDWR | getattr(os, "O_BINARY", 0),
+        )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    return os.open(path, flags, mode)
+
+
+def write_new_regular(
+    path: pathlib.Path, contents: bytes, mode: int, label: str
+) -> None:
+    try:
+        descriptor = open_new_regular(path, mode)
+    except OSError:
+        if path.exists() or path.is_symlink():
+            fail(f"refusing to overwrite {label}")
+        fail(f"could not create {label}")
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size != 0:
+                fail(f"new {label} is not an empty regular file")
+            if stream.write(contents) != len(contents):
+                fail(f"could not write complete {label}")
+            stream.flush()
+            os.fsync(stream.fileno())
+            after = os.fstat(stream.fileno())
+            if not stat.S_ISREG(after.st_mode) or after.st_size != len(contents):
+                fail(f"new {label} changed while writing")
+    except OSError:
+        fail(f"could not write {label}")
 
 
 def parse_json(contents: bytes, label: str, *, canonical: bool = False) -> object:
@@ -1347,58 +1489,84 @@ def sign(arguments: argparse.Namespace) -> None:
     signer_bytes = read_regular(signer, MAX_ARTIFACT_BYTES)
     if sha256(signer_bytes) != valid_sha(arguments.signer_sha256, "signer executable"):
         fail("signer executable differs from its reviewed digest")
-    output = arguments.output.resolve()
+    payload_path = arguments.bundle.resolve() / "promotion.payload.json"
+    payload_bytes = read_regular(payload_path)
+    if compact_json(payload) != payload_bytes:
+        fail("promotion payload changed after verification")
+    output = pathlib.Path(os.path.abspath(arguments.output))
     if output.exists() or output.is_symlink():
         fail("refusing to overwrite promotion envelope")
-    payload_path = arguments.bundle.resolve() / "promotion.payload.json"
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tempfile.TemporaryDirectory(
-        prefix="windows-image-sign-", dir=output.parent
-    ) as temporary:
-        signature_path = pathlib.Path(temporary) / "signature.bin"
+    with tempfile.TemporaryDirectory(prefix="windows-image-sign-") as temporary:
+        temporary_path = pathlib.Path(temporary)
+        staged_signer = temporary_path / (
+            "signer.exe" if os.name == "nt" else "signer"
+        )
+        staged_payload = temporary_path / "promotion.payload.json"
+        signature_path = temporary_path / "signature.bin"
+        write_new_regular(staged_signer, signer_bytes, 0o500, "signer snapshot")
+        write_new_regular(staged_payload, payload_bytes, 0o400, "payload snapshot")
         environment = {
             name: os.environ[name]
             for name in ("SystemRoot", "WINDIR", "TEMP", "TMP")
             if name in os.environ
         }
-        try:
-            result = subprocess.run(
-                [
-                    str(signer),
-                    "sign-windows-image-v1",
-                    "--key-handle",
-                    arguments.key_handle,
-                    "--payload",
-                    str(payload_path),
-                    "--payload-sha256",
-                    sha256(read_regular(payload_path)),
-                    "--signature-output",
-                    str(signature_path),
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=environment,
-                check=False,
-                timeout=60,
+        with retain_exact_regular(
+            staged_signer, signer_bytes, MAX_ARTIFACT_BYTES
+        ) as signer_stream, retain_exact_regular(
+            staged_payload, payload_bytes, MAX_JSON_BYTES
+        ) as payload_stream:
+            try:
+                result = subprocess.run(
+                    [
+                        str(staged_signer),
+                        "sign-windows-image-v1",
+                        "--key-handle",
+                        arguments.key_handle,
+                        "--payload",
+                        str(staged_payload),
+                        "--payload-sha256",
+                        sha256(payload_bytes),
+                        "--signature-output",
+                        str(signature_path),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    check=False,
+                    timeout=60,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                fail("external promotion signer failed")
+            if result.returncode != 0 or result.stdout or result.stderr:
+                fail("external promotion signer returned an invalid result")
+            signature = read_regular(signature_path, 64)
+            if len(signature) != 64 or signature == bytes(64):
+                fail("external promotion signature is invalid")
+            if (
+                read_open_regular(
+                    signer_stream, staged_signer, MAX_ARTIFACT_BYTES
+                )
+                != signer_bytes
+            ):
+                fail("signer snapshot changed during signing")
+            if (
+                read_open_regular(payload_stream, staged_payload, MAX_JSON_BYTES)
+                != payload_bytes
+            ):
+                fail("payload snapshot changed during signing")
+            envelope_bytes = canonical_json(
+                {
+                    "key_id": arguments.key_id,
+                    "payload_base64": base64.b64encode(payload_bytes).decode(),
+                    "schema_version": 1,
+                    "signature_base64": base64.b64encode(signature).decode(),
+                }
             )
-        except (OSError, subprocess.TimeoutExpired):
-            fail("external promotion signer failed")
-        if result.returncode != 0 or result.stdout or result.stderr:
-            fail("external promotion signer returned an invalid result")
-        signature = read_regular(signature_path, 64)
-        if len(signature) != 64 or signature == bytes(64):
-            fail("external promotion signature is invalid")
-    payload_bytes = read_regular(payload_path)
-    envelope = {
-        "key_id": arguments.key_id,
-        "payload_base64": base64.b64encode(payload_bytes).decode(),
-        "schema_version": 1,
-        "signature_base64": base64.b64encode(signature).decode(),
-    }
-    output.write_bytes(canonical_json(envelope))
+            write_new_regular(output, envelope_bytes, 0o600, "promotion envelope")
     print(f"promotion_serial={payload['promotion_serial']}")
-    print(f"promotion_envelope_sha256={sha256(read_regular(output))}")
+    print(f"promotion_envelope_sha256={sha256(envelope_bytes)}")
 
 
 def parser() -> argparse.ArgumentParser:

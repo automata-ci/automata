@@ -8,6 +8,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -222,6 +223,18 @@ class WindowsImagePipelineTests(unittest.TestCase):
         pipeline.assemble(argparse.Namespace(**arguments))
         return output
 
+    def sign_arguments(
+        self, bundle: pathlib.Path, signer: pathlib.Path, output: pathlib.Path
+    ) -> argparse.Namespace:
+        return argparse.Namespace(
+            bundle=bundle,
+            key_id="windows-promotion-2026",
+            key_handle="kh:windows:17",
+            signer=signer.resolve(),
+            signer_sha256=digest(signer.read_bytes()),
+            output=output,
+        )
+
     def test_checked_in_lock_and_recipe_are_exact_and_non_placeholder(self) -> None:
         directory = (
             REPOSITORY_ROOT / "images" / "windows-server-2025-hyperv"
@@ -369,19 +382,33 @@ class WindowsImagePipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "serial"):
             self.assemble(output=self.root / "rollback", promotion_serial=0)
 
-    def test_external_signer_receives_only_opaque_handle_and_exact_payload(self) -> None:
+    def test_external_signer_receives_only_opaque_handle_and_exact_payload(
+        self,
+    ) -> None:
         bundle = self.assemble()
         signer = self.root / "approved-signer.exe"
-        signer.write_bytes(b"approved external signer executable")
+        signer_bytes = b"approved external signer executable"
+        signer.write_bytes(signer_bytes)
+        payload_bytes = (bundle / "promotion.payload.json").read_bytes()
         output = self.root / "promotion.envelope.json"
 
         def invoke(command: list[str], **_: object) -> subprocess.CompletedProcess:
             self.assertIn("sign-windows-image-v1", command)
-            self.assertEqual(command[command.index("--key-handle") + 1], "kh:windows:17")
-            payload = pathlib.Path(command[command.index("--payload") + 1])
+            self.assertEqual(
+                command[command.index("--key-handle") + 1], "kh:windows:17"
+            )
+            staged_signer = pathlib.Path(command[0])
+            staged_payload = pathlib.Path(command[command.index("--payload") + 1])
+            self.assertNotEqual(staged_signer.resolve(), signer.resolve())
+            self.assertNotEqual(
+                staged_payload.resolve(),
+                (bundle / "promotion.payload.json").resolve(),
+            )
+            self.assertEqual(staged_signer.read_bytes(), signer_bytes)
+            self.assertEqual(staged_payload.read_bytes(), payload_bytes)
             self.assertEqual(
                 command[command.index("--payload-sha256") + 1],
-                digest(payload.read_bytes()),
+                digest(payload_bytes),
             )
             pathlib.Path(command[command.index("--signature-output") + 1]).write_bytes(
                 bytes(range(64))
@@ -389,24 +416,130 @@ class WindowsImagePipelineTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, b"", b"")
 
         with mock.patch.object(pipeline.subprocess, "run", side_effect=invoke):
-            pipeline.sign(
-                argparse.Namespace(
-                    bundle=bundle,
-                    key_id="windows-promotion-2026",
-                    key_handle="kh:windows:17",
-                    signer=signer.resolve(),
-                    signer_sha256=digest(signer.read_bytes()),
-                    output=output,
-                )
-            )
+            pipeline.sign(self.sign_arguments(bundle, signer, output))
         envelope = json.loads(output.read_bytes())
         self.assertEqual(envelope["key_id"], "windows-promotion-2026")
         self.assertEqual(
             base64.b64decode(envelope["payload_base64"]),
-            (bundle / "promotion.payload.json").read_bytes(),
+            payload_bytes,
         )
         self.assertEqual(len(base64.b64decode(envelope["signature_base64"])), 64)
-        self.assertNotIn("kh:windows:17", (bundle / "promotion.payload.json").read_text())
+        self.assertNotIn(
+            "kh:windows:17", (bundle / "promotion.payload.json").read_text()
+        )
+
+    def test_signer_source_replacement_cannot_change_retained_executable(
+        self,
+    ) -> None:
+        bundle = self.assemble()
+        signer = self.root / "approved-signer.exe"
+        signer_bytes = b"approved external signer executable"
+        signer.write_bytes(signer_bytes)
+        arguments = self.sign_arguments(
+            bundle, signer, self.root / "promotion.envelope.json"
+        )
+
+        def replace_source(
+            command: list[str], **_: object
+        ) -> subprocess.CompletedProcess:
+            signer.write_bytes(b"replacement executable")
+            staged_signer = pathlib.Path(command[0])
+            self.assertNotEqual(staged_signer.resolve(), signer.resolve())
+            self.assertEqual(staged_signer.read_bytes(), signer_bytes)
+            if os.name == "nt":
+                with self.assertRaises(OSError):
+                    staged_signer.write_bytes(b"replacement executable")
+            pathlib.Path(command[command.index("--signature-output") + 1]).write_bytes(
+                bytes(range(64))
+            )
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with mock.patch.object(pipeline.subprocess, "run", side_effect=replace_source):
+            pipeline.sign(arguments)
+        self.assertEqual(signer.read_bytes(), b"replacement executable")
+        self.assertTrue(arguments.output.is_file())
+
+    def test_payload_replacement_cannot_change_signature_input_or_envelope(
+        self,
+    ) -> None:
+        bundle = self.assemble()
+        signer = self.root / "approved-signer.exe"
+        signer.write_bytes(b"approved external signer executable")
+        payload_path = bundle / "promotion.payload.json"
+        payload_bytes = payload_path.read_bytes()
+        output = self.root / "promotion.envelope.json"
+
+        def replace_payload(
+            command: list[str], **_: object
+        ) -> subprocess.CompletedProcess:
+            payload_path.write_bytes(b'{"attacker":true}')
+            staged_payload = pathlib.Path(command[command.index("--payload") + 1])
+            self.assertNotEqual(staged_payload.resolve(), payload_path.resolve())
+            self.assertEqual(staged_payload.read_bytes(), payload_bytes)
+            if os.name == "nt":
+                with self.assertRaises(OSError):
+                    staged_payload.write_bytes(b'{"attacker":true}')
+            self.assertEqual(
+                command[command.index("--payload-sha256") + 1], digest(payload_bytes)
+            )
+            pathlib.Path(command[command.index("--signature-output") + 1]).write_bytes(
+                bytes(range(64))
+            )
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with mock.patch.object(pipeline.subprocess, "run", side_effect=replace_payload):
+            pipeline.sign(self.sign_arguments(bundle, signer, output))
+        envelope = json.loads(output.read_bytes())
+        self.assertEqual(base64.b64decode(envelope["payload_base64"]), payload_bytes)
+        self.assertEqual(payload_path.read_bytes(), b'{"attacker":true}')
+
+    def test_payload_replacement_after_verification_fails_before_signing(self) -> None:
+        bundle = self.assemble()
+        signer = self.root / "approved-signer.exe"
+        signer.write_bytes(b"approved external signer executable")
+        payload_path = bundle / "promotion.payload.json"
+        verify_bundle = pipeline.verify_bundle
+
+        def verify_then_replace(directory: pathlib.Path) -> dict:
+            payload = verify_bundle(directory)
+            payload_path.write_bytes(b'{"attacker":true}')
+            return payload
+
+        with mock.patch.object(
+            pipeline, "verify_bundle", side_effect=verify_then_replace
+        ), mock.patch.object(pipeline.subprocess, "run") as invoke:
+            with self.assertRaisesRegex(
+                SystemExit, "promotion payload changed after verification"
+            ):
+                pipeline.sign(
+                    self.sign_arguments(
+                        bundle, signer, self.root / "promotion.envelope.json"
+                    )
+                )
+        invoke.assert_not_called()
+
+    def test_output_replacement_race_never_overwrites_existing_file(self) -> None:
+        bundle = self.assemble()
+        signer = self.root / "approved-signer.exe"
+        signer.write_bytes(b"approved external signer executable")
+        output = self.root / "promotion.envelope.json"
+        attacker_contents = b"attacker-owned-output"
+
+        def replace_output(
+            command: list[str], **_: object
+        ) -> subprocess.CompletedProcess:
+            output.write_bytes(attacker_contents)
+            pathlib.Path(command[command.index("--signature-output") + 1]).write_bytes(
+                bytes(range(64))
+            )
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with mock.patch.object(pipeline.subprocess, "run", side_effect=replace_output):
+            with self.assertRaisesRegex(
+                SystemExit, "refusing to overwrite promotion envelope"
+            ):
+                pipeline.sign(self.sign_arguments(bundle, signer, output))
+        self.assertEqual(output.read_bytes(), attacker_contents)
 
 
 if __name__ == "__main__":
