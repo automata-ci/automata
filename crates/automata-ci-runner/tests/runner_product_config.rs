@@ -4,6 +4,7 @@ use automata_ci_core::{
     Architecture, ContainerFeature, OperatingSystem, ResourceCapacity, RunnerFeature,
     RunnerRequirements, SandboxFeature, Sha256Digest,
 };
+use automata_ci_execution::SandboxPrivilegePolicy;
 use automata_ci_runner::product::{
     RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
 };
@@ -1247,6 +1248,17 @@ fn local_docker_configuration_is_closed_current_only_and_mutually_exclusive() {
     );
     assert!(local.guest_image().reference().ends_with(&"ab".repeat(32)));
     assert!(configured.inventory().containers().features().is_empty());
+    assert_eq!(
+        configured.executor().privilege(),
+        SandboxPrivilegePolicy::Administrator
+    );
+    assert!(
+        configured
+            .inventory()
+            .sandbox()
+            .features()
+            .contains(&SandboxFeature::PRIVILEGED_USER)
+    );
 
     for field in ["endpoint", "socket", "docker_host"] {
         let mut open = value.clone();
@@ -1269,6 +1281,14 @@ fn local_docker_configuration_is_closed_current_only_and_mutually_exclusive() {
     egress["executor"]["network"] = serde_json::json!("private_egress");
     assert_eq!(
         parse_value(&egress).expect_err("local Docker is network-disabled only"),
+        RunnerProductConfigError::InvalidExecutor
+    );
+
+    let mut unprivileged = value.clone();
+    unprivileged["executor"]["privilege"] = serde_json::json!("unprivileged");
+    assert_eq!(
+        parse_value(&unprivileged)
+            .expect_err("local Docker uses the attenuated confined administrator identity"),
         RunnerProductConfigError::InvalidExecutor
     );
 
