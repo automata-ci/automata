@@ -1473,25 +1473,69 @@ BEGIN
     THEN
         RAISE EXCEPTION 'installation singleton identity is immutable'
             USING ERRCODE = 'check_violation',
-                  CONSTRAINT = 'human_auth_installation_state_identity_immutable';
+                  CONSTRAINT = 'installation_state_identity_immutable';
     END IF;
     IF OLD.state = 'configured' THEN
         RAISE EXCEPTION 'configured installation state is immutable'
             USING ERRCODE = 'check_violation',
-                  CONSTRAINT = 'human_auth_installation_state_configured_immutable';
+                  CONSTRAINT = 'installation_state_configured_immutable';
     END IF;
-    IF NEW.revision <> OLD.revision + 1 OR NEW.updated_at_ms < OLD.updated_at_ms THEN
+    IF NEW.revision <> OLD.revision + 1
+        OR NEW.updated_at_ms < OLD.updated_at_ms
+    THEN
         RAISE EXCEPTION 'installation state updates require the next CAS revision'
             USING ERRCODE = 'check_violation',
-                  CONSTRAINT = 'human_auth_installation_state_update_cas';
+                  CONSTRAINT = 'installation_state_update_cas';
     END IF;
     IF OLD.state = 'unconfigured' THEN
-        IF NEW.state <> 'pending' OR NEW.setup_transaction_id IS NOT NULL THEN
-            RAISE EXCEPTION 'installation must be armed before login binding'
+        IF NEW.state = 'pending'
+            AND NEW.configuration_mode = 'human'
+            AND NEW.setup_transaction_id IS NULL
+        THEN
+            NULL;
+        ELSIF NEW.state = 'configured'
+            AND NEW.configuration_mode = 'deployment'
+        THEN
+            IF NOT EXISTS (
+                SELECT 1
+                FROM tenants AS tenant
+                WHERE tenant.id = NEW.configured_tenant_id
+                  AND tenant.id = NEW.tenant_id
+                  AND tenant.display_name = NEW.tenant_display_name
+            ) OR NOT EXISTS (
+                SELECT 1
+                FROM security_audit_events AS audit
+                WHERE audit.event_id =
+                        NEW.deployment_bootstrap_audit_event_id
+                  AND audit.tenant_id = NEW.configured_tenant_id
+                  AND audit.occurred_at_ms = NEW.configured_at_ms
+                  AND audit.actor_kind = 'system'
+                  AND audit.actor_principal_id IS NULL
+                  AND audit.actor_session_id IS NULL
+                  AND audit.authorization_revision IS NULL
+                  AND audit.action =
+                        'auth.installation.deployment_configured'
+                  AND audit.outcome = 'succeeded'
+                  AND audit.resource_kind = 'installation'
+                  AND audit.resource_id = 'singleton'
+                  AND audit.request_id =
+                        NEW.deployment_bootstrap_operation_id::text
+            ) THEN
+                RAISE EXCEPTION 'deployment installation lacks exact tenant and audit evidence'
+                    USING ERRCODE = 'check_violation',
+                          CONSTRAINT =
+                              'installation_state_deployment_completion_exact';
+            END IF;
+        ELSE
+            RAISE EXCEPTION 'installation state transition is not permitted'
                 USING ERRCODE = 'check_violation',
-                      CONSTRAINT = 'human_auth_installation_state_transition';
+                      CONSTRAINT = 'installation_state_transition';
         END IF;
-    ELSIF OLD.state = 'pending' AND NEW.state = 'pending' THEN
+    ELSIF OLD.state = 'pending'
+        AND OLD.configuration_mode = 'human'
+        AND NEW.state = 'pending'
+        AND NEW.configuration_mode = 'human'
+    THEN
         IF OLD.setup_transaction_id IS NULL
             AND NEW.setup_transaction_id IS NOT NULL
         THEN
@@ -1500,8 +1544,8 @@ BEGIN
                 OR NEW.expected_provider_id IS DISTINCT FROM OLD.expected_provider_id
                 OR NEW.expected_provider_subject IS DISTINCT FROM OLD.expected_provider_subject
                 OR NEW.challenge_expires_at_ms IS DISTINCT FROM OLD.challenge_expires_at_ms
-                OR NEW.target_tenant_id IS DISTINCT FROM OLD.target_tenant_id
-                OR NEW.target_tenant_display_name IS DISTINCT FROM OLD.target_tenant_display_name
+                OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+                OR NEW.tenant_display_name IS DISTINCT FROM OLD.tenant_display_name
                 OR NOT EXISTS (
                     SELECT 1
                     FROM human_login_transactions AS login
@@ -1517,7 +1561,7 @@ BEGIN
             THEN
                 RAISE EXCEPTION 'login binding cannot rewrite the armed setup'
                     USING ERRCODE = 'check_violation',
-                          CONSTRAINT = 'human_auth_installation_state_bind_exact';
+                          CONSTRAINT = 'installation_state_bind_exact';
             END IF;
         ELSIF OLD.challenge_expires_at_ms <= NEW.updated_at_ms
             AND NEW.setup_transaction_id IS NULL
@@ -1526,15 +1570,19 @@ BEGIN
         ELSE
             RAISE EXCEPTION 'pending setup may only bind once or be rearmed after expiry'
                 USING ERRCODE = 'check_violation',
-                      CONSTRAINT = 'human_auth_installation_state_pending_exact';
+                      CONSTRAINT = 'installation_state_pending_exact';
         END IF;
-    ELSIF OLD.state = 'pending' AND NEW.state = 'configured' THEN
+    ELSIF OLD.state = 'pending'
+        AND OLD.configuration_mode = 'human'
+        AND NEW.state = 'configured'
+        AND NEW.configuration_mode = 'human'
+    THEN
         IF OLD.setup_transaction_id IS NULL
             OR OLD.challenge_expires_at_ms <= NEW.updated_at_ms
             OR NEW.expected_provider_id IS DISTINCT FROM OLD.expected_provider_id
             OR NEW.expected_provider_subject IS DISTINCT FROM OLD.expected_provider_subject
-            OR NEW.target_tenant_id IS DISTINCT FROM OLD.target_tenant_id
-            OR NEW.target_tenant_display_name IS DISTINCT FROM OLD.target_tenant_display_name
+            OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
+            OR NEW.tenant_display_name IS DISTINCT FROM OLD.tenant_display_name
             OR NEW.setup_transaction_id IS DISTINCT FROM OLD.setup_transaction_id
             OR NOT EXISTS (
                 SELECT 1
@@ -1544,17 +1592,18 @@ BEGIN
                   AND login.tenant_id IS NULL
                   AND login.provider_id = OLD.expected_provider_id
                   AND login.status = 'succeeded'
-                  AND login.completed_principal_id = NEW.configured_principal_id
+                  AND login.completed_principal_id =
+                        NEW.configured_principal_id
             )
         THEN
             RAISE EXCEPTION 'installation completion is not bound to a succeeded setup login'
                 USING ERRCODE = 'check_violation',
-                      CONSTRAINT = 'human_auth_installation_state_completion_exact';
+                      CONSTRAINT = 'installation_state_human_completion_exact';
         END IF;
     ELSE
         RAISE EXCEPTION 'installation state transition is not permitted'
             USING ERRCODE = 'check_violation',
-                  CONSTRAINT = 'human_auth_installation_state_transition';
+                  CONSTRAINT = 'installation_state_transition';
     END IF;
     RETURN NEW;
 END;

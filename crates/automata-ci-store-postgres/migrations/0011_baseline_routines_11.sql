@@ -220,9 +220,11 @@ BEGIN
        OR NEW.tenant_id IS DISTINCT FROM OLD.tenant_id
        OR NEW.runner_group_id IS DISTINCT FROM OLD.runner_group_id
        OR NEW.token_sha256 IS DISTINCT FROM OLD.token_sha256
+       OR NEW.issuer_kind IS DISTINCT FROM OLD.issuer_kind
        OR NEW.issued_by_principal_id IS DISTINCT FROM OLD.issued_by_principal_id
        OR NEW.issued_by_session_id IS DISTINCT FROM OLD.issued_by_session_id
        OR NEW.issued_authorization_revision IS DISTINCT FROM OLD.issued_authorization_revision
+       OR NEW.installation_authority_sha256 IS DISTINCT FROM OLD.installation_authority_sha256
        OR NEW.issued_at_ms IS DISTINCT FROM OLD.issued_at_ms
        OR NEW.expires_at_ms IS DISTINCT FROM OLD.expires_at_ms
        OR (OLD.consumed_at_ms IS NOT NULL AND (

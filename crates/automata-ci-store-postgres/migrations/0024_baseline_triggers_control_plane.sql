@@ -250,11 +250,11 @@ CREATE TRIGGER github_workflow_run_subject_evidence_no_truncate BEFORE TRUNCATE 
 
 CREATE TRIGGER github_workflow_run_subject_evidence_no_update_delete BEFORE DELETE OR UPDATE ON github_workflow_run_subject_evidence FOR EACH ROW EXECUTE FUNCTION automata_github_workflow_run_subject_evidence_immutable();
 
-CREATE TRIGGER human_auth_installation_state_lifecycle_guard BEFORE UPDATE ON human_auth_installation_state FOR EACH ROW EXECUTE FUNCTION automata_enforce_installation_state_lifecycle();
+CREATE TRIGGER installation_state_lifecycle_guard BEFORE UPDATE ON installation_state FOR EACH ROW EXECUTE FUNCTION automata_enforce_installation_state_lifecycle();
 
-CREATE TRIGGER human_auth_installation_state_no_insert_delete BEFORE INSERT OR DELETE ON human_auth_installation_state FOR EACH ROW EXECUTE FUNCTION automata_reject_installation_singleton_replacement();
+CREATE TRIGGER installation_state_no_insert_delete BEFORE INSERT OR DELETE ON installation_state FOR EACH ROW EXECUTE FUNCTION automata_reject_installation_singleton_replacement();
 
-CREATE TRIGGER human_auth_installation_state_no_truncate BEFORE TRUNCATE ON human_auth_installation_state FOR EACH STATEMENT EXECUTE FUNCTION automata_reject_installation_singleton_replacement();
+CREATE TRIGGER installation_state_no_truncate BEFORE TRUNCATE ON installation_state FOR EACH STATEMENT EXECUTE FUNCTION automata_reject_installation_singleton_replacement();
 
 CREATE TRIGGER human_login_transactions_lifecycle_guard BEFORE UPDATE ON human_login_transactions FOR EACH ROW EXECUTE FUNCTION automata_enforce_human_login_transaction_lifecycle();
 

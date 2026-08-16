@@ -238,9 +238,11 @@ CREATE TABLE runner_enrollment_tokens (
     tenant_id text NOT NULL,
     runner_group_id uuid NOT NULL,
     token_sha256 bytea NOT NULL,
-    issued_by_principal_id uuid NOT NULL,
-    issued_by_session_id uuid NOT NULL,
-    issued_authorization_revision bigint NOT NULL,
+    issuer_kind text COLLATE pg_catalog."C" NOT NULL,
+    issued_by_principal_id uuid,
+    issued_by_session_id uuid,
+    issued_authorization_revision bigint,
+    installation_authority_sha256 bytea,
     issued_at_ms bigint NOT NULL,
     expires_at_ms bigint NOT NULL,
     consumed_at_ms bigint,
@@ -253,6 +255,34 @@ CREATE TABLE runner_enrollment_tokens (
     CONSTRAINT runner_enrollment_tokens_ids_non_nil CHECK (((id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (runner_group_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_principal_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND (issued_by_session_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((consumed_runner_id IS NULL) OR (consumed_runner_id <> '00000000-0000-0000-0000-000000000000'::uuid)) AND ((redeem_operation_id IS NULL) OR (redeem_operation_id <> '00000000-0000-0000-0000-000000000000'::uuid)))),
     CONSTRAINT runner_enrollment_tokens_lifetime CHECK (((issued_at_ms >= 0) AND ((expires_at_ms - issued_at_ms) >= 60000) AND ((expires_at_ms - issued_at_ms) <= 3600000))),
     CONSTRAINT runner_enrollment_tokens_revision_positive CHECK ((issued_authorization_revision > 0)),
+    CONSTRAINT runner_enrollment_tokens_issuer_kind CHECK (
+        issuer_kind IN ('human', 'installation_bootstrap')
+    ),
+    CONSTRAINT runner_enrollment_tokens_installation_authority_digest CHECK (
+        installation_authority_sha256 IS NULL
+        OR (
+            octet_length(installation_authority_sha256) = 32
+            AND installation_authority_sha256 <>
+                decode(repeat('00', 32), 'hex')
+        )
+    ),
+    CONSTRAINT runner_enrollment_tokens_issuer_shape CHECK ((
+        (
+            issuer_kind = 'human'
+            AND issued_by_principal_id IS NOT NULL
+            AND issued_by_session_id IS NOT NULL
+            AND issued_authorization_revision IS NOT NULL
+            AND installation_authority_sha256 IS NULL
+        )
+        OR
+        (
+            issuer_kind = 'installation_bootstrap'
+            AND issued_by_principal_id IS NULL
+            AND issued_by_session_id IS NULL
+            AND issued_authorization_revision IS NULL
+            AND installation_authority_sha256 IS NOT NULL
+        )
+    ) IS TRUE),
     CONSTRAINT runner_enrollment_tokens_consumption_shape CHECK (((((consumed_at_ms IS NULL) AND (consumed_runner_id IS NULL) AND (redeem_operation_id IS NULL) AND (redeem_request_sha256 IS NULL) AND (redeem_response IS NULL) AND (redeem_certificate_expires_at_seconds IS NULL)) OR ((consumed_at_ms >= issued_at_ms) AND (consumed_at_ms < expires_at_ms) AND (consumed_runner_id IS NOT NULL) AND (redeem_operation_id IS NOT NULL) AND (octet_length(redeem_request_sha256) = 32) AND (octet_length(redeem_response) >= 1) AND (octet_length(redeem_response) <= 524288) AND ((redeem_certificate_expires_at_seconds - (consumed_at_ms / 1000)) >= 300))) IS TRUE))
 );
 

@@ -310,8 +310,12 @@ ALTER TABLE ONLY delegated_actor_identities
 ALTER TABLE ONLY delegated_actor_identities
     ADD CONSTRAINT delegated_actor_identities_mapping_key UNIQUE (issuer, subject, principal_id);
 
-ALTER TABLE ONLY human_auth_installation_state
-    ADD CONSTRAINT human_auth_installation_state_pkey PRIMARY KEY (singleton);
+ALTER TABLE ONLY installation_state
+    ADD CONSTRAINT installation_state_pkey PRIMARY KEY (singleton);
+
+ALTER TABLE ONLY installation_state
+    ADD CONSTRAINT installation_state_deployment_authority_unique
+    UNIQUE (configured_tenant_id, deployment_authority_sha256);
 
 ALTER TABLE ONLY human_login_transactions
     ADD CONSTRAINT human_login_transactions_pkey PRIMARY KEY (id);
@@ -693,6 +697,9 @@ ALTER TABLE ONLY tenant_human_memberships
 
 ALTER TABLE ONLY tenants
     ADD CONSTRAINT tenants_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY tenants
+    ADD CONSTRAINT tenants_exact_id_display_name UNIQUE (id, display_name);
 
 ALTER TABLE ONLY workspace_provisioning_operations
     ADD CONSTRAINT workspace_provisioning_operations_pkey PRIMARY KEY (authority_id, operation_id);
