@@ -1937,7 +1937,8 @@ mod tests {
         #[cfg(target_os = "macos")]
         let configuration = include_bytes!("../../config/runner.macos.example.json").as_slice();
         #[cfg(target_os = "windows")]
-        let configuration = include_bytes!("../../config/runner.windows.example.json").as_slice();
+        let configuration =
+            include_bytes!("../../tests/fixtures/runner.windows.product.json").as_slice();
         let config = RunnerProductConfig::from_json(configuration)
             .expect("checked-in host runner configuration");
         let mut registered_features = config.inventory().containers().features().clone();

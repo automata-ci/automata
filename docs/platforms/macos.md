@@ -221,6 +221,12 @@ code requirement, runner identity, endpoints, and credential sources. The
 environment profile manifest digest must exactly equal
 `macos_virtualization.template_manifest_sha256`.
 
+Provision the three configured TLS paths as owner-only regular files beneath
+`~/Library/Application Support/Automata/tls`. The long-lived runner renews and
+atomically reconciles that file-backed identity before expiry; Keychain remains
+the custody boundary for stable spool and object-store secrets. A
+Keychain-backed TLS identity is not a current alternate mode.
+
 The linked checked-in example is the sole complete current boundary: runner
 product schema 5. It selects the `macos_virtualization` provider, a writable
 unprivileged executor with networking disabled, and the mandatory closed
