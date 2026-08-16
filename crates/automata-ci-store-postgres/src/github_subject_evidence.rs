@@ -23,7 +23,7 @@ use automata_ci_store::{
     ProviderDeliveryId, ProviderInstallationId, ProviderRepositoryId, ProviderRepositoryOwnerId,
     ProviderRepositoryVisibility, RecordGithubWorkflowRunSubjectEvidence, RepositoryId,
     ResolveGithubRepositoryDispatch, TenantScope, ValidateGithubWorkflowRunSubjectEvidenceReplay,
-    WorkflowRuntimePolicyRevision, WorkflowSnapshotId,
+    WorkflowAdmissionIdempotency, WorkflowRuntimePolicyRevision, WorkflowSnapshotId,
 };
 
 use super::{PostgresStore, durable_schema::current_durable_schemas, pg_bigint};
@@ -269,6 +269,7 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RecordGithubWorkflowRunSubjectEvidence,
 ) -> Result<(), GithubSubjectEvidenceStoreError> {
+    validate_provider_delivery_idempotency(transaction, request).await?;
     // All-direct ingress initially owns one aggregate discovery Check. Derive
     // the exact per-workflow Check inside this transaction before policy may
     // admit or terminalize that workflow; any failed authority check rolls the
@@ -339,7 +340,6 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
            AND $15 >= inbox.accepted_at_ms
            AND $15 >= $13
            AND $15 < $14
-           AND $16 = inbox.delivery_id
            AND subject.origin_kind = 'provider_delivery'
            AND subject.schedule_fire_id IS NULL
            AND subject.subject_kind = 'workflow'
@@ -361,7 +361,7 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
                  AND subject.terminal_cause IS NULL
                  AND subject.desired_revision = 1
                  AND subject.desired_updated_at_ms = inbox.accepted_at_ms)
-             OR (subject.event_control_subject_id = $17
+             OR (subject.event_control_subject_id = $16
                  AND subject.desired_state = 'completed'
                  AND subject.desired_conclusion = 'skipped'
                  AND subject.terminal_cause = 'workflow_skipped'
@@ -386,7 +386,6 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
     .bind(claim.claimed_at().get())
     .bind(claim.expires_at().get())
     .bind(request.admitted_at().get())
-    .bind(request.provider_delivery_idempotency_key())
     .bind(event_control_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await
@@ -396,6 +395,61 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
     } else {
         Err(GithubSubjectEvidenceStoreError::AuthorityRejected)
     }
+}
+
+async fn validate_provider_delivery_idempotency(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &RecordGithubWorkflowRunSubjectEvidence,
+) -> Result<(), GithubSubjectEvidenceStoreError> {
+    let claim = request.admission_claim();
+    let coordinates = sqlx::query_as::<_, (String, String, String)>(
+        r"
+        SELECT repository.scm_provider, repository.provider_repository_id,
+               inbox.delivery_id
+        FROM provider_delivery_inbox AS inbox
+        JOIN repositories AS repository
+          ON repository.tenant_id = inbox.tenant_id
+         AND repository.id = $2
+         AND repository.scm_provider = inbox.provider
+         AND repository.provider_repository_id = inbox.provider_repository_id::TEXT
+        WHERE inbox.tenant_id = $1
+          AND inbox.id = $3
+          AND inbox.state = 'claimed'
+          AND inbox.claim_owner_id = $4
+          AND inbox.attempt_count = $5
+          AND inbox.claim_fence = $6
+          AND inbox.claimed_at_ms = $7
+          AND inbox.claim_expires_at_ms = $8
+          AND $9 >= inbox.accepted_at_ms
+          AND $9 >= $7
+          AND $9 < $8
+        FOR SHARE OF inbox, repository
+        ",
+    )
+    .bind(request.tenant().as_str())
+    .bind(request.repository_id().as_uuid())
+    .bind(request.delivery_id().as_uuid())
+    .bind(claim.claim().owner().as_uuid())
+    .bind(i16::try_from(claim.attempt()).expect("attempt fits SMALLINT"))
+    .bind(pg_bigint(claim.claim().fence()))
+    .bind(claim.claimed_at().get())
+    .bind(claim.expires_at().get())
+    .bind(request.admitted_at().get())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .ok_or(GithubSubjectEvidenceStoreError::AuthorityRejected)?;
+    let expected = WorkflowAdmissionIdempotency::namespaced_provider_delivery(
+        &coordinates.0,
+        &coordinates.1,
+        &coordinates.2,
+        request.workflow_path().as_str(),
+    )
+    .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
+    if expected.key() != request.provider_delivery_idempotency_key() {
+        return Err(GithubSubjectEvidenceStoreError::AuthorityRejected);
+    }
+    Ok(())
 }
 
 /// Links the delivery's database-derived Check and inserts its run receipt

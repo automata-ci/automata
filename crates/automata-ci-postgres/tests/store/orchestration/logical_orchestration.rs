@@ -310,8 +310,14 @@ async fn stage_authenticated_delivery(
         claimed.claimed_at(),
     )
     .await?;
+    let durable_idempotency = WorkflowAdmissionIdempotency::namespaced_provider_delivery(
+        "github",
+        &manifest.github_repository_id().get().to_string(),
+        &command.idempotency().key(),
+        command.workflow_path(),
+    )?;
     Ok((
-        logical_command_at(command, claimed.claimed_at())?,
+        logical_command_at_with_idempotency(command, durable_idempotency, claimed.claimed_at())?,
         AuthenticatedGithubDeliveryClaim::new(
             claimed.claim(),
             claimed.attempt(),
