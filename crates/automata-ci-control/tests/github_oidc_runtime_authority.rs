@@ -17,9 +17,7 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobContentReference, JobExecutionContext, JobId, JobInstanceIdentity,
     JobIr, JobIrEnvelope, JobPermissionGrant, JobPermissionRequest, JobSource, Lease, LeaseId,
     PermissionLevel, RunId, RunValueTemplates, RunnerId, RunnerRequirements, RunnerSessionId,
-    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TrustActorEvidence,
-    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
-    TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis,
+    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, UnixMillis,
     ValueTemplate, WorkflowId,
 };
 use automata_ci_oidc_github::{
@@ -45,30 +43,6 @@ const NEW_SECRET: &[u8] = b"synthetic-new-request-key-material-at-least-thirty-t
 
 assert_obj_safe!(GithubOidcAuthorityIdGenerator);
 assert_obj_safe!(GithubOidcAuthorityProvisioner);
-
-fn trusted_snapshot() -> TrustSnapshot {
-    TrustPolicy::current()
-        .evaluate(
-            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
-                .with_original_actor(
-                    TrustActorEvidence::new(
-                        "actor-1",
-                        TrustActorKind::User,
-                        TrustAutomationKind::None,
-                    )
-                    .expect("actor evidence"),
-                )
-                .with_repositories(
-                    TrustRepositoryEvidence::new("42", "7").expect("source repository"),
-                    TrustRepositoryEvidence::new("42", "7").expect("target repository"),
-                )
-                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
-                .with_revisions("source-sha", "target-sha", "execution-sha")
-                .with_fork(false)
-                .with_token_recursion(TrustTokenRecursion::Suppressed),
-        )
-        .expect("trusted snapshot")
-}
 
 #[tokio::test]
 async fn denied_permission_matrix_declines_without_ids_or_durable_calls() {
@@ -780,7 +754,7 @@ impl Fixture {
             )],
         )
         .with_permission_request(permission_request)
-        .with_trust_snapshot(trusted_snapshot());
+        .with_trust_snapshot(crate::runner_control_support::trusted_snapshot());
         if let Some(timeout_seconds) = timeout_seconds {
             job = job.with_timeout_seconds(timeout_seconds);
         }
