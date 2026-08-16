@@ -263,10 +263,13 @@ impl GithubProviderConfig {
         for workspace in workspaces {
             let workspace_id = workspace.workspace_id();
             let workspace_revision = workspace.revision();
-            let projected_revision = configuration_revision
-                .get()
-                .checked_add(workspace_revision.get())
-                .ok_or(GithubProviderConfigError)?;
+            // One reviewed shard generation must describe both the provider
+            // authority and every repository projection loaded by a replica.
+            // Mixed generations are never partially activated.
+            if workspace_revision.get() != configuration_revision.get() {
+                return Err(GithubProviderConfigError);
+            }
+            let projected_revision = configuration_revision.get();
             for selected in workspace.repositories() {
                 repositories.push(database_repository_config(
                     workspace_id,
