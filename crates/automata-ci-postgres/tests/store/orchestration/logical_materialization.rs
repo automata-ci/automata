@@ -1589,6 +1589,133 @@ async fn logical_concurrency_preemption_fences_unmaterialized_work() -> TestResu
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // Keep the lock gate and all atomic absence proofs together.
+async fn claim_next_contends_while_admission_holds_the_repository_lock() -> TestResult {
+    run_with_database(|database| async move {
+        let mut fixture =
+            fixture_with_concurrency(&database, "materialization-claim-next-lock", 27_000, true)
+                .await?;
+        let prepared =
+            publish_single_materialization_candidate(&database, &mut fixture, 27_100, [0x79; 32])
+                .await?;
+        let predecessor_run_id = fixture.command.run_id();
+        let instance_id = prepared.activated.id().as_uuid();
+        let ready_unclaimed: bool = sqlx::query_scalar(
+            r"
+            SELECT logical_job.state = 'activated'
+                   AND publication.condition_matched
+                   AND publication.instance_count = 1
+                   AND claim.instance_id IS NULL
+            FROM logical_workflow_instances AS instance
+            JOIN logical_workflow_jobs AS logical_job
+              ON logical_job.run_id = instance.run_id
+             AND logical_job.invocation_id = instance.invocation_id
+             AND logical_job.id = instance.logical_job_id
+            JOIN logical_workflow_activation_publications AS publication
+              ON publication.run_id = instance.run_id
+             AND publication.invocation_id = instance.invocation_id
+             AND publication.logical_job_id = instance.logical_job_id
+            LEFT JOIN logical_workflow_materialization_claims AS claim
+              ON claim.instance_id = instance.id
+            WHERE instance.id = $1 AND instance.run_id = $2
+            ",
+        )
+        .bind(instance_id)
+        .bind(predecessor_run_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert!(ready_unclaimed);
+
+        let replacement = replacement_admission(&fixture, 0xd3, 1_200)?;
+        let replacement_run_id = replacement.run_id;
+        let mut gate = database.pool().begin().await?;
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await?;
+        sqlx::query("LOCK TABLE concurrency_groups IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *gate)
+            .await?;
+
+        let admission_store = database.store().clone();
+        let admission =
+            tokio::spawn(async move { admission_store.admit_workflow(replacement.command).await });
+        let admission_pid =
+            wait_for_backend_blocked_by(database.pool(), gate_pid, "INSERT INTO concurrency_groups")
+                .await?;
+
+        let observed_at = database_now_ms(&database).await?;
+        let request = materialization_selection_request(27_190, 27_200, observed_at, 60_000);
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            database
+                .store()
+                .claim_next_logical_instance_materialization(request.clone()),
+        )
+        .await??;
+        assert_eq!(
+            outcome,
+            LogicalInstanceMaterializationSelectionOutcome::Contended
+        );
+        let replay = tokio::time::timeout(
+            Duration::from_secs(2),
+            database
+                .store()
+                .claim_next_logical_instance_materialization(request.clone()),
+        )
+        .await??;
+        assert_eq!(replay, outcome);
+        assert_eq!(
+            wait_for_backend_blocked_by(
+                database.pool(),
+                gate_pid,
+                "INSERT INTO concurrency_groups",
+            )
+            .await?,
+            admission_pid
+        );
+        let durable_outcomes: Vec<String> = sqlx::query_scalar(
+            "SELECT outcome FROM logical_workflow_materialization_work_selections WHERE selection_id = $1",
+        )
+        .bind(request.selection_id().as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(durable_outcomes, vec!["contended"]);
+
+        gate.commit().await?;
+        let admission_receipt = tokio::time::timeout(Duration::from_secs(5), admission).await???;
+        assert_eq!(admission_receipt.run_id(), replacement_run_id);
+        assert_eq!(
+            run_status(database.pool(), predecessor_run_id).await?,
+            "cancelled"
+        );
+        let cancellation_evidence: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT preempting_run_id FROM logical_workflow_concurrency_cancellations WHERE run_id = $1",
+        )
+        .bind(predecessor_run_id.as_uuid())
+        .fetch_all(database.pool())
+        .await?;
+        assert_eq!(cancellation_evidence, vec![replacement_run_id.as_uuid()]);
+        let durable_rows: (i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM logical_workflow_materialization_claims WHERE run_id = $1),
+                (SELECT count(*) FROM logical_workflow_concrete_jobs WHERE run_id = $1),
+                (SELECT count(*) FROM jobs WHERE run_id = $1),
+                (SELECT count(*) FROM job_attempts AS attempt
+                 JOIN jobs AS job ON job.id = attempt.job_id WHERE job.run_id = $1)
+            ",
+        )
+        .bind(predecessor_run_id.as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(durable_rows, (0, 0, 0, 0));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 async fn cancellation_first_rejects_a_waiting_materialization_without_partial_rows() -> TestResult {
     run_with_database(|database| async move {
         let race =
@@ -1686,9 +1813,9 @@ async fn materialization_first_is_visible_to_waiting_cancellation_and_replays() 
         let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *gate)
             .await?;
-        // Stop the commit after it owns the run but before it locks the
-        // materialization claim. Unlike the concrete-job table, this table is
-        // not read by the admission-side current-attempt liveness trigger.
+        // Stop the commit after it owns the repository and run but before it
+        // locks the materialization claim. Unlike the concrete-job table, this
+        // table is not read by the admission-side current-attempt liveness trigger.
         sqlx::query("LOCK TABLE logical_workflow_materialization_claims IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *gate)
             .await?;
@@ -1707,7 +1834,12 @@ async fn materialization_first_is_visible_to_waiting_cancellation_and_replays() 
         let admission_store = database.store().clone();
         let admission =
             tokio::spawn(async move { admission_store.admit_workflow(replacement.command).await });
-        wait_for_backend_blocked_by(database.pool(), materialization_pid, "SELECT status").await?;
+        wait_for_backend_blocked_by(
+            database.pool(),
+            materialization_pid,
+            "INSERT INTO repositories",
+        )
+        .await?;
         gate.commit().await?;
 
         let materialized =

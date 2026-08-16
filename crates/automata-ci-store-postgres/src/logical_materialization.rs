@@ -809,7 +809,7 @@ async fn lock_run(
         JOIN repositories AS repository ON repository.id = run.repository_id
         WHERE repository.tenant_id = $1
           AND run.id = $2
-        FOR SHARE OF run
+        FOR SHARE OF repository, run
         ",
     )
     .bind(target.tenant().as_str())
