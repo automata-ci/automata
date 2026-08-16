@@ -1307,19 +1307,27 @@ fn fixture(tenant: &str, namespace: u128) -> Fixture {
         Vec::new(),
     )
     .expect("logical job");
+    let repository = AdmissionRepository::new(
+        repository_id,
+        "github",
+        manifest.github_repository_id().get().to_string(),
+        "example",
+        format!("project-{namespace}"),
+    )
+    .expect("repository");
+    let head_sha = vec![0x14; 20];
+    let trust_snapshot = crate::support::authenticated_github_trust_snapshot(
+        &repository,
+        "refs/heads/main",
+        &head_sha,
+    )
+    .expect("trust snapshot");
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("logical-result-{namespace}"))
             .expect("idempotency"),
         Sha256Digest::from_bytes([0x40; 32]),
-        AdmissionRepository::new(
-            repository_id,
-            "github",
-            manifest.github_repository_id().get().to_string(),
-            "example",
-            format!("project-{namespace}"),
-        )
-        .expect("repository"),
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "CI",
@@ -1344,7 +1352,7 @@ fn fixture(tenant: &str, namespace: u128) -> Fixture {
             &[0x13; 512],
             "application/json",
         ),
-        vec![0x14; 20],
+        head_sha,
         vec![logical_job],
         UnixMillis::new(1_000),
     )
@@ -1353,6 +1361,7 @@ fn fixture(tenant: &str, namespace: u128) -> Fixture {
         &[0x15; 512],
         "application/vnd.automata.job-runtime-context.protobuf",
     ))
+    .trust_snapshot(trust_snapshot)
     .build()
     .expect("logical admission");
     Fixture {
@@ -1410,6 +1419,21 @@ fn dependency_fixtures(tenant: &str, namespace: u128) -> [Fixture; 3] {
         )
         .expect("build job"),
     ];
+    let repository = AdmissionRepository::new(
+        repository_id,
+        "github",
+        manifest.github_repository_id().get().to_string(),
+        "example",
+        format!("project-{namespace}"),
+    )
+    .expect("repository");
+    let head_sha = vec![0x14; 20];
+    let trust_snapshot = crate::support::authenticated_github_trust_snapshot(
+        &repository,
+        "refs/heads/main",
+        &head_sha,
+    )
+    .expect("trust snapshot");
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!(
@@ -1417,14 +1441,7 @@ fn dependency_fixtures(tenant: &str, namespace: u128) -> [Fixture; 3] {
         ))
         .expect("idempotency"),
         Sha256Digest::from_bytes([0x40; 32]),
-        AdmissionRepository::new(
-            repository_id,
-            "github",
-            manifest.github_repository_id().get().to_string(),
-            "example",
-            format!("project-{namespace}"),
-        )
-        .expect("repository"),
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "CI",
@@ -1449,7 +1466,7 @@ fn dependency_fixtures(tenant: &str, namespace: u128) -> [Fixture; 3] {
             &[0x13; 512],
             "application/json",
         ),
-        vec![0x14; 20],
+        head_sha,
         logical_jobs,
         UnixMillis::new(1_000),
     )
@@ -1458,6 +1475,7 @@ fn dependency_fixtures(tenant: &str, namespace: u128) -> [Fixture; 3] {
         &[0x15; 512],
         "application/vnd.automata.job-runtime-context.protobuf",
     ))
+    .trust_snapshot(trust_snapshot)
     .build()
     .expect("dependency admission");
     [base_id, prepare_id, build_id].map(|logical_job_id| Fixture {
@@ -1509,15 +1527,15 @@ fn fixture_manifest(tenant: TenantScope, namespace: u128) -> GithubProviderManif
 async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture) -> TestResult {
     let manifest = &fixture.manifest;
     let configured_at = database_now_ms(database).await?;
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(configured_at),
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(configured_at),
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     database
         .store()
         .ensure_github_server_service_authority(EnsureGithubServerServiceAuthority::new(
@@ -1556,7 +1574,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
                         manifest.repository_visibility(),
                         manifest.github_repository_name().as_str(),
                     )?,
-                    format!("logical-job-result-{}", fixture.namespace),
+                    fixture.command.idempotency().key(),
                 )?,
                 fixture.command.request_digest(),
                 crate::support::authenticated_github_event_object(fixture.command.event())?,
@@ -1639,6 +1657,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 

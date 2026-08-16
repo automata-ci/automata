@@ -1163,15 +1163,15 @@ async fn fixture_with_visibility(
         GithubProviderManifestLimits::github_dot_com_ci(),
         GithubProviderManifestRevision::new(1)?,
     );
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(configured_at),
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(configured_at),
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     let checks = GithubServerServiceAuthorityIdentity::new(
         tenant_scope.clone(),
         GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(namespace + 21))?,
@@ -1265,23 +1265,27 @@ async fn fixture_with_visibility(
         &[2; 64],
         "application/json",
     );
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        github_repository.get().to_string(),
+        "automata-ci",
+        "automata",
+    )?;
+    let git_ref = "refs/heads/main";
+    let head_sha = vec![3; 20];
+    let trust_snapshot =
+        crate::support::authenticated_github_trust_snapshot(&repository, git_ref, &head_sha)?;
     let mut command = AdmitLogicalWorkflowRun::builder(
         tenant_scope.clone(),
         WorkflowAdmissionIdempotency::provider_delivery(format!("preparation-{namespace}"))
             .expect("idempotency"),
         Sha256Digest::from_bytes([30; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            github_repository.get().to_string(),
-            "automata-ci",
-            "automata",
-        )
-        .expect("repository"),
+        repository,
         workflow,
         ".ci/workflows/ci.yml",
         "Automata CI",
-        "refs/heads/main",
+        git_ref,
         snapshot,
         object(
             format!("preparation/{namespace}/source"),
@@ -1298,10 +1302,11 @@ async fn fixture_with_visibility(
         invocation,
         "push",
         event.clone(),
-        vec![3; 20],
+        head_sha,
         jobs,
         UnixMillis::new(configured_at),
     )
+    .trust_snapshot(trust_snapshot)
     .base_context(object(
         format!("preparation/{namespace}/base-context.pb"),
         &[4; 64],
@@ -1323,7 +1328,7 @@ async fn fixture_with_visibility(
                         visibility,
                         "automata-ci/automata",
                     )?,
-                    format!("activation-preparation-{namespace}"),
+                    command.idempotency().key(),
                 )?,
                 Sha256Digest::from_bytes([29; 32]),
                 crate::support::authenticated_github_event_object(&event)?,
@@ -1411,6 +1416,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 

@@ -45,10 +45,8 @@ use automata_ci_store::{
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     OpenRunnerSession, ProtectedGithubRuntimeAuthority, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
-    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, RegisterProviderDeliveryWorkflowInventory,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
     RenewLogicalActivationPreparation, RenewLogicalInstanceMaterialization,
     RenewLogicalJobActivation, ReusableSecretPermission,
     RevalidateGithubRuntimeAuthorityRevocation, RoutingDocument, RunnerGeneration,
@@ -114,19 +112,21 @@ fn logical_fixture(
         Vec::new(),
     )
     .expect("logical job");
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        manifest.github_repository_id().get().to_string(),
+        "example",
+        "project",
+    )
+    .expect("repository");
+    let head_sha = vec![0x14; 20];
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("job-authority-{namespace}"))
             .expect("idempotency"),
         digest(0x40),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            manifest.github_repository_id().get().to_string(),
-            "example",
-            "project",
-        )
-        .expect("repository"),
+        repository.clone(),
         workflow_id,
         WORKFLOW_PATH,
         "CI",
@@ -151,9 +151,17 @@ fn logical_fixture(
             0x13,
             "application/json",
         ),
-        vec![0x14; 20],
+        head_sha.clone(),
         vec![logical_job],
         database_epoch,
+    )
+    .trust_snapshot(
+        crate::support::authenticated_github_trust_snapshot(
+            &repository,
+            "refs/heads/main",
+            &head_sha,
+        )
+        .expect("authenticated GitHub trust snapshot"),
     )
     .base_context(admission_object(
         format!("job-authority/{namespace}/base-context"),
@@ -291,7 +299,8 @@ fn retime_logical_admission(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    );
+    )
+    .trust_snapshot(command.trust_snapshot().clone());
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
@@ -306,16 +315,16 @@ async fn admit_signed_workflow(
 ) -> TestResult {
     let tenant = TenantScope::from_authenticated_tenant_id(&fixture.tenant)?;
     let manifest = &fixture.manifest;
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        database_epoch,
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                database_epoch,
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await
         .map_err(|error| format!("repository bootstrap failed: {error:?}"))?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     let checks = service_authority(
         manifest,
         namespace_id(manifest, 1),
@@ -430,26 +439,14 @@ async fn register_workflow_inventory(
     fixture: &LogicalFixture,
     claimed: &ClaimedProviderDelivery,
 ) -> TestResult {
-    let inventory = ProviderDeliveryWorkflowInventory::new(
-        fixture.manifest.digest(),
-        "1414141414141414141414141414141414141414",
-        digest(0x90),
-        vec![ProviderDeliveryWorkflowInventoryEntry::new(
-            WORKFLOW_PATH,
-            ProviderDeliveryWorkflowSourceState::Ready(fixture.command.source().digest()),
-        )?],
-    )?;
-    database
-        .store()
-        .register_provider_delivery_workflow_inventory(
-            RegisterProviderDeliveryWorkflowInventory::new(
-                claimed.claim(),
-                inventory,
-                claimed.claimed_at(),
-            )?,
-        )
-        .await?;
-    Ok(())
+    crate::support::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await
 }
 
 fn namespace_id(manifest: &GithubProviderManifest, suffix: u128) -> u128 {

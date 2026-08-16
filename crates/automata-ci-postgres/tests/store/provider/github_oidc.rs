@@ -55,13 +55,11 @@ use automata_ci_store::{
     LogicalWorkSelectionStoreError, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     OpenRunnerSession, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
-    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
-    RegisterProviderDeliveryWorkflowInventory, ReserveGithubOidcAuthority, RetainGithubOidcKey,
-    ReusableSecretPermission, RoutingDocument, RunnerGeneration, RunnerProtocolVersion,
-    StableRunnerSlot, StoreError, TenantScope, WorkflowAdmissionIdempotency,
+    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
+    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
+    ProviderRepositoryVisibility, PublishLogicalJobActivation, ReserveGithubOidcAuthority,
+    RetainGithubOidcKey, ReusableSecretPermission, RoutingDocument, RunnerGeneration,
+    RunnerProtocolVersion, StableRunnerSlot, StoreError, TenantScope, WorkflowAdmissionIdempotency,
     WorkflowPlanRepository as _, WorkflowSnapshotId, github_oidc_rs256_public_key_fingerprint,
 };
 use sha2::{Digest as _, Sha256};
@@ -270,13 +268,16 @@ fn logical_oidc_fixture_with_profile(
         Vec::new(),
     )
     .expect("test logical job");
+    let repository =
+        AdmissionRepository::new(repository_id, "github", "4242", "example", "project")
+            .expect("test repository");
+    let head_sha = vec![0x14; 20];
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("oidc-live-{namespace}"))
             .expect("test idempotency"),
         digest(0x40),
-        AdmissionRepository::new(repository_id, "github", "4242", "example", "project")
-            .expect("test repository"),
+        repository.clone(),
         workflow_id,
         WORKFLOW_PATH,
         "OIDC",
@@ -293,9 +294,17 @@ fn logical_oidc_fixture_with_profile(
         invocation_id,
         "push",
         admission_object(format!("oidc/{namespace}/event"), 0x13, "application/json"),
-        vec![0x14; 20],
+        head_sha.clone(),
         vec![logical_job],
         UnixMillis::new(1_000),
+    )
+    .trust_snapshot(
+        crate::support::authenticated_github_trust_snapshot(
+            &repository,
+            "refs/heads/main",
+            &head_sha,
+        )
+        .expect("authenticated GitHub trust snapshot"),
     )
     .base_context(admission_object(
         format!("oidc/{namespace}/base-context"),
@@ -415,7 +424,8 @@ fn retime_logical_admission(
         command.head_sha().to_vec(),
         command.jobs().to_vec(),
         admitted_at,
-    );
+    )
+    .trust_snapshot(command.trust_snapshot().clone());
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
@@ -433,15 +443,15 @@ async fn admit_signed_oidc_workflow(
     let installation = manifest.installation_id();
     let provider_repository_id = manifest.github_repository_id();
     let bootstrap_at = database_now(database).await?;
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        bootstrap_at,
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                bootstrap_at,
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     let checks_authority = GithubServerServiceAuthorityIdentity::new(
         tenant.clone(),
         GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(40_011))?,
@@ -549,26 +559,14 @@ async fn register_workflow_inventory(
     fixture: &LogicalOidcFixture,
     claimed: &ClaimedProviderDelivery,
 ) -> TestResult {
-    let inventory = ProviderDeliveryWorkflowInventory::new(
-        fixture.manifest.digest(),
-        "1414141414141414141414141414141414141414",
-        digest(0x90),
-        vec![ProviderDeliveryWorkflowInventoryEntry::new(
-            WORKFLOW_PATH,
-            ProviderDeliveryWorkflowSourceState::Ready(fixture.command.source().digest()),
-        )?],
-    )?;
-    database
-        .store()
-        .register_provider_delivery_workflow_inventory(
-            RegisterProviderDeliveryWorkflowInventory::new(
-                claimed.claim(),
-                inventory,
-                claimed.claimed_at(),
-            )?,
-        )
-        .await?;
-    Ok(())
+    crate::support::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await
 }
 
 async fn claim_oidc_activation(

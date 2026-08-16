@@ -8,9 +8,7 @@ use automata_ci_auth::{
 };
 use automata_ci_core::{
     JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile, OperationId, RunId, Sha256Digest,
-    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
-    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
-    UnixMillis, WorkflowId, WorkflowJobKey,
+    TrustSnapshot, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
@@ -78,33 +76,6 @@ fn object_with_media(key: String, digest: u8, media_type: &str) -> AdmissionObje
         media_type,
     )
     .expect("admission object")
-}
-
-fn trusted_snapshot(namespace: u128) -> TrustSnapshot {
-    let repository_id = namespace.to_string();
-    TrustPolicy::current()
-        .evaluate(
-            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
-                .with_original_actor(
-                    TrustActorEvidence::new(
-                        format!("actor-{namespace}"),
-                        TrustActorKind::User,
-                        TrustAutomationKind::None,
-                    )
-                    .expect("actor evidence"),
-                )
-                .with_repositories(
-                    TrustRepositoryEvidence::new(repository_id.as_str(), "owner-1")
-                        .expect("source repository"),
-                    TrustRepositoryEvidence::new(repository_id.as_str(), "owner-1")
-                        .expect("target repository"),
-                )
-                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
-                .with_revisions("source-sha", "target-sha", "execution-sha")
-                .with_fork(false)
-                .with_token_recursion(TrustTokenRecursion::Suppressed),
-        )
-        .expect("trusted snapshot")
 }
 
 async fn prepare_job(
@@ -206,8 +177,10 @@ fn fixture_manifest_binding(
         GithubServerServiceAppClientId::new(format!("Iv1.logical-orchestration-{namespace}"))
             .expect("app client ID"),
         GithubServerServiceJwtIssuer::AppClientId,
-        Sha256Digest::from_bytes([0x71; 32]),
-        GithubServerServiceRevision::new(1).expect("configuration revision"),
+        Sha256Digest::from_bytes(
+            [u8::try_from(0x70 + manifest_revision).expect("small manifest revision"); 32],
+        ),
+        GithubServerServiceRevision::new(manifest_revision).expect("configuration revision"),
         GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes([0x72; 32]))
             .expect("webhook fingerprint"),
         GithubServerServiceRevision::new(1).expect("webhook revision"),
@@ -234,15 +207,15 @@ async fn stage_authenticated_admission(
 ) -> TestResult<(AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim)> {
     let manifest = fixture_manifest(command.tenant().clone(), namespace);
     let configured_at = database_now_ms(database).await?;
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(configured_at),
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(configured_at),
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     database
         .store()
         .ensure_github_server_service_authority(EnsureGithubServerServiceAuthority::new(
@@ -435,22 +408,28 @@ fn fixture_at(
         vec![first_id],
     )
     .expect("second job");
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        manifest.github_repository_id().get().to_string(),
+        "sample-owner",
+        format!("sample-{namespace}"),
+    )
+    .expect("repository");
+    let git_ref = "refs/heads/main";
+    let head_sha = vec![9; 20];
+    let trust_snapshot =
+        crate::support::authenticated_github_trust_snapshot(&repository, git_ref, &head_sha)
+            .expect("authenticated GitHub trust snapshot");
     AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(idempotency_key).expect("idempotency"),
         Sha256Digest::from_bytes([request_digest; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            manifest.github_repository_id().get().to_string(),
-            "sample-owner",
-            format!("sample-{namespace}"),
-        )
-        .expect("repository"),
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "Verify",
-        "refs/heads/main",
+        git_ref,
         snapshot_id,
         object(format!("logical/{namespace}/source"), 1),
         object_with_media(
@@ -463,12 +442,12 @@ fn fixture_at(
         root_id,
         "push",
         object(format!("logical/{namespace}/event"), 3),
-        vec![9; 20],
+        head_sha,
         vec![first, second],
         admitted_at,
     )
     .actor("sample-actor")
-    .trust_snapshot(trusted_snapshot(namespace))
+    .trust_snapshot(trust_snapshot)
     .base_context(object_with_media(
         format!("logical/{namespace}/base-context.pb"),
         4,
@@ -745,15 +724,20 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
             2,
             2,
         );
+        let replacement_bootstrap =
+            github_manifest_fixture::fixture_github_repository_bootstrap(
+                replacement,
+                UnixMillis::new(database_now_ms(&database).await?),
+            );
         database
             .store()
-            .bootstrap_github_provider_repository(
-                github_manifest_fixture::fixture_github_repository_bootstrap(
-                    replacement,
-                    UnixMillis::new(database_now_ms(&database).await?),
-                ),
-            )
+            .bootstrap_github_provider_repository(replacement_bootstrap.clone())
             .await?;
+        crate::support::seed_fresh_github_workflow_permission_defaults(
+            &database,
+            &replacement_bootstrap,
+        )
+        .await?;
         let delivery_id = authenticated.claim().delivery_id();
         let origin = EventSubjectOrigin::ProviderDelivery(delivery_id);
         let subject_id = EventSubjectId::derive(
@@ -1309,11 +1293,18 @@ async fn concurrent_replay_has_one_insert_and_changed_digest_conflicts() -> Test
         assert_eq!(left.run_id(), right.run_id());
         assert_eq!(left.run_number(), right.run_number());
 
+        let conflicting_trust_snapshot =
+            crate::support::authenticated_github_trust_snapshot_for_actor(
+                command.repository(),
+                command.git_ref(),
+                command.head_sha(),
+                "conflicting-authenticated-github-fixture-actor",
+            )?;
         let conflicting_trust = logical_command_at_with_trust_snapshot(
             &command,
             command.idempotency().clone(),
             command.admitted_at(),
-            trusted_snapshot(201),
+            conflicting_trust_snapshot,
         )?;
         assert!(matches!(
             database

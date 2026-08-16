@@ -60,18 +60,16 @@ use automata_ci_store::{
     ManagedSecretDeliveryProposal, ObjectKey, OpenRunnerSession, PrepareJobEnvironment,
     ProtectedEnvironmentRepository as _, ProtectedEnvironmentStoreError, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
-    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, RegisterProviderDeliveryWorkflowInventory, RepositoryId,
-    RepositorySecretId, RepositorySecretManagementRepository as _, RepositorySecretMutationId,
-    RepositorySecretName, RepositorySecretProviderMutationResult, RepositorySecretVersionId,
-    ReserveRepositorySecretVersionMutation, ReserveRepositorySecretVersionMutationOutcome,
-    ResolveManagedSecretAuthority, ReusableSecretPermission, ReviewJobEnvironment, RoutingDocument,
-    RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, SecretCustodyKeySet,
-    SecretCustodyRepository as _, SecretWorkloadGrantId, StableRunnerSlot, TenantScope,
-    VerifySecretCustody, VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency,
-    WorkflowSnapshotId,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
+    RepositoryId, RepositorySecretId, RepositorySecretManagementRepository as _,
+    RepositorySecretMutationId, RepositorySecretName, RepositorySecretProviderMutationResult,
+    RepositorySecretVersionId, ReserveRepositorySecretVersionMutation,
+    ReserveRepositorySecretVersionMutationOutcome, ResolveManagedSecretAuthority,
+    ReusableSecretPermission, ReviewJobEnvironment, RoutingDocument, RunnerGeneration,
+    RunnerProtocolVersion, RunnerSessionFence, SecretCustodyKeySet, SecretCustodyRepository as _,
+    SecretWorkloadGrantId, StableRunnerSlot, TenantScope, VerifySecretCustody,
+    VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -305,23 +303,29 @@ fn logical_fixture_with_requirements(
     )
     .expect("test logical job")
     .with_credential_requirements(credential_requirements);
+    let repository = AdmissionRepository::new(
+        repository_id,
+        "github",
+        manifest.github_repository_id().get().to_string(),
+        "example",
+        "project",
+    )
+    .expect("test repository");
+    let git_ref = "refs/heads/main";
+    let head_sha = vec![0x14; 20];
+    let trust_snapshot =
+        crate::support::authenticated_github_trust_snapshot(&repository, git_ref, &head_sha)
+            .expect("authenticated GitHub trust snapshot");
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(delivery_key.clone())
             .expect("test idempotency"),
         digest(0x40),
-        AdmissionRepository::new(
-            repository_id,
-            "github",
-            manifest.github_repository_id().get().to_string(),
-            "example",
-            "project",
-        )
-        .expect("test repository"),
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "Managed secret",
-        "refs/heads/main",
+        git_ref,
         snapshot_id,
         admission_object("secret/source".to_owned(), 0x11, "application/yaml"),
         admission_object(
@@ -334,7 +338,7 @@ fn logical_fixture_with_requirements(
         invocation_id,
         "push",
         admission_object("secret/event".to_owned(), 0x13, "application/json"),
-        vec![0x14; 20],
+        head_sha,
         vec![logical_job],
         UnixMillis::new(1_000),
     )
@@ -343,6 +347,7 @@ fn logical_fixture_with_requirements(
         0x15,
         "application/vnd.automata.job-runtime-context.protobuf",
     ))
+    .trust_snapshot(trust_snapshot)
     .build()
     .expect("test logical admission");
     LogicalFixture {
@@ -417,26 +422,14 @@ async fn admit_authenticated_fixture(
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
-    database
-        .store()
-        .register_provider_delivery_workflow_inventory(
-            RegisterProviderDeliveryWorkflowInventory::new(
-                claimed.claim(),
-                ProviderDeliveryWorkflowInventory::new(
-                    fixture.manifest.digest(),
-                    "1414141414141414141414141414141414141414",
-                    digest(0x90),
-                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
-                        fixture.command.workflow_path(),
-                        ProviderDeliveryWorkflowSourceState::Ready(
-                            fixture.command.source().digest(),
-                        ),
-                    )?],
-                )?,
-                claimed.claimed_at(),
-            )?,
-        )
-        .await?;
+    crate::support::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     let command = logical_command_at(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
@@ -456,15 +449,15 @@ async fn bootstrap_manifest(
     manifest: &GithubProviderManifest,
 ) -> TestResult {
     let configured_at = database_now_ms(database).await?;
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(configured_at),
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(configured_at),
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     database
         .store()
         .ensure_github_server_service_authority(EnsureGithubServerServiceAuthority::new(
@@ -519,6 +512,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 

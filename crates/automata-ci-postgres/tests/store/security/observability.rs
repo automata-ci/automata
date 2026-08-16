@@ -34,13 +34,11 @@ use automata_ci_store::{
     LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
     LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
     ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
-    ProviderDeliveryRepository as _, ProviderDeliveryWorkflowInventory,
-    ProviderDeliveryWorkflowInventoryEntry, ProviderDeliveryWorkflowSourceState,
-    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
-    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    RegisterProviderDeliveryWorkflowInventory, RunnerCommandPayload, RunnerGeneration,
-    RunnerOperationKind, RunnerSessionFence, SessionEpoch, TenantScope, WORKFLOW_ADMISSION_EPOCH,
-    WorkflowAdmissionIdempotency, WorkflowRunStatus, WorkflowSnapshotId,
+    ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    RunnerCommandPayload, RunnerGeneration, RunnerOperationKind, RunnerSessionFence, SessionEpoch,
+    TenantScope, WORKFLOW_ADMISSION_EPOCH, WorkflowAdmissionIdempotency, WorkflowRunStatus,
+    WorkflowSnapshotId,
 };
 use uuid::Uuid;
 
@@ -705,6 +703,7 @@ async fn insert_logical_metrics_state(
     })
 }
 
+#[allow(clippy::too_many_lines)] // Builds the complete authenticated metrics graph.
 async fn build_logical_metrics_fixture(
     database: &TestDatabase,
     seed: &MetricsSeed,
@@ -745,21 +744,26 @@ async fn build_logical_metrics_fixture(
     let pending_job = LogicalWorkflowJobId::from_uuid(Uuid::new_v4())?;
     let delivery_key = format!("metrics-logical-{suffix}");
     let admitted_at = UnixMillis::new(database_now_ms(database).await?);
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        provider_repository_id.get().to_string(),
+        "automata",
+        format!("metrics-{suffix}"),
+    )?;
+    let git_ref = "refs/heads/main";
+    let head_sha = vec![20; 20];
+    let trust_snapshot =
+        crate::support::authenticated_github_trust_snapshot(&repository, git_ref, &head_sha)?;
     let command = AdmitLogicalWorkflowRun::builder(
         tenant,
         WorkflowAdmissionIdempotency::provider_delivery(delivery_key.clone())?,
         Sha256Digest::from_bytes([14; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            provider_repository_id.get().to_string(),
-            "automata",
-            format!("metrics-{suffix}"),
-        )?,
+        repository,
         WorkflowId::from_uuid(Uuid::new_v4()),
         ".ci/workflows/ci.yml",
         "Metrics",
-        "refs/heads/main",
+        git_ref,
         WorkflowSnapshotId::from_uuid(Uuid::new_v4()),
         logical_metrics_object(
             format!("metrics/{suffix}/workflow.yml"),
@@ -780,7 +784,7 @@ async fn build_logical_metrics_fixture(
             18,
             "application/json",
         ),
-        vec![20; 20],
+        head_sha,
         vec![
             logical_metrics_job(active_job, "active", 0),
             logical_metrics_job(expired_job, "expired", 1),
@@ -794,6 +798,7 @@ async fn build_logical_metrics_fixture(
         "application/vnd.automata.job-runtime-context.protobuf",
     ))
     .actor("metrics-observer")
+    .trust_snapshot(trust_snapshot)
     .build()?;
     Ok(LogicalMetricsFixture {
         suffix,
@@ -855,26 +860,14 @@ async fn admit_logical_metrics_fixture(
         .await?
         .ok_or("accepted metrics delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
-    database
-        .store()
-        .register_provider_delivery_workflow_inventory(
-            RegisterProviderDeliveryWorkflowInventory::new(
-                claimed.claim(),
-                ProviderDeliveryWorkflowInventory::new(
-                    fixture.manifest.digest(),
-                    "1414141414141414141414141414141414141414",
-                    Sha256Digest::from_bytes([0x90; 32]),
-                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
-                        fixture.command.workflow_path(),
-                        ProviderDeliveryWorkflowSourceState::Ready(
-                            fixture.command.source().digest(),
-                        ),
-                    )?],
-                )?,
-                claimed.claimed_at(),
-            )?,
-        )
-        .await?;
+    crate::support::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     fixture.command = logical_metrics_command_at(&fixture.command, claimed.claimed_at())?;
     database
         .store()
@@ -896,15 +889,15 @@ async fn bootstrap_logical_metrics_manifest(
     database: &TestDatabase,
     manifest: &GithubProviderManifest,
 ) -> TestResult {
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(database_now_ms(database).await?),
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(database_now_ms(database).await?),
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     database
         .store()
         .ensure_github_server_service_authority(EnsureGithubServerServiceAuthority::new(
@@ -984,6 +977,7 @@ fn logical_metrics_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.actor(command.actor().unwrap_or_default()).build()?)
 }
 
