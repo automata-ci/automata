@@ -26,7 +26,7 @@ use sqlx::PgPool;
 use tokio::sync::OnceCell;
 
 #[cfg(feature = "test-support")]
-use crate::store::PostgresStore;
+use automata_ci_store_postgres::PostgresStore;
 
 /// Environment variable containing the isolated `PostgreSQL` server URL.
 const DATABASE_URL_ENVIRONMENT: &str = "AUTOMATA_TEST_DATABASE_URL";

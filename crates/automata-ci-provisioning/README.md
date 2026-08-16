@@ -10,7 +10,7 @@ idempotency identity, mutations, and export behind explicit ports.
 It contains no gRPC, HTTP, SQL, Cloud billing, or private Automata Cloud code.
 The public versioned wire schema lives beside its gRPC adapter in
 `automata-ci-provisioning-grpc`; the atomic PostgreSQL adapter lives in
-the `provisioning` namespace of `automata-ci-postgres`.
+`automata-ci-provisioning-postgres`.
 
 Usage export contains provider-neutral actual execution facts rather than
 prices, invoices, or Stripe objects. A consumer deduplicates stable event IDs

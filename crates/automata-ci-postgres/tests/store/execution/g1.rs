@@ -30,7 +30,6 @@ use automata_ci_core::{
     OperatingSystem, OperationId, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerLabel,
     RunnerPlatform, RunnerRequirements, RunnerSessionId, Sha256Digest, UnixMillis,
 };
-use automata_ci_postgres::store::PostgresStore;
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CloseRunnerSession, CommandCursor, CommandReplayLimit,
     CommandSequence, DocumentSchema, EnqueueRunnerCommand, HeartbeatRunnerSession, JobDependency,
@@ -38,6 +37,7 @@ use automata_ci_store::{
     RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion,
     StableRunnerSlot, StoreError, WORKFLOW_ADMISSION_EPOCH, WorkflowPlanRepository as _,
 };
+use automata_ci_store_postgres::PostgresStore;
 
 use crate::support::{
     TestClock, TestDatabase, TestResult, run_with_database, runner_capability_document,

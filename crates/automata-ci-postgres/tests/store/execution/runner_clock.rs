@@ -39,7 +39,6 @@ use automata_ci_core::{
 use automata_ci_key_management::{
     KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, SecretBytes, WrappedDataKey,
 };
-use automata_ci_postgres::store::PostgresStore;
 use automata_ci_store::{
     AttemptStoreError, CommandCursor, CommandReplayDisposition, CommandReplayLimit,
     CommandSequence, DocumentSchema, EnqueueRunnerCommand,
@@ -48,6 +47,7 @@ use automata_ci_store::{
     RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion,
     StableRunnerSlot, StoreError,
 };
+use automata_ci_store_postgres::PostgresStore;
 use sqlx::PgPool;
 use tokio::sync::Semaphore;
 

@@ -36,13 +36,13 @@ use automata_ci_auth::{
         ProviderTokenMetadata, ProviderTokenSet, ProviderTokenVault,
     },
 };
+use automata_ci_auth_postgres::{
+    PostgresHumanSessionRepository, PostgresHumanSignInFinalizer,
+    PostgresLoginTransactionRepository, PostgresProviderTokenVault,
+};
 use automata_ci_key_management::{
     KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring,
     LocalKeyMaterial, SecretBytes, WrappedDataKey,
-};
-use automata_ci_postgres::auth::{
-    PostgresHumanSessionRepository, PostgresHumanSignInFinalizer,
-    PostgresLoginTransactionRepository, PostgresProviderTokenVault,
 };
 use automata_ci_postgres::test_support::TestClock;
 use sqlx::PgPool;

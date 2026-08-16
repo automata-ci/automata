@@ -85,8 +85,9 @@ use automata_ci_store::{
     WorkflowRerunRepository,
 };
 use automata_ci_store_postgres::{
-    PostgresLiveLogTicketRepository, PostgresLogCommitListener, PostgresSecretCustodyRepository,
-    PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
+    PostgresConnectionConfig, PostgresConnectionConfigError, PostgresLiveLogTicketRepository,
+    PostgresLogCommitListener, PostgresSecretCustodyRepository, PostgresSecretManagementRepository,
+    PostgresStore, PostgresStoreError,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
@@ -104,6 +105,7 @@ use rustls::{
 use thiserror::Error;
 use tokio::net::TcpListener;
 
+use super::config::DatabaseTransportLoadError;
 use super::github_job_runtime_authority::unavailable_github_job_runtime_authority_issuer;
 use super::github_oidc::{
     GithubOidcProductError, build_github_oidc_product, compose_runtime_authority_issuer,
@@ -787,15 +789,20 @@ struct DatabaseBuild {
 
 async fn connect_database(config: &ServerConfig) -> Result<DatabaseBuild, ServerCompositionError> {
     let database_url = config.load_database_url()?;
+    let transport_security = config
+        .load_database_transport()
+        .map_err(|error| match error {
+            DatabaseTransportLoadError::Secret(error) => ServerCompositionError::Secret(error),
+            DatabaseTransportLoadError::InvalidPrivateCa => {
+                ServerCompositionError::PostgresConfiguration(
+                    PostgresConnectionConfigError::InvalidPrivateCa,
+                )
+            }
+        })?;
+    let connection = PostgresConnectionConfig::parse(&database_url, transport_security)?;
     let payload_keyring = config.control_plane_encryption().load_local_keyring()?;
     let control_plane_key_provider: Arc<dyn KeyEncryptionProvider> = Arc::new(payload_keyring);
-    let store = PostgresStore::connect(
-        &database_url,
-        config.database_max_connections,
-        config.database_transport_security,
-    )
-    .await
-    .map_err(ServerCompositionError::from)?;
+    let store = PostgresStore::connect(connection, config.database_max_connections).await?;
     Ok(DatabaseBuild {
         store: store.with_runner_payload_encryption(Arc::clone(&control_plane_key_provider)),
         control_plane_key_provider,
@@ -1921,6 +1928,9 @@ pub enum ServerCompositionError {
     /// `PostgreSQL` could not connect or apply embedded migrations.
     #[error(transparent)]
     Postgres(#[from] PostgresStoreError),
+    /// The exact `PostgreSQL` URL, environment, or transport policy was invalid.
+    #[error(transparent)]
+    PostgresConfiguration(#[from] PostgresConnectionConfigError),
     /// S3 namespace or credential configuration was invalid.
     #[error(transparent)]
     S3(#[from] S3BlobStoreConfigError),

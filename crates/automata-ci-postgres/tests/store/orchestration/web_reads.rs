@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::support::{TestDatabase, TestResult, run_with_database, seed_control_plane};
 
-use automata_ci_postgres::store::PostgresLiveLogTicketRepository;
+use automata_ci_store_postgres::PostgresLiveLogTicketRepository;
 
 #[derive(Clone, Copy, Debug)]
 #[allow(clippy::struct_field_names)]

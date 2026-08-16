@@ -1,8 +1,8 @@
-use automata_ci_postgres::store::PostgresSecretManagementRepository;
 use automata_ci_store::{
     BuiltinSecretCleanupRepository, RepositorySecretManagementReadRepository,
     RepositorySecretManagementRepository, SecretMutationRecoveryRepository,
 };
+use automata_ci_store_postgres::PostgresSecretManagementRepository;
 
 #[tokio::test]
 async fn concrete_adapter_is_redacted_and_ports_are_object_safe() {

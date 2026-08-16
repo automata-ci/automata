@@ -6,7 +6,8 @@ reconciliation, publication, and managed-secret metadata. Execution-control
 contracts for attempts, lease polling and runnable queues, cancellation,
 maintenance, and identifier-free state snapshots live in
 `automata-ci-control`. Database drivers, schema migrations, and concrete
-repositories live in `automata-ci-postgres`.
+repositories live in the owning domain adapter crates, including
+`automata-ci-store-postgres`.
 
 ## Tests
 

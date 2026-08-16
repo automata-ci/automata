@@ -7,7 +7,6 @@ use automata_ci_core::{
     TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence,
     TrustTokenRecursion, UnixMillis, WorkflowId, WorkflowJobKey,
 };
-use automata_ci_postgres::store::PostgresStore;
 use automata_ci_schedule::CronExpression;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
@@ -36,6 +35,7 @@ use automata_ci_store::{
     RegisterGithubScheduledCheckSubject, RetryGithubScheduleFire, TenantScope,
     WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
+use automata_ci_store_postgres::PostgresStore;
 use uuid::Uuid;
 
 use crate::support::{TestResult, run_with_database};

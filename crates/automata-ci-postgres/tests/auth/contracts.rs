@@ -5,12 +5,12 @@ use automata_ci_auth::{
     request_auth::RequestAuthenticationResolver, session::HumanSessionRepository,
     vault::ProviderTokenVault,
 };
-use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::auth::{
+use automata_ci_auth_postgres::{
     PostgresHumanSessionRepository, PostgresInstallationRepository,
     PostgresLoginTransactionRepository, PostgresProviderTokenVault,
     PostgresRequestAuthenticationResolver,
 };
+use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use static_assertions::assert_impl_all;
 

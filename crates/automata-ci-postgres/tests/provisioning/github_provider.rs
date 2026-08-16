@@ -2,10 +2,6 @@ use std::sync::Arc;
 
 use automata_ci_core::JobAuthorityProfile;
 use automata_ci_key_management::KeyEncryptionProvider;
-use automata_ci_postgres::provisioning::{
-    PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
-    PostgresWorkspaceGithubRepositoriesApplier, PostgresWorkspaceProvisioner,
-};
 use automata_ci_provisioning::{
     ApplyGithubProviderConfigurationCommand, ApplyWorkspaceGithubRepositoriesCommand,
     AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyWorkspaceGithubRepositories,
@@ -17,6 +13,10 @@ use automata_ci_provisioning::{
     OperationId, ProvisionWorkspaceCommand, ProvisioningAuthority, ProvisioningAuthorityId,
     ShardId, WorkspaceGithubRepositoriesApplier, WorkspaceGithubRepositoriesFailureKind,
     WorkspaceGithubRepositoriesRevision, WorkspaceId, WorkspaceProvisioner,
+};
+use automata_ci_provisioning_postgres::{
+    PostgresGithubProviderConfigurationApplier, PostgresGithubProviderDesiredStateReader,
+    PostgresWorkspaceGithubRepositoriesApplier, PostgresWorkspaceProvisioner,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
