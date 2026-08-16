@@ -22,7 +22,7 @@ use super::{
 
 const DEVICE_SLOW_DOWN_SECONDS: u64 = 5;
 const MAX_DEVICE_FLOW_SECONDS: u64 = 3_600;
-const MAX_DEVICE_POLL_INTERVAL_SECONDS: u64 = 300;
+pub(super) const MAX_DEVICE_POLL_INTERVAL_SECONDS: u64 = 300;
 
 /// Provider protocol for state-bound browser and device authorization flows.
 #[derive(Debug)]
