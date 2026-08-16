@@ -22,6 +22,12 @@ const KEYCHAIN_SKIP_AUTHENTICATED_ITEMS: bool = true;
 #[cfg(target_os = "macos")]
 const KEYCHAIN_DISABLE_INTERACTION: bool = true;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScalarLineEnding {
+    Forbidden,
+    OptionalSingle,
+}
+
 /// A secret-bearing input location. Secret bytes are never accepted directly
 /// in process arguments or in the runner configuration document.
 #[derive(Clone, Deserialize, Eq, PartialEq)]
@@ -117,23 +123,47 @@ impl SecretSource {
             Self::Environment { .. } | Self::MacosKeychain { .. } => maximum_bytes,
         };
         let mut bytes = self.read(input_limit)?;
-        if matches!(self, Self::File { .. }) {
-            if bytes.ends_with(b"\r\n") {
-                let scalar_len = bytes.len() - 2;
-                bytes.truncate(scalar_len);
-            } else if bytes.ends_with(b"\n") {
-                let scalar_len = bytes.len() - 1;
-                bytes.truncate(scalar_len);
-            }
-        }
-        if bytes.is_empty() || bytes.len() > maximum_bytes {
-            return Err(SecureInputError::InvalidSize);
-        }
-        if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
-            return Err(SecureInputError::InvalidEncoding);
-        }
+        let line_ending = if matches!(self, Self::File { .. }) {
+            ScalarLineEnding::OptionalSingle
+        } else {
+            ScalarLineEnding::Forbidden
+        };
+        normalize_scalar_bytes(&mut bytes, maximum_bytes, line_ending)?;
         Ok(bytes)
     }
+}
+
+pub(crate) fn normalize_scalar_bytes(
+    bytes: &mut Vec<u8>,
+    maximum_bytes: usize,
+    line_ending: ScalarLineEnding,
+) -> Result<(), SecureInputError> {
+    if maximum_bytes == 0 {
+        return Err(SecureInputError::InvalidLimit);
+    }
+    let framed_limit = match line_ending {
+        ScalarLineEnding::Forbidden => maximum_bytes,
+        ScalarLineEnding::OptionalSingle => maximum_bytes
+            .checked_add(2)
+            .ok_or(SecureInputError::InvalidLimit)?,
+    };
+    if bytes.len() > framed_limit {
+        return Err(SecureInputError::InvalidSize);
+    }
+    if line_ending == ScalarLineEnding::OptionalSingle {
+        if bytes.ends_with(b"\r\n") {
+            bytes.truncate(bytes.len() - 2);
+        } else if bytes.ends_with(b"\n") {
+            bytes.truncate(bytes.len() - 1);
+        }
+    }
+    if bytes.is_empty() || bytes.len() > maximum_bytes {
+        return Err(SecureInputError::InvalidSize);
+    }
+    if bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n')) {
+        return Err(SecureInputError::InvalidEncoding);
+    }
+    Ok(())
 }
 
 impl fmt::Debug for SecretSource {
@@ -261,7 +291,7 @@ pub(crate) fn validate_absolute_path(path: &Path) -> Result<(), SecureInputError
     Ok(())
 }
 
-fn validate_environment_name(name: &str) -> Result<(), SecureInputError> {
+pub(crate) fn validate_environment_name(name: &str) -> Result<(), SecureInputError> {
     let valid = !name.is_empty()
         && name.len() <= 128
         && name
@@ -548,6 +578,48 @@ fn read_file(
     _trust: FileTrust,
 ) -> Result<Vec<u8>, SecureInputError> {
     Err(SecureInputError::UnsupportedPlatform)
+}
+
+#[cfg(test)]
+mod scalar_tests {
+    use super::{ScalarLineEnding, SecureInputError, normalize_scalar_bytes};
+
+    #[test]
+    fn exact_scalars_reject_every_line_ending() {
+        for mut bytes in [b"value\n".to_vec(), b"value\r\n".to_vec()] {
+            assert_eq!(
+                normalize_scalar_bytes(&mut bytes, 5, ScalarLineEnding::Forbidden),
+                Err(SecureInputError::InvalidSize)
+            );
+        }
+        let mut exact = b"value".to_vec();
+        normalize_scalar_bytes(&mut exact, 5, ScalarLineEnding::Forbidden).expect("exact scalar");
+        assert_eq!(exact, b"value");
+    }
+
+    #[test]
+    fn line_terminated_scalars_accept_only_one_lf_or_crlf() {
+        for mut bytes in [
+            b"value".to_vec(),
+            b"value\n".to_vec(),
+            b"value\r\n".to_vec(),
+        ] {
+            normalize_scalar_bytes(&mut bytes, 5, ScalarLineEnding::OptionalSingle)
+                .expect("optional single line ending");
+            assert_eq!(bytes, b"value");
+        }
+        for mut bytes in [
+            b"value\r".to_vec(),
+            b"value\n\n".to_vec(),
+            b"value\r\r".to_vec(),
+            b"value\r\n\n".to_vec(),
+            b"value\r\nextra".to_vec(),
+        ] {
+            assert!(
+                normalize_scalar_bytes(&mut bytes, 5, ScalarLineEnding::OptionalSingle).is_err()
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

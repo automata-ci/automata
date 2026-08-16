@@ -5,7 +5,10 @@ use std::sync::Arc;
 use automata_ci_auth::{
     github::{GithubTokenResponse, GithubWebCallback},
     human::ProviderCredential,
-    secret::{CsrfToken, PkceVerifier, SecretBytes, SecretString, SharedSensitiveString},
+    secret::{
+        CsrfToken, PkceVerifier, RunnerEnrollmentToken, SecretBytes, SecretString,
+        SharedSensitiveString,
+    },
     vault::{ProviderAccessToken, ProviderRefreshToken, ProviderTokenSet, VersionedProviderTokens},
 };
 use static_assertions::{assert_impl_all, assert_not_impl_any};
@@ -13,6 +16,7 @@ use support::{DeterministicRandom, secret, token_response};
 
 assert_not_impl_any!(SecretString: serde::Serialize, Clone);
 assert_not_impl_any!(SecretBytes: serde::Serialize, Clone);
+assert_not_impl_any!(RunnerEnrollmentToken: serde::Serialize, Clone, std::fmt::Display);
 assert_not_impl_any!(ProviderAccessToken: serde::Serialize, Clone);
 assert_not_impl_any!(ProviderRefreshToken: serde::Serialize, Clone);
 assert_not_impl_any!(ProviderTokenSet: serde::Serialize, Clone);
@@ -71,6 +75,60 @@ fn csrf_tokens_are_unpredictable_length_and_constant_time_comparable() {
     assert!(!format!("{token:?}").contains(token.expose_secret()));
     assert!(CsrfToken::from_generated_secret(secret(token.expose_secret())).is_ok());
     assert!(CsrfToken::from_generated_secret(secret("too-short")).is_err());
+}
+
+#[test]
+fn runner_enrollment_token_has_one_redacted_canonical_representation() {
+    let token = RunnerEnrollmentToken::generate(&DeterministicRandom::new(7))
+        .expect("runner enrollment token");
+    assert_eq!(
+        token.expose_secret(),
+        "atm_re_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc"
+    );
+    assert_eq!(
+        token.expose_secret().len(),
+        RunnerEnrollmentToken::BYTE_LENGTH
+    );
+    assert_eq!(
+        token.digest(),
+        [
+            0x9b, 0xd4, 0x7e, 0xbc, 0x44, 0x56, 0xa0, 0xe2, 0x09, 0xf9, 0x9f, 0x3d, 0xf5, 0xa7,
+            0xb2, 0x8a, 0x1d, 0xa7, 0x65, 0x83, 0x24, 0x81, 0x68, 0x61, 0xaf, 0xd2, 0xcd, 0x50,
+            0x00, 0xcc, 0xf2, 0x6b,
+        ]
+    );
+    assert_eq!(format!("{token:?}"), "RunnerEnrollmentToken([REDACTED])");
+    assert!(!format!("{token:?}").contains(token.expose_secret()));
+
+    let restored: RunnerEnrollmentToken =
+        serde_json::from_str(&format!("\"{}\"", token.expose_secret()))
+            .expect("canonical persisted token");
+    assert_eq!(restored.expose_secret(), token.expose_secret());
+}
+
+#[test]
+fn runner_enrollment_token_parser_rejects_every_noncanonical_shape_without_echoing_it() {
+    let canonical = RunnerEnrollmentToken::generate(&DeterministicRandom::new(7))
+        .expect("runner enrollment token");
+    for invalid in [
+        "plain-secret".to_owned(),
+        format!("{}A", canonical.expose_secret()),
+        format!("{}\n", canonical.expose_secret()),
+        canonical.expose_secret().replace("atm_re_", "ATM_RE_"),
+        canonical
+            .expose_secret()
+            .strip_suffix('c')
+            .expect("suffix")
+            .to_owned()
+            + "d",
+    ] {
+        let document = serde_json::to_string(&invalid).expect("test JSON");
+        let error = serde_json::from_str::<RunnerEnrollmentToken>(&document)
+            .expect_err("noncanonical token");
+        let rendered = format!("{error:?}");
+        assert!(!rendered.contains(&invalid));
+        assert!(rendered.contains("runner enrollment token is invalid"));
+    }
 }
 
 #[test]
