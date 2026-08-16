@@ -4304,7 +4304,7 @@ async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_l
     run_with_database(|database| async move {
         let pool = database.pool();
         let clock = TestClock::freeze_at_database_now(pool).await?;
-        let now_ms = clock.now().await?.div_euclid(1_000) * 1_000;
+        let now_ms = clock.now().await?;
         seed_tenant(pool, "windows-runner-enrollment").await?;
         let manager = Uuid::new_v4();
         seed_member(
