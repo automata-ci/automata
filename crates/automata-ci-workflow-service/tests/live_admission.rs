@@ -83,10 +83,14 @@ async fn authenticated_admission_publishes_exact_evidence_to_rustfs_before_commi
     }
 
     assert!(matches!(
-        service
-            .admit_authenticated_github_delivery(support::changed_event_request(&request), claim,)
-            .await
-            .expect_err("changed evidence under one delivery must conflict"),
+        Box::pin(
+            service.admit_authenticated_github_delivery(
+                support::changed_event_request(&request),
+                claim,
+            )
+        )
+        .await
+        .expect_err("changed evidence under one delivery must conflict"),
         WorkflowAdmissionError::Store(LogicalWorkflowAdmissionStoreError::IdempotencyConflict)
     ));
     assert_eq!(repository.commit_attempts(), 3);

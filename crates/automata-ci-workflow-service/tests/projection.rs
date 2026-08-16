@@ -29,11 +29,26 @@ use automata_ci_workflow_github::{
 use automata_ci_workflow_service::{
     GithubWorkflowPlanVerifier, WorkflowAdmissionError, WorkflowAdmissionFailure,
     WorkflowAdmissionObservation, WorkflowAdmissionObserver, WorkflowAdmissionRequest,
-    WorkflowAdmissionRequestError, WorkflowAdmissionService, WorkflowAdmissionStage,
-    WorkflowAdmissionStageOutcome,
+    WorkflowAdmissionRequestError, WorkflowAdmissionResult, WorkflowAdmissionService,
+    WorkflowAdmissionStage, WorkflowAdmissionStageOutcome,
 };
 use bytes::Bytes;
 use uuid::Uuid;
+
+async fn admit_bounded(
+    service: &WorkflowAdmissionService,
+    request: WorkflowAdmissionRequest,
+) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
+    Box::pin(service.admit(request)).await
+}
+
+async fn admit_authenticated_bounded(
+    service: &WorkflowAdmissionService,
+    request: WorkflowAdmissionRequest,
+    claim: AuthenticatedGithubDeliveryClaim,
+) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
+    Box::pin(service.admit_authenticated_github_delivery(request, claim)).await
+}
 
 #[tokio::test]
 async fn run_name_is_evaluated_once_and_is_identical_on_replay() {
@@ -47,7 +62,9 @@ async fn run_name_is_evaluated_once_and_is_identical_on_replay() {
     let repository = Arc::new(ControllableRepository::default());
     let service = service(repository.clone());
 
-    let first = service.admit(request.clone()).await.expect("new admission");
+    let first = admit_bounded(&service, request.clone())
+        .await
+        .expect("new admission");
     let first_command = repository.take_command();
     assert!(!first.receipt().is_replay());
     assert_eq!(
@@ -56,7 +73,9 @@ async fn run_name_is_evaluated_once_and_is_identical_on_replay() {
     );
 
     repository.mode.store(1, Ordering::SeqCst);
-    let replay = service.admit(request).await.expect("exact replay");
+    let replay = admit_bounded(&service, request)
+        .await
+        .expect("exact replay");
     let replay_command = repository.take_command();
     assert!(replay.receipt().is_replay());
     assert_eq!(
@@ -97,16 +116,12 @@ async fn run_name_fallback_precedence_is_explicit_then_provider_then_commit() {
     ];
     for (tenant, run_name, provider, commit, expected) in cases {
         let repository = Arc::new(ControllableRepository::default());
-        service(repository.clone())
-            .admit(run_name_request(
-                tenant,
-                run_name,
-                provider,
-                commit,
-                "production",
-            ))
-            .await
-            .expect("admission");
+        admit_bounded(
+            &service(repository.clone()),
+            run_name_request(tenant, run_name, provider, commit, "production"),
+        )
+        .await
+        .expect("admission");
         assert_eq!(repository.take_command().display_title(), expected);
     }
 }
@@ -115,15 +130,17 @@ async fn run_name_fallback_precedence_is_explicit_then_provider_then_commit() {
 async fn run_name_has_exact_durable_byte_and_control_boundaries() {
     for (length, accepted) in [(1_023, true), (1_024, true), (1_025, false)] {
         let repository = Arc::new(ControllableRepository::default());
-        let result = service(repository.clone())
-            .admit(run_name_request(
+        let result = admit_bounded(
+            &service(repository.clone()),
+            run_name_request(
                 &format!("run-name-{length}"),
                 Some(&"a".repeat(length)),
                 None,
                 None,
                 "production",
-            ))
-            .await;
+            ),
+        )
+        .await;
         if accepted {
             result.expect("bounded run-name");
             assert_eq!(
@@ -144,16 +161,18 @@ async fn run_name_has_exact_durable_byte_and_control_boundaries() {
     }
 
     let repository = Arc::new(ControllableRepository::default());
-    let error = service(repository.clone())
-        .admit(run_name_request(
+    let error = admit_bounded(
+        &service(repository.clone()),
+        run_name_request(
             "run-name-control",
             Some("\"bad\\nname\""),
             None,
             None,
             "production",
-        ))
-        .await
-        .expect_err("control characters are not durable titles");
+        ),
+    )
+    .await
+    .expect_err("control characters are not durable titles");
     assert!(matches!(error, WorkflowAdmissionError::RunNameEvaluation));
     assert!(repository.command.lock().expect("command lock").is_none());
 }
@@ -186,7 +205,7 @@ async fn human_projection_is_bound_into_the_logical_admission() {
     let repository = Arc::new(ControllableRepository::default());
     let service = service(repository.clone());
 
-    service.admit(request).await.expect("admission");
+    admit_bounded(&service, request).await.expect("admission");
     let command = repository.take_command();
     assert_eq!(command.workflow_name(), "CI");
     assert_eq!(command.git_ref(), support::GIT_REF);
@@ -208,14 +227,16 @@ async fn human_projection_is_bound_into_the_logical_admission() {
 #[tokio::test]
 async fn admission_resolves_max_queue_concurrency_from_safe_context() {
     let repository = Arc::new(ControllableRepository::default());
-    service(repository.clone())
-        .admit(concurrency_request(
+    admit_bounded(
+        &service(repository.clone()),
+        concurrency_request(
             "logical-max-queue",
             "queue-${{ github.ref }}-${{ vars.channel }}",
             "github.ref != 'refs/heads/main'",
-        ))
-        .await
-        .expect("max-queue admission");
+        ),
+    )
+    .await
+    .expect("max-queue admission");
 
     let command = repository.take_command();
     let concurrency = command.concurrency().expect("workflow concurrency");
@@ -228,14 +249,16 @@ async fn admission_resolves_max_queue_concurrency_from_safe_context() {
 #[tokio::test]
 async fn admission_rejects_expression_resolved_max_queue_conflict_before_store_commit() {
     let repository = Arc::new(ControllableRepository::default());
-    let error = service(repository.clone())
-        .admit(concurrency_request(
+    let error = admit_bounded(
+        &service(repository.clone()),
+        concurrency_request(
             "logical-max-queue-conflict",
             "queue-${{ github.ref }}",
             "github.ref == 'refs/heads/main'",
-        ))
-        .await
-        .expect_err("resolved queue: max conflict must fail before persistence");
+        ),
+    )
+    .await
+    .expect_err("resolved queue: max conflict must fail before persistence");
 
     assert!(matches!(
         error,
@@ -249,14 +272,16 @@ async fn admission_rejects_expression_resolved_max_queue_conflict_before_store_c
 #[tokio::test]
 async fn admission_rejects_late_bound_concurrency_before_store_commit() {
     let repository = Arc::new(ControllableRepository::default());
-    let error = service(repository.clone())
-        .admit(concurrency_request(
+    let error = admit_bounded(
+        &service(repository.clone()),
+        concurrency_request(
             "logical-late-concurrency",
             "queue-${{ github.run_number }}",
             "github.ref != 'refs/heads/main'",
-        ))
-        .await
-        .expect_err("late-bound run identity must fail closed");
+        ),
+    )
+    .await
+    .expect_err("late-bound run identity must fail closed");
 
     assert!(matches!(
         error,
@@ -269,8 +294,7 @@ async fn admission_rejects_late_bound_concurrency_before_store_commit() {
 async fn authenticated_delivery_uses_the_distinct_store_path_and_digest() {
     let request = support::push_request("logical-provider-evidence");
     let local_repository = Arc::new(ControllableRepository::default());
-    service(local_repository.clone())
-        .admit(request.clone())
+    admit_bounded(&service(local_repository.clone()), request.clone())
         .await
         .expect("ordinary admission");
     let local_digest = local_repository.take_command().request_digest();
@@ -279,10 +303,13 @@ async fn authenticated_delivery_uses_the_distinct_store_path_and_digest() {
     let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(42)).expect("delivery ID");
     let current_claim = authenticated_claim(delivery_id);
     let provider_repository = Arc::new(ControllableRepository::default());
-    service(provider_repository.clone())
-        .admit_authenticated_github_delivery(request, current_claim)
-        .await
-        .expect("authenticated delivery admission");
+    admit_authenticated_bounded(
+        &service(provider_repository.clone()),
+        request,
+        current_claim,
+    )
+    .await
+    .expect("authenticated delivery admission");
     let provider_digest = provider_repository.take_command().request_digest();
     assert_eq!(provider_repository.take_delivery_id(), Some(delivery_id));
     assert_ne!(provider_digest, local_digest);
@@ -331,14 +358,12 @@ async fn base_context_metadata_and_request_digest_bind_every_admitted_value() {
     }
 
     let first_repository = Arc::new(ControllableRepository::default());
-    service(first_repository.clone())
-        .admit(first_request)
+    admit_bounded(&service(first_repository.clone()), first_request)
         .await
         .expect("first admission");
     let first = first_repository.take_command();
     let second_repository = Arc::new(ControllableRepository::default());
-    service(second_repository.clone())
-        .admit(second_request)
+    admit_bounded(&service(second_repository.clone()), second_request)
         .await
         .expect("second admission");
     let second = second_repository.take_command();
@@ -378,13 +403,13 @@ async fn provider_only_entrypoint_rejects_operation_admission_before_the_store()
     let current_claim = authenticated_claim(delivery_id);
     let repository = Arc::new(ControllableRepository::default());
     assert!(matches!(
-        service(repository.clone())
-            .admit_authenticated_github_delivery(
-                support::operation_request("logical-local-absence"),
-                current_claim,
-            )
-            .await
-            .expect_err("operation admission cannot claim provider evidence"),
+        admit_authenticated_bounded(
+            &service(repository.clone()),
+            support::operation_request("logical-local-absence"),
+            current_claim,
+        )
+        .await
+        .expect_err("operation admission cannot claim provider evidence"),
         WorkflowAdmissionError::Internal
     ));
     assert!(repository.command.lock().expect("command lock").is_none());
@@ -405,15 +430,18 @@ async fn observer_distinguishes_new_replay_and_durable_failure() {
     let observer = Arc::new(RecordingObserver::default());
     let service = service(repository.clone()).with_observer(observer.clone());
 
-    service.admit(request.clone()).await.expect("new admission");
+    admit_bounded(&service, request.clone())
+        .await
+        .expect("new admission");
     repository.mode.store(1, Ordering::SeqCst);
-    service
-        .admit(request.clone())
+    admit_bounded(&service, request.clone())
         .await
         .expect("receipt replay");
     repository.mode.store(2, Ordering::SeqCst);
     assert!(matches!(
-        service.admit(request).await.expect_err("durable conflict"),
+        admit_bounded(&service, request)
+            .await
+            .expect_err("durable conflict"),
         WorkflowAdmissionError::Store(LogicalWorkflowAdmissionStoreError::IdempotencyConflict)
     ));
 
