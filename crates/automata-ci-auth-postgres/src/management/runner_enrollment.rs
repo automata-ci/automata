@@ -36,7 +36,7 @@ const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
 
 /// A runner may request renewal only inside this fixed interval before its
 /// currently presented certificate expires.
-pub const RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+const RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 const MAX_RUNNER_CERTIFICATE_RENEWAL_RESPONSE_BYTES: usize = 512 * 1_024;
 

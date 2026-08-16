@@ -36,8 +36,7 @@ use automata_ci_auth_postgres::{
         EnsureInstallationBootstrapRunnerEnrollmentToken,
         InstallationBootstrapRunnerEnrollmentTokenOutcome, IssuedRunnerCertificateRenewal,
         MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
-        PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment,
-        RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS, RenewRunnerCertificate,
+        PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment, RenewRunnerCertificate,
         RunnerCertificateRenewalOutcome, RunnerCertificateRenewalSigningError,
         RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
     },
@@ -53,6 +52,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::support::{TestResult, run_with_database};
+
+const RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 #[derive(sqlx::FromRow)]
 struct StoredRunnerEnrollmentIssuer {
