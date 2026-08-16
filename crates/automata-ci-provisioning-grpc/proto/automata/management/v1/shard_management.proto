@@ -22,6 +22,19 @@ service ShardManagementService {
   rpc ApplyWorkspaceEntitlement(ApplyWorkspaceEntitlementRequest) returns (ApplyWorkspaceEntitlementResponse) {
     option idempotency_level = IDEMPOTENT;
   }
+
+  // Applies the complete shard-wide GitHub App, credential, and runtime-policy
+  // configuration. Credential bytes are protected by mTLS in transit and are
+  // envelope-encrypted by Core before PostgreSQL persistence.
+  rpc ApplyGithubProviderConfiguration(ApplyGithubProviderConfigurationRequest) returns (ApplyGithubProviderConfigurationResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
+
+  // Replaces one workspace's complete selected GitHub repository set. Omitted
+  // repositories are disconnected by this revision.
+  rpc ApplyWorkspaceGithubRepositories(ApplyWorkspaceGithubRepositoriesRequest) returns (ApplyWorkspaceGithubRepositoriesResponse) {
+    option idempotency_level = IDEMPOTENT;
+  }
 }
 
 // Identifies the workspace that Core must create.
@@ -187,4 +200,118 @@ enum ApplyWorkspaceEntitlementFailureReason {
 // construct contract-specific details.
 message ApplyWorkspaceEntitlementFailure {
   ApplyWorkspaceEntitlementFailureReason reason = 1;
+}
+
+enum GithubAppJwtIssuer {
+  GITHUB_APP_JWT_ISSUER_UNSPECIFIED = 0;
+  GITHUB_APP_JWT_ISSUER_APP_CLIENT_ID = 1;
+  GITHUB_APP_JWT_ISSUER_APP_ID = 2;
+}
+
+message GithubProviderSchedulePolicy {
+  uint64 poll_millis = 1;
+  uint64 discovery_claim_millis = 2;
+  uint64 fire_claim_millis = 3;
+  uint64 retry_millis = 4;
+  uint64 staleness_millis = 5;
+  uint32 maximum_manifests = 6;
+  uint32 maximum_fires_per_pass = 7;
+}
+
+message GithubProviderConfiguration {
+  // Canonical HTTPS base URL used in GitHub Check details links.
+  string dashboard_url = 1;
+  uint64 app_id = 2;
+  string app_client_id = 3;
+  GithubAppJwtIssuer jwt_issuer = 4;
+  bytes app_private_key_pem = 5;
+  bytes webhook_secret = 6;
+  string check_name = 7;
+  // Canonical or configuration-form JSON for the public runner-policy schema.
+  bytes runner_policy = 8;
+  GithubProviderSchedulePolicy schedule = 9;
+}
+
+message ApplyGithubProviderConfigurationRequest {
+  string operation_id = 1;
+  string shard_id = 2;
+  uint64 revision = 3;
+  GithubProviderConfiguration configuration = 4;
+}
+
+message ApplyGithubProviderConfigurationResponse {
+  string operation_id = 1;
+  string shard_id = 2;
+  uint64 revision = 3;
+  google.protobuf.Timestamp applied_at = 4;
+}
+
+enum ApplyGithubProviderConfigurationFailureReason {
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_UNSPECIFIED = 0;
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_INVALID_REQUEST = 1;
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_UNAUTHENTICATED = 2;
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_FORBIDDEN = 3;
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_STALE_REVISION = 5;
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_INTERNAL_ERROR = 6;
+  APPLY_GITHUB_PROVIDER_CONFIGURATION_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 7;
+}
+
+message ApplyGithubProviderConfigurationFailure {
+  ApplyGithubProviderConfigurationFailureReason reason = 1;
+}
+
+enum GithubRepositoryVisibility {
+  GITHUB_REPOSITORY_VISIBILITY_UNSPECIFIED = 0;
+  GITHUB_REPOSITORY_VISIBILITY_PUBLIC = 1;
+  GITHUB_REPOSITORY_VISIBILITY_PRIVATE = 2;
+}
+
+enum GithubJobAuthorityProfile {
+  GITHUB_JOB_AUTHORITY_PROFILE_UNSPECIFIED = 0;
+  GITHUB_JOB_AUTHORITY_PROFILE_STANDARD = 1;
+  GITHUB_JOB_AUTHORITY_PROFILE_CREDENTIAL_FREE = 2;
+}
+
+message GithubRepositorySelection {
+  uint64 installation_id = 1;
+  uint64 repository_id = 2;
+  uint64 repository_owner_id = 3;
+  string repository_name = 4;
+  string default_branch = 5;
+  GithubRepositoryVisibility visibility = 6;
+  GithubJobAuthorityProfile authority_profile = 7;
+}
+
+message ApplyWorkspaceGithubRepositoriesRequest {
+  string operation_id = 1;
+  string shard_id = 2;
+  string workspace_id = 3;
+  uint64 revision = 4;
+  repeated GithubRepositorySelection repositories = 5;
+}
+
+message ApplyWorkspaceGithubRepositoriesResponse {
+  string operation_id = 1;
+  string shard_id = 2;
+  string workspace_id = 3;
+  uint64 revision = 4;
+  google.protobuf.Timestamp applied_at = 5;
+}
+
+enum ApplyWorkspaceGithubRepositoriesFailureReason {
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_UNSPECIFIED = 0;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_INVALID_REQUEST = 1;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_UNAUTHENTICATED = 2;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_FORBIDDEN = 3;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_OPERATION_CONFLICT = 4;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_STALE_REVISION = 5;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_WORKSPACE_UNAVAILABLE = 6;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_INTERNAL_ERROR = 7;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_TEMPORARILY_UNAVAILABLE = 8;
+  APPLY_WORKSPACE_GITHUB_REPOSITORIES_FAILURE_REASON_SHARD_REGISTRY_CONFLICT = 9;
+}
+
+message ApplyWorkspaceGithubRepositoriesFailure {
+  ApplyWorkspaceGithubRepositoriesFailureReason reason = 1;
 }

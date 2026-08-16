@@ -15,6 +15,7 @@
 //! Cloud billing concepts.
 
 mod entitlement;
+mod github_provider;
 mod model;
 mod port;
 mod usage;
@@ -25,6 +26,19 @@ pub use entitlement::{
     EntitlementDurationSeconds, EntitlementFailure, EntitlementFailureKind, EntitlementRevision,
     EntitlementTimestamp, EntitlementValueError, WorkspaceExecutionEntitlement,
 };
+pub use github_provider::{
+    ApplyGithubProviderConfigurationCommand, ApplyGithubProviderConfigurationResult,
+    ApplyWorkspaceGithubRepositoriesCommand, ApplyWorkspaceGithubRepositoriesResult,
+    AuthorizedApplyGithubProviderConfiguration, AuthorizedApplyWorkspaceGithubRepositories,
+    GithubProviderConfiguration, GithubProviderConfigurationFailure,
+    GithubProviderConfigurationFailureKind, GithubProviderConfigurationRevision,
+    GithubProviderDesiredState, GithubProviderDesiredStateFailure,
+    GithubProviderDesiredStateFailureKind, GithubProviderRepositorySelection,
+    GithubProviderSchedulePolicy, GithubProviderSecret, GithubProviderTimestamp,
+    GithubProviderValueError, MAX_GITHUB_PROVIDER_REPOSITORIES,
+    WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
+    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
+};
 pub use model::{
     AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
     InitialOwnerPrincipalId, OperationId, ProvisionWorkspaceCommand, ProvisionWorkspaceResult,
@@ -33,10 +47,13 @@ pub use model::{
     ShardId, WorkspaceId,
 };
 pub use port::{
-    EntitlementApplicationFuture, ProvisioningAuthenticationError,
+    EntitlementApplicationFuture, GithubProviderConfigurationApplicationFuture,
+    GithubProviderConfigurationApplier, GithubProviderDesiredStateLoadFuture,
+    GithubProviderDesiredStateReader, ProvisioningAuthenticationError,
     ProvisioningAuthenticationFuture, ProvisioningWorkloadAuthenticator, UsageExportFuture,
-    WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier, WorkspaceProvisioner,
-    WorkspaceProvisioningFuture, WorkspaceUsageExporter,
+    WorkloadAuthenticationEvidence, WorkspaceEntitlementApplier,
+    WorkspaceGithubRepositoriesApplicationFuture, WorkspaceGithubRepositoriesApplier,
+    WorkspaceProvisioner, WorkspaceProvisioningFuture, WorkspaceUsageExporter,
 };
 pub use usage::{
     AuthorizedListWorkspaceUsage, ConsumedComputeMilliseconds, ListWorkspaceUsageCommand,

@@ -15,7 +15,10 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
+automata-ci-core.workspace = true
 automata-ci-provisioning.workspace = true
+automata-ci-store.workspace = true
+automata-ci-workflow-service.workspace = true
 bytes.workspace = true
 prost = { version = "=0.14.4", default-features = false, features = ["derive"] }
 prost-types = { version = "=0.14.4", default-features = false }
@@ -26,10 +29,12 @@ tokio-util.workspace = true
 tonic = { workspace = true, features = ["codegen", "router", "server", "tls-ring"] }
 tonic-prost.workspace = true
 tonic-types.workspace = true
+url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 rcgen = { workspace = true, features = ["pem"] }
+serde_json.workspace = true
 static_assertions.workspace = true
 tonic = { workspace = true, features = ["channel", "tls-ring"] }
 

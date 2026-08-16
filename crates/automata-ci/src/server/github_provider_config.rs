@@ -1,9 +1,12 @@
-//! Strict non-secret configuration for the optional GitHub provider product.
+//! Validated runtime projection of database-backed GitHub provider desired state.
 
 use std::{collections::BTreeSet, fmt, str::FromStr as _, sync::Arc};
 
 use automata_ci_core::JobAuthorityProfile;
 use automata_ci_github_delivery::GithubScheduleServiceConfig;
+use automata_ci_provisioning::{
+    GithubProviderDesiredState, GithubProviderRepositorySelection, WorkspaceId,
+};
 use automata_ci_results_github::CacheRepositoryMetadata;
 use automata_ci_store::{
     GithubCheckName, GithubInstallationBindingGeneration, GithubProviderGitRef,
@@ -16,18 +19,21 @@ use automata_ci_store::{
 use automata_ci_workflow_service::GithubRunnerPolicy;
 use serde::Deserialize;
 use serde_json::value::RawValue;
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::{Host, Url};
 use zeroize::Zeroizing;
 
 use super::SecretSource;
 
-/// Maximum encoded size of the strict GitHub provider configuration document.
-pub const MAX_GITHUB_PROVIDER_CONFIG_BYTES: usize = 512 * 1_024;
+const MAX_GITHUB_PROVIDER_TEST_FIXTURE_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
-pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
+pub use automata_ci_provisioning::MAX_GITHUB_PROVIDER_REPOSITORIES;
 
 const CONFIG_SCHEMA: u16 = 4;
+const DATABASE_CONNECTION_ID_DOMAIN: &[u8] =
+    b"automata-ci/github-provider/database-connection/v1\0";
+const DATABASE_AUTHORITY_ID_DOMAIN: &[u8] = b"automata-ci/github-provider/database-authority/v1\0";
 
 /// Sanitized GitHub provider configuration failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -68,6 +74,20 @@ impl ConfiguredUuid {
             return Err(GithubProviderConfigError);
         }
         Ok(Self(decoded))
+    }
+
+    fn derive(domain: &[u8], parts: &[&[u8]]) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(domain);
+        for part in parts {
+            digest.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(part);
+        }
+        let mut decoded = [0_u8; 16];
+        decoded.copy_from_slice(&digest.finalize()[..16]);
+        decoded[6] = (decoded[6] & 0x0f) | 0x50;
+        decoded[8] = (decoded[8] & 0x3f) | 0x80;
+        Self(decoded)
     }
 }
 
@@ -147,25 +167,22 @@ pub struct GithubProviderConfig {
 }
 
 impl GithubProviderConfig {
-    /// Loads one bounded current configuration from an environment/file reference.
+    /// Loads a bounded legacy configuration fixture for protocol-emulator tests.
     ///
-    /// This step validates only typed non-secret policy and nested source
-    /// references. It deliberately does not load the App key or webhook secret.
-    /// The later composition boundary must load the sole webhook source exactly
-    /// once, construct the shared `GithubWebhookVerifier` from those bytes, and
-    /// use the fingerprint derived internally by that verifier. That fingerprint
-    /// and [`GithubProviderWebhookConfig::verifier_revision`] must be pinned into
-    /// every configured repository manifest. There is no independently supplied
-    /// or per-repository verifier fingerprint.
+    /// Production server composition never calls this function and has no JSON
+    /// provider input. It remains public only because the external GitHub
+    /// emulator matrix constructs historical topology fixtures in a separate
+    /// integration-test crate.
     ///
     /// # Errors
     ///
     /// Returns one sanitized error for unavailable/excessive input, malformed
     /// JSON, unknown fields, unsupported schema, invalid typed values, an
     /// incoherent visibility/authority shape, or duplicate identities.
-    pub fn load(source: &SecretSource) -> Result<Self, GithubProviderConfigError> {
+    #[doc(hidden)]
+    pub fn load_test_fixture(source: &SecretSource) -> Result<Self, GithubProviderConfigError> {
         let bytes = source
-            .load_bytes(MAX_GITHUB_PROVIDER_CONFIG_BYTES)
+            .load_bytes(MAX_GITHUB_PROVIDER_TEST_FIXTURE_BYTES)
             .map_err(|_| GithubProviderConfigError)?;
         let raw: RawConfig =
             serde_json::from_slice(&bytes).map_err(|_| GithubProviderConfigError)?;
@@ -200,6 +217,91 @@ impl GithubProviderConfig {
             webhook,
             schedule,
             repositories: repositories.into(),
+        })
+    }
+
+    /// Projects one database-backed desired-state snapshot into runtime input.
+    pub(crate) fn from_desired_state(
+        desired: GithubProviderDesiredState,
+    ) -> Result<DatabaseGithubProviderConfig, GithubProviderConfigError> {
+        let (
+            _shard_id,
+            configuration_revision,
+            app_configuration_revision,
+            webhook_verifier_revision,
+            configuration,
+            workspaces,
+        ) = desired.into_parts();
+        let (
+            dashboard_url,
+            app_id,
+            app_client_id,
+            jwt_issuer,
+            private_key,
+            webhook_secret,
+            check_name,
+            runner_policy,
+            schedule,
+        ) = configuration.into_parts();
+        let app_configuration_revision =
+            GithubServerServiceRevision::new(app_configuration_revision)
+                .map_err(|_| GithubProviderConfigError)?;
+        let webhook_verifier_revision = GithubServerServiceRevision::new(webhook_verifier_revision)
+            .map_err(|_| GithubProviderConfigError)?;
+        let schedule = GithubScheduleServiceConfig::new(
+            schedule.poll_millis(),
+            schedule.discovery_claim_millis(),
+            schedule.fire_claim_millis(),
+            schedule.retry_millis(),
+            schedule.staleness_millis(),
+            schedule.maximum_manifests(),
+            schedule.maximum_fires_per_pass(),
+        )
+        .map(GithubProviderScheduleConfig)
+        .map_err(|_| GithubProviderConfigError)?;
+        let mut repositories = Vec::new();
+        for workspace in workspaces {
+            let workspace_id = workspace.workspace_id();
+            let workspace_revision = workspace.revision();
+            let projected_revision = configuration_revision
+                .get()
+                .checked_add(workspace_revision.get())
+                .ok_or(GithubProviderConfigError)?;
+            for selected in workspace.repositories() {
+                repositories.push(database_repository_config(
+                    workspace_id,
+                    projected_revision,
+                    selected,
+                    &runner_policy,
+                    &check_name,
+                )?);
+            }
+        }
+        if repositories.len() > MAX_GITHUB_PROVIDER_REPOSITORIES {
+            return Err(GithubProviderConfigError);
+        }
+        validate_unique_repositories(&repositories)?;
+        repositories.sort_unstable_by_key(|repository| {
+            (repository.installation_id, repository.repository_id)
+        });
+        Ok(DatabaseGithubProviderConfig {
+            config: Self {
+                transport: GithubProviderTransport::GithubDotCom,
+                dashboard_url,
+                app: GithubProviderAppConfig {
+                    app_id,
+                    client_id: app_client_id,
+                    jwt_issuer,
+                    configuration_revision: app_configuration_revision,
+                },
+                webhook: GithubProviderWebhookConfig {
+                    verifier_revision: webhook_verifier_revision,
+                },
+                schedule,
+                repositories: repositories.into(),
+            },
+            app_private_key: private_key.into_inner(),
+            webhook_secret: webhook_secret.into_inner(),
         })
     }
 
@@ -262,6 +364,126 @@ impl fmt::Debug for GithubProviderConfig {
             )
             .finish()
     }
+}
+
+/// Runtime configuration and already-decrypted credentials loaded from `PostgreSQL`.
+pub(crate) struct DatabaseGithubProviderConfig {
+    config: GithubProviderConfig,
+    app_private_key: Zeroizing<Vec<u8>>,
+    webhook_secret: Zeroizing<Vec<u8>>,
+}
+
+impl DatabaseGithubProviderConfig {
+    /// Returns the non-secret runtime projection.
+    pub(crate) const fn config(&self) -> &GithubProviderConfig {
+        &self.config
+    }
+
+    /// Consumes the database projection at the runtime secret boundary.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (GithubProviderConfig, Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>) {
+        (self.config, self.app_private_key, self.webhook_secret)
+    }
+
+    /// Returns whether the snapshot currently selects any repositories.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.config.repositories.is_empty()
+    }
+}
+
+impl fmt::Debug for DatabaseGithubProviderConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DatabaseGithubProviderConfig")
+            .field("config", &self.config)
+            .field("app_private_key", &"[REDACTED]")
+            .field("webhook_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+fn database_repository_config(
+    workspace_id: WorkspaceId,
+    projected_revision: u64,
+    selected: &GithubProviderRepositorySelection,
+    runner_policy: &GithubRunnerPolicy,
+    check_name: &GithubCheckName,
+) -> Result<GithubProviderRepositoryConfig, GithubProviderConfigError> {
+    let tenant = TenantScope::from_authenticated_tenant_id(workspace_id.to_string())
+        .map_err(|_| GithubProviderConfigError)?;
+    let repository_id = selected.repository_id();
+    let workspace_bytes = workspace_id.as_uuid();
+    let repository_bytes = repository_id.get().to_be_bytes();
+    let revision_bytes = projected_revision.to_be_bytes();
+    let policy_revision = GithubServerServiceRevision::new(projected_revision)
+        .map_err(|_| GithubProviderConfigError)?;
+    let connection_id = GithubProviderConnectionId(ConfiguredUuid::derive(
+        DATABASE_CONNECTION_ID_DOMAIN,
+        &[workspace_bytes.as_bytes(), &repository_bytes],
+    ));
+    let authority = |scope: &'static [u8]| GithubProviderAuthorityConfig {
+        authority_id: GithubProviderAuthorityId(ConfiguredUuid::derive(
+            DATABASE_AUTHORITY_ID_DOMAIN,
+            &[
+                workspace_bytes.as_bytes(),
+                &repository_bytes,
+                &revision_bytes,
+                scope,
+            ],
+        )),
+        policy_revision,
+    };
+    let repository_name = selected.repository_name().clone();
+    let cache_repository = CacheRepositoryMetadata::new(
+        repository_name.as_str(),
+        selected.default_branch().to_owned(),
+    )
+    .map_err(|_| GithubProviderConfigError)?;
+    let workflow_git_ref = GithubProviderGitRef::new(cache_repository.default_branch_ref())
+        .map_err(|_| GithubProviderConfigError)?;
+    let installation_binding_generation =
+        GithubInstallationBindingGeneration::new(projected_revision)
+            .map_err(|_| GithubProviderConfigError)?;
+    let manifest_revision = GithubProviderManifestRevision::new(projected_revision)
+        .map_err(|_| GithubProviderConfigError)?;
+    let runtime_policy_revision = WorkflowRuntimePolicyRevision::new(projected_revision)
+        .map_err(|_| GithubProviderConfigError)?;
+    let visibility = selected.visibility();
+    let private_source_authority = match visibility {
+        ProviderRepositoryVisibility::Public => None,
+        ProviderRepositoryVisibility::Private => Some(authority(b"private-source-read")),
+    };
+    let private_pull_request_files_authority = match visibility {
+        ProviderRepositoryVisibility::Public => None,
+        ProviderRepositoryVisibility::Private => {
+            Some(authority(b"private-pull-request-files-read"))
+        }
+    };
+    Ok(GithubProviderRepositoryConfig {
+        tenant: tenant.clone(),
+        internal_repository_id: GithubProviderInternalRepositoryId::derive(&tenant, repository_id),
+        connection_id,
+        installation_id: selected.installation_id(),
+        installation_binding_generation,
+        repository_id,
+        repository_owner_id: selected.repository_owner_id(),
+        repository_name,
+        cache_repository,
+        workflow_git_ref,
+        visibility,
+        manifest_revision,
+        policy_revision,
+        runtime_policy_revision,
+        authority_profile: selected.authority_profile(),
+        runner_policy: runner_policy.clone(),
+        workflow_selection: GithubProviderWorkflowSelection::all_direct(),
+        check_name: check_name.clone(),
+        checks_write_authority: authority(b"checks-write"),
+        workflow_permissions_authority: authority(b"workflow-permissions-read"),
+        private_source_authority,
+        private_pull_request_files_authority,
+    })
 }
 
 fn validate_dashboard_url(
@@ -455,13 +677,12 @@ impl fmt::Debug for GithubProviderScheduleConfig {
     }
 }
 
-/// Validated GitHub App identity and private-key source reference.
+/// Validated GitHub App identity and database-derived key revision.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubProviderAppConfig {
     app_id: GithubServerServiceAppId,
     client_id: GithubServerServiceAppClientId,
     jwt_issuer: GithubServerServiceJwtIssuer,
-    private_key_source: SecretSource,
     configuration_revision: GithubServerServiceRevision,
 }
 
@@ -475,6 +696,7 @@ impl GithubProviderAppConfig {
             configuration_revision,
         } = raw;
         let private_key_source = Zeroizing::new(private_key_source);
+        parse_secret_source(private_key_source.as_str())?;
         Ok(Self {
             app_id: GithubServerServiceAppId::new(id).map_err(|_| GithubProviderConfigError)?,
             client_id: GithubServerServiceAppClientId::new(client_id)
@@ -483,7 +705,6 @@ impl GithubProviderAppConfig {
                 RawJwtIssuer::AppId => GithubServerServiceJwtIssuer::AppId,
                 RawJwtIssuer::AppClientId => GithubServerServiceJwtIssuer::AppClientId,
             },
-            private_key_source: parse_secret_source(private_key_source.as_str())?,
             configuration_revision: GithubServerServiceRevision::new(configuration_revision)
                 .map_err(|_| GithubProviderConfigError)?,
         })
@@ -507,16 +728,6 @@ impl GithubProviderAppConfig {
         self.jwt_issuer
     }
 
-    /// Returns the validated reference to the App private-key material.
-    ///
-    /// Later composition must load it once, construct the signer from that key,
-    /// and derive the App-key SPKI fingerprint pinned with this configuration
-    /// revision; no key fingerprint is accepted from this document.
-    #[must_use]
-    pub const fn private_key_source(&self) -> &SecretSource {
-        &self.private_key_source
-    }
-
     /// Returns the positive immutable App configuration revision.
     #[must_use]
     pub const fn configuration_revision(&self) -> GithubServerServiceRevision {
@@ -531,16 +742,14 @@ impl fmt::Debug for GithubProviderAppConfig {
             .field("app_id", &self.app_id)
             .field("client_id", &self.client_id)
             .field("jwt_issuer", &self.jwt_issuer)
-            .field("private_key_source", &self.private_key_source)
             .field("configuration_revision", &self.configuration_revision)
             .finish()
     }
 }
 
-/// Sole configured webhook verification authority for all repositories.
+/// Sole database-derived webhook verification authority for all repositories.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GithubProviderWebhookConfig {
-    hmac_secret_source: SecretSource,
     verifier_revision: GithubServerServiceRevision,
 }
 
@@ -551,21 +760,11 @@ impl GithubProviderWebhookConfig {
             verifier_revision,
         } = raw;
         let hmac_secret_source = Zeroizing::new(hmac_secret_source);
+        parse_secret_source(hmac_secret_source.as_str())?;
         Ok(Self {
-            hmac_secret_source: parse_secret_source(hmac_secret_source.as_str())?,
             verifier_revision: GithubServerServiceRevision::new(verifier_revision)
                 .map_err(|_| GithubProviderConfigError)?,
         })
-    }
-
-    /// Returns the validated sole HMAC-secret source reference.
-    ///
-    /// Later composition must load this source only once, enforce the key-size
-    /// policy, construct the shared verifier from those bytes, and use the
-    /// fingerprint that verifier derives internally.
-    #[must_use]
-    pub const fn hmac_secret_source(&self) -> &SecretSource {
-        &self.hmac_secret_source
     }
 
     /// Returns the sole revision that every later provider manifest must pin.
@@ -582,7 +781,6 @@ impl fmt::Debug for GithubProviderWebhookConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GithubProviderWebhookConfig")
-            .field("hmac_secret_source", &self.hmac_secret_source)
             .field("verifier_revision", &self.verifier_revision)
             .finish()
     }

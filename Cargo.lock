@@ -673,6 +673,7 @@ dependencies = [
  "automata-ci-secret-postgres",
  "automata-ci-store",
  "automata-ci-store-postgres",
+ "automata-ci-workflow-service",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -682,6 +683,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -718,21 +720,30 @@ dependencies = [
 name = "automata-ci-provisioning"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-core",
+ "automata-ci-github",
+ "automata-ci-store",
+ "automata-ci-workflow-service",
  "thiserror",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "automata-ci-provisioning-grpc"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-core",
  "automata-ci-provisioning",
+ "automata-ci-store",
+ "automata-ci-workflow-service",
  "bytes",
  "prost",
  "prost-types",
  "protox",
  "rcgen",
+ "serde_json",
  "static_assertions",
  "thiserror",
  "tokio",
@@ -742,6 +753,7 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tonic-types",
+ "url",
  "zeroize",
 ]
 
@@ -749,8 +761,14 @@ dependencies = [
 name = "automata-ci-provisioning-postgres"
 version = "0.1.0"
 dependencies = [
+ "automata-ci-core",
+ "automata-ci-key-management",
  "automata-ci-provisioning",
+ "automata-ci-store",
+ "automata-ci-workflow-service",
+ "sha2 0.11.0",
  "sqlx",
+ "url",
  "uuid",
 ]
 

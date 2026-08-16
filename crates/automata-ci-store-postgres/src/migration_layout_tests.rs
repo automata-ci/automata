@@ -169,6 +169,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0041_private_pull_request_files_authority.sql",
         "a458499937bd5133caeee8271f961e0d8c96e2db9d58ac0cd538ed1e6f99687aa03cdae3ea111bbe526a18075d56d5ba",
     ),
+    (
+        "0042_github_provider_desired_state.sql",
+        "5276d0877686f09d9c05c50b4675c2b82a9b93588d7865f3e4910d1daf7d39bd01c2826eb15edfcfd41b42e14269df98",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

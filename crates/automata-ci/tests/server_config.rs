@@ -275,26 +275,6 @@ fn human_auth_configuration_is_atomic_and_derives_a_fixed_callback() {
 }
 
 #[test]
-fn github_provider_is_disabled_without_its_single_config_source() {
-    let cli = Cli::try_parse_from([
-        "automata",
-        "server",
-        "--results-public-url",
-        "https://results.example.test/",
-    ])
-    .expect("provider-disabled syntax");
-    let Command::Server(args) = cli.command else {
-        panic!("server command expected");
-    };
-    assert!(
-        ServerConfig::from_args(&args)
-            .expect("provider configuration is optional")
-            .github_provider()
-            .is_none()
-    );
-}
-
-#[test]
 fn conformance_export_authority_is_loopback_machine_only_and_bounded() {
     let token_path = test_file("conformance-export-token.txt");
     write_secret_file(&token_path, b"0123456789abcdef0123456789abcdef\n");

@@ -489,21 +489,6 @@ pub struct ServerArgs {
     #[arg(long, env = "AUTOMATA_RESULTS_KEY_ID", default_value = "primary")]
     pub results_key_id: String,
 
-    /// Optional strict GitHub provider manifest for live integration.
-    ///
-    /// The document contains one App/webhook authority and a bounded repository
-    /// registry. Private values remain nested environment or file references;
-    /// raw webhook secrets and App keys are never accepted in argv. Loading this
-    /// manifest converges its exact durable authorities before installing the
-    /// signed webhook route and supervising source delivery, Checks publication,
-    /// scoped App credentials, and credential release as one runtime.
-    #[arg(
-        long,
-        env = "AUTOMATA_GITHUB_PROVIDER_CONFIG_SOURCE",
-        value_name = "env:NAME|file:PATH"
-    )]
-    pub github_provider_config_source: Option<SecretSource>,
-
     /// Optional strict manifest reference enabling GitHub-compatible workload OIDC.
     ///
     /// The manifest contains only bounded public policy plus environment or file

@@ -328,82 +328,36 @@ the exact same repository UUID, attempt UUID, and decision.
 
 ## GitHub provider registry
 
-Enable the provider runtime with one owner-only manifest reference, never an
-inline JSON value:
+The GitHub provider is database-backed. There is no replica-local provider JSON
+file or provider CLI flag. The private mTLS shard-management API applies two
+independent, monotonically versioned resources:
 
-```console
---github-provider-config-source file:/etc/automata/github-provider.json
-```
+- one shard-wide GitHub App configuration containing the dashboard origin,
+  App identity and credentials, webhook secret, Check name, runner policy, and
+  scheduler policy;
+- one complete repository desired set per workspace. Omission from a newer set
+  is authoritative, including an empty set used to disconnect a workspace.
 
-Add that option to the complete `automata server` command; it is not a
-standalone command.
+App private keys and webhook secrets are envelope-encrypted before their
+transaction commits, using the mandatory control-plane key provider. PostgreSQL
+stores ciphertext and authenticated envelope metadata, never plaintext.
+Management operation IDs are idempotent and revisions must advance. Current
+desired state is retained separately from durable operation receipts used to
+answer retries. Superseded configuration and repository selections are replaced
+rather than accumulated without a current rollback or audit consumer.
 
-Start from the checked
-[`github-provider.example.json`](config/github-provider.example.json). The
-outer file and each nested `private_key_source` or `hmac_secret_source` must be
-an `env:NAME` or absolute `file:/path` reference accepted by the secret-source
-policy; secret bytes do not belong in the manifest. File sources must be
-owner-only regular files and cannot be symlinks.
-
-The current provider manifest is schema 4. It requires an explicit top-level
-`dashboard_url`, which is the trusted canonical Automata origin used for Check
-Run links, and a distinct `workflow_permissions_read` authority for every
-repository, plus a separate `private_pull_request_files_read` authority
-(`null` for public repositories and exact authority for private repositories).
-Schema-1 through schema-3 files are rejected rather than being guessed or
-silently granted broader GitHub App authority.
-
-The required `transport` selects one closed origin policy. Use
-`{"mode":"github_dot_com"}` in production. The integration suite can select
-`loopback_emulator` with an exact `http://...localhost:PORT/api/v3/` control
-base and a separate `http://...invalid:PORT/` job-runtime origin. The ports
-must match. The mapped origin is carried only into job repository authority;
-the control plane continues to use loopback. Invalid origin pairs are rejected
-and emulator mode has no GitHub.com fallback.
-
-Each repository entry binds one existing tenant to stable numeric GitHub App
-installation, repository, and owner IDs, an exact `owner/name`, its canonical
-`default_branch` name, and a unique non-nil connection UUID. The default branch
-is server-owned cache metadata and is never taken from a job or action request.
-Revisions are positive and non-regressing. The entry's
-`policy_revision` must equal every nested authority revision, and authority
-UUIDs are globally unique. A `public` repository must set both
-`private_repository_source_read` and `private_pull_request_files_read` to
-`null`; a `private` repository must provide both exact, distinct authorities.
-The former grants only `contents: read`; the latter grants only
-`pull requests: read` and is used solely for private pull-request file pages.
-`checks_write` is mandatory for both. Use
-`credential_free` only for jobs intentionally barred from credential-bearing
-authority; `standard` selects the credential-bearing, fail-private output
-profile. Unknown fields, aliases, duplicate identities, incoherent visibility,
-and partial authority shapes fail startup.
-
-Repository removal is not a schema-3 rollout operation. Deleting an entry from
-the local file stops that process from serving it, but cannot prove that another
-replica with the same GitHub App no longer owns the durable authorities. Keep
-the entry configured until a future provider-registry desired-set revision can
-seal the complete membership and retire omitted authorities atomically. Current
-startup safely retires superseded authority revisions only for repositories
-that remain explicitly present, and continues maintaining each `retiring`
-authority until provider revocation reaches `retired`. Changing a retained
-repository's GitHub installation, App client identity, or provider transport/
-API origin is likewise not a schema-3 rollout operation: startup rejects it
-before retirement because the historical revocation broker route is not
-durably retained yet.
-
-Every repository `tenant_id` must equal the server's one effective UI tenant.
-With human authentication enabled, that is the tenant in durable installation
-state (or its configured bootstrap tenant while setup is active); without human
-authentication, it is the validated fallback tenant, which defaults to `local`.
-Set it with `--fallback-tenant-id` (or `AUTOMATA_FALLBACK_TENANT_ID`) when the
-default is not appropriate. A mismatch fails startup before the App private key
-or webhook HMAC is loaded and before provider manifests or runtime state are
-constructed. The current registry has no tenant chooser or multi-tenant
-compatibility mode.
+At startup, every control-plane replica loads one repeatable-read snapshot,
+decrypts the current credentials, validates the runner and repository policy,
+and derives stable internal connection and distinct service-authority
+identities. Private repositories receive separate source-read and pull-request
+files-read authorities; public repositories receive neither. A configured App
+with no selected repositories leaves the provider runtime disabled while
+remaining ready for repository onboarding. Live revision watching and omitted
+repository authority retirement remain follow-up reconciliation work.
 
 The GitHub App webhook URL is the public Automata origin plus
 `/webhooks/github`. Configure GitHub with the same HMAC secret referenced by the
-manifest, subscribe only to the supported `push`, `pull_request`, `merge_group`,
+configuration, subscribe only to the supported `push`, `pull_request`, `merge_group`,
 and `repository_dispatch` events selected for the installation. The App's
 registration-wide permissions are Administration read, Checks write, Contents
 read, Pull requests read, and Merge queues read; Automata's private-source

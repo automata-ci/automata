@@ -12,8 +12,14 @@ homepage.workspace = true
 readme = "README.md"
 
 [dependencies]
+automata-ci-core.workspace = true
+automata-ci-key-management.workspace = true
 automata-ci-provisioning.workspace = true
+automata-ci-store.workspace = true
+automata-ci-workflow-service.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [lints]
