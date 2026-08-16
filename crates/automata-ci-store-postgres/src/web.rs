@@ -550,16 +550,7 @@ fn decode_run(row: &PgRow) -> Result<HumanRun, StoreError> {
             "workflow run latest-attempt aggregate count is inconsistent",
         ));
     }
-    let conclusion = if job_count == attempt_count && job_count > 0 {
-        aggregate_conclusion(&lifecycles)
-    } else {
-        None
-    };
-    if status == WorkflowRunStatus::Completed && conclusion.is_none() {
-        return Err(StoreError::corrupt_data(
-            "completed workflow run lacks a terminal latest attempt for every job",
-        ));
-    }
+    let conclusion = derive_run_conclusion(status, job_count, attempt_count, &lifecycles)?;
 
     let run_number = positive_u64(
         row.try_get("run_number").map_err(operation_error)?,
@@ -647,6 +638,30 @@ fn aggregate_conclusion(lifecycles: &[JobLifecycle]) -> Option<HumanRunConclusio
     } else {
         Some(HumanRunConclusion::Success)
     }
+}
+
+fn derive_run_conclusion(
+    status: WorkflowRunStatus,
+    job_count: i64,
+    attempt_count: i64,
+    lifecycles: &[JobLifecycle],
+) -> Result<Option<HumanRunConclusion>, StoreError> {
+    // A terminal latest attempt can become visible before the workflow
+    // finalizer commits the workflow status. The workflow row is the durable
+    // source of truth for whether a conclusion may be published.
+    if status != WorkflowRunStatus::Completed {
+        return Ok(None);
+    }
+    let conclusion = if job_count == attempt_count && job_count > 0 {
+        aggregate_conclusion(lifecycles)
+    } else {
+        None
+    };
+    conclusion.map(Some).ok_or_else(|| {
+        StoreError::corrupt_data(
+            "completed workflow run lacks a terminal latest attempt for every job",
+        )
+    })
 }
 
 fn parse_run_status(value: &str) -> Result<WorkflowRunStatus, StoreError> {
@@ -2517,8 +2532,8 @@ mod tests {
         MAX_REPOSITORY_DISCOVERY_SCOPES, MAX_REPOSITORY_RBAC_ROLE_NAMES, MAX_REPOSITORY_RBAC_ROWS,
         RBAC_POLICY_AT_REVISION_SQL, RBAC_POLICY_SQL, REPOSITORIES_AFTER_SQL,
         REPOSITORIES_FIRST_SQL, RepositoryDiscoveryFilter, assemble_repository_rbac_policy,
-        enforce_repository_rbac_limit, repository_discovery_filter, repository_rbac_query_limit,
-        repository_role_names, valid_repository_discovery_permissions,
+        derive_run_conclusion, enforce_repository_rbac_limit, repository_discovery_filter,
+        repository_rbac_query_limit, repository_role_names, valid_repository_discovery_permissions,
         validated_artifact_block_count,
     };
     use automata_ci_auth::{
@@ -2529,9 +2544,32 @@ mod tests {
         },
         human::{PrincipalId, TenantId},
     };
-    use automata_ci_store::{StoreError, TenantScope};
+    use automata_ci_core::JobLifecycle;
+    use automata_ci_store::{HumanRunConclusion, StoreError, TenantScope, WorkflowRunStatus};
     use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
+
+    #[test]
+    fn in_progress_run_does_not_publish_a_terminal_attempt_conclusion() {
+        assert_eq!(
+            derive_run_conclusion(WorkflowRunStatus::InProgress, 1, 1, &[JobLifecycle::Lost],)
+                .expect("in-progress aggregate"),
+            None
+        );
+    }
+
+    #[test]
+    fn completed_run_requires_and_publishes_its_terminal_conclusion() {
+        assert_eq!(
+            derive_run_conclusion(WorkflowRunStatus::Completed, 1, 1, &[JobLifecycle::Lost],)
+                .expect("completed aggregate"),
+            Some(HumanRunConclusion::Lost)
+        );
+        assert!(matches!(
+            derive_run_conclusion(WorkflowRunStatus::Completed, 1, 0, &[]),
+            Err(StoreError::CorruptData(_))
+        ));
+    }
 
     #[test]
     fn repository_discovery_accepts_only_the_bounded_exact_permission_union() {
