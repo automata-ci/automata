@@ -20,52 +20,8 @@ fn compile(
     event: WorkflowEventProvenance,
     metadata: Option<GithubEventMetadata>,
 ) -> CompilationReport {
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
-    let request = CompileWorkflowRequest::new(parsed.plan().expect("source plan"), event);
-    let request = match metadata {
-        Some(metadata) => request.with_event_metadata(metadata),
-        None => request,
-    };
-    GithubWorkflowCompiler::new().compile(request)
-}
-
-fn assert_rejected_with(report: &CompilationReport, code: &str) {
-    assert!(
-        report.plan().is_none(),
-        "unexpected plan: {:#?}",
-        report.plan()
-    );
-    assert!(
-        report.disposition() == CompilationDisposition::Rejected,
-        "unexpected disposition: {:?}",
-        report.disposition()
-    );
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == code),
-        "missing diagnostic `{code}`: {:#?}",
-        report.diagnostics()
-    );
-}
-
-fn assert_not_selected(report: &CompilationReport, reason: WorkflowNotSelectedReason) {
-    assert_eq!(report.plan(), None);
-    assert_eq!(
-        report.disposition(),
-        CompilationDisposition::NotSelected(reason)
-    );
-    assert!(
-        report.diagnostics().is_empty(),
-        "ordinary non-selection must not emit diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let parsed = support::parse_accepted(source);
+    support::compile(parsed.plan().expect("source plan"), event, metadata)
 }
 
 #[test]
@@ -94,7 +50,7 @@ fn filtered_workflow_selects_only_live_main_pushes() {
             WorkflowNotSelectedReason::DeletedPush,
         ),
     ] {
-        assert_not_selected(
+        support::assert_not_selected(
             &compile(FILTERED_WORKFLOW, event("push", git_ref), Some(metadata)),
             reason,
         );
@@ -104,7 +60,7 @@ fn filtered_workflow_selects_only_live_main_pushes() {
 #[test]
 fn event_absence_is_structured_non_selection_without_diagnostics() {
     let source = "on: workflow_dispatch\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             event("push", "refs/heads/main"),
@@ -117,7 +73,7 @@ fn event_absence_is_structured_non_selection_without_diagnostics() {
 #[test]
 fn event_absence_does_not_compile_an_unrelated_workflow_body() {
     let source = "on: workflow_dispatch\njobs:\n  test:\n    runs-on: linux\n    environment: production\n    steps:\n      - run: true\n";
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             event("pull_request", "refs/pull/1/merge"),
@@ -149,7 +105,7 @@ fn path_filter_demand_does_not_compile_the_workflow_body() {
 #[test]
 fn a_selected_event_still_rejects_an_unsupported_workflow_body() {
     let source = "on: pull_request\njobs:\n  test:\n    runs-on: linux\n    environment: production\n    steps:\n      - run: true\n";
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(
             source,
             event("pull_request", "refs/pull/1/merge"),
@@ -169,7 +125,7 @@ fn repository_dispatch_types_select_only_the_exact_custom_event() {
     );
     assert!(matching.is_accepted(), "{:#?}", matching.diagnostics());
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             filtered,
             event("repository_dispatch", "refs/heads/main"),
@@ -190,7 +146,7 @@ fn repository_dispatch_types_select_only_the_exact_custom_event() {
 #[test]
 fn repository_dispatch_requires_exact_bounded_metadata() {
     let source = "on: repository_dispatch\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(
             source,
             event("repository_dispatch", "refs/heads/main"),
@@ -198,7 +154,7 @@ fn repository_dispatch_requires_exact_bounded_metadata() {
         ),
         "github.compile.event_metadata_required",
     );
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(
             source,
             event("repository_dispatch", "refs/heads/main"),
@@ -207,7 +163,7 @@ fn repository_dispatch_requires_exact_bounded_metadata() {
         "github.compile.event_metadata_mismatch",
     );
     for event_type in [String::new(), "x".repeat(101), "bad\nevent".to_owned()] {
-        assert_rejected_with(
+        support::assert_rejected_with(
             &compile(
                 source,
                 event("repository_dispatch", "refs/heads/main"),
@@ -233,7 +189,7 @@ fn pull_requests_use_github_default_actions() {
         );
     }
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             FILTERED_WORKFLOW,
             event("pull_request", "refs/pull/42/merge"),
@@ -257,7 +213,7 @@ fn pull_request_branch_filters_use_target_base_never_event_or_head_ref() {
         matching_base.diagnostics()
     );
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             event("pull_request", "refs/heads/main"),
@@ -277,7 +233,7 @@ fn explicit_pull_request_types_replace_the_default_action_set() {
     );
     assert!(closed.is_accepted(), "{:#?}", closed.diagnostics());
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             event("pull_request", "refs/pull/42/merge"),
@@ -297,7 +253,7 @@ fn ordered_negative_patterns_exclude_and_later_reinclude() {
     );
     assert!(reincluded.is_accepted(), "{:#?}", reincluded.diagnostics());
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             event("push", "refs/heads/releases/10-alpha"),
@@ -317,7 +273,7 @@ fn push_branch_and_tag_filters_are_ref_kind_specific() {
     );
     assert!(tag.is_accepted(), "{:#?}", tag.diagnostics());
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             event("push", "refs/heads/v2.10.1"),
@@ -355,7 +311,7 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
 
     for path in ["src/generated/output.rs", "docs/readme.md"] {
-        assert_not_selected(
+        support::assert_not_selected(
             &compile(
                 source,
                 event("push", "refs/heads/main"),
@@ -440,7 +396,7 @@ fn tag_pushes_never_require_changed_file_metadata() {
 fn paths_ignore_requires_at_least_one_changed_file_outside_the_ignore_set() {
     let source = "on:\n  pull_request:\n    branches: [main]\n    paths-ignore: ['docs/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     for files in [Vec::<&str>::new(), vec!["docs/readme.md"]] {
-        assert_not_selected(
+        support::assert_not_selected(
             &compile(
                 source,
                 event("pull_request", "refs/pull/42/merge"),
@@ -492,7 +448,7 @@ fn invalid_changed_file_metadata_is_bounded_and_sanitized() {
             GithubChangedFiles::complete([format!("{sentinel}\n")]),
         )),
     );
-    assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
+    support::assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
     assert!(!format!("{:?}", report.diagnostics()).contains(sentinel));
 }
 
@@ -519,7 +475,7 @@ fn changed_file_metadata_enforces_event_specific_provider_windows() {
             GithubChangedFiles::complete(files),
         )),
     );
-    assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
+    support::assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
 
     let pull_request_source = "on:\n  pull_request:\n    paths: ['src/file-2999.rs']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     let files = (0..3_000).map(|index| format!("src/file-{index}.rs"));
@@ -544,7 +500,7 @@ fn changed_file_metadata_enforces_event_specific_provider_windows() {
             GithubChangedFiles::complete(files),
         )),
     );
-    assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
+    support::assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
 }
 
 #[test]
@@ -576,7 +532,7 @@ fn push_and_pull_request_fail_closed_without_verified_metadata() {
         ("push", "refs/heads/main"),
         ("pull_request", "refs/pull/42/merge"),
     ] {
-        assert_rejected_with(
+        support::assert_rejected_with(
             &compile(FILTERED_WORKFLOW, event(name, git_ref), None),
             "github.compile.event_metadata_required",
         );
@@ -592,14 +548,11 @@ fn push_and_pull_request_fail_closed_without_verified_metadata() {
 
 #[test]
 fn preselected_recompilation_validates_the_exact_trigger_span() {
-    let parsed = support::parse(FILTERED_WORKFLOW);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let initial = GithubWorkflowCompiler::new().compile(
-        CompileWorkflowRequest::new(
-            parsed.plan().expect("source plan"),
-            event("push", "refs/heads/main"),
-        )
-        .with_event_metadata(GithubEventMetadata::push(false)),
+    let parsed = support::parse_accepted(FILTERED_WORKFLOW);
+    let initial = support::compile(
+        parsed.plan().expect("source plan"),
+        event("push", "refs/heads/main"),
+        Some(GithubEventMetadata::push(false)),
     );
     let plan = initial.plan().expect("initial plan");
     let replay =
@@ -611,9 +564,8 @@ fn preselected_recompilation_validates_the_exact_trigger_span() {
     assert_eq!(replay.plan(), Some(plan));
 
     let shifted_source = format!("\n{FILTERED_WORKFLOW}");
-    let shifted = support::parse(&shifted_source);
-    assert!(shifted.is_accepted(), "{:#?}", shifted.diagnostics());
-    assert_rejected_with(
+    let shifted = support::parse_accepted(&shifted_source);
+    support::assert_rejected_with(
         &GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_preselected_event(
             shifted.plan().expect("shifted plan"),
             plan.event().clone(),

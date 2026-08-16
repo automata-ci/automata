@@ -4,22 +4,17 @@ use automata_ci_core::{
     CompiledValueTemplate, ExpressionContext, LogicalJobKind, WorkflowEventProvenance,
     WorkflowPlanVersion,
 };
-use automata_ci_workflow_github::{CompileWorkflowRequest, GithubWorkflowCompiler};
 
 fn compile(source: &str) -> automata_ci_workflow_github::CompilationReport {
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
-    GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(source);
+    support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("resource-test")
             .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
             .with_git_ref("refs/heads/main"),
-    ))
+        None,
+    )
 }
 
 #[test]

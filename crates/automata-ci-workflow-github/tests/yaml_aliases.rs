@@ -2,16 +2,14 @@ use crate::support;
 
 use automata_ci_core::{WorkflowEventProvenance, WorkflowPlan};
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, DiagnosticKind, GithubWorkflowCompiler, GithubWorkflowFrontend,
-    ParseWorkflowRequest, RunnerSelection, SourceProvenance, WorkflowFrontend, WorkflowParseLimits,
-    YamlNode, YamlNodeKind,
+    DiagnosticKind, GithubWorkflowFrontend, ParseWorkflowRequest, RunnerSelection,
+    SourceProvenance, WorkflowFrontend, WorkflowParseLimits, YamlNode, YamlNodeKind,
 };
 use serde_json::Value;
 
 #[test]
 fn scalar_sequence_mapping_and_whole_job_aliases_decode_before_compilation() {
-    let report = support::parse(include_str!("fixtures/aliases-equivalent.yml"));
-    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let report = support::parse_accepted(include_str!("fixtures/aliases-equivalent.yml"));
     let plan = report.plan().expect("source plan");
 
     assert!(contains_alias(plan.document().root()));
@@ -53,8 +51,7 @@ fn scalar_sequence_mapping_and_whole_job_aliases_decode_before_compilation() {
 
 #[test]
 fn alias_use_spans_are_primary_and_definition_spans_are_retained() {
-    let report = support::parse(include_str!("fixtures/aliases.yml"));
-    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let report = support::parse_accepted(include_str!("fixtures/aliases.yml"));
     let plan = report.plan().expect("source plan");
     let build = mapping_value(
         mapping_value(plan.expanded_document().root(), "jobs"),
@@ -78,8 +75,7 @@ fn alias_use_spans_are_primary_and_definition_spans_are_retained() {
 
 #[test]
 fn duplicate_anchor_names_rebind_only_subsequent_aliases() {
-    let report = support::parse(include_str!("fixtures/aliases-redefined.yml"));
-    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let report = support::parse_accepted(include_str!("fixtures/aliases-redefined.yml"));
     let jobs = report.plan().expect("source plan").workflow().jobs();
     assert_eq!(environment_value(jobs[0].job(), "GENERATION"), "first");
     assert_eq!(environment_value(jobs[1].job(), "GENERATION"), "second");
@@ -95,10 +91,11 @@ fn alias_expansion_cannot_hide_a_duplicate_mapping_key_from_compilation() {
         "expanded workflow remains inspectable: {:#?}",
         parsed.diagnostics()
     );
-    let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let compiled = support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "push"),
-    ));
+        None,
+    );
     let diagnostic = compiled
         .diagnostics()
         .iter()
@@ -299,13 +296,14 @@ fn compile(source: &str) -> WorkflowPlan {
         source,
     ));
     assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let compiled = support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("alias-equivalence")
             .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
             .with_git_ref("refs/heads/main"),
-    ));
+        None,
+    );
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
     compiled.plan().expect("logical plan").clone()
 }

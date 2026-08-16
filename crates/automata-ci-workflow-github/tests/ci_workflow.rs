@@ -5,12 +5,7 @@ use automata_ci_workflow_github::YamlNodeKind;
 #[test]
 fn source_ast_retains_mapping_order_and_scalar_styles() {
     let source = include_str!("fixtures/valid.yml");
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("plan");
     let entries = plan.document().root().as_mapping().expect("root mapping");
 

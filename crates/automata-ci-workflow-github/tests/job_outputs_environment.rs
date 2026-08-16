@@ -1,10 +1,7 @@
 use crate::support;
 
 use automata_ci_core::WorkflowEventProvenance;
-use automata_ci_workflow_github::{
-    CompileWorkflowRequest, DiagnosticKind, GithubWorkflowCompiler, JobEnvironment,
-    ScalarResolution,
-};
+use automata_ci_workflow_github::{DiagnosticKind, JobEnvironment, ScalarResolution};
 
 #[test]
 fn source_model_decodes_job_outputs_and_both_environment_forms() {
@@ -29,12 +26,7 @@ jobs:
       - run: echo publish
 "#;
 
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "source diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("source plan");
 
     let package = plan.workflow().jobs()[0].job();
@@ -195,10 +187,11 @@ fn current_lowering_fails_closed_for_malformed_output_and_environment_shapes() {
             _ => unreachable!("test field is fixed"),
         }
 
-        let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+        let report = support::compile(
             plan,
             WorkflowEventProvenance::new("github", "workflow_dispatch"),
-        ));
+            None,
+        );
         assert!(report.plan().is_none(), "{field}: {value}");
         let diagnostics = report
             .diagnostics()
@@ -227,16 +220,12 @@ jobs:
         run: echo build
 ";
 
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
-    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(source);
+    let report = support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch"),
-    ));
+        None,
+    );
 
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
     let job = &report.plan().expect("current plan").jobs()[0];

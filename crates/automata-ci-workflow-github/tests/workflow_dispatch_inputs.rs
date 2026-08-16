@@ -2,8 +2,8 @@ use crate::support;
 
 use automata_ci_core::{ContextValue, WorkflowEventProvenance};
 use automata_ci_workflow_github::{
-    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubEventMetadata,
-    GithubWorkflowCompiler, GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputType,
+    CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
+    GithubWorkflowDispatchInputDefault, GithubWorkflowDispatchInputType,
     GithubWorkflowDispatchInputValue, GithubWorkflowDispatchInputs,
     GithubWorkflowDispatchInputsError, MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS,
     MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS,
@@ -12,24 +12,15 @@ use automata_ci_workflow_github::{
 const JOB: &str = "jobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: true\n";
 
 fn compile(source: &str, inputs: Option<GithubWorkflowDispatchInputs>) -> CompilationReport {
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
-    let request = CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(source);
+    support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("synthetic-dispatch")
             .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
             .with_git_ref("refs/heads/main"),
-    );
-    let request = match inputs {
-        Some(inputs) => request.with_event_metadata(GithubEventMetadata::workflow_dispatch(inputs)),
-        None => request,
-    };
-    GithubWorkflowCompiler::new().compile(request)
+        inputs.map(GithubEventMetadata::workflow_dispatch),
+    )
 }
 
 fn payload(
@@ -39,18 +30,9 @@ fn payload(
 }
 
 fn assert_rejected_with(report: &CompilationReport, code: &str) {
-    assert_eq!(report.disposition(), CompilationDisposition::Rejected);
-    assert!(report.plan().is_none());
+    support::assert_rejected_with(report, code);
     assert!(report.workflow_dispatch_contract().is_none());
     assert!(report.workflow_dispatch_inputs().is_none());
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == code),
-        "missing diagnostic `{code}`: {:#?}",
-        report.diagnostics()
-    );
 }
 
 #[test]

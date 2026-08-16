@@ -8,22 +8,17 @@ use automata_ci_core::{
     MatrixValue as PlanMatrixValue, MatrixValueTemplate, OutputSensitivity,
     ReusableSecretForwarding, WorkflowEventProvenance, WorkflowPlanVersion,
 };
-use automata_ci_workflow_github::{CompileWorkflowRequest, GithubWorkflowCompiler};
 
 fn compile(source: &str, event: &str) -> automata_ci_workflow_github::CompilationReport {
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
-    GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(source);
+    support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", event)
             .with_delivery_id("synthetic-current")
             .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
             .with_git_ref("refs/heads/main"),
-    ))
+        None,
+    )
 }
 
 fn assert_rejected(source: &str, code: &str) {

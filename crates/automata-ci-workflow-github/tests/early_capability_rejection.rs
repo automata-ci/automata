@@ -1,7 +1,7 @@
 use crate::support;
 
 use automata_ci_core::WorkflowEventProvenance;
-use automata_ci_workflow_github::{CompileWorkflowRequest, DiagnosticKind, GithubWorkflowCompiler};
+use automata_ci_workflow_github::DiagnosticKind;
 
 fn assert_rejected_before_plan(source: &str, code: &str, exact_span: &str) {
     assert_rejected_before_plan_for_event(source, "workflow_dispatch", code, exact_span);
@@ -13,13 +13,13 @@ fn assert_rejected_before_plan_for_event(
     code: &str,
     exact_span: &str,
 ) {
-    let parsed = support::parse(source);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
+    let parsed = support::parse_accepted(source);
     let source_plan = parsed.plan().expect("source plan");
-    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let report = support::compile(
         source_plan,
         WorkflowEventProvenance::new("github", event_name),
-    ));
+        None,
+    );
 
     assert!(
         report.plan().is_none(),

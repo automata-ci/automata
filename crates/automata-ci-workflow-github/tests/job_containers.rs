@@ -2,8 +2,7 @@ use crate::support;
 
 use automata_ci_core::{LogicalJobKind, TransportProtocol, WorkflowEventProvenance};
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, DiagnosticKind, GithubWorkflowCompiler, GithubWorkflowSourcePlan, Job,
-    JobContainer, JobServices, ScalarResolution,
+    DiagnosticKind, GithubWorkflowSourcePlan, Job, JobContainer, JobServices, ScalarResolution,
 };
 
 const MALFORMED_CONTAINER_DIAGNOSTICS: [(&str, &str); 14] = [
@@ -152,12 +151,7 @@ jobs:
       - run: echo verify
 "#;
 
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "source diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("source plan");
     let job = plan.workflow().jobs()[0].job();
 
@@ -265,12 +259,7 @@ jobs:
       - run: echo verify
 "#;
 
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "source diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let job = report.plan().expect("source plan").workflow().jobs()[0].job();
     assert!(matches!(
         job.container(),
@@ -455,17 +444,13 @@ jobs:
       - run: echo verify
 ";
 
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
+    let parsed = support::parse_accepted(source);
     let source_plan = parsed.plan().expect("source plan");
-    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let report = support::compile(
         source_plan,
         WorkflowEventProvenance::new("github", "workflow_dispatch"),
-    ));
+        None,
+    );
     assert!(report.plan().is_none());
     let container = report
         .diagnostics()
@@ -508,12 +493,12 @@ jobs:
       - run: echo verify
 "#;
 
-    let parsed = support::parse(source);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(source);
+    let report = support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch"),
-    ));
+        None,
+    );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
     let LogicalJobKind::Steps(job) = report.plan().expect("plan").jobs()[0].execution() else {
         panic!("step job");
@@ -541,12 +526,12 @@ jobs:
 #[test]
 fn current_lowering_rejects_unimplemented_or_invalid_service_surface() {
     for (source, code) in UNSUPPORTED_SERVICE_CASES {
-        let parsed = support::parse(source);
-        assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-        let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+        let parsed = support::parse_accepted(source);
+        let report = support::compile(
             parsed.plan().expect("source plan"),
             WorkflowEventProvenance::new("github", "workflow_dispatch"),
-        ));
+            None,
+        );
         assert!(report.plan().is_none(), "unexpected plan for `{code}`");
         assert!(
             report
