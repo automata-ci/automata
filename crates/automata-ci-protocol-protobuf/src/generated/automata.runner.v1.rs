@@ -3,10 +3,7 @@
 pub struct Unit {}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RunnerFrame {
-    #[prost(
-        oneof = "runner_frame::Payload",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10"
-    )]
+    #[prost(oneof = "runner_frame::Payload", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub payload: ::core::option::Option<runner_frame::Payload>,
 }
 /// Nested message and enum types in `RunnerFrame`.
@@ -37,10 +34,7 @@ pub mod runner_frame {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerFrame {
-    #[prost(
-        oneof = "server_frame::Payload",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10"
-    )]
+    #[prost(oneof = "server_frame::Payload", tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub payload: ::core::option::Option<server_frame::Payload>,
 }
 /// Nested message and enum types in `ServerFrame`.
@@ -628,10 +622,7 @@ pub struct ExpressionCallInstruction {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExpressionInstruction {
-    #[prost(
-        oneof = "expression_instruction::Value",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8"
-    )]
+    #[prost(oneof = "expression_instruction::Value", tags = "1, 2, 3, 4, 5, 6, 7, 8")]
     pub value: ::core::option::Option<expression_instruction::Value>,
 }
 /// Nested message and enum types in `ExpressionInstruction`.
@@ -1408,11 +1399,15 @@ impl HandshakeErrorCode {
         match value {
             "HANDSHAKE_ERROR_CODE_UNSPECIFIED" => Some(Self::Unspecified),
             "HANDSHAKE_ERROR_CODE_INVALID_HELLO" => Some(Self::InvalidHello),
-            "HANDSHAKE_ERROR_CODE_UNSUPPORTED_PROTOCOL" => Some(Self::UnsupportedProtocol),
+            "HANDSHAKE_ERROR_CODE_UNSUPPORTED_PROTOCOL" => {
+                Some(Self::UnsupportedProtocol)
+            }
             "HANDSHAKE_ERROR_CODE_UNSUPPORTED_JOB_IR" => Some(Self::UnsupportedJobIr),
             "HANDSHAKE_ERROR_CODE_UNAUTHENTICATED" => Some(Self::Unauthenticated),
             "HANDSHAKE_ERROR_CODE_UNAUTHORIZED" => Some(Self::Unauthorized),
-            "HANDSHAKE_ERROR_CODE_SESSION_NOT_RESUMABLE" => Some(Self::SessionNotResumable),
+            "HANDSHAKE_ERROR_CODE_SESSION_NOT_RESUMABLE" => {
+                Some(Self::SessionNotResumable)
+            }
             _ => None,
         }
     }
@@ -1501,7 +1496,9 @@ impl RuntimeAuthorityEndpointSecurity {
         match self {
             Self::Unspecified => "RUNTIME_AUTHORITY_ENDPOINT_SECURITY_UNSPECIFIED",
             Self::Tls => "RUNTIME_AUTHORITY_ENDPOINT_SECURITY_TLS",
-            Self::LoopbackDevelopment => "RUNTIME_AUTHORITY_ENDPOINT_SECURITY_LOOPBACK_DEVELOPMENT",
+            Self::LoopbackDevelopment => {
+                "RUNTIME_AUTHORITY_ENDPOINT_SECURITY_LOOPBACK_DEVELOPMENT"
+            }
             Self::TrustedPrivateDevelopment => {
                 "RUNTIME_AUTHORITY_ENDPOINT_SECURITY_TRUSTED_PRIVATE_DEVELOPMENT"
             }
@@ -1603,7 +1600,9 @@ impl ExpressionComparisonOperator {
             Self::Equal => "EXPRESSION_COMPARISON_OPERATOR_EQUAL",
             Self::NotEqual => "EXPRESSION_COMPARISON_OPERATOR_NOT_EQUAL",
             Self::GreaterThan => "EXPRESSION_COMPARISON_OPERATOR_GREATER_THAN",
-            Self::GreaterThanOrEqual => "EXPRESSION_COMPARISON_OPERATOR_GREATER_THAN_OR_EQUAL",
+            Self::GreaterThanOrEqual => {
+                "EXPRESSION_COMPARISON_OPERATOR_GREATER_THAN_OR_EQUAL"
+            }
             Self::LessThan => "EXPRESSION_COMPARISON_OPERATOR_LESS_THAN",
             Self::LessThanOrEqual => "EXPRESSION_COMPARISON_OPERATOR_LESS_THAN_OR_EQUAL",
         }
@@ -1619,7 +1618,9 @@ impl ExpressionComparisonOperator {
                 Some(Self::GreaterThanOrEqual)
             }
             "EXPRESSION_COMPARISON_OPERATOR_LESS_THAN" => Some(Self::LessThan),
-            "EXPRESSION_COMPARISON_OPERATOR_LESS_THAN_OR_EQUAL" => Some(Self::LessThanOrEqual),
+            "EXPRESSION_COMPARISON_OPERATOR_LESS_THAN_OR_EQUAL" => {
+                Some(Self::LessThanOrEqual)
+            }
             _ => None,
         }
     }
@@ -1993,7 +1994,9 @@ impl RemoteErrorCode {
             "REMOTE_ERROR_CODE_STALE_SESSION" => Some(Self::StaleSession),
             "REMOTE_ERROR_CODE_INVALID_SLOT" => Some(Self::InvalidSlot),
             "REMOTE_ERROR_CODE_OPERATION_KEY_REUSED" => Some(Self::OperationKeyReused),
-            "REMOTE_ERROR_CODE_COMMAND_CURSOR_CONFLICT" => Some(Self::CommandCursorConflict),
+            "REMOTE_ERROR_CODE_COMMAND_CURSOR_CONFLICT" => {
+                Some(Self::CommandCursorConflict)
+            }
             "REMOTE_ERROR_CODE_LEASE_NOT_FOUND" => Some(Self::LeaseNotFound),
             "REMOTE_ERROR_CODE_STALE_FENCING_TOKEN" => Some(Self::StaleFencingToken),
             "REMOTE_ERROR_CODE_CONFLICT" => Some(Self::Conflict),
