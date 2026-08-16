@@ -22,7 +22,8 @@ pub use action_graph::{
     MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
     WINDOWS_ACTION_GRAPH_SCHEMA_VERSION, WindowsActionArchiveFacts, WindowsActionGraphError,
     WindowsRepositoryActionArchive, WindowsRepositoryActionGraph,
-    windows_action_archive_policy_sha256, windows_repository_action_key_sha256,
+    valid_windows_action_path_component, windows_action_archive_policy_sha256,
+    windows_repository_action_key_sha256,
 };
 pub use container::{
     ContainerCredentials, ContainerPort, ContainerSpec, MountSource, TransportProtocol, VolumeMount,

@@ -10,7 +10,8 @@ use automata_ci_runner_runtime::{
 
 use support::{
     Fixture, PhaseResponse, action_step, local_action_step, prepared_node24_action,
-    windows_envelope, windows_envelope_with_action_graph, windows_repository_action_graph,
+    prepared_windows_namespace_unsafe_node24_action, windows_envelope,
+    windows_envelope_with_action_graph, windows_repository_action_graph,
 };
 
 #[tokio::test]
@@ -113,4 +114,34 @@ fn windows_repository_action_without_complete_graph_is_rejected_before_lease() {
         Err(AdmissionRejection::InvalidJob)
     );
     assert_eq!(fixture.provider.counts(), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn windows_namespace_aliased_entrypoints_fail_before_provider_mutation() {
+    for (phase, main, pre, post) in [
+        ("main", "CONOUT$.js", None, None),
+        ("pre", "dist/index.js", Some("LONGFI~1.JS"), None),
+        ("post", "dist/index.js", None, Some("CON .txt")),
+    ] {
+        let action = prepared_windows_namespace_unsafe_node24_action(main, pre, post);
+        let graph = windows_repository_action_graph("actions/example", &action);
+        let fixture = Fixture::windows_actions(vec![action], Vec::new());
+        let job = windows_envelope_with_action_graph(
+            vec![action_step("action", "actions/example")],
+            graph,
+        );
+        let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+        let result = fixture
+            .executor
+            .execute(fixture.request(job), events, ExecutionCancellation::new())
+            .await
+            .expect("namespace rejection is a terminal job result");
+
+        assert_eq!(result.conclusion(), JobConclusion::Failure, "{phase}");
+        assert_eq!(fixture.provider.counts(), (0, 0, 0), "{phase}");
+        let state = fixture.endpoint_state.lock().expect("endpoint lock");
+        assert!(state.materialized_action_graphs.is_empty(), "{phase}");
+        assert!(state.commands.is_empty(), "{phase}");
+    }
 }

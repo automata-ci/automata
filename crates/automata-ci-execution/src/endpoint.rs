@@ -6,6 +6,7 @@ use automata_ci_core::{
     MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES, MAX_WINDOWS_ACTION_GRAPH_ARCHIVES,
     MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES, MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES,
     MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, WindowsActionArchiveFacts,
+    valid_windows_action_path_component,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -1370,7 +1371,7 @@ fn valid_sealed_relative_path(value: &str) -> bool {
         && value.is_ascii()
         && !value.contains('/')
         && !value.starts_with('\\')
-        && value.split('\\').all(valid_sealed_windows_component)
+        && value.split('\\').all(valid_windows_action_path_component)
 }
 
 fn valid_sealed_absolute_path(value: &str) -> bool {
@@ -1381,37 +1382,7 @@ fn valid_sealed_absolute_path(value: &str) -> bool {
         && value
             .split('\\')
             .skip(1)
-            .all(valid_sealed_windows_component)
-}
-
-fn valid_sealed_windows_component(component: &str) -> bool {
-    if component.is_empty()
-        || matches!(component, "." | "..")
-        || component.ends_with([' ', '.'])
-        || !component.is_ascii()
-        || component
-            .bytes()
-            .any(|byte| matches!(byte, b':' | b'*' | b'?' | b'"' | b'<' | b'>' | b'|'))
-    {
-        return false;
-    }
-    let stem = component.split('.').next().unwrap_or_default();
-    let folded = stem.to_ascii_uppercase();
-    if matches!(folded.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
-        || folded
-            .strip_prefix("COM")
-            .or_else(|| folded.strip_prefix("LPT"))
-            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
-    {
-        return false;
-    }
-    !stem.rsplit_once('~').is_some_and(|(prefix, suffix)| {
-        !prefix.is_empty()
-            && prefix.len() <= 6
-            && !suffix.is_empty()
-            && suffix.bytes().all(|byte| byte.is_ascii_digit())
-            && suffix.as_bytes()[0] != b'0'
-    })
+            .all(valid_windows_action_path_component)
 }
 
 /// Bounded copy-from-sandbox request.
@@ -1840,6 +1811,8 @@ mod sealed_action_tests {
     fn archive_rejects_windows_namespace_aliases() {
         for destination in [
             r"C:\actions\CON.txt",
+            r"C:\actions\CONIN$.js",
+            r"C:\actions\CONOUT$.js",
             r"C:\actions\file.js:evil",
             r"C:\actions\LONGFI~1.JS",
             r"C:\actions\CLOCK$",
@@ -1848,6 +1821,8 @@ mod sealed_action_tests {
         }
         for subpath in [
             "CON.txt",
+            "CONIN$.js",
+            "CONOUT$.js",
             r"folder\file.js:evil",
             "LONGFI~1.JS",
             r"\\server\share",

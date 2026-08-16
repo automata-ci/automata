@@ -22,7 +22,7 @@ use automata_ci_core::{
     StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, TrustOutputAuthority,
     UnixMillis, ValueSource, ValueTemplate, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
     WORKFLOW_EVENT_MEDIA_TYPE, WindowsRepositoryActionArchive, WindowsRepositoryActionGraph,
-    windows_repository_action_key_sha256,
+    valid_windows_action_path_component, windows_repository_action_key_sha256,
 };
 use automata_ci_execution::{
     ActionArchiveMaterialization, ActionGraphMaterializationRequest, Cancellation,
@@ -1942,6 +1942,17 @@ impl GithubJobExecutor {
                 ActionBundleLimits::default(),
             )
             .map_err(|_| ActionLoadError::Preparation(ActionPreparationErrorKind::Content))?;
+            if let PreparedActionExecution::Javascript(javascript) = action.definition().execution()
+            {
+                for entrypoint in [Some(javascript.main()), javascript.pre(), javascript.post()]
+                    .into_iter()
+                    .flatten()
+                {
+                    normalize_windows_relative_path(entrypoint).map_err(|_| {
+                        ActionLoadError::Preparation(ActionPreparationErrorKind::Content)
+                    })?;
+                }
+            }
         }
         Ok(())
     }
@@ -8184,7 +8195,7 @@ fn normalize_windows_relative_path(path: &str) -> Result<String, ExecutorAdapter
     let components = path.split(['/', '\\']).collect::<Vec<_>>();
     if components
         .iter()
-        .any(|component| component.is_empty() || matches!(*component, "." | ".."))
+        .any(|component| !valid_windows_action_path_component(component))
     {
         return Err(invalid_job());
     }

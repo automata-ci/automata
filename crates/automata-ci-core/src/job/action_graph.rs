@@ -437,24 +437,42 @@ fn valid_subpath(value: &str) -> bool {
     {
         return false;
     }
-    value.split('/').all(valid_windows_component)
+    value.split('/').all(valid_windows_action_path_component)
 }
 
-fn valid_windows_component(component: &str) -> bool {
+/// Returns whether one Windows action-path component has one unambiguous
+/// filesystem identity under the sealed action archive policy.
+///
+/// This deliberately rejects DOS device names, 8.3 aliases, alternate-stream
+/// syntax, path separators, controls, and trailing-dot/space aliases. Callers
+/// remain responsible for splitting and bounding the complete path.
+#[must_use]
+pub fn valid_windows_action_path_component(component: &str) -> bool {
     if component.is_empty()
         || matches!(component, "." | "..")
         || !component.is_ascii()
         || component.ends_with([' ', '.'])
-        || component
-            .bytes()
-            .any(|byte| matches!(byte, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*'))
+        || component.bytes().any(|byte| {
+            byte.is_ascii_control()
+                || matches!(
+                    byte,
+                    b'/' | b'\\' | b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*'
+                )
+        })
     {
         return false;
     }
     if component.starts_with('.') {
         return true;
     }
-    let stem = component.split('.').next().unwrap_or(component);
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or(component)
+        .trim_end_matches([' ', '.']);
+    if stem.is_empty() {
+        return false;
+    }
     if short_name_shaped(stem) {
         return false;
     }
@@ -481,4 +499,53 @@ fn short_name_shaped(stem: &str) -> bool {
 
 fn zero_digest(digest: Sha256Digest) -> bool {
     digest.as_bytes().iter().all(|byte| *byte == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_windows_action_path_component;
+
+    #[test]
+    fn windows_action_components_reject_every_namespace_alias() {
+        for component in [
+            "CON",
+            "con.txt",
+            "CON .txt",
+            "CONIN$.js",
+            "conout$.JS",
+            "COM1.log",
+            "lpt9",
+            "LONGFI~1.JS",
+            "A~999.txt",
+            "name:stream",
+            "trailing.",
+            "trailing ",
+            ".",
+            "..",
+            "nested/path",
+            r"nested\path",
+            "control\u{1f}.js",
+            "naïve.js",
+        ] {
+            assert!(
+                !valid_windows_action_path_component(component),
+                "unexpectedly accepted {component:?}"
+            );
+        }
+
+        for component in [
+            "dist",
+            "index.js",
+            ".github",
+            ".gitignore",
+            "long-file-name.js",
+            "COM10.txt",
+            "LPT0.txt",
+        ] {
+            assert!(
+                valid_windows_action_path_component(component),
+                "unexpectedly rejected {component:?}"
+            );
+        }
+    }
 }

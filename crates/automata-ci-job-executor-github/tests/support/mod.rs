@@ -1065,7 +1065,11 @@ pub fn prepared_node24_action() -> PreparedAction {
     prepared_node24_action_with_post_condition("always()")
 }
 
-pub fn prepared_windows_namespace_unsafe_node24_action() -> PreparedAction {
+pub fn prepared_windows_namespace_unsafe_node24_action(
+    main: &str,
+    pre: Option<&str>,
+    post: Option<&str>,
+) -> PreparedAction {
     let compiler = GithubConditionCompiler::default();
     let pre_condition = compiler
         .compile_condition(Some("always()"), GithubConditionPhase::Step)
@@ -1075,10 +1079,10 @@ pub fn prepared_windows_namespace_unsafe_node24_action() -> PreparedAction {
         .expect("valid post condition");
     let javascript = PreparedJavascriptAction::new(
         JavascriptRuntime::Node24,
-        "dist/index.js",
-        None,
+        main,
+        pre.map(str::to_owned),
         pre_condition,
-        None,
+        post.map(str::to_owned),
         post_condition,
     )
     .expect("valid JavaScript action");
@@ -1088,7 +1092,6 @@ pub fn prepared_windows_namespace_unsafe_node24_action() -> PreparedAction {
             b"runs:\n  using: node24\n  main: dist/index.js\n",
         ),
         ("dist/index.js", b"console.log('must not run')\n"),
-        ("CON.txt", b"unsafe Windows namespace entry\n"),
     ]);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
     let definition = PreparedActionDefinition::new(

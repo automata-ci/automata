@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Cursor, Read as _},
+    str,
 };
 
+use automata_ci_core::valid_windows_action_path_component;
 use automata_ci_scm::RepositorySnapshot;
 use bytes::Bytes;
 use flate2::read::MultiGzDecoder;
@@ -166,10 +168,9 @@ pub fn validate_windows_materialization_archive(
             return Err(ActionArchiveError::ResourceLimit);
         }
         let components = archive_components(&path)?;
-        if components
-            .iter()
-            .any(|component| !valid_windows_archive_component(component))
-        {
+        if components.iter().any(|component| {
+            !str::from_utf8(component).is_ok_and(valid_windows_action_path_component)
+        }) {
             return Err(ActionArchiveError::UnsafePath);
         }
         let (archive_root, relative) = components
@@ -323,58 +324,6 @@ fn record_windows_namespace_path(
     }
     namespace_paths.insert(folded, WindowsNamespaceEntry { spelling, kind });
     Ok(())
-}
-
-fn valid_windows_archive_component(component: &[u8]) -> bool {
-    if component.is_empty()
-        || !component.is_ascii()
-        || component.ends_with(b" ")
-        || component.ends_with(b".")
-        || component.iter().any(|byte| {
-            byte.is_ascii_control()
-                || matches!(byte, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*')
-        })
-    {
-        return false;
-    }
-    if component == b"." || component == b".." {
-        return false;
-    }
-    if component.starts_with(b".") {
-        return true;
-    }
-    let stem = component
-        .split(|byte| *byte == b'.')
-        .next()
-        .unwrap_or(component);
-    let stem = stem
-        .iter()
-        .rposition(|byte| !matches!(byte, b' ' | b'.'))
-        .map_or(&[][..], |last| &stem[..=last]);
-    if stem.is_empty() || windows_short_name_shaped(stem) {
-        return false;
-    }
-    let upper = stem.iter().map(u8::to_ascii_uppercase).collect::<Vec<_>>();
-    !matches!(
-        upper.as_slice(),
-        b"CON" | b"PRN" | b"AUX" | b"NUL" | b"CLOCK$" | b"CONIN$" | b"CONOUT$"
-    ) && !upper
-        .strip_prefix(b"COM")
-        .or_else(|| upper.strip_prefix(b"LPT"))
-        .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix[0], b'1'..=b'9'))
-}
-
-fn windows_short_name_shaped(stem: &[u8]) -> bool {
-    let Some(tilde) = stem.iter().rposition(|byte| *byte == b'~') else {
-        return false;
-    };
-    let (prefix, suffix) = stem.split_at(tilde);
-    let digits = &suffix[1..];
-    !prefix.is_empty()
-        && prefix.len() <= 6
-        && !digits.is_empty()
-        && matches!(digits[0], b'1'..=b'9')
-        && digits[1..].iter().all(u8::is_ascii_digit)
 }
 
 /// Validates immutable archive bytes and selects one action definition.
