@@ -96,12 +96,14 @@ or the control-plane/spool envelope keys.
 
 ### Phase 2: certificate rotation and runner lifecycle
 
-- [ ] Add an mTLS-authenticated rotation prepare endpoint taking a new local CSR.
-- [ ] Register old/new digests with bounded overlap (at most two active leaves).
-- [ ] Confirm the new leaf on its first session, then write-once revoke the old leaf; make every
-  crash boundary retry-safe.
-- [ ] Rotate automatically before a configurable renewal window and expose expiry/renewal in
-  `doctor`, readiness, and metrics.
+- [x] Add a dedicated mTLS-authenticated renewal endpoint taking a fresh local CSR.
+- [x] Permit one durable successor per presented leaf, with exact operation/request/response
+  replay and an overlap bounded by the presented leaf's existing expiry.
+- [x] Persist the request, private key, and exact response before publication; prove the returned
+  leaf and key at every crash-recovery boundary.
+- [x] Renew inside a fixed server due window, drain the old runner generation, and recompose from
+  the newly published identity without weakening external shutdown.
+- [ ] Expose certificate expiry and renewal health in `doctor`, readiness, and metrics.
 - [ ] Add `automata runner list|get|disable|enable|drain|delete` with `runners:read` or
   `runners:manage`, generation bumps, live-session fencing, destructive confirmation, and audit.
 - [ ] Add token list/revoke operations that never return token plaintext.

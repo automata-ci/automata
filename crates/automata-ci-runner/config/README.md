@@ -103,12 +103,14 @@ replace cluster-side CNI, node-local traffic, admission-policy, RuntimeClass,
 or kubelet verification.
 
 > [!WARNING]
-> Initial enrollment is available through `automata runner token` and
-> `automata-runner enroll` on Unix hosts. Windows remains an unprovisionable
-> source-only experiment; there is no static-registration fallback. Automated
-> certificate rotation and runner disable/drain/delete lifecycle operations
-> remain planned work; account for that operational gap before a production
-> deployment.
+> Initial enrollment and automatic certificate renewal are qualified only for
+> Unix file-backed TLS custody. `automata-runner run` renews that identity
+> before expiry, durably recovers an interrupted rotation, drains the old
+> runner generation, and reloads the new files itself. The checked-in macOS
+> Keychain and Windows environment-backed TLS sources fail closed because
+> native atomic rotation adapters are not yet qualified. There is no manual,
+> static-registration, or alternate-protocol fallback; native macOS and
+> Windows custody adapters remain required before those hosts can be promoted.
 
 Configure the control plane with the
 [`automata` reference](https://github.com/automata-ci/automata/blob/main/crates/automata-ci/README.md),
@@ -463,6 +465,17 @@ with the same server, configuration, runner name, and source selector. The
 private stage retains the original token and key and is loaded before the source;
 an explicit stdin retry may therefore use `/dev/null`. Do not mint a replacement
 token or delete the stage.
+
+The long-lived runner owns certificate renewal after enrollment. It requests a
+replacement only inside the fixed server due window, keeps the existing leaf
+usable for exact replay until that leaf expires, and stores request, key, and
+response recovery state beside `runner-key.pem` under the same owner-only
+custody lock. Do not delete `.automata-renewal-*` state or replace either TLS
+file independently. After an accepted response, the process publishes each
+file with an atomic replacement and crash-reconciles the pair, drains every
+task and control connection using the old identity, and rebuilds the full
+runner composition from disk. Normal service shutdown remains authoritative
+during this sequence.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service

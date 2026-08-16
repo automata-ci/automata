@@ -46,9 +46,12 @@ mod runner_enrollment;
 pub use runner_enrollment::{
     ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken,
     EnsureInstallationBootstrapRunnerEnrollmentToken, InstallationBootstrapRequestError,
-    InstallationBootstrapRunnerEnrollmentTokenOutcome, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
-    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
+    InstallationBootstrapRunnerEnrollmentTokenOutcome, IssuedRunnerCertificateRenewal,
+    MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
+    PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment, PreparedRunnerEnrollment,
+    RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS, RenewRunnerCertificate,
+    RunnerCertificateRenewalOutcome, RunnerCertificateRenewalRequestError,
+    RunnerCertificateRenewalSigningError, RunnerEnrollmentConsumeOutcome,
     RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord,
 };
 

@@ -1,5 +1,9 @@
 use std::{
     collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -9,6 +13,7 @@ use automata_ci_auth::{
     },
     human::{PrincipalId, TenantId},
     installation::InstallationTenant,
+    machine::{AuthenticatedMachine, ExternalRunnerIdentity},
     management::{
         ChangeMemberStatus, CreateRole, DeleteRole, DirectBindingGrantOptionCollection,
         DirectBindingGrantOptionsState, GrantRole, HumanRbacManagementRepository,
@@ -34,9 +39,12 @@ use automata_ci_postgres::auth::{
     management::{
         ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken,
         EnsureInstallationBootstrapRunnerEnrollmentToken,
-        InstallationBootstrapRunnerEnrollmentTokenOutcome, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-        MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
-        PrepareRunnerEnrollment, RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
+        InstallationBootstrapRunnerEnrollmentTokenOutcome, IssuedRunnerCertificateRenewal,
+        MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
+        PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment,
+        RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS, RenewRunnerCertificate,
+        RunnerCertificateRenewalOutcome, RunnerCertificateRenewalSigningError,
+        RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
     },
 };
 use automata_ci_postgres::runner_auth::PostgresRunnerMachineDirectory;
@@ -132,6 +140,69 @@ async fn seed_tenant(pool: &PgPool, tenant_id: &str) -> TestResult {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn seed_runner_certificate(
+    pool: &PgPool,
+    tenant_id: &str,
+    group_id: Uuid,
+    runner_id: RunnerId,
+    leaf_sha256: [u8; 32],
+    expires_at_seconds: i64,
+    created_at_ms: i64,
+) -> TestResult {
+    let group = RunnerGroup::new("certificate-renewal")?;
+    let capabilities = RunnerCapabilities::new(
+        runner_id,
+        RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
+    )
+    .with_groups([group]);
+    let name = format!("renewal-{runner_id}");
+    let external_identity = format!("automata:runner:{}", runner_id.as_uuid().hyphenated());
+    sqlx::query(
+        r"
+        INSERT INTO runners (
+            id,tenant_id,group_id,name,normalized_name,labels,capabilities,
+            slots,status,generation,created_at_ms,updated_at_ms,session_epoch,
+            external_identity,desired_state
+        ) VALUES ($1,$2,$3,$4,$4,'{}',$5,1,'offline',1,$6,$6,0,$7,'active')
+        ",
+    )
+    .bind(runner_id.as_uuid())
+    .bind(tenant_id)
+    .bind(group_id)
+    .bind(name)
+    .bind(serde_json::to_value(capabilities)?)
+    .bind(created_at_ms)
+    .bind(external_identity)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_machine_certificates (leaf_sha256,runner_id,expires_at_seconds) VALUES ($1,$2,$3)",
+    )
+    .bind(leaf_sha256.as_slice())
+    .bind(runner_id.as_uuid())
+    .bind(expires_at_seconds)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn authenticated_runner(
+    runner_id: RunnerId,
+    leaf_sha256: [u8; 32],
+    authenticated_at_seconds: i64,
+    expires_at_seconds: i64,
+) -> TestResult<AuthenticatedMachine> {
+    Ok(AuthenticatedMachine::new(
+        ExternalRunnerIdentity::new(format!(
+            "automata:runner:{}",
+            runner_id.as_uuid().hyphenated()
+        ))?,
+        leaf_sha256,
+        UnixTimestamp::from_seconds(u64::try_from(authenticated_at_seconds)?),
+        UnixTimestamp::from_seconds(u64::try_from(expires_at_seconds)?),
+    )?)
 }
 
 async fn seed_member(
@@ -4415,6 +4486,301 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                 .await?,
             RunnerEnrollmentPrepareOutcome::Rejected
         ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the integration test keeps due-window, exact replay, fanout exclusion, cleanup, and audit invariants visible together"
+)]
+async fn runner_certificate_renewal_is_exact_serialized_and_bounded() -> TestResult {
+    run_with_database(|database| async move {
+        let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
+        let initial_now_ms = clock.now().await?;
+        let initial_now_seconds = initial_now_ms.div_euclid(1_000);
+        seed_tenant(pool, "runner-certificate-renewal").await?;
+        let group_id = Uuid::new_v4();
+        sqlx::query(
+            r"
+            INSERT INTO runner_groups (
+                id,tenant_id,name,normalized_name,created_at_ms,updated_at_ms
+            ) VALUES ($1,'runner-certificate-renewal','Certificate renewal',
+                      'certificate-renewal',$2,$2)
+            ",
+        )
+        .bind(group_id)
+        .bind(initial_now_ms)
+        .execute(pool)
+        .await?;
+
+        let repository = PostgresRunnerEnrollmentRepository::new(pool.clone());
+        let runner_id = RunnerId::new();
+        let old_leaf = [0x41; 32];
+        let old_expiry = initial_now_seconds
+            .checked_add(RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS + 3_600)
+            .ok_or("old certificate expiry overflow")?;
+        seed_runner_certificate(
+            pool,
+            "runner-certificate-renewal",
+            group_id,
+            runner_id,
+            old_leaf,
+            old_expiry,
+            initial_now_ms,
+        )
+        .await?;
+        let machine = authenticated_runner(runner_id, old_leaf, initial_now_seconds, old_expiry)?;
+        let operation_id = Uuid::new_v4();
+        let request_sha256 = [0x42; 32];
+        let not_due = repository
+            .renew_runner_certificate(
+                RenewRunnerCertificate::new(machine.clone(), operation_id, request_sha256)?,
+                |_, _| -> Result<_, RunnerCertificateRenewalSigningError> {
+                    panic!("signer must not run outside the fixed due window")
+                },
+            )
+            .await?;
+        assert_eq!(not_due, RunnerCertificateRenewalOutcome::NotDue);
+
+        clock.advance(3_600_000).await?;
+        let due_now_seconds = clock.now().await?.div_euclid(1_000);
+        let renewed_leaf = [0x43; 32];
+        let renewed_expiry = due_now_seconds
+            .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+            .ok_or("renewed certificate expiry overflow")?;
+        let exact_response = br#"{"operation":"first-renewal"}"#.to_vec();
+        let applied = repository
+            .renew_runner_certificate(
+                RenewRunnerCertificate::new(machine.clone(), operation_id, request_sha256)?,
+                |signed_runner_id, database_time_ms| {
+                    assert_eq!(signed_runner_id, runner_id.as_uuid());
+                    assert_eq!(database_time_ms.div_euclid(1_000), due_now_seconds);
+                    Ok(IssuedRunnerCertificateRenewal::new(
+                        renewed_leaf,
+                        due_now_seconds,
+                        renewed_expiry,
+                        exact_response.clone(),
+                    ))
+                },
+            )
+            .await?;
+        assert_eq!(
+            applied,
+            RunnerCertificateRenewalOutcome::Applied(exact_response.clone())
+        );
+        let applied_debug = format!("{applied:?}");
+        assert!(applied_debug.contains("REDACTED"));
+        assert!(!applied_debug.contains("first-renewal"));
+        let replayed = repository
+            .renew_runner_certificate(
+                RenewRunnerCertificate::new(machine.clone(), operation_id, request_sha256)?,
+                |_, _| -> Result<_, RunnerCertificateRenewalSigningError> {
+                    panic!("exact replay must not sign again")
+                },
+            )
+            .await?;
+        assert_eq!(
+            replayed,
+            RunnerCertificateRenewalOutcome::Replayed(exact_response.clone())
+        );
+        assert_eq!(
+            repository
+                .renew_runner_certificate(
+                    RenewRunnerCertificate::new(machine.clone(), operation_id, [0x44; 32])?,
+                    |_, _| -> Result<_, RunnerCertificateRenewalSigningError> {
+                        panic!("conflicting exact request must not sign")
+                    },
+                )
+                .await?,
+            RunnerCertificateRenewalOutcome::Conflict
+        );
+        assert_eq!(
+            repository
+                .renew_runner_certificate(
+                    RenewRunnerCertificate::new(machine.clone(), Uuid::new_v4(), request_sha256,)?,
+                    |_, _| -> Result<_, RunnerCertificateRenewalSigningError> {
+                        panic!("a presented leaf may have only one durable successor")
+                    },
+                )
+                .await?,
+            RunnerCertificateRenewalOutcome::Conflict
+        );
+        let committed: (i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM runner_machine_certificates WHERE runner_id=$1),
+                (SELECT count(*) FROM runner_machine_certificates
+                    WHERE runner_id=$1 AND leaf_sha256=$2),
+                (SELECT count(*) FROM runner_certificate_renewal_receipts WHERE runner_id=$1),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.certificate.renew' AND resource_id=$3)
+            ",
+        )
+        .bind(runner_id.as_uuid())
+        .bind(old_leaf.as_slice())
+        .bind(runner_id.as_uuid().hyphenated().to_string())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(committed, (2, 1, 1, 1));
+
+        let update = sqlx::query(
+            "UPDATE runner_certificate_renewal_receipts SET response=$2 WHERE operation_id=$1",
+        )
+        .bind(operation_id)
+        .bind(br#"{"different":true}"#.as_slice())
+        .execute(pool)
+        .await
+        .expect_err("renewal receipt must be immutable");
+        assert_eq!(
+            update
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("runner_certificate_renewal_receipts_immutable")
+        );
+        let delete =
+            sqlx::query("DELETE FROM runner_certificate_renewal_receipts WHERE operation_id=$1")
+                .bind(operation_id)
+                .execute(pool)
+                .await
+                .expect_err("live replay receipt must not be deletable");
+        assert_eq!(
+            delete
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::constraint),
+            Some("runner_certificate_renewal_receipts_live_delete")
+        );
+
+        let next_due_ms = renewed_expiry
+            .checked_sub(RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS)
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .ok_or("successor due time overflow")?;
+        clock.set(next_due_ms).await?;
+        let next_now_seconds = next_due_ms.div_euclid(1_000);
+        let next_leaf = [0x45; 32];
+        let next_expiry = next_now_seconds
+            .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+            .ok_or("next certificate expiry overflow")?;
+        let successor_machine =
+            authenticated_runner(runner_id, renewed_leaf, next_now_seconds, renewed_expiry)?;
+        assert!(matches!(
+            repository
+                .renew_runner_certificate(
+                    RenewRunnerCertificate::new(successor_machine, Uuid::new_v4(), [0x46; 32],)?,
+                    |signed_runner_id, database_time_ms| {
+                        assert_eq!(signed_runner_id, runner_id.as_uuid());
+                        Ok(IssuedRunnerCertificateRenewal::new(
+                            next_leaf,
+                            database_time_ms.div_euclid(1_000),
+                            next_expiry,
+                            br#"{"operation":"second-renewal"}"#.to_vec(),
+                        ))
+                    },
+                )
+                .await?,
+            RunnerCertificateRenewalOutcome::Applied(_)
+        ));
+        let bounded: (i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM runner_machine_certificates WHERE runner_id=$1),
+                (SELECT count(*) FROM runner_machine_certificates
+                    WHERE runner_id=$1 AND leaf_sha256=$2),
+                (SELECT count(*) FROM runner_certificate_renewal_receipts WHERE runner_id=$1),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.certificate.renew' AND resource_id=$3)
+            ",
+        )
+        .bind(runner_id.as_uuid())
+        .bind(old_leaf.as_slice())
+        .bind(runner_id.as_uuid().hyphenated().to_string())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(bounded, (2, 0, 1, 2));
+
+        let racing_runner = RunnerId::new();
+        let racing_leaf = [0x51; 32];
+        let racing_expiry = next_now_seconds
+            .checked_add(RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS)
+            .ok_or("racing certificate expiry overflow")?;
+        seed_runner_certificate(
+            pool,
+            "runner-certificate-renewal",
+            group_id,
+            racing_runner,
+            racing_leaf,
+            racing_expiry,
+            next_due_ms,
+        )
+        .await?;
+        let racing_machine =
+            authenticated_runner(racing_runner, racing_leaf, next_now_seconds, racing_expiry)?;
+        let signer_calls = Arc::new(AtomicUsize::new(0));
+        let left_calls = Arc::clone(&signer_calls);
+        let right_calls = Arc::clone(&signer_calls);
+        let racing_renewed_expiry = next_now_seconds
+            .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+            .ok_or("racing renewal expiry overflow")?;
+        let (left, right) = tokio::join!(
+            repository.renew_runner_certificate(
+                RenewRunnerCertificate::new(racing_machine.clone(), Uuid::new_v4(), [0x52; 32],)?,
+                move |_, database_time_ms| {
+                    left_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(IssuedRunnerCertificateRenewal::new(
+                        [0x53; 32],
+                        database_time_ms.div_euclid(1_000),
+                        racing_renewed_expiry,
+                        br#"{"racer":"left"}"#.to_vec(),
+                    ))
+                },
+            ),
+            repository.renew_runner_certificate(
+                RenewRunnerCertificate::new(racing_machine, Uuid::new_v4(), [0x54; 32],)?,
+                move |_, database_time_ms| {
+                    right_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(IssuedRunnerCertificateRenewal::new(
+                        [0x55; 32],
+                        database_time_ms.div_euclid(1_000),
+                        racing_renewed_expiry,
+                        br#"{"racer":"right"}"#.to_vec(),
+                    ))
+                },
+            ),
+        );
+        let racing_outcomes = [left?, right?];
+        assert_eq!(
+            racing_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RunnerCertificateRenewalOutcome::Applied(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            racing_outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, RunnerCertificateRenewalOutcome::Conflict))
+                .count(),
+            1
+        );
+        assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
+        let racing_counts: (i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM runner_machine_certificates WHERE runner_id=$1),
+                (SELECT count(*) FROM runner_certificate_renewal_receipts WHERE runner_id=$1),
+                (SELECT count(*) FROM security_audit_events
+                    WHERE action='runner.certificate.renew' AND resource_id=$2)
+            ",
+        )
+        .bind(racing_runner.as_uuid())
+        .bind(racing_runner.as_uuid().hyphenated().to_string())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(racing_counts, (2, 1, 1));
         Ok(())
     })
     .await

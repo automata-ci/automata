@@ -1,9 +1,9 @@
 use std::fmt;
 
-use automata_ci_auth::installation::InstallationRepositoryError;
 use automata_ci_auth::management::{
     ManagementActor, ManagementMutationOutcome, ManagementRepositoryError,
 };
+use automata_ci_auth::{installation::InstallationRepositoryError, machine::AuthenticatedMachine};
 use automata_ci_core::{MAX_REGISTERED_RUNNERS, RunnerCapabilities, RunnerGroup};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -20,16 +20,25 @@ use super::{
 const ACTION_TOKEN_CREATE: &str = "runner.enrollment_token.create";
 const ACTION_TOKEN_BOOTSTRAP: &str = "runner.enrollment_token.installation_bootstrap";
 const ACTION_ENROLL: &str = "runner.enroll";
+const ACTION_CERTIFICATE_RENEW: &str = "runner.certificate.renew";
 const ISSUER_HUMAN: &str = "human";
 const ISSUER_INSTALLATION_BOOTSTRAP: &str = "installation_bootstrap";
 const RESOURCE_ENROLLMENT: &str = "runner_enrollment";
+const RESOURCE_RUNNER_CERTIFICATE: &str = "runner_certificate";
 const MIN_TOKEN_LIFETIME_MS: i64 = 60 * 1_000;
 const MAX_TOKEN_LIFETIME_MS: i64 = 60 * 60 * 1_000;
 const RUNNER_ENROLLMENT_CAPACITY_LOCK: i64 = 0x4155_544f_4d41_5441;
 const RUNNER_ENROLLMENT_CREATE_LOCK_SALT: i64 = 0x454e_524f_4c4c_4d54;
+const RUNNER_CERTIFICATE_RENEWAL_OPERATION_LOCK_SALT: i64 = 0x4345_5254_5245_4e57;
 const MAX_NAME_BYTES: usize = 255;
 const MAX_GROUP_CHARACTERS: usize = 256;
 const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
+
+/// A runner may request renewal only inside this fixed interval before its
+/// currently presented certificate expires.
+pub const RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+const MAX_RUNNER_CERTIFICATE_RENEWAL_RESPONSE_BYTES: usize = 512 * 1_024;
 
 /// Postgres adapter for one-time runner enrollment creation and redemption.
 ///
@@ -143,6 +152,134 @@ pub const MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS: i64 = 30 * 24 * 60 * 60;
 /// covers the bounded HTTP exchange and durable credential publication so a
 /// one-use token cannot be consumed for a certificate that expires in transit.
 pub const MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS: i64 = 5 * 60;
+
+/// Authenticated, idempotent request to replace one runner certificate.
+pub struct RenewRunnerCertificate {
+    machine: AuthenticatedMachine,
+    operation_id: Uuid,
+    request_sha256: [u8; 32],
+}
+
+impl RenewRunnerCertificate {
+    /// Binds a renewal operation to the exact mTLS leaf used for this request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a nil operation identifier or an all-zero request digest.
+    pub fn new(
+        machine: AuthenticatedMachine,
+        operation_id: Uuid,
+        request_sha256: [u8; 32],
+    ) -> Result<Self, RunnerCertificateRenewalRequestError> {
+        if operation_id.is_nil() || request_sha256 == [0; 32] {
+            return Err(RunnerCertificateRenewalRequestError);
+        }
+        Ok(Self {
+            machine,
+            operation_id,
+            request_sha256,
+        })
+    }
+}
+
+impl fmt::Debug for RenewRunnerCertificate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RenewRunnerCertificate")
+            .field("operation_id", &self.operation_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One certificate and exact response produced by the configured issuer.
+pub struct IssuedRunnerCertificateRenewal {
+    leaf_sha256: [u8; 32],
+    issued_at_seconds: i64,
+    expires_at_seconds: i64,
+    response: Vec<u8>,
+}
+
+impl IssuedRunnerCertificateRenewal {
+    /// Creates the material returned by a synchronous renewal signer.
+    ///
+    /// The repository validates the material again against its transaction's
+    /// database time and the presented certificate before committing it.
+    #[must_use]
+    pub fn new(
+        leaf_sha256: [u8; 32],
+        issued_at_seconds: i64,
+        expires_at_seconds: i64,
+        response: Vec<u8>,
+    ) -> Self {
+        Self {
+            leaf_sha256,
+            issued_at_seconds,
+            expires_at_seconds,
+            response,
+        }
+    }
+}
+
+impl fmt::Debug for IssuedRunnerCertificateRenewal {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IssuedRunnerCertificateRenewal")
+            .field("issued_at_seconds", &self.issued_at_seconds)
+            .field("expires_at_seconds", &self.expires_at_seconds)
+            .field("response_bytes", &self.response.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Sanitized failure produced when the configured certificate signer rejects
+/// a CSR or cannot create the fixed runner certificate profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerCertificateRenewalSigningError;
+
+/// Invalid public fields at the renewal repository boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunnerCertificateRenewalRequestError;
+
+impl fmt::Display for RunnerCertificateRenewalRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("runner certificate renewal request is invalid")
+    }
+}
+
+impl std::error::Error for RunnerCertificateRenewalRequestError {}
+
+/// Durable result of one authenticated certificate-renewal request.
+#[derive(Clone, Eq, PartialEq)]
+pub enum RunnerCertificateRenewalOutcome {
+    /// A new certificate, immutable receipt, and one audit event committed.
+    Applied(Vec<u8>),
+    /// The exact operation and request already committed for this old leaf.
+    Replayed(Vec<u8>),
+    /// The presented machine no longer names one exact current runner record.
+    Rejected,
+    /// The current certificate is outside the fixed renewal window.
+    NotDue,
+    /// An operation or old-leaf receipt is already bound to different bytes.
+    Conflict,
+}
+
+impl fmt::Debug for RunnerCertificateRenewalOutcome {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Applied(response) => formatter
+                .debug_tuple("Applied")
+                .field(&format_args!("[REDACTED; {} bytes]", response.len()))
+                .finish(),
+            Self::Replayed(response) => formatter
+                .debug_tuple("Replayed")
+                .field(&format_args!("[REDACTED; {} bytes]", response.len()))
+                .finish(),
+            Self::Rejected => formatter.write_str("Rejected"),
+            Self::NotDue => formatter.write_str("NotDue"),
+            Self::Conflict => formatter.write_str("Conflict"),
+        }
+    }
+}
 
 /// Authorized request to create a short-lived runner enrollment token record.
 pub struct CreateRunnerEnrollmentToken {
@@ -307,6 +444,29 @@ struct CreatedEnrollmentRow {
     installation_authority_sha256: Option<Vec<u8>>,
     issued_at_ms: i64,
     expires_at_ms: i64,
+}
+
+#[derive(FromRow)]
+struct RenewalAuthorityRow {
+    runner_id: Uuid,
+    tenant_id: String,
+    external_identity: Option<String>,
+    desired_state: String,
+    leaf_sha256: Vec<u8>,
+    expires_at_seconds: i64,
+    revoked_at_seconds: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct RenewalReceiptRow {
+    operation_id: Uuid,
+    runner_id: Uuid,
+    presented_leaf_sha256: Vec<u8>,
+    request_sha256: Vec<u8>,
+    renewed_leaf_sha256: Vec<u8>,
+    response: Vec<u8>,
+    renewed_expires_at_seconds: i64,
+    stored_certificate_expires_at_seconds: Option<i64>,
 }
 
 #[derive(Clone, Copy)]
@@ -809,6 +969,293 @@ impl PostgresRunnerEnrollmentRepository {
         commit(transaction).await?;
         Ok(RunnerEnrollmentConsumeOutcome::Applied(request.response))
     }
+
+    /// Renews one currently authenticated runner certificate inside a single
+    /// database transaction.
+    ///
+    /// The presented certificate and runner row remain locked from
+    /// revalidation through signing, certificate insertion, immutable receipt,
+    /// audit append, and commit. The signer is invoked synchronously with the
+    /// exact database time while those locks are held.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized repository error when storage is unavailable or
+    /// durable authority state violates the closed renewal schema.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the transaction deliberately keeps renewal authority, signing, receipt, and audit visibly contiguous"
+    )]
+    pub async fn renew_runner_certificate<Sign>(
+        &self,
+        request: RenewRunnerCertificate,
+        sign: Sign,
+    ) -> Result<RunnerCertificateRenewalOutcome, ManagementRepositoryError>
+    where
+        Sign:
+            FnOnce(
+                Uuid,
+                i64,
+            )
+                -> Result<IssuedRunnerCertificateRenewal, RunnerCertificateRenewalSigningError>,
+    {
+        let presented_leaf_sha256 = *request.machine.certificate_sha256();
+        if presented_leaf_sha256 == [0; 32] {
+            return Err(ManagementRepositoryError::InvalidRequest);
+        }
+        let mut transaction = self.pool.begin().await.map_err(map_database_error)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,$2))")
+            .bind(request.operation_id.hyphenated().to_string())
+            .bind(RUNNER_CERTIFICATE_RENEWAL_OPERATION_LOCK_SALT)
+            .execute(&mut *transaction)
+            .await
+            .map_err(map_database_error)?;
+        let authority = sqlx::query_as::<_, RenewalAuthorityRow>(
+            r"
+            SELECT runner.id AS runner_id,
+                   runner.tenant_id,
+                   runner.external_identity,
+                   runner.desired_state,
+                   certificate.leaf_sha256,
+                   certificate.expires_at_seconds,
+                   certificate.revoked_at_seconds
+            FROM runner_machine_certificates AS certificate
+            JOIN runners AS runner ON runner.id = certificate.runner_id
+            WHERE certificate.leaf_sha256 = $1
+            FOR UPDATE OF certificate, runner
+            ",
+        )
+        .bind(presented_leaf_sha256.as_slice())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+        let Some(authority) = authority else {
+            commit(transaction).await?;
+            return Ok(RunnerCertificateRenewalOutcome::Rejected);
+        };
+        let now_ms = database_time_milliseconds(&mut transaction)
+            .await
+            .map_err(map_database_error)?;
+        let now_seconds = now_ms.div_euclid(1_000);
+        let authenticated_expires_at_seconds =
+            i64::try_from(request.machine.certificate_expires_at().as_seconds())
+                .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+        if authority.runner_id.is_nil()
+            || authority.tenant_id.is_empty()
+            || authority.external_identity.as_deref()
+                != Some(request.machine.external_identity().as_str())
+            || authority.desired_state != "active"
+            || authority.leaf_sha256.as_slice() != presented_leaf_sha256
+            || authority.revoked_at_seconds.is_some()
+            || authority.expires_at_seconds != authenticated_expires_at_seconds
+            || authority.expires_at_seconds <= now_seconds
+        {
+            commit(transaction).await?;
+            return Ok(RunnerCertificateRenewalOutcome::Rejected);
+        }
+
+        let receipt = load_renewal_receipt(&mut transaction, &presented_leaf_sha256).await?;
+        if let Some(receipt) = receipt {
+            let valid = !receipt.operation_id.is_nil()
+                && receipt.runner_id == authority.runner_id
+                && receipt.presented_leaf_sha256.as_slice() == presented_leaf_sha256
+                && receipt.request_sha256.len() == 32
+                && receipt.renewed_leaf_sha256.len() == 32
+                && receipt.renewed_leaf_sha256.as_slice() != presented_leaf_sha256
+                && !receipt.response.is_empty()
+                && receipt.response.len() <= MAX_RUNNER_CERTIFICATE_RENEWAL_RESPONSE_BYTES
+                && receipt.renewed_expires_at_seconds > authority.expires_at_seconds
+                && receipt.stored_certificate_expires_at_seconds
+                    == Some(receipt.renewed_expires_at_seconds);
+            if !valid {
+                return Err(ManagementRepositoryError::CorruptData);
+            }
+            let exact = receipt.operation_id == request.operation_id
+                && receipt.request_sha256.as_slice() == request.request_sha256;
+            commit(transaction).await?;
+            return if exact {
+                Ok(RunnerCertificateRenewalOutcome::Replayed(receipt.response))
+            } else {
+                Ok(RunnerCertificateRenewalOutcome::Conflict)
+            };
+        }
+        let operation_collision: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM runner_certificate_renewal_receipts WHERE operation_id=$1)",
+        )
+        .bind(request.operation_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+        if operation_collision {
+            commit(transaction).await?;
+            return Ok(RunnerCertificateRenewalOutcome::Conflict);
+        }
+        let remaining = authority.expires_at_seconds.saturating_sub(now_seconds);
+        if remaining > RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS {
+            commit(transaction).await?;
+            return Ok(RunnerCertificateRenewalOutcome::NotDue);
+        }
+
+        delete_expired_runner_certificate_state(&mut transaction, authority.runner_id, now_seconds)
+            .await?;
+        let active_certificates: i64 = sqlx::query_scalar(
+            r"
+            SELECT count(*)
+            FROM runner_machine_certificates
+            WHERE runner_id=$1
+              AND revoked_at_seconds IS NULL
+              AND expires_at_seconds > $2
+            ",
+        )
+        .bind(authority.runner_id)
+        .bind(now_seconds)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+        if active_certificates != 1 {
+            return Err(ManagementRepositoryError::CorruptData);
+        }
+
+        let Ok(issued) = sign(authority.runner_id, now_ms) else {
+            commit(transaction).await?;
+            return Ok(RunnerCertificateRenewalOutcome::Rejected);
+        };
+        if issued.leaf_sha256 == [0; 32]
+            || issued.leaf_sha256 == presented_leaf_sha256
+            || issued.issued_at_seconds != now_seconds
+            || issued.expires_at_seconds <= authority.expires_at_seconds
+            || issued
+                .expires_at_seconds
+                .checked_sub(now_seconds)
+                .is_none_or(|remaining| {
+                    remaining < MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS
+                })
+            || issued
+                .expires_at_seconds
+                .checked_sub(issued.issued_at_seconds)
+                .is_none_or(|lifetime| {
+                    !(1..=MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS).contains(&lifetime)
+                })
+            || issued.response.is_empty()
+            || issued.response.len() > MAX_RUNNER_CERTIFICATE_RENEWAL_RESPONSE_BYTES
+        {
+            return Err(ManagementRepositoryError::InvalidRequest);
+        }
+
+        sqlx::query(
+            "INSERT INTO runner_machine_certificates (leaf_sha256,runner_id,expires_at_seconds) VALUES ($1,$2,$3)",
+        )
+        .bind(issued.leaf_sha256.as_slice())
+        .bind(authority.runner_id)
+        .bind(issued.expires_at_seconds)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+        let audit_event_id = Uuid::new_v4();
+        sqlx::query(
+            r"
+            INSERT INTO security_audit_events (
+                event_id,tenant_id,occurred_at_ms,actor_kind,action,outcome,
+                resource_kind,resource_id,request_id
+            ) VALUES ($1,$2,$3,'system',$4,'succeeded',$5,$6,$7)
+            ",
+        )
+        .bind(audit_event_id)
+        .bind(&authority.tenant_id)
+        .bind(now_ms)
+        .bind(ACTION_CERTIFICATE_RENEW)
+        .bind(RESOURCE_RUNNER_CERTIFICATE)
+        .bind(authority.runner_id.hyphenated().to_string())
+        .bind(request.operation_id.hyphenated().to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+        sqlx::query(
+            r"
+            INSERT INTO runner_certificate_renewal_receipts (
+                operation_id,runner_id,presented_leaf_sha256,request_sha256,
+                renewed_leaf_sha256,response,renewed_expires_at_seconds,
+                created_at_ms,audit_event_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ",
+        )
+        .bind(request.operation_id)
+        .bind(authority.runner_id)
+        .bind(presented_leaf_sha256.as_slice())
+        .bind(request.request_sha256.as_slice())
+        .bind(issued.leaf_sha256.as_slice())
+        .bind(&issued.response)
+        .bind(issued.expires_at_seconds)
+        .bind(now_ms)
+        .bind(audit_event_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(map_database_error)?;
+        commit(transaction).await?;
+        Ok(RunnerCertificateRenewalOutcome::Applied(issued.response))
+    }
+}
+
+async fn load_renewal_receipt(
+    transaction: &mut Transaction<'_, Postgres>,
+    presented_leaf_sha256: &[u8; 32],
+) -> Result<Option<RenewalReceiptRow>, ManagementRepositoryError> {
+    sqlx::query_as::<_, RenewalReceiptRow>(
+        r"
+        SELECT receipt.operation_id,
+               receipt.runner_id,
+               receipt.presented_leaf_sha256,
+               receipt.request_sha256,
+               receipt.renewed_leaf_sha256,
+               receipt.response,
+               receipt.renewed_expires_at_seconds,
+               certificate.expires_at_seconds AS stored_certificate_expires_at_seconds
+        FROM runner_certificate_renewal_receipts AS receipt
+        LEFT JOIN runner_machine_certificates AS certificate
+          ON certificate.runner_id=receipt.runner_id
+         AND certificate.leaf_sha256=receipt.renewed_leaf_sha256
+        WHERE receipt.presented_leaf_sha256=$1
+        ",
+    )
+    .bind(presented_leaf_sha256.as_slice())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_database_error)
+}
+
+async fn delete_expired_runner_certificate_state(
+    transaction: &mut Transaction<'_, Postgres>,
+    runner_id: Uuid,
+    now_seconds: i64,
+) -> Result<(), ManagementRepositoryError> {
+    sqlx::query(
+        r"
+        DELETE FROM runner_certificate_renewal_receipts AS receipt
+        USING runner_machine_certificates AS certificate
+        WHERE receipt.runner_id=$1
+          AND certificate.runner_id=receipt.runner_id
+          AND certificate.leaf_sha256=receipt.presented_leaf_sha256
+          AND certificate.expires_at_seconds <= $2
+        ",
+    )
+    .bind(runner_id)
+    .bind(now_seconds)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    sqlx::query(
+        r"
+        DELETE FROM runner_machine_certificates
+        WHERE runner_id=$1
+          AND expires_at_seconds <= $2
+        ",
+    )
+    .bind(runner_id)
+    .bind(now_seconds)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    Ok(())
 }
 
 async fn create_authorized_runner_enrollment(

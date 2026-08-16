@@ -9,6 +9,14 @@ validates the host and opens an mTLS session to
 the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
+For Unix file-backed TLS custody, the long-lived command also renews its runner
+certificate before expiry through the dedicated mTLS authority. It recovers
+partial file rotation durably, drains every old-identity task and connection,
+then rebuilds the composition with the replacement identity. The macOS
+Keychain and Windows environment-backed examples intentionally fail closed at
+this boundary until native atomic custody adapters and physical-host
+qualification exist; there is no manual or static-identity fallback.
+
 `automata-runner run` selects exactly one host-compatible provider from its
 configuration: rootless Podman or Kubernetes on Linux, fresh
 Hyper-V-isolated Windows containers on Windows, or disposable

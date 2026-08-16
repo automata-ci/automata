@@ -804,6 +804,7 @@ impl ControlSemanticMetrics {
                     "application",
                     &[
                         "forbidden",
+                        "too_early",
                         "conflict",
                         "unavailable",
                         "internal",
@@ -828,52 +829,54 @@ impl ControlSemanticMetrics {
                     .get_or_create(&RunnerTransportByteLabels { route, direction });
             }
         }
-        let route = "ephemeral_secrets";
-        self.preinitialize_transport_request(route, "cancelled", "cancelled");
-        for (stage, outcomes) in [
-            (
-                "head",
-                &[
-                    "http_version",
-                    "method",
-                    "not_found",
-                    "unsupported_media_type",
-                    "length_required",
-                    "invalid_content_length",
-                    "body_too_large",
-                ][..],
-            ),
-            (
-                "authentication",
-                &["untrusted", "expired", "unavailable", "timeout"][..],
-            ),
-            (
-                "body",
-                &["too_large", "invalid", "transport", "timeout"][..],
-            ),
-            (
-                "application",
-                &[
-                    "forbidden",
-                    "conflict",
-                    "unavailable",
-                    "internal",
-                    "timeout",
-                ][..],
-            ),
-            ("response", &["too_large", "success"][..]),
-        ] {
-            for outcome in outcomes {
-                self.preinitialize_transport_request(route, stage, outcome);
+        for route in ["ephemeral_secrets", "certificate_renewal"] {
+            self.preinitialize_transport_request(route, "cancelled", "cancelled");
+            for (stage, outcomes) in [
+                (
+                    "head",
+                    &[
+                        "http_version",
+                        "method",
+                        "not_found",
+                        "unsupported_media_type",
+                        "length_required",
+                        "invalid_content_length",
+                        "body_too_large",
+                    ][..],
+                ),
+                (
+                    "authentication",
+                    &["untrusted", "expired", "unavailable", "timeout"][..],
+                ),
+                (
+                    "body",
+                    &["too_large", "invalid", "transport", "timeout"][..],
+                ),
+                (
+                    "application",
+                    &[
+                        "forbidden",
+                        "too_early",
+                        "conflict",
+                        "unavailable",
+                        "internal",
+                        "timeout",
+                    ][..],
+                ),
+                ("response", &["too_large", "success"][..]),
+            ] {
+                for outcome in outcomes {
+                    self.preinitialize_transport_request(route, stage, outcome);
+                }
             }
-        }
-        self.runner_transport_in_flight
-            .get_or_create(&RunnerTransportRouteLabels { route })
-            .set(0);
-        for direction in ["request", "response"] {
-            let _ = self
-                .runner_transport_bytes
-                .get_or_create(&RunnerTransportByteLabels { route, direction });
+            self.runner_transport_in_flight
+                .get_or_create(&RunnerTransportRouteLabels { route })
+                .set(0);
+            for direction in ["request", "response"] {
+                let _ = self
+                    .runner_transport_bytes
+                    .get_or_create(&RunnerTransportByteLabels { route, direction });
+            }
         }
     }
 
@@ -2377,6 +2380,7 @@ const fn runner_transport_route(route: RunnerTransportRoute) -> &'static str {
         RunnerTransportRoute::Handshake => "handshake",
         RunnerTransportRoute::Sync => "sync",
         RunnerTransportRoute::EphemeralSecrets => "ephemeral_secrets",
+        RunnerTransportRoute::CertificateRenewal => "certificate_renewal",
     }
 }
 
@@ -2425,6 +2429,7 @@ const fn runner_transport_application_rejection(
 ) -> &'static str {
     match reason {
         RunnerTransportApplicationRejection::Forbidden => "forbidden",
+        RunnerTransportApplicationRejection::TooEarly => "too_early",
         RunnerTransportApplicationRejection::Conflict => "conflict",
         RunnerTransportApplicationRejection::Unavailable => "unavailable",
         RunnerTransportApplicationRejection::Internal => "internal",

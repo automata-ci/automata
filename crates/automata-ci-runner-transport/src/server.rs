@@ -27,10 +27,13 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::{
-    ApplicationErrorKind, AuthenticatedRunnerEphemeralRequest, AuthenticatedRunnerRequest,
-    ConfigurationError, ControlRoute, EPHEMERAL_SECRETS_CONTENT_TYPE, EPHEMERAL_SECRETS_PATH,
-    MAX_EPHEMERAL_REQUEST_BYTES, MAX_EPHEMERAL_RESPONSE_BYTES, NoopRunnerTransportObserver,
-    PROTOBUF_CONTENT_TYPE, RunnerControlHandler, RunnerEphemeralHandler,
+    ApplicationError, ApplicationErrorKind, AuthenticatedRunnerCertificateRenewalRequest,
+    AuthenticatedRunnerEphemeralRequest, AuthenticatedRunnerRequest,
+    CERTIFICATE_RENEWAL_CONTENT_TYPE, CERTIFICATE_RENEWAL_PATH, ConfigurationError, ControlRoute,
+    EPHEMERAL_SECRETS_CONTENT_TYPE, EPHEMERAL_SECRETS_PATH, MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES,
+    MAX_CERTIFICATE_RENEWAL_RESPONSE_BYTES, MAX_EPHEMERAL_REQUEST_BYTES,
+    MAX_EPHEMERAL_RESPONSE_BYTES, NoopRunnerTransportObserver, PROTOBUF_CONTENT_TYPE,
+    RunnerCertificateRenewalHandler, RunnerControlHandler, RunnerEphemeralHandler,
     RunnerTransportApplicationRejection, RunnerTransportAuthenticationRejection,
     RunnerTransportBodyRejection, RunnerTransportByteDirection, RunnerTransportConnectionEvent,
     RunnerTransportDecodeRejection, RunnerTransportHeadRejection, RunnerTransportObserver,
@@ -95,6 +98,7 @@ pub struct RunnerControlServer {
     verifier: Arc<dyn MachineIdentityVerifier>,
     handler: Arc<dyn RunnerControlHandler>,
     ephemeral_route: Option<EphemeralRouteConfig>,
+    certificate_renewal_route: Option<CertificateRenewalRouteConfig>,
     observer: Arc<dyn RunnerTransportObserver>,
     protocol_limits: ProtocolLimits,
     transport_limits: TransportLimits,
@@ -131,6 +135,7 @@ impl RunnerControlServer {
             verifier,
             handler,
             ephemeral_route: None,
+            certificate_renewal_route: None,
             observer: Arc::new(NoopRunnerTransportObserver),
             protocol_limits,
             transport_limits,
@@ -162,6 +167,24 @@ impl RunnerControlServer {
         handler: Arc<dyn RunnerEphemeralHandler>,
     ) -> Self {
         self.ephemeral_route = Some(EphemeralRouteConfig {
+            expected_authority,
+            handler,
+        });
+        self
+    }
+
+    /// Installs the certificate-renewal route on this mTLS listener.
+    ///
+    /// The route is absent unless product composition has an exact certificate
+    /// issuer and durable renewal repository. Every request is reauthenticated
+    /// from its presented leaf before the handler receives bounded bytes.
+    #[must_use]
+    pub fn with_certificate_renewal_handler(
+        mut self,
+        expected_authority: Authority,
+        handler: Arc<dyn RunnerCertificateRenewalHandler>,
+    ) -> Self {
+        self.certificate_renewal_route = Some(CertificateRenewalRouteConfig {
             expected_authority,
             handler,
         });
@@ -222,6 +245,7 @@ impl RunnerControlServer {
                         verifier: Arc::clone(&self.verifier),
                         handler: Arc::clone(&self.handler),
                         ephemeral_route: self.ephemeral_route.clone(),
+                        certificate_renewal_route: self.certificate_renewal_route.clone(),
                         observer: Arc::clone(&self.observer),
                         protocol_limits: self.protocol_limits,
                         transport_limits: self.transport_limits,
@@ -279,6 +303,7 @@ struct ConnectionState {
     verifier: Arc<dyn MachineIdentityVerifier>,
     handler: Arc<dyn RunnerControlHandler>,
     ephemeral_route: Option<EphemeralRouteConfig>,
+    certificate_renewal_route: Option<CertificateRenewalRouteConfig>,
     observer: Arc<dyn RunnerTransportObserver>,
     protocol_limits: ProtocolLimits,
     transport_limits: TransportLimits,
@@ -335,6 +360,7 @@ async fn serve_connection(
         verifier: state.verifier,
         handler: state.handler,
         ephemeral_route: state.ephemeral_route,
+        certificate_renewal_route: state.certificate_renewal_route,
         observer: Arc::clone(&state.observer),
         evidence,
         protocol_limits: state.protocol_limits,
@@ -405,6 +431,7 @@ struct RequestState {
     verifier: Arc<dyn MachineIdentityVerifier>,
     handler: Arc<dyn RunnerControlHandler>,
     ephemeral_route: Option<EphemeralRouteConfig>,
+    certificate_renewal_route: Option<CertificateRenewalRouteConfig>,
     observer: Arc<dyn RunnerTransportObserver>,
     evidence: Arc<MachineAuthenticationEvidence>,
     protocol_limits: ProtocolLimits,
@@ -430,6 +457,10 @@ async fn handle_request(request: Request<Incoming>, state: Arc<RequestState>) ->
 
     if request.uri().path() == EPHEMERAL_SECRETS_PATH && state.ephemeral_route.is_some() {
         return handle_ephemeral_request(request, &state, &mut request_observation).await;
+    }
+    if request.uri().path() == CERTIFICATE_RENEWAL_PATH && state.certificate_renewal_route.is_some()
+    {
+        return handle_certificate_renewal_request(request, &state, &mut request_observation).await;
     }
 
     let (route, declared_length) = match validate_request_head(&request, &state.transport_limits) {
@@ -509,10 +540,13 @@ async fn handle_ephemeral_request(
         )
         .respond(request_observation);
     };
-    let declared_length = match validate_ephemeral_request_head(
+    let declared_length = match validate_sensitive_request_head(
         &request,
         &state.transport_limits,
         &route_config.expected_authority,
+        EPHEMERAL_SECRETS_PATH,
+        EPHEMERAL_SECRETS_CONTENT_TYPE,
+        MAX_EPHEMERAL_REQUEST_BYTES,
     ) {
         Ok(length) => length,
         Err((reason, status)) => {
@@ -529,7 +563,16 @@ async fn handle_ephemeral_request(
         Err(failure) => return failure.respond(request_observation),
     };
     let (_, body) = request.into_parts();
-    let body = match receive_ephemeral_request_body(body, declared_length, state, route).await {
+    let body = match receive_sensitive_request_body(
+        body,
+        declared_length,
+        state,
+        route,
+        MAX_EPHEMERAL_REQUEST_BYTES,
+        None,
+    )
+    .await
+    {
         Ok(body) => body,
         Err(failure) => return failure.respond(request_observation),
     };
@@ -549,14 +592,7 @@ async fn handle_ephemeral_request(
     {
         Ok(Ok(reply)) => reply,
         Ok(Err(error)) => {
-            return RequestFailure::new(
-                RunnerTransportRequestObservation::ApplicationRejected {
-                    route,
-                    reason: transport_application_rejection(error.kind()),
-                },
-                application_status(error.kind()),
-            )
-            .respond(request_observation);
+            return sensitive_application_failure(route, error, request_observation);
         }
         Err(_) => {
             return RequestFailure::new(
@@ -569,10 +605,113 @@ async fn handle_ephemeral_request(
             .respond(request_observation);
         }
     };
-    let body = reply.into_body();
-    if body.len() > MAX_EPHEMERAL_RESPONSE_BYTES
-        || body.len() > state.transport_limits.response_body_bytes()
+    sensitive_success_response(
+        reply.into_body(),
+        state,
+        route,
+        MAX_EPHEMERAL_RESPONSE_BYTES,
+        EPHEMERAL_SECRETS_CONTENT_TYPE,
+        request_observation,
+    )
+}
+
+async fn handle_certificate_renewal_request(
+    request: Request<Incoming>,
+    state: &RequestState,
+    request_observation: &mut RequestObservationGuard,
+) -> HttpResponse {
+    let route = RunnerTransportRoute::CertificateRenewal;
+    request_observation.set_route(route);
+    let Some(route_config) = state.certificate_renewal_route.as_ref() else {
+        return RequestFailure::new(
+            RunnerTransportRequestObservation::ApplicationRejected {
+                route,
+                reason: RunnerTransportApplicationRejection::Unavailable,
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+        .respond(request_observation);
+    };
+    let declared_length = match validate_sensitive_request_head(
+        &request,
+        &state.transport_limits,
+        &route_config.expected_authority,
+        CERTIFICATE_RENEWAL_PATH,
+        CERTIFICATE_RENEWAL_CONTENT_TYPE,
+        MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES,
+    ) {
+        Ok(length) => length,
+        Err((reason, status)) => {
+            return RequestFailure::new(
+                RunnerTransportRequestObservation::HeadRejected { route, reason },
+                status,
+            )
+            .respond(request_observation);
+        }
+    };
+    let _in_flight = RequestInFlight::new(Arc::clone(&state.observer), route);
+    let machine = match authenticate_request(state, route).await {
+        Ok(machine) => machine,
+        Err(failure) => return failure.respond(request_observation),
+    };
+    let total_deadline = tokio::time::Instant::now() + state.transport_limits.handler_timeout();
+    let (_, body) = request.into_parts();
+    let body = match receive_sensitive_request_body(
+        body,
+        declared_length,
+        state,
+        route,
+        MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES,
+        Some(total_deadline),
+    )
+    .await
     {
+        Ok(body) => body,
+        Err(failure) => return failure.respond(request_observation),
+    };
+    state.observer.observe_bytes(
+        route,
+        RunnerTransportByteDirection::Request,
+        u64::try_from(body.len()).unwrap_or(u64::MAX),
+    );
+    let cancellation = state.shutdown.child_token();
+    let _cancel_on_drop = cancellation.clone().drop_guard();
+    let request = AuthenticatedRunnerCertificateRenewalRequest::new(machine, body, cancellation);
+    let reply = match timeout_at(total_deadline, route_config.handler.handle(request)).await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(error)) => {
+            return sensitive_application_failure(route, error, request_observation);
+        }
+        Err(_) => {
+            return RequestFailure::new(
+                RunnerTransportRequestObservation::ApplicationRejected {
+                    route,
+                    reason: RunnerTransportApplicationRejection::Timeout,
+                },
+                StatusCode::GATEWAY_TIMEOUT,
+            )
+            .respond(request_observation);
+        }
+    };
+    sensitive_success_response(
+        reply.into_body(),
+        state,
+        route,
+        MAX_CERTIFICATE_RENEWAL_RESPONSE_BYTES,
+        CERTIFICATE_RENEWAL_CONTENT_TYPE,
+        request_observation,
+    )
+}
+
+fn sensitive_success_response(
+    body: Zeroizing<Vec<u8>>,
+    state: &RequestState,
+    route: RunnerTransportRoute,
+    route_maximum: usize,
+    media_type: &'static str,
+    request_observation: &mut RequestObservationGuard,
+) -> HttpResponse {
+    if body.len() > route_maximum || body.len() > state.transport_limits.response_body_bytes() {
         return RequestFailure::response_rejected(
             route,
             RunnerTransportResponseRejection::TooLarge,
@@ -585,13 +724,31 @@ async fn handle_ephemeral_request(
         u64::try_from(body.len()).unwrap_or(u64::MAX),
     );
     request_observation.finish(RunnerTransportRequestObservation::Succeeded { route });
-    ephemeral_response(body)
+    sensitive_response(body, media_type)
 }
 
-fn validate_ephemeral_request_head<B>(
+fn sensitive_application_failure(
+    route: RunnerTransportRoute,
+    error: ApplicationError,
+    request_observation: &mut RequestObservationGuard,
+) -> HttpResponse {
+    RequestFailure::new(
+        RunnerTransportRequestObservation::ApplicationRejected {
+            route,
+            reason: transport_application_rejection(error.kind()),
+        },
+        application_status(error.kind()),
+    )
+    .respond(request_observation)
+}
+
+fn validate_sensitive_request_head<B>(
     request: &Request<B>,
     limits: &TransportLimits,
     expected_authority: &Authority,
+    expected_path: &str,
+    media_type: &str,
+    route_maximum: usize,
 ) -> Result<usize, (RunnerTransportHeadRejection, StatusCode)> {
     if request.version() != Version::HTTP_2 {
         return Err((
@@ -608,21 +765,17 @@ fn validate_ephemeral_request_head<B>(
     if request.uri().scheme() != Some(&Scheme::HTTPS)
         || request.uri().authority() != Some(expected_authority)
         || request.uri().query().is_some()
-        || request.uri().path() != EPHEMERAL_SECRETS_PATH
+        || request.uri().path() != expected_path
     {
         return Err((
             RunnerTransportHeadRejection::NotFound,
             StatusCode::NOT_FOUND,
         ));
     }
-    validate_exact_media_type(request.headers(), EPHEMERAL_SECRETS_CONTENT_TYPE)
+    validate_exact_media_type(request.headers(), media_type)
         .map_err(|status| (RunnerTransportHeadRejection::UnsupportedMediaType, status))?;
-    validate_exact_header(
-        request.headers(),
-        ACCEPT,
-        EPHEMERAL_SECRETS_CONTENT_TYPE.as_bytes(),
-    )
-    .map_err(|status| (RunnerTransportHeadRejection::UnsupportedMediaType, status))?;
+    validate_exact_header(request.headers(), ACCEPT, media_type.as_bytes())
+        .map_err(|status| (RunnerTransportHeadRejection::UnsupportedMediaType, status))?;
     validate_exact_header(request.headers(), CACHE_CONTROL, b"no-store")
         .map_err(|status| (RunnerTransportHeadRejection::UnsupportedMediaType, status))?;
     if request.headers().contains_key(CONTENT_ENCODING)
@@ -643,7 +796,7 @@ fn validate_ephemeral_request_head<B>(
             status,
         )
     })?;
-    if length == 0 || length > MAX_EPHEMERAL_REQUEST_BYTES || length > limits.request_body_bytes() {
+    if length == 0 || length > route_maximum || length > limits.request_body_bytes() {
         return Err((
             RunnerTransportHeadRejection::BodyTooLarge,
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -658,18 +811,24 @@ struct EphemeralRouteConfig {
     handler: Arc<dyn RunnerEphemeralHandler>,
 }
 
-async fn receive_ephemeral_request_body(
+#[derive(Clone)]
+struct CertificateRenewalRouteConfig {
+    expected_authority: Authority,
+    handler: Arc<dyn RunnerCertificateRenewalHandler>,
+}
+
+async fn receive_sensitive_request_body(
     body: Incoming,
     declared_length: usize,
     state: &RequestState,
     route: RunnerTransportRoute,
+    route_maximum: usize,
+    total_deadline: Option<tokio::time::Instant>,
 ) -> Result<Zeroizing<Vec<u8>>, RequestFailure> {
-    let maximum = MAX_EPHEMERAL_REQUEST_BYTES.min(state.transport_limits.request_body_bytes());
-    let result = timeout(
-        state.transport_limits.request_body_timeout(),
-        read_secret_body(body, declared_length, maximum),
-    )
-    .await;
+    let maximum = route_maximum.min(state.transport_limits.request_body_bytes());
+    let body_deadline = tokio::time::Instant::now() + state.transport_limits.request_body_timeout();
+    let deadline = total_deadline.map_or(body_deadline, |total| total.min(body_deadline));
+    let result = timeout_at(deadline, read_secret_body(body, declared_length, maximum)).await;
     let (reason, status) = match result {
         Ok(Ok(body)) => return Ok(body),
         Ok(Err(BodyReadError::TooLarge)) => (
@@ -1182,6 +1341,7 @@ const fn runner_request_header(
 const fn application_status(kind: ApplicationErrorKind) -> StatusCode {
     match kind {
         ApplicationErrorKind::Forbidden => StatusCode::FORBIDDEN,
+        ApplicationErrorKind::TooEarly => StatusCode::TOO_EARLY,
         ApplicationErrorKind::StaleSession | ApplicationErrorKind::Conflict => StatusCode::CONFLICT,
         ApplicationErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         ApplicationErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1193,6 +1353,7 @@ const fn transport_application_rejection(
 ) -> RunnerTransportApplicationRejection {
     match kind {
         ApplicationErrorKind::Forbidden => RunnerTransportApplicationRejection::Forbidden,
+        ApplicationErrorKind::TooEarly => RunnerTransportApplicationRejection::TooEarly,
         ApplicationErrorKind::StaleSession | ApplicationErrorKind::Conflict => {
             RunnerTransportApplicationRejection::Conflict
         }
@@ -1291,14 +1452,13 @@ fn protobuf_response(body: Bytes) -> HttpResponse {
     response
 }
 
-fn ephemeral_response(body: Zeroizing<Vec<u8>>) -> HttpResponse {
+fn sensitive_response(body: Zeroizing<Vec<u8>>, media_type: &'static str) -> HttpResponse {
     let content_length = HeaderValue::from(body.len());
     let mut response = Response::new(Full::new(ResponseBytes::sensitive(body)));
     *response.status_mut() = StatusCode::OK;
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE),
-    );
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(media_type));
     response
         .headers_mut()
         .insert(CONTENT_LENGTH, content_length);
@@ -1389,15 +1549,29 @@ mod tests {
         let authority: Authority = "runner.example:8443".parse().expect("authority");
         let mut request = request(&format!("https://{authority}{EPHEMERAL_SECRETS_PATH}"));
         assert!(
-            validate_ephemeral_request_head(&request, &TransportLimits::default(), &authority)
-                .is_ok()
+            validate_sensitive_request_head(
+                &request,
+                &TransportLimits::default(),
+                &authority,
+                EPHEMERAL_SECRETS_PATH,
+                EPHEMERAL_SECRETS_CONTENT_TYPE,
+                MAX_EPHEMERAL_REQUEST_BYTES,
+            )
+            .is_ok()
         );
 
         request
             .headers_mut()
             .append(CONTENT_LENGTH, HeaderValue::from_static("1"));
         assert_eq!(
-            validate_ephemeral_request_head(&request, &TransportLimits::default(), &authority),
+            validate_sensitive_request_head(
+                &request,
+                &TransportLimits::default(),
+                &authority,
+                EPHEMERAL_SECRETS_PATH,
+                EPHEMERAL_SECRETS_CONTENT_TYPE,
+                MAX_EPHEMERAL_REQUEST_BYTES,
+            ),
             Err((
                 RunnerTransportHeadRejection::InvalidContentLength,
                 StatusCode::BAD_REQUEST
@@ -1414,7 +1588,14 @@ mod tests {
                 .headers_mut()
                 .insert(header, HeaderValue::from_static("identity"));
             assert_eq!(
-                validate_ephemeral_request_head(&request, &TransportLimits::default(), &authority),
+                validate_sensitive_request_head(
+                    &request,
+                    &TransportLimits::default(),
+                    &authority,
+                    EPHEMERAL_SECRETS_PATH,
+                    EPHEMERAL_SECRETS_CONTENT_TYPE,
+                    MAX_EPHEMERAL_REQUEST_BYTES,
+                ),
                 Err((
                     RunnerTransportHeadRejection::UnsupportedMediaType,
                     StatusCode::UNSUPPORTED_MEDIA_TYPE
@@ -1433,10 +1614,13 @@ mod tests {
             format!("http://{authority}{EPHEMERAL_SECRETS_PATH}"),
         ] {
             assert_eq!(
-                validate_ephemeral_request_head(
+                validate_sensitive_request_head(
                     &request(&uri),
                     &TransportLimits::default(),
-                    &authority
+                    &authority,
+                    EPHEMERAL_SECRETS_PATH,
+                    EPHEMERAL_SECRETS_CONTENT_TYPE,
+                    MAX_EPHEMERAL_REQUEST_BYTES,
                 ),
                 Err((
                     RunnerTransportHeadRejection::NotFound,

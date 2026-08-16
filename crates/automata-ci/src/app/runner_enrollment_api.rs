@@ -12,13 +12,19 @@ use automata_ci_auth::{
     time::Clock,
 };
 use automata_ci_auth_postgres::management::{
-    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
-    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
-    RunnerEnrollmentPrepareOutcome,
+    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, IssuedRunnerCertificateRenewal,
+    MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
+    PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment, PreparedRunnerEnrollment,
+    RenewRunnerCertificate, RunnerCertificateRenewalOutcome, RunnerCertificateRenewalSigningError,
+    RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
 };
 use automata_ci_control::runner_control::capability_admission::RunnerCapabilityReadiness;
 use automata_ci_core::{RunnerCapabilities, RunnerFeature, RunnerGroup};
+use automata_ci_runner_transport::{
+    ApplicationError, ApplicationErrorKind, AuthenticatedRunnerCertificateRenewalRequest,
+    CertificateRenewalHandlerFuture, RunnerCertificateRenewalHandler,
+    RunnerCertificateRenewalReply,
+};
 use axum::{
     Router,
     body::Bytes,
@@ -48,6 +54,7 @@ pub(crate) const RUNNER_ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 pub(crate) const RUNNER_ENROLLMENT_REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
 
 const REDEEM_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-request.v1\0";
+const RENEWAL_REQUEST_DOMAIN: &[u8] = b"automata.runner-certificate-renewal-request.v1\0";
 const MAX_REQUEST_BYTES: usize = 384 * 1_024;
 const INITIAL_REQUEST_CAPACITY_BYTES: usize = 8 * 1_024;
 const MAX_CSR_BYTES: usize = 32 * 1_024;
@@ -314,6 +321,140 @@ fn server_root_authority(
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RunnerCertificateIssuerError;
+
+/// Operational certificate-renewal handler installed only with the exact
+/// runner issuer and its durable `PostgreSQL` authority.
+pub(crate) struct OperationalRunnerCertificateRenewalHandler {
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
+    issuer: Arc<RunnerCertificateIssuer>,
+}
+
+impl OperationalRunnerCertificateRenewalHandler {
+    pub(crate) fn new(
+        repository: Arc<PostgresRunnerEnrollmentRepository>,
+        issuer: Arc<RunnerCertificateIssuer>,
+    ) -> Self {
+        Self { repository, issuer }
+    }
+
+    async fn handle_inner(
+        &self,
+        request: AuthenticatedRunnerCertificateRenewalRequest,
+    ) -> Result<RunnerCertificateRenewalReply, ApplicationError> {
+        let (machine, body, cancellation) = request.into_parts();
+        let document: RenewRunnerCertificateDocument = serde_json::from_slice(&body)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Forbidden))?;
+        if document.operation_id.is_nil()
+            || document.csr_pem.is_empty()
+            || document.csr_pem.len() > MAX_CSR_BYTES
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Forbidden));
+        }
+        let mut digest = Sha256::new();
+        digest.update(RENEWAL_REQUEST_DOMAIN);
+        digest.update(body.as_slice());
+        let request_sha256 = digest.finalize().into();
+        let renewal = RenewRunnerCertificate::new(machine, document.operation_id, request_sha256)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Forbidden))?;
+        let certificate_issuer = Arc::clone(&self.issuer);
+        let operation_id = document.operation_id;
+        let csr_pem = document.csr_pem;
+        let operation = self.repository.renew_runner_certificate(
+            renewal,
+            move |runner_id, database_time_ms| {
+                let issued_certificate = certificate_issuer
+                    .issue(runner_id, &csr_pem, database_time_ms)
+                    .map_err(|_| RunnerCertificateRenewalSigningError)?;
+                let response = RenewRunnerCertificateResponse {
+                    operation_id,
+                    runner_id,
+                    control_endpoint: issued_certificate.control_endpoint,
+                    certificate_chain_pem: issued_certificate.certificate_chain_pem,
+                    certificate_expires_at_seconds: issued_certificate.expires_at_seconds,
+                };
+                let response = serde_json::to_vec(&response)
+                    .map_err(|_| RunnerCertificateRenewalSigningError)?;
+                Ok(IssuedRunnerCertificateRenewal::new(
+                    issued_certificate.leaf_sha256,
+                    issued_certificate.issued_at_seconds,
+                    issued_certificate.expires_at_seconds,
+                    response,
+                ))
+            },
+        );
+        let outcome = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return Err(ApplicationError::new(ApplicationErrorKind::Unavailable));
+            }
+            outcome = operation => outcome,
+        }
+        .map_err(renewal_repository_error)?;
+        renewal_outcome_reply(outcome)
+    }
+}
+
+fn renewal_outcome_reply(
+    outcome: RunnerCertificateRenewalOutcome,
+) -> Result<RunnerCertificateRenewalReply, ApplicationError> {
+    match outcome {
+        RunnerCertificateRenewalOutcome::Applied(response)
+        | RunnerCertificateRenewalOutcome::Replayed(response) => {
+            RunnerCertificateRenewalReply::new(response)
+        }
+        RunnerCertificateRenewalOutcome::Rejected => {
+            Err(ApplicationError::new(ApplicationErrorKind::Forbidden))
+        }
+        RunnerCertificateRenewalOutcome::NotDue => {
+            Err(ApplicationError::new(ApplicationErrorKind::TooEarly))
+        }
+        RunnerCertificateRenewalOutcome::Conflict => {
+            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+        }
+    }
+}
+
+impl fmt::Debug for OperationalRunnerCertificateRenewalHandler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OperationalRunnerCertificateRenewalHandler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RunnerCertificateRenewalHandler for OperationalRunnerCertificateRenewalHandler {
+    fn handle(
+        &self,
+        request: AuthenticatedRunnerCertificateRenewalRequest,
+    ) -> CertificateRenewalHandlerFuture<'_> {
+        Box::pin(self.handle_inner(request))
+    }
+}
+
+fn renewal_repository_error(error: ManagementRepositoryError) -> ApplicationError {
+    let kind = match error {
+        ManagementRepositoryError::InvalidRequest => ApplicationErrorKind::Forbidden,
+        ManagementRepositoryError::Unavailable => ApplicationErrorKind::Unavailable,
+        ManagementRepositoryError::CorruptData => ApplicationErrorKind::Internal,
+    };
+    ApplicationError::new(kind)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenewRunnerCertificateDocument {
+    operation_id: Uuid,
+    csr_pem: String,
+}
+
+#[derive(Serialize)]
+struct RenewRunnerCertificateResponse {
+    operation_id: Uuid,
+    runner_id: Uuid,
+    control_endpoint: String,
+    certificate_chain_pem: String,
+    certificate_expires_at_seconds: i64,
+}
 
 #[derive(Clone)]
 struct RunnerEnrollmentCreateApiState {
@@ -783,6 +924,17 @@ mod tests {
             .expect("server certificate")
             .pem();
         format!("{leaf}{ca_pem}")
+    }
+
+    #[test]
+    fn renewal_not_due_is_retryable_but_a_real_conflict_is_terminal() {
+        let not_due = renewal_outcome_reply(RunnerCertificateRenewalOutcome::NotDue)
+            .expect_err("not-due renewal must remain retryable");
+        assert_eq!(not_due.kind(), ApplicationErrorKind::TooEarly);
+
+        let conflict = renewal_outcome_reply(RunnerCertificateRenewalOutcome::Conflict)
+            .expect_err("durable renewal conflict must remain terminal");
+        assert_eq!(conflict.kind(), ApplicationErrorKind::Conflict);
     }
 
     #[tokio::test]
