@@ -198,6 +198,12 @@ fn fixture_manifest_binding(
         GithubInstallationBindingGeneration::new(installation_generation)
             .expect("installation generation"),
     )
+    .with_repository_owner_id(
+        ProviderRepositoryOwnerId::new(
+            u64::try_from(namespace + 104).expect("repository owner ID"),
+        )
+        .expect("repository owner ID"),
+    )
 }
 
 async fn stage_authenticated_admission(
@@ -1933,6 +1939,7 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
             .await?
             .ok_or("signed source was not resolved")?;
         assert_eq!(source.repository(), signed.repository());
+        assert_eq!(source.repository_owner_id(), "804");
         assert_eq!(source.workflow_id(), signed.workflow_id());
         assert_eq!(source.workflow_path(), signed.workflow_path());
         assert_eq!(source.source(), signed.source());
