@@ -243,13 +243,13 @@ BEGIN
             OR check_outbox.claimed_at_ms > NEW.granted_at_ms
             OR check_outbox.state_updated_at_ms > NEW.granted_at_ms
             OR check_outbox.claim_expires_at_ms <= NEW.granted_at_ms
-            OR NEW.required_through_ms::NUMERIC >
-                check_outbox.claim_expires_at_ms::NUMERIC
-                + CASE NEW.consumer_action
+            OR NEW.required_through_ms::NUMERIC
+                > check_outbox.claim_expires_at_ms::NUMERIC
+                + (CASE NEW.consumer_action
                     WHEN 'publish_check_run' THEN 600000
                     ELSE 300000
-                  END
-            OR CASE NEW.consumer_action
+                END)
+            OR (CASE NEW.consumer_action
                 WHEN 'ensure_check_suite' THEN check_outbox.claim_action <> 'ensure_suite'
                 WHEN 'create_check_run' THEN
                     check_outbox.claim_action <> 'prepare_run_create'
@@ -257,7 +257,7 @@ BEGIN
                     check_outbox.claim_action <> 'reconcile_run_create'
                 WHEN 'publish_check_run' THEN check_outbox.claim_action <> 'publish'
                 ELSE TRUE
-               END
+            END)
             OR check_subject.tenant_id <> authority.tenant_id
             OR check_subject.repository_id <> authority.repository_id
             OR check_subject.provider_connection_id <>
