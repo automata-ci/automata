@@ -554,6 +554,14 @@ runner mTLS, Results, and the Docker socket are private to exact Compose
 networks or mounts. Job containers use a separate network and reach Results
 through an exact gateway/proxy; they cannot join the dependency network.
 
+The rendered PostgreSQL certificate uses one deterministic reserved `.invalid`
+DNS identity. The control plane selects the explicit
+Web-PKI-plus-private-CA verify-full policy: SQLx's compiled public roots remain
+in the declared trust union, while the reserved name prevents a public CA from
+issuing a competing certificate. Database URLs contain explicit TCP fields and
+no query parameters; ambient `PG*`, passfile, socket, and search-path authority
+is rejected.
+
 An optional public HTTPS origin is added only for GitHub connection. Its
 gateway exposes the minimum human callback, setup, and webhook routes. A tunnel
 provider must preserve webhook bytes and headers, persist its origin across

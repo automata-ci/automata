@@ -1,11 +1,10 @@
 use std::{fmt, net::IpAddr, time::Duration};
 
+use automata_ci_tls::{MAX_CA_CERTIFICATE_PEM_BYTES, ValidatedCaCertificate};
 use aws_sdk_s3::{Client, config::Region};
 use aws_smithy_http_client::tls::{TlsContext, TrustStore};
-use rustls::{RootCertStore, pki_types::CertificateDer};
 use thiserror::Error;
 use url::{Host, Url};
-use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
 use crate::adapter::S3BlobStore;
@@ -17,7 +16,7 @@ const MAX_KMS_KEY_ID_BYTES: usize = 2_048;
 const MAX_OPERATION_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Maximum accepted size of one exact private S3 CA certificate in PEM form.
-pub const MAX_S3_PRIVATE_CA_PEM_BYTES: usize = 1024 * 1024;
+pub const MAX_S3_PRIVATE_CA_PEM_BYTES: usize = MAX_CA_CERTIFICATE_PEM_BYTES;
 
 /// Closed trust policy for authenticating an HTTPS S3 endpoint.
 #[derive(Clone, Eq, PartialEq)]
@@ -28,7 +27,7 @@ pub struct S3TlsTrust {
 #[derive(Clone, Eq, PartialEq)]
 enum S3TlsTrustPolicy {
     WebPki,
-    PrivateCa { certificate_pem: Vec<u8> },
+    PrivateCa(ValidatedCaCertificate),
 }
 
 impl S3TlsTrust {
@@ -51,48 +50,18 @@ impl S3TlsTrust {
     /// terminal LF, and no trailing data or second document. When `KeyUsage` is
     /// present, it must authorize certificate signing.
     pub fn private_ca(certificate_pem: impl Into<Vec<u8>>) -> Result<Self, S3BlobStoreConfigError> {
-        let certificate_pem = certificate_pem.into();
-        if certificate_pem.is_empty() || certificate_pem.len() > MAX_S3_PRIVATE_CA_PEM_BYTES {
-            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
-        }
-        let (label, certificate_der) = pem_rfc7468::decode_vec(&certificate_pem)
-            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
-        if label != "CERTIFICATE" {
-            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
-        }
-        let canonical_pem = pem_rfc7468::encode_string(
-            "CERTIFICATE",
-            pem_rfc7468::LineEnding::LF,
-            &certificate_der,
-        )
-        .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
-        if canonical_pem.as_bytes() != certificate_pem {
-            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
-        }
-        let (remaining, certificate) = parse_x509_certificate(&certificate_der)
-            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
-        let key_usage = certificate
-            .key_usage()
-            .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
-        if !remaining.is_empty()
-            || !certificate.tbs_certificate.is_ca()
-            || key_usage.is_some_and(|usage| !usage.value.key_cert_sign())
-        {
-            return Err(S3BlobStoreConfigError::InvalidPrivateCa);
-        }
-        RootCertStore::empty()
-            .add(CertificateDer::from(certificate_der))
+        let certificate = ValidatedCaCertificate::new(certificate_pem)
             .map_err(|_| S3BlobStoreConfigError::InvalidPrivateCa)?;
         Ok(Self {
-            mode: S3TlsTrustPolicy::PrivateCa { certificate_pem },
+            mode: S3TlsTrustPolicy::PrivateCa(certificate),
         })
     }
 
     fn tls_context(&self) -> Result<TlsContext, S3BlobStoreConfigError> {
         let trust_store = match &self.mode {
             S3TlsTrustPolicy::WebPki => TrustStore::default(),
-            S3TlsTrustPolicy::PrivateCa { certificate_pem } => {
-                TrustStore::empty().with_pem_certificate(certificate_pem.clone())
+            S3TlsTrustPolicy::PrivateCa(certificate) => {
+                TrustStore::empty().with_pem_certificate(certificate.as_pem().to_vec())
             }
         };
         TlsContext::builder()
@@ -102,7 +71,7 @@ impl S3TlsTrust {
     }
 
     const fn is_private_ca(&self) -> bool {
-        matches!(&self.mode, S3TlsTrustPolicy::PrivateCa { .. })
+        matches!(&self.mode, S3TlsTrustPolicy::PrivateCa(_))
     }
 }
 
@@ -110,7 +79,7 @@ impl fmt::Debug for S3TlsTrust {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match &self.mode {
             S3TlsTrustPolicy::WebPki => "S3TlsTrust::WebPki",
-            S3TlsTrustPolicy::PrivateCa { .. } => "S3TlsTrust::PrivateCa([certificate redacted])",
+            S3TlsTrustPolicy::PrivateCa(_) => "S3TlsTrust::PrivateCa([certificate redacted])",
         })
     }
 }

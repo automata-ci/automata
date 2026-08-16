@@ -48,6 +48,7 @@ members = [
     "crates/automata-ci-service-proxy",
     "crates/automata-ci-store",
     "crates/automata-ci-store-postgres",
+    "crates/automata-ci-tls",
     "crates/automata-ci-ui-renderer",
     "crates/automata-ci-workflow-github",
     "crates/automata-ci-workflow-service",
@@ -118,6 +119,7 @@ automata-ci-secret = { path = "crates/automata-ci-secret", version = "0.1.0" }
 automata-ci-secret-postgres = { path = "crates/automata-ci-secret-postgres", version = "0.1.0" }
 automata-ci-store = { path = "crates/automata-ci-store", version = "0.1.0" }
 automata-ci-store-postgres = { path = "crates/automata-ci-store-postgres", version = "0.1.0" }
+automata-ci-tls = { path = "crates/automata-ci-tls", version = "0.1.0" }
 automata-ci-ui-renderer = { path = "crates/automata-ci-ui-renderer", version = "0.1.0" }
 automata-ci-workflow-github = { path = "crates/automata-ci-workflow-github", version = "0.1.0" }
 automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", version = "0.1.0" }
@@ -141,6 +143,7 @@ k8s-openapi = { version = "0.28.0", features = ["v1_34"] }
 kube = { version = "4.2.0", default-features = false, features = ["client", "ring", "rustls-tls", "ws"] }
 libc = "0.2.189"
 pem-rfc7468 = { version = "1.0.0", default-features = false, features = ["std"] }
+percent-encoding = "2.3.2"
 processkit = { version = "=3.3.1", default-features = false, features = ["limits"] }
 prometheus-client = "=0.25.0"
 prost = { version = "=0.14.4", default-features = false, features = ["derive"] }

@@ -113,10 +113,22 @@ This applies to database, object-store, runner TLS, Results signing,
 authentication, and wrapping-key credentials. References are redacted from
 debug and startup errors, and loaded values have context-specific size limits.
 
-Database connections force full TLS certificate and hostname verification.
-Local development may select `--database-transport loopback-plaintext`, but
-the effective target must be a Unix socket or literal loopback IP address;
-hostnames and remote addresses are rejected.
+Database URLs use one exact `postgresql://` TCP grammar with an explicit host,
+port, user, non-empty password, and database. Query parameters, fragments,
+socket paths, the `postgres://` alias, `.pgpass`, and every ambient `PG*`
+environment setting are rejected. Connections use the fixed `public` search
+path.
+
+The default `--database-transport web-pki-verify-full` requires TLS certificate
+and hostname verification through SQLx's compiled Web PKI roots. The explicit
+`web-pki-plus-private-ca-verify-full` mode adds one bounded canonical CA from
+`--database-private-ca-source`; SQLx retains the Web PKI roots in that mode, so
+it is intentionally a trust union rather than private-CA-only trust. Local
+development may select `loopback-plaintext`, but only with a literal-loopback
+TCP address. Hostnames, remote addresses, and Unix sockets are rejected.
+Generated local topology uses a reserved `.invalid` database DNS identity with
+the explicit Web-PKI-plus-private-CA union, so no public CA can issue for that
+name even though the compiled public roots remain installed.
 
 Required server sources are:
 

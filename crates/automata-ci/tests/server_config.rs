@@ -272,6 +272,73 @@ fn server_s3_trust_policy_is_closed_and_exact() {
 }
 
 #[test]
+fn server_database_transport_policy_names_the_exact_trust_union() {
+    let marker = "AUTOMATA_DATABASE_CA_REFERENCE_MARKER";
+    let private = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--database-transport",
+        "web-pki-plus-private-ca-verify-full",
+        "--database-private-ca-source",
+        &format!("env:{marker}"),
+    ])
+    .expect("additive private CA syntax");
+    let Command::Server(private) = private.command else {
+        panic!("server command expected");
+    };
+    let config = ServerConfig::from_args(&private).expect("complete additive CA policy");
+    let debug = format!("{config:?}");
+    assert!(debug.contains("WebPkiPlusPrivateCaVerifyFull"));
+    assert!(!debug.contains(marker));
+
+    for arguments in [
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--database-transport",
+            "web-pki-plus-private-ca-verify-full",
+        ],
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--database-private-ca-source",
+            "file:/run/secrets/unrequested-database-ca.pem",
+        ],
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--database-transport",
+            "loopback-plaintext",
+            "--database-private-ca-source",
+            "file:/run/secrets/unrequested-database-ca.pem",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments).expect("database trust syntax");
+        let Command::Server(args) = cli.command else {
+            panic!("server command expected");
+        };
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidDatabaseTransport)
+        ));
+    }
+
+    assert!(
+        Cli::try_parse_from(["automata", "server", "--database-transport", "verify-full",])
+            .is_err(),
+        "the ambiguous legacy trust label must not remain accepted"
+    );
+}
+
+#[test]
 fn server_private_ca_and_loopback_plaintext_are_incompatible() {
     let private_plaintext = Cli::try_parse_from([
         "automata",

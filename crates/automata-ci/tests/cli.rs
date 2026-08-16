@@ -1,5 +1,5 @@
 use automata_ci::cli::{
-    AuthCommand, Cli, Command, EnvironmentReviewDecision, InternalCommand,
+    AuthCommand, Cli, Command, DatabaseTransport, EnvironmentReviewDecision, InternalCommand,
     InternalObjectStoreCommand, LocalCommand, LocalContainerEngine, OutputFormat, RepositoryRef,
     RerunSelection, S3TlsTrustMode, SecretCommand, SecretProviderCommand, SecretScope,
 };
@@ -14,6 +14,8 @@ fn server_uses_a_loopback_default() {
         panic!("server command expected");
     };
     assert_eq!(args.listen.to_string(), "127.0.0.1:8080");
+    assert_eq!(args.database_transport, DatabaseTransport::WebPkiVerifyFull);
+    assert!(args.database_private_ca_source.is_none());
 }
 
 #[test]

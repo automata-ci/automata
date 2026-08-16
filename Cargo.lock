@@ -374,18 +374,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-blob",
+ "automata-ci-tls",
  "aws-sdk-s3",
  "aws-smithy-http-client",
  "base64 0.23.1",
  "bytes",
- "pem-rfc7468",
  "rcgen",
  "rustls",
  "thiserror",
  "tokio",
  "tokio-rustls",
  "url",
- "x509-parser",
  "zeroize",
 ]
 
@@ -1132,6 +1131,9 @@ dependencies = [
  "automata-ci-oidc-github",
  "automata-ci-schedule",
  "automata-ci-store",
+ "automata-ci-tls",
+ "percent-encoding",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1140,7 +1142,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "automata-ci-tls"
+version = "0.1.0"
+dependencies = [
+ "pem-rfc7468",
+ "rcgen",
+ "rustls",
+ "thiserror",
+ "x509-parser",
 ]
 
 [[package]]

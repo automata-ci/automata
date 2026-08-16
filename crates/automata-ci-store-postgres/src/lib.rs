@@ -2,7 +2,7 @@
 #![deny(missing_docs)]
 //! `PostgreSQL` implementation of Automata's durable store ports.
 
-use std::{fmt, net::IpAddr, str::FromStr as _, sync::Arc};
+use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_auth::authorization::{OutputVisibility, SecretExposureClass};
@@ -18,10 +18,7 @@ use automata_ci_core::{
     JobLifecycle, Lease, LeaseGuard, LeaseId, RunnerId, RunnerSessionId, UnixMillis,
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider, KeyPurpose};
-use sqlx::{
-    PgConnection, PgPool, Row as _,
-    postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
-};
+use sqlx::{PgConnection, PgPool, Row as _, postgres::PgPoolOptions};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -39,6 +36,7 @@ mod schema_bindings_tests;
 
 mod admission;
 mod conformance;
+mod connection;
 mod durable_schema;
 mod event_subject;
 mod g1;
@@ -80,6 +78,10 @@ mod workflow_rerun;
 mod workflow_run_trust_snapshot;
 mod workflow_runtime_policy;
 
+pub use connection::{
+    MAX_POSTGRES_PRIVATE_CA_PEM_BYTES, PostgresConnectionConfig, PostgresConnectionConfigError,
+    PostgresTransportSecurity,
+};
 pub use github_oidc::{
     PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository,
 };
@@ -95,30 +97,15 @@ pub use secret_management::PostgresSecretManagementRepository;
 /// APIs where exposing the `PostgreSQL` driver as an error source is useful.
 #[derive(Debug, Error)]
 pub enum PostgresStoreError {
-    /// The connection URL or pool configuration is invalid.
-    #[error("PostgreSQL connection configuration is invalid")]
-    InvalidConfiguration,
-    /// Plaintext transport was requested for a non-local endpoint.
-    #[error("plaintext PostgreSQL is restricted to a local socket or literal loopback address")]
-    InsecureTransport,
+    /// The pool bound is zero.
+    #[error("PostgreSQL maximum connections must be greater than zero")]
+    InvalidPoolSize,
     /// Establishing the configured database pool failed.
     #[error("failed to connect to PostgreSQL")]
     Connection(#[source] sqlx::Error),
     /// Applying the embedded schema migrations failed.
     #[error("failed to migrate PostgreSQL")]
     Migration(#[source] sqlx::migrate::MigrateError),
-}
-
-/// Fail-closed transport policy for a `PostgreSQL` connection.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PostgresTransportSecurity {
-    /// Require TLS with both certificate-chain and hostname verification.
-    VerifyFull,
-    /// Explicit local-development exception that disables TLS.
-    ///
-    /// This mode accepts only a Unix-domain socket or a literal loopback IP
-    /// address. Hostnames such as `localhost` are deliberately rejected.
-    LoopbackPlaintext,
 }
 
 const RUNNER_COMMAND_ENCRYPTION_PURPOSE: &str = "control-plane/runner-command:v1";
@@ -450,22 +437,19 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
-    /// Connects to `PostgreSQL` with a bounded pool and explicit transport policy.
+    /// Connects to `PostgreSQL` with a bounded pool and validated exact configuration.
     ///
     /// # Errors
     ///
-    /// Returns an error if the URL or pool bound is invalid, a plaintext policy
-    /// targets anything other than a local socket or literal loopback address,
-    /// or `PostgreSQL` cannot be reached.
+    /// Returns an error if the pool bound is zero or `PostgreSQL` cannot be reached.
     pub async fn connect(
-        database_url: &str,
+        connection: PostgresConnectionConfig,
         maximum_connections: u32,
-        transport_security: PostgresTransportSecurity,
     ) -> Result<Self, PostgresStoreError> {
         if maximum_connections == 0 {
-            return Err(PostgresStoreError::InvalidConfiguration);
+            return Err(PostgresStoreError::InvalidPoolSize);
         }
-        let options = connection_options(database_url, transport_security)?;
+        let options = connection.into_connect_options();
         let pool = PgPoolOptions::new()
             .max_connections(maximum_connections)
             .connect_with(options)
@@ -551,89 +535,6 @@ impl PostgresStore {
         .ok_or(AttemptStoreError::NotFound(attempt_id))?;
 
         decode_snapshot(&row)
-    }
-}
-
-fn connection_options(
-    database_url: &str,
-    transport_security: PostgresTransportSecurity,
-) -> Result<PgConnectOptions, PostgresStoreError> {
-    let scheme = database_url
-        .split_once(':')
-        .map(|(scheme, _)| scheme)
-        .ok_or(PostgresStoreError::InvalidConfiguration)?;
-    if !scheme.eq_ignore_ascii_case("postgres") && !scheme.eq_ignore_ascii_case("postgresql") {
-        return Err(PostgresStoreError::InvalidConfiguration);
-    }
-    let options = PgConnectOptions::from_str(database_url)
-        .map_err(|_| PostgresStoreError::InvalidConfiguration)?;
-    match transport_security {
-        PostgresTransportSecurity::VerifyFull => Ok(options.ssl_mode(PgSslMode::VerifyFull)),
-        PostgresTransportSecurity::LoopbackPlaintext => {
-            let host = options.get_host();
-            let local_socket = options.get_socket().is_some() || host.starts_with('/');
-            let ip_literal = host
-                .strip_prefix('[')
-                .and_then(|host| host.strip_suffix(']'))
-                .unwrap_or(host);
-            let literal_loopback = ip_literal
-                .parse::<IpAddr>()
-                .is_ok_and(|address| address.is_loopback());
-            if !local_socket && !literal_loopback {
-                return Err(PostgresStoreError::InsecureTransport);
-            }
-            Ok(options.ssl_mode(PgSslMode::Disable))
-        }
-    }
-}
-
-#[cfg(test)]
-mod transport_security_tests {
-    use super::*;
-
-    #[test]
-    fn verified_transport_overrides_fallback_modes() {
-        let options = connection_options(
-            "postgresql://user:secret@database.example.test/automata?sslmode=disable",
-            PostgresTransportSecurity::VerifyFull,
-        )
-        .expect("verified transport configuration");
-        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
-    }
-
-    #[test]
-    fn plaintext_transport_accepts_only_effective_local_targets() {
-        for url in [
-            "postgresql://user@127.0.0.1/automata?sslmode=prefer",
-            "postgresql://user@[::1]/automata?sslmode=require",
-            "postgresql://user@%2Fvar%2Frun%2Fpostgresql/automata",
-        ] {
-            let options = connection_options(url, PostgresTransportSecurity::LoopbackPlaintext)
-                .unwrap_or_else(|error| panic!("explicit local target {url}: {error}"));
-            assert!(matches!(options.get_ssl_mode(), PgSslMode::Disable));
-        }
-
-        for url in [
-            "postgresql://user@localhost/automata",
-            "postgresql://user@database.example.test/automata",
-            "postgresql://user@127.0.0.1/automata?host=database.example.test",
-        ] {
-            assert!(matches!(
-                connection_options(url, PostgresTransportSecurity::LoopbackPlaintext),
-                Err(PostgresStoreError::InsecureTransport)
-            ));
-        }
-    }
-
-    #[test]
-    fn non_postgres_urls_are_rejected_without_echoing_the_input() {
-        let error = connection_options(
-            "https://user:unique-secret@example.test/automata",
-            PostgresTransportSecurity::VerifyFull,
-        )
-        .expect_err("wrong URL scheme");
-        assert!(matches!(error, PostgresStoreError::InvalidConfiguration));
-        assert!(!error.to_string().contains("unique-secret"));
     }
 }
 

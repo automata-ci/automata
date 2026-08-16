@@ -28,7 +28,7 @@ use automata_ci_provisioning::{
     DelegatedActorIssuer, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
 };
 use automata_ci_results_github::ResultsPublicEndpoint;
-use automata_ci_store_postgres::PostgresTransportSecurity;
+use automata_ci_store_postgres::{MAX_POSTGRES_PRIVATE_CA_PEM_BYTES, PostgresTransportSecurity};
 
 use crate::cli::{DatabaseTransport, S3ConnectionArgs, S3TlsTrustMode, ServerArgs};
 
@@ -300,6 +300,14 @@ pub enum SecretLoadError {
     InvalidCertificate,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum DatabaseTransportLoadError {
+    #[error(transparent)]
+    Secret(#[from] SecretLoadError),
+    #[error("PostgreSQL private CA source is invalid")]
+    InvalidPrivateCa,
+}
+
 /// Validated product configuration for one control-plane replica.
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
@@ -319,7 +327,7 @@ pub struct ServerConfig {
     pub(crate) github_oidc: Option<GithubOidcConfig>,
     pub(crate) database_url: SecretSource,
     pub(crate) database_max_connections: u32,
-    pub(crate) database_transport_security: PostgresTransportSecurity,
+    pub(crate) database_transport: DatabaseTransportConfig,
     pub(crate) s3: S3ConnectionConfig,
     pub(crate) runner_client_ca_certificate: SecretSource,
     pub(crate) runner_client_ca_private_key: SecretSource,
@@ -333,6 +341,17 @@ pub struct ServerConfig {
     pub(crate) maximum_lease_failures: LeaseFailureLimit,
     pub(crate) stale_runner_session_timeout: StaleSessionTimeoutMillis,
     pub(crate) fallback_tenant_id: String,
+}
+
+/// Validated source-level `PostgreSQL` transport policy.
+#[derive(Clone, Debug)]
+pub(crate) enum DatabaseTransportConfig {
+    /// Verify through `SQLx`'s compiled Web PKI roots.
+    WebPkiVerifyFull,
+    /// Verify through compiled Web PKI roots plus one explicit private CA.
+    WebPkiPlusPrivateCaVerifyFull { certificate_source: SecretSource },
+    /// Disable TLS for an exact literal-loopback TCP URL.
+    LoopbackPlaintext,
 }
 
 /// Shared validated S3 connection, trust, deadline, and credential sources.
@@ -741,6 +760,7 @@ impl ServerConfig {
         validate_server_secret_sources(args)?;
         validate_local_listeners(args)?;
         validate_fallback_tenant(&args.fallback_tenant_id)?;
+        let database_transport = database_transport_configuration(args)?;
         let s3_at_rest_encryption = s3_at_rest_encryption(args.s3_kms_key_id.as_deref())?;
         let s3 =
             S3ConnectionConfig::from_args(&args.s3, args.s3_prefix.clone(), s3_at_rest_encryption)?;
@@ -803,12 +823,7 @@ impl ServerConfig {
             github_oidc,
             database_url: args.database_url_source.clone(),
             database_max_connections: args.database_max_connections,
-            database_transport_security: match args.database_transport {
-                DatabaseTransport::VerifyFull => PostgresTransportSecurity::VerifyFull,
-                DatabaseTransport::LoopbackPlaintext => {
-                    PostgresTransportSecurity::LoopbackPlaintext
-                }
-            },
+            database_transport,
             s3,
             runner_client_ca_certificate: args.runner_client_ca_certificate_source.clone(),
             runner_client_ca_private_key: args.runner_client_ca_key_source.clone(),
@@ -880,6 +895,27 @@ impl ServerConfig {
 
     pub(crate) fn load_database_url(&self) -> Result<Zeroizing<String>, SecretLoadError> {
         self.database_url.load_scalar(MAX_DATABASE_URL_BYTES)
+    }
+
+    pub(crate) fn load_database_transport(
+        &self,
+    ) -> Result<PostgresTransportSecurity, DatabaseTransportLoadError> {
+        match &self.database_transport {
+            DatabaseTransportConfig::WebPkiVerifyFull => {
+                Ok(PostgresTransportSecurity::web_pki_verify_full())
+            }
+            DatabaseTransportConfig::WebPkiPlusPrivateCaVerifyFull { certificate_source } => {
+                let certificate_pem =
+                    certificate_source.load_bytes(MAX_POSTGRES_PRIVATE_CA_PEM_BYTES)?;
+                PostgresTransportSecurity::web_pki_plus_private_ca_verify_full(
+                    certificate_pem.to_vec(),
+                )
+                .map_err(|_| DatabaseTransportLoadError::InvalidPrivateCa)
+            }
+            DatabaseTransportConfig::LoopbackPlaintext => {
+                Ok(PostgresTransportSecurity::loopback_plaintext())
+            }
+        }
     }
 
     pub(crate) fn load_client_ca_pem(&self) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
@@ -1331,6 +1367,7 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
     let optional = [
         args.github_provider_config_source.as_ref(),
         args.github_oidc_config_source.as_ref(),
+        args.database_private_ca_source.as_ref(),
         args.conformance_export_token_source.as_ref(),
         args.management_client_ca_certificate_source.as_ref(),
         args.management_server_certificate_source.as_ref(),
@@ -1347,6 +1384,31 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         return Err(ServerConfigError::InvalidSecretSource);
     }
     Ok(())
+}
+
+fn database_transport_configuration(
+    args: &ServerArgs,
+) -> Result<DatabaseTransportConfig, ServerConfigError> {
+    match (
+        args.database_transport,
+        args.database_private_ca_source.as_ref(),
+    ) {
+        (DatabaseTransport::WebPkiVerifyFull, None) => {
+            Ok(DatabaseTransportConfig::WebPkiVerifyFull)
+        }
+        (DatabaseTransport::WebPkiPlusPrivateCaVerifyFull, Some(certificate_source)) => {
+            Ok(DatabaseTransportConfig::WebPkiPlusPrivateCaVerifyFull {
+                certificate_source: certificate_source.clone(),
+            })
+        }
+        (DatabaseTransport::LoopbackPlaintext, None) => {
+            Ok(DatabaseTransportConfig::LoopbackPlaintext)
+        }
+        (DatabaseTransport::WebPkiVerifyFull | DatabaseTransport::LoopbackPlaintext, Some(_))
+        | (DatabaseTransport::WebPkiPlusPrivateCaVerifyFull, None) => {
+            Err(ServerConfigError::InvalidDatabaseTransport)
+        }
+    }
 }
 
 fn validate_external_url(args: &ServerArgs, external_url: &Url) -> Result<(), ServerConfigError> {
@@ -1482,6 +1544,9 @@ pub enum ServerConfigError {
     /// The `PostgreSQL` pool size is zero.
     #[error("database maximum connections must be greater than zero")]
     InvalidDatabaseConnections,
+    /// The `PostgreSQL` transport and additive CA source are inconsistent.
+    #[error("database transport configuration is invalid")]
+    InvalidDatabaseTransport,
     /// A configured duration is zero.
     #[error("server durations must be greater than zero")]
     InvalidDuration,
