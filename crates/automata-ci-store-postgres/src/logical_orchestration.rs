@@ -195,7 +195,7 @@ async fn resolve_authenticated_dispatch_source(
         r"
         SELECT DISTINCT repository.scm_provider,
                repository.provider_repository_id,
-               current_manifest.github_repository_owner_id,
+               manifest.github_repository_owner_id,
                repository.owner, repository.name, workflow.path,
                snapshot.source_digest, snapshot.source_object_key,
                snapshot.source_size_bytes, snapshot.source_media_type
@@ -203,6 +203,12 @@ async fn resolve_authenticated_dispatch_source(
         JOIN github_provider_manifest_current AS current_manifest
           ON current_manifest.tenant_id = repository.tenant_id
          AND current_manifest.repository_id = repository.id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = current_manifest.tenant_id
+         AND manifest.repository_id = current_manifest.repository_id
+         AND manifest.provider_connection_id = current_manifest.provider_connection_id
+         AND manifest.manifest_revision = current_manifest.manifest_revision
+         AND manifest.manifest_digest = current_manifest.manifest_digest
         JOIN workflow_definitions AS workflow
           ON workflow.repository_id = repository.id
         JOIN workflow_runs AS run
@@ -226,7 +232,7 @@ async fn resolve_authenticated_dispatch_source(
           AND run.git_ref = $4
           AND run.head_sha = $5
           AND run.admission_epoch = $6
-          AND current_manifest.github_repository_owner_id IS NOT NULL
+          AND manifest.github_repository_owner_id IS NOT NULL
         LIMIT 2
         ",
     )
