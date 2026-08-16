@@ -1288,6 +1288,17 @@ async fn run_detail(
         .await
     {
         Ok(Some(data)) => data,
+        Ok(None) if context.viewer().is_none() && context.sign_in_action().is_some() => {
+            let mut return_path = format!(
+                "/{}/{}/actions/runs/{run_id}",
+                repository_path.owner, repository_path.name
+            );
+            if let Some(query) = raw_query.as_deref().filter(|query| !query.is_empty()) {
+                return_path.push('?');
+                return_path.push_str(query);
+            }
+            return deep_link_sign_in(state, &context, return_path).await;
+        }
         Ok(None) => return not_found(),
         Err(error) => return data_error_response(error),
     };
@@ -1370,26 +1381,7 @@ async fn job_log(
                 return_path.push('?');
                 return_path.push_str(query);
             }
-            let csp_nonce = match new_csp_nonce() {
-                Ok(nonce) => nonce,
-                Err(error) => {
-                    error!(%error, "failed to generate a CSP nonce");
-                    return internal_server_error();
-                }
-            };
-            let request_json = match model::deep_link_sign_in(
-                client_assets(),
-                csp_nonce.clone(),
-                &context,
-                return_path,
-            ) {
-                Ok(request) => request,
-                Err(error) => {
-                    error!(%error, "failed to assemble deep-link sign-in page");
-                    return internal_server_error();
-                }
-            };
-            return render(state, request_json, csp_nonce).await;
+            return deep_link_sign_in(state, &context, return_path).await;
         }
         Ok(None) => return not_found(),
         Err(error) => return data_error_response(error),
@@ -1423,6 +1415,29 @@ async fn job_log(
             return internal_server_error();
         }
     };
+    render(state, request_json, csp_nonce).await
+}
+
+async fn deep_link_sign_in(
+    state: WebState,
+    context: &RequestContext,
+    return_path: String,
+) -> Response<Body> {
+    let csp_nonce = match new_csp_nonce() {
+        Ok(nonce) => nonce,
+        Err(error) => {
+            error!(%error, "failed to generate a CSP nonce");
+            return internal_server_error();
+        }
+    };
+    let request_json =
+        match model::deep_link_sign_in(client_assets(), csp_nonce.clone(), context, return_path) {
+            Ok(request) => request,
+            Err(error) => {
+                error!(%error, "failed to assemble deep-link sign-in page");
+                return internal_server_error();
+            }
+        };
     render(state, request_json, csp_nonce).await
 }
 
@@ -4928,6 +4943,43 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(data.calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn anonymous_missing_and_denied_run_links_share_an_exact_sign_in_handoff() {
+        for outcome in [FakeOutcome::Missing, FakeOutcome::Unauthorized] {
+            let (app, renderer, data) = test_router(outcome);
+            let context = RequestContext::new(
+                TenantId::new("acme-production").expect("tenant"),
+                AuthorizationContext::anonymous(),
+                None,
+                Some(crate::app::github_auth::GITHUB_WEB_BEGIN_PATH.to_owned()),
+            )
+            .expect("anonymous sign-in context");
+            let app = app.layer(Extension(context));
+            let uri =
+                format!("/acme-labs/payments-api/actions/runs/{RUN_ID}?job_cursor=request_job");
+
+            let response = get(&app, &uri).await;
+            let page = renderer.page();
+
+            assert_page_headers(&response, &page);
+            assert_eq!(page["page"]["kind"], "deep-link-sign-in");
+            assert_eq!(
+                page["page"]["shell"]["signIn"]["action"],
+                crate::app::github_auth::GITHUB_WEB_BEGIN_PATH
+            );
+            assert_eq!(page["page"]["shell"]["signIn"]["returnPath"], uri);
+            assert_eq!(
+                data.calls(),
+                vec![RecordedCall::RunDetail {
+                    repository: repository_path(),
+                    run_id: run_id(),
+                    job_cursor: Some("request_job".to_owned()),
+                    limit: RUN_JOB_PAGE_SIZE,
+                }]
+            );
+        }
     }
 
     #[tokio::test]

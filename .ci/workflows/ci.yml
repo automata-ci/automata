@@ -1,10 +1,9 @@
-name: CI
+name: Main CI
 
 on:
   push:
     branches:
       - main
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -390,6 +389,15 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      rustfs:
+        image: docker.io/rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c
+        env:
+          RUSTFS_ACCESS_KEY: automata-local
+          RUSTFS_SECRET_KEY: automata-local-secret-change-me
+          RUSTFS_SSE_S3_MASTER_KEY: YXV0b21hdGEtbG9jYWwtc3NlLW1hc3Rlci1rZXktdjE=
+          RUSTFS_ADDRESS: 0.0.0.0:9000
+        ports:
+          - 9000:9000
     env:
       AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
       AUTOMATA_TEST_DATABASE_NAMESPACE: res01_${{ github.run_id }}_${{ github.run_attempt }}
@@ -456,24 +464,14 @@ jobs:
           npm ci --prefix target/exact-actions/download-artifact --ignore-scripts --no-audit --no-fund
           npm ci --prefix target/exact-actions/cache --ignore-scripts --no-audit --no-fund
 
-      - name: Start pinned production-compatible object store
+      - name: Wait for pinned production-compatible object store
         run: |
-          docker run --detach --rm \
-            --name automata-res01-rustfs \
-            --publish 127.0.0.1:9000:9000 \
-            --env RUSTFS_ACCESS_KEY="$AUTOMATA_TEST_S3_ACCESS_KEY" \
-            --env RUSTFS_SECRET_KEY="$AUTOMATA_TEST_S3_SECRET_KEY" \
-            --env RUSTFS_SSE_S3_MASTER_KEY=YXV0b21hdGEtbG9jYWwtc3NlLW1hc3Rlci1rZXktdjE= \
-            --env RUSTFS_ADDRESS=0.0.0.0:9000 \
-            docker.io/rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c \
-            /data
           for ((attempt = 1; attempt <= 30; attempt += 1)); do
             if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
               exit 0
             fi
             sleep 2
           done
-          docker logs automata-res01-rustfs
           exit 1
 
       - name: Initialize and verify immutable object storage
@@ -504,10 +502,6 @@ jobs:
           path: target/agent-scratch/exact-client-real-store/**/redacted-results-transcript.json
           if-no-files-found: error
           retention-days: 14
-
-      - name: Stop object store
-        if: ${{ always() }}
-        run: docker rm --force automata-res01-rustfs 2>/dev/null || true
 
   renderer_tests:
     name: Rust renderer tests
@@ -603,7 +597,6 @@ jobs:
 
   renderer:
     name: Reproduce embedded renderer
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -800,7 +793,6 @@ jobs:
           RENDERER_TESTS_RESULT: ${{ needs.renderer_tests.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           RENDERER_RESULT: ${{ needs.renderer.result }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           [[ "$DIST_BUILD_RESULT" == success ]]
           [[ "$VERIFY_RESULT" == success ]]
@@ -810,10 +802,6 @@ jobs:
           [[ "$RUST_COVERAGE_RESULT" == success ]]
           [[ "$RENDERER_TESTS_RESULT" == success ]]
           [[ "$FRONTEND_RESULT" == success ]]
-          if [[ "$EVENT_NAME" == pull_request ]]; then
-            [[ "$RENDERER_RESULT" == success || "$RENDERER_RESULT" == skipped ]]
-          else
-            [[ "$RENDERER_RESULT" == success ]]
-          fi
+          [[ "$RENDERER_RESULT" == success ]]
           [[ "$AUTOMATA_EXPECTED_GIT_SHA" == "$GITHUB_SHA" ]]
           printf 'validated distribution candidate %s\n' "$GITHUB_SHA"
