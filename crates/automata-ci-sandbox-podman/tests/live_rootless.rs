@@ -18,10 +18,10 @@ use automata_ci_execution::{
     EnvironmentProfile, EnvironmentProfileId, EnvironmentValue, EnvironmentVariable, ExecutionArgv,
     ExecutionCommand, ExecutionEnvironment, ExecutionErrorKind, ExecutionTermination,
     ImmutableImage, NetworkPolicy, NeverCancelled, OperationId, ProviderErrorKind, ResourceLimits,
-    RootFilesystemPolicy, SandboxEnvironment, SandboxGeneration, SandboxPrivilegePolicy,
-    SandboxProvider, SandboxSpec, ServiceContainerSpec, ServiceContainerSpecs,
-    ServiceHealthOverrides, ServiceHealthPolicy, ServicePort, ServiceTransportProtocol,
-    Sha256Digest, TargetPath,
+    RootFilesystemPolicy, RunnerId, SandboxCustody, SandboxEnvironment, SandboxGeneration,
+    SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, ServiceContainerSpec,
+    ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
+    ServiceTransportProtocol, Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_podman::{
     BuildKitRuntime, CommandRequest, CommandTermination, JobContainerEngine, PodmanBinary,
@@ -105,14 +105,24 @@ fn opt_in_rootless_contract_leaves_no_owned_resources() {
         Err(error) => {
             if let Some(handle) = error.recovery_handle() {
                 let _ignored = provider.destroy(
-                    &DestroySandbox::new(OperationId::new(), handle.clone(), generation),
+                    &DestroySandbox::new(
+                        OperationId::new(),
+                        handle.clone(),
+                        generation,
+                        spec.custody(),
+                    ),
                     &NeverCancelled,
                 );
             }
             panic!("create live sandbox: {error}");
         }
     };
-    let mut cleanup = SandboxCleanup::new(provider.clone(), created.handle().clone(), generation);
+    let mut cleanup = SandboxCleanup::new(
+        provider.clone(),
+        created.handle().clone(),
+        generation,
+        spec.custody(),
+    );
     let endpoint = provider
         .attach(created.handle(), &NeverCancelled)
         .expect("attach live endpoint");
@@ -127,7 +137,12 @@ fn opt_in_rootless_contract_leaves_no_owned_resources() {
 
     provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), created.handle().clone(), generation),
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                generation,
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy live sandbox");
@@ -200,7 +215,12 @@ fn opt_in_rootless_services_are_healthy_discoverable_recoverable_and_exactly_rem
         Err(error) => {
             if let Some(handle) = error.recovery_handle() {
                 let _ignored = provider.destroy(
-                    &DestroySandbox::new(OperationId::new(), handle.clone(), generation),
+                    &DestroySandbox::new(
+                        OperationId::new(),
+                        handle.clone(),
+                        generation,
+                        spec.custody(),
+                    ),
                     &NeverCancelled,
                 );
             }
@@ -252,7 +272,7 @@ fn opt_in_rootless_services_are_healthy_discoverable_recoverable_and_exactly_rem
     );
     reopened
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, generation),
+            &DestroySandbox::new(OperationId::new(), handle, generation, spec.custody()),
             &NeverCancelled,
         )
         .expect("destroy live service sandbox");
@@ -289,7 +309,12 @@ fn opt_in_rootless_administrator_is_confined_and_writable() {
     let created = provider
         .create(&spec, &NeverCancelled)
         .expect("create rootless administrator sandbox");
-    let mut cleanup = SandboxCleanup::new(provider.clone(), created.handle().clone(), generation);
+    let mut cleanup = SandboxCleanup::new(
+        provider.clone(),
+        created.handle().clone(),
+        generation,
+        spec.custody(),
+    );
     let endpoint = provider
         .attach(created.handle(), &NeverCancelled)
         .expect("attach live endpoint");
@@ -310,7 +335,12 @@ fn opt_in_rootless_administrator_is_confined_and_writable() {
 
     provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), created.handle().clone(), generation),
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                generation,
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy rootless administrator sandbox");
@@ -337,7 +367,12 @@ fn opt_in_hosted_profile_exposes_pinned_libclang_to_bindgen() {
     let created = provider
         .create(&spec, &NeverCancelled)
         .expect("create hosted-profile sandbox");
-    let mut cleanup = SandboxCleanup::new(provider.clone(), created.handle().clone(), generation);
+    let mut cleanup = SandboxCleanup::new(
+        provider.clone(),
+        created.handle().clone(),
+        generation,
+        spec.custody(),
+    );
     let endpoint = provider
         .attach(created.handle(), &NeverCancelled)
         .expect("attach hosted-profile sandbox");
@@ -374,7 +409,12 @@ printf 'libclang-profile-ok\n'
 
     provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), created.handle().clone(), generation),
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                generation,
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy hosted-profile sandbox");
@@ -405,7 +445,12 @@ fn opt_in_host_gateway_alias_reaches_local_git_without_a_host_socket() {
     let created = provider
         .create(&spec, &NeverCancelled)
         .expect("create host-alias sandbox");
-    let mut cleanup = SandboxCleanup::new(provider.clone(), created.handle().clone(), generation);
+    let mut cleanup = SandboxCleanup::new(
+        provider.clone(),
+        created.handle().clone(),
+        generation,
+        spec.custody(),
+    );
     let endpoint = provider
         .attach(created.handle(), &NeverCancelled)
         .expect("attach host-alias sandbox");
@@ -431,7 +476,12 @@ fn opt_in_host_gateway_alias_reaches_local_git_without_a_host_socket() {
 
     provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), created.handle().clone(), generation),
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                generation,
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy host-alias sandbox");
@@ -460,14 +510,24 @@ fn opt_in_attempt_scoped_docker_api_runs_the_distribution_command_surface() {
         Err(error) => {
             if let Some(handle) = error.recovery_handle() {
                 let _ignored = provider.destroy(
-                    &DestroySandbox::new(OperationId::new(), handle.clone(), generation),
+                    &DestroySandbox::new(
+                        OperationId::new(),
+                        handle.clone(),
+                        generation,
+                        spec.custody(),
+                    ),
                     &NeverCancelled,
                 );
             }
             panic!("create sandbox with attempt-scoped Docker API: {error}");
         }
     };
-    let mut cleanup = SandboxCleanup::new(provider.clone(), created.handle().clone(), generation);
+    let mut cleanup = SandboxCleanup::new(
+        provider.clone(),
+        created.handle().clone(),
+        generation,
+        spec.custody(),
+    );
     let endpoint = provider
         .attach(created.handle(), &NeverCancelled)
         .expect("attach Docker-compatible sandbox");
@@ -490,7 +550,12 @@ fn opt_in_attempt_scoped_docker_api_runs_the_distribution_command_surface() {
 
     provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), created.handle().clone(), generation),
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                generation,
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy Docker-compatible sandbox");
@@ -529,14 +594,24 @@ fn opt_in_attempt_scoped_buildx_runs_the_pinned_buildkit_container_driver() {
         Err(error) => {
             if let Some(handle) = error.recovery_handle() {
                 let _ignored = provider.destroy(
-                    &DestroySandbox::new(OperationId::new(), handle.clone(), generation),
+                    &DestroySandbox::new(
+                        OperationId::new(),
+                        handle.clone(),
+                        generation,
+                        spec.custody(),
+                    ),
                     &NeverCancelled,
                 );
             }
             panic!("create sandbox with attempt-scoped BuildKit API: {error}");
         }
     };
-    let mut cleanup = SandboxCleanup::new(provider.clone(), created.handle().clone(), generation);
+    let mut cleanup = SandboxCleanup::new(
+        provider.clone(),
+        created.handle().clone(),
+        generation,
+        spec.custody(),
+    );
     let endpoint = provider
         .attach(created.handle(), &NeverCancelled)
         .expect("attach BuildKit-compatible sandbox");
@@ -559,7 +634,12 @@ fn opt_in_attempt_scoped_buildx_runs_the_pinned_buildkit_container_driver() {
 
     provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), created.handle().clone(), generation),
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                generation,
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy BuildKit-compatible sandbox");
@@ -846,6 +926,7 @@ struct SandboxCleanup {
     provider: RootlessPodmanProvider,
     handle: Option<automata_ci_execution::SandboxHandle>,
     generation: SandboxGeneration,
+    custody: SandboxCustody,
 }
 
 impl SandboxCleanup {
@@ -853,11 +934,13 @@ impl SandboxCleanup {
         provider: RootlessPodmanProvider,
         handle: automata_ci_execution::SandboxHandle,
         generation: SandboxGeneration,
+        custody: SandboxCustody,
     ) -> Self {
         Self {
             provider,
             handle: Some(handle),
             generation,
+            custody,
         }
     }
 
@@ -870,7 +953,7 @@ impl Drop for SandboxCleanup {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
             let _ignored = self.provider.destroy(
-                &DestroySandbox::new(OperationId::new(), handle, self.generation),
+                &DestroySandbox::new(OperationId::new(), handle, self.generation, self.custody),
                 &NeverCancelled,
             );
         }
@@ -944,6 +1027,9 @@ fn live_spec_with_network(
     SandboxSpec::new(
         operation_id,
         generation,
+        SandboxCustody::ProfileAdmission {
+            runner_id: RunnerId::new(),
+        },
         profile,
         TargetPath::posix("/__w").expect("workspace"),
         network,

@@ -3245,6 +3245,7 @@ impl RunnerSessionSupervisor {
         ));
         let signal = ExecutionCancellation::new();
         let request = CleanupRequest::new(
+            self.inner.config.capabilities().runner_id(),
             session.negotiated.session_id(),
             durable.slot(),
             lease.attempt_id(),

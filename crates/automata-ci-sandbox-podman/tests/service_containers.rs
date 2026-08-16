@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 use automata_ci_execution::{
     DestroyDisposition, DestroySandbox, EnvironmentName, EnvironmentValue, EnvironmentVariable,
     ExecutionEnvironment, ImmutableImage, NeverCancelled, OperationId, OperationOutcome,
-    ProviderErrorKind, SandboxCapability, SandboxProvider, ServiceContainerSpec,
+    ProviderErrorKind, RunnerId, SandboxCapability, SandboxProvider, ServiceContainerSpec,
     ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
     ServiceTransportProtocol,
 };
@@ -92,7 +92,7 @@ fn services_use_one_job_network_hardened_argv_and_restart_durable_bindings() {
 
     reopened
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, generation),
+            &DestroySandbox::new(OperationId::new(), handle, generation, spec.custody()),
             &NeverCancelled,
         )
         .expect("destroy services and sandbox");
@@ -105,9 +105,10 @@ fn services_use_one_job_network_hardened_argv_and_restart_durable_bindings() {
 fn podman_normalized_tagged_digest_remains_exactly_owned() {
     let fixture = Fixture::new_with_service_proxy("service-tagged-digest-normalization");
     fixture.fake.normalize_tagged_digest_image_names();
+    let spec = service_spec(OperationId::new());
     let record = fixture
         .provider
-        .create(&service_spec(OperationId::new()), &NeverCancelled)
+        .create(&spec, &NeverCancelled)
         .expect("create services after Podman normalizes tagged digest names");
 
     fixture
@@ -117,6 +118,7 @@ fn podman_normalized_tagged_digest_remains_exactly_owned() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -170,6 +172,7 @@ fn stopped_proxy_is_recreated_with_fresh_logs_and_the_durable_listener_ports() {
                 OperationId::new(),
                 replayed.handle().clone(),
                 replayed.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -203,7 +206,12 @@ fn durable_helper_identity_allows_exact_destroy_after_configuration_is_removed()
     );
     reopened
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, record.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                record.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("manifest-pinned helper identity remains destroyable");
@@ -353,6 +361,7 @@ fn exact_low_tcp_and_udp_ports_are_bound_only_after_the_job_netns_sysctl() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -402,7 +411,12 @@ fn cancellation_during_health_readiness_is_uncertain_and_exactly_recoverable() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("exact recovery destroy");
@@ -432,7 +446,12 @@ fn cancellation_before_first_service_create_is_exactly_recoverable() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy manifest entries whose containers were never created");
@@ -454,7 +473,12 @@ fn created_service_with_unparseable_identifier_is_adopted_only_for_exact_destroy
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("fully verified deterministic service name can be removed by captured ID");
@@ -476,7 +500,12 @@ fn created_service_with_wrong_valid_identifier_recovers_by_the_fenced_name() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("the verified deterministic service name remains exactly recoverable");
@@ -507,7 +536,12 @@ fn proxy_transition_rejects_wrong_argv_after_a_wrong_valid_identifier() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("restored exact proxy command permits fenced recovery");
@@ -536,11 +570,178 @@ fn primary_container_must_remain_in_the_captured_job_pod() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
         .expect("restore exact pod relation before cleanup");
     assert!(fixture.fake.is_empty());
+}
+
+#[test]
+fn service_only_remnants_are_not_reported_absent() {
+    let fixture = Fixture::new_with_service_proxy("service-only-remnants");
+    let spec = service_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create service sandbox");
+    fixture.fake.retain_services_only();
+
+    let error = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("owned service remnants are partial state, not absence");
+    assert_eq!(error.kind(), ProviderErrorKind::InvalidState);
+
+    fixture
+        .provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                record.handle().clone(),
+                record.generation(),
+                spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("exact custody reconciles service-only remnants");
+    assert!(fixture.fake.is_empty());
+}
+
+#[test]
+fn destroy_reconciles_named_and_captured_service_and_proxy_remnants() {
+    type Mutation = (&'static str, fn(&support::FakePodman));
+    let cases: [Mutation; 4] = [
+        (
+            "service-captured-only",
+            support::FakePodman::hide_one_service_name,
+        ),
+        (
+            "service-divergent-name",
+            support::FakePodman::diverge_one_service_name,
+        ),
+        (
+            "proxy-captured-only",
+            support::FakePodman::hide_service_proxy_name,
+        ),
+        (
+            "proxy-divergent-name",
+            support::FakePodman::diverge_service_proxy_name,
+        ),
+    ];
+
+    for (label, mutate) in cases {
+        let fixture = Fixture::new_with_service_proxy(label);
+        let spec = service_spec(OperationId::new());
+        let record = fixture
+            .provider
+            .create(&spec, &NeverCancelled)
+            .expect("create service sandbox");
+        mutate(&fixture.fake);
+
+        fixture
+            .provider
+            .destroy(
+                &DestroySandbox::new(
+                    OperationId::new(),
+                    record.handle().clone(),
+                    record.generation(),
+                    spec.custody(),
+                ),
+                &NeverCancelled,
+            )
+            .unwrap_or_else(|error| panic!("{label}: exact remnants must reconcile: {error}"));
+        assert!(fixture.fake.is_empty(), "{label}");
+        assert!(
+            !service_manifest_path(fixture.scratch.path(), spec.operation_id()).exists(),
+            "{label}: manifest may disappear only after every captured resource"
+        );
+    }
+}
+
+#[test]
+fn recovery_and_destroy_reject_one_service_with_asymmetric_custody() {
+    let fixture = Fixture::new_with_service_proxy("service-asymmetric-custody");
+    let spec = service_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create service sandbox");
+    fixture.fake.retain_services_only();
+    fixture
+        .fake
+        .replace_one_service_custody("job", RunnerId::new(), 1);
+
+    let error = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("one service with different custody must fail recovery");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let before_destroy = fixture.fake.commands().len();
+    let error = fixture
+        .provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                record.handle().clone(),
+                record.generation(),
+                spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect_err("asymmetric service custody must fence destroy");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_no_removal_after(&fixture.fake, before_destroy);
+    assert!(!fixture.fake.is_empty());
+}
+
+#[test]
+fn recovery_and_destroy_reject_proxy_with_asymmetric_custody() {
+    let fixture = Fixture::new_with_service_proxy("proxy-asymmetric-custody");
+    let spec = service_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create service sandbox");
+    fixture
+        .fake
+        .replace_service_proxy_custody("job", RunnerId::new(), 1);
+
+    let error = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("proxy with different custody must fail recovery");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let before_destroy = fixture.fake.commands().len();
+    let error = fixture
+        .provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                record.handle().clone(),
+                record.generation(),
+                spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect_err("asymmetric proxy custody must fence destroy");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_no_removal_after(&fixture.fake, before_destroy);
+    assert!(!fixture.fake.is_empty());
+}
+
+fn assert_no_removal_after(fake: &support::FakePodman, command_index: usize) {
+    assert!(
+        fake.commands()[command_index..].iter().all(|command| {
+            !podman_command(command)
+                .iter()
+                .any(|value| *value == "rm" || value.ends_with("/rm"))
+        }),
+        "custody validation must complete before any removal"
+    );
 }
 
 #[test]
@@ -558,7 +759,12 @@ fn cancellation_after_proxy_start_is_uncertain_and_exactly_recoverable() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("exact proxy recovery destroy");
@@ -566,7 +772,7 @@ fn cancellation_after_proxy_start_is_uncertain_and_exactly_recoverable() {
 }
 
 #[test]
-fn cancellation_after_one_service_deletion_retains_the_exact_recovery_fence() {
+fn cancellation_during_destroy_preflight_has_no_effect_and_remains_retryable() {
     let fixture = Fixture::new_with_service_proxy("service-destroy-cancellation");
     let spec = service_spec(OperationId::new());
     let record = fixture
@@ -593,13 +799,14 @@ fn cancellation_after_one_service_deletion_retains_the_exact_recovery_fence() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
-        .expect_err("partial service cleanup cancellation is uncertain");
+        .expect_err("preflight cancellation must stop before service cleanup");
     assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
-    assert_eq!(error.outcome(), OperationOutcome::Uncertain);
-    assert_eq!(error.recovery_handle(), Some(record.handle()));
+    assert_eq!(error.outcome(), OperationOutcome::KnownNoEffect);
+    assert_eq!(error.recovery_handle(), None);
 
     fixture
         .provider
@@ -608,6 +815,7 @@ fn cancellation_after_one_service_deletion_retains_the_exact_recovery_fence() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -726,7 +934,12 @@ fn health_readiness_obeys_the_aggregate_deadline_and_retains_recovery() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("cleanup timed-out services");
@@ -756,6 +969,7 @@ fn provider_drives_healthchecks_inside_its_delegated_cgroup() {
                 OperationId::new(),
                 created.handle().clone(),
                 spec.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -778,7 +992,12 @@ fn override_health_policy_fails_closed_when_backend_omits_the_healthcheck() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("cleanup health-config drift");
@@ -800,7 +1019,12 @@ fn override_health_policy_requires_the_exact_requested_backend_configuration() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("exact-ID cleanup does not require a healthy workload");
@@ -837,6 +1061,7 @@ fn noncanonical_or_ambiguous_proxy_status_fails_closed() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -876,6 +1101,7 @@ fn stale_service_manifest_fingerprint_is_rejected_before_destroy_mutation() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -896,6 +1122,7 @@ fn stale_service_manifest_fingerprint_is_rejected_before_destroy_mutation() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -906,9 +1133,10 @@ fn stale_service_manifest_fingerprint_is_rejected_before_destroy_mutation() {
 fn destroy_reconciles_owned_core_remnants_without_a_service_manifest() {
     let fixture = Fixture::new_with_service_proxy("service-partial-cleanup");
     let operation_id = OperationId::new();
+    let spec = service_spec(operation_id);
     let record = fixture
         .provider
-        .create(&service_spec(operation_id), &NeverCancelled)
+        .create(&spec, &NeverCancelled)
         .expect("create service sandbox");
     fs::remove_file(service_manifest_path(fixture.scratch.path(), operation_id))
         .expect("simulate manifest cleanup before process crash");
@@ -921,6 +1149,7 @@ fn destroy_reconciles_owned_core_remnants_without_a_service_manifest() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -936,6 +1165,7 @@ fn destroy_reconciles_owned_core_remnants_without_a_service_manifest() {
                     OperationId::new(),
                     record.handle().clone(),
                     record.generation(),
+                    spec.custody(),
                 ),
                 &NeverCancelled,
             )
@@ -960,6 +1190,7 @@ fn network_name_replacement_is_never_deleted_after_the_owned_id_is_captured() {
                 OperationId::new(),
                 record.handle().clone(),
                 record.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )

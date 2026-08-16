@@ -44,6 +44,7 @@ use tokio_tungstenite::{
 
 const NAMESPACE: &str = "automata-runners";
 const HANDLE: &str = "a-endpoint-contract-7";
+const FINGERPRINT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
 #[derive(Clone, Debug)]
 struct TestCancellation(Arc<AtomicBool>);
@@ -109,6 +110,7 @@ struct ServerState {
     websocket_uris: Vec<String>,
     plain_uris: Vec<String>,
     stale_pod_identity: bool,
+    policy_spec_drift: bool,
     failure: Option<String>,
 }
 
@@ -210,11 +212,26 @@ impl FakeExecServer {
             .len()
     }
 
+    fn plain_uris(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .expect("server state lock")
+            .plain_uris
+            .clone()
+    }
+
     fn make_pod_identity_stale(&self) {
         self.state
             .lock()
             .expect("server state lock")
             .stale_pod_identity = true;
+    }
+
+    fn make_policy_spec_drift(&self) {
+        self.state
+            .lock()
+            .expect("server state lock")
+            .policy_spec_drift = true;
     }
 
     fn assert_finished(&self) {
@@ -277,13 +294,17 @@ async fn handle_plain_http(
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request URI"))?;
-    let stale_pod_identity = {
+    let (stale_pod_identity, policy_spec_drift) = {
         let mut state = state.lock().expect("server state lock");
         state.plain_uris.push(uri.into());
-        state.stale_pod_identity
+        (state.stale_pod_identity, state.policy_spec_drift)
     };
-    let body =
-        serde_json::to_vec(&owned_running_pod(stale_pod_identity)).expect("serialize owned Pod");
+    let resource = if uri.contains("/networkpolicies/") {
+        owned_network_policy(policy_spec_drift)
+    } else {
+        owned_running_pod(stale_pod_identity)
+    };
+    let body = serde_json::to_vec(&resource).expect("serialize owned Kubernetes resource");
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -351,7 +372,17 @@ fn owned_running_pod(stale_identity: bool) -> serde_json::Value {
             "uid": "endpoint-pod-uid",
             "labels": {
                 "ci.automata.dev/managed": "true",
-                "ci.automata.dev/sandbox": HANDLE
+                "ci.automata.dev/sandbox": HANDLE,
+                "ci.automata.dev/sandbox-schema": "2",
+                "ci.automata.dev/custody-kind": "profile-admission",
+                "ci.automata.dev/custody-runner": "00000000-0000-4000-8000-000000000001",
+                "ci.automata.dev/custody-slot": "0"
+            },
+            "annotations": {
+                "ci.automata.dev/generation": "7",
+                "ci.automata.dev/profile-id": "example.com/linux",
+                "ci.automata.dev/profile-digest": FINGERPRINT,
+                "ci.automata.dev/spec-sha256": FINGERPRINT
             }
         },
         "status": {
@@ -369,6 +400,44 @@ fn owned_running_pod(stale_identity: bool) -> serde_json::Value {
         pod["metadata"]["uid"] = json!("replacement-pod-uid");
     }
     pod
+}
+
+fn owned_network_policy(spec_drift: bool) -> serde_json::Value {
+    let mut policy = json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": format!("{HANDLE}-deny"),
+            "namespace": NAMESPACE,
+            "uid": "endpoint-policy-uid",
+            "labels": {
+                "ci.automata.dev/managed": "true",
+                "ci.automata.dev/sandbox": HANDLE,
+                "ci.automata.dev/sandbox-schema": "2",
+                "ci.automata.dev/custody-kind": "profile-admission",
+                "ci.automata.dev/custody-runner": "00000000-0000-4000-8000-000000000001",
+                "ci.automata.dev/custody-slot": "0"
+            },
+            "annotations": {
+                "ci.automata.dev/generation": "7",
+                "ci.automata.dev/profile-id": "example.com/linux",
+                "ci.automata.dev/profile-digest": FINGERPRINT,
+                "ci.automata.dev/spec-sha256": FINGERPRINT
+            }
+        },
+        "spec": {
+            "podSelector": {
+                "matchLabels": {"ci.automata.dev/sandbox": HANDLE}
+            },
+            "ingress": [],
+            "egress": [],
+            "policyTypes": ["Ingress", "Egress"]
+        }
+    });
+    if spec_drift {
+        policy["spec"]["egress"] = json!([{}]);
+    }
+    policy
 }
 
 fn immutable_image() -> ImmutableImage {
@@ -428,6 +497,19 @@ fn guest_response(value: serde_json::Value) -> GuestResponse {
 fn assert_execution_error(error: ExecutionError, kind: ExecutionErrorKind, stage: ExecutionStage) {
     assert_eq!(error.kind(), kind);
     assert_eq!(error.stage(), stage);
+}
+
+fn assert_required_policy_checks(server: &FakeExecServer, exchange_count: usize) {
+    let plain_uris = server.plain_uris();
+    assert_eq!(plain_uris.len(), 2 * (exchange_count + 1));
+    assert_eq!(
+        plain_uris
+            .iter()
+            .filter(|uri| uri.contains("/networkpolicies/"))
+            .count(),
+        exchange_count + 1,
+        "attach and every endpoint exchange must fetch the required policy"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -532,6 +614,7 @@ async fn exec_and_copy_round_trips_preserve_exact_guest_requests_and_results() {
             && !uri.contains("sensitive-value")
             && !uri.contains("literal%20argument")
     }));
+    assert_required_policy_checks(&server, 3);
     server.assert_finished();
 }
 
@@ -792,6 +875,19 @@ async fn every_exchange_revalidates_pod_identity_and_observes_late_cancellation(
             .copy_to(&copy, &NeverCancelled)
             .expect_err("replacement Pod UID must reject the endpoint"),
         ExecutionErrorKind::OwnershipMismatch,
+        ExecutionStage::CopyTo,
+    );
+    assert!(server.websocket_uris().is_empty());
+    server.assert_finished();
+
+    let server = FakeExecServer::start([]).await;
+    let endpoint = attach_endpoint(&server);
+    server.make_policy_spec_drift();
+    assert_execution_error(
+        endpoint
+            .copy_to(&copy, &NeverCancelled)
+            .expect_err("drifted deny-all policy must reject the endpoint"),
+        ExecutionErrorKind::BackendRejected,
         ExecutionStage::CopyTo,
     );
     assert!(server.websocket_uris().is_empty());

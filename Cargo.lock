@@ -469,6 +469,7 @@ name = "automata-ci-execution"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "serde",
  "static_assertions",
  "thiserror",
 ]

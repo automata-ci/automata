@@ -222,8 +222,14 @@ impl OrphanRecoveryCoordinator {
                 Arc::clone(&self.content_operations),
             ));
             let signal = ExecutionCancellation::new();
-            let request =
-                CleanupRequest::new(session_id, slot_ordinal, lease.attempt_id(), guard, sandbox);
+            let request = CleanupRequest::new(
+                self.runner_id,
+                session_id,
+                slot_ordinal,
+                lease.attempt_id(),
+                guard,
+                sandbox,
+            );
             let cleanup = self.executor.cleanup(request, events, signal.clone());
             tokio::pin!(cleanup);
             tokio::select! {

@@ -8,9 +8,9 @@ use std::{
 
 use automata_ci_core::{
     AttemptId, JobIrEnvelope, JobLifecycle, JobResult, Lease, LeaseGuard, LogChannel, OperationId,
-    RunnerSessionId, UnixMillis,
+    RunnerId, RunnerSessionId, UnixMillis,
 };
-use automata_ci_execution::SandboxEnvironment;
+use automata_ci_execution::{SandboxCustody, SandboxEnvironment};
 use automata_ci_protocol::{JobRuntimeAuthorities, ManagedSecretBindingOverlay};
 use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal};
 use automata_ci_runner_journal::{
@@ -130,6 +130,12 @@ impl ExecutionRequest {
         self.slot
     }
 
+    /// Returns the exact runner and durable-slot custody for this job.
+    #[must_use]
+    pub fn sandbox_custody(&self) -> SandboxCustody {
+        job_custody(self.lease.runner_id(), self.slot)
+    }
+
     /// Returns the exact fenced lease.
     #[must_use]
     pub const fn lease(&self) -> &Lease {
@@ -221,6 +227,7 @@ impl fmt::Debug for ExecutionRequest {
 /// Immutable input for post-terminal sandbox reconciliation.
 #[derive(Clone, Debug)]
 pub struct CleanupRequest {
+    runner_id: RunnerId,
     session_id: RunnerSessionId,
     slot: RunnerSlotOrdinal,
     attempt_id: AttemptId,
@@ -230,10 +237,11 @@ pub struct CleanupRequest {
 
 impl CleanupRequest {
     /// Constructs post-terminal cleanup work for a sandbox identity retained
-    /// by the durable journal. The caller must supply the same session, slot,
-    /// attempt, and lease guard that own the identity.
+    /// by the durable journal. The caller must supply the same runner,
+    /// session, slot, attempt, and lease guard that own the identity.
     #[must_use]
     pub const fn new(
+        runner_id: RunnerId,
         session_id: RunnerSessionId,
         slot: RunnerSlotOrdinal,
         attempt_id: AttemptId,
@@ -241,6 +249,7 @@ impl CleanupRequest {
         sandbox: SandboxIdentity,
     ) -> Self {
         Self {
+            runner_id,
             session_id,
             slot,
             attempt_id,
@@ -261,6 +270,12 @@ impl CleanupRequest {
         self.slot
     }
 
+    /// Returns the exact runner and durable-slot custody being reconciled.
+    #[must_use]
+    pub fn sandbox_custody(&self) -> SandboxCustody {
+        job_custody(self.runner_id, self.slot)
+    }
+
     /// Returns the attempt identity.
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
@@ -277,6 +292,14 @@ impl CleanupRequest {
     #[must_use]
     pub const fn sandbox(&self) -> &SandboxIdentity {
         &self.sandbox
+    }
+}
+
+fn job_custody(runner_id: RunnerId, slot: RunnerSlotOrdinal) -> SandboxCustody {
+    SandboxCustody::Job {
+        runner_id,
+        slot_ordinal: std::num::NonZeroU16::new(slot.get())
+            .expect("runner slot ordinals are non-zero"),
     }
 }
 

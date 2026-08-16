@@ -63,6 +63,8 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   connected-store diagnostics expose no bound state, validated transport is
   one closed security mode, and bucket creation is region-correct, idempotent,
   conflict-reverified, and bounded by one total deadline.
+- Sandbox specifications now require one closed runner-custody variant across
+  every provider; job custody includes a mandatory non-zero durable slot.
 
 ### Changed
 

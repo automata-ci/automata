@@ -66,7 +66,8 @@ use super::{
     config::{ObjectStoreTlsTrust, required_podman_state_root},
     metrics::RunnerMetrics,
     profile_admission::{
-        ProfileAdmissionOutcome, ProfileAdmissionPolicy, admit_environment_profiles,
+        ProfileAdmissionError, ProfileAdmissionOutcome, ProfileAdmissionPolicy,
+        admit_environment_profiles,
     },
     spool_crypto::{AES_256_GCM_KEY_BYTES, Aes256GcmContentKeyring, Aes256GcmContentProtector},
     state::{capture_dedicated_runtime_mount, ensure_private_directory},
@@ -741,7 +742,7 @@ fn admit_configured_environment_profiles(
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
     };
-    let result = admit_environment_profiles(provider, config.environments(), policy, cancellation);
+    let result = admit_runner_profiles(config, provider, policy, cancellation);
     match result {
         Ok(ProfileAdmissionOutcome::Admitted) => {
             info!(
@@ -766,6 +767,21 @@ fn admit_configured_environment_profiles(
             Err(RunnerProductError::EnvironmentProfileAdmission)
         }
     }
+}
+
+fn admit_runner_profiles(
+    config: &RunnerProductConfig,
+    provider: &dyn automata_ci_execution::SandboxProvider,
+    policy: ProfileAdmissionPolicy,
+    cancellation: &crate::podman_probe::ProbeCancellation,
+) -> Result<ProfileAdmissionOutcome, ProfileAdmissionError> {
+    admit_environment_profiles(
+        provider,
+        config.runner_id(),
+        config.environments(),
+        policy,
+        cancellation,
+    )
 }
 
 async fn bind_metrics_listener(

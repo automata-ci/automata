@@ -4,6 +4,7 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     io::Read as _,
+    num::NonZeroU16,
     os::windows::fs::{MetadataExt as _, OpenOptionsExt as _},
     path::{Component, Path, PathBuf},
     str::FromStr as _,
@@ -14,9 +15,10 @@ use std::{
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, EnvironmentProfile, EnvironmentProfileId,
     NeverCancelled, OperationId, OperationOutcome, ProviderCapabilities, ProviderError,
-    ProviderErrorKind, ProviderId, ProviderStage, RootFilesystemPolicy, SandboxCapability,
-    SandboxHandle, SandboxInspection, SandboxLaunch, SandboxPrivilegePolicy, SandboxProvider,
-    SandboxRecord, SandboxSpec, SandboxState, Sha256Digest, TargetPath, TargetPlatform,
+    ProviderErrorKind, ProviderId, ProviderStage, RootFilesystemPolicy, RunnerId,
+    SandboxCapability, SandboxCustody, SandboxHandle, SandboxInspection, SandboxLaunch,
+    SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
+    Sha256Digest, TargetPath, TargetPlatform,
 };
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
@@ -44,6 +46,11 @@ const MAX_PROCESS_LIMIT: u32 = 1_000_000;
 const CONTROL_OUTPUT_BYTES: usize = 1024 * 1024;
 const OWNER_LABEL: &str = "io.automata.owner";
 const OWNER_VALUE: &str = "automata-runner";
+const RESOURCE_SCHEMA_LABEL: &str = "io.automata.sandbox-schema";
+const RESOURCE_SCHEMA: &str = "2";
+const CUSTODY_KIND_LABEL: &str = "io.automata.custody-kind";
+const CUSTODY_RUNNER_LABEL: &str = "io.automata.custody-runner";
+const CUSTODY_SLOT_LABEL: &str = "io.automata.custody-slot";
 const SANDBOX_LABEL: &str = "io.automata.sandbox";
 const GENERATION_LABEL: &str = "io.automata.generation";
 const PROFILE_LABEL: &str = "io.automata.profile";
@@ -399,6 +406,7 @@ impl ProviderInner {
                     handle: entry.handle.clone(),
                     generation: entry.generation,
                     profile: entry.profile.clone(),
+                    custody: entry.custody,
                 };
                 lifecycle
                     .append(&DurableEvent::DestroyIntent {
@@ -522,7 +530,10 @@ impl ProviderInner {
         })?;
         let new_create = if let Some(replay) = lifecycle.snapshot.creates.get(&spec.operation_id())
         {
-            if replay.handle != handle.opaque() || replay.fingerprint != fingerprint {
+            if replay.handle != handle.opaque()
+                || replay.fingerprint != fingerprint
+                || replay.custody != spec.custody()
+            {
                 return Err(error::known(
                     ProviderErrorKind::Conflict,
                     ProviderStage::CreateSandbox,
@@ -531,6 +542,7 @@ impl ProviderInner {
             if let Some(tombstone) = lifecycle.snapshot.tombstones.get(handle.opaque()) {
                 if tombstone.generation != names.generation().get()
                     || tombstone.profile != *spec.profile().attestation()
+                    || tombstone.custody != spec.custody()
                 {
                     return Err(invalid_lifecycle());
                 }
@@ -545,7 +557,13 @@ impl ProviderInner {
                 .entries
                 .get(handle.opaque())
                 .ok_or_else(invalid_lifecycle)?;
-            validate_durable_entry(entry, names, fingerprint, spec.profile().attestation())?;
+            validate_durable_entry(
+                entry,
+                names,
+                fingerprint,
+                spec.profile().attestation(),
+                spec.custody(),
+            )?;
             if entry.phase == DurableEntryPhase::Destroying {
                 return Err(error::known(
                     ProviderErrorKind::Conflict,
@@ -566,11 +584,13 @@ impl ProviderInner {
                     operation_id: spec.operation_id(),
                     fingerprint: fingerprint.to_owned(),
                     handle: handle.opaque().to_owned(),
+                    custody: spec.custody(),
                 },
                 entry: DurableEntry {
                     handle: handle.opaque().to_owned(),
                     generation: names.generation().get(),
                     profile: spec.profile().attestation().clone(),
+                    custody: spec.custody(),
                     container: names.container(),
                     fingerprint: fingerprint.to_owned(),
                     phase: DurableEntryPhase::Intent,
@@ -965,6 +985,7 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
                 return Ok(SandboxInspection::new(
                     names.handle(),
                     names.generation(),
+                    tombstone.custody,
                     tombstone.profile.clone(),
                     SandboxState::Absent,
                 ));
@@ -981,6 +1002,7 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
             return Ok(SandboxInspection::new(
                 names.handle(),
                 names.generation(),
+                entry.custody,
                 entry.profile,
                 SandboxState::Degraded,
             ));
@@ -989,6 +1011,7 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
         Ok(SandboxInspection::new(
             names.handle(),
             names.generation(),
+            entry.custody,
             entry.profile,
             inspection.sandbox_state(),
         ))
@@ -1074,7 +1097,10 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
             )
         })?;
         if let Some(replay) = lifecycle.snapshot.destroys.get(&request.operation_id()) {
-            if replay.handle != handle.opaque() || replay.generation != request.generation().get() {
+            if replay.handle != handle.opaque()
+                || replay.generation != request.generation().get()
+                || replay.custody != request.custody()
+            {
                 return Err(error::known(
                     ProviderErrorKind::Conflict,
                     ProviderStage::DestroySandbox,
@@ -1092,7 +1118,9 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
             .get(&request.operation_id())
             .cloned()
         {
-            if pending.handle != handle.opaque() || pending.generation != request.generation().get()
+            if pending.handle != handle.opaque()
+                || pending.generation != request.generation().get()
+                || pending.custody != request.custody()
             {
                 return Err(error::known(
                     ProviderErrorKind::Conflict,
@@ -1112,7 +1140,9 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
             ));
         } else if let Some(tombstone) = lifecycle.snapshot.tombstones.get(handle.opaque()).cloned()
         {
-            if tombstone.generation != request.generation().get() {
+            if tombstone.generation != request.generation().get()
+                || tombstone.custody != request.custody()
+            {
                 return Err(error::known(
                     ProviderErrorKind::OwnershipMismatch,
                     ProviderStage::VerifyOwnership,
@@ -1123,6 +1153,7 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
                 handle: handle.opaque().to_owned(),
                 generation: request.generation().get(),
                 profile: tombstone.profile,
+                custody: request.custody(),
             };
             lifecycle
                 .append(&DurableEvent::DestroyAbsent { request: durable })
@@ -1143,7 +1174,8 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
                 .ok_or_else(|| {
                     error::known(ProviderErrorKind::NotFound, ProviderStage::DestroySandbox)
                 })?;
-            if entry.generation != request.generation().get() {
+            if entry.generation != request.generation().get() || entry.custody != request.custody()
+            {
                 return Err(error::known(
                     ProviderErrorKind::OwnershipMismatch,
                     ProviderStage::VerifyOwnership,
@@ -1154,6 +1186,7 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
                 handle: handle.opaque().to_owned(),
                 generation: request.generation().get(),
                 profile: entry.profile,
+                custody: request.custody(),
             };
             lifecycle
                 .append(&DurableEvent::DestroyIntent {
@@ -1175,6 +1208,13 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
             .get(handle.opaque())
             .cloned()
             .ok_or_else(invalid_lifecycle)?;
+        if entry.generation != pending.generation
+            || entry.profile != pending.profile
+            || entry.custody != pending.custody
+            || pending.custody != request.custody()
+        {
+            return Err(invalid_lifecycle());
+        }
         if let Some(inspection) = self
             .inspect_optional(names, cancellation)
             .map_err(|failure| {
@@ -1422,8 +1462,21 @@ fn expected_labels(
     names: &ResourceName,
     fingerprint: &str,
 ) -> BTreeMap<String, String> {
+    let (custody_kind, custody_runner, custody_slot) = match spec.custody() {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            ("profile-admission", runner_id.to_string(), "0".to_owned())
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => ("job", runner_id.to_string(), slot_ordinal.get().to_string()),
+    };
     BTreeMap::from([
         (OWNER_LABEL.to_owned(), OWNER_VALUE.to_owned()),
+        (RESOURCE_SCHEMA_LABEL.to_owned(), RESOURCE_SCHEMA.to_owned()),
+        (CUSTODY_KIND_LABEL.to_owned(), custody_kind.to_owned()),
+        (CUSTODY_RUNNER_LABEL.to_owned(), custody_runner),
+        (CUSTODY_SLOT_LABEL.to_owned(), custody_slot),
         (SANDBOX_LABEL.to_owned(), names.identifier().to_owned()),
         (
             GENERATION_LABEL.to_owned(),
@@ -1517,8 +1570,17 @@ fn validate_durable_snapshot(
         if operation_id != &create.operation_id
             || names.identifier() != create.operation_id.as_uuid().simple().to_string()
             || !valid_fingerprint(&create.fingerprint)
-            || !(snapshot.entries.contains_key(&create.handle)
-                || snapshot.tombstones.contains_key(&create.handle))
+            || snapshot
+                .entries
+                .get(&create.handle)
+                .map(|entry| entry.custody)
+                .or_else(|| {
+                    snapshot
+                        .tombstones
+                        .get(&create.handle)
+                        .map(|tombstone| tombstone.custody)
+                })
+                != Some(create.custody)
         {
             return Err(invalid_lifecycle());
         }
@@ -1557,6 +1619,7 @@ fn validate_durable_snapshot(
                 entry.phase != DurableEntryPhase::Destroying
                     || entry.generation != pending.generation
                     || entry.profile != pending.profile
+                    || entry.custody != pending.custody
             })
         {
             return Err(invalid_lifecycle());
@@ -1568,7 +1631,10 @@ fn validate_durable_snapshot(
             || snapshot
                 .tombstones
                 .get(&destroy.handle)
-                .is_none_or(|tombstone| tombstone.generation != destroy.generation)
+                .is_none_or(|tombstone| {
+                    tombstone.generation != destroy.generation
+                        || tombstone.custody != destroy.custody
+                })
         {
             return Err(invalid_lifecycle());
         }
@@ -1581,9 +1647,10 @@ fn validate_durable_entry(
     names: &ResourceName,
     fingerprint: &str,
     profile: &EnvironmentProfile,
+    custody: SandboxCustody,
 ) -> Result<(), ProviderError> {
     validate_durable_entry_shape(entry, names)?;
-    if entry.fingerprint != fingerprint || entry.profile != *profile {
+    if entry.fingerprint != fingerprint || entry.profile != *profile || entry.custody != custody {
         return Err(invalid_lifecycle());
     }
     Ok(())
@@ -1624,6 +1691,7 @@ fn validate_durable_inspection(
         .label(CPU_LIMIT_LABEL)
         .and_then(|value| value.parse::<u32>().ok());
     if inspection.profile()? != entry.profile
+        || inspection.custody()? != entry.custody
         || inspection.label(SPEC_DIGEST_LABEL) != Some(entry.fingerprint.as_str())
         || inspection.label(IMAGE_LABEL) != Some(inspection.config.image.as_str())
         || inspection.label(WORKSPACE_LABEL) != Some(inspection.config.working_directory.as_str())
@@ -1775,11 +1843,13 @@ fn validate_owned_shape(
             .is_some_and(|healthcheck| healthcheck.test == ["NONE"])
         && inspection.network_settings.has_no_connectivity()
         && labels.get(OWNER_LABEL).map(String::as_str) == Some(OWNER_VALUE)
+        && labels.get(RESOURCE_SCHEMA_LABEL).map(String::as_str) == Some(RESOURCE_SCHEMA)
         && labels.get(SANDBOX_LABEL).map(String::as_str) == Some(names.identifier())
         && labels.get(GENERATION_LABEL).map(String::as_str)
             == Some(names.generation().get().to_string().as_str())
         && labels.get(HYPERV_LABEL).map(String::as_str) == Some("true")
-        && inspection.process_limit().is_ok();
+        && inspection.process_limit().is_ok()
+        && inspection.custody().is_ok();
     if !owned {
         return Err(error::known(
             ProviderErrorKind::OwnershipMismatch,
@@ -1795,6 +1865,8 @@ fn record(names: &ResourceName, profile: EnvironmentProfile, state: SandboxState
 
 fn spec_fingerprint(spec: &SandboxSpec) -> String {
     let mut hash = Sha256::new();
+    hash_field(&mut hash, b"automata-windows-hyperv-spec-v2");
+    hash_custody(&mut hash, spec.custody());
     for value in [
         spec.profile().id().as_str(),
         &spec.profile().digest().to_string(),
@@ -1837,6 +1909,23 @@ fn spec_fingerprint(spec: &SandboxSpec) -> String {
         hash_field(&mut hash, b"allocation-absent");
     }
     hex_digest(hash.finalize().into())
+}
+
+fn hash_custody(hash: &mut Sha256, custody: SandboxCustody) {
+    match custody {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            hash_field(hash, b"profile-admission");
+            hash_field(hash, runner_id.as_uuid().as_bytes());
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => {
+            hash_field(hash, b"job");
+            hash_field(hash, runner_id.as_uuid().as_bytes());
+            hash_field(hash, &slot_ordinal.get().to_be_bytes());
+        }
+    }
 }
 
 fn hash_field(hash: &mut Sha256, value: &[u8]) {
@@ -2168,6 +2257,29 @@ impl ContainerInspection {
         }
     }
 
+    fn custody(&self) -> Result<SandboxCustody, ProviderError> {
+        let runner_id = self
+            .label(CUSTODY_RUNNER_LABEL)
+            .and_then(|value| RunnerId::from_str(value).ok())
+            .ok_or_else(ownership_mismatch)?;
+        let slot = self
+            .label(CUSTODY_SLOT_LABEL)
+            .and_then(|value| value.parse::<u16>().ok())
+            .ok_or_else(ownership_mismatch)?;
+        match self.label(CUSTODY_KIND_LABEL) {
+            Some("profile-admission") if slot == 0 => {
+                Ok(SandboxCustody::ProfileAdmission { runner_id })
+            }
+            Some("job") => NonZeroU16::new(slot)
+                .map(|slot_ordinal| SandboxCustody::Job {
+                    runner_id,
+                    slot_ordinal,
+                })
+                .ok_or_else(ownership_mismatch),
+            _ => Err(ownership_mismatch()),
+        }
+    }
+
     fn sandbox_state(&self) -> SandboxState {
         match self.state.status.as_str() {
             "created" => SandboxState::Created,
@@ -2188,6 +2300,13 @@ impl ContainerInspection {
                 )
             })
     }
+}
+
+fn ownership_mismatch() -> ProviderError {
+    error::known(
+        ProviderErrorKind::OwnershipMismatch,
+        ProviderStage::VerifyOwnership,
+    )
 }
 
 #[derive(Deserialize)]
@@ -2338,6 +2457,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         env, fs,
+        num::NonZeroU16,
         path::PathBuf,
         sync::{Arc, Mutex},
     };
@@ -2345,7 +2465,7 @@ mod tests {
     use super::*;
     use automata_ci_execution::{
         ExecutionArgv, ExecutionEnvironment, ImmutableImage, NetworkPolicy, ResourceLimits,
-        SandboxEnvironment, SandboxGeneration, SandboxPrivilegePolicy,
+        RunnerId, SandboxEnvironment, SandboxGeneration, SandboxPrivilegePolicy,
     };
     use serde_json::{Value, json};
 
@@ -2402,6 +2522,15 @@ mod tests {
     }
 
     fn hyperv_spec_with_keepalive(arguments: Vec<String>) -> SandboxSpec {
+        hyperv_spec_with_custody(
+            arguments,
+            SandboxCustody::ProfileAdmission {
+                runner_id: RunnerId::new(),
+            },
+        )
+    }
+
+    fn hyperv_spec_with_custody(arguments: Vec<String>, custody: SandboxCustody) -> SandboxSpec {
         let workspace = TargetPath::windows(r"C:\__w").expect("workspace");
         let profile = EnvironmentProfile::new(
             EnvironmentProfileId::new("example.com/windows-hyperv").expect("profile id"),
@@ -2424,6 +2553,7 @@ mod tests {
         SandboxSpec::new(
             OperationId::new(),
             SandboxGeneration::new(3).expect("generation"),
+            custody,
             environment,
             workspace,
             NetworkPolicy::Disabled,
@@ -2584,6 +2714,9 @@ mod tests {
         let generic = SandboxSpec::new(
             OperationId::new(),
             SandboxGeneration::new(4).expect("generation"),
+            SandboxCustody::ProfileAdmission {
+                runner_id: RunnerId::new(),
+            },
             generic_environment,
             workspace,
             NetworkPolicy::Disabled,
@@ -2633,6 +2766,12 @@ mod tests {
                 "/NetworkSettings/Networks/none/IPAddress",
                 json!("10.0.0.2"),
             ),
+            ("/Config/Labels/io.automata.sandbox-schema", json!("1")),
+            (
+                "/Config/Labels/io.automata.custody-runner",
+                json!(RunnerId::new().to_string()),
+            ),
+            ("/Config/Labels/io.automata.custody-slot", json!("1")),
         ] {
             let mut weakened = baseline.clone();
             *weakened
@@ -2673,11 +2812,13 @@ mod tests {
                             operation_id: spec.operation_id(),
                             fingerprint: fingerprint.clone(),
                             handle: names.handle().opaque().to_owned(),
+                            custody: spec.custody(),
                         },
                         entry: DurableEntry {
                             handle: names.handle().opaque().to_owned(),
                             generation: names.generation().get(),
                             profile: spec.profile().attestation().clone(),
+                            custody: spec.custody(),
                             container: names.container(),
                             fingerprint,
                             phase: DurableEntryPhase::Intent,
@@ -2718,6 +2859,80 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_rejects_wrong_runner_slot_and_old_resource_schema() {
+        let runner_id = RunnerId::new();
+        for (label, custody, pointer, replacement) in [
+            (
+                "schema",
+                SandboxCustody::ProfileAdmission { runner_id },
+                "/Config/Labels/io.automata.sandbox-schema",
+                json!("1"),
+            ),
+            (
+                "runner",
+                SandboxCustody::ProfileAdmission { runner_id },
+                "/Config/Labels/io.automata.custody-runner",
+                json!(RunnerId::new().to_string()),
+            ),
+            (
+                "slot",
+                SandboxCustody::Job {
+                    runner_id,
+                    slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+                },
+                "/Config/Labels/io.automata.custody-slot",
+                json!("1"),
+            ),
+        ] {
+            let root = TestRoot::new(&format!("recovery-{label}"));
+            let spec = hyperv_spec_with_custody(vec!["keepalive".to_owned()], custody);
+            let names = ResourceName::for_create(spec.operation_id(), spec.generation());
+            let fingerprint = spec_fingerprint(&spec);
+            {
+                let (mut journal, mut snapshot) =
+                    LifecycleJournal::open(&root.path).expect("open lifecycle WAL");
+                journal
+                    .append_to_snapshot(
+                        &mut snapshot,
+                        &DurableEvent::CreateIntent {
+                            create: DurableCreate {
+                                operation_id: spec.operation_id(),
+                                fingerprint: fingerprint.clone(),
+                                handle: names.handle().opaque().to_owned(),
+                                custody: spec.custody(),
+                            },
+                            entry: DurableEntry {
+                                handle: names.handle().opaque().to_owned(),
+                                generation: names.generation().get(),
+                                profile: spec.profile().attestation().clone(),
+                                custody: spec.custody(),
+                                container: names.container(),
+                                fingerprint: fingerprint.clone(),
+                                phase: DurableEntryPhase::Intent,
+                            },
+                        },
+                    )
+                    .expect("persist current create intent");
+            }
+            let mut observed = inspection_value(&spec, &names, &fingerprint);
+            *observed
+                .pointer_mut(pointer)
+                .expect("inspection mutation path") = replacement;
+            let executor = Arc::new(ScriptedExecutor::new([RuntimeCommandOutput::success(
+                serde_json::to_vec(&vec![observed]).expect("inspection JSON"),
+            )]));
+
+            let error = WindowsHyperVContainerProvider::open_with_executor(
+                root.options(),
+                executor.clone(),
+            )
+            .expect_err("startup recovery must bind current schema and exact custody");
+            assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+            executor.assert_drained();
+        }
+    }
+
+    #[test]
     fn startup_completes_the_exact_pending_destroy_operation() {
         let root = TestRoot::new("pending-destroy");
         let spec = hyperv_spec();
@@ -2736,11 +2951,13 @@ mod tests {
                             operation_id: spec.operation_id(),
                             fingerprint: fingerprint.clone(),
                             handle: handle.clone(),
+                            custody: spec.custody(),
                         },
                         entry: DurableEntry {
                             handle: handle.clone(),
                             generation: names.generation().get(),
                             profile: spec.profile().attestation().clone(),
+                            custody: spec.custody(),
                             container: names.container(),
                             fingerprint: fingerprint.clone(),
                             phase: DurableEntryPhase::Intent,
@@ -2765,6 +2982,7 @@ mod tests {
                             handle,
                             generation: names.generation().get(),
                             profile: spec.profile().attestation().clone(),
+                            custody: spec.custody(),
                         },
                     },
                 )
@@ -2782,7 +3000,12 @@ mod tests {
         let provider =
             WindowsHyperVContainerProvider::open_with_executor(root.options(), executor.clone())
                 .expect("startup completes pending cleanup");
-        let request = DestroySandbox::new(destroy_operation, names.handle(), names.generation());
+        let request = DestroySandbox::new(
+            destroy_operation,
+            names.handle(),
+            names.generation(),
+            spec.custody(),
+        );
         assert_eq!(
             provider
                 .destroy(&request, &NeverCancelled)
@@ -2842,10 +3065,37 @@ mod tests {
             .expect("create exact sandbox");
         assert_eq!(record.state(), SandboxState::Running);
 
+        let runtime_calls = executor.calls.lock().expect("calls lock").len();
+        let SandboxCustody::ProfileAdmission { runner_id } = spec.custody() else {
+            panic!("test spec uses profile-admission custody");
+        };
+        let wrong_custody = DestroySandbox::new(
+            OperationId::new(),
+            record.handle().clone(),
+            record.generation(),
+            SandboxCustody::Job {
+                runner_id,
+                slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+            },
+        );
+        assert_eq!(
+            provider
+                .destroy(&wrong_custody, &NeverCancelled)
+                .expect_err("wrong custody must not authorize container removal")
+                .kind(),
+            ProviderErrorKind::OwnershipMismatch
+        );
+        assert_eq!(
+            executor.calls.lock().expect("calls lock").len(),
+            runtime_calls,
+            "custody rejection must precede every runtime mutation"
+        );
+
         let destroy = DestroySandbox::new(
             OperationId::new(),
             record.handle().clone(),
             record.generation(),
+            spec.custody(),
         );
         assert_eq!(
             provider
@@ -2863,6 +3113,7 @@ mod tests {
             OperationId::new(),
             record.handle().clone(),
             record.generation(),
+            spec.custody(),
         );
         assert_eq!(
             provider
@@ -2876,13 +3127,11 @@ mod tests {
                 .expect("exact absent replay"),
             DestroyDisposition::AlreadyAbsent
         );
-        assert_eq!(
-            provider
-                .inspect(record.handle(), &NeverCancelled)
-                .expect("inspect tombstone")
-                .state(),
-            SandboxState::Absent
-        );
+        let inspection = provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("inspect tombstone");
+        assert_eq!(inspection.state(), SandboxState::Absent);
+        assert_eq!(inspection.custody(), spec.custody());
         assert_eq!(
             provider
                 .create(&spec, &NeverCancelled)

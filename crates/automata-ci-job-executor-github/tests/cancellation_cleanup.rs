@@ -24,6 +24,7 @@ async fn cancelled_phase_returns_cancelled_and_cleanup_destroys_the_exact_fenced
     let request = fixture.request(run_job("exit 0\n"));
     let session_id = request.session_id();
     let slot = request.slot();
+    let runner_id = request.lease().runner_id();
     let attempt_id = request.lease().attempt_id();
     let guard = request.lease().guard();
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
@@ -37,7 +38,15 @@ async fn cancelled_phase_returns_cancelled_and_cleanup_destroys_the_exact_fenced
     assert!(cancellation.is_cancelled());
     assert_eq!(result.conclusion(), JobConclusion::Cancelled);
     assert_eq!(fixture.events.sandbox(), Some(journal_identity()));
-    let cleanup = CleanupRequest::new(session_id, slot, attempt_id, guard, journal_identity());
+    let cleanup = CleanupRequest::new(
+        runner_id,
+        session_id,
+        slot,
+        attempt_id,
+        guard,
+        journal_identity(),
+    );
+    let expected_custody = cleanup.sandbox_custody();
     fixture
         .executor
         .cleanup(cleanup, events, ExecutionCancellation::new())
@@ -54,6 +63,7 @@ async fn cancelled_phase_returns_cancelled_and_cleanup_destroys_the_exact_fenced
     )
     .expect("valid sandbox handle");
     assert_eq!(destroy_request.handle(), &expected_handle);
+    assert_eq!(destroy_request.custody(), expected_custody);
     assert_eq!(
         destroy_request.generation(),
         SandboxGeneration::new(guard.fencing_token().get()).expect("valid generation")

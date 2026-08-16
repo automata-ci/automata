@@ -5,14 +5,14 @@ use std::{
     time::Duration,
 };
 
-use automata_ci_core::JobResourceAllocation;
+use automata_ci_core::{JobResourceAllocation, RunnerId};
 use automata_ci_execution::{
     Cancellation, CopyToRequest, DestroyDisposition, DestroySandbox, EnvironmentProfile,
     ExecutionArgv, ExecutionCommand, ExecutionError, ExecutionErrorKind, ExecutionStage,
     ExecutionTermination, NetworkPolicy, OperationId, OperationOutcome, ProviderError,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
-    SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState, TargetPath,
-    TargetPlatform,
+    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxEnvironment,
+    SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec,
+    SandboxState, TargetPath, TargetPlatform,
 };
 use automata_ci_job_executor_github::{WindowsScriptShell, windows_script_arguments};
 use uuid::Uuid;
@@ -523,6 +523,7 @@ impl Error for ProfileAdmissionError {
 
 pub(super) fn admit_environment_profiles(
     provider: &dyn SandboxProvider,
+    runner_id: RunnerId,
     environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
     policy: ProfileAdmissionPolicy,
     cancellation: &ProbeCancellation,
@@ -539,6 +540,7 @@ pub(super) fn admit_environment_profiles(
     })?;
     let context = ProfileAdmissionContext {
         provider,
+        runner_id,
         policy,
         generation,
         probe_attempt,
@@ -567,6 +569,7 @@ pub(super) fn admit_environment_profiles(
 
 struct ProfileAdmissionContext<'context> {
     provider: &'context dyn SandboxProvider,
+    runner_id: RunnerId,
     policy: ProfileAdmissionPolicy,
     generation: SandboxGeneration,
     probe_attempt: Option<OperationId>,
@@ -575,6 +578,70 @@ struct ProfileAdmissionContext<'context> {
 }
 
 impl ProfileAdmissionContext<'_> {
+    const fn custody(&self) -> SandboxCustody {
+        SandboxCustody::ProfileAdmission {
+            runner_id: self.runner_id,
+        }
+    }
+
+    fn cleanup_after_create_failure(
+        &self,
+        recovery_handle: Option<&SandboxHandle>,
+        operation_id: OperationId,
+        outcome: OperationOutcome,
+    ) -> (ProfileAdmissionCleanupStatus, Option<ProviderError>) {
+        match recovery_handle {
+            Some(handle) => self.cleanup_handle(handle, operation_id),
+            None if outcome == OperationOutcome::KnownNoEffect => {
+                (ProfileAdmissionCleanupStatus::NotRequired, None)
+            }
+            None => (ProfileAdmissionCleanupStatus::Failed, None),
+        }
+    }
+
+    fn cleanup_handle(
+        &self,
+        handle: &SandboxHandle,
+        operation_id: OperationId,
+    ) -> (ProfileAdmissionCleanupStatus, Option<ProviderError>) {
+        match self.destroy_with_reconciliation(handle, operation_id) {
+            Ok(_) => (ProfileAdmissionCleanupStatus::Complete, None),
+            Err(error) => (ProfileAdmissionCleanupStatus::Failed, Some(error)),
+        }
+    }
+
+    fn destroy_with_reconciliation(
+        &self,
+        handle: &SandboxHandle,
+        operation_id: OperationId,
+    ) -> Result<DestroyEvidence, ProviderError> {
+        let request = DestroySandbox::new(
+            operation_id,
+            handle.clone(),
+            self.generation,
+            self.custody(),
+        );
+        match self.provider.destroy(&request, &self.cleanup_cancellation) {
+            Ok(DestroyDisposition::Destroyed) => Ok(DestroyEvidence::Destroyed),
+            Ok(DestroyDisposition::AlreadyAbsent) => Ok(DestroyEvidence::InitiallyAbsent),
+            Err(error)
+                if error.outcome() == OperationOutcome::Uncertain
+                    && error
+                        .recovery_handle()
+                        .is_none_or(|recovery_handle| recovery_handle == handle) =>
+            {
+                match self
+                    .provider
+                    .destroy(&request, &self.cleanup_cancellation)?
+                {
+                    DestroyDisposition::Destroyed => Ok(DestroyEvidence::Destroyed),
+                    DestroyDisposition::AlreadyAbsent => Ok(DestroyEvidence::ReconciledAbsent),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn admit(&self, environment: &SandboxEnvironment) -> Result<(), ProfileAdmissionError> {
         let operation_ids =
             AdmissionOperationIds::for_profile(environment.attestation(), self.probe_attempt);
@@ -601,6 +668,7 @@ impl ProfileAdmissionContext<'_> {
         let mut spec = SandboxSpec::new(
             operation_ids.create,
             self.generation,
+            self.custody(),
             environment.clone(),
             workspace.clone(),
             self.policy.network,
@@ -671,13 +739,10 @@ impl ProfileAdmissionContext<'_> {
             Ok(record) => record,
             Err(error) => {
                 let recovery_handle = error.recovery_handle().cloned();
-                let (cleanup, cleanup_error) = cleanup_after_create_failure(
-                    self.provider,
+                let (cleanup, cleanup_error) = self.cleanup_after_create_failure(
                     recovery_handle.as_ref(),
-                    self.generation,
                     destroy_operation_id,
                     error.outcome(),
-                    &self.cleanup_cancellation,
                 );
                 return Err(ProfileAdmissionError::provider(
                     ProfileAdmissionErrorKind::CreateFailed,
@@ -693,13 +758,8 @@ impl ProfileAdmissionContext<'_> {
             || record.profile() != environment.attestation()
             || record.state() != SandboxState::Running
         {
-            let (cleanup, cleanup_error) = cleanup_handle(
-                self.provider,
-                record.handle(),
-                self.generation,
-                destroy_operation_id,
-                &self.cleanup_cancellation,
-            );
+            let (cleanup, cleanup_error) =
+                self.cleanup_handle(record.handle(), destroy_operation_id);
             return Err(ProfileAdmissionError::evidence(
                 ProfileAdmissionErrorKind::InvalidCreateEvidence,
                 cleanup,
@@ -721,13 +781,8 @@ impl ProfileAdmissionContext<'_> {
         {
             Ok(inspection) => inspection,
             Err(error) => {
-                let (cleanup, cleanup_error) = cleanup_handle(
-                    self.provider,
-                    record.handle(),
-                    self.generation,
-                    destroy_operation_id,
-                    &self.cleanup_cancellation,
-                );
+                let (cleanup, cleanup_error) =
+                    self.cleanup_handle(record.handle(), destroy_operation_id);
                 return Err(ProfileAdmissionError::provider(
                     ProfileAdmissionErrorKind::InspectFailed,
                     error,
@@ -739,16 +794,12 @@ impl ProfileAdmissionContext<'_> {
         if inspection.handle() != record.handle()
             || inspection.handle().provider() != self.provider.provider_id()
             || inspection.generation() != self.generation
+            || inspection.custody() != self.custody()
             || inspection.profile() != environment.attestation()
             || inspection.state() != SandboxState::Running
         {
-            let (cleanup, cleanup_error) = cleanup_handle(
-                self.provider,
-                record.handle(),
-                self.generation,
-                destroy_operation_id,
-                &self.cleanup_cancellation,
-            );
+            let (cleanup, cleanup_error) =
+                self.cleanup_handle(record.handle(), destroy_operation_id);
             return Err(ProfileAdmissionError::evidence(
                 ProfileAdmissionErrorKind::InvalidInspectionEvidence,
                 cleanup,
@@ -774,13 +825,8 @@ impl ProfileAdmissionContext<'_> {
         {
             Ok(endpoint) => endpoint,
             Err(error) => {
-                let (cleanup, cleanup_error) = cleanup_handle(
-                    self.provider,
-                    record.handle(),
-                    self.generation,
-                    operation_ids.destroy,
-                    &self.cleanup_cancellation,
-                );
+                let (cleanup, cleanup_error) =
+                    self.cleanup_handle(record.handle(), operation_ids.destroy);
                 return Err(ProfileAdmissionError::provider(
                     ProfileAdmissionErrorKind::AttachFailed,
                     error,
@@ -798,13 +844,8 @@ impl ProfileAdmissionContext<'_> {
             .into_iter()
             .all(|capability| endpoint.capabilities().contains(&capability))
         {
-            let (cleanup, cleanup_error) = cleanup_handle(
-                self.provider,
-                record.handle(),
-                self.generation,
-                operation_ids.destroy,
-                &self.cleanup_cancellation,
-            );
+            let (cleanup, cleanup_error) =
+                self.cleanup_handle(record.handle(), operation_ids.destroy);
             return Err(ProfileAdmissionError::evidence(
                 ProfileAdmissionErrorKind::InvalidAttachEvidence,
                 cleanup,
@@ -824,13 +865,8 @@ impl ProfileAdmissionContext<'_> {
                 probe.script_content(execution_operation_id),
             ) else {
                 if script.is_some() || probe.script_name().is_some() {
-                    let (cleanup, cleanup_error) = cleanup_handle(
-                        self.provider,
-                        record.handle(),
-                        self.generation,
-                        operation_ids.destroy,
-                        &self.cleanup_cancellation,
-                    );
+                    let (cleanup, cleanup_error) =
+                        self.cleanup_handle(record.handle(), operation_ids.destroy);
                     return Err(ProfileAdmissionError::evidence(
                         ProfileAdmissionErrorKind::InvalidCopyEvidence,
                         cleanup,
@@ -840,13 +876,8 @@ impl ProfileAdmissionContext<'_> {
                 continue;
             };
             let Ok(request) = CopyToRequest::new(operation_id, script.clone(), content) else {
-                let (cleanup, cleanup_error) = cleanup_handle(
-                    self.provider,
-                    record.handle(),
-                    self.generation,
-                    operation_ids.destroy,
-                    &self.cleanup_cancellation,
-                );
+                let (cleanup, cleanup_error) =
+                    self.cleanup_handle(record.handle(), operation_ids.destroy);
                 return Err(ProfileAdmissionError::evidence(
                     ProfileAdmissionErrorKind::InvalidCopyEvidence,
                     cleanup,
@@ -854,13 +885,8 @@ impl ProfileAdmissionContext<'_> {
                 ));
             };
             if let Err(error) = endpoint.copy_to(&request, &self.provisioning_cancellation) {
-                let (cleanup, cleanup_error) = cleanup_handle(
-                    self.provider,
-                    record.handle(),
-                    self.generation,
-                    operation_ids.destroy,
-                    &self.cleanup_cancellation,
-                );
+                let (cleanup, cleanup_error) =
+                    self.cleanup_handle(record.handle(), operation_ids.destroy);
                 return Err(ProfileAdmissionError::execution(
                     ProfileAdmissionErrorKind::CopyFailed,
                     error,
@@ -877,13 +903,8 @@ impl ProfileAdmissionContext<'_> {
             .zip(operation_ids.exec)
         {
             let Ok(argv) = probe.argv(script.as_ref(), operation_id) else {
-                let (cleanup, cleanup_error) = cleanup_handle(
-                    self.provider,
-                    record.handle(),
-                    self.generation,
-                    operation_ids.destroy,
-                    &self.cleanup_cancellation,
-                );
+                let (cleanup, cleanup_error) =
+                    self.cleanup_handle(record.handle(), operation_ids.destroy);
                 return Err(ProfileAdmissionError::evidence(
                     ProfileAdmissionErrorKind::InvalidExecutionEvidence,
                     cleanup,
@@ -898,13 +919,8 @@ impl ProfileAdmissionContext<'_> {
                 SHELL_PROBE_TIMEOUT,
                 SHELL_PROBE_OUTPUT_BYTES,
             ) else {
-                let (cleanup, cleanup_error) = cleanup_handle(
-                    self.provider,
-                    record.handle(),
-                    self.generation,
-                    operation_ids.destroy,
-                    &self.cleanup_cancellation,
-                );
+                let (cleanup, cleanup_error) =
+                    self.cleanup_handle(record.handle(), operation_ids.destroy);
                 return Err(ProfileAdmissionError::evidence(
                     ProfileAdmissionErrorKind::InvalidExecutionEvidence,
                     cleanup,
@@ -914,13 +930,8 @@ impl ProfileAdmissionContext<'_> {
             let output = match endpoint.exec(&command, &self.provisioning_cancellation) {
                 Ok(output) => output,
                 Err(error) => {
-                    let (cleanup, cleanup_error) = cleanup_handle(
-                        self.provider,
-                        record.handle(),
-                        self.generation,
-                        operation_ids.destroy,
-                        &self.cleanup_cancellation,
-                    );
+                    let (cleanup, cleanup_error) =
+                        self.cleanup_handle(record.handle(), operation_ids.destroy);
                     return Err(ProfileAdmissionError::execution(
                         ProfileAdmissionErrorKind::ExecutionFailed,
                         error,
@@ -934,13 +945,8 @@ impl ProfileAdmissionContext<'_> {
                 || !probe.expected_stdout_matches(operation_id, output.stdout())
                 || !output.stderr().is_empty()
             {
-                let (cleanup, cleanup_error) = cleanup_handle(
-                    self.provider,
-                    record.handle(),
-                    self.generation,
-                    operation_ids.destroy,
-                    &self.cleanup_cancellation,
-                );
+                let (cleanup, cleanup_error) =
+                    self.cleanup_handle(record.handle(), operation_ids.destroy);
                 if output.termination() == ExecutionTermination::Cancelled
                     && self
                         .provisioning_cancellation
@@ -969,13 +975,7 @@ impl ProfileAdmissionContext<'_> {
         record: &automata_ci_execution::SandboxRecord,
         operation_id: OperationId,
     ) -> Result<(), ProfileAdmissionError> {
-        match destroy_with_reconciliation(
-            self.provider,
-            record.handle(),
-            self.generation,
-            operation_id,
-            &self.cleanup_cancellation,
-        ) {
+        match self.destroy_with_reconciliation(record.handle(), operation_id) {
             Ok(DestroyEvidence::Destroyed | DestroyEvidence::ReconciledAbsent) => Ok(()),
             Ok(DestroyEvidence::InitiallyAbsent) => Err(ProfileAdmissionError::evidence(
                 ProfileAdmissionErrorKind::InvalidDestroyEvidence,
@@ -1091,67 +1091,11 @@ fn validate_catalog(
     Ok(())
 }
 
-fn cleanup_after_create_failure(
-    provider: &dyn SandboxProvider,
-    recovery_handle: Option<&SandboxHandle>,
-    generation: SandboxGeneration,
-    operation_id: OperationId,
-    outcome: OperationOutcome,
-    cancellation: &dyn Cancellation,
-) -> (ProfileAdmissionCleanupStatus, Option<ProviderError>) {
-    match recovery_handle {
-        Some(handle) => cleanup_handle(provider, handle, generation, operation_id, cancellation),
-        None if outcome == OperationOutcome::KnownNoEffect => {
-            (ProfileAdmissionCleanupStatus::NotRequired, None)
-        }
-        None => (ProfileAdmissionCleanupStatus::Failed, None),
-    }
-}
-
-fn cleanup_handle(
-    provider: &dyn SandboxProvider,
-    handle: &SandboxHandle,
-    generation: SandboxGeneration,
-    operation_id: OperationId,
-    cancellation: &dyn Cancellation,
-) -> (ProfileAdmissionCleanupStatus, Option<ProviderError>) {
-    match destroy_with_reconciliation(provider, handle, generation, operation_id, cancellation) {
-        Ok(_) => (ProfileAdmissionCleanupStatus::Complete, None),
-        Err(error) => (ProfileAdmissionCleanupStatus::Failed, Some(error)),
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DestroyEvidence {
     Destroyed,
     ReconciledAbsent,
     InitiallyAbsent,
-}
-
-fn destroy_with_reconciliation(
-    provider: &dyn SandboxProvider,
-    handle: &SandboxHandle,
-    generation: SandboxGeneration,
-    operation_id: OperationId,
-    cancellation: &dyn Cancellation,
-) -> Result<DestroyEvidence, ProviderError> {
-    let request = DestroySandbox::new(operation_id, handle.clone(), generation);
-    match provider.destroy(&request, cancellation) {
-        Ok(DestroyDisposition::Destroyed) => Ok(DestroyEvidence::Destroyed),
-        Ok(DestroyDisposition::AlreadyAbsent) => Ok(DestroyEvidence::InitiallyAbsent),
-        Err(error)
-            if error.outcome() == OperationOutcome::Uncertain
-                && error
-                    .recovery_handle()
-                    .is_none_or(|recovery_handle| recovery_handle == handle) =>
-        {
-            match provider.destroy(&request, cancellation)? {
-                DestroyDisposition::Destroyed => Ok(DestroyEvidence::Destroyed),
-                DestroyDisposition::AlreadyAbsent => Ok(DestroyEvidence::ReconciledAbsent),
-            }
-        }
-        Err(error) => Err(error),
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1246,7 +1190,10 @@ impl Cancellation for CleanupCancellation<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        num::NonZeroU16,
+        sync::{Arc, Mutex},
+    };
 
     use automata_ci_execution::{
         CopyFromRequest, ExecutionEndpoint, ExecutionEnvironment, ExecutionOutput,
@@ -1257,6 +1204,10 @@ mod tests {
 
     use super::*;
 
+    fn runner_id() -> RunnerId {
+        RunnerId::from_uuid(Uuid::from_u128(0x8fe5_8afb_3922_4299_a540_4da9_bfa4_25d6))
+    }
+
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     enum FakeBehavior {
         #[default]
@@ -1264,6 +1215,7 @@ mod tests {
         CreateFailureWithRecovery,
         CreateState(SandboxState),
         InspectState(SandboxState),
+        InspectCustody(SandboxCustody),
         DestroyInitiallyAbsent,
         DestroyUncertainOnce,
         CancelAfterCreate(u8),
@@ -1287,7 +1239,7 @@ mod tests {
     #[derive(Debug)]
     struct FakeState {
         calls: Vec<Call>,
-        resources: BTreeMap<SandboxHandle, (SandboxGeneration, EnvironmentProfile)>,
+        resources: BTreeMap<SandboxHandle, (SandboxGeneration, SandboxCustody, EnvironmentProfile)>,
     }
 
     #[derive(Debug)]
@@ -1365,7 +1317,11 @@ mod tests {
             state.calls.push(Call::Create(Box::new(spec.clone())));
             state.resources.insert(
                 handle.clone(),
-                (spec.generation(), spec.profile().attestation().clone()),
+                (
+                    spec.generation(),
+                    spec.custody(),
+                    spec.profile().attestation().clone(),
+                ),
             );
             drop(state);
             let cancel_after_create = match self.behavior {
@@ -1441,10 +1397,16 @@ mod tests {
                 ));
             }
             let state = self.state.lock().expect("fake state");
-            let (generation, profile) = state.resources.get(handle).expect("owned resource");
+            let (generation, custody, profile) =
+                state.resources.get(handle).expect("owned resource");
+            let custody = match self.behavior {
+                FakeBehavior::InspectCustody(custody) => custody,
+                _ => *custody,
+            };
             Ok(SandboxInspection::new(
                 handle.clone(),
                 *generation,
+                custody,
                 profile.clone(),
                 match self.behavior {
                     FakeBehavior::InspectState(state) => state,
@@ -1822,7 +1784,13 @@ mod tests {
         let profiles = BTreeMap::from([(attestation, environment)]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, linux_tool_policy(), &signals),
+            admit_environment_profiles(
+                &provider,
+                runner_id(),
+                &profiles,
+                linux_tool_policy(),
+                &signals,
+            ),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         let calls = provider.calls();
@@ -1944,9 +1912,14 @@ mod tests {
             let (profile, sandbox) = environment("linux-tools", profile_digest(0x57), 0x68);
             let profiles = BTreeMap::from([(profile, sandbox)]);
 
-            let error =
-                admit_environment_profiles(&provider, &profiles, linux_tool_policy(), &signals)
-                    .expect_err("Linux profile tools require the complete sandbox boundary");
+            let error = admit_environment_profiles(
+                &provider,
+                runner_id(),
+                &profiles,
+                linux_tool_policy(),
+                &signals,
+            )
+            .expect_err("Linux profile tools require the complete sandbox boundary");
             assert_eq!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidProviderEvidence
@@ -2008,7 +1981,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         assert_eq!(provider.resource_count(), 0);
@@ -2025,6 +1998,12 @@ mod tests {
             assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Administrator);
             assert_eq!(spec.resources(), policy().resources);
             assert_eq!(spec.generation().get(), ADMISSION_GENERATION);
+            assert_eq!(
+                spec.custody(),
+                SandboxCustody::ProfileAdmission {
+                    runner_id: runner_id(),
+                }
+            );
             let Call::Inspect(inspected) = &calls[1] else {
                 panic!("profile create must be inspected")
             };
@@ -2034,6 +2013,7 @@ mod tests {
             assert!(!cleanup_cancelled);
             assert_eq!(inspected, destroyed.handle());
             assert_eq!(destroyed.generation(), spec.generation());
+            assert_eq!(destroyed.custody(), spec.custody());
             assert_ne!(destroyed.operation_id(), spec.operation_id());
         }
 
@@ -2046,7 +2026,7 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         let second_ids: Vec<_> = provider.calls()[calls.len()..]
@@ -2114,7 +2094,7 @@ mod tests {
         .expect("Hyper-V container admission policy");
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy, &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         let calls = provider.calls();
@@ -2267,8 +2247,9 @@ mod tests {
             .expect("capabilities with one required boundary omitted");
             let (profiles, policy) = windows_hyperv_fixture();
 
-            let error = admit_environment_profiles(&provider, &profiles, policy, &signals)
-                .expect_err("every isolated boundary must be explicitly advertised");
+            let error =
+                admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals)
+                    .expect_err("every isolated boundary must be explicitly advertised");
             assert_eq!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidProviderEvidence
@@ -2293,8 +2274,9 @@ mod tests {
             let provider = FakeProvider::new(behavior, signals.clone());
             let (profiles, policy) = windows_hyperv_fixture();
 
-            let error = admit_environment_profiles(&provider, &profiles, policy, &signals)
-                .expect_err("invalid shell evidence must reject admission");
+            let error =
+                admit_environment_profiles(&provider, runner_id(), &profiles, policy, &signals)
+                    .expect_err("invalid shell evidence must reject admission");
             assert_eq!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidExecutionEvidence
@@ -2349,8 +2331,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::CreateFailureWithRecovery, signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0x31), 0x41)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("create failure cannot admit profile");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("create failure cannot admit profile");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::CreateFailed);
         assert_eq!(
             error.cleanup_status(),
@@ -2365,15 +2348,29 @@ mod tests {
 
     #[test]
     fn invalid_create_and_inspection_evidence_are_cleaned() {
+        let expected_runner = runner_id();
         for behavior in [
             FakeBehavior::CreateState(SandboxState::Created),
             FakeBehavior::InspectState(SandboxState::Degraded),
+            FakeBehavior::InspectCustody(SandboxCustody::ProfileAdmission {
+                runner_id: RunnerId::new(),
+            }),
+            FakeBehavior::InspectCustody(SandboxCustody::Job {
+                runner_id: expected_runner,
+                slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+            }),
         ] {
             let signals = ProbeCancellation::default();
             let provider = FakeProvider::new(behavior, signals.clone());
             let profiles = BTreeMap::from([environment("linux", profile_digest(0x51), 0x61)]);
-            let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-                .expect_err("invalid lifecycle evidence cannot admit profile");
+            let error = admit_environment_profiles(
+                &provider,
+                expected_runner,
+                &profiles,
+                policy(),
+                &signals,
+            )
+            .expect_err("invalid lifecycle evidence cannot admit profile");
             assert!(matches!(
                 error.kind(),
                 ProfileAdmissionErrorKind::InvalidCreateEvidence
@@ -2394,7 +2391,7 @@ mod tests {
         let profiles = BTreeMap::from([environment("linux", profile_digest(0x71), 0x81)]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Cancelled)
         );
         assert_eq!(provider.resource_count(), 0);
@@ -2410,8 +2407,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::CancelAfterCreate(2), signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0x91), 0xa1)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("forced cancellation may interrupt cleanup but cannot hide it");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("forced cancellation may interrupt cleanup but cannot hide it");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::InspectFailed);
         assert_eq!(
             error.cleanup_status(),
@@ -2430,8 +2428,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::InspectAndDestroyFailure, signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0xb1), 0xc1)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("cleanup failure cannot admit profile");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("cleanup failure cannot admit profile");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::InspectFailed);
         assert_eq!(
             error.cleanup_status(),
@@ -2453,8 +2452,9 @@ mod tests {
         let provider = FakeProvider::new(FakeBehavior::DestroyInitiallyAbsent, signals.clone());
         let profiles = BTreeMap::from([environment("linux", profile_digest(0xc1), 0xd1)]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("an initially absent destroy target invalidates lifecycle evidence");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("an initially absent destroy target invalidates lifecycle evidence");
         assert_eq!(
             error.kind(),
             ProfileAdmissionErrorKind::InvalidDestroyEvidence
@@ -2473,7 +2473,7 @@ mod tests {
         let profiles = BTreeMap::from([environment("linux", profile_digest(0xc7), 0xd7)]);
 
         assert_eq!(
-            admit_environment_profiles(&provider, &profiles, policy(), &signals),
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals),
             Ok(ProfileAdmissionOutcome::Admitted)
         );
         assert_eq!(provider.resource_count(), 0);
@@ -2498,8 +2498,9 @@ mod tests {
             environment("linux", colliding_digest, 0xf1),
         ]);
 
-        let error = admit_environment_profiles(&provider, &profiles, policy(), &signals)
-            .expect_err("colliding replay coordinates must fail before create");
+        let error =
+            admit_environment_profiles(&provider, runner_id(), &profiles, policy(), &signals)
+                .expect_err("colliding replay coordinates must fail before create");
         assert_eq!(error.kind(), ProfileAdmissionErrorKind::InvalidCatalog);
         assert_eq!(
             error.cleanup_status(),

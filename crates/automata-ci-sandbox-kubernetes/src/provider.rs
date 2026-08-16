@@ -1,10 +1,10 @@
-use std::{future::Future, str::FromStr as _, sync::Arc, time::Instant};
+use std::{future::Future, num::NonZeroU16, str::FromStr as _, sync::Arc, time::Instant};
 
-use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, Sha256Digest};
+use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, RunnerId, Sha256Digest};
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, OperationOutcome, ProviderCapabilities,
-    ProviderError, ProviderErrorKind, ProviderId, ProviderStage, SandboxCapability, SandboxHandle,
-    SandboxInspection, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
+    ProviderError, ProviderErrorKind, ProviderId, ProviderStage, SandboxCapability, SandboxCustody,
+    SandboxHandle, SandboxInspection, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
 };
 use k8s_openapi::api::{core::v1::Pod, networking::v1::NetworkPolicy};
 use kube::{
@@ -18,8 +18,10 @@ use crate::{
     endpoint::KubernetesExecutionEndpoint,
     invalid_configuration,
     objects::{
-        FINGERPRINT_ANNOTATION, GENERATION_ANNOTATION, MANAGED_LABEL, PROFILE_DIGEST_ANNOTATION,
-        PROFILE_ID_ANNOTATION, SANDBOX_LABEL, build_objects, network_policy_name,
+        CUSTODY_KIND_LABEL, CUSTODY_RUNNER_LABEL, CUSTODY_SLOT_LABEL, FINGERPRINT_ANNOTATION,
+        GENERATION_ANNOTATION, MANAGED_LABEL, PROFILE_DIGEST_ANNOTATION, PROFILE_ID_ANNOTATION,
+        SANDBOX_LABEL, SANDBOX_SCHEMA, SCHEMA_LABEL, build_objects, deny_all_network_policy_spec,
+        network_policy_name,
     },
 };
 
@@ -34,6 +36,14 @@ struct KubernetesInner {
     config: KubernetesSandboxConfig,
     provider_id: ProviderId,
     capabilities: ProviderCapabilities,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct SandboxObjectIdentity {
+    generation: automata_ci_execution::SandboxGeneration,
+    custody: SandboxCustody,
+    profile: EnvironmentProfile,
+    fingerprint: String,
 }
 
 impl KubernetesSandboxProvider {
@@ -174,16 +184,18 @@ impl SandboxProvider for KubernetesSandboxProvider {
         ensure_not_cancelled(cancellation, ProviderStage::Attach)?;
         let pods: Api<Pod> =
             Api::namespaced(self.inner.client.clone(), self.inner.config.namespace());
+        let policies: Api<NetworkPolicy> =
+            Api::namespaced(self.inner.client.clone(), self.inner.config.namespace());
         let name = handle.opaque().to_owned();
+        let namespace = self.inner.config.namespace().to_owned();
         let timeout_duration = self.inner.config.operation_timeout();
-        let pod = block_on(async move {
-            timeout(timeout_duration, pods.get(&name))
-                .await
-                .map_err(|_| ProviderErrorKind::TimedOut)?
-                .map_err(|error| map_kube_error(&error))
+        let (pod, policy) = block_on(async move {
+            get_sandbox_objects(&pods, &policies, &name, timeout_duration).await
         })
         .map_err(|kind| provider_error(kind, ProviderStage::Attach))?;
-        verify_managed(&pod, handle.opaque(), None)
+        let (pod, policy) = require_sandbox_pair(pod, policy, handle.opaque(), &namespace)
+            .map_err(|kind| provider_error(kind, ProviderStage::Attach))?;
+        let identity = verify_required_sandbox_objects(&pod, &policy, handle.opaque(), &namespace)
             .map_err(|kind| provider_error(kind, ProviderStage::Attach))?;
         if pod_state(&pod) != SandboxState::Running {
             return Err(provider_error(
@@ -199,6 +211,7 @@ impl SandboxProvider for KubernetesSandboxProvider {
             self.inner.config.namespace().into(),
             handle.clone(),
             uid,
+            identity,
             self.inner.config.operation_timeout(),
         )))
     }
@@ -212,23 +225,24 @@ impl SandboxProvider for KubernetesSandboxProvider {
         ensure_not_cancelled(cancellation, ProviderStage::Inspect)?;
         let pods: Api<Pod> =
             Api::namespaced(self.inner.client.clone(), self.inner.config.namespace());
+        let policies: Api<NetworkPolicy> =
+            Api::namespaced(self.inner.client.clone(), self.inner.config.namespace());
         let name = handle.opaque().to_owned();
+        let namespace = self.inner.config.namespace().to_owned();
         let timeout_duration = self.inner.config.operation_timeout();
-        let pod = block_on(async move {
-            timeout(timeout_duration, pods.get(&name))
-                .await
-                .map_err(|_| ProviderErrorKind::TimedOut)?
-                .map_err(|error| map_kube_error(&error))
+        let (pod, policy) = block_on(async move {
+            get_sandbox_objects(&pods, &policies, &name, timeout_duration).await
         })
         .map_err(|kind| provider_error(kind, ProviderStage::Inspect))?;
-        verify_managed(&pod, handle.opaque(), None)
+        let (pod, policy) = require_sandbox_pair(pod, policy, handle.opaque(), &namespace)
             .map_err(|kind| provider_error(kind, ProviderStage::Inspect))?;
-        let (generation, profile) =
-            identity_from_pod(&pod).map_err(|kind| provider_error(kind, ProviderStage::Inspect))?;
+        let identity = verify_required_sandbox_objects(&pod, &policy, handle.opaque(), &namespace)
+            .map_err(|kind| provider_error(kind, ProviderStage::Inspect))?;
         Ok(SandboxInspection::new(
             handle.clone(),
-            generation,
-            profile,
+            identity.generation,
+            identity.custody,
+            identity.profile,
             pod_state(&pod),
         ))
     }
@@ -251,18 +265,52 @@ impl SandboxProvider for KubernetesSandboxProvider {
         let name = request.handle().opaque().to_owned();
         let policy_name = network_policy_name(&name);
         let generation = request.generation().get();
+        let custody = request.custody();
+        let namespace = self.inner.config.namespace().to_owned();
         let timeout_duration = self.inner.config.operation_timeout();
         let result = block_on(async move {
+            let started = Instant::now();
+            let pod = timed_get_opt(&pods, &name, remaining(timeout_duration, started)?).await?;
+            let policy = timed_get_opt(
+                &policies,
+                &policy_name,
+                remaining(timeout_duration, started)?,
+            )
+            .await?;
+            let pod_identity = pod
+                .as_ref()
+                .map(|pod| {
+                    let identity = owned_pod_identity(pod, &name, &namespace)?;
+                    if identity.generation.get() != generation || identity.custody != custody {
+                        return Err(ProviderErrorKind::OwnershipMismatch);
+                    }
+                    Ok(identity)
+                })
+                .transpose()?;
+            if let Some(policy) = policy.as_ref() {
+                let policy_identity = owned_policy_identity(policy, &name, &namespace)?;
+                if policy_identity.generation.get() != generation
+                    || policy_identity.custody != custody
+                {
+                    return Err(ProviderErrorKind::OwnershipMismatch);
+                }
+                if pod_identity
+                    .as_ref()
+                    .is_some_and(|pod_identity| pod_identity != &policy_identity)
+                {
+                    return Err(ProviderErrorKind::OwnershipMismatch);
+                }
+            }
             let pod_existed =
-                delete_pod_and_wait(&pods, &name, generation, timeout_duration).await?;
+                delete_pod_and_wait(&pods, &name, pod, remaining(timeout_duration, started)?)
+                    .await?;
             // Network isolation must outlive the exact Pod UID. Kubernetes Pod
             // deletion is asynchronous even after DELETE succeeds.
             let policy_existed = delete_policy_and_wait(
                 &policies,
                 &policy_name,
-                &name,
-                generation,
-                timeout_duration,
+                policy,
+                remaining(timeout_duration, started)?,
             )
             .await?;
             let existed = pod_existed || policy_existed;
@@ -284,17 +332,54 @@ impl SandboxProvider for KubernetesSandboxProvider {
     }
 }
 
+async fn get_sandbox_objects(
+    pods: &Api<Pod>,
+    policies: &Api<NetworkPolicy>,
+    sandbox: &str,
+    deadline: Duration,
+) -> Result<(Option<Pod>, Option<NetworkPolicy>), ProviderErrorKind> {
+    let started = Instant::now();
+    let pod = timed_get_opt(pods, sandbox, remaining(deadline, started)?).await?;
+    let policy = timed_get_opt(
+        policies,
+        &network_policy_name(sandbox),
+        remaining(deadline, started)?,
+    )
+    .await?;
+    Ok((pod, policy))
+}
+
+fn require_sandbox_pair(
+    pod: Option<Pod>,
+    policy: Option<NetworkPolicy>,
+    sandbox: &str,
+    namespace: &str,
+) -> Result<(Pod, NetworkPolicy), ProviderErrorKind> {
+    match (pod, policy) {
+        (Some(pod), Some(policy)) => Ok((pod, policy)),
+        (None, None) => Err(ProviderErrorKind::NotFound),
+        (Some(pod), None) => {
+            owned_pod_identity(&pod, sandbox, namespace)?;
+            Err(ProviderErrorKind::InvalidState)
+        }
+        (None, Some(policy)) => {
+            owned_policy_identity(&policy, sandbox, namespace)?;
+            verify_required_policy_health(&policy, sandbox)?;
+            Err(ProviderErrorKind::InvalidState)
+        }
+    }
+}
+
 async fn delete_pod_and_wait(
     pods: &Api<Pod>,
     name: &str,
-    generation: u64,
+    pod: Option<Pod>,
     deadline: Duration,
 ) -> Result<bool, ProviderErrorKind> {
     let started = Instant::now();
-    let Some(pod) = timed_get_opt(pods, name, remaining(deadline, started)?).await? else {
+    let Some(pod) = pod else {
         return Ok(false);
     };
-    verify_managed(&pod, name, Some(generation))?;
     let uid = pod.uid().ok_or(ProviderErrorKind::BackendRejected)?;
     let resource_version = pod
         .resource_version()
@@ -330,16 +415,13 @@ async fn delete_pod_and_wait(
 async fn delete_policy_and_wait(
     policies: &Api<NetworkPolicy>,
     policy_name: &str,
-    sandbox_name: &str,
-    generation: u64,
+    policy: Option<NetworkPolicy>,
     deadline: Duration,
 ) -> Result<bool, ProviderErrorKind> {
     let started = Instant::now();
-    let Some(policy) = timed_get_opt(policies, policy_name, remaining(deadline, started)?).await?
-    else {
+    let Some(policy) = policy else {
         return Ok(false);
     };
-    verify_managed(&policy, sandbox_name, Some(generation))?;
     let uid = policy.uid().ok_or(ProviderErrorKind::BackendRejected)?;
     let resource_version = policy
         .resource_version()
@@ -465,6 +547,10 @@ fn verify_observed_pod(
 ) -> Result<(), ProviderErrorKind> {
     let name = expected.name_any();
     verify_managed(observed, &name, None)?;
+    if observed.name_any() != name || observed.namespace() != expected.namespace() {
+        return Err(ProviderErrorKind::Conflict);
+    }
+    verify_same_object_identity(observed, expected)?;
     verify_fingerprint(observed, fingerprint)?;
     let observed = observed.spec.as_ref().ok_or(ProviderErrorKind::Conflict)?;
     let expected = expected
@@ -499,6 +585,10 @@ fn verify_observed_policy(
     fingerprint: &str,
 ) -> Result<(), ProviderErrorKind> {
     verify_managed(observed, sandbox, None)?;
+    if observed.name_any() != expected.name_any() || observed.namespace() != expected.namespace() {
+        return Err(ProviderErrorKind::Conflict);
+    }
+    verify_same_object_identity(observed, expected)?;
     verify_fingerprint(observed, fingerprint)?;
     (observed.spec == expected.spec)
         .then_some(())
@@ -573,10 +663,20 @@ pub(crate) fn pod_state(pod: &Pod) -> SandboxState {
     }
 }
 
-fn identity_from_pod(
-    pod: &Pod,
-) -> Result<(automata_ci_execution::SandboxGeneration, EnvironmentProfile), ProviderErrorKind> {
-    let annotations = pod.annotations();
+fn identity_from_object<K>(
+    object: &K,
+) -> Result<
+    (
+        automata_ci_execution::SandboxGeneration,
+        SandboxCustody,
+        EnvironmentProfile,
+    ),
+    ProviderErrorKind,
+>
+where
+    K: Resource,
+{
+    let annotations = ResourceExt::annotations(object);
     let generation = annotations
         .get(GENERATION_ANNOTATION)
         .and_then(|value| value.parse().ok())
@@ -590,7 +690,185 @@ fn identity_from_pod(
         .get(PROFILE_DIGEST_ANNOTATION)
         .and_then(|value| Sha256Digest::from_str(value).ok())
         .ok_or(ProviderErrorKind::OwnershipMismatch)?;
-    Ok((generation, EnvironmentProfile::new(profile_id, digest)))
+    Ok((
+        generation,
+        custody_from_object(object)?,
+        EnvironmentProfile::new(profile_id, digest),
+    ))
+}
+
+fn fingerprint_from_object<K>(object: &K) -> Result<&str, ProviderErrorKind>
+where
+    K: Resource,
+{
+    let value = ResourceExt::annotations(object)
+        .get(FINGERPRINT_ANNOTATION)
+        .map(String::as_str)
+        .ok_or(ProviderErrorKind::OwnershipMismatch)?;
+    let digest = Sha256Digest::from_str(value).map_err(|_| ProviderErrorKind::OwnershipMismatch)?;
+    (digest.to_string() == value)
+        .then_some(value)
+        .ok_or(ProviderErrorKind::OwnershipMismatch)
+}
+
+fn object_identity<K>(object: &K) -> Result<SandboxObjectIdentity, ProviderErrorKind>
+where
+    K: Resource,
+{
+    let (generation, custody, profile) = identity_from_object(object)?;
+    let identity = SandboxObjectIdentity {
+        generation,
+        custody,
+        profile,
+        fingerprint: fingerprint_from_object(object)?.to_owned(),
+    };
+    canonical_identity_encoding(object, &identity)
+        .then_some(identity)
+        .ok_or(ProviderErrorKind::OwnershipMismatch)
+}
+
+fn owned_pod_identity(
+    pod: &Pod,
+    sandbox: &str,
+    namespace: &str,
+) -> Result<SandboxObjectIdentity, ProviderErrorKind> {
+    verify_managed(pod, sandbox, None)?;
+    if pod.name_any() != sandbox || pod.namespace().as_deref() != Some(namespace) {
+        return Err(ProviderErrorKind::OwnershipMismatch);
+    }
+    object_identity(pod)
+}
+
+fn owned_policy_identity(
+    policy: &NetworkPolicy,
+    sandbox: &str,
+    namespace: &str,
+) -> Result<SandboxObjectIdentity, ProviderErrorKind> {
+    verify_managed(policy, sandbox, None)?;
+    if policy.name_any() != network_policy_name(sandbox)
+        || policy.namespace().as_deref() != Some(namespace)
+    {
+        return Err(ProviderErrorKind::OwnershipMismatch);
+    }
+    object_identity(policy)
+}
+
+fn verify_same_object_identity<K>(observed: &K, expected: &K) -> Result<(), ProviderErrorKind>
+where
+    K: Resource,
+{
+    const ANNOTATIONS: [&str; 3] = [
+        GENERATION_ANNOTATION,
+        PROFILE_ID_ANNOTATION,
+        PROFILE_DIGEST_ANNOTATION,
+    ];
+    const LABELS: [&str; 3] = [CUSTODY_KIND_LABEL, CUSTODY_RUNNER_LABEL, CUSTODY_SLOT_LABEL];
+    let observed_annotations = ResourceExt::annotations(observed);
+    let expected_annotations = ResourceExt::annotations(expected);
+    let observed_labels = ResourceExt::labels(observed);
+    let expected_labels = ResourceExt::labels(expected);
+    let exact_encoding = ANNOTATIONS
+        .iter()
+        .all(|key| observed_annotations.get(*key) == expected_annotations.get(*key))
+        && LABELS
+            .iter()
+            .all(|key| observed_labels.get(*key) == expected_labels.get(*key));
+    (identity_from_object(observed)? == identity_from_object(expected)? && exact_encoding)
+        .then_some(())
+        .ok_or(ProviderErrorKind::Conflict)
+}
+
+fn canonical_identity_encoding<K>(object: &K, identity: &SandboxObjectIdentity) -> bool
+where
+    K: Resource,
+{
+    let annotations = ResourceExt::annotations(object);
+    let labels = ResourceExt::labels(object);
+    let generation = identity.generation.get().to_string();
+    let profile_digest = identity.profile.digest().to_string();
+    let (kind, runner_id, slot) = match identity.custody {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            ("profile-admission", runner_id.to_string(), "0".to_owned())
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => ("job", runner_id.to_string(), slot_ordinal.get().to_string()),
+    };
+    annotations.get(GENERATION_ANNOTATION).map(String::as_str) == Some(generation.as_str())
+        && annotations.get(PROFILE_ID_ANNOTATION).map(String::as_str)
+            == Some(identity.profile.id().as_str())
+        && annotations
+            .get(PROFILE_DIGEST_ANNOTATION)
+            .map(String::as_str)
+            == Some(profile_digest.as_str())
+        && labels.get(CUSTODY_KIND_LABEL).map(String::as_str) == Some(kind)
+        && labels.get(CUSTODY_RUNNER_LABEL).map(String::as_str) == Some(runner_id.as_str())
+        && labels.get(CUSTODY_SLOT_LABEL).map(String::as_str) == Some(slot.as_str())
+}
+
+fn verify_matching_object_identity(
+    observed: &SandboxObjectIdentity,
+    expected: &SandboxObjectIdentity,
+) -> Result<(), ProviderErrorKind> {
+    if observed.generation != expected.generation
+        || observed.custody != expected.custody
+        || observed.profile != expected.profile
+    {
+        return Err(ProviderErrorKind::OwnershipMismatch);
+    }
+    (observed.fingerprint == expected.fingerprint)
+        .then_some(())
+        .ok_or(ProviderErrorKind::Conflict)
+}
+
+fn verify_required_policy_health(
+    policy: &NetworkPolicy,
+    sandbox: &str,
+) -> Result<(), ProviderErrorKind> {
+    (policy.spec.as_ref() == Some(&deny_all_network_policy_spec(sandbox)))
+        .then_some(())
+        .ok_or(ProviderErrorKind::Conflict)
+}
+
+pub(crate) fn verify_required_sandbox_objects(
+    pod: &Pod,
+    policy: &NetworkPolicy,
+    sandbox: &str,
+    namespace: &str,
+) -> Result<SandboxObjectIdentity, ProviderErrorKind> {
+    let pod_identity = owned_pod_identity(pod, sandbox, namespace)?;
+    let policy_identity = owned_policy_identity(policy, sandbox, namespace)?;
+    verify_matching_object_identity(&policy_identity, &pod_identity)?;
+    verify_required_policy_health(policy, sandbox)?;
+    Ok(pod_identity)
+}
+
+fn custody_from_object<K>(object: &K) -> Result<SandboxCustody, ProviderErrorKind>
+where
+    K: Resource,
+{
+    let labels = ResourceExt::labels(object);
+    let runner_id = labels
+        .get(CUSTODY_RUNNER_LABEL)
+        .and_then(|value| RunnerId::from_str(value).ok())
+        .ok_or(ProviderErrorKind::OwnershipMismatch)?;
+    let slot = labels
+        .get(CUSTODY_SLOT_LABEL)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or(ProviderErrorKind::OwnershipMismatch)?;
+    match labels.get(CUSTODY_KIND_LABEL).map(String::as_str) {
+        Some("profile-admission") if slot == 0 => {
+            Ok(SandboxCustody::ProfileAdmission { runner_id })
+        }
+        Some("job") => NonZeroU16::new(slot)
+            .map(|slot_ordinal| SandboxCustody::Job {
+                runner_id,
+                slot_ordinal,
+            })
+            .ok_or(ProviderErrorKind::OwnershipMismatch),
+        _ => Err(ProviderErrorKind::OwnershipMismatch),
+    }
 }
 
 pub(crate) fn verify_managed<K>(
@@ -606,6 +884,10 @@ where
         .map(String::as_str)
         != Some("true")
         || ResourceExt::labels(object)
+            .get(SCHEMA_LABEL)
+            .map(String::as_str)
+            != Some(SANDBOX_SCHEMA)
+        || ResourceExt::labels(object)
             .get(SANDBOX_LABEL)
             .map(String::as_str)
             != Some(sandbox)
@@ -618,6 +900,7 @@ where
     {
         return Err(ProviderErrorKind::OwnershipMismatch);
     }
+    custody_from_object(object)?;
     Ok(())
 }
 

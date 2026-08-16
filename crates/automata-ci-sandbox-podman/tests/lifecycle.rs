@@ -3,6 +3,7 @@
 use crate::support;
 
 use std::{
+    num::NonZeroU16,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -14,9 +15,9 @@ use automata_ci_execution::{
     CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox, EnvironmentName,
     EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
     ExecutionErrorKind, ExecutionSignal, NetworkPolicy, NeverCancelled, OperationId,
-    ProviderErrorKind, RootFilesystemPolicy, SandboxCapability, SandboxGeneration,
-    SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState, SignalRequest, TargetPath,
-    WaitRequest,
+    ProviderErrorKind, RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody,
+    SandboxGeneration, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState,
+    SignalRequest, TargetPath, WaitRequest,
 };
 use automata_ci_sandbox_podman::{
     CommandOutput, PodmanCommandExecutor, PodmanHostGatewayAlias, PodmanLaunchTrust,
@@ -24,7 +25,8 @@ use automata_ci_sandbox_podman::{
 };
 
 use support::{
-    Fixture, sample_spec, sample_spec_with, sample_spec_with_digest, test_single_file_tar,
+    Fixture, sample_spec, sample_spec_with, sample_spec_with_digest_and_custody,
+    test_single_file_tar,
 };
 
 #[derive(Debug)]
@@ -151,6 +153,7 @@ fn whole_job_create_replay_exec_and_destroy_are_exact() {
                 OperationId::new(),
                 created.handle().clone(),
                 created.generation(),
+                spec.custody(),
             ),
             &cancellation,
         )
@@ -164,6 +167,7 @@ fn whole_job_create_replay_exec_and_destroy_are_exact() {
                     OperationId::new(),
                     created.handle().clone(),
                     created.generation(),
+                    spec.custody(),
                 ),
                 &cancellation,
             )
@@ -215,7 +219,12 @@ fn create_fails_uncertain_when_the_live_cgroup_can_swap() {
     fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, spec.generation()),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle,
+                spec.generation(),
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect("destroy replayed sandbox");
@@ -262,6 +271,7 @@ fn attach_reverifies_and_quarantines_a_running_sandbox() {
                 OperationId::new(),
                 replay.handle().clone(),
                 replay.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -271,9 +281,10 @@ fn attach_reverifies_and_quarantines_a_running_sandbox() {
 #[test]
 fn partial_workspace_cleanup_reopens_and_retries_only_the_exact_user_namespace_target() {
     let fixture = Fixture::new("workspace-cleanup-reopen");
+    let spec = sample_spec(OperationId::new());
     let created = fixture
         .provider
-        .create(&sample_spec(OperationId::new()), &NeverCancelled)
+        .create(&spec, &NeverCancelled)
         .expect("create sandbox");
     let generation = created.generation();
     let handle = created.handle().clone();
@@ -292,7 +303,12 @@ fn partial_workspace_cleanup_reopens_and_retries_only_the_exact_user_namespace_t
     let first = fixture
         .provider
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle.clone(), generation),
+            &DestroySandbox::new(
+                OperationId::new(),
+                handle.clone(),
+                generation,
+                spec.custody(),
+            ),
             &NeverCancelled,
         )
         .expect_err("injected exact workspace deletion failure");
@@ -337,7 +353,7 @@ fn partial_workspace_cleanup_reopens_and_retries_only_the_exact_user_namespace_t
     .expect("reopen exact provider state");
     let disposition = reopened
         .destroy(
-            &DestroySandbox::new(OperationId::new(), handle, generation),
+            &DestroySandbox::new(OperationId::new(), handle, generation, spec.custody()),
             &NeverCancelled,
         )
         .expect("replay partial exact cleanup");
@@ -356,9 +372,10 @@ fn partial_workspace_cleanup_reopens_and_retries_only_the_exact_user_namespace_t
 #[test]
 fn workspace_cleanup_rejects_a_swapped_symlink_without_touching_its_target() {
     let fixture = Fixture::new("workspace-cleanup-symlink");
+    let spec = sample_spec(OperationId::new());
     let created = fixture
         .provider
-        .create(&sample_spec(OperationId::new()), &NeverCancelled)
+        .create(&spec, &NeverCancelled)
         .expect("create sandbox");
     let workspace = std::fs::read_dir(fixture.scratch.path().join("workspaces"))
         .expect("workspace root")
@@ -380,6 +397,7 @@ fn workspace_cleanup_rejects_a_swapped_symlink_without_touching_its_target() {
                 OperationId::new(),
                 created.handle().clone(),
                 created.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -387,7 +405,7 @@ fn workspace_cleanup_rejects_a_swapped_symlink_without_touching_its_target() {
     assert_eq!(error.kind(), ProviderErrorKind::LocalStorage);
     assert_eq!(
         error.outcome(),
-        automata_ci_execution::OperationOutcome::Uncertain
+        automata_ci_execution::OperationOutcome::KnownNoEffect
     );
     assert_eq!(
         std::fs::read(outside.join("retained")).expect("outside content survives"),
@@ -581,6 +599,7 @@ fn writable_ephemeral_rootfs_is_explicit_and_retains_isolation_controls() {
     let spec = SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(1).expect("generation"),
+        baseline.custody(),
         baseline.profile().clone(),
         baseline.workspace().clone(),
         NetworkPolicy::PrivateEgress,
@@ -642,6 +661,7 @@ fn writable_ephemeral_rootfs_is_explicit_and_retains_isolation_controls() {
                 OperationId::new(),
                 created.handle().clone(),
                 created.generation(),
+                spec.custody(),
             ),
             &NeverCancelled,
         )
@@ -684,6 +704,57 @@ fn partial_create_failure_returns_recovery_handle_and_replays() {
 }
 
 #[test]
+fn wrong_destroy_custody_never_removes_owned_resources() {
+    let fixture = Fixture::new("destroy-custody");
+    let spec = sample_spec(OperationId::new());
+    let created = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create sandbox");
+    let before = fixture.fake.commands().len();
+    let SandboxCustody::ProfileAdmission { runner_id } = spec.custody() else {
+        panic!("test spec uses profile-admission custody");
+    };
+
+    let error = fixture
+        .provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                created.generation(),
+                SandboxCustody::Job {
+                    runner_id,
+                    slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+                },
+            ),
+            &NeverCancelled,
+        )
+        .expect_err("wrong custody must not authorize deletion");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert!(fixture.fake.commands()[before..].iter().all(|command| {
+        !semantic(command)
+            .iter()
+            .any(|value| value == "rm" || value.ends_with("/rm"))
+    }));
+    assert!(!fixture.fake.is_empty());
+
+    fixture
+        .provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                created.generation(),
+                spec.custody(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("matching custody authorizes cleanup");
+    assert!(fixture.fake.is_empty());
+}
+
+#[test]
 fn conflicting_spec_and_foreign_ownership_fail_closed() {
     let fixture = Fixture::new("ownership");
     let operation_id = OperationId::new();
@@ -692,10 +763,12 @@ fn conflicting_spec_and_foreign_ownership_fail_closed() {
         .provider
         .create(&first, &NeverCancelled)
         .expect("initial create");
-    let conflicting = sample_spec_with(
+    let conflicting = sample_spec_with_digest_and_custody(
         operation_id,
         "automata.dev/different-profile-v1",
+        [0x11; 32],
         NetworkPolicy::Disabled,
+        first.custody(),
     );
     let error = fixture
         .provider
@@ -712,6 +785,7 @@ fn conflicting_spec_and_foreign_ownership_fail_closed() {
                 OperationId::new(),
                 created.handle().clone(),
                 created.generation(),
+                first.custody(),
             ),
             &NeverCancelled,
         )
@@ -726,6 +800,84 @@ fn conflicting_spec_and_foreign_ownership_fail_closed() {
 }
 
 #[test]
+fn recovery_reports_custody_and_rejects_wrong_runner_slot_and_old_resource_schema() {
+    let fixture = Fixture::new("custody-runner");
+    let spec = sample_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create current custody resources");
+    assert_eq!(
+        fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("inspect current custody")
+            .custody(),
+        spec.custody()
+    );
+
+    let wrong_runner = RunnerId::new();
+    fixture
+        .fake
+        .replace_custody("profile-admission", wrong_runner, 0);
+    let wrong_runner = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("recovery must reject custody that differs from durable evidence");
+    assert_eq!(wrong_runner.kind(), ProviderErrorKind::InvalidState);
+    let wrong_runner = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("create replay must reject a wrong runner label");
+    assert_eq!(wrong_runner.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let fixture = Fixture::new("custody-slot");
+    let baseline = sample_spec(OperationId::new());
+    let runner_id = RunnerId::new();
+    let spec = SandboxSpec::new(
+        baseline.operation_id(),
+        baseline.generation(),
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        },
+        baseline.profile().clone(),
+        baseline.workspace().clone(),
+        baseline.network(),
+        baseline.root_filesystem(),
+        baseline.resources(),
+    );
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create slot test resources");
+    fixture.fake.replace_custody("job", runner_id, 1);
+    let wrong_slot = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("recovery must reject a slot that differs from durable evidence");
+    assert_eq!(wrong_slot.kind(), ProviderErrorKind::InvalidState);
+    let wrong_slot = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("create replay must reject a wrong slot label");
+    assert_eq!(wrong_slot.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let fixture = Fixture::new("custody-schema");
+    let spec = sample_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create schema test resources");
+    fixture.fake.replace_resource_schema("1");
+    let old_schema = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("schema-1 Podman resources must not recover");
+    assert_eq!(old_schema.kind(), ProviderErrorKind::InvalidState);
+}
+
+#[test]
 fn same_profile_id_with_a_different_attestation_digest_cannot_replay() {
     let fixture = Fixture::new("profile-attestation");
     let operation_id = OperationId::new();
@@ -735,11 +887,12 @@ fn same_profile_id_with_a_different_attestation_digest_cannot_replay() {
         .create(&first, &NeverCancelled)
         .expect("initial create");
 
-    let conflicting = sample_spec_with_digest(
+    let conflicting = sample_spec_with_digest_and_custody(
         operation_id,
         first.profile().id().as_str(),
         [0x22; 32],
         first.network(),
+        first.custody(),
     );
     let error = fixture
         .provider
