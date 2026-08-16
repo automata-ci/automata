@@ -947,6 +947,8 @@ impl PodmanInner {
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ProviderError> {
+        let mut next_health_check = Instant::now();
+        let mut health_interval = None;
         loop {
             if cancellation.is_cancelled() {
                 return Err(provider_error::known(
@@ -976,10 +978,94 @@ impl PodmanInner {
                     ));
                 }
                 ServiceReadiness::Waiting => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    thread::sleep(SERVICE_HEALTH_POLL_INTERVAL.min(remaining));
+                    let now = Instant::now();
+                    if now >= next_health_check {
+                        let interval = if let Some(interval) = health_interval {
+                            interval
+                        } else {
+                            let interval = self.service_health_interval(
+                                entry,
+                                names,
+                                fingerprint,
+                                deadline,
+                                cancellation,
+                            )?;
+                            health_interval = Some(interval);
+                            interval
+                        };
+                        self.run_service_healthcheck(
+                            entry,
+                            names,
+                            fingerprint,
+                            deadline,
+                            cancellation,
+                        )?;
+                        next_health_check = Instant::now()
+                            .checked_add(interval)
+                            .unwrap_or(deadline)
+                            .min(deadline);
+                    } else {
+                        let remaining = deadline.saturating_duration_since(now);
+                        let until_check = next_health_check.saturating_duration_since(now);
+                        thread::sleep(SERVICE_HEALTH_POLL_INTERVAL.min(remaining).min(until_check));
+                    }
                 }
             }
+        }
+    }
+
+    fn service_health_interval(
+        &self,
+        entry: &ServiceManifestEntry,
+        names: &ResourceNames,
+        fingerprint: &str,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+    ) -> Result<Duration, ProviderError> {
+        let inspection = self.verify_service_for_spec(
+            entry,
+            names,
+            fingerprint,
+            deadline,
+            cancellation,
+            ProviderStage::Start,
+        )?;
+        let mut arguments = self.base_arguments();
+        arguments.extend(os_args(["container", "inspect", "--format"]));
+        arguments.push(SERVICE_HEALTH_CONFIGURATION_FORMAT.into());
+        arguments.push(inspection.identifier().into());
+        let output = Self::require_success(
+            self.run(arguments, deadline, cancellation, ProviderStage::Start),
+            ProviderStage::Start,
+            None,
+        )?;
+        parse_service_health_interval(output.stdout())
+            .ok_or_else(|| provider_error::invalid_state(ProviderStage::Start))
+    }
+
+    fn run_service_healthcheck(
+        &self,
+        entry: &ServiceManifestEntry,
+        names: &ResourceNames,
+        fingerprint: &str,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+    ) -> Result<(), ProviderError> {
+        let inspection = self.verify_service_for_spec(
+            entry,
+            names,
+            fingerprint,
+            deadline,
+            cancellation,
+            ProviderStage::Start,
+        )?;
+        let mut arguments = self.base_arguments();
+        arguments.extend(os_args(["healthcheck", "run"]));
+        arguments.push(inspection.identifier().into());
+        let output = self.run(arguments, deadline, cancellation, ProviderStage::Start);
+        match output.termination() {
+            CommandTermination::Exited(Some(0 | 1)) if !output.was_truncated() => Ok(()),
+            _ => Self::require_success(output, ProviderStage::Start, None).map(|_| ()),
         }
     }
 
@@ -4592,6 +4678,16 @@ fn parse_service_readiness(
     }
 }
 
+fn parse_service_health_interval(bytes: &[u8]) -> Option<Duration> {
+    let serde_json::Value::Object(configuration) =
+        serde_json::from_slice::<serde_json::Value>(bytes).ok()?
+    else {
+        return None;
+    };
+    let nanoseconds = configuration.get("Interval")?.as_u64()?;
+    (nanoseconds > 0).then(|| Duration::from_nanos(nanoseconds))
+}
+
 fn service_inspection_format() -> String {
     format!("{}\n{{{{.Id}}}}", label_format(true, true))
 }
@@ -4946,5 +5042,16 @@ mod capability_contract_tests {
             JobContainerEngine::AttemptScopedDockerApi,
             true,
         ));
+    }
+
+    #[test]
+    fn service_health_interval_requires_positive_canonical_nanoseconds() {
+        assert_eq!(
+            parse_service_health_interval(br#"{"Interval":5000000000}"#),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(parse_service_health_interval(br#"{"Interval":0}"#), None);
+        assert_eq!(parse_service_health_interval(br#"{"Interval":"5s"}"#), None);
+        assert_eq!(parse_service_health_interval(b"null"), None);
     }
 }
