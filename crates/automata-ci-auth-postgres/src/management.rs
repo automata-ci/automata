@@ -45,9 +45,9 @@ mod runner_enrollment;
 
 pub use runner_enrollment::{
     ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PrepareRunnerEnrollment,
-    PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
-    RunnerEnrollmentTokenRecord,
+    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
+    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
+    RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord,
 };
 
 const ACTION_ROLE_CREATE: &str = "rbac.role.create";

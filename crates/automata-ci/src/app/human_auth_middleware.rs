@@ -212,7 +212,6 @@ fn request_surface(path: &str) -> HumanRequestSurface {
                 | "/api/v1/auth/device/poll"
                 | "/api/v1/setup/device"
                 | "/api/v1/setup/device/poll"
-                | "/api/v1/runner-enrollments/redeem"
         )
     {
         HumanRequestSurface::Bypass
@@ -1025,6 +1024,10 @@ mod tests {
             HumanRequestSurface::Cli
         );
         assert_eq!(request_surface("/api/v1/users"), HumanRequestSurface::Cli);
+        assert_eq!(
+            request_surface(crate::app::runner_enrollment_api::RUNNER_ENROLLMENT_REDEEM_PATH),
+            HumanRequestSurface::Cli
+        );
         assert_eq!(request_surface("/api/v1"), HumanRequestSurface::Cli);
         assert_eq!(
             request_surface("/api/v1/local/future-route"),

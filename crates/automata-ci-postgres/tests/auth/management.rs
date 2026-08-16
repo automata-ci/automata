@@ -23,7 +23,7 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_auth_postgres::{
-    PostgresHumanRbacManagementRepository,
+    PostgresHumanRbacManagementRepository, PostgresRunnerEnrollmentRepository,
     management::{
         ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken,
         MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
@@ -3208,7 +3208,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
         let session_id = Uuid::new_v4();
         let authority_revision =
             seed_session(pool, "runner-enrollment", manager, session_id).await?;
-        let repository = PostgresHumanRbacManagementRepository::new(pool.clone());
+        let repository = PostgresRunnerEnrollmentRepository::new(pool.clone());
         let token_sha256 = [7_u8; 32];
         let enrollment_id = Uuid::new_v4();
         let issued = repository
