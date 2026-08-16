@@ -11,11 +11,11 @@ pub(crate) const CLIENT_SCRIPT_BYTES: &[u8] = include_bytes!(
 );
 pub(crate) const CLIENT_SCRIPT_SHA256: &str =
     "191e2c5ea2a7c03fe9a67e2eab4e138a12a9c527d107afd588a562d59df055b5";
-pub(crate) const CLIENT_SCRIPT_PATH: &str = "/assets/entry-client-BRzAGVbD.js";
+pub(crate) const CLIENT_SCRIPT_PATH: &str = "/assets/entry-client-BtS0iu6T.js";
 
 pub(crate) const CLIENT_STYLE_BYTES: &[u8] = include_bytes!(
-    "../assets/styles-607d44447964098c0df6f74676c74050e5e4e13385620640814ef35111ac245b.css"
+    "../assets/styles-f023a41fc0df18f83bc3fcbc17a8e2bb4c1e461225c439e403d9e96e97a15fd2.css"
 );
 pub(crate) const CLIENT_STYLE_SHA256: &str =
-    "607d44447964098c0df6f74676c74050e5e4e13385620640814ef35111ac245b";
-pub(crate) const CLIENT_STYLE_PATH: &str = "/assets/entry-client-BWZFEySi.css";
+    "f023a41fc0df18f83bc3fcbc17a8e2bb4c1e461225c439e403d9e96e97a15fd2";
+pub(crate) const CLIENT_STYLE_PATH: &str = "/assets/entry-client-CZQroQzR.css";

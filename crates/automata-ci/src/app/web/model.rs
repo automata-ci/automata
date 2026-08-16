@@ -2040,7 +2040,7 @@ pub(super) fn job_log(
         .map(|job| JobLogNavigationItem {
             id: job.id.to_string(),
             name: job.name,
-            href: job.logs_available.then(|| paths.job(data.run.id, job.id)),
+            href: Some(paths.job(data.run.id, job.id)),
             status: status(job.status),
         })
         .collect::<Vec<_>>();
@@ -2671,7 +2671,7 @@ fn job_model(
     Ok(Job {
         id: job.id.to_string(),
         name: job.name.clone(),
-        href: job.logs_available.then(|| paths.job(run_id, job.id)),
+        href: Some(paths.job(run_id, job.id)),
         runner_label: job.runner_label.clone(),
         status: status(job.status),
         started_at: job.started_at.map(timestamp).transpose()?,
@@ -3230,7 +3230,7 @@ mod tests {
         },
         secret::{CsrfToken, SecretString},
     };
-    use automata_ci_core::{RunId, WorkflowId};
+    use automata_ci_core::{JobId, RunId, WorkflowId};
     use automata_ci_ui_renderer::{RenderPolicy, Renderer, WasmtimeRenderer, client_assets};
     use serde_json::Value;
 
@@ -3274,6 +3274,34 @@ mod tests {
         assert_eq!(
             query_href("/actions", &[("branch", "feature/a b")]),
             "/actions?branch=feature%2Fa%20b"
+        );
+    }
+
+    #[test]
+    fn public_job_metadata_keeps_its_detail_destination_when_logs_are_restricted() {
+        let paths = RepositoryPaths::new(&fixture_repository());
+        let run_id =
+            RunId::from_str("550e8400-e29b-41d4-a716-446655440000").expect("fixture run ID");
+        let job_id =
+            JobId::from_str("650e8400-e29b-41d4-a716-446655440000").expect("fixture job ID");
+        let job = JobSummary {
+            id: job_id,
+            name: "Workspace tests".to_owned(),
+            attempt: None,
+            runner_label: None,
+            status: DataStatus::Queued,
+            started_at: None,
+            finished_at: None,
+            logs_available: false,
+        };
+
+        let model = job_model(&paths, run_id, &job).expect("valid job model");
+
+        assert_eq!(
+            model.href.as_deref(),
+            Some(
+                "/automata-ci/automata/actions/runs/550e8400-e29b-41d4-a716-446655440000/jobs/650e8400-e29b-41d4-a716-446655440000"
+            )
         );
     }
 
