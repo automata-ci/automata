@@ -23,10 +23,11 @@ workspace = true
 automata-ci-auth.workspace = true
 automata-ci-core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
+ring.workspace = true
 thiserror.workspace = true
 url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
