@@ -43,7 +43,7 @@ pub use observer::{
     LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
     RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerLeaseRequestStage,
+    RunnerLeaseRequestStage, RunnerRuntimeAuthorityRequestStage,
 };
 pub use port::{
     AuthorizedRunnerRegistration, CompositeRuntimeAuthorityIssuer, ControlIdGenerator,

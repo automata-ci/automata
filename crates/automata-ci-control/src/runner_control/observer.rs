@@ -127,6 +127,31 @@ pub enum RunnerLeaseRequestStage {
     DurableCompletion,
 }
 
+/// Closed stages at which a post-accept runtime-authority request can fail.
+///
+/// Values expose no runner, repository, lease, credential, or provider identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunnerRuntimeAuthorityRequestStage {
+    /// Cancellation, request-key, protocol, or delivery-binding construction.
+    RequestValidation,
+    /// Durable authorization against the exact accepted lease offer.
+    DurableAuthorization,
+    /// Reading the immutable job IR selected by that offer.
+    JobIrRead,
+    /// Authenticating and decoding the selected job IR.
+    JobIrVerification,
+    /// Issuing the job's exact runtime-authority bundle.
+    AuthorityIssue,
+    /// Revalidating the issued bundle against the job and lease.
+    AuthorityValidation,
+    /// Encoding and digesting the validated authority bundle.
+    BundleEncoding,
+    /// Constructing the exact durable delivery commit.
+    CommitConstruction,
+    /// Committing the authority delivery before returning it to the runner.
+    DurableCommit,
+}
+
 /// Durable runner-control mutation kinds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunnerDurableMessageKind {
@@ -198,6 +223,14 @@ pub trait RunnerControlObserver: fmt::Debug + Send + Sync {
     fn observe_lease_request_failure(
         &self,
         _stage: RunnerLeaseRequestStage,
+        _failure: RunnerControlFailure,
+    ) {
+    }
+
+    /// Records the sanitized stage and category of one failed runtime-authority request.
+    fn observe_runtime_authority_request_failure(
+        &self,
+        _stage: RunnerRuntimeAuthorityRequestStage,
         _failure: RunnerControlFailure,
     ) {
     }

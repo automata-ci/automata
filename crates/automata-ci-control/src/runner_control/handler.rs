@@ -69,7 +69,7 @@ use super::{
     LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
     RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerLeaseRequestStage,
+    RunnerLeaseRequestStage, RunnerRuntimeAuthorityRequestStage,
 };
 
 const HEARTBEAT_KIND: &str = "automata.runner.lease-heartbeat.v1";
@@ -1410,87 +1410,114 @@ impl DurableRunnerControlHandler {
         digest: Sha256Digest,
         cancellation: &CancellationToken,
     ) -> Result<ServerToRunner, ApplicationError> {
-        Self::not_cancelled(cancellation)?;
-        let durable_request = receipt_request(
-            fence,
-            request.header().operation_id(),
-            RUNTIME_AUTHORITY_REQUEST_KIND,
-            digest,
-        )?;
-        let protocol_version =
-            RunnerProtocolVersion::new(request.header().protocol_version().get())
-                .map_err(|_| app(ApplicationErrorKind::Internal))?;
-        let authorization = AuthorizeRuntimeAuthorityDelivery::new(
-            durable_request,
-            protocol_version,
-            request.binding(),
-            self.ports.clock.now(),
-        )
-        .map_err(|_| app(ApplicationErrorKind::Conflict))?;
-        let admission = self
-            .ports
-            .durability
-            .runtime_authority_deliveries
-            .authorize_runtime_authority_delivery(authorization)
-            .await
-            .map_err(store_application_error)?;
-        Self::not_cancelled(cancellation)?;
+        let mut stage = RunnerRuntimeAuthorityRequestStage::RequestValidation;
+        let result = async {
+            Self::not_cancelled(cancellation)?;
+            let durable_request = receipt_request(
+                fence,
+                request.header().operation_id(),
+                RUNTIME_AUTHORITY_REQUEST_KIND,
+                digest,
+            )?;
+            let protocol_version =
+                RunnerProtocolVersion::new(request.header().protocol_version().get())
+                    .map_err(|_| app(ApplicationErrorKind::Internal))?;
+            let authorization = AuthorizeRuntimeAuthorityDelivery::new(
+                durable_request,
+                protocol_version,
+                request.binding(),
+                self.ports.clock.now(),
+            )
+            .map_err(|_| app(ApplicationErrorKind::Conflict))?;
 
-        let metadata = admission.offer().job_ir();
-        let bytes = self
-            .ports
-            .lease
-            .job_ir_objects
-            .read_job_ir(metadata, metadata.encoded_size())
-            .await
-            .map_err(port_application_error)?;
-        let job = verify_job_ir_blob(
-            metadata,
-            &bytes,
-            automata_ci_core::JobIrVersion::current(),
-            &self.config.protocol_limits,
-        )
-        .map_err(|_| app(ApplicationErrorKind::Internal))?;
-        Self::not_cancelled(cancellation)?;
-        let offer = admission.offer();
-        let authorities = self.issue_runtime_authorities(&job, offer).await?;
-        authorities
-            .validate_for(&job, offer.lease())
-            .map_err(|_| app(ApplicationErrorKind::Internal))?;
-        let encoded = Zeroizing::new(
-            encode_runtime_authorities(
-                &authorities,
-                &job,
-                offer.lease(),
+            stage = RunnerRuntimeAuthorityRequestStage::DurableAuthorization;
+            let admission = self
+                .ports
+                .durability
+                .runtime_authority_deliveries
+                .authorize_runtime_authority_delivery(authorization)
+                .await
+                .map_err(store_application_error)?;
+            Self::not_cancelled(cancellation)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::JobIrRead;
+            let metadata = admission.offer().job_ir();
+            let bytes = self
+                .ports
+                .lease
+                .job_ir_objects
+                .read_job_ir(metadata, metadata.encoded_size())
+                .await
+                .map_err(port_application_error)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::JobIrVerification;
+            let job = verify_job_ir_blob(
+                metadata,
+                &bytes,
+                automata_ci_core::JobIrVersion::current(),
                 &self.config.protocol_limits,
             )
-            .map_err(|_| app(ApplicationErrorKind::Internal))?,
-        );
-        let bundle_digest = sha256(&encoded);
-        if admission
-            .committed_bundle_digest()
-            .is_some_and(|committed| committed != bundle_digest)
-        {
-            return Err(app(ApplicationErrorKind::Internal));
-        }
-        let commit =
-            CommitRuntimeAuthorityDelivery::new(admission, bundle_digest, self.ports.clock.now())
-                .map_err(|_| app(ApplicationErrorKind::Conflict))?;
-        Self::not_cancelled(cancellation)?;
-        self.ports
-            .durability
-            .runtime_authority_deliveries
-            .commit_runtime_authority_delivery(commit)
-            .await
-            .map_err(store_application_error)?;
-        Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
-            RuntimeAuthorityGrant::new(
-                self.reply_header(request.header()),
-                request.binding(),
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
+            Self::not_cancelled(cancellation)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::AuthorityIssue;
+            let offer = admission.offer();
+            let authorities = self.issue_runtime_authorities(&job, offer).await?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::AuthorityValidation;
+            authorities
+                .validate_for(&job, offer.lease())
+                .map_err(|_| app(ApplicationErrorKind::Internal))?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::BundleEncoding;
+            let encoded = Zeroizing::new(
+                encode_runtime_authorities(
+                    &authorities,
+                    &job,
+                    offer.lease(),
+                    &self.config.protocol_limits,
+                )
+                .map_err(|_| app(ApplicationErrorKind::Internal))?,
+            );
+            let bundle_digest = sha256(&encoded);
+            if admission
+                .committed_bundle_digest()
+                .is_some_and(|committed| committed != bundle_digest)
+            {
+                return Err(app(ApplicationErrorKind::Internal));
+            }
+
+            stage = RunnerRuntimeAuthorityRequestStage::CommitConstruction;
+            let commit = CommitRuntimeAuthorityDelivery::new(
+                admission,
                 bundle_digest,
-                authorities,
-            ),
-        )))
+                self.ports.clock.now(),
+            )
+            .map_err(|_| app(ApplicationErrorKind::Conflict))?;
+            Self::not_cancelled(cancellation)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::DurableCommit;
+            self.ports
+                .durability
+                .runtime_authority_deliveries
+                .commit_runtime_authority_delivery(commit)
+                .await
+                .map_err(store_application_error)?;
+            Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
+                RuntimeAuthorityGrant::new(
+                    self.reply_header(request.header()),
+                    request.binding(),
+                    bundle_digest,
+                    authorities,
+                ),
+            )))
+        }
+        .await;
+        if let Err(error) = &result {
+            self.observer
+                .observe_runtime_authority_request_failure(stage, control_failure(error.kind()));
+        }
+        result
     }
 
     async fn issue_runtime_authorities(
