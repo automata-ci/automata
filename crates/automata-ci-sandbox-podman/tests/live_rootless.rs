@@ -78,8 +78,12 @@ printf 'attempt-scoped-docker-ok\n'
 struct AtomicCancellation(AtomicBool);
 
 impl Cancellation for AtomicCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+    fn disposition(&self) -> automata_ci_execution::CancellationDisposition {
+        if self.0.load(Ordering::Acquire) {
+            automata_ci_execution::CancellationDisposition::Terminate
+        } else {
+            automata_ci_execution::CancellationDisposition::Active
+        }
     }
 }
 

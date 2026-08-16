@@ -66,6 +66,11 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Changed
 
+- Sandbox cancellation now crosses provider boundaries as an explicit
+  `Active | Terminate` disposition. `Terminate` authorizes provider-specific
+  termination handling when an adapter reaches a cancellation checkpoint; it
+  does not prove remote work quiesced or a durable operation cancelled. That
+  requires proving the exact sandbox absent.
 - PostgreSQL product connections now accept one exact `postgresql://` TCP URL
   with explicit host, port, user, non-empty password, and database. Query and
   fragment options, socket paths, `.pgpass`, ambient `PG*` configuration, and

@@ -1422,7 +1422,7 @@ impl ExecutionEndpoint for FakeEndpoint {
         let program = request.argv().program().as_str();
         let mut state = self.state.lock().expect("endpoint lock");
         state.commands.push(request.clone());
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return execution_output(ExecutionTermination::Cancelled, Vec::new(), false)
                 .map_err(|_| execution_error(ExecutionStage::Exec));
         }

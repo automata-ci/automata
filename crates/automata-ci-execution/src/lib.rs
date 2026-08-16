@@ -37,10 +37,10 @@ mod value;
 pub use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, OperationId, Sha256Digest};
 pub use capability::{ProviderCapabilities, SandboxCapability};
 pub use endpoint::{
-    Cancellation, CopyFromRequest, CopyToRequest, EnvironmentName, EnvironmentValue,
-    EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionEnvironment,
-    ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream, ExecutionSignal,
-    ExecutionTermination, NeverCancelled, SignalRequest, WaitRequest,
+    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, EnvironmentName,
+    EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint,
+    ExecutionEnvironment, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
+    ExecutionSignal, ExecutionTermination, NeverCancelled, SignalRequest, WaitRequest,
 };
 pub use error::{
     ExecutionError, ExecutionErrorKind, ExecutionStage, OperationOutcome, ProviderError,
