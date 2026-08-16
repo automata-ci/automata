@@ -3519,8 +3519,8 @@ mod tests {
     use automata_ci_execution::{
         CopyFromRequest, CopyToRequest, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
         ExecutionSignal, NeverCancelled, OperationId, OperationOutcome, ProviderCapabilities,
-        ProviderError, ProviderErrorKind, ProviderId, ProviderStage, SandboxCapability,
-        SandboxGeneration, SandboxHandle, SignalRequest, TargetPath, WaitRequest,
+        ProviderError, ProviderErrorKind, ProviderId, ProviderStage, RunnerId, SandboxCapability,
+        SandboxCustody, SandboxGeneration, SandboxHandle, SignalRequest, TargetPath, WaitRequest,
     };
     use prometheus_client::encoding::prometheus_protobuf;
 
@@ -4361,6 +4361,9 @@ mod tests {
                     OperationId::new(),
                     handle,
                     SandboxGeneration::new(1).expect("generation"),
+                    SandboxCustody::ProfileAdmission {
+                        runner_id: RunnerId::new(),
+                    },
                 ),
                 &NeverCancelled,
             ),

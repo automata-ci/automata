@@ -31,10 +31,10 @@ use automata_ci_execution::{
     ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
     ExecutionStage, ExecutionTermination, ImmutableImage, NetworkPolicy, OperationOutcome,
     ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
-    SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord,
-    SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork,
-    ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxEnvironment,
+    SandboxGeneration, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider,
+    SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings,
+    ServiceNetwork, ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -658,6 +658,20 @@ fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> Exe
         environment,
         JobLifecycle::Preparing,
         None,
+    )
+}
+
+pub fn recovered_request(request: &ExecutionRequest) -> ExecutionRequest {
+    ExecutionRequest::new(
+        request.session_id(),
+        request.slot(),
+        request.lease().clone(),
+        request.job().clone(),
+        request.runtime_authorities().clone(),
+        request.job_content().clone(),
+        request.environment().clone(),
+        request.recovery_lifecycle(),
+        Some(journal_identity()),
     )
 }
 
@@ -1663,9 +1677,11 @@ struct ProviderState {
     pub creates: usize,
     pub create_operations: BTreeSet<OperationId>,
     pub create_failures: VecDeque<ProviderError>,
+    pub inspects: usize,
     pub attaches: usize,
     pub destroy_requests: Vec<DestroySandbox>,
     pub specs: Vec<SandboxSpec>,
+    pub inspection_custody: Option<SandboxCustody>,
 }
 
 impl FakeProvider {
@@ -1732,6 +1748,10 @@ impl FakeProvider {
             .len()
     }
 
+    pub fn inspection_count(&self) -> usize {
+        self.state.lock().expect("provider lock").inspects
+    }
+
     pub fn fail_next_create(&self, kind: ProviderErrorKind, outcome: OperationOutcome) {
         let recovery_handle = (outcome == OperationOutcome::Uncertain).then(|| self.handle.clone());
         self.state
@@ -1756,6 +1776,10 @@ impl FakeProvider {
             .expect("provider lock")
             .destroy_requests
             .clone()
+    }
+
+    pub fn set_inspection_custody(&self, custody: SandboxCustody) {
+        self.state.lock().expect("provider lock").inspection_custody = Some(custody);
     }
 }
 
@@ -1816,9 +1840,16 @@ impl SandboxProvider for FakeProvider {
         handle: &SandboxHandle,
         _cancellation: &dyn Cancellation,
     ) -> Result<SandboxInspection, ProviderError> {
+        let mut state = self.state.lock().expect("provider lock");
+        state.inspects += 1;
+        let custody = state
+            .inspection_custody
+            .unwrap_or_else(|| state.specs.last().expect("created sandbox spec").custody());
+        drop(state);
         Ok(SandboxInspection::new(
             handle.clone(),
             SandboxGeneration::new(7).expect("valid generation"),
+            custody,
             self.environment.attestation().clone(),
             SandboxState::Running,
         ))

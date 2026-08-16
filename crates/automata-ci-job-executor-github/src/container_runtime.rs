@@ -144,6 +144,7 @@ pub(super) fn sandbox_spec(
     let mut spec = SandboxSpec::new(
         operation_id,
         generation,
+        request.sandbox_custody(),
         request.environment().clone(),
         workspace.clone(),
         config.network(),

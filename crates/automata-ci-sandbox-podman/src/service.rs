@@ -1,16 +1,16 @@
 use std::collections::BTreeSet;
 
 use automata_ci_core::Sha256Digest;
-use automata_ci_execution::ServiceHealthPolicy;
 use automata_ci_execution::{
     ImmutableImage, ServiceContainerSpecs, ServicePort, ServiceTransportProtocol,
 };
+use automata_ci_execution::{SandboxCustody, ServiceHealthPolicy};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::naming::ResourceNames;
 
-const MANIFEST_SCHEMA: u64 = 1;
+const MANIFEST_SCHEMA: u64 = 3;
 const MAX_SERVICES: usize = 64;
 const MAX_PORTS_PER_SERVICE: usize = 256;
 const MAX_AGGREGATE_PIDS: u32 = 1_000_000;
@@ -18,6 +18,7 @@ const MAX_AGGREGATE_PIDS: u32 = 1_000_000;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServiceManifest {
     fingerprint: String,
+    custody: SandboxCustody,
     network: String,
     aggregate_pids: u32,
     proxy_container: String,
@@ -31,6 +32,7 @@ impl ServiceManifest {
     pub(crate) fn from_specs(
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         aggregate_pids: u32,
         specs: &ServiceContainerSpecs,
         proxy_image: Option<&ImmutableImage>,
@@ -71,6 +73,7 @@ impl ServiceManifest {
         };
         Some(Self {
             fingerprint: fingerprint.to_owned(),
+            custody,
             network: names.network(),
             aggregate_pids,
             proxy_container: names.service_proxy(),
@@ -116,6 +119,7 @@ impl ServiceManifest {
             "schema": MANIFEST_SCHEMA,
             "handle": names.handle().opaque(),
             "fingerprint": self.fingerprint,
+            "custody": self.custody,
             "network": self.network,
             "aggregate_pids": self.aggregate_pids,
             "proxy_container": self.proxy_container,
@@ -138,6 +142,7 @@ impl ServiceManifest {
                 "schema",
                 "handle",
                 "fingerprint",
+                "custody",
                 "network",
                 "aggregate_pids",
                 "proxy_container",
@@ -154,6 +159,7 @@ impl ServiceManifest {
             return None;
         }
         let fingerprint = root.get("fingerprint")?.as_str()?.to_owned();
+        let custody = serde_json::from_value(root.get("custody")?.clone()).ok()?;
         let aggregate_pids = u32::try_from(root.get("aggregate_pids")?.as_u64()?).ok()?;
         let proxy_identifier = match root.get("proxy_identifier")? {
             Value::Null => None,
@@ -324,6 +330,7 @@ impl ServiceManifest {
         }
         Some(Self {
             fingerprint,
+            custody,
             network: names.network(),
             aggregate_pids,
             proxy_container: names.service_proxy(),
@@ -336,6 +343,10 @@ impl ServiceManifest {
 
     pub(crate) fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+
+    pub(crate) const fn custody(&self) -> SandboxCustody {
+        self.custody
     }
 
     pub(crate) fn network(&self) -> &str {
@@ -504,6 +515,7 @@ impl ServiceManifest {
 
     pub(crate) fn same_request(&self, other: &Self) -> bool {
         self.fingerprint == other.fingerprint
+            && self.custody == other.custody
             && self.network == other.network
             && self.aggregate_pids == other.aggregate_pids
             && self.proxy_container == other.proxy_container
@@ -782,7 +794,7 @@ const fn parse_protocol(value: &str) -> Option<ServiceTransportProtocol> {
 
 #[cfg(test)]
 mod tests {
-    use automata_ci_execution::{OperationId, SandboxGeneration};
+    use automata_ci_execution::{OperationId, RunnerId, SandboxCustody, SandboxGeneration};
 
     use super::*;
 
@@ -796,6 +808,7 @@ mod tests {
             "schema": MANIFEST_SCHEMA,
             "handle": names.handle().opaque(),
             "fingerprint": "0".repeat(64),
+            "custody": SandboxCustody::ProfileAdmission { runner_id: RunnerId::new() },
             "network": names.network(),
             "aggregate_pids": 1,
             "proxy_container": names.service_proxy(),
@@ -807,7 +820,11 @@ mod tests {
         let current = serde_json::to_vec(&manifest).expect("current manifest");
         ServiceManifest::decode(&current, &names).expect("decode current manifest");
 
-        for schema in [0, MANIFEST_SCHEMA.checked_add(1).expect("test schema")] {
+        for schema in [
+            0,
+            MANIFEST_SCHEMA - 1,
+            MANIFEST_SCHEMA.checked_add(1).expect("test schema"),
+        ] {
             manifest["schema"] = json!(schema);
             let bytes = serde_json::to_vec(&manifest).expect("noncurrent manifest");
             assert!(

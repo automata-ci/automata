@@ -11,7 +11,7 @@ use automata_ci_sandbox_guest::{
     GuestTermination, MAX_GUEST_FRAME_BYTES, decode_frame, encode_frame,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::{core::v1::Pod, networking::v1::NetworkPolicy};
 use kube::{Api, Client, ResourceExt as _, api::AttachParams};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
@@ -19,8 +19,10 @@ use tokio::{
 };
 
 use crate::{
-    objects::{GUEST_BINARY, GUEST_SOCKET, MAIN_CONTAINER},
-    provider::{block_on, map_kube_error, pod_state, verify_managed},
+    objects::{GUEST_BINARY, GUEST_SOCKET, MAIN_CONTAINER, network_policy_name},
+    provider::{
+        SandboxObjectIdentity, block_on, map_kube_error, pod_state, verify_required_sandbox_objects,
+    },
 };
 
 const ENDPOINT_CAPABILITIES: [SandboxCapability; 4] = [
@@ -35,6 +37,7 @@ pub(crate) struct KubernetesExecutionEndpoint {
     namespace: String,
     handle: SandboxHandle,
     uid: String,
+    identity: SandboxObjectIdentity,
     operation_timeout: Duration,
 }
 
@@ -44,6 +47,7 @@ impl KubernetesExecutionEndpoint {
         namespace: String,
         handle: SandboxHandle,
         uid: String,
+        identity: SandboxObjectIdentity,
         operation_timeout: Duration,
     ) -> Self {
         Self {
@@ -51,6 +55,7 @@ impl KubernetesExecutionEndpoint {
             namespace,
             handle,
             uid,
+            identity,
             operation_timeout,
         }
     }
@@ -69,8 +74,12 @@ impl KubernetesExecutionEndpoint {
         let frame = encode_frame(request)
             .map_err(|_| execution_error(ExecutionErrorKind::BackendRejected, stage))?;
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        let policies: Api<NetworkPolicy> = Api::namespaced(self.client.clone(), &self.namespace);
         let name = self.handle.opaque().to_owned();
+        let policy_name = network_policy_name(&name);
+        let namespace = self.namespace.clone();
         let uid = self.uid.clone();
+        let expected_identity = self.identity.clone();
         let operation_timeout = self.operation_timeout;
         let response = block_on(async move {
             let operation = async move {
@@ -78,10 +87,25 @@ impl KubernetesExecutionEndpoint {
                     .await
                     .map_err(|_| automata_ci_execution::ProviderErrorKind::TimedOut)?
                     .map_err(|error| map_kube_error(&error))?;
-                verify_managed(&pod, &name, None)?;
                 if pod.uid().as_deref() != Some(&uid)
                     || pod_state(&pod) != automata_ci_execution::SandboxState::Running
                 {
+                    return Err(automata_ci_execution::ProviderErrorKind::OwnershipMismatch);
+                }
+                let policy = timeout(operation_timeout, policies.get(&policy_name))
+                    .await
+                    .map_err(|_| automata_ci_execution::ProviderErrorKind::TimedOut)?
+                    .map_err(|error| {
+                        let kind = map_kube_error(&error);
+                        if kind == automata_ci_execution::ProviderErrorKind::NotFound {
+                            automata_ci_execution::ProviderErrorKind::InvalidState
+                        } else {
+                            kind
+                        }
+                    })?;
+                let observed_identity =
+                    verify_required_sandbox_objects(&pod, &policy, &name, &namespace)?;
+                if observed_identity != expected_identity {
                     return Err(automata_ci_execution::ProviderErrorKind::OwnershipMismatch);
                 }
                 let params = AttachParams::default()

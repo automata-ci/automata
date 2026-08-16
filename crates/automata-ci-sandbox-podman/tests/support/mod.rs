@@ -15,8 +15,8 @@ use std::{
 
 use automata_ci_execution::{
     EnvironmentProfile, EnvironmentProfileId, ExecutionArgv, ExecutionEnvironment, ImmutableImage,
-    NetworkPolicy, OperationId, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
-    SandboxGeneration, SandboxSpec, Sha256Digest, TargetPath,
+    NetworkPolicy, OperationId, ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCustody,
+    SandboxEnvironment, SandboxGeneration, SandboxSpec, Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_podman::{
     CommandOutput, CommandRequest, CommandTermination, PodmanBinary, PodmanCommandExecutor,
@@ -24,11 +24,15 @@ use automata_ci_sandbox_podman::{
 };
 
 const OWNER: &str = "io.automata.owner";
+const RESOURCE_SCHEMA: &str = "io.automata.sandbox-schema";
 const SANDBOX: &str = "io.automata.sandbox";
 const GENERATION: &str = "io.automata.generation";
 const PROFILE: &str = "io.automata.profile";
 const PROFILE_DIGEST: &str = "io.automata.profile-sha256";
 const SPEC: &str = "io.automata.spec-sha256";
+const CUSTODY_KIND: &str = "io.automata.custody-kind";
+const CUSTODY_RUNNER: &str = "io.automata.custody-runner";
+const CUSTODY_SLOT: &str = "io.automata.custody-slot";
 const FAKE_INFRA_ID: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
 #[derive(Debug)]
@@ -204,6 +208,61 @@ impl FakePodman {
         }
         for resource in state.containers.values_mut() {
             resource.labels.insert(OWNER.to_owned(), owner.to_owned());
+        }
+    }
+
+    pub(crate) fn replace_custody(&self, kind: &str, runner: RunnerId, slot: u16) {
+        let mut state = self.state.lock().expect("fake lock");
+        if let Some(resource) = state.network.as_mut() {
+            replace_custody_labels(resource, kind, runner, slot);
+        }
+        if let Some(resource) = state.pod.as_mut() {
+            replace_custody_labels(resource, kind, runner, slot);
+        }
+        for resource in state.containers.values_mut() {
+            replace_custody_labels(resource, kind, runner, slot);
+        }
+    }
+
+    pub(crate) fn replace_one_service_custody(&self, kind: &str, runner: RunnerId, slot: u16) {
+        let mut state = self.state.lock().expect("fake lock");
+        let resource = state
+            .containers
+            .values_mut()
+            .find(|resource| {
+                resource.name.starts_with("automata-job-service-")
+                    && !resource.name.starts_with("automata-job-service-proxy-")
+            })
+            .expect("service container exists");
+        replace_custody_labels(resource, kind, runner, slot);
+    }
+
+    pub(crate) fn replace_service_proxy_custody(&self, kind: &str, runner: RunnerId, slot: u16) {
+        let mut state = self.state.lock().expect("fake lock");
+        let resource = state
+            .containers
+            .values_mut()
+            .find(|resource| resource.name.starts_with("automata-job-service-proxy-"))
+            .expect("service proxy exists");
+        replace_custody_labels(resource, kind, runner, slot);
+    }
+
+    pub(crate) fn replace_resource_schema(&self, schema: &str) {
+        let mut state = self.state.lock().expect("fake lock");
+        if let Some(resource) = state.network.as_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
+        }
+        if let Some(resource) = state.pod.as_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
+        }
+        for resource in state.containers.values_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
         }
     }
 
@@ -436,6 +495,56 @@ impl FakePodman {
         state.containers.clear();
     }
 
+    pub(crate) fn retain_services_only(&self) {
+        let mut state = self.state.lock().expect("fake lock");
+        state.network = None;
+        state.pod = None;
+        state
+            .containers
+            .retain(|_, resource| resource.name.starts_with("automata-job-service-"));
+    }
+
+    pub(crate) fn hide_one_service_name(&self) {
+        self.split_container_name(false, false);
+    }
+
+    pub(crate) fn diverge_one_service_name(&self) {
+        self.split_container_name(false, true);
+    }
+
+    pub(crate) fn hide_service_proxy_name(&self) {
+        self.split_container_name(true, false);
+    }
+
+    pub(crate) fn diverge_service_proxy_name(&self) {
+        self.split_container_name(true, true);
+    }
+
+    fn split_container_name(&self, proxy: bool, divergent_name: bool) {
+        let mut state = self.state.lock().expect("fake lock");
+        let name = state
+            .containers
+            .iter()
+            .find_map(|(name, resource)| {
+                let is_proxy = resource.name.starts_with("automata-job-service-proxy-");
+                let is_service = resource.name.starts_with("automata-job-service-") && !is_proxy;
+                ((proxy && is_proxy) || (!proxy && is_service)).then(|| name.clone())
+            })
+            .expect("target service container exists");
+        let original = state
+            .containers
+            .remove(&name)
+            .expect("selected service container exists");
+        let captured_key = format!("captured-remnant-{}", original.identifier);
+        if divergent_name {
+            state.next_container_id = state.next_container_id.saturating_add(1);
+            let mut replacement = original.clone();
+            replacement.identifier = format!("{:064x}", state.next_container_id);
+            state.containers.insert(name, replacement);
+        }
+        state.containers.insert(captured_key, original);
+    }
+
     pub(crate) fn no_swap_verifications(&self) -> u32 {
         self.state.lock().expect("fake lock").no_swap_verifications
     }
@@ -448,6 +557,18 @@ impl FakePodman {
         let state = self.state.lock().expect("fake lock");
         state.network.is_none() && state.pod.is_none() && state.containers.is_empty()
     }
+}
+
+fn replace_custody_labels(resource: &mut Resource, kind: &str, runner: RunnerId, slot: u16) {
+    resource
+        .labels
+        .insert(CUSTODY_KIND.to_owned(), kind.to_owned());
+    resource
+        .labels
+        .insert(CUSTODY_RUNNER.to_owned(), runner.to_string());
+    resource
+        .labels
+        .insert(CUSTODY_SLOT.to_owned(), slot.to_string());
 }
 
 impl PodmanCommandExecutor for FakePodman {
@@ -1367,9 +1488,20 @@ fn option_values<'a>(arguments: &'a [String], option: &'a str) -> impl Iterator<
 }
 
 fn inspect_bytes(resource: &Resource) -> Vec<u8> {
-    let mut values = [OWNER, SANDBOX, GENERATION, PROFILE, PROFILE_DIGEST, SPEC]
-        .map(|key| resource.labels.get(key).cloned().unwrap_or_default())
-        .to_vec();
+    let mut values = [
+        OWNER,
+        RESOURCE_SCHEMA,
+        SANDBOX,
+        GENERATION,
+        PROFILE,
+        PROFILE_DIGEST,
+        SPEC,
+        CUSTODY_KIND,
+        CUSTODY_RUNNER,
+        CUSTODY_SLOT,
+    ]
+    .map(|key| resource.labels.get(key).cloned().unwrap_or_default())
+    .to_vec();
     if let Some(state) = &resource.state {
         values.push(state.clone());
     }
@@ -1487,6 +1619,24 @@ pub(crate) fn sample_spec_with_digest(
     profile_digest: [u8; 32],
     network: NetworkPolicy,
 ) -> SandboxSpec {
+    sample_spec_with_digest_and_custody(
+        operation_id,
+        profile_id,
+        profile_digest,
+        network,
+        SandboxCustody::ProfileAdmission {
+            runner_id: RunnerId::new(),
+        },
+    )
+}
+
+pub(crate) fn sample_spec_with_digest_and_custody(
+    operation_id: OperationId,
+    profile_id: &str,
+    profile_digest: [u8; 32],
+    network: NetworkPolicy,
+    custody: SandboxCustody,
+) -> SandboxSpec {
     let image = ImmutableImage::new(format!(
         "registry.example.invalid/automata/arch@sha256:{}",
         "0".repeat(64)
@@ -1511,6 +1661,7 @@ pub(crate) fn sample_spec_with_digest(
     SandboxSpec::new(
         operation_id,
         SandboxGeneration::new(1).expect("generation"),
+        custody,
         profile,
         TargetPath::posix("/__w").expect("workspace"),
         network,

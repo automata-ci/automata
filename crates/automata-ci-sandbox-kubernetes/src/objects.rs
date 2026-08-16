@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use automata_ci_core::{JobResourceAllocation, ResourceCapacity, Sha256Digest};
 use automata_ci_execution::{
-    ImmutableImage, NetworkPolicy as SandboxNetworkPolicy, RootFilesystemPolicy, SandboxSpec,
+    ImmutableImage, NetworkPolicy as SandboxNetworkPolicy, RootFilesystemPolicy, SandboxCustody,
+    SandboxSpec,
 };
 use k8s_openapi::{
     api::{
@@ -27,6 +28,11 @@ use crate::{
 
 pub(crate) const MANAGED_LABEL: &str = "ci.automata.dev/managed";
 pub(crate) const SANDBOX_LABEL: &str = "ci.automata.dev/sandbox";
+pub(crate) const SCHEMA_LABEL: &str = "ci.automata.dev/sandbox-schema";
+pub(crate) const CUSTODY_KIND_LABEL: &str = "ci.automata.dev/custody-kind";
+pub(crate) const CUSTODY_RUNNER_LABEL: &str = "ci.automata.dev/custody-runner";
+pub(crate) const CUSTODY_SLOT_LABEL: &str = "ci.automata.dev/custody-slot";
+pub(crate) const SANDBOX_SCHEMA: &str = "2";
 pub(crate) const GENERATION_ANNOTATION: &str = "ci.automata.dev/generation";
 pub(crate) const PROFILE_ID_ANNOTATION: &str = "ci.automata.dev/profile-id";
 pub(crate) const PROFILE_DIGEST_ANNOTATION: &str = "ci.automata.dev/profile-digest";
@@ -53,7 +59,7 @@ pub(crate) fn build_objects(
         .image()
         .ok_or_else(|| invalid_configuration(automata_ci_execution::ProviderStage::Validate))?;
     let fingerprint = fingerprint(spec, image, allocation, config);
-    let labels = object_labels(name);
+    let labels = object_labels(name, spec.custody());
     let annotations = object_annotations(spec, &fingerprint);
     let pod = build_pod(
         name,
@@ -112,10 +118,23 @@ fn validated_allocation(
     Ok(allocation)
 }
 
-fn object_labels(name: &str) -> BTreeMap<String, String> {
+fn object_labels(name: &str, custody: SandboxCustody) -> BTreeMap<String, String> {
+    let (kind, runner, slot) = match custody {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            ("profile-admission", runner_id.to_string(), "0".to_owned())
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => ("job", runner_id.to_string(), slot_ordinal.get().to_string()),
+    };
     BTreeMap::from([
         (MANAGED_LABEL.into(), "true".into()),
         (SANDBOX_LABEL.into(), name.into()),
+        (SCHEMA_LABEL.into(), SANDBOX_SCHEMA.into()),
+        (CUSTODY_KIND_LABEL.into(), kind.into()),
+        (CUSTODY_RUNNER_LABEL.into(), runner),
+        (CUSTODY_SLOT_LABEL.into(), slot),
     ])
 }
 
@@ -359,15 +378,19 @@ fn deny_all_network_policy(
             annotations: Some(annotations),
             ..ObjectMeta::default()
         },
-        spec: Some(NetworkPolicySpec {
-            egress: Some(Vec::new()),
-            ingress: Some(Vec::new()),
-            pod_selector: Some(LabelSelector {
-                match_labels: Some(BTreeMap::from([(SANDBOX_LABEL.into(), name.into())])),
-                ..LabelSelector::default()
-            }),
-            policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
+        spec: Some(deny_all_network_policy_spec(name)),
+    }
+}
+
+pub(crate) fn deny_all_network_policy_spec(name: &str) -> NetworkPolicySpec {
+    NetworkPolicySpec {
+        egress: Some(Vec::new()),
+        ingress: Some(Vec::new()),
+        pod_selector: Some(LabelSelector {
+            match_labels: Some(BTreeMap::from([(SANDBOX_LABEL.into(), name.into())])),
+            ..LabelSelector::default()
         }),
+        policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
     }
 }
 
@@ -421,6 +444,7 @@ fn fingerprint(
     config: &KubernetesSandboxConfig,
 ) -> String {
     let mut digest = Sha256::new();
+    hash_fingerprint_field(&mut digest, b"automata-kubernetes-sandbox-spec-v2");
     let operation_id = spec.operation_id().to_string();
     let generation = spec.generation().get().to_string();
     let profile_digest = spec.profile().attestation().digest().to_string();
@@ -436,6 +460,7 @@ fn fingerprint(
     ] {
         hash_fingerprint_field(&mut digest, value.as_bytes());
     }
+    hash_custody(&mut digest, spec.custody());
     digest.update([spec.network() as u8]);
     digest.update([spec.root_filesystem() as u8]);
     digest.update([spec.privilege() as u8]);
@@ -479,6 +504,23 @@ fn fingerprint(
         digest.update(resources.gpu_count().to_be_bytes());
     }
     Sha256Digest::from_bytes(digest.finalize().into()).to_string()
+}
+
+fn hash_custody(digest: &mut Sha256, custody: SandboxCustody) {
+    match custody {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            hash_fingerprint_field(digest, b"profile-admission");
+            hash_fingerprint_field(digest, runner_id.as_uuid().as_bytes());
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => {
+            hash_fingerprint_field(digest, b"job");
+            hash_fingerprint_field(digest, runner_id.as_uuid().as_bytes());
+            hash_fingerprint_field(digest, &slot_ordinal.get().to_be_bytes());
+        }
+    }
 }
 
 fn hash_fingerprint_field(digest: &mut Sha256, value: &[u8]) {
@@ -553,6 +595,9 @@ mod tests {
         SandboxSpec::new(
             OperationId::new(),
             SandboxGeneration::new(7).expect("generation"),
+            SandboxCustody::ProfileAdmission {
+                runner_id: automata_ci_core::RunnerId::new(),
+            },
             environment,
             workspace,
             NetworkPolicy::Disabled,
@@ -698,6 +743,7 @@ mod tests {
         let missing_allocation = SandboxSpec::new(
             original.operation_id(),
             original.generation(),
+            original.custody(),
             original.profile().clone(),
             original.workspace().clone(),
             original.network(),
@@ -714,6 +760,7 @@ mod tests {
         let too_small = SandboxSpec::new(
             original.operation_id(),
             original.generation(),
+            original.custody(),
             original.profile().clone(),
             original.workspace().clone(),
             original.network(),
@@ -731,6 +778,7 @@ mod tests {
         let incoherent = SandboxSpec::new(
             original.operation_id(),
             original.generation(),
+            original.custody(),
             original.profile().clone(),
             original.workspace().clone(),
             original.network(),

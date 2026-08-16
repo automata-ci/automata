@@ -4706,7 +4706,8 @@ impl GithubJobExecutor {
         let cancellation = ProviderCancellationBridge(cancellation);
         let generation = SandboxGeneration::new(request.lease().fencing_token().get())
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let handle = if let Some(recovered) = request.recovered_sandbox() {
+        let expected_custody = request.sandbox_custody();
+        let (handle, invalid_evidence) = if let Some(recovered) = request.recovered_sandbox() {
             if recovered.provider().as_str() != self.ports.provider.provider_id().as_str() {
                 return Err(ExecutorAdapterError::new(
                     ExecutorAdapterErrorKind::InvalidJob,
@@ -4717,20 +4718,7 @@ impl GithubJobExecutor {
                 recovered.handle().as_str(),
             )
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::InvalidJob))?;
-            let inspection = self
-                .ports
-                .provider
-                .inspect(&handle, &cancellation)
-                .map_err(|error| map_provider_error(&error))?;
-            if inspection.generation() != generation
-                || inspection.profile() != request.environment().attestation()
-                || inspection.state() != SandboxState::Running
-            {
-                return Err(ExecutorAdapterError::new(
-                    ExecutorAdapterErrorKind::InvalidJob,
-                ));
-            }
-            handle
+            (handle, ExecutorAdapterErrorKind::InvalidJob)
         } else {
             let operation_id = events
                 .begin_provider_operation(ProviderOperationKind::CreateSandbox)
@@ -4764,8 +4752,22 @@ impl GithubJobExecutor {
             events
                 .sandbox_created(operation_id, identity)
                 .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            record.handle().clone()
+            (record.handle().clone(), ExecutorAdapterErrorKind::Internal)
         };
+        let inspection = self
+            .ports
+            .provider
+            .inspect(&handle, &cancellation)
+            .map_err(|error| map_provider_error(&error))?;
+        if inspection.handle() != &handle
+            || inspection.handle().provider() != self.ports.provider.provider_id()
+            || inspection.generation() != generation
+            || inspection.custody() != expected_custody
+            || inspection.profile() != request.environment().attestation()
+            || inspection.state() != SandboxState::Running
+        {
+            return Err(ExecutorAdapterError::new(invalid_evidence));
+        }
         let services = if service_specs.is_empty() {
             ServiceContainerBindings::empty()
         } else {
@@ -5466,7 +5468,8 @@ impl GithubJobExecutor {
         let operation_id = events
             .begin_provider_operation(ProviderOperationKind::DestroySandbox)
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        let destroy = DestroySandbox::new(operation_id, handle, generation);
+        let destroy =
+            DestroySandbox::new(operation_id, handle, generation, request.sandbox_custody());
         match self
             .ports
             .provider

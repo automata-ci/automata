@@ -1,5 +1,6 @@
 use std::{
     convert::Infallible,
+    num::NonZeroU16,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,9 +15,9 @@ use automata_ci_core::{
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, ExecutionArgv, ExecutionEnvironment,
     ImmutableImage, NetworkPolicy, NeverCancelled, OperationOutcome, ProviderError,
-    ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy,
-    SandboxCapability, SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxProvider,
-    SandboxSpec, SandboxState, TargetPath,
+    ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy, RunnerId,
+    SandboxCapability, SandboxCustody, SandboxEnvironment, SandboxGeneration, SandboxHandle,
+    SandboxProvider, SandboxSpec, SandboxState, TargetPath,
 };
 use automata_ci_sandbox_kubernetes::{
     KUBERNETES_PROVIDER_ID, KubernetesSandboxConfig, KubernetesSandboxProvider,
@@ -30,7 +31,13 @@ use tower::service_fn;
 const NAMESPACE: &str = "automata-runners";
 const MANAGED_LABEL: &str = "ci.automata.dev/managed";
 const SANDBOX_LABEL: &str = "ci.automata.dev/sandbox";
+const SCHEMA_LABEL: &str = "ci.automata.dev/sandbox-schema";
+const CUSTODY_KIND_LABEL: &str = "ci.automata.dev/custody-kind";
+const CUSTODY_RUNNER_LABEL: &str = "ci.automata.dev/custody-runner";
+const CUSTODY_SLOT_LABEL: &str = "ci.automata.dev/custody-slot";
 const GENERATION_ANNOTATION: &str = "ci.automata.dev/generation";
+const PROFILE_ID_ANNOTATION: &str = "ci.automata.dev/profile-id";
+const PROFILE_DIGEST_ANNOTATION: &str = "ci.automata.dev/profile-digest";
 const FINGERPRINT_ANNOTATION: &str = "ci.automata.dev/spec-sha256";
 
 #[derive(Clone, Debug)]
@@ -84,6 +91,8 @@ struct FakeState {
     corrupt_policy_fingerprint: bool,
     mutate_pod_create: bool,
     mutate_policy_create: bool,
+    mutate_pod_create_annotation: Option<(String, Value)>,
+    mutate_policy_create_annotation: Option<(String, Value)>,
     pod_view: PodView,
     cancel_after_request: Option<(usize, Arc<AtomicBool>)>,
     next_response: Option<(StatusCode, Vec<u8>)>,
@@ -188,6 +197,14 @@ impl FakeKube {
                 if !is_policy && std::mem::take(&mut state.mutate_pod_create) {
                     resource["spec"]["hostNetwork"] = json!(true);
                 }
+                let annotation_mutation = if is_policy {
+                    state.mutate_policy_create_annotation.take()
+                } else {
+                    state.mutate_pod_create_annotation.take()
+                };
+                if let Some((annotation, value)) = annotation_mutation {
+                    resource["metadata"]["annotations"][annotation] = value;
+                }
                 let conflict = if is_policy {
                     state.policy = Some(resource.clone());
                     std::mem::take(&mut state.conflict_policy_create)
@@ -253,6 +270,26 @@ impl FakeKube {
         self.0.lock().expect("fake state lock").mutate_pod_create = true;
     }
 
+    fn mutate_create_annotation(&self, policy: bool, annotation: &str, value: Value) {
+        let mutation = Some((annotation.to_owned(), value));
+        let mut state = self.0.lock().expect("fake state lock");
+        if policy {
+            state.mutate_policy_create_annotation = mutation;
+        } else {
+            state.mutate_pod_create_annotation = mutation;
+        }
+    }
+
+    fn replace_annotation(&self, policy: bool, annotation: &str, value: Value) {
+        let mut state = self.0.lock().expect("fake state lock");
+        let resource = if policy {
+            state.policy.as_mut().expect("policy exists")
+        } else {
+            state.pod.as_mut().expect("Pod exists")
+        };
+        resource["metadata"]["annotations"][annotation] = value;
+    }
+
     fn cancel_after(&self, request_index: usize, cancellation: &TestCancellation) {
         self.0.lock().expect("fake state lock").cancel_after_request =
             Some((request_index, Arc::clone(&cancellation.0)));
@@ -268,6 +305,73 @@ impl FakeKube {
 
     fn delay_next(&self, delay: Duration) {
         self.0.lock().expect("fake state lock").delay_next = Some(delay);
+    }
+
+    fn replace_custody(&self, kind: &str, runner: RunnerId, slot: u16) {
+        let mut state = self.0.lock().expect("fake state lock");
+        let replace = |resource: &mut Value| {
+            resource["metadata"]["labels"][CUSTODY_KIND_LABEL] = json!(kind);
+            resource["metadata"]["labels"][CUSTODY_RUNNER_LABEL] = json!(runner.to_string());
+            resource["metadata"]["labels"][CUSTODY_SLOT_LABEL] = json!(slot.to_string());
+        };
+        if let Some(resource) = state.pod.as_mut() {
+            replace(resource);
+        }
+        if let Some(resource) = state.policy.as_mut() {
+            replace(resource);
+        }
+    }
+
+    fn replace_schema(&self, schema: &str) {
+        let mut state = self.0.lock().expect("fake state lock");
+        let replace = |resource: &mut Value| {
+            resource["metadata"]["labels"][SCHEMA_LABEL] = json!(schema);
+        };
+        if let Some(resource) = state.pod.as_mut() {
+            replace(resource);
+        }
+        if let Some(resource) = state.policy.as_mut() {
+            replace(resource);
+        }
+    }
+
+    fn remove_policy(&self) {
+        self.0.lock().expect("fake state lock").policy = None;
+    }
+
+    fn remove_pod(&self) {
+        self.0.lock().expect("fake state lock").pod = None;
+    }
+
+    fn replace_policy_identity(&self) {
+        let mut state = self.0.lock().expect("fake state lock");
+        state.policy.as_mut().expect("policy exists")["metadata"]["labels"][SANDBOX_LABEL] =
+            json!("a-different-sandbox-1");
+    }
+
+    fn replace_policy_schema(&self) {
+        let mut state = self.0.lock().expect("fake state lock");
+        state.policy.as_mut().expect("policy exists")["metadata"]["labels"][SCHEMA_LABEL] =
+            json!("1");
+    }
+
+    fn replace_policy_fingerprint(&self) {
+        let mut state = self.0.lock().expect("fake state lock");
+        state.policy.as_mut().expect("policy exists")["metadata"]["annotations"]
+            [FINGERPRINT_ANNOTATION] = json!("ab".repeat(32));
+    }
+
+    fn replace_policy_custody(&self) {
+        let mut state = self.0.lock().expect("fake state lock");
+        let policy = state.policy.as_mut().expect("policy exists");
+        policy["metadata"]["labels"][CUSTODY_KIND_LABEL] = json!("job");
+        policy["metadata"]["labels"][CUSTODY_RUNNER_LABEL] = json!(RunnerId::new().to_string());
+        policy["metadata"]["labels"][CUSTODY_SLOT_LABEL] = json!("9");
+    }
+
+    fn replace_policy_spec(&self) {
+        let mut state = self.0.lock().expect("fake state lock");
+        state.policy.as_mut().expect("policy exists")["spec"]["egress"] = json!([{}]);
     }
 }
 
@@ -357,7 +461,7 @@ fn config() -> KubernetesSandboxConfig {
 fn sandbox_spec() -> SandboxSpec {
     let profile = EnvironmentProfile::new(
         EnvironmentProfileId::new("example.com/linux").expect("profile id"),
-        Sha256Digest::from_bytes([2; 32]),
+        Sha256Digest::from_bytes([0xab; 32]),
     );
     let workspace = TargetPath::posix("/workspace").expect("workspace");
     let environment = SandboxEnvironment::new(
@@ -380,6 +484,10 @@ fn sandbox_spec() -> SandboxSpec {
     SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(7).expect("generation"),
+        SandboxCustody::Job {
+            runner_id: RunnerId::new(),
+            slot_ordinal: NonZeroU16::new(7).expect("non-zero slot"),
+        },
         environment,
         workspace,
         NetworkPolicy::Disabled,
@@ -406,7 +514,12 @@ fn sandbox_handle(spec: &SandboxSpec) -> SandboxHandle {
 }
 
 fn destroy_request(spec: &SandboxSpec) -> DestroySandbox {
-    DestroySandbox::new(OperationId::new(), sandbox_handle(spec), spec.generation())
+    DestroySandbox::new(
+        OperationId::new(),
+        sandbox_handle(spec),
+        spec.generation(),
+        spec.custody(),
+    )
 }
 
 fn test_provider(fake: &FakeKube) -> KubernetesSandboxProvider {
@@ -458,6 +571,7 @@ async fn complete_lifecycle_uses_exact_owned_objects_and_delete_preconditions() 
     assert_eq!(replayed, record);
     assert_eq!(inspection.handle(), &handle);
     assert_eq!(inspection.generation(), spec.generation());
+    assert_eq!(inspection.custody(), spec.custody());
     assert_eq!(inspection.profile(), spec.profile().attestation());
     assert_eq!(inspection.state(), SandboxState::Running);
     assert_eq!(endpoint.handle(), &handle);
@@ -490,6 +604,7 @@ async fn complete_lifecycle_uses_exact_owned_objects_and_delete_preconditions() 
     let pod_body: Value = serde_json::from_slice(&requests[3].body).expect("Pod body");
     assert_eq!(policy_body["metadata"]["labels"][MANAGED_LABEL], "true");
     assert_eq!(policy_body["metadata"]["labels"][SANDBOX_LABEL], name);
+    assert_eq!(policy_body["metadata"]["labels"][SCHEMA_LABEL], "2");
     assert_eq!(
         policy_body["spec"]["policyTypes"],
         json!(["Ingress", "Egress"])
@@ -567,6 +682,65 @@ async fn create_rejects_admission_mutation_of_security_objects() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_and_replay_reject_admission_mutated_generation_and_profile() {
+    let mutations = [
+        ("generation", GENERATION_ANNOTATION, json!("8")),
+        (
+            "generation canonical spelling",
+            GENERATION_ANNOTATION,
+            json!("07"),
+        ),
+        (
+            "profile id",
+            PROFILE_ID_ANNOTATION,
+            json!("example.com/mutated"),
+        ),
+        (
+            "profile digest",
+            PROFILE_DIGEST_ANNOTATION,
+            json!("44".repeat(32)),
+        ),
+        (
+            "profile digest canonical spelling",
+            PROFILE_DIGEST_ANNOTATION,
+            json!("AB".repeat(32)),
+        ),
+    ];
+
+    for policy in [true, false] {
+        for (label, annotation, value) in &mutations {
+            let resource = if policy { "policy" } else { "Pod" };
+            let fake = FakeKube::default();
+            fake.mutate_create_annotation(policy, annotation, value.clone());
+            let error = test_provider(&fake)
+                .create(&sandbox_spec(), &NeverCancelled)
+                .expect_err("admission-mutated identity must reject create");
+            assert_eq!(
+                error.kind(),
+                ProviderErrorKind::Conflict,
+                "{resource} {label}"
+            );
+
+            let fake = FakeKube::default();
+            let provider = test_provider(&fake);
+            let spec = sandbox_spec();
+            provider
+                .create(&spec, &NeverCancelled)
+                .expect("seed exact resources");
+            fake.replace_annotation(policy, annotation, value.clone());
+            let error = provider
+                .create(&spec, &NeverCancelled)
+                .expect_err("mutated stored identity must reject replay");
+            assert_eq!(
+                error.kind(),
+                ProviderErrorKind::Conflict,
+                "{resource} {label}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_recovers_both_create_conflicts_by_verifying_stored_fingerprints() {
     let fake = FakeKube::default();
     fake.conflict_on_create();
@@ -595,6 +769,218 @@ async fn create_recovers_both_create_conflicts_by_verifying_stored_fingerprints(
             Method::GET,
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_reports_and_revalidates_exact_custody_and_current_schema() {
+    let fake = FakeKube::default();
+    let provider = test_provider(&fake);
+    let spec = sandbox_spec();
+    let handle = sandbox_handle(&spec);
+    provider
+        .create(&spec, &NeverCancelled)
+        .expect("create current Kubernetes resources");
+
+    let wrong_runner = RunnerId::new();
+    fake.replace_custody("job", wrong_runner, 7);
+    assert_eq!(
+        provider
+            .inspect(&handle, &NeverCancelled)
+            .expect("custody is explicit recovery evidence")
+            .custody(),
+        SandboxCustody::Job {
+            runner_id: wrong_runner,
+            slot_ordinal: NonZeroU16::new(7).expect("non-zero slot"),
+        }
+    );
+    let error = provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("replay must reject a wrong runner");
+    assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+
+    let SandboxCustody::Job { runner_id, .. } = spec.custody() else {
+        panic!("test spec uses job custody");
+    };
+    fake.replace_custody("job", runner_id, 2);
+    assert_eq!(
+        provider
+            .inspect(&handle, &NeverCancelled)
+            .expect("job slot is explicit recovery evidence")
+            .custody(),
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        }
+    );
+    let error = provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("replay must reject a wrong slot");
+    assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+
+    fake.replace_schema("1");
+    let error = provider
+        .inspect(&handle, &NeverCancelled)
+        .expect_err("schema-1 Kubernetes resources must not recover");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_requires_the_exact_deny_all_policy_evidence() {
+    type PolicyMutationCase = (&'static str, fn(&FakeKube), ProviderErrorKind);
+    let cases: [PolicyMutationCase; 6] = [
+        (
+            "missing",
+            FakeKube::remove_policy,
+            ProviderErrorKind::InvalidState,
+        ),
+        (
+            "identity",
+            FakeKube::replace_policy_identity,
+            ProviderErrorKind::OwnershipMismatch,
+        ),
+        (
+            "schema",
+            FakeKube::replace_policy_schema,
+            ProviderErrorKind::OwnershipMismatch,
+        ),
+        (
+            "fingerprint",
+            FakeKube::replace_policy_fingerprint,
+            ProviderErrorKind::Conflict,
+        ),
+        (
+            "custody",
+            FakeKube::replace_policy_custody,
+            ProviderErrorKind::OwnershipMismatch,
+        ),
+        (
+            "deny-all spec",
+            FakeKube::replace_policy_spec,
+            ProviderErrorKind::Conflict,
+        ),
+    ];
+
+    for (label, mutate, expected_kind) in cases {
+        let fake = FakeKube::default();
+        let provider = test_provider(&fake);
+        let spec = sandbox_spec();
+        let handle = sandbox_handle(&spec);
+        provider
+            .create(&spec, &NeverCancelled)
+            .expect("create exact Kubernetes resources");
+        mutate(&fake);
+
+        let error = provider.inspect(&handle, &NeverCancelled).expect_err(label);
+        assert_eq!(error.kind(), expected_kind, "{label}");
+        assert_eq!(error.stage(), ProviderStage::Inspect, "{label}");
+
+        let error = provider.attach(&handle, &NeverCancelled).expect_err(label);
+        assert_eq!(error.kind(), expected_kind, "{label}");
+        assert_eq!(error.stage(), ProviderStage::Attach, "{label}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inspection_detects_an_owned_policy_only_remnant() {
+    let fake = FakeKube::default();
+    let provider = test_provider(&fake);
+    let spec = sandbox_spec();
+    let handle = sandbox_handle(&spec);
+    provider
+        .create(&spec, &NeverCancelled)
+        .expect("seed exact Kubernetes resources");
+    fake.remove_pod();
+    let before = fake.request_count();
+
+    let error = provider
+        .inspect(&handle, &NeverCancelled)
+        .expect_err("policy-only remnant must not look absent");
+
+    assert_error(
+        &error,
+        ProviderErrorKind::InvalidState,
+        ProviderStage::Inspect,
+        OperationOutcome::KnownNoEffect,
+    );
+    let requests = fake.requests();
+    assert_eq!(requests[before..].len(), 2);
+    assert!(requests[before].uri.contains("/pods/"));
+    assert!(requests[before + 1].uri.contains("/networkpolicies/"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleanup_uses_policy_ownership_not_current_deny_all_health() {
+    let fake = FakeKube::default();
+    let provider = test_provider(&fake);
+    let spec = sandbox_spec();
+    provider
+        .create(&spec, &NeverCancelled)
+        .expect("seed exact Kubernetes resources");
+    fake.replace_policy_spec();
+
+    assert_eq!(
+        provider
+            .destroy(&destroy_request(&spec), &NeverCancelled)
+            .expect("owned resources remain removable after policy spec drift"),
+        DestroyDisposition::Destroyed
+    );
+
+    let fake = FakeKube::default();
+    let provider = test_provider(&fake);
+    let spec = sandbox_spec();
+    provider
+        .create(&spec, &NeverCancelled)
+        .expect("seed exact Kubernetes resources");
+    fake.replace_policy_identity();
+    let before = fake.request_count();
+    let error = provider
+        .destroy(&destroy_request(&spec), &NeverCancelled)
+        .expect_err("foreign policy identity must reject cleanup before deletion");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert!(
+        fake.requests()[before..]
+            .iter()
+            .all(|request| request.method != Method::DELETE)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wrong_destroy_custody_never_issues_a_delete() {
+    let fake = FakeKube::default();
+    let provider = test_provider(&fake);
+    let spec = sandbox_spec();
+    provider
+        .create(&spec, &NeverCancelled)
+        .expect("create exact Kubernetes resources");
+    let before = fake.request_count();
+    let SandboxCustody::Job { runner_id, .. } = spec.custody() else {
+        panic!("test spec uses job custody");
+    };
+
+    let error = provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                sandbox_handle(&spec),
+                spec.generation(),
+                SandboxCustody::Job {
+                    runner_id,
+                    slot_ordinal: NonZeroU16::new(8).expect("non-zero slot"),
+                },
+            ),
+            &NeverCancelled,
+        )
+        .expect_err("wrong custody must not authorize Kubernetes deletion");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert!(
+        fake.requests()[before..]
+            .iter()
+            .all(|request| request.method != Method::DELETE)
+    );
+
+    provider
+        .destroy(&destroy_request(&spec), &NeverCancelled)
+        .expect("matching custody authorizes cleanup");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

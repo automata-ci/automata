@@ -14,10 +14,10 @@ use automata_ci_execution::{
     Cancellation, ContainerHandle, DestroyDisposition, DestroySandbox, EnvironmentProfile,
     ExecutionEnvironment, NetworkPolicy, NeverCancelled, OperationOutcome, ProviderCapabilities,
     ProviderError, ProviderErrorKind, ProviderId, ProviderStage, RootFilesystemPolicy,
-    SandboxCapability, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider,
-    SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings,
-    ServiceContainerSpec, ServiceHealthPolicy, ServiceNetwork, ServicePortBinding,
-    ServiceTransportProtocol,
+    SandboxCapability, SandboxCustody, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy,
+    SandboxProvider, SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding,
+    ServiceContainerBindings, ServiceContainerSpec, ServiceHealthPolicy, ServiceNetwork,
+    ServicePortBinding, ServiceTransportProtocol,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -433,12 +433,19 @@ impl PodmanInner {
             self.options.service_proxy_image(),
             self.options.buildkit_runtime(),
         );
-        let labels = names.labels(spec.profile().attestation(), &fingerprint);
+        let labels = names.labels(spec.profile().attestation(), &fingerprint, spec.custody());
         let labels = ProvisionLabels {
             arguments: &labels,
             fingerprint: &fingerprint,
+            custody: spec.custody(),
         };
-        self.reject_conflicting_replay(&names, &fingerprint, deadline, cancellation)?;
+        self.reject_conflicting_replay(
+            &names,
+            &fingerprint,
+            spec.custody(),
+            deadline,
+            cancellation,
+        )?;
         let mut service_manifest = self.prepare_service_manifest(spec, &names, &fingerprint)?;
 
         let workspace = self
@@ -520,6 +527,11 @@ impl PodmanInner {
             cancellation,
         )?;
         let inspection = self.inspect_with_deadline(&handle, deadline, cancellation)?;
+        if inspection.custody() != spec.custody() {
+            return Err(provider_error::ownership_mismatch(
+                ProviderStage::VerifyOwnership,
+            ));
+        }
         finish_create(&inspection, handle)
     }
 
@@ -589,6 +601,7 @@ impl PodmanInner {
         let manifest = ServiceManifest::from_specs(
             names,
             fingerprint,
+            spec.custody(),
             resources.pids(),
             spec.services(),
             self.options.service_proxy_image(),
@@ -702,6 +715,7 @@ impl PodmanInner {
                     entry,
                     names,
                     labels.fingerprint,
+                    labels.custody,
                     deadline,
                     cancellation,
                 )?;
@@ -711,6 +725,7 @@ impl PodmanInner {
                     entry,
                     names,
                     labels.fingerprint,
+                    labels.custody,
                     service_cgroup
                         .as_deref()
                         .ok_or_else(|| provider_error::invalid_state(ProviderStage::Start))?,
@@ -720,7 +735,14 @@ impl PodmanInner {
                 )?;
             }
             for entry in manifest.entries() {
-                self.wait_for_service(entry, names, labels.fingerprint, deadline, cancellation)?;
+                self.wait_for_service(
+                    entry,
+                    names,
+                    labels.fingerprint,
+                    labels.custody,
+                    deadline,
+                    cancellation,
+                )?;
             }
             if manifest.port_count() != 0 {
                 self.ensure_service_proxy(
@@ -759,6 +781,7 @@ impl PodmanInner {
                     entry,
                     names,
                     labels.fingerprint,
+                    labels.custody,
                     deadline,
                     cancellation,
                     ProviderStage::VerifyOwnership,
@@ -785,6 +808,7 @@ impl PodmanInner {
                     entry,
                     names,
                     labels.fingerprint,
+                    labels.custody,
                     deadline,
                     cancellation,
                     ProviderStage::VerifyOwnership,
@@ -877,6 +901,7 @@ impl PodmanInner {
             entry,
             names,
             labels.fingerprint,
+            labels.custody,
             deadline,
             cancellation,
             ProviderStage::VerifyOwnership,
@@ -912,6 +937,7 @@ impl PodmanInner {
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ProviderError> {
@@ -919,6 +945,7 @@ impl PodmanInner {
             entry,
             names,
             fingerprint,
+            custody,
             deadline,
             cancellation,
             ProviderStage::Start,
@@ -944,6 +971,7 @@ impl PodmanInner {
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ProviderError> {
@@ -966,6 +994,7 @@ impl PodmanInner {
                 entry,
                 names,
                 fingerprint,
+                custody,
                 deadline,
                 cancellation,
                 ProviderStage::Start,
@@ -987,6 +1016,7 @@ impl PodmanInner {
                                 entry,
                                 names,
                                 fingerprint,
+                                custody,
                                 deadline,
                                 cancellation,
                             )?;
@@ -997,6 +1027,7 @@ impl PodmanInner {
                             entry,
                             names,
                             fingerprint,
+                            custody,
                             deadline,
                             cancellation,
                         )?;
@@ -1019,6 +1050,7 @@ impl PodmanInner {
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<Duration, ProviderError> {
@@ -1026,6 +1058,7 @@ impl PodmanInner {
             entry,
             names,
             fingerprint,
+            custody,
             deadline,
             cancellation,
             ProviderStage::Start,
@@ -1048,6 +1081,7 @@ impl PodmanInner {
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ProviderError> {
@@ -1055,6 +1089,7 @@ impl PodmanInner {
             entry,
             names,
             fingerprint,
+            custody,
             deadline,
             cancellation,
             ProviderStage::Start,
@@ -1075,6 +1110,7 @@ impl PodmanInner {
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         pod_cgroup: &str,
         aggregate_pids: u32,
         deadline: Instant,
@@ -1084,6 +1120,7 @@ impl PodmanInner {
             entry,
             names,
             fingerprint,
+            custody,
             deadline,
             cancellation,
             ProviderStage::Start,
@@ -1136,11 +1173,13 @@ impl PodmanInner {
         parse_process_id(output.stdout()).ok_or_else(|| provider_error::invalid_state(stage))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn service_readiness(
         &self,
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
         stage: ProviderStage,
@@ -1153,7 +1192,7 @@ impl PodmanInner {
         else {
             return Ok(ServiceReadiness::Failed);
         };
-        if !names.expected_ownership().matches(&inspection)
+        if !names.expected_ownership(custody).matches(&inspection)
             || inspection.spec_fingerprint() != fingerprint
         {
             return Err(provider_error::ownership_mismatch(
@@ -1166,7 +1205,7 @@ impl PodmanInner {
             return Ok(ServiceReadiness::Failed);
         };
         if named_container.identifier() != inspection.identifier()
-            || !names.expected_ownership().matches(&named_container)
+            || !names.expected_ownership(custody).matches(&named_container)
             || named_container.spec_fingerprint() != fingerprint
         {
             return Err(provider_error::ownership_mismatch(
@@ -1193,11 +1232,13 @@ impl PodmanInner {
             .ok_or_else(|| provider_error::invalid_state(stage))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn verify_service_for_spec(
         &self,
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
         stage: ProviderStage,
@@ -1208,6 +1249,7 @@ impl PodmanInner {
             entry,
             names,
             fingerprint,
+            custody,
             deadline,
             cancellation,
             stage,
@@ -1221,6 +1263,7 @@ impl PodmanInner {
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
         stage: ProviderStage,
@@ -1230,6 +1273,7 @@ impl PodmanInner {
             entry,
             names,
             fingerprint,
+            custody,
             deadline,
             cancellation,
             stage,
@@ -1260,6 +1304,7 @@ impl PodmanInner {
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
         stage: ProviderStage,
@@ -1267,7 +1312,7 @@ impl PodmanInner {
         let inspection = self
             .inspect_named_container(token, deadline, cancellation, stage)?
             .ok_or_else(|| provider_error::invalid_state(stage))?;
-        if !names.expected_ownership().matches(&inspection)
+        if !names.expected_ownership(custody).matches(&inspection)
             || inspection.spec_fingerprint() != fingerprint
         {
             return Err(provider_error::ownership_mismatch(
@@ -1278,7 +1323,7 @@ impl PodmanInner {
             .inspect_named_container(entry.container(), deadline, cancellation, stage)?
             .ok_or_else(|| provider_error::invalid_state(stage))?;
         if named_container.identifier() != inspection.identifier()
-            || !names.expected_ownership().matches(&named_container)
+            || !names.expected_ownership(custody).matches(&named_container)
             || named_container.spec_fingerprint() != fingerprint
         {
             return Err(provider_error::ownership_mismatch(
@@ -1381,7 +1426,7 @@ impl PodmanInner {
                 ProviderStage::CreateContainer,
             )?
             .ok_or_else(|| provider_error::invalid_state(ProviderStage::CreateContainer))?;
-        if !names.expected_ownership().matches(&primary)
+        if !names.expected_ownership(labels.custody).matches(&primary)
             || primary.spec_fingerprint() != manifest.fingerprint()
             || primary.state() != Some("running")
         {
@@ -1398,7 +1443,7 @@ impl PodmanInner {
                 ProviderStage::CreateContainer,
             )?
             .ok_or_else(|| provider_error::invalid_state(ProviderStage::CreateContainer))?;
-        if !names.expected_ownership().matches(&pod)
+        if !names.expected_ownership(labels.custody).matches(&pod)
             || pod.spec_fingerprint() != manifest.fingerprint()
         {
             return Err(provider_error::ownership_mismatch(
@@ -1411,6 +1456,7 @@ impl PodmanInner {
             pod.identifier(),
             names,
             manifest.fingerprint(),
+            manifest.custody(),
             deadline,
             cancellation,
             ProviderStage::VerifyOwnership,
@@ -1422,6 +1468,7 @@ impl PodmanInner {
                 &entry,
                 names,
                 manifest.fingerprint(),
+                manifest.custody(),
                 deadline,
                 cancellation,
                 ProviderStage::CreateContainer,
@@ -1534,11 +1581,12 @@ impl PodmanInner {
 
         let proxy = match existing {
             Some(proxy) if proxy.state() == Some("running") => proxy,
-            Some(proxy) => {
-                self.remove_verified_proxy_container(
-                    &proxy,
-                    manifest,
+            Some(_) => {
+                let _removed = self.remove_manifest_containers(
+                    proxy_container_tokens(manifest),
                     names,
+                    manifest.fingerprint(),
+                    manifest.custody(),
                     deadline,
                     cancellation,
                 )?;
@@ -1731,7 +1779,9 @@ impl PodmanInner {
         cancellation: &dyn Cancellation,
         stage: ProviderStage,
     ) -> Result<InspectedServiceContainer, ProviderError> {
-        if !names.expected_ownership().matches(&inspection)
+        if !names
+            .expected_ownership(manifest.custody())
+            .matches(&inspection)
             || inspection.spec_fingerprint() != manifest.fingerprint()
         {
             return Err(provider_error::ownership_mismatch(
@@ -1791,7 +1841,9 @@ impl PodmanInner {
             .inspect_named_container(manifest.proxy_container(), deadline, cancellation, stage)?
             .ok_or_else(|| provider_error::invalid_state(stage))?;
         if stable.identifier() != inspection.identifier()
-            || !names.expected_ownership().matches(&stable)
+            || !names
+                .expected_ownership(manifest.custody())
+                .matches(&stable)
             || stable.spec_fingerprint() != manifest.fingerprint()
         {
             return Err(provider_error::ownership_mismatch(
@@ -1809,6 +1861,7 @@ impl PodmanInner {
         expected_pod: &str,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
         stage: ProviderStage,
@@ -1835,7 +1888,7 @@ impl PodmanInner {
             .ok_or_else(|| provider_error::invalid_state(stage))?;
         if actual_pod != Some(expected_pod)
             || stable.identifier() != inspection.identifier()
-            || !names.expected_ownership().matches(&stable)
+            || !names.expected_ownership(custody).matches(&stable)
             || stable.spec_fingerprint() != fingerprint
         {
             return Err(provider_error::ownership_mismatch(
@@ -1912,7 +1965,9 @@ impl PodmanInner {
         let primary = self
             .inspect_named_container(&names.container(), deadline, cancellation, stage)?
             .ok_or_else(|| provider_error::invalid_state(stage))?;
-        if !names.expected_ownership().matches(&primary)
+        if !names
+            .expected_ownership(manifest.custody())
+            .matches(&primary)
             || primary.spec_fingerprint() != manifest.fingerprint()
             || primary.state() != Some("running")
         {
@@ -1923,7 +1978,7 @@ impl PodmanInner {
         let pod = self
             .inspect_resource(ResourceKind::Pod, names, deadline, cancellation, stage)?
             .ok_or_else(|| provider_error::invalid_state(stage))?;
-        if !names.expected_ownership().matches(&pod)
+        if !names.expected_ownership(manifest.custody()).matches(&pod)
             || pod.spec_fingerprint() != manifest.fingerprint()
         {
             return Err(provider_error::ownership_mismatch(
@@ -1936,6 +1991,7 @@ impl PodmanInner {
             pod.identifier(),
             names,
             manifest.fingerprint(),
+            manifest.custody(),
             deadline,
             cancellation,
             ProviderStage::VerifyOwnership,
@@ -2034,6 +2090,7 @@ impl PodmanInner {
                 entry,
                 names,
                 manifest.fingerprint(),
+                manifest.custody(),
                 deadline,
                 cancellation,
                 ProviderStage::Inspect,
@@ -2045,6 +2102,7 @@ impl PodmanInner {
                 entry,
                 names,
                 manifest.fingerprint(),
+                manifest.custody(),
                 deadline,
                 cancellation,
                 ProviderStage::Inspect,
@@ -2078,6 +2136,7 @@ impl PodmanInner {
         self.inspect_with_deadline(handle, self.operation_deadline(), cancellation)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn inspect_with_deadline(
         &self,
         handle: &SandboxHandle,
@@ -2108,12 +2167,27 @@ impl PodmanInner {
         )?;
         let present = [network.as_ref(), pod.as_ref(), container.as_ref()];
         if present.iter().all(Option::is_none) {
+            if let Some(manifest) = self.load_service_manifest(&names, ProviderStage::Inspect)? {
+                let subordinates_present = self.verify_manifest_subordinate_ownership(
+                    &manifest,
+                    &names,
+                    manifest.custody(),
+                    deadline,
+                    cancellation,
+                    ProviderStage::Inspect,
+                )?;
+                if subordinates_present {
+                    return Err(provider_error::invalid_state(ProviderStage::Inspect));
+                }
+            }
             return Err(provider_error::known(
                 ProviderErrorKind::NotFound,
                 ProviderStage::Inspect,
             ));
         }
-        let expected = names.expected_ownership();
+        let labels = [network.as_deref(), pod.as_deref(), container.as_deref()];
+        let custody = consistent_custody(labels)?;
+        let expected = names.expected_ownership(custody);
         if present
             .iter()
             .flatten()
@@ -2121,7 +2195,6 @@ impl PodmanInner {
         {
             return Err(provider_error::ownership_mismatch(ProviderStage::Inspect));
         }
-        let labels = [network.as_deref(), pod.as_deref(), container.as_deref()];
         let profile = consistent_profile(labels)?;
         let core_fingerprint = ensure_consistent_fingerprint(labels)?;
         let workspace = self
@@ -2137,15 +2210,24 @@ impl PodmanInner {
         let manifest = self
             .load_service_manifest(&names, ProviderStage::Inspect)?
             .ok_or_else(|| provider_error::invalid_state(ProviderStage::Inspect))?;
-        if manifest.fingerprint() != core_fingerprint {
+        if manifest.fingerprint() != core_fingerprint || manifest.custody() != custody {
             return Err(provider_error::invalid_state(ProviderStage::Inspect));
         }
+        self.verify_manifest_subordinate_ownership(
+            &manifest,
+            &names,
+            custody,
+            deadline,
+            cancellation,
+            ProviderStage::Inspect,
+        )?;
         if state == SandboxState::Running {
             for entry in manifest.entries() {
                 if self.service_readiness(
                     entry,
                     &names,
                     manifest.fingerprint(),
+                    manifest.custody(),
                     deadline,
                     cancellation,
                     ProviderStage::Inspect,
@@ -2174,11 +2256,13 @@ impl PodmanInner {
         Ok(SandboxInspection::new(
             handle.clone(),
             names.generation(),
+            custody,
             profile,
             state,
         ))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn destroy(
         &self,
         request: &DestroySandbox,
@@ -2192,8 +2276,18 @@ impl PodmanInner {
             ));
         }
         let deadline = self.operation_deadline();
+        let manifest = self.load_service_manifest(&names, ProviderStage::DestroyContainer)?;
+        if !self.verify_destroy_authority(
+            request,
+            &names,
+            manifest.as_ref(),
+            deadline,
+            cancellation,
+        )? {
+            return Ok(DestroyDisposition::AlreadyAbsent);
+        }
         let (manifest, mut removed) =
-            self.remove_services_for_destroy(request, &names, deadline, cancellation)?;
+            self.remove_services_for_destroy(request, &names, manifest, deadline, cancellation)?;
         fence_destroy_result(
             self.stop_job_docker_service(&names),
             removed,
@@ -2207,19 +2301,37 @@ impl PodmanInner {
             )?;
         }
         let primary = fence_destroy_result(
-            self.remove_exact(ResourceKind::Container, &names, deadline, cancellation),
+            self.remove_exact(
+                ResourceKind::Container,
+                &names,
+                request.custody(),
+                deadline,
+                cancellation,
+            ),
             removed,
             request.handle(),
         )?;
         removed |= primary;
         let pod = fence_destroy_result(
-            self.remove_exact(ResourceKind::Pod, &names, deadline, cancellation),
+            self.remove_exact(
+                ResourceKind::Pod,
+                &names,
+                request.custody(),
+                deadline,
+                cancellation,
+            ),
             removed,
             request.handle(),
         )?;
         removed |= pod;
         let network = fence_destroy_result(
-            self.remove_exact(ResourceKind::Network, &names, deadline, cancellation),
+            self.remove_exact(
+                ResourceKind::Network,
+                &names,
+                request.custody(),
+                deadline,
+                cancellation,
+            ),
             removed,
             request.handle(),
         )?;
@@ -2265,10 +2377,10 @@ impl PodmanInner {
         &self,
         request: &DestroySandbox,
         names: &ResourceNames,
+        manifest: Option<ServiceManifest>,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<(Option<ServiceManifest>, bool), ProviderError> {
-        let manifest = self.load_service_manifest(names, ProviderStage::DestroyContainer)?;
         let Some(current) = manifest.as_ref() else {
             // A crash may leave any subset of the core sandbox resources after
             // the service manifest has disappeared. The main destroy path
@@ -2280,6 +2392,7 @@ impl PodmanInner {
         self.verify_manifest_core_fingerprint(
             names,
             current.fingerprint(),
+            request.custody(),
             deadline,
             cancellation,
             ProviderStage::DestroyContainer,
@@ -2291,6 +2404,7 @@ impl PodmanInner {
                 entry,
                 names,
                 current.fingerprint(),
+                request.custody(),
                 deadline,
                 cancellation,
             ) {
@@ -2304,6 +2418,103 @@ impl PodmanInner {
         Ok((manifest, removed))
     }
 
+    fn verify_destroy_authority(
+        &self,
+        request: &DestroySandbox,
+        names: &ResourceNames,
+        manifest: Option<&ServiceManifest>,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+    ) -> Result<bool, ProviderError> {
+        if manifest.is_some_and(|manifest| manifest.custody() != request.custody()) {
+            return Err(provider_error::ownership_mismatch(
+                ProviderStage::VerifyOwnership,
+            ));
+        }
+        let expected = names.expected_ownership(request.custody());
+        let mut evidence = manifest.is_some();
+        for kind in [
+            ResourceKind::Network,
+            ResourceKind::Pod,
+            ResourceKind::Container,
+        ] {
+            let Some(labels) = self.inspect_resource(
+                kind,
+                names,
+                deadline,
+                cancellation,
+                ProviderStage::VerifyOwnership,
+            )?
+            else {
+                continue;
+            };
+            evidence = true;
+            if !expected.matches(&labels) {
+                return Err(provider_error::ownership_mismatch(
+                    ProviderStage::VerifyOwnership,
+                ));
+            }
+            if manifest.is_some_and(|manifest| labels.spec_fingerprint() != manifest.fingerprint())
+            {
+                return Err(provider_error::invalid_state(
+                    ProviderStage::VerifyOwnership,
+                ));
+            }
+        }
+        if let Some(manifest) = manifest {
+            evidence |= self.verify_manifest_subordinate_ownership(
+                manifest,
+                names,
+                request.custody(),
+                deadline,
+                cancellation,
+                ProviderStage::VerifyOwnership,
+            )?;
+        }
+        let workspace = self
+            .state
+            .workspace_exists(&names.workspace())
+            .map_err(|_| provider_error::local_storage(ProviderStage::VerifyOwnership))?;
+        if !evidence && workspace {
+            return Err(provider_error::ownership_mismatch(
+                ProviderStage::VerifyOwnership,
+            ));
+        }
+        Ok(evidence)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_manifest_subordinate_ownership(
+        &self,
+        manifest: &ServiceManifest,
+        names: &ResourceNames,
+        custody: SandboxCustody,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+        stage: ProviderStage,
+    ) -> Result<bool, ProviderError> {
+        if manifest.custody() != custody {
+            return Err(provider_error::ownership_mismatch(stage));
+        }
+        let expected = names.expected_ownership(custody);
+        let mut present = false;
+        for token in manifest_subordinate_tokens(manifest) {
+            let Some(labels) =
+                self.inspect_named_container(&token, deadline, cancellation, stage)?
+            else {
+                continue;
+            };
+            present = true;
+            if !expected.matches(&labels) {
+                return Err(provider_error::ownership_mismatch(stage));
+            }
+            if labels.spec_fingerprint() != manifest.fingerprint() {
+                return Err(provider_error::invalid_state(stage));
+            }
+        }
+        Ok(present)
+    }
+
     #[allow(clippy::single_match_else)]
     fn remove_service_proxy_container(
         &self,
@@ -2312,119 +2523,153 @@ impl PodmanInner {
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<bool, ProviderError> {
-        if manifest.port_count() == 0 {
-            return Ok(false);
-        }
-        let inspection = if manifest.proxy_transition() {
-            match self.inspect_named_container(
-                manifest.proxy_container(),
-                deadline,
-                cancellation,
-                ProviderStage::DestroyContainer,
-            )? {
-                Some(inspection) => inspection,
-                None => return Ok(false),
-            }
-        } else {
-            match manifest.proxy_identifier() {
-                Some(identifier) => match self.inspect_named_container(
-                    identifier,
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroyContainer,
-                )? {
-                    Some(inspection) => inspection,
-                    None => {
-                        if self.named_container_exists(
-                            manifest.proxy_container(),
-                            deadline,
-                            cancellation,
-                            ProviderStage::DestroyContainer,
-                        )? {
-                            return Err(provider_error::ownership_mismatch(
-                                ProviderStage::VerifyOwnership,
-                            ));
-                        }
-                        return Ok(false);
-                    }
-                },
-                None => match self.inspect_named_container(
-                    manifest.proxy_container(),
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroyContainer,
-                )? {
-                    Some(_) => {
-                        return Err(provider_error::ownership_mismatch(
-                            ProviderStage::VerifyOwnership,
-                        ));
-                    }
-                    None => return Ok(false),
-                },
-            }
-        };
-        let inspection = self.verify_service_proxy_container(
-            inspection,
-            manifest,
+        self.remove_manifest_containers(
+            proxy_container_tokens(manifest),
             names,
-            None,
+            manifest.fingerprint(),
+            manifest.custody(),
             deadline,
             cancellation,
-            ProviderStage::DestroyContainer,
-        )?;
-        self.remove_verified_proxy_container(&inspection, manifest, names, deadline, cancellation)
+        )
     }
 
-    fn remove_verified_proxy_container(
+    fn remove_manifest_containers(
         &self,
-        inspection: &InspectedServiceContainer,
-        manifest: &ServiceManifest,
+        tokens: BTreeSet<String>,
         names: &ResourceNames,
+        fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<bool, ProviderError> {
-        let mut arguments = self.base_arguments();
-        arguments.extend(os_args([
-            "rm",
-            "--force",
-            "--ignore",
-            "--time",
-            "0",
-            "--volumes",
-        ]));
-        arguments.push(inspection.identifier().into());
-        self.run_mutation(
-            arguments,
+        let identifiers = self.manifest_container_identifiers(
+            &tokens,
+            names,
+            fingerprint,
+            custody,
             deadline,
             cancellation,
-            ProviderStage::DestroyContainer,
-            names.handle(),
         )?;
-        if self.named_container_exists(
-            inspection.identifier(),
-            deadline,
-            cancellation,
-            ProviderStage::DestroyContainer,
-        )? {
-            return Err(provider_error::uncertain(
-                ProviderErrorKind::BackendRejected,
+        let expected = names.expected_ownership(custody);
+        let mut removed = false;
+        for identifier in identifiers {
+            let inspection = fence_destroy_result(
+                self.inspect_named_container(
+                    &identifier,
+                    deadline,
+                    cancellation,
+                    ProviderStage::DestroyContainer,
+                ),
+                removed,
+                &names.handle(),
+            )?;
+            let Some(inspection) = inspection else {
+                continue;
+            };
+            if inspection.identifier() != identifier
+                || !expected.matches(&inspection)
+                || inspection.spec_fingerprint() != fingerprint
+            {
+                let error = provider_error::ownership_mismatch(ProviderStage::VerifyOwnership);
+                return Err(if removed {
+                    destroy_service_error(&error, names.handle())
+                } else {
+                    error
+                });
+            }
+            let mut arguments = self.base_arguments();
+            arguments.extend(os_args([
+                "rm",
+                "--force",
+                "--ignore",
+                "--time",
+                "0",
+                "--volumes",
+            ]));
+            arguments.push(identifier.clone().into());
+            fence_destroy_result(
+                self.run_mutation(
+                    arguments,
+                    deadline,
+                    cancellation,
+                    ProviderStage::DestroyContainer,
+                    names.handle(),
+                ),
+                removed,
+                &names.handle(),
+            )?;
+            removed = true;
+            if self
+                .named_container_exists(
+                    &identifier,
+                    deadline,
+                    cancellation,
+                    ProviderStage::DestroyContainer,
+                )
+                .map_err(|error| destroy_service_error(&error, names.handle()))?
+            {
+                return Err(provider_error::uncertain(
+                    ProviderErrorKind::BackendRejected,
+                    ProviderStage::DestroyContainer,
+                    names.handle(),
+                ));
+            }
+        }
+        for token in tokens {
+            if self
+                .named_container_exists(
+                    &token,
+                    deadline,
+                    cancellation,
+                    ProviderStage::DestroyContainer,
+                )
+                .map_err(|error| destroy_service_error(&error, names.handle()))?
+            {
+                return Err(provider_error::uncertain(
+                    ProviderErrorKind::OwnershipMismatch,
+                    ProviderStage::VerifyOwnership,
+                    names.handle(),
+                ));
+            }
+        }
+        Ok(removed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn manifest_container_identifiers(
+        &self,
+        tokens: &BTreeSet<String>,
+        names: &ResourceNames,
+        fingerprint: &str,
+        custody: SandboxCustody,
+        deadline: Instant,
+        cancellation: &dyn Cancellation,
+    ) -> Result<BTreeSet<String>, ProviderError> {
+        let expected = names.expected_ownership(custody);
+        let mut identifiers = BTreeSet::new();
+        for token in tokens {
+            let Some(inspection) = self.inspect_named_container(
+                token,
+                deadline,
+                cancellation,
                 ProviderStage::DestroyContainer,
-                names.handle(),
-            ));
+            )?
+            else {
+                continue;
+            };
+            if !expected.matches(&inspection) {
+                return Err(provider_error::ownership_mismatch(
+                    ProviderStage::VerifyOwnership,
+                ));
+            }
+            if inspection.spec_fingerprint() != fingerprint {
+                return Err(provider_error::invalid_state(
+                    ProviderStage::DestroyContainer,
+                ));
+            }
+            identifiers.insert(inspection.identifier().to_owned());
         }
-        if self.named_container_exists(
-            manifest.proxy_container(),
-            deadline,
-            cancellation,
-            ProviderStage::DestroyContainer,
-        )? {
-            return Err(provider_error::uncertain(
-                ProviderErrorKind::OwnershipMismatch,
-                ProviderStage::VerifyOwnership,
-                names.handle(),
-            ));
-        }
-        Ok(true)
+        Ok(identifiers)
     }
 
     fn remove_exact_workspace(
@@ -2487,6 +2732,7 @@ impl PodmanInner {
         &self,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ProviderError> {
@@ -2498,7 +2744,7 @@ impl PodmanInner {
             if let Some(labels) =
                 self.inspect_resource(kind, names, deadline, cancellation, ProviderStage::Inspect)?
             {
-                if !names.expected_ownership().matches(&labels) {
+                if !names.expected_ownership(custody).matches(&labels) {
                     return Err(provider_error::ownership_mismatch(
                         ProviderStage::VerifyOwnership,
                     ));
@@ -2518,6 +2764,7 @@ impl PodmanInner {
         &self,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
         stage: ProviderStage,
@@ -2531,7 +2778,7 @@ impl PodmanInner {
             else {
                 continue;
             };
-            if !names.expected_ownership().matches(&labels) {
+            if !names.expected_ownership(custody).matches(&labels) {
                 return Err(provider_error::ownership_mismatch(
                     ProviderStage::VerifyOwnership,
                 ));
@@ -2563,6 +2810,7 @@ impl PodmanInner {
                 names,
                 spec.profile().attestation(),
                 labels.fingerprint,
+                labels.custody,
                 deadline,
                 cancellation,
             );
@@ -2586,6 +2834,7 @@ impl PodmanInner {
             names,
             spec.profile().attestation(),
             labels.fingerprint,
+            labels.custody,
             deadline,
             cancellation,
         )
@@ -2612,6 +2861,7 @@ impl PodmanInner {
                 names,
                 spec.profile().attestation(),
                 labels.fingerprint,
+                labels.custody,
                 deadline,
                 cancellation,
             )?;
@@ -2667,6 +2917,7 @@ impl PodmanInner {
             names,
             spec.profile().attestation(),
             labels.fingerprint,
+            labels.custody,
             deadline,
             cancellation,
         )?;
@@ -2757,6 +3008,7 @@ impl PodmanInner {
                 names,
                 spec.profile().attestation(),
                 labels.fingerprint,
+                labels.custody,
                 deadline,
                 cancellation,
             );
@@ -2820,6 +3072,7 @@ impl PodmanInner {
             names,
             spec.profile().attestation(),
             labels.fingerprint,
+            labels.custody,
             deadline,
             cancellation,
         )
@@ -3421,12 +3674,14 @@ impl PodmanInner {
         self.verify_buildkit_image_in_engine(job_arguments, runtime.image(), deadline, cancellation)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn verify_owned_for_spec(
         &self,
         kind: ResourceKind,
         names: &ResourceNames,
         profile: &EnvironmentProfile,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<(), ProviderError> {
@@ -3439,7 +3694,7 @@ impl PodmanInner {
                 ProviderStage::VerifyOwnership,
             )?
             .ok_or_else(|| provider_error::invalid_state(ProviderStage::VerifyOwnership))?;
-        if !names.expected_ownership().matches(&labels)
+        if !names.expected_ownership(custody).matches(&labels)
             || labels.profile().as_ref() != Some(profile)
             || labels.spec_fingerprint() != fingerprint
         {
@@ -3515,6 +3770,7 @@ impl PodmanInner {
         &self,
         kind: ResourceKind,
         names: &ResourceNames,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<bool, ProviderError> {
@@ -3523,7 +3779,7 @@ impl PodmanInner {
         else {
             return Ok(false);
         };
-        if !names.expected_ownership().matches(&labels) {
+        if !names.expected_ownership(custody).matches(&labels) {
             return Err(provider_error::ownership_mismatch(
                 ProviderStage::VerifyOwnership,
             ));
@@ -3555,165 +3811,23 @@ impl PodmanInner {
         Ok(true)
     }
 
-    #[allow(clippy::single_match_else, clippy::too_many_lines)]
     fn remove_service_container(
         &self,
         entry: &ServiceManifestEntry,
         names: &ResourceNames,
         fingerprint: &str,
+        custody: SandboxCustody,
         deadline: Instant,
         cancellation: &dyn Cancellation,
     ) -> Result<bool, ProviderError> {
-        let inspection = if entry.transition() {
-            let Some(named_container) = self.inspect_named_container(
-                entry.container(),
-                deadline,
-                cancellation,
-                ProviderStage::DestroyContainer,
-            )?
-            else {
-                return Ok(false);
-            };
-            let pending_matches_name = if let Some(identifier) = entry.identifier() {
-                self.inspect_named_container(
-                    identifier,
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroyContainer,
-                )?
-                .is_some_and(|pending| pending.identifier() == named_container.identifier())
-            } else {
-                false
-            };
-            if pending_matches_name {
-                self.inspect_service_container_base(
-                    entry.identifier().ok_or_else(|| {
-                        provider_error::invalid_state(ProviderStage::DestroyContainer)
-                    })?,
-                    entry,
-                    names,
-                    fingerprint,
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroyContainer,
-                )?
-            } else {
-                self.inspect_service_container(
-                    entry.container(),
-                    entry,
-                    names,
-                    fingerprint,
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroyContainer,
-                )?
-            }
-        } else {
-            match entry.identifier() {
-                Some(identifier) => match self.inspect_named_container(
-                    identifier,
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroyContainer,
-                )? {
-                    Some(inspection) => inspection,
-                    None => {
-                        if self.named_container_exists(
-                            entry.container(),
-                            deadline,
-                            cancellation,
-                            ProviderStage::DestroyContainer,
-                        )? {
-                            return Err(provider_error::ownership_mismatch(
-                                ProviderStage::VerifyOwnership,
-                            ));
-                        }
-                        return Ok(false);
-                    }
-                },
-                None => match self.inspect_named_container(
-                    entry.container(),
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroyContainer,
-                )? {
-                    Some(_) => {
-                        return Err(provider_error::ownership_mismatch(
-                            ProviderStage::VerifyOwnership,
-                        ));
-                    }
-                    None => return Ok(false),
-                },
-            }
-        };
-        if !names.expected_ownership().matches(&inspection)
-            || inspection.spec_fingerprint() != fingerprint
-        {
-            return Err(provider_error::ownership_mismatch(
-                ProviderStage::VerifyOwnership,
-            ));
-        }
-        let named_container = self
-            .inspect_named_container(
-                entry.container(),
-                deadline,
-                cancellation,
-                ProviderStage::DestroyContainer,
-            )?
-            .ok_or_else(|| provider_error::invalid_state(ProviderStage::DestroyContainer))?;
-        if named_container.identifier() != inspection.identifier() {
-            return Err(provider_error::ownership_mismatch(
-                ProviderStage::VerifyOwnership,
-            ));
-        }
-        let mut arguments = self.base_arguments();
-        arguments.extend(os_args([
-            "rm",
-            "--force",
-            "--ignore",
-            "--time",
-            "0",
-            "--volumes",
-        ]));
-        arguments.push(inspection.identifier().into());
-        self.run_mutation(
-            arguments,
+        self.remove_manifest_containers(
+            service_container_tokens(entry),
+            names,
+            fingerprint,
+            custody,
             deadline,
             cancellation,
-            ProviderStage::DestroyContainer,
-            names.handle(),
-        )?;
-        let still_exists = self
-            .named_container_exists(
-                inspection.identifier(),
-                deadline,
-                cancellation,
-                ProviderStage::DestroyContainer,
-            )
-            .map_err(|error| destroy_service_error(&error, names.handle()))?;
-        if still_exists {
-            return Err(provider_error::uncertain(
-                ProviderErrorKind::BackendRejected,
-                ProviderStage::DestroyContainer,
-                names.handle(),
-            ));
-        }
-        if self
-            .named_container_exists(
-                entry.container(),
-                deadline,
-                cancellation,
-                ProviderStage::DestroyContainer,
-            )
-            .map_err(|error| destroy_service_error(&error, names.handle()))?
-        {
-            return Err(provider_error::uncertain(
-                ProviderErrorKind::OwnershipMismatch,
-                ProviderStage::VerifyOwnership,
-                names.handle(),
-            ));
-        }
-        Ok(true)
+        )
     }
 
     pub(crate) fn run_endpoint(
@@ -4059,6 +4173,7 @@ fn finish_create(
 struct ProvisionLabels<'a> {
     arguments: &'a [String],
     fingerprint: &'a str,
+    custody: SandboxCustody,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4280,6 +4395,19 @@ fn consistent_profile(
     Ok(profile)
 }
 
+fn consistent_custody(
+    present: [Option<&InspectedLabels>; 3],
+) -> Result<SandboxCustody, ProviderError> {
+    let mut observed = present.iter().flatten().map(|labels| labels.custody());
+    let custody = observed
+        .next()
+        .ok_or_else(|| provider_error::invalid_state(ProviderStage::Inspect))?;
+    if observed.any(|other| other != custody) {
+        return Err(provider_error::ownership_mismatch(ProviderStage::Inspect));
+    }
+    Ok(custody)
+}
+
 fn ensure_consistent_fingerprint(
     present: [Option<&InspectedLabels>; 3],
 ) -> Result<String, ProviderError> {
@@ -4380,6 +4508,8 @@ fn spec_fingerprint(
     buildkit_runtime: Option<&crate::BuildKitRuntime>,
 ) -> String {
     let mut hasher = Sha256::new();
+    hash_field(&mut hasher, b"automata-podman-sandbox-spec-v2");
+    hash_custody(&mut hasher, spec.custody());
     hash_field(&mut hasher, spec.profile().id().as_str().as_bytes());
     hash_field(&mut hasher, spec.profile().digest().as_bytes());
     hash_field(
@@ -4494,6 +4624,23 @@ fn spec_fingerprint(
         hash_service_health(&mut hasher, service.health());
     }
     Sha256Digest::from_bytes(hasher.finalize().into()).to_string()
+}
+
+fn hash_custody(hasher: &mut Sha256, custody: SandboxCustody) {
+    match custody {
+        SandboxCustody::ProfileAdmission { runner_id } => {
+            hash_field(hasher, b"profile-admission");
+            hash_field(hasher, runner_id.as_uuid().as_bytes());
+        }
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal,
+        } => {
+            hash_field(hasher, b"job");
+            hash_field(hasher, runner_id.as_uuid().as_bytes());
+            hash_field(hasher, &slot_ordinal.get().to_be_bytes());
+        }
+    }
 }
 
 fn hash_service_health(hasher: &mut Sha256, health: &ServiceHealthPolicy) {
@@ -4875,6 +5022,31 @@ fn create_service_error(error: &ProviderError, handle: SandboxHandle) -> Provide
         OperationOutcome::Uncertain,
         Some(handle),
     )
+}
+
+fn manifest_subordinate_tokens(manifest: &ServiceManifest) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    for entry in manifest.entries() {
+        tokens.extend(service_container_tokens(entry));
+    }
+    tokens.extend(proxy_container_tokens(manifest));
+    tokens
+}
+
+fn service_container_tokens(entry: &ServiceManifestEntry) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::from([entry.container().to_owned()]);
+    if let Some(identifier) = entry.identifier() {
+        tokens.insert(identifier.to_owned());
+    }
+    tokens
+}
+
+fn proxy_container_tokens(manifest: &ServiceManifest) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::from([manifest.proxy_container().to_owned()]);
+    if let Some(identifier) = manifest.proxy_identifier() {
+        tokens.insert(identifier.to_owned());
+    }
+    tokens
 }
 
 fn destroy_service_error(error: &ProviderError, handle: SandboxHandle) -> ProviderError {

@@ -55,6 +55,7 @@ async fn service_specs_cross_the_fenced_sandbox_boundary_and_cleanup_with_the_jo
     let request = fixture.request(job);
     let session_id = request.session_id();
     let slot = request.slot();
+    let runner_id = request.lease().runner_id();
     let attempt_id = request.lease().attempt_id();
     let guard = request.lease().guard();
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
@@ -113,7 +114,14 @@ async fn service_specs_cross_the_fenced_sandbox_boundary_and_cleanup_with_the_jo
     assert!(!format!("{sandbox:?}").contains(support::SECRET));
     assert!(!format!("{sandbox:?}").contains("pg_isready"));
 
-    let cleanup = CleanupRequest::new(session_id, slot, attempt_id, guard, journal_identity());
+    let cleanup = CleanupRequest::new(
+        runner_id,
+        session_id,
+        slot,
+        attempt_id,
+        guard,
+        journal_identity(),
+    );
     fixture
         .executor
         .cleanup(cleanup, events, ExecutionCancellation::new())
@@ -129,6 +137,7 @@ async fn cancelled_service_job_retains_exact_sandbox_cleanup_ownership() {
     let request = fixture.request(job);
     let session_id = request.session_id();
     let slot = request.slot();
+    let runner_id = request.lease().runner_id();
     let attempt_id = request.lease().attempt_id();
     let guard = request.lease().guard();
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
@@ -147,7 +156,14 @@ async fn cancelled_service_job_retains_exact_sandbox_cleanup_ownership() {
     fixture
         .executor
         .cleanup(
-            CleanupRequest::new(session_id, slot, attempt_id, guard, journal_identity()),
+            CleanupRequest::new(
+                runner_id,
+                session_id,
+                slot,
+                attempt_id,
+                guard,
+                journal_identity(),
+            ),
             events,
             ExecutionCancellation::new(),
         )
