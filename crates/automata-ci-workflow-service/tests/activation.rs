@@ -1,3 +1,5 @@
+use crate::support::{located, span};
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -14,9 +16,9 @@ use automata_ci_core::{
     LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate, LogicalTimeoutTemplate,
     MatrixAxis, MatrixAxisValues, MatrixPatch, MatrixPatchSet, MatrixTemplate, MatrixValue,
     MatrixValueTemplate, NeedContext, NeedOutput, OutputSensitivity, PlanEvaluationPhase,
-    PlanExpression, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, SecretBinding,
-    StepJobTemplate, WorkflowEventProvenance, WorkflowJobKey, WorkflowPlan,
-    WorkflowSourceProvenance, WorkflowStepKey, WorkflowStrategyTemplate,
+    PlanExpression, PlanSourceOrigin, SecretBinding, StepJobTemplate, WorkflowEventProvenance,
+    WorkflowJobKey, WorkflowPlan, WorkflowSourceProvenance, WorkflowStepKey,
+    WorkflowStrategyTemplate,
 };
 use automata_ci_workflow_service::{
     ActivateLogicalJobRequest, ActivationEvaluationContext, ActivationStatus, ActivationValue,
@@ -24,19 +26,6 @@ use automata_ci_workflow_service::{
     LogicalJobActivator, ValidatedLogicalJob, ValidatedLogicalPlan,
 };
 use thiserror::Error;
-
-fn span() -> PlanSourceSpan {
-    PlanSourceSpan::new(
-        "synthetic.yml",
-        PlanSourceLocation::new(0, 1, 1).expect("start"),
-        PlanSourceLocation::new(1, 1, 2).expect("end"),
-    )
-    .expect("span")
-}
-
-fn located<T>(value: T) -> Located<T> {
-    Located::new(value, span())
-}
 
 fn expression(source: &str, contexts: Vec<ExpressionContext>) -> CompiledExpressionTemplate {
     let mut instructions = contexts
