@@ -392,7 +392,7 @@ async fn admit_logical_workflow_transaction(
     if !claimed {
         let (receipt, admitted_at) =
             replay_receipt(&mut transaction, &command, github_subject_evidence_required).await?;
-        validate_trust_snapshot_replay(&mut transaction, &command).await?;
+        validate_trust_snapshot_replay(&mut transaction, &command, admitted_at).await?;
         validate_replayed_subject_evidence(
             &mut transaction,
             &command,
@@ -2063,6 +2063,7 @@ async fn insert_trust_snapshot(
 async fn validate_trust_snapshot_replay(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
+    durable_admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let row = sqlx::query(
         r"
@@ -2109,7 +2110,7 @@ async fn validate_trust_snapshot_replay(
         && row
             .try_get::<i64, _>("created_at_ms")
             .map_err(operation_error)?
-            == command.admitted_at().get();
+            == durable_admitted_at.get();
     if !exact {
         return Err(LogicalWorkflowAdmissionStoreError::IdempotencyConflict);
     }

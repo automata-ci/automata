@@ -1057,6 +1057,31 @@ async fn distinct_provider_admissions_reuse_exact_workflow_enable_state() -> Tes
             .await?;
         assert!(!first.is_replay());
 
+        let replayed_at = UnixMillis::new(
+            database_now_ms(&database)
+                .await?
+                .max(first_command.admitted_at().get() + 1),
+        );
+        let retimed_first_command = logical_command_at(&first_command, replayed_at)?;
+        let replay = database
+            .store()
+            .admit_authenticated_github_delivery(retimed_first_command, first_claim, replayed_at)
+            .await?;
+        assert!(replay.is_replay());
+        assert_eq!(replay.run_id(), first.run_id());
+        let replay_evidence: (i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT (SELECT count(*) FROM workflow_runs WHERE id = $1),
+                   (SELECT count(*) FROM workflow_admission_receipts WHERE run_id = $1),
+                   (SELECT count(*) FROM workflow_run_trust_snapshots WHERE run_id = $1),
+                   (SELECT count(*) FROM event_subject_progress WHERE run_id = $1)
+            ",
+        )
+        .bind(first.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(replay_evidence, (1, 1, 1, 1));
+
         let (second_command, second_claim) =
             stage_authenticated_delivery(&database, &manifest, &second_fixture, WORKFLOW_NAMESPACE)
                 .await?;
