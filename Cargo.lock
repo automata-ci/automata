@@ -721,6 +721,7 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-auth",
  "automata-ci-core",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",

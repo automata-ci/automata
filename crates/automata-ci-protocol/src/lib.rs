@@ -8,9 +8,11 @@
 
 pub mod message;
 pub mod negotiation;
+pub mod windows_admission;
 
 pub use message::*;
 pub use negotiation::*;
+pub use windows_admission::*;
 
 /// Current schema version for the message structs in this crate.
 ///
