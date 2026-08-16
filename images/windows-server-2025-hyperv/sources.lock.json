@@ -1,0 +1,30 @@
+{
+  "architecture": "x86_64",
+  "base_image": "mcr.microsoft.com/windows/servercore@sha256:2cd01bf7793879d5e1756b46045ea5dd61d040837e36d48c340f6e17d3263507",
+  "profile_id": "automata.dev/windows-2025-x64-hyperv-v1",
+  "schema_version": 1,
+  "sources": [
+    {
+      "filename": "PowerShell-7.6.5-win-x64.zip",
+      "kind": "pwsh",
+      "sha256": "32eb8f6cdce08f86e987d625a2733e54ac3e289ae7e1621b14c0b5bcec2434ea",
+      "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.5/PowerShell-7.6.5-win-x64.zip",
+      "version": "7.6.5"
+    },
+    {
+      "filename": "MinGit-2.55.0.4-64-bit.zip",
+      "kind": "gnu_tar",
+      "sha256": "4e03f94c2ffbf70be337e005cee02661c732dbfc81031a078bda9299b9a7d644",
+      "url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.4/MinGit-2.55.0.4-64-bit.zip",
+      "version": "1.35-git-for-windows-2.55.0.4"
+    },
+    {
+      "filename": "node-v24.19.0-win-x64.zip",
+      "kind": "node24",
+      "sha256": "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
+      "url": "https://nodejs.org/download/release/v24.19.0/node-v24.19.0-win-x64.zip",
+      "version": "24.19.0"
+    }
+  ],
+  "variant": "server-core-2025"
+}

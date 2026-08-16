@@ -143,7 +143,8 @@ missing, stale, expired, tampered, or mismatched custody fails closed, and
 runtime startup re-runs the full
 profile probes independently; the receipt never substitutes for live evidence,
 and control-plane registered/live intersection retains only capabilities proved
-twice. Missing,
+twice. Workspace-local actions remain omitted on Windows because user checkout
+bytes cannot enter the broker-owned pre-sandbox sealed graph. Missing,
 mismatched, revoked, or substituted evidence and tools stop startup. The
 checked-in candidate files are contract fixtures: they do not claim a built,
 signed, scanned, patched, or physical-host-tested image, and they do not close
@@ -801,6 +802,11 @@ and the broker can mutate only exact generation-bound Automata resources.
       SBOM, patch, revocation, and external Ed25519 promotion metadata.
 - [x] Keep checked-in fixtures explicitly candidate-only and withhold action
       and Node capabilities even after evidence promotion.
+- [x] Add a digest-pinned Server Core 2025 recipe, twice-verified tool
+      acquisition, reproducible local helper build, Hyper-V qualification
+      collector, canonical provenance/SBOM/patch/revocation assembler, and
+      external opaque-key-handle signing command. The pipeline publishes
+      nothing and cannot promote its checked-in candidate fixtures.
 - [ ] Define the exact Server Core host/image compatibility matrix.
 - [ ] Build a digest-pinned image containing guest executable and reviewed
       shells/tools without job-time mutable installation.
