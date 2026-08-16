@@ -685,7 +685,8 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
             "workflow_runs_publication_snapshot_immutable",
         );
 
-        let unsafe_attempt = sqlx::query(
+        let readable_attempt = Uuid::new_v4();
+        sqlx::query(
             r"
             INSERT INTO job_attempts (
                 id, job_id, attempt_number, lifecycle, fencing_token,
@@ -699,12 +700,10 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
             )
             ",
         )
-        .bind(Uuid::new_v4())
+        .bind(readable_attempt)
         .bind(public_job)
         .execute(database.pool())
-        .await
-        .expect_err("readable-secret attempt resources remain private");
-        assert_constraint(&unsafe_attempt, "job_attempts_exposure_safety");
+        .await?;
 
         let attempt = Uuid::new_v4();
         sqlx::query(
@@ -715,32 +714,12 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 raw_log_disposition, requested_log_visibility,
                 effective_log_visibility, output_safety_reason, classified_at_ms
             ) VALUES (
-                $1, $2, 1, 'succeeded', 7, 1, 2, 'secretless',
+                $1, $2, 2, 'succeeded', 8, 1, 2, 'secretless',
                 'persist', 'public', 'public', 'repository_policy', 1
             )
             ",
         )
         .bind(attempt)
-        .bind(public_job)
-        .execute(database.pool())
-        .await?;
-
-        let readable_attempt = Uuid::new_v4();
-        sqlx::query(
-            r"
-            INSERT INTO job_attempts (
-                id, job_id, attempt_number, lifecycle, fencing_token,
-                queued_at_ms, changed_at_ms, secret_exposure_class,
-                raw_log_disposition, requested_log_visibility,
-                effective_log_visibility, output_safety_reason, classified_at_ms
-            ) VALUES (
-                $1, $2, 2, 'succeeded', 8, 1, 2, 'readable_secret',
-                'persist', 'public', 'private',
-                'secret_exposure', 1
-            )
-            ",
-        )
-        .bind(readable_attempt)
         .bind(public_job)
         .execute(database.pool())
         .await?;
@@ -809,7 +788,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 requested_visibility, effective_visibility,
                 publication_safety_reason
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, 7, 'public-artifact', 7,
+                $1, $2, $3, $4, $5, $6, 8, 'public-artifact', 7,
                 'application/octet-stream', 1, 'secretless',
                 'public', 'public', 'repository_policy'
             ) RETURNING id
@@ -877,12 +856,12 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 output_safety_reason
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, 1, $8, 7, 1, 2,
-                'secretless', 'persist', 'public', 'public', 'repository_policy'
+                'readable_secret', 'persist', 'public', 'public', 'repository_policy'
             )
             ",
         )
         .bind(stream)
-        .bind(attempt)
+        .bind(readable_attempt)
         .bind(fence.session_id().as_uuid())
         .bind(Uuid::new_v4())
         .bind(fence.runner_id().as_uuid())
@@ -2109,7 +2088,7 @@ async fn create_public_run_and_job(pool: &PgPool, seed: &SeedData) -> TestResult
             event_media_type, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, workflow_name, head_sha, status,
             2, 2, 2, 'public', 'public', 'public', 'public',
-            'repository_policy', 1, runner_requirements_schema
+            'repository_policy', 2, runner_requirements_schema
         FROM workflow_runs
         WHERE id = $2
         ",

@@ -2892,12 +2892,9 @@ fn runner_log_safety_is_consistent(safety: &DurableRunnerLogSafety) -> bool {
                 safety.requested_visibility.as_str(),
                 safety.effective_visibility.as_str(),
             ),
-            ("private", "private")
-                | ("authenticated", "private" | "authenticated")
-                | ("public", "private" | "authenticated" | "public")
+            ("private", "private") | ("authenticated", "authenticated") | ("public", "public")
         )
-        && (safety.secret_exposure != SecretExposureClass::ReadableSecret
-            || safety.effective_visibility == "private")
+        && safety.reason == "repository_policy"
 }
 
 #[cfg(test)]
@@ -2916,7 +2913,7 @@ mod runner_log_safety_tests {
             schema: automata_ci_store::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA,
         };
         assert!(runner_log_safety_is_consistent(&safety));
-        for schema in [0, 2] {
+        for schema in [0, 1, 3] {
             safety.schema = schema;
             assert!(!runner_log_safety_is_consistent(&safety));
         }

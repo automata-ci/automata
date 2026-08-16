@@ -66,6 +66,10 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Changed
 
+- Job-log visibility now follows the repository publication policy after the
+  runner's mandatory secret masker. Public repositories can therefore expose
+  redacted logs without exposing readable runtime authority; artifact audience
+  remains independently constrained.
 - Sandbox cancellation now crosses provider boundaries as an explicit
   `Active | Terminate` disposition. `Terminate` authorizes provider-specific
   termination handling when an adapter reaches a cancellation checkpoint; it

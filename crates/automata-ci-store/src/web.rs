@@ -563,8 +563,8 @@ pub struct HumanTerminalResult {
     pub committed_at: UnixMillis,
 }
 
-/// Immutable output-safety evidence for a log stream or artifact.
-pub const HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA: i32 = 1;
+/// Immutable output-safety evidence for a runner-redacted log stream or artifact.
+pub const HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA: i32 = 2;
 
 /// Returns whether an output-safety schema is the exact schema accepted by this build.
 #[must_use]
@@ -579,7 +579,7 @@ pub struct HumanOutputPublication {
     pub secret_exposure: SecretExposureClass,
     /// Audience originally requested for this output kind.
     pub requested_visibility: OutputVisibility,
-    /// Immutable audience after exposure-driven narrowing.
+    /// Immutable audience after output-kind publication policy is applied.
     pub effective_visibility: OutputVisibility,
     /// Closed machine reason supporting the effective audience.
     pub safety_reason: String,

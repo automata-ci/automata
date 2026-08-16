@@ -119,11 +119,11 @@ fn pg_bigint(value: u64) -> i64 {
 ///
 /// Standard execution requires a Results runtime authority, and the GitHub
 /// execution context exposes its bearer to user code as
-/// `ACTIONS_RUNTIME_TOKEN`. Standard attempts are
-/// therefore readable-secret. Only a fully validated credential-free `JobIR` may
-/// admit a secretless logical attempt. Attempts persist runner-redacted logs,
-/// while readable-secret attempts retain a private visibility ceiling. Retries
-/// must reproduce the canonical snapshot exactly.
+/// `ACTIONS_RUNTIME_TOKEN`. Standard attempts are therefore readable-secret.
+/// Only a fully validated credential-free `JobIR` may admit a secretless
+/// logical attempt. Attempts persist only runner-redacted logs, whose immutable
+/// audience exactly follows repository policy. Retries must reproduce the
+/// canonical snapshot exactly.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CurrentAttemptOutputSafety {
     secret_exposure: SecretExposureClass,
@@ -172,12 +172,9 @@ impl CurrentAttemptOutputSafety {
             output_safety_schema,
         };
         (valid_raw_log_policy(secret_exposure, raw_log_disposition, output_safety_schema)
-            && snapshot.effective_log_visibility <= snapshot.requested_log_visibility
-            && (!matches!(
-                snapshot.secret_exposure,
-                SecretExposureClass::ReadableSecret
-            ) || matches!(snapshot.effective_log_visibility, OutputVisibility::Private)))
-        .then_some(snapshot)
+            && snapshot.effective_log_visibility == snapshot.requested_log_visibility
+            && snapshot.output_safety_reason == "repository_policy")
+            .then_some(snapshot)
     }
 
     pub(crate) const fn secret_exposure_class(self) -> &'static str {
@@ -226,23 +223,12 @@ impl CurrentAttemptOutputSafety {
         requested_log_visibility: &str,
     ) -> Option<Self> {
         let requested_log_visibility = parse_output_visibility(requested_log_visibility)?;
-        let readable_secret = matches!(secret_exposure, SecretExposureClass::ReadableSecret);
         Some(Self {
             secret_exposure,
             raw_log_disposition: "persist",
             requested_log_visibility,
-            effective_log_visibility: if readable_secret {
-                OutputVisibility::Private
-            } else {
-                requested_log_visibility
-            },
-            output_safety_reason: if readable_secret
-                && !matches!(requested_log_visibility, OutputVisibility::Private)
-            {
-                "secret_exposure"
-            } else {
-                "repository_policy"
-            },
+            effective_log_visibility: requested_log_visibility,
+            output_safety_reason: "repository_policy",
             output_safety_schema: automata_ci_store::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA,
         })
     }
@@ -311,20 +297,16 @@ mod attempt_output_safety_tests {
     use super::CurrentAttemptOutputSafety;
 
     #[test]
-    fn current_readable_snapshot_closes_every_requested_audience() {
-        for (requested, reason) in [
-            ("private", "repository_policy"),
-            ("authenticated", "secret_exposure"),
-            ("public", "secret_exposure"),
-        ] {
+    fn current_readable_snapshot_publishes_only_to_the_requested_audience() {
+        for requested in ["private", "authenticated", "public"] {
             let snapshot = CurrentAttemptOutputSafety::readable(requested)
-                .expect("closed publication audience");
+                .expect("exact publication audience");
             assert_eq!(snapshot.secret_exposure_class(), "readable_secret");
             assert_eq!(snapshot.raw_log_disposition(), "persist");
             assert_eq!(snapshot.requested_log_visibility(), requested);
-            assert_eq!(snapshot.effective_log_visibility(), "private");
-            assert_eq!(snapshot.output_safety_reason(), reason);
-            assert_eq!(snapshot.output_safety_schema(), 1);
+            assert_eq!(snapshot.effective_log_visibility(), requested);
+            assert_eq!(snapshot.output_safety_reason(), "repository_policy");
+            assert_eq!(snapshot.output_safety_schema(), 2);
         }
         assert!(CurrentAttemptOutputSafety::readable("unknown").is_none());
 
@@ -347,18 +329,18 @@ mod attempt_output_safety_tests {
             "public",
             "public",
             "repository_policy",
-            1,
+            2,
         )
         .expect("canonical secretless snapshot");
         assert_eq!(secretless.secret_exposure_class(), "secretless");
-        assert_eq!(secretless.output_safety_schema(), 1);
+        assert_eq!(secretless.output_safety_schema(), 2);
         let current = CurrentAttemptOutputSafety::from_durable(
             "readable_secret",
             "persist",
             "public",
-            "private",
-            "secret_exposure",
-            1,
+            "public",
+            "repository_policy",
+            2,
         )
         .expect("current readable-secret snapshot");
         assert!(current.supports_current_authority_profile());
@@ -367,9 +349,9 @@ mod attempt_output_safety_tests {
                 "readable_secret",
                 "persist",
                 "public",
-                "private",
-                "secret_exposure",
-                2,
+                "public",
+                "repository_policy",
+                1,
             )
             .is_none()
         );
@@ -380,7 +362,7 @@ mod attempt_output_safety_tests {
                 "public",
                 "private",
                 "secret_exposure",
-                1,
+                2,
             )
             .is_none()
         );
@@ -391,7 +373,7 @@ mod attempt_output_safety_tests {
                 "private",
                 "public",
                 "repository_policy",
-                1,
+                2,
             )
             .is_none()
         );
