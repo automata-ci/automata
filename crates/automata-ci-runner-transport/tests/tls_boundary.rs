@@ -3,13 +3,13 @@ use crate::support;
 use std::time::Duration;
 
 use automata_ci_runner_transport::{HANDSHAKE_PATH, PROTOBUF_CONTENT_TYPE, TransportLimits};
-use http::{Method, Request, StatusCode, header::CONTENT_TYPE};
+use http::{HeaderValue, Method, StatusCode, Version};
 use http_body_util::{BodyExt as _, Full};
 use tokio::time::timeout;
 
 use support::{
     HandlerMode, RecordingVerifier, TestHandler, TestPki, hello_request, raw_h2_sender,
-    spawn_server,
+    raw_request, spawn_server,
 };
 
 #[tokio::test]
@@ -117,21 +117,18 @@ async fn forwarded_certificate_header_cannot_replace_rustls_evidence() {
             .await
             .expect("valid raw h2 client");
     let body = hello_request().canonical_bytes().clone();
-    let mut request = Request::new(Full::new(body.clone()).boxed_unsync());
-    *request.method_mut() = Method::POST;
-    *request.uri_mut() = format!("https://{}{HANDSHAKE_PATH}", running.address)
-        .parse()
-        .expect("request URI");
-    request.headers_mut().insert(
-        CONTENT_TYPE,
-        http::HeaderValue::from_static(PROTOBUF_CONTENT_TYPE),
+    let mut request = raw_request(
+        running.address,
+        Method::POST,
+        HANDSHAKE_PATH,
+        Version::HTTP_11,
+        Full::new(body.clone()).boxed_unsync(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(body.len().into()),
     );
-    request
-        .headers_mut()
-        .insert(http::header::CONTENT_LENGTH, body.len().into());
     request.headers_mut().insert(
         "x-forwarded-client-cert",
-        http::HeaderValue::from_static("forged-certificate"),
+        HeaderValue::from_static("forged-certificate"),
     );
 
     let response = sender.send_request(request).await.expect("h2 response");
@@ -151,18 +148,15 @@ async fn connection_rejected(address: std::net::SocketAddr, config: rustls::Clie
         return true;
     };
     let body = hello_request().canonical_bytes().clone();
-    let mut request = Request::new(Full::new(body.clone()).boxed_unsync());
-    *request.method_mut() = Method::POST;
-    *request.uri_mut() = format!("https://{address}{HANDSHAKE_PATH}")
-        .parse()
-        .expect("request URI");
-    request.headers_mut().insert(
-        CONTENT_TYPE,
-        http::HeaderValue::from_static(PROTOBUF_CONTENT_TYPE),
+    let request = raw_request(
+        address,
+        Method::POST,
+        HANDSHAKE_PATH,
+        Version::HTTP_11,
+        Full::new(body.clone()).boxed_unsync(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(body.len().into()),
     );
-    request
-        .headers_mut()
-        .insert(http::header::CONTENT_LENGTH, body.len().into());
     let rejected = timeout(Duration::from_secs(2), sender.send_request(request))
         .await
         .expect("HTTP attempt deadline")

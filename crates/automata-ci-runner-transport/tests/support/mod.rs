@@ -30,12 +30,17 @@ use automata_ci_protocol::{
 };
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, ClientTlsConfig,
-    HandlerFuture, HyperRunnerControlClient, PreparedRequest, RunnerControlHandler,
-    RunnerControlServer, ServerTlsConfig, TransportLimits,
+    HANDSHAKE_PATH, HandlerFuture, HyperRunnerControlClient, PROTOBUF_CONTENT_TYPE,
+    PreparedRequest, RunnerControlHandler, RunnerControlServer, RunnerTransportByteDirection,
+    RunnerTransportConnectionEvent, RunnerTransportObserver, RunnerTransportRequestObservation,
+    RunnerTransportRoute, RunnerTransportTlsOutcome, ServerTlsConfig, TransportLimits,
 };
 use bytes::Bytes;
-use http::Uri;
-use http_body_util::combinators::UnsyncBoxBody;
+use http::{
+    HeaderValue, Method, Request, Uri, Version,
+    header::{CONTENT_LENGTH, CONTENT_TYPE},
+};
+use http_body_util::{BodyExt as _, Full, combinators::UnsyncBoxBody};
 use hyper::client::conn::http2::SendRequest;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rcgen::{
@@ -51,6 +56,7 @@ use rustls::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
+    sync::Notify,
     task::JoinHandle,
 };
 use tokio_rustls::TlsConnector;
@@ -60,6 +66,8 @@ pub type RawBody = UnsyncBoxBody<Bytes, Infallible>;
 pub type RawSender = SendRequest<RawBody>;
 type CalendarDate = (i32, u8, u8);
 type Validity = (CalendarDate, CalendarDate);
+
+pub const TEST_WATCHDOG: Duration = Duration::from_secs(5);
 
 pub struct Identity {
     certificates: Vec<Vec<u8>>,
@@ -326,6 +334,172 @@ impl MachineIdentityVerifier for RecordingVerifier {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordedTransportEvent {
+    Connection(RunnerTransportConnectionEvent),
+    Tls(RunnerTransportTlsOutcome, Duration),
+    Request(RunnerTransportRequestObservation, Duration),
+    RequestStarted(RunnerTransportRoute),
+    RequestFinished(RunnerTransportRoute),
+    Bytes(RunnerTransportRoute, RunnerTransportByteDirection, u64),
+}
+
+pub trait RecordedTransportEventExpectation: Copy + fmt::Debug {
+    fn matches(self, event: &RecordedTransportEvent) -> bool;
+}
+
+impl RecordedTransportEventExpectation for RunnerTransportConnectionEvent {
+    fn matches(self, event: &RecordedTransportEvent) -> bool {
+        matches!(event, RecordedTransportEvent::Connection(observed) if self == *observed)
+    }
+}
+
+impl RecordedTransportEventExpectation for RunnerTransportTlsOutcome {
+    fn matches(self, event: &RecordedTransportEvent) -> bool {
+        matches!(event, RecordedTransportEvent::Tls(observed, _) if self == *observed)
+    }
+}
+
+impl RecordedTransportEventExpectation for RunnerTransportRequestObservation {
+    fn matches(self, event: &RecordedTransportEvent) -> bool {
+        matches!(event, RecordedTransportEvent::Request(observed, _) if self == *observed)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Http2Terminal;
+
+impl RecordedTransportEventExpectation for Http2Terminal {
+    fn matches(self, event: &RecordedTransportEvent) -> bool {
+        matches!(
+            event,
+            RecordedTransportEvent::Connection(
+                RunnerTransportConnectionEvent::Http2Closed
+                    | RunnerTransportConnectionEvent::Http2Error
+            )
+        )
+    }
+}
+
+macro_rules! recorded_values {
+    ($observer:expr, $pattern:pat => $value:expr) => {
+        $observer
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                $pattern => Some($value),
+                _ => None,
+            })
+            .collect()
+    };
+}
+
+#[derive(Debug, Default)]
+pub struct RecordingTransportObserver {
+    events: Mutex<Vec<RecordedTransportEvent>>,
+    changed: Notify,
+}
+
+impl RecordingTransportObserver {
+    pub fn events(&self) -> Vec<RecordedTransportEvent> {
+        self.events.lock().expect("transport event lock").clone()
+    }
+
+    pub fn connection_events(&self) -> Vec<RunnerTransportConnectionEvent> {
+        recorded_values!(self, RecordedTransportEvent::Connection(event) => event)
+    }
+
+    pub fn tls_outcomes(&self) -> Vec<RunnerTransportTlsOutcome> {
+        recorded_values!(self, RecordedTransportEvent::Tls(outcome, _) => outcome)
+    }
+
+    pub fn request_observations(&self) -> Vec<RunnerTransportRequestObservation> {
+        recorded_values!(self, RecordedTransportEvent::Request(observation, _) => observation)
+    }
+
+    pub fn request_starts(&self) -> Vec<RunnerTransportRoute> {
+        recorded_values!(self, RecordedTransportEvent::RequestStarted(route) => route)
+    }
+
+    pub fn request_finishes(&self) -> Vec<RunnerTransportRoute> {
+        recorded_values!(self, RecordedTransportEvent::RequestFinished(route) => route)
+    }
+
+    pub fn bytes(&self) -> Vec<(RunnerTransportRoute, RunnerTransportByteDirection, u64)> {
+        recorded_values!(
+            self,
+            RecordedTransportEvent::Bytes(route, direction, bytes) => (route, direction, bytes)
+        )
+    }
+
+    pub async fn wait_for(
+        &self,
+        expected: impl RecordedTransportEventExpectation,
+        count: usize,
+        watchdog: Duration,
+    ) {
+        tokio::time::timeout(watchdog, async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                let observed = self
+                    .events
+                    .lock()
+                    .expect("transport event lock")
+                    .iter()
+                    .filter(|event| expected.matches(event))
+                    .count();
+                if observed >= count {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("observer did not record {count} {expected:?} events"));
+    }
+
+    fn record(&self, event: RecordedTransportEvent) {
+        self.events
+            .lock()
+            .expect("transport event lock")
+            .push(event);
+        self.changed.notify_waiters();
+    }
+}
+
+impl RunnerTransportObserver for RecordingTransportObserver {
+    fn observe_connection(&self, event: RunnerTransportConnectionEvent) {
+        self.record(RecordedTransportEvent::Connection(event));
+    }
+
+    fn observe_tls(&self, outcome: RunnerTransportTlsOutcome, duration: Duration) {
+        self.record(RecordedTransportEvent::Tls(outcome, duration));
+    }
+
+    fn observe_request(&self, observation: RunnerTransportRequestObservation, duration: Duration) {
+        self.record(RecordedTransportEvent::Request(observation, duration));
+    }
+
+    fn request_started(&self, route: RunnerTransportRoute) {
+        self.record(RecordedTransportEvent::RequestStarted(route));
+    }
+
+    fn request_finished(&self, route: RunnerTransportRoute) {
+        self.record(RecordedTransportEvent::RequestFinished(route));
+    }
+
+    fn observe_bytes(
+        &self,
+        route: RunnerTransportRoute,
+        direction: RunnerTransportByteDirection,
+        bytes: u64,
+    ) {
+        self.record(RecordedTransportEvent::Bytes(route, direction, bytes));
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum HandlerMode {
     Reply,
@@ -547,12 +721,25 @@ pub struct RunningServer {
 }
 
 impl RunningServer {
-    pub async fn stop(self) {
+    pub fn request_shutdown(&self) {
         self.shutdown.cancel();
-        self.task
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    pub async fn finish(self) {
+        tokio::time::timeout(TEST_WATCHDOG, self.task)
             .await
+            .expect("server task watchdog")
             .expect("server task")
             .expect("server serve result");
+    }
+
+    pub async fn stop(self) {
+        self.request_shutdown();
+        self.finish().await;
     }
 }
 
@@ -562,12 +749,32 @@ pub async fn spawn_server(
     handler: Arc<dyn RunnerControlHandler>,
     limits: &TransportLimits,
 ) -> RunningServer {
+    spawn_server_inner(pki, verifier, handler, limits, None).await
+}
+
+pub async fn spawn_server_with_observer(
+    pki: &TestPki,
+    verifier: Arc<dyn MachineIdentityVerifier>,
+    handler: Arc<dyn RunnerControlHandler>,
+    limits: &TransportLimits,
+    observer: Arc<dyn RunnerTransportObserver>,
+) -> RunningServer {
+    spawn_server_inner(pki, verifier, handler, limits, Some(observer)).await
+}
+
+async fn spawn_server_inner(
+    pki: &TestPki,
+    verifier: Arc<dyn MachineIdentityVerifier>,
+    handler: Arc<dyn RunnerControlHandler>,
+    limits: &TransportLimits,
+    observer: Option<Arc<dyn RunnerTransportObserver>>,
+) -> RunningServer {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind test server");
     let address = listener.local_addr().expect("test listener address");
     let tls = pki.server_tls();
-    let server = RunnerControlServer::new(
+    let mut server = RunnerControlServer::new(
         listener,
         &tls,
         verifier,
@@ -576,6 +783,9 @@ pub async fn spawn_server(
         *limits,
     )
     .expect("runner control server");
+    if let Some(observer) = observer {
+        server = server.with_observer(observer);
+    }
     let endpoint: Uri = format!("https://{address}/")
         .parse()
         .expect("test endpoint");
@@ -588,6 +798,44 @@ pub async fn spawn_server(
         shutdown,
         task,
     }
+}
+
+pub fn raw_request(
+    address: SocketAddr,
+    method: Method,
+    path: &str,
+    version: Version,
+    body: RawBody,
+    content_type: Option<HeaderValue>,
+    content_length: Option<HeaderValue>,
+) -> Request<RawBody> {
+    let mut request = Request::new(body);
+    *request.method_mut() = method;
+    *request.version_mut() = version;
+    *request.uri_mut() = format!("https://{address}{path}")
+        .parse()
+        .expect("request URI");
+    if let Some(content_type) = content_type {
+        request.headers_mut().insert(CONTENT_TYPE, content_type);
+    }
+    if let Some(content_length) = content_length {
+        request.headers_mut().insert(CONTENT_LENGTH, content_length);
+    }
+    request
+}
+
+pub fn raw_hello_request(address: SocketAddr) -> Request<RawBody> {
+    let body = hello_request().canonical_bytes().clone();
+    let content_length = body.len();
+    raw_request(
+        address,
+        Method::POST,
+        HANDSHAKE_PATH,
+        Version::HTTP_2,
+        Full::new(body).boxed_unsync(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(content_length.into()),
+    )
 }
 
 pub fn client(

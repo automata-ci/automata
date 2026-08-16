@@ -14,7 +14,7 @@ use automata_ci_runner_transport::{
     RunnerControlHandler, SYNC_PATH, TransportLimits,
 };
 use bytes::Bytes;
-use http::{Method, Request, Response, StatusCode, Uri, Version, header::CONTENT_TYPE};
+use http::{HeaderValue, Method, Response, StatusCode, Uri, Version, header::CONTENT_TYPE};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{server::conn::http2, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use support::{
     HandlerMode, RecordingVerifier, TestHandler, TestPki, client, heartbeat_request, hello_request,
-    poll_request, raw_h2_sender, spawn_server,
+    poll_request, raw_h2_sender, raw_request, spawn_server,
 };
 
 #[derive(Debug, Default)]
@@ -291,18 +291,26 @@ async fn one_h2_connection_runs_concurrent_long_polls_without_affinity() {
             .await
             .expect("one h2 connection");
     let mut second_sender = first_sender.clone();
-    let first = poll_request();
-    let second = poll_request();
+    let first = poll_request().canonical_bytes().clone();
+    let second = poll_request().canonical_bytes().clone();
 
     let first_response = first_sender.send_request(raw_request(
         running.address,
+        Method::POST,
         SYNC_PATH,
-        first.canonical_bytes().clone(),
+        Version::HTTP_2,
+        Full::new(first.clone()).boxed_unsync(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(first.len().into()),
     ));
     let second_response = second_sender.send_request(raw_request(
         running.address,
+        Method::POST,
         SYNC_PATH,
-        second.canonical_bytes().clone(),
+        Version::HTTP_2,
+        Full::new(second.clone()).boxed_unsync(),
+        Some(HeaderValue::from_static(PROTOBUF_CONTENT_TYPE)),
+        Some(second.len().into()),
     ));
     let (first_response, second_response) = tokio::join!(first_response, second_response);
     assert_eq!(first_response.expect("first poll").status(), StatusCode::OK);
@@ -494,28 +502,6 @@ impl RunnerControlHandler for WrongSessionHandler {
             )))
         })
     }
-}
-
-fn raw_request(
-    address: std::net::SocketAddr,
-    path: &str,
-    body: Bytes,
-) -> Request<support::RawBody> {
-    let body_len = body.len();
-    let mut request = Request::new(Full::new(body).boxed_unsync());
-    *request.method_mut() = Method::POST;
-    *request.version_mut() = Version::HTTP_2;
-    *request.uri_mut() = format!("https://{address}{path}")
-        .parse()
-        .expect("request URI");
-    request.headers_mut().insert(
-        CONTENT_TYPE,
-        http::HeaderValue::from_static(PROTOBUF_CONTENT_TYPE),
-    );
-    request
-        .headers_mut()
-        .insert(http::header::CONTENT_LENGTH, body_len.into());
-    request
 }
 
 async fn spawn_fixed_response_server(
