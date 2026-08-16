@@ -938,7 +938,7 @@ async fn sql_canonical_functions_match_rust_golden_and_reject_direct_forgery() -
         .expect_err("a binding generation must stay positive");
         assert_constraint(
             &zero_binding_generation,
-            "github_provider_manifest_revisions_positive",
+            "github_provider_manifest_installation_binding_generation_positi",
         );
         Ok(())
     })
