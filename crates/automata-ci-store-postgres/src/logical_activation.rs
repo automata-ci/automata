@@ -69,9 +69,11 @@ impl LogicalActivationRepository for PostgresStore {
                    publication.effective_max_parallel,
                    publication.instance_count
             FROM logical_workflow_activation_publications AS publication
-            JOIN logical_workflow_runs AS run
-              ON run.run_id = publication.run_id
-            WHERE run.tenant_id = $1
+            JOIN logical_workflow_runs AS marker
+              ON marker.run_id = publication.run_id
+            JOIN workflow_runs AS run ON run.id = marker.run_id
+            JOIN repositories AS repository ON repository.id = run.repository_id
+            WHERE repository.tenant_id = $1
               AND publication.run_id = $2
               AND publication.invocation_id = $3
               AND publication.logical_job_id = $4

@@ -915,6 +915,20 @@ async fn assert_scheduling_policy_roundtrip_and_conflict(
             .await?,
         Some(scheduling_policy.clone())
     );
+    let foreign_scope = LogicalJobSchedulingPolicyScope::new(
+        TenantScope::from_authenticated_tenant_id("activation-policy-other-tenant")?,
+        scheduling_scope.run_id(),
+        scheduling_scope.invocation_id(),
+        scheduling_scope.logical_job_id(),
+    )?;
+    assert_eq!(
+        database
+            .store()
+            .resolved_logical_job_scheduling_policy(&foreign_scope)
+            .await?,
+        None,
+        "the scheduling policy read must remain tenant scoped"
+    );
 
     let changed_policy = ResolvedLogicalJobSchedulingPolicy::for_claim(
         claimed.claim(),
