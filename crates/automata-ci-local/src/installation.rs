@@ -186,6 +186,50 @@ impl fmt::Display for InstallationId {
     }
 }
 
+impl FromStr for InstallationId {
+    type Err = InstallationIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_canonical(value).ok_or(InstallationIdError)
+    }
+}
+
+/// Rejected noncanonical or non-random installation UUID.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("installation identity must be a canonical UUIDv4")]
+pub struct InstallationIdError;
+
+/// Configured name and immutable UUID expected at one installation anchor.
+///
+/// This value is an assertion supplied by configuration, not proof that an
+/// Engine anchor exists. Provider connection resolves it to a verified
+/// [`Installation`] before exposing any execution capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallationBinding {
+    name: InstallationName,
+    id: InstallationId,
+}
+
+impl InstallationBinding {
+    /// Constructs one validated but not yet Engine-verified binding.
+    #[must_use]
+    pub const fn new(name: InstallationName, id: InstallationId) -> Self {
+        Self { name, id }
+    }
+
+    /// Returns the configured installation selector.
+    #[must_use]
+    pub const fn name(&self) -> &InstallationName {
+        &self.name
+    }
+
+    /// Returns the configured immutable anchor UUID.
+    #[must_use]
+    pub const fn id(&self) -> InstallationId {
+        self.id
+    }
+}
+
 /// Verified identity of one engine-owned local installation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Installation {

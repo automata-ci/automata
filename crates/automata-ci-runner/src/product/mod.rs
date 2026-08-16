@@ -19,10 +19,10 @@ pub use composition::{
 };
 pub use config::{
     ClientTlsSources, ExecutorProductConfig, GithubProductConfig, KubernetesProductConfig,
-    MacosVirtualizationProductConfig, MetricsProductConfig, PodmanProductConfig,
-    RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
-    RunnerProviderConfig, SpoolProtectionConfig, StateRoots, ToolchainConfig,
-    WindowsHyperVProductConfig,
+    LocalDockerProductConfig, MacosVirtualizationProductConfig, MetricsProductConfig,
+    PodmanProductConfig, RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig,
+    RunnerProductConfigError, RunnerProviderConfig, SpoolProtectionConfig, StateRoots,
+    ToolchainConfig, WindowsHyperVProductConfig,
 };
 pub use context::StandardGithubContext;
 pub(crate) use files::{

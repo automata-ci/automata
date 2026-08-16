@@ -336,16 +336,6 @@ GitHub token. It never admits, schedules, or runs work, contacts GitHub, or
 creates a Check Run; local admission and execution remain later roadmap
 checkpoints.
 
-The opt-in live adapter contract creates one randomly named identity volume,
-adopts the same UUID through the public adapter, then re-inspects and removes
-only that exact unattached fixture:
-
-```console
-AUTOMATA_TEST_LOCAL_DOCKER=1 cargo test --locked -p automata-ci-local \
-  'engine::tests::live_docker_public_adapter_creates_and_re_adopts_one_exact_anchor' \
-  -- --ignored --exact
-```
-
 ## External integration-test services
 
 Database and object-storage integration lanes use services managed outside the

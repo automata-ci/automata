@@ -11,6 +11,12 @@ use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, MutexGuard},
 };
+#[cfg(target_os = "linux")]
+use std::{
+    fs::File,
+    io::{Read as _, Seek as _, Write as _},
+    sync::atomic::{AtomicBool, Ordering},
+};
 #[cfg(any(unix, windows))]
 use std::{process::Stdio, time::Duration};
 
@@ -23,6 +29,15 @@ use std::os::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+#[cfg(target_os = "linux")]
+use rustix::{
+    fd::OwnedFd,
+    fs::{
+        self as unix_fs, AtFlags, FileType, Mode, OFlags, RenameFlags, StatVfsMountFlags, fstat,
+        open, openat, renameat_with, unlinkat,
+    },
+    io::Errno,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use sha2::{Digest as _, Sha256};
@@ -79,6 +94,76 @@ const MAX_PROCESS_LIMIT: u32 = 1_000_000;
 const MAX_REPLAY_ENTRIES: usize = 256;
 #[cfg(unix)]
 const MAX_REPLAY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Largest guest executable admitted by the protected local bootstrap contract.
+#[cfg(target_os = "linux")]
+pub const MAX_LOCAL_GUEST_BINARY_BYTES: u64 = 24 * 1024 * 1024;
+/// Exact tmpfs byte ceiling required by the protected local bootstrap contract.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_TMPFS_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const LOCAL_CONTROL_TMPFS_MINIMUM_HEADROOM_BYTES: u64 = 8 * 1024 * 1024;
+#[cfg(target_os = "linux")]
+const _: () = assert!(
+    LOCAL_CONTROL_TMPFS_BYTES
+        >= MAX_LOCAL_GUEST_BINARY_BYTES * 2 + LOCAL_CONTROL_TMPFS_MINIMUM_HEADROOM_BYTES
+);
+/// Initial mode of the sealer-owned protected-control tmpfs mount.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_DIRECTORY_MODE_INITIAL: u32 = 0o733;
+/// Final mode of the sealed protected-control directory.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_DIRECTORY_MODE_SEALED: u32 = 0o510;
+/// Exact mode of the immutable bootstrap seed.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_SEED_MODE: u32 = 0o555;
+/// Private construction mode used before the bootstrap seed is published.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_SEED_STAGE_MODE: u32 = 0o600;
+/// Exact mode of the sealed protected client.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_CLIENT_MODE: u32 = 0o550;
+/// Read-only staging mode used before the protected client is sealed.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_CLIENT_MODE_STAGED: u32 = 0o554;
+#[cfg(target_os = "linux")]
+const LOCAL_CONTROL_TMPFS_MAGIC: i64 = 0x0102_1994;
+#[cfg(target_os = "linux")]
+static LOCAL_EXECUTION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+#[cfg(target_os = "linux")]
+const LOCAL_STAGE_REQUEST: &[u8] = b"\xff\xff\xff\xffautomata-local-client-stage-v1";
+#[cfg(target_os = "linux")]
+const LOCAL_STAGE_ACKNOWLEDGEMENT: &[u8] = b"automata-local-client-stage-ok-v1";
+#[cfg(target_os = "linux")]
+const LOCAL_SEAL_REQUEST: &[u8] = b"automata-local-client-seal-v1";
+#[cfg(target_os = "linux")]
+const LOCAL_SEAL_ACKNOWLEDGEMENT: &[u8] = b"automata-local-client-ready-v1";
+#[cfg(target_os = "linux")]
+const LOCAL_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const MAX_LOCAL_ID_MAP_BYTES: usize = 256;
+
+/// Fixed Linux abstract socket used by the evaluation-only local broker.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_SOCKET: &str = "@automata-ci-control-v1";
+/// Fixed tmpfs mount protecting the local broker client from the root job.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_DIRECTORY: &str = "/automata-control";
+/// One-shot local broker seed executable, present only during startup.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_SEED: &str = "/automata-control/.seed";
+/// Sealed local broker client executable used for all live operations.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_CLIENT: &str = "/automata-control/automata-ci-sandbox-guest";
+/// Dedicated UID accepted by the Linux local broker.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_UID: u32 = 65_532;
+/// Dedicated GID accepted by the Linux local broker.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_GID: u32 = 65_532;
+/// One-shot UID that owns and seals the Linux local control tmpfs.
+#[cfg(target_os = "linux")]
+pub const LOCAL_CONTROL_SEAL_UID: u32 = 65_533;
 
 /// One operation sent through anonymous stdin to the sandbox guest.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -546,6 +631,557 @@ pub fn decode_frame<T: for<'de> Deserialize<'de>>(frame: &[u8]) -> Result<T, Gue
     }
     serde_json::from_slice(&frame[4..]).map_err(|_| GuestProtocolError::InvalidFrame)
 }
+#[cfg(target_os = "linux")]
+struct LocalBootstrap {
+    control: OwnedFd,
+    seed: File,
+    seed_device: u64,
+    seed_inode: u64,
+    seed_size: i64,
+    seed_digest: [u8; 32],
+    ready: AtomicBool,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LocalPeerRole {
+    Unrestricted,
+    #[cfg(target_os = "linux")]
+    Sealer,
+    #[cfg(target_os = "linux")]
+    Client,
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+enum GuestServiceMode {
+    Standard,
+    #[cfg(target_os = "linux")]
+    Local(Arc<LocalBootstrap>),
+}
+
+#[cfg(unix)]
+impl GuestServiceMode {
+    const fn local_pid_one(&self) -> bool {
+        match self {
+            Self::Standard => false,
+            #[cfg(target_os = "linux")]
+            Self::Local(_) => true,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LocalBootstrap {
+    fn prepare() -> io::Result<Self> {
+        if rustix::process::getpid().as_raw_pid() != 1
+            || rustix::process::getuid().as_raw() != 0
+            || rustix::process::geteuid().as_raw() != 0
+            || rustix::process::getgid().as_raw() != 0
+            || rustix::process::getegid().as_raw() != 0
+        {
+            return Err(local_contract_error());
+        }
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)?;
+        if rustix::process::dumpable_behavior()? != rustix::process::DumpableBehavior::NotDumpable
+            || !valid_local_process_envelope()?
+        {
+            return Err(local_contract_error());
+        }
+        let control = open(
+            LOCAL_CONTROL_DIRECTORY,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        if !valid_local_control(
+            &control,
+            LOCAL_CONTROL_DIRECTORY_MODE_INITIAL,
+            LOCAL_CONTROL_SEAL_UID,
+            LOCAL_CONTROL_GID,
+        ) || !local_path_absent(&control, ".seed")?
+            || !local_path_absent(&control, ".seed.stage")?
+            || !local_path_absent(&control, "automata-ci-sandbox-guest")?
+        {
+            return Err(local_contract_error());
+        }
+
+        let seed = openat(
+            &control,
+            ".seed.stage",
+            OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(LOCAL_CONTROL_SEED_STAGE_MODE),
+        )?;
+        let mut seed = File::from(seed);
+        let source = File::open("/proc/self/exe")?;
+        let source_size = source.metadata()?.len();
+        if source_size == 0 || source_size > MAX_LOCAL_GUEST_BINARY_BYTES {
+            return Err(local_contract_error());
+        }
+        let mut source = source.take(MAX_LOCAL_GUEST_BINARY_BYTES + 1);
+        let mut digest = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            copied = copied
+                .checked_add(u64::try_from(read).map_err(|_| local_contract_error())?)
+                .ok_or_else(local_contract_error)?;
+            if copied > MAX_LOCAL_GUEST_BINARY_BYTES {
+                return Err(local_contract_error());
+            }
+            digest.update(&buffer[..read]);
+            seed.write_all(&buffer[..read])?;
+        }
+        if copied != source_size {
+            return Err(local_contract_error());
+        }
+        seed.flush()?;
+        unix_fs::fchmod(&seed, Mode::from_raw_mode(LOCAL_CONTROL_SEED_MODE))?;
+        unix_fs::fsync(&seed)?;
+        let written = fstat(&seed)?;
+        if !valid_local_seed_stat(&written, 1) {
+            return Err(local_contract_error());
+        }
+        drop(seed);
+
+        renameat_with(
+            &control,
+            ".seed.stage",
+            &control,
+            ".seed",
+            RenameFlags::NOREPLACE,
+        )?;
+
+        let seed = openat(
+            &control,
+            ".seed",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let seed = File::from(seed);
+        let written = fstat(&seed)?;
+        if !valid_local_seed_stat(&written, 1) {
+            return Err(local_contract_error());
+        }
+        Ok(Self {
+            control,
+            seed,
+            seed_device: written.st_dev,
+            seed_inode: written.st_ino,
+            seed_size: written.st_size,
+            seed_digest: digest.finalize().into(),
+            ready: AtomicBool::new(false),
+        })
+    }
+
+    fn verify_staged(&self) -> io::Result<File> {
+        if self.is_ready() {
+            return Err(local_contract_error());
+        }
+        let seed = fstat(&self.seed)?;
+        let control_valid = valid_local_control(
+            &self.control,
+            LOCAL_CONTROL_DIRECTORY_MODE_INITIAL,
+            LOCAL_CONTROL_SEAL_UID,
+            LOCAL_CONTROL_GID,
+        );
+        let seed_valid = valid_local_seed_stat(&seed, 0);
+        let seed_absent = local_path_absent(&self.control, ".seed")?;
+        let stage_absent = local_path_absent(&self.control, ".seed.stage")?;
+        if !control_valid
+            || !seed_valid
+            || seed.st_dev != self.seed_device
+            || seed.st_ino != self.seed_inode
+            || seed.st_size != self.seed_size
+            || !seed_absent
+            || !stage_absent
+        {
+            return Err(local_contract_error());
+        }
+        let client = openat(
+            &self.control,
+            "automata-ci-sandbox-guest",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut client = File::from(client);
+        let client_valid = valid_local_staged_client_stat(&fstat(&client)?);
+        let digest_valid = file_has_digest(&mut client, self.seed_size, &self.seed_digest)?;
+        if !client_valid || !digest_valid {
+            return Err(local_contract_error());
+        }
+        Ok(client)
+    }
+
+    fn verify_sealed_and_mark_ready(&self, client: &mut File) -> io::Result<()> {
+        let seed = fstat(&self.seed)?;
+        if !valid_local_control(
+            &self.control,
+            LOCAL_CONTROL_DIRECTORY_MODE_SEALED,
+            LOCAL_CONTROL_SEAL_UID,
+            LOCAL_CONTROL_GID,
+        ) || !valid_local_client_stat(&fstat(&*client)?)
+            || !file_has_digest(client, self.seed_size, &self.seed_digest)?
+            || !valid_local_seed_stat(&seed, 0)
+            || seed.st_dev != self.seed_device
+            || seed.st_ino != self.seed_inode
+            || seed.st_size != self.seed_size
+        {
+            return Err(local_contract_error());
+        }
+        self.ready.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn valid_local_process_envelope() -> io::Result<bool> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    let uid_map = std::fs::read_to_string("/proc/self/uid_map")?;
+    let gid_map = std::fs::read_to_string("/proc/self/gid_map")?;
+    if status.len() > 64 * 1024 {
+        return Ok(false);
+    }
+    let field = |name: &str| {
+        status.lines().find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|value| value.strip_prefix(':'))
+                .map(str::trim)
+        })
+    };
+    // The local provider's administrator is deliberately attenuated to UID 0
+    // in a daemon-remapped namespace. No POSIX capability is part of that
+    // contract, including the bounding set from which an executable might
+    // otherwise regain authority.
+    let zero_credentials = |value: &str| value.split_ascii_whitespace().eq(["0", "0", "0", "0"]);
+    let zero_capability = |name: &str| field(name) == Some("0000000000000000");
+    let groups = rustix::process::getgroups()?;
+    Ok(field("Uid").is_some_and(zero_credentials)
+        && field("Gid").is_some_and(zero_credentials)
+        && field("Groups").is_some_and(|value| value.split_ascii_whitespace().eq(["0"]))
+        && groups.len() == 1
+        && groups[0].as_raw() == 0
+        && zero_capability("CapInh")
+        && zero_capability("CapPrm")
+        && zero_capability("CapEff")
+        && zero_capability("CapBnd")
+        && zero_capability("CapAmb")
+        && field("NoNewPrivs") == Some("1")
+        && field("Seccomp") == Some("2")
+        && valid_local_id_map(&uid_map)
+        && valid_local_id_map(&gid_map))
+}
+
+#[cfg(target_os = "linux")]
+fn valid_local_id_map(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_LOCAL_ID_MAP_BYTES || !value.ends_with('\n') {
+        return false;
+    }
+    let mut lines = value.lines();
+    let Some(mapping) = lines.next() else {
+        return false;
+    };
+    if lines.next().is_some() {
+        return false;
+    }
+    let canonical_decimal = |field: &str| {
+        field
+            .parse::<u64>()
+            .ok()
+            .filter(|parsed| parsed.to_string() == field)
+    };
+    let mut fields = mapping.split_ascii_whitespace();
+    let Some(inside_start) = fields.next().and_then(canonical_decimal) else {
+        return false;
+    };
+    let Some(outside_start) = fields.next().and_then(canonical_decimal) else {
+        return false;
+    };
+    let Some(length) = fields.next().and_then(canonical_decimal) else {
+        return false;
+    };
+    inside_start == 0
+        && outside_start != 0
+        && length > u64::from(LOCAL_CONTROL_SEAL_UID)
+        && fields.next().is_none()
+        && outside_start
+            .checked_add(length)
+            .is_some_and(|end| end <= u64::from(u32::MAX) + 1)
+}
+
+#[cfg(target_os = "linux")]
+fn valid_local_control<Fd: std::os::fd::AsFd>(control: Fd, mode: u32, uid: u32, gid: u32) -> bool {
+    let Ok(stat) = fstat(&control) else {
+        return false;
+    };
+    let Ok(filesystem_stats) = unix_fs::fstatfs(&control) else {
+        return false;
+    };
+    let Ok(mount_stats) = unix_fs::fstatvfs(control) else {
+        return false;
+    };
+    let required_flags = StatVfsMountFlags::NOSUID | StatVfsMountFlags::NODEV;
+    let rejected_flags = StatVfsMountFlags::NOEXEC | StatVfsMountFlags::RDONLY;
+    FileType::from_raw_mode(stat.st_mode) == FileType::Directory
+        && stat.st_uid == uid
+        && stat.st_gid == gid
+        && stat.st_mode & 0o7777 == mode
+        && stat.st_nlink == 2
+        && filesystem_stats.f_type == LOCAL_CONTROL_TMPFS_MAGIC
+        && mount_stats.f_flag.contains(required_flags)
+        && !mount_stats.f_flag.intersects(rejected_flags)
+        && mount_stats
+            .f_frsize
+            .checked_mul(mount_stats.f_blocks)
+            .is_some_and(|bytes| bytes == LOCAL_CONTROL_TMPFS_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+fn valid_local_client_stat(stat: &unix_fs::Stat) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+        && stat.st_uid == LOCAL_CONTROL_SEAL_UID
+        && stat.st_gid == LOCAL_CONTROL_GID
+        && stat.st_mode & 0o7777 == LOCAL_CONTROL_CLIENT_MODE
+        && stat.st_nlink == 1
+        && stat.st_size > 0
+        && u64::try_from(stat.st_size).is_ok_and(|size| size <= MAX_LOCAL_GUEST_BINARY_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+fn valid_local_staged_client_stat(stat: &unix_fs::Stat) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+        && stat.st_uid == LOCAL_CONTROL_SEAL_UID
+        && stat.st_gid == LOCAL_CONTROL_GID
+        && stat.st_mode & 0o7777 == LOCAL_CONTROL_CLIENT_MODE_STAGED
+        && stat.st_nlink == 1
+        && stat.st_size > 0
+        && u64::try_from(stat.st_size).is_ok_and(|size| size <= MAX_LOCAL_GUEST_BINARY_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+fn valid_local_seed_stat(stat: &unix_fs::Stat, links: u64) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+        && stat.st_uid == 0
+        && stat.st_gid == 0
+        && stat.st_mode & 0o7777 == LOCAL_CONTROL_SEED_MODE
+        && stat.st_nlink == links
+        && stat.st_size > 0
+        && u64::try_from(stat.st_size).is_ok_and(|size| size <= MAX_LOCAL_GUEST_BINARY_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+fn file_has_digest(file: &mut File, size: i64, expected: &[u8; 32]) -> io::Result<bool> {
+    file.rewind()?;
+    let mut digest = Sha256::new();
+    let mut observed = 0_i64;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        observed = observed
+            .checked_add(i64::try_from(read).map_err(|_| local_contract_error())?)
+            .ok_or_else(local_contract_error)?;
+        if observed > size {
+            return Ok(false);
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(observed == size && <[u8; 32]>::from(digest.finalize()) == *expected)
+}
+
+#[cfg(target_os = "linux")]
+fn local_path_absent(control: &OwnedFd, name: &str) -> io::Result<bool> {
+    match openat(
+        control,
+        name,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(_) => Ok(false),
+        Err(Errno::NOENT) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stage_local_client() -> io::Result<OwnedFd> {
+    if rustix::process::getuid().as_raw() != LOCAL_CONTROL_SEAL_UID
+        || rustix::process::geteuid().as_raw() != LOCAL_CONTROL_SEAL_UID
+        || rustix::process::getgid().as_raw() != LOCAL_CONTROL_GID
+        || rustix::process::getegid().as_raw() != LOCAL_CONTROL_GID
+    {
+        return Err(local_contract_error());
+    }
+    let control = open(
+        LOCAL_CONTROL_DIRECTORY,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    if !valid_local_control(
+        &control,
+        LOCAL_CONTROL_DIRECTORY_MODE_INITIAL,
+        LOCAL_CONTROL_SEAL_UID,
+        LOCAL_CONTROL_GID,
+    ) || !local_path_absent(&control, ".seed.stage")?
+        || !local_path_absent(&control, "automata-ci-sandbox-guest")?
+    {
+        return Err(local_contract_error());
+    }
+    let seed = openat(
+        &control,
+        ".seed",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let seed_stat = fstat(&seed)?;
+    let executable = File::open("/proc/self/exe")?;
+    let executable_stat = fstat(&executable)?;
+    if !valid_local_seed_stat(&seed_stat, 1)
+        || seed_stat.st_dev != executable_stat.st_dev
+        || seed_stat.st_ino != executable_stat.st_ino
+        || seed_stat.st_size != executable_stat.st_size
+    {
+        return Err(local_contract_error());
+    }
+    let client = openat(
+        &control,
+        "automata-ci-sandbox-guest",
+        OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(LOCAL_CONTROL_CLIENT_MODE_STAGED),
+    )?;
+    let mut client = File::from(client);
+    let mut source = executable.take(MAX_LOCAL_GUEST_BINARY_BYTES + 1);
+    let copied = io::copy(&mut source, &mut client)?;
+    if copied == 0
+        || copied > MAX_LOCAL_GUEST_BINARY_BYTES
+        || i64::try_from(copied).ok() != Some(seed_stat.st_size)
+    {
+        return Err(local_contract_error());
+    }
+    client.flush()?;
+    unix_fs::fchmod(
+        &client,
+        Mode::from_raw_mode(LOCAL_CONTROL_CLIENT_MODE_STAGED),
+    )?;
+    unix_fs::fsync(&client)?;
+    if !valid_local_staged_client_stat(&fstat(&client)?) {
+        return Err(local_contract_error());
+    }
+    drop(client);
+    unlinkat(&control, ".seed", AtFlags::empty())?;
+    unix_fs::fsync(&control)?;
+    Ok(control)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_local_client_state(control: &OwnedFd) -> io::Result<()> {
+    if !valid_local_control(
+        control,
+        LOCAL_CONTROL_DIRECTORY_MODE_SEALED,
+        LOCAL_CONTROL_SEAL_UID,
+        LOCAL_CONTROL_GID,
+    ) || !local_path_absent(control, ".seed")?
+        || !local_path_absent(control, ".seed.stage")?
+    {
+        return Err(local_contract_error());
+    }
+    let client = openat(
+        control,
+        "automata-ci-sandbox-guest",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut client = File::from(client);
+    let mut executable = File::open("/proc/self/exe")?;
+    let client_stat = fstat(&client)?;
+    let executable_stat = fstat(&executable)?;
+    if !valid_local_client_stat(&client_stat) || client_stat.st_size != executable_stat.st_size {
+        return Err(local_contract_error());
+    }
+    let client_digest: [u8; 32] = Sha256::digest(read_bounded_local_file(&mut client)?).into();
+    let executable_digest: [u8; 32] =
+        Sha256::digest(read_bounded_local_file(&mut executable)?).into();
+    if client_digest != executable_digest {
+        return Err(local_contract_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_bounded_local_file(file: &mut File) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(MAX_LOCAL_GUEST_BINARY_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    let size = u64::try_from(bytes.len()).map_err(|_| local_contract_error())?;
+    if size == 0 || size > MAX_LOCAL_GUEST_BINARY_BYTES {
+        return Err(local_contract_error());
+    }
+    Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+async fn exchange_local_seal(control: &OwnedFd) -> io::Result<()> {
+    let deadline = tokio::time::Instant::now() + LOCAL_BOOTSTRAP_TIMEOUT;
+    let mut stream = loop {
+        match connect_stream(Path::new(LOCAL_CONTROL_SOCKET)).await {
+            Ok(stream) => break stream,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    stream.write_all(LOCAL_STAGE_REQUEST).await?;
+    let mut staged = vec![0; LOCAL_STAGE_ACKNOWLEDGEMENT.len()];
+    stream.read_exact(&mut staged).await?;
+    if staged != LOCAL_STAGE_ACKNOWLEDGEMENT {
+        return Err(local_contract_error());
+    }
+    let client = openat(
+        control,
+        "automata-ci-sandbox-guest",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    unix_fs::fchmod(&client, Mode::from_raw_mode(LOCAL_CONTROL_CLIENT_MODE))?;
+    unix_fs::fsync(&client)?;
+    unix_fs::fchmod(
+        control,
+        Mode::from_raw_mode(LOCAL_CONTROL_DIRECTORY_MODE_SEALED),
+    )?;
+    unix_fs::fsync(control)?;
+    stream.write_all(LOCAL_SEAL_REQUEST).await?;
+    stream.shutdown().await?;
+    let mut acknowledgement = vec![0; LOCAL_SEAL_ACKNOWLEDGEMENT.len()];
+    stream.read_exact(&mut acknowledgement).await?;
+    require_eof(&mut stream)
+        .await
+        .map_err(|error| match error {
+            GuestProtocolError::Io(error) => error,
+            GuestProtocolError::InvalidFrame => local_contract_error(),
+        })?;
+    if acknowledgement != LOCAL_SEAL_ACKNOWLEDGEMENT {
+        return Err(local_contract_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn local_contract_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "local guest contract rejected",
+    )
+}
 
 /// Runs the guest Unix-socket server until its listener fails.
 ///
@@ -554,7 +1190,93 @@ pub fn decode_frame<T: for<'de> Deserialize<'de>>(frame: &[u8]) -> Result<T, Gue
 /// Returns a sanitized transport error when the socket cannot be bound or accepted.
 #[cfg(unix)]
 pub async fn serve(socket: &Path) -> Result<(), GuestProtocolError> {
-    serve_internal(socket, None).await
+    serve_internal(socket, None, GuestServiceMode::Standard).await
+}
+
+/// Runs the fixed Linux local broker as the container's non-dumpable PID 1.
+///
+/// # Errors
+///
+/// Rejects any process, control tmpfs, or seed state outside the closed local
+/// contract, and returns a sanitized transport error when serving fails.
+#[cfg(target_os = "linux")]
+pub async fn serve_local_broker() -> Result<(), GuestProtocolError> {
+    let bootstrap = Arc::new(LocalBootstrap::prepare()?);
+    serve_internal(
+        Path::new(LOCAL_CONTROL_SOCKET),
+        None,
+        GuestServiceMode::Local(bootstrap),
+    )
+    .await
+}
+
+/// Atomically seals the fixed Linux local client and authenticates it to PID 1.
+///
+/// This command is deliberately one-shot and must be invoked by the Docker
+/// manager as UID 65533 and GID 65532 from [`LOCAL_CONTROL_SEED`] before any workflow
+/// process exists.
+///
+/// # Errors
+///
+/// Rejects the wrong caller, executable, tmpfs, ownership, mode, link, or
+/// prior setup state, as well as a broker that does not acknowledge the seal.
+#[cfg(target_os = "linux")]
+pub async fn seal_local_client() -> Result<(), GuestProtocolError> {
+    let control = stage_local_client()?;
+    exchange_local_seal(&control).await?;
+    validate_local_client_state(&control)?;
+    Ok(())
+}
+
+/// Waits for PID 1's exact seed and executes its one-shot local sealing mode.
+///
+/// The Docker manager invokes this pre-workload bootstrap through the exact
+/// overlay guest it already uploaded and read back. The sealing child itself
+/// is always executed from PID 1's independently copied seed.
+///
+/// # Errors
+///
+/// Returns a sanitized failure if the seed does not appear within the fixed
+/// startup deadline or its sealing child does not exit successfully.
+#[cfg(target_os = "linux")]
+pub async fn bootstrap_local_client() -> Result<(), GuestProtocolError> {
+    if rustix::process::getuid().as_raw() != LOCAL_CONTROL_SEAL_UID
+        || rustix::process::geteuid().as_raw() != LOCAL_CONTROL_SEAL_UID
+        || rustix::process::getgid().as_raw() != LOCAL_CONTROL_GID
+        || rustix::process::getegid().as_raw() != LOCAL_CONTROL_GID
+    {
+        return Err(local_contract_error().into());
+    }
+    let deadline = tokio::time::Instant::now() + LOCAL_BOOTSTRAP_TIMEOUT;
+    loop {
+        match std::fs::symlink_metadata(LOCAL_CONTROL_SEED) {
+            Ok(metadata) if metadata.file_type().is_file() => break,
+            Ok(_) => return Err(local_contract_error().into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "local seed timed out").into());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let status = tokio::time::timeout(
+        LOCAL_BOOTSTRAP_TIMEOUT,
+        Command::new(LOCAL_CONTROL_SEED)
+            .arg("seal-local-client")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "local seal timed out"))??;
+    if !status.success() {
+        return Err(local_contract_error().into());
+    }
+    Ok(())
 }
 
 /// Runs the macOS VM guest server with its mandatory sealed-template identity.
@@ -564,25 +1286,37 @@ pub async fn serve(socket: &Path) -> Result<(), GuestProtocolError> {
 /// Returns a sanitized transport error when the socket cannot be bound or accepted.
 #[cfg(unix)]
 pub async fn serve_vm(socket: &Path, identity: GuestIdentity) -> Result<(), GuestProtocolError> {
-    serve_internal(socket, Some(identity)).await
+    serve_internal(socket, Some(identity), GuestServiceMode::Standard).await
 }
 
 #[cfg(unix)]
 async fn serve_internal(
     socket: &Path,
     identity: Option<GuestIdentity>,
+    service: GuestServiceMode,
 ) -> Result<(), GuestProtocolError> {
     let listener = bind_listener(socket).await?;
     let replay = Arc::new(Mutex::new(ReplayCache::default()));
     let mut connections = JoinSet::new();
+    #[cfg(target_os = "linux")]
+    if service.local_pid_one() {
+        connections.spawn(reap_local_children());
+    }
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
+                #[cfg(target_os = "linux")]
+                let Some(peer_role) = local_peer_role(&stream, &service) else {
+                    continue;
+                };
+                #[cfg(not(target_os = "linux"))]
+                let peer_role = LocalPeerRole::Unrestricted;
                 let replay = Arc::clone(&replay);
                 let identity = identity.clone();
+                let service = service.clone();
                 connections.spawn(async move {
-                    let _ = serve_connection(stream, replay, identity).await;
+                    let _ = serve_connection(stream, replay, identity, service, peer_role).await;
                 });
             }
             result = connections.join_next(), if !connections.is_empty() => {
@@ -590,6 +1324,50 @@ async fn serve_internal(
             }
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn reap_local_children() {
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let _execution = LOCAL_EXECUTION_LOCK.lock().await;
+        while let Ok(Some(_)) = rustix::process::wait(rustix::process::WaitOptions::NOHANG) {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_peer_role(stream: &UnixStream, service: &GuestServiceMode) -> Option<LocalPeerRole> {
+    let GuestServiceMode::Local(local) = service else {
+        return Some(LocalPeerRole::Unrestricted);
+    };
+    local_stream_peer_role(stream, local.is_ready())
+}
+
+#[cfg(target_os = "linux")]
+fn local_stream_peer_role(stream: &UnixStream, ready: bool) -> Option<LocalPeerRole> {
+    let credentials = stream.peer_cred().ok()?;
+    local_peer_role_for_credentials(ready, credentials.uid(), credentials.gid())
+}
+
+#[cfg(target_os = "linux")]
+const fn local_peer_role_for_credentials(ready: bool, uid: u32, gid: u32) -> Option<LocalPeerRole> {
+    if gid != LOCAL_CONTROL_GID {
+        return None;
+    }
+    match (ready, uid) {
+        (false, LOCAL_CONTROL_SEAL_UID) => Some(LocalPeerRole::Sealer),
+        (true, LOCAL_CONTROL_UID) => Some(LocalPeerRole::Client),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_peer_role_is_current(
+    captured: LocalPeerRole,
+    current: Option<LocalPeerRole>,
+    required: LocalPeerRole,
+) -> bool {
+    captured == required && current == Some(required)
 }
 
 /// Runs the guest Unix-socket server until its listener fails.
@@ -632,6 +1410,31 @@ pub async fn forward_stdio(socket: &Path) -> Result<(), GuestProtocolError> {
     Ok(())
 }
 
+/// Forwards one exact framed request to the protected local broker.
+///
+/// Unlike the protocol-v3 standard client, this closed local transport
+/// requires end-of-input and half-closes the broker request. The broker can
+/// therefore execute the request only after Docker has delivered the complete
+/// bounded input.
+///
+/// # Errors
+///
+/// Returns a sanitized framing or transport failure.
+#[cfg(target_os = "linux")]
+pub async fn forward_local_stdio() -> Result<(), GuestProtocolError> {
+    let mut input = tokio::io::stdin();
+    let request = read_frame(&mut input).await?;
+    require_eof(&mut input).await?;
+    let mut stream = connect_stream(Path::new(LOCAL_CONTROL_SOCKET)).await?;
+    stream.write_all(&request).await?;
+    stream.shutdown().await?;
+    let response = read_frame(&mut stream).await?;
+    let mut output = tokio::io::stdout();
+    output.write_all(&response).await?;
+    output.flush().await?;
+    Ok(())
+}
+
 /// Forwards one framed request between stdio and the guest Unix socket.
 ///
 /// # Errors
@@ -660,7 +1463,7 @@ pub async fn serve_stdio_once() -> Result<(), GuestProtocolError> {
     let request: GuestRequest = decode_frame(&frame)?;
     let response = match immediate_rejection(&request) {
         Some(response) => response,
-        None => handle_request(request, None).await,
+        None => handle_request(request, None, false).await,
     };
     let mut output = tokio::io::stdout();
     output.write_all(&encode_frame(&response)?).await?;
@@ -788,11 +1591,45 @@ async fn serve_connection(
     mut stream: UnixStream,
     replay: Arc<Mutex<ReplayCache>>,
     identity: Option<GuestIdentity>,
+    service: GuestServiceMode,
+    peer_role: LocalPeerRole,
 ) -> Result<(), GuestProtocolError> {
-    let frame = read_frame(&mut stream).await?;
+    let mut header = [0_u8; 4];
+    stream.read_exact(&mut header).await?;
+    #[cfg(target_os = "linux")]
+    if let GuestServiceMode::Local(local) = &service
+        && handle_local_seal(&mut stream, &header, local, peer_role).await?
+    {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if matches!(&service, GuestServiceMode::Local(_))
+        && !local_peer_role_is_current(
+            peer_role,
+            local_peer_role(&stream, &service),
+            LocalPeerRole::Client,
+        )
+    {
+        return Err(GuestProtocolError::InvalidFrame);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = peer_role;
+    let frame = read_frame_with_header(&mut stream, header).await?;
     let request: GuestRequest = decode_frame(&frame)?;
     let immediate_response = immediate_rejection(&request);
     if let Some(response) = immediate_response {
+        stream.write_all(&encode_frame(&response)?).await?;
+        stream.shutdown().await?;
+        return Ok(());
+    }
+
+    if service.local_pid_one() {
+        require_eof(&mut stream).await?;
+        // Local endpoint replay is linearized and retained by the durable host.
+        // A transport ambiguity leaves InvocationCommitted evidence and forces
+        // exact sandbox destruction, so this broker must never retain or
+        // re-invoke workflow operations on the host's behalf.
+        let response = handle_request(request, identity, true).await;
         stream.write_all(&encode_frame(&response)?).await?;
         stream.shutdown().await?;
         return Ok(());
@@ -813,6 +1650,42 @@ async fn serve_connection(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+async fn handle_local_seal(
+    stream: &mut UnixStream,
+    header: &[u8; 4],
+    local: &Arc<LocalBootstrap>,
+    peer_role: LocalPeerRole,
+) -> Result<bool, GuestProtocolError> {
+    if header != &LOCAL_STAGE_REQUEST[..4] {
+        return Ok(false);
+    }
+    if !local_peer_role_is_current(
+        peer_role,
+        local_stream_peer_role(stream, local.is_ready()),
+        LocalPeerRole::Sealer,
+    ) {
+        return Err(GuestProtocolError::InvalidFrame);
+    }
+    let mut remainder = vec![0_u8; LOCAL_STAGE_REQUEST.len() - 4];
+    stream.read_exact(&mut remainder).await?;
+    if remainder != LOCAL_STAGE_REQUEST[4..] {
+        return Err(GuestProtocolError::InvalidFrame);
+    }
+    let mut client = local.verify_staged()?;
+    stream.write_all(LOCAL_STAGE_ACKNOWLEDGEMENT).await?;
+    let mut seal = vec![0_u8; LOCAL_SEAL_REQUEST.len()];
+    stream.read_exact(&mut seal).await?;
+    if seal != LOCAL_SEAL_REQUEST {
+        return Err(GuestProtocolError::InvalidFrame);
+    }
+    require_eof(stream).await?;
+    local.verify_sealed_and_mark_ready(&mut client)?;
+    stream.write_all(LOCAL_SEAL_ACKNOWLEDGEMENT).await?;
+    stream.shutdown().await?;
+    Ok(true)
+}
+
 #[cfg(any(unix, windows))]
 fn immediate_rejection(request: &GuestRequest) -> Option<GuestResponse> {
     if request.protocol() != GUEST_PROTOCOL_VERSION {
@@ -827,16 +1700,21 @@ fn immediate_rejection(request: &GuestRequest) -> Option<GuestResponse> {
     }
 }
 
-#[cfg(unix)]
-async fn wait_for_disconnect<R: AsyncRead + Unpin>(
-    reader: &mut R,
-) -> Result<(), GuestProtocolError> {
+#[cfg(any(unix, windows))]
+async fn require_eof<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(), GuestProtocolError> {
     let mut unexpected = [0_u8; 1];
     match reader.read(&mut unexpected).await {
         Ok(0) => Ok(()),
         Ok(_) => Err(GuestProtocolError::InvalidFrame),
         Err(error) => Err(GuestProtocolError::Io(error)),
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_disconnect<R: AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<(), GuestProtocolError> {
+    require_eof(reader).await
 }
 
 #[cfg(unix)]
@@ -1004,7 +1882,7 @@ async fn replay_request(
                 }
             }
             ReplayDecision::Execute(reservation) => {
-                let response = handle_request(request, identity).await;
+                let response = handle_request(request, identity, false).await;
                 reservation.commit(response.clone());
                 return response;
             }
@@ -1016,6 +1894,14 @@ async fn replay_request(
 async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, GuestProtocolError> {
     let mut header = [0_u8; 4];
     reader.read_exact(&mut header).await?;
+    read_frame_with_header(reader, header).await
+}
+
+#[cfg(any(unix, windows))]
+async fn read_frame_with_header<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    header: [u8; 4],
+) -> Result<Vec<u8>, GuestProtocolError> {
     let length = usize::try_from(u32::from_be_bytes(header))
         .map_err(|_| GuestProtocolError::InvalidFrame)?;
     if length == 0 || length > MAX_GUEST_FRAME_BYTES {
@@ -1029,7 +1915,11 @@ async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Vec<u8>, Gue
 }
 
 #[cfg(any(unix, windows))]
-async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) -> GuestResponse {
+async fn handle_request(
+    request: GuestRequest,
+    identity: Option<GuestIdentity>,
+    local_pid_one: bool,
+) -> GuestResponse {
     match request {
         GuestRequest::Probe { .. } => GuestResponse::Ready {
             protocol: GUEST_PROTOCOL_VERSION,
@@ -1084,6 +1974,7 @@ async fn handle_request(request: GuestRequest, identity: Option<GuestIdentity>) 
                 timeout_millis,
                 output_limit,
                 process_limit,
+                local_pid_one,
             )
             .await
         }
@@ -1137,7 +2028,16 @@ async fn execute(
     timeout_millis: u64,
     output_limit: usize,
     process_limit: Option<u32>,
+    local_pid_one: bool,
 ) -> GuestResponse {
+    #[cfg(target_os = "linux")]
+    let _execution = if local_pid_one {
+        Some(LOCAL_EXECUTION_LOCK.lock().await)
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let _ = local_pid_one;
     if !valid_execution_request(
         &program,
         &arguments,
@@ -1629,7 +2529,7 @@ mod tests {
             nonce: "fresh-nonce".into(),
         };
         assert_eq!(
-            handle_request(request, Some(identity.clone())).await,
+            handle_request(request, Some(identity.clone()), false).await,
             GuestResponse::Hello {
                 protocol: GUEST_PROTOCOL_VERSION,
                 nonce: "fresh-nonce".into(),
@@ -1664,11 +2564,11 @@ mod tests {
             process_limit: 511,
         };
         assert_eq!(
-            handle_request(request.clone(), Some(identity)).await,
+            handle_request(request.clone(), Some(identity), false).await,
             rejected(GuestRejection::InvalidRequest)
         );
         assert_eq!(
-            handle_request(request, None).await,
+            handle_request(request, None, false).await,
             rejected(GuestRejection::InvalidRequest)
         );
     }
@@ -1761,6 +2661,7 @@ mod tests {
             100,
             1_024,
             None,
+            false,
         )
         .await;
         let GuestResponse::Exec {
@@ -1828,6 +2729,7 @@ mod tests {
             5_000,
             1_024,
             None,
+            false,
         )
         .await;
         assert!(matches!(

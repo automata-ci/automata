@@ -19,9 +19,9 @@ deployment configuration until native atomic TLS custody and physical-host
 qualification exist; there is no manual or static-identity fallback.
 
 `automata-runner run` selects exactly one host-compatible provider from its
-configuration: rootless Podman or Kubernetes on Linux, fresh
-Hyper-V-isolated Windows containers on Windows, or disposable
-Virtualization.framework VMs on Apple Silicon macOS 15+. The checked-in
+configuration: rootless Podman, Kubernetes, or the evaluation-only fixed-relay
+Docker provider on Linux; fresh Hyper-V-isolated Windows containers on Windows;
+or disposable Virtualization.framework VMs on Apple Silicon macOS 15+. The checked-in
 Linux host examples
 ([one](config/runner.local-1.example.json),
 [two](config/runner.local-2.example.json), and
@@ -129,6 +129,23 @@ anonymous standard-input document. They never enter the Podman host process
 environment. Jobs do not receive runner state paths, the host Podman socket,
 control-plane credentials, or provider-control credentials.
 
+The evaluation-only local Docker provider similarly exposes no host socket,
+bind, per-job volume, or network. It uses one fixed private relay and an
+already-present immutable guest image, then verifies the exact daemon,
+installation anchor, image, and container identity around lifecycle operations.
+The rootful relay daemon must attest daemon-default user-namespace remapping
+plus built-in seccomp and private cgroup namespaces, expose every required
+memory/CPU/PID controller, have AppArmor and SELinux disabled, and exactly match
+the architecture already advertised by the runner inventory. Its trusted
+configuration must leave `default-ulimits` empty because Docker API v1.44 does
+not expose that daemon setting. Rootless Docker is not qualified, and each sandbox separately proves one
+nonzero host UID/GID mapping that covers its fixed identities. The guest's
+protected client lives in tmpfs. Its administrator contract is an attenuated
+UID 0 inside that remapped namespace with every Linux capability set empty; it
+does not promise `chown`, identity switching, or other POSIX capabilities.
+Durable host state owns execution replay; an ambiguous committed invocation
+causes the exact sandbox to be destroyed rather than restarted.
+
 The Windows provider creates a fresh digest-pinned Windows container per job
 with runtime isolation fixed to `hyperv`, networking fixed to `none`, no host
 mounts, a writable disposable container root, and `ContainerUser` identity.
@@ -166,7 +183,7 @@ the private journal state root. A warm job
 therefore reads local disk first and falls back to the shared object store; it
 does not contact GitHub again.
 
-Runner product schema 4 requires an explicit object-store trust policy.
+Runner product schema 5 requires an explicit object-store trust policy.
 `web_pki` uses platform roots; `private_ca` loads exactly one bounded CA through
 an existing secure-input descriptor and installs it into an otherwise empty
 root store. The PEM bytes must use canonical RFC 7468 64-column/LF encoding

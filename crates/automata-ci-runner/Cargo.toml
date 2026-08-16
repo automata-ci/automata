@@ -37,6 +37,7 @@ automata-ci-expression-github.workspace = true
 automata-ci-github.workspace = true
 automata-ci-github-runtime.workspace = true
 automata-ci-job-executor-github.workspace = true
+automata-ci-local.workspace = true
 automata-ci-metrics.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-runner-journal.workspace = true

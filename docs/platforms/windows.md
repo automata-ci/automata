@@ -330,7 +330,7 @@ The provider configuration is closed:
   and
 - a bounded lifecycle timeout.
 
-Current runner product schema v4 selects exactly one provider. The Windows
+Current runner product schema v5 selects exactly one provider. The Windows
 provider requires one or more digest-attested environment profiles with:
 
 - an immutable digest-qualified Windows image reference;

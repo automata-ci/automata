@@ -34,7 +34,7 @@ use super::files::{
 use super::spool_crypto::MAX_DECRYPT_ONLY_CONTENT_KEYS;
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 4;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 5;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -152,7 +152,20 @@ impl RunnerProductConfig {
     pub const fn podman(&self) -> Option<&PodmanProductConfig> {
         match &self.provider {
             RunnerProviderConfig::Podman(config) => Some(config),
-            RunnerProviderConfig::Kubernetes(_)
+            RunnerProviderConfig::LocalDocker(_)
+            | RunnerProviderConfig::Kubernetes(_)
+            | RunnerProviderConfig::WindowsHyperV(_)
+            | RunnerProviderConfig::MacosVirtualization(_) => None,
+        }
+    }
+
+    /// Returns evaluation-only local Docker policy when selected.
+    #[must_use]
+    pub const fn local_docker(&self) -> Option<&LocalDockerProductConfig> {
+        match &self.provider {
+            RunnerProviderConfig::LocalDocker(config) => Some(config),
+            RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
@@ -164,6 +177,7 @@ impl RunnerProductConfig {
         match &self.provider {
             RunnerProviderConfig::Kubernetes(config) => Some(config),
             RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::LocalDocker(_)
             | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
@@ -175,6 +189,7 @@ impl RunnerProductConfig {
         match &self.provider {
             RunnerProviderConfig::WindowsHyperV(config) => Some(config),
             RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::LocalDocker(_)
             | RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::MacosVirtualization(_) => None,
         }
@@ -186,6 +201,7 @@ impl RunnerProductConfig {
         match &self.provider {
             RunnerProviderConfig::MacosVirtualization(config) => Some(config),
             RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::LocalDocker(_)
             | RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::WindowsHyperV(_) => None,
         }
@@ -306,12 +322,35 @@ impl StateRoots {
 pub enum RunnerProviderConfig {
     /// Rootless Podman on a dedicated Linux execution host.
     Podman(PodmanProductConfig),
+    /// Fixed-relay, evaluation-only Docker Engine sibling containers.
+    LocalDocker(LocalDockerProductConfig),
     /// Authenticated Kubernetes Pods on a dedicated Linux execution host.
     Kubernetes(KubernetesProductConfig),
     /// Fresh Hyper-V-isolated Windows containers.
     WindowsHyperV(WindowsHyperVProductConfig),
     /// Disposable Virtualization.framework machines for untrusted macOS jobs.
     MacosVirtualization(MacosVirtualizationProductConfig),
+}
+
+/// Closed evaluation-only local Docker provider configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalDockerProductConfig {
+    installation_binding: automata_ci_local::InstallationBinding,
+    guest_image: ImmutableImage,
+}
+
+impl LocalDockerProductConfig {
+    /// Returns the configured installation binding resolved during provider connection.
+    #[must_use]
+    pub const fn installation_binding(&self) -> &automata_ci_local::InstallationBinding {
+        &self.installation_binding
+    }
+
+    /// Returns the already-present digest-pinned sandbox-guest image.
+    #[must_use]
+    pub const fn guest_image(&self) -> &ImmutableImage {
+        &self.guest_image
+    }
 }
 
 /// Validated Kubernetes product configuration and operator attestations.
@@ -930,6 +969,9 @@ pub enum RunnerProductConfigError {
     /// Rootless Podman process configuration is invalid.
     #[error("runner Podman configuration is invalid")]
     InvalidPodman,
+    /// Fixed-relay local Docker binding or guest image is invalid.
+    #[error("runner local Docker configuration is invalid")]
+    InvalidLocalDocker,
     /// Exactly one host-compatible execution provider must be selected.
     #[error("runner execution provider configuration is invalid")]
     InvalidProvider,
@@ -956,6 +998,7 @@ pub enum RunnerProductConfigError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProviderKind {
     Podman,
+    LocalDocker,
     Kubernetes,
     WindowsHyperV,
     MacosVirtualization,
@@ -973,6 +1016,8 @@ struct RawRunnerProductConfig {
     inventory: RawInventory,
     #[serde(default)]
     podman: Option<RawPodmanProductConfig>,
+    #[serde(default)]
+    local_docker: Option<RawLocalDockerProductConfig>,
     #[serde(default)]
     kubernetes: Option<RawKubernetesProductConfig>,
     #[serde(default)]
@@ -994,14 +1039,16 @@ impl RawRunnerProductConfig {
         }
         let provider_kind = match (
             &self.podman,
+            &self.local_docker,
             &self.kubernetes,
             &self.windows_hyperv,
             &self.macos_virtualization,
         ) {
-            (Some(_), None, None, None) => ProviderKind::Podman,
-            (None, Some(_), None, None) => ProviderKind::Kubernetes,
-            (None, None, Some(_), None) => ProviderKind::WindowsHyperV,
-            (None, None, None, Some(_)) => ProviderKind::MacosVirtualization,
+            (Some(_), None, None, None, None) => ProviderKind::Podman,
+            (None, Some(_), None, None, None) => ProviderKind::LocalDocker,
+            (None, None, Some(_), None, None) => ProviderKind::Kubernetes,
+            (None, None, None, Some(_), None) => ProviderKind::WindowsHyperV,
+            (None, None, None, None, Some(_)) => ProviderKind::MacosVirtualization,
             _ => return Err(RunnerProductConfigError::InvalidProvider),
         };
         let control_endpoint = validate_control_endpoint(&self.control_endpoint)?;
@@ -1016,18 +1063,24 @@ impl RawRunnerProductConfig {
         let executor = self.executor.validate(provider_kind)?;
         let provider = match (
             self.podman,
+            self.local_docker,
             self.kubernetes,
             self.windows_hyperv,
             self.macos_virtualization,
         ) {
-            (Some(raw), None, None, None) => {
+            (Some(raw), None, None, None, None) => {
                 RunnerProviderConfig::Podman(raw.validate(github.server_url())?)
             }
-            (None, Some(raw), None, None) => {
+            (None, Some(raw), None, None, None) => {
+                RunnerProviderConfig::LocalDocker(raw.validate(&executor)?)
+            }
+            (None, None, Some(raw), None, None) => {
                 RunnerProviderConfig::Kubernetes(raw.validate(&executor)?)
             }
-            (None, None, Some(raw), None) => RunnerProviderConfig::WindowsHyperV(raw.validate()?),
-            (None, None, None, Some(raw)) => {
+            (None, None, None, Some(raw), None) => {
+                RunnerProviderConfig::WindowsHyperV(raw.validate()?)
+            }
+            (None, None, None, None, Some(raw)) => {
                 RunnerProviderConfig::MacosVirtualization(raw.validate()?)
             }
             _ => return Err(RunnerProductConfigError::InvalidProvider),
@@ -1069,6 +1122,7 @@ impl RawRunnerProductConfig {
                 podman.buildkit_runtime().is_some(),
             ),
             RunnerProviderConfig::Kubernetes(_)
+            | RunnerProviderConfig::LocalDocker(_)
             | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => (
                 automata_ci_sandbox_podman::JobContainerEngine::Disabled,
@@ -1107,6 +1161,7 @@ impl RawRunnerProductConfig {
         }
         match &provider {
             RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::LocalDocker(_)
             | RunnerProviderConfig::WindowsHyperV(_)
             | RunnerProviderConfig::MacosVirtualization(_) => {
                 if inventory.resources_per_job().ephemeral_disk_bytes() != 0
@@ -1138,6 +1193,11 @@ impl RawRunnerProductConfig {
         {
             return Err(RunnerProductConfigError::InvalidInventory);
         }
+        if matches!(provider, RunnerProviderConfig::LocalDocker(_))
+            && !valid_local_docker_topology(&executor, &environments)
+        {
+            return Err(RunnerProductConfigError::InvalidInventory);
+        }
         let object_store = self.object_store.validate()?;
         Ok(RunnerProductConfig {
             runner_id: self.runner_id,
@@ -1154,6 +1214,26 @@ impl RawRunnerProductConfig {
             metrics,
         })
     }
+}
+
+fn valid_local_docker_topology(
+    executor: &ExecutorProductConfig,
+    environments: &BTreeMap<EnvironmentProfile, SandboxEnvironment>,
+) -> bool {
+    let control_directory = automata_ci_local::LOCAL_DOCKER_CONTROL_DIRECTORY;
+    let valid_path = |path: &TargetPath| {
+        path.platform() == TargetPlatform::Posix
+            && path.as_str() != "/"
+            && path.as_str() != "/automata"
+            && !path.as_str().starts_with("/automata/")
+            && path.as_str() != control_directory
+            && !path.as_str().starts_with(&format!("{control_directory}/"))
+    };
+    valid_path(executor.runner_root())
+        && environments.values().all(|environment| {
+            matches!(environment.launch(), SandboxLaunch::Container { .. })
+                && valid_path(environment.workspace())
+        })
 }
 
 fn valid_macos_provider_topology(
@@ -1219,7 +1299,7 @@ impl RawStateRoots {
             (ProviderKind::Podman, Some(provider), None, None)
             | (ProviderKind::WindowsHyperV, None, Some(provider), None)
             | (ProviderKind::MacosVirtualization, None, None, Some(provider)) => Some(provider),
-            (ProviderKind::Kubernetes, None, None, None) => None,
+            (ProviderKind::Kubernetes | ProviderKind::LocalDocker, None, None, None) => None,
             _ => return Err(RunnerProductConfigError::InvalidStateRoots),
         };
         let mut roots = vec![&self.journal, &self.spool];
@@ -1228,7 +1308,10 @@ impl RawStateRoots {
             .iter()
             .any(|path| validate_absolute_path(path).is_err());
         let overlap = match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
+            ProviderKind::Podman
+            | ProviderKind::LocalDocker
+            | ProviderKind::Kubernetes
+            | ProviderKind::MacosVirtualization => {
                 roots.iter().enumerate().any(|(left_index, left)| {
                     roots.iter().enumerate().any(|(right_index, right)| {
                         left_index != right_index
@@ -1539,7 +1622,7 @@ impl RawInventory {
         if !matches!(
             (provider_kind, &host_operating_system),
             (
-                ProviderKind::Podman | ProviderKind::Kubernetes,
+                ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes,
                 OperatingSystem::Linux
             ) | (ProviderKind::WindowsHyperV, OperatingSystem::Windows)
                 | (ProviderKind::MacosVirtualization, OperatingSystem::Macos)
@@ -1590,7 +1673,7 @@ fn provider_capabilities(
     BTreeSet<RunnerFeature>,
 ) {
     match provider_kind {
-        ProviderKind::Podman | ProviderKind::Kubernetes => {
+        ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes => {
             let mut sandbox_features = BTreeSet::from([
                 SandboxFeature::CLEAN_WORKSPACE,
                 SandboxFeature::NETWORK_ISOLATION,
@@ -1780,7 +1863,7 @@ impl RawEnvironment {
         let default_environment = ExecutionEnvironment::new(default_environment)
             .map_err(|_| RunnerProductConfigError::InvalidInventory)?;
         match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes => {
+            ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes => {
                 let image = ImmutableImage::new(
                     self.image
                         .ok_or(RunnerProductConfigError::InvalidInventory)?,
@@ -1851,6 +1934,43 @@ impl RawEnvironment {
                 .map_err(|_| RunnerProductConfigError::InvalidInventory)
             }
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLocalDockerProductConfig {
+    installation_name: String,
+    installation_id: String,
+    guest_image: String,
+}
+
+impl RawLocalDockerProductConfig {
+    fn validate(
+        self,
+        executor: &ExecutorProductConfig,
+    ) -> Result<LocalDockerProductConfig, RunnerProductConfigError> {
+        if std::env::consts::OS != "linux" {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
+        if executor.resources().memory_bytes()
+            < automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES
+            || executor.resources().cpu_millis()
+                < automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS
+            || executor.resources().pids() < automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS
+        {
+            return Err(RunnerProductConfigError::InvalidLocalDocker);
+        }
+        let name = automata_ci_local::InstallationName::new(self.installation_name)
+            .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
+        let id = automata_ci_local::InstallationId::from_str(&self.installation_id)
+            .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
+        let guest_image = ImmutableImage::new(self.guest_image)
+            .map_err(|_| RunnerProductConfigError::InvalidLocalDocker)?;
+        Ok(LocalDockerProductConfig {
+            installation_binding: automata_ci_local::InstallationBinding::new(name, id),
+            guest_image,
+        })
     }
 }
 
@@ -2313,17 +2433,17 @@ impl RawExecutorProductConfig {
         if matches!(
             (provider_kind, network, root_filesystem, privilege),
             (
-                ProviderKind::Podman | ProviderKind::Kubernetes,
+                ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes,
                 NetworkPolicy::Host,
                 _,
                 _,
             ) | (
-                ProviderKind::Podman | ProviderKind::Kubernetes,
+                ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes,
                 _,
                 RootFilesystemPolicy::Host,
                 _,
             ) | (
-                ProviderKind::Podman | ProviderKind::Kubernetes,
+                ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes,
                 _,
                 _,
                 SandboxPrivilegePolicy::Host
@@ -2336,6 +2456,10 @@ impl RawExecutorProductConfig {
                 && (network != NetworkPolicy::Disabled
                     || root_filesystem != RootFilesystemPolicy::Writable
                     || privilege != SandboxPrivilegePolicy::Unprivileged))
+            || (provider_kind == ProviderKind::LocalDocker
+                && (network != NetworkPolicy::Disabled
+                    || root_filesystem != RootFilesystemPolicy::Writable
+                    || privilege != SandboxPrivilegePolicy::Administrator))
         {
             return Err(RunnerProductConfigError::InvalidExecutor);
         }
@@ -2349,9 +2473,10 @@ impl RawExecutorProductConfig {
         let tool_cache = parse_path(self.tool_cache)?;
         let temp = parse_path(self.temp)?;
         let path_separator = match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
-                ':'
-            }
+            ProviderKind::Podman
+            | ProviderKind::LocalDocker
+            | ProviderKind::Kubernetes
+            | ProviderKind::MacosVirtualization => ':',
             ProviderKind::WindowsHyperV => ';',
         };
         if target_is_root(&home)
@@ -2403,9 +2528,10 @@ fn provider_target_path(
         return Err(RunnerProductConfigError::InvalidExecutor);
     }
     match provider_kind {
-        ProviderKind::Podman | ProviderKind::Kubernetes | ProviderKind::MacosVirtualization => {
-            TargetPath::posix(value)
-        }
+        ProviderKind::Podman
+        | ProviderKind::LocalDocker
+        | ProviderKind::Kubernetes
+        | ProviderKind::MacosVirtualization => TargetPath::posix(value),
         ProviderKind::WindowsHyperV => TargetPath::windows(value),
     }
     .map_err(|_| RunnerProductConfigError::InvalidExecutor)
@@ -2468,7 +2594,7 @@ impl RawToolchainConfig {
             node24: self.node24.map(path).transpose()?,
         };
         let valid = match provider_kind {
-            ProviderKind::Podman | ProviderKind::Kubernetes => {
+            ProviderKind::Podman | ProviderKind::LocalDocker | ProviderKind::Kubernetes => {
                 config.bash.is_some()
                     && config.sh.is_some()
                     && config.install.is_some()

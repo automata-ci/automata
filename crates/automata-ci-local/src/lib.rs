@@ -20,6 +20,9 @@ use tokio::{
 mod check;
 mod engine;
 mod installation;
+#[cfg(target_os = "linux")]
+mod local_docker;
+mod local_docker_error;
 #[cfg(unix)]
 mod snapshot;
 #[cfg(not(unix))]
@@ -33,9 +36,51 @@ pub use check::{
 };
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
 pub use installation::{
-    ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
-    InstallationSelectorKey,
+    ComposeProjectName, Installation, InstallationBinding, InstallationId, InstallationIdError,
+    InstallationName, InstallationNameError, InstallationSelectorKey,
 };
+pub use local_docker_error::{LocalDockerError, LocalDockerErrorCode};
+/// Reserved in-container directory used by the fixed-relay Docker provider's protected client.
+pub const LOCAL_DOCKER_CONTROL_DIRECTORY: &str = "/automata-control";
+
+/// Smallest whole-job memory limit accepted by the fixed-relay Docker provider.
+pub const MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES: u64 = 256 * 1_024 * 1_024;
+/// Smallest CPU quota accepted by the fixed-relay Docker provider, in millicores.
+pub const MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS: u32 = 1_000;
+/// Smallest process limit that can contain PID 1, the protected client, and one workload process.
+pub const MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS: u32 = 3;
+
+/// Connects the exact production-consumed fixed-relay Docker provider.
+///
+/// The concrete adapter remains private so callers cannot depend on engine
+/// implementation details outside the provider-neutral execution boundary.
+/// Returned raw execution endpoints are attempt-once. The production runner
+/// installs its durable exact-request decorator before any retryable job
+/// operation; profile admission issues each raw operation once and destroys
+/// the sandbox after a failure or ambiguous result.
+///
+/// The provider substitutes its protected guest broker for the profile
+/// keepalive as container PID 1. The complete keepalive remains bound into the
+/// sandbox identity, but is not executed as an initialization command.
+///
+/// # Errors
+///
+/// Returns a redacted failure when the relay, daemon identity, installation
+/// binding, anchor, or already-present immutable guest image fails verification.
+#[cfg(target_os = "linux")]
+pub async fn connect_local_docker_provider(
+    installation: InstallationBinding,
+    guest_image: automata_ci_execution::ImmutableImage,
+    expected_runner_architecture: &automata_ci_core::Architecture,
+) -> Result<std::sync::Arc<dyn automata_ci_execution::SandboxProvider>, LocalDockerError> {
+    let provider = local_docker::LocalDockerProvider::connect(
+        installation,
+        guest_image,
+        expected_runner_architecture,
+    )
+    .await?;
+    Ok(std::sync::Arc::new(provider))
+}
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TERMINATION_TIMEOUT: Duration = Duration::from_secs(1);
