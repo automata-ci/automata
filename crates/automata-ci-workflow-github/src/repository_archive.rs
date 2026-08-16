@@ -64,35 +64,22 @@ impl RepositoryWorkflowLocation {
     }
 }
 
-/// Exact archive trust policy used by repository workflow discovery.
-///
-/// GitHub delivery archives retain their established `.ci/workflows`
-/// authority and reject every symbolic link. A local snapshot declares its one
-/// workflow namespace, or explicitly declares that it has none, and may contain
-/// links that pass the portable contained-target and archive-graph checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RepositoryWorkflowDiscoveryPolicy {
-    /// A remote GitHub repository archive used by authenticated delivery and
-    /// schedule processing.
+pub(crate) enum RepositoryWorkflowDiscoveryPolicy {
     GithubDelivery,
-    /// An immutable archive sealed from a local Git worktree.
-    LocalSnapshot {
-        /// The one namespace present in the snapshot, or `None` when the
-        /// snapshot asserts that neither workflow namespace exists.
-        workflow_location: Option<RepositoryWorkflowLocation>,
-    },
+    LocalGithubArchive,
 }
 
 impl RepositoryWorkflowDiscoveryPolicy {
-    const fn workflow_location(self) -> Option<RepositoryWorkflowLocation> {
+    const fn workflow_location(self) -> RepositoryWorkflowLocation {
         match self {
-            Self::GithubDelivery => Some(RepositoryWorkflowLocation::Automata),
-            Self::LocalSnapshot { workflow_location } => workflow_location,
+            Self::GithubDelivery => RepositoryWorkflowLocation::Automata,
+            Self::LocalGithubArchive => RepositoryWorkflowLocation::Github,
         }
     }
 
     const fn allows_symlinks(self) -> bool {
-        matches!(self, Self::LocalSnapshot { .. })
+        matches!(self, Self::LocalGithubArchive)
     }
 }
 
@@ -356,8 +343,8 @@ impl RepositoryWorkflowDiscoveryOutcome {
     }
 }
 
-/// Validates one exact tar.gz repository archive and discovers direct GitHub
-/// workflow files.
+/// Validates one authenticated GitHub-delivery archive and discovers direct
+/// Automata workflow files.
 ///
 /// The archive is never extracted. It must contain one explicit, safe root
 /// directory and only canonical paths beneath that root. Every entry and all
@@ -372,11 +359,40 @@ impl RepositoryWorkflowDiscoveryOutcome {
 /// aliased, duplicate, or type-conflicting paths; a prohibited or unsafe link;
 /// unsupported archive metadata; a non-regular workflow entry; a workflow
 /// namespace that conflicts with `policy`; or archive-wide resource exhaustion.
-pub fn discover_repository_workflows(
+pub fn discover_github_delivery_workflows(
+    archive_bytes: &[u8],
+    limits: RepositoryWorkflowDiscoveryLimits,
+) -> Result<Vec<RepositoryWorkflowDiscoveryOutcome>, RepositoryWorkflowDiscoveryError> {
+    discover_repository_workflows(
+        archive_bytes,
+        limits,
+        RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
+        &|| false,
+    )
+}
+
+pub(crate) fn discover_local_github_workflows(
+    archive_bytes: &[u8],
+    limits: RepositoryWorkflowDiscoveryLimits,
+    cancellation: &dyn Fn() -> bool,
+) -> Result<Vec<RepositoryWorkflowDiscoveryOutcome>, RepositoryWorkflowDiscoveryError> {
+    discover_repository_workflows(
+        archive_bytes,
+        limits,
+        RepositoryWorkflowDiscoveryPolicy::LocalGithubArchive,
+        cancellation,
+    )
+}
+
+fn discover_repository_workflows(
     archive_bytes: &[u8],
     limits: RepositoryWorkflowDiscoveryLimits,
     policy: RepositoryWorkflowDiscoveryPolicy,
+    cancellation: &dyn Fn() -> bool,
 ) -> Result<Vec<RepositoryWorkflowDiscoveryOutcome>, RepositoryWorkflowDiscoveryError> {
+    if cancellation() {
+        return Err(RepositoryWorkflowDiscoveryError::Cancelled);
+    }
     let compressed_bytes = u64::try_from(archive_bytes.len())
         .map_err(|_| RepositoryWorkflowDiscoveryError::ResourceLimit)?;
     if compressed_bytes > limits.maximum_compressed_bytes() {
@@ -389,12 +405,17 @@ pub fn discover_repository_workflows(
         decoder,
         limits.maximum_decompressed_bytes(),
         limit_state.clone(),
+        cancellation,
     );
     let mut archive = tar::Archive::new(reader);
-    let workflows = inspect_archive_entries(&mut archive, limits, policy, &limit_state)?;
+    let workflows =
+        inspect_archive_entries(&mut archive, limits, policy, &limit_state, cancellation)?;
     let mut reader = archive.into_inner();
     verify_tar_termination(&mut reader, &limit_state)?;
 
+    if cancellation() {
+        return Err(RepositoryWorkflowDiscoveryError::Cancelled);
+    }
     Ok(workflows
         .into_iter()
         .map(|(path, result)| RepositoryWorkflowDiscoveryOutcome { path, result })
@@ -406,6 +427,7 @@ fn inspect_archive_entries<R: io::Read>(
     limits: RepositoryWorkflowDiscoveryLimits,
     policy: RepositoryWorkflowDiscoveryPolicy,
     limit_state: &ReadLimitState,
+    cancellation: &dyn Fn() -> bool,
 ) -> Result<
     BTreeMap<String, Result<Vec<u8>, RepositoryWorkflowDiscoveryFailure>>,
     RepositoryWorkflowDiscoveryError,
@@ -416,10 +438,13 @@ fn inspect_archive_entries<R: io::Read>(
         .map_err(|_| read_error(limit_state))?
         .raw(true);
     for entry in entries {
+        if cancellation() {
+            return Err(RepositoryWorkflowDiscoveryError::Cancelled);
+        }
         let entry = entry.map_err(|_| read_error(limit_state))?;
         inspection.inspect_entry(entry, limits, limit_state)?;
     }
-    inspection.finish(limit_state)
+    inspection.finish(limit_state, cancellation)
 }
 
 struct ArchiveInspection {
@@ -530,10 +555,7 @@ impl ArchiveInspection {
             return Err(RepositoryWorkflowDiscoveryError::UnsupportedArchiveEntry);
         }
 
-        let is_workflow = self
-            .policy
-            .workflow_location()
-            .is_some_and(|location| is_direct_workflow(&relative_components, location));
+        let is_workflow = is_direct_workflow(&relative_components, self.policy.workflow_location());
         if is_workflow && !entry_type.is_file() {
             return Err(RepositoryWorkflowDiscoveryError::UnsupportedWorkflowEntry);
         }
@@ -666,6 +688,7 @@ impl ArchiveInspection {
     fn finish(
         self,
         limit_state: &ReadLimitState,
+        cancellation: &dyn Fn() -> bool,
     ) -> Result<
         BTreeMap<String, Result<Vec<u8>, RepositoryWorkflowDiscoveryFailure>>,
         RepositoryWorkflowDiscoveryError,
@@ -685,7 +708,7 @@ impl ArchiveInspection {
         let validator = self
             .path_validator
             .ok_or(RepositoryWorkflowDiscoveryError::MissingArchiveRoot)?;
-        self.graph.validate_links(validator)?;
+        self.graph.validate_links(validator, cancellation)?;
         Ok(self.workflows)
     }
 }
@@ -761,7 +784,7 @@ fn is_direct_workflow(relative_components: &[&str], location: RepositoryWorkflow
 
 fn workflow_location_conflicts(
     relative_components: &[&str],
-    location: Option<RepositoryWorkflowLocation>,
+    location: RepositoryWorkflowLocation,
 ) -> bool {
     if relative_components.len() < 2 || relative_components[1] != "workflows" {
         return false;
@@ -771,7 +794,7 @@ fn workflow_location_conflicts(
         ".github" => Some(RepositoryWorkflowLocation::Github),
         _ => None,
     };
-    actual.is_some() && actual != location
+    actual.is_some_and(|actual| actual != location)
 }
 
 fn validate_symlink<R: io::Read>(
@@ -966,6 +989,7 @@ impl ArchivePathGraph {
     fn validate_links(
         &self,
         validator: RepositoryPathValidator,
+        cancellation: &dyn Fn() -> bool,
     ) -> Result<(), RepositoryWorkflowDiscoveryError> {
         let hop_limit = self
             .nodes
@@ -975,6 +999,9 @@ impl ArchivePathGraph {
             .min(MAX_SYMLINK_RESOLUTION_HOPS);
         let mut directory_aliases = Vec::new();
         for node in 1..self.nodes.len() {
+            if cancellation() {
+                return Err(RepositoryWorkflowDiscoveryError::Cancelled);
+            }
             let ArchiveNodeKind::Symlink(target) = &self.nodes[node].kind else {
                 continue;
             };
@@ -989,17 +1016,21 @@ impl ArchivePathGraph {
                 directory_aliases.push((self.nodes[node].parent, target));
             }
         }
-        self.validate_directory_containment(&directory_aliases)
+        self.validate_directory_containment(&directory_aliases, cancellation)
     }
 
     fn validate_directory_containment(
         &self,
         aliases: &[(usize, usize)],
+        cancellation: &dyn Fn() -> bool,
     ) -> Result<(), RepositoryWorkflowDiscoveryError> {
         let mut outgoing = vec![Vec::new(); self.nodes.len()];
         let mut incoming = vec![0_usize; self.nodes.len()];
         let mut directory_count = 0_usize;
         for (parent, node) in self.nodes.iter().enumerate() {
+            if cancellation() {
+                return Err(RepositoryWorkflowDiscoveryError::Cancelled);
+            }
             if !node.kind.is_directory() {
                 continue;
             }
@@ -1025,6 +1056,9 @@ impl ArchivePathGraph {
             .collect::<VecDeque<_>>();
         let mut visited = 0_usize;
         while let Some(node) = ready.pop_front() {
+            if cancellation() {
+                return Err(RepositoryWorkflowDiscoveryError::Cancelled);
+            }
             visited += 1;
             for child in outgoing[node].iter().copied() {
                 incoming[child] -= 1;
@@ -1322,12 +1356,21 @@ struct ReadLimitState(Rc<ReadState>);
 #[derive(Default)]
 struct ReadState {
     exceeded: Cell<bool>,
+    cancelled: Cell<bool>,
     stream_tail: RefCell<StreamTail>,
 }
 
 impl ReadLimitState {
     fn mark_exceeded(&self) {
         self.0.exceeded.set(true);
+    }
+
+    fn mark_cancelled(&self) {
+        self.0.cancelled.set(true);
+    }
+
+    fn cancelled(&self) -> bool {
+        self.0.cancelled.get()
     }
 
     fn exceeded(&self) -> bool {
@@ -1386,24 +1429,35 @@ impl StreamTail {
     }
 }
 
-struct BoundedReader<R> {
+struct BoundedReader<'a, R> {
     inner: R,
     remaining: u64,
     limit_state: ReadLimitState,
+    cancellation: &'a dyn Fn() -> bool,
 }
 
-impl<R> BoundedReader<R> {
-    fn new(inner: R, maximum_bytes: u64, limit_state: ReadLimitState) -> Self {
+impl<'a, R> BoundedReader<'a, R> {
+    fn new(
+        inner: R,
+        maximum_bytes: u64,
+        limit_state: ReadLimitState,
+        cancellation: &'a dyn Fn() -> bool,
+    ) -> Self {
         Self {
             inner,
             remaining: maximum_bytes,
             limit_state,
+            cancellation,
         }
     }
 }
 
-impl<R: io::Read> io::Read for BoundedReader<R> {
+impl<R: io::Read> io::Read for BoundedReader<'_, R> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        if (self.cancellation)() {
+            self.limit_state.mark_cancelled();
+            return Err(io::Error::other("cancelled"));
+        }
         if bytes.is_empty() {
             return Ok(0);
         }
@@ -1429,7 +1483,9 @@ impl<R: io::Read> io::Read for BoundedReader<R> {
 }
 
 fn read_error(limit_state: &ReadLimitState) -> RepositoryWorkflowDiscoveryError {
-    if limit_state.exceeded() {
+    if limit_state.cancelled() {
+        RepositoryWorkflowDiscoveryError::Cancelled
+    } else if limit_state.exceeded() {
         RepositoryWorkflowDiscoveryError::ResourceLimit
     } else {
         RepositoryWorkflowDiscoveryError::Malformed
@@ -1456,6 +1512,8 @@ impl Error for RepositoryWorkflowDiscoveryLimitsError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum RepositoryWorkflowDiscoveryError {
+    /// Cooperative local analysis cancellation interrupted archive inspection.
+    Cancelled,
     /// Gzip or tar framing, sizes, padding, or termination are invalid.
     Malformed,
     /// A configured or implementation-wide resource ceiling was exceeded.
@@ -1486,6 +1544,7 @@ pub enum RepositoryWorkflowDiscoveryError {
 impl fmt::Display for RepositoryWorkflowDiscoveryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Cancelled => "repository archive inspection was cancelled",
             Self::Malformed => "repository archive is malformed",
             Self::ResourceLimit => "repository archive exceeds a configured resource limit",
             Self::UnsafePath => "repository archive contains an unsafe path",
@@ -1513,13 +1572,35 @@ impl Error for RepositoryWorkflowDiscoveryError {}
 #[cfg(test)]
 mod limit_contract_tests {
     use super::{
-        ArchiveNodeKind, ArchivePathGraph, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES,
-        MAX_ENTRY_COUNT, MAX_ENTRY_PATH_BYTES, MAX_EXPANDED_BYTES, MAX_GLOBAL_PAX_BYTES,
-        MAX_REPOSITORY_WORKFLOW_PATH_BYTES, MAX_WORKFLOW_BYTES, MAX_WORKFLOW_COUNT,
-        RepositoryArchiveLimitRejection, RepositoryWorkflowDiscoveryError,
-        archive_policy_limit_rejection, global_pax_byte_rejection,
-        repository_workflow_path_byte_rejection,
+        ArchiveNodeKind, ArchivePathGraph, BoundedReader, MAX_COMPRESSED_BYTES,
+        MAX_DECOMPRESSED_BYTES, MAX_ENTRY_COUNT, MAX_ENTRY_PATH_BYTES, MAX_EXPANDED_BYTES,
+        MAX_GLOBAL_PAX_BYTES, MAX_REPOSITORY_WORKFLOW_PATH_BYTES, MAX_WORKFLOW_BYTES,
+        MAX_WORKFLOW_COUNT, ReadLimitState, RepositoryArchiveLimitRejection,
+        RepositoryWorkflowDiscoveryError, archive_policy_limit_rejection,
+        global_pax_byte_rejection, read_error, repository_workflow_path_byte_rejection,
     };
+
+    #[test]
+    fn cancellation_stops_standard_readers_instead_of_requesting_a_retry() {
+        use std::io::Read as _;
+
+        let state = ReadLimitState::default();
+        let cancelled = || true;
+        let mut reader = BoundedReader::new(
+            std::io::Cursor::new(b"payload"),
+            64,
+            state.clone(),
+            &cancelled,
+        );
+        let error = reader
+            .read_to_end(&mut Vec::new())
+            .expect_err("cancellation must terminate the read");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            read_error(&state),
+            RepositoryWorkflowDiscoveryError::Cancelled
+        );
+    }
 
     #[test]
     fn derived_component_storage_has_an_exact_cumulative_byte_boundary() {

@@ -9,23 +9,21 @@ use std::{
 
 use automata_ci_core::Sha256Digest;
 use automata_ci_workflow_github::{
-    RepositoryPathValidationError, RepositoryPathValidator, RepositoryWorkflowDiscoveryError,
-    RepositoryWorkflowDiscoveryLimits, RepositoryWorkflowDiscoveryOutcome,
-    RepositoryWorkflowDiscoveryPolicy, RepositoryWorkflowLocation, discover_repository_workflows,
+    RepositoryPathValidationError, RepositoryPathValidator, RepositoryWorkflowDiscoveryLimits,
 };
-use bytes::Bytes;
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _, ambient_authority};
 use cap_std::fs::{Dir, File, Metadata, OpenOptions};
 use flate2::{Compression, GzBuilder};
-use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use tar::{Builder as TarBuilder, EntryType, Header};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt as _, process::Command as ProcessCommand, time::timeout};
+use tokio_util::sync::CancellationToken;
 
 use super::{
-    CaptureFailure, CommandFailure, MAX_COMMAND_STREAM_BYTES, read_bounded, spawn_contained,
-    terminate_process_tree, terminate_remaining_process_tree,
+    CaptureFailure, CommandFailure, MAX_COMMAND_STREAM_BYTES, read_bounded,
+    snapshot_limits::local_snapshot_limits, spawn_contained, terminate_process_tree,
+    terminate_remaining_process_tree,
 };
 
 const SNAPSHOT_ROOT: &str = "worktree";
@@ -34,10 +32,151 @@ const MAX_GIT_COORDINATE_FIELD_BYTES: usize = 16 * 1_024;
 const MAX_GIT_COORDINATES_BYTES: usize = 4 * (MAX_GIT_COORDINATE_FIELD_BYTES + 2);
 const MAX_GIT_LOCATOR_BYTES: usize = MAX_GIT_COORDINATE_FIELD_BYTES;
 const MAX_GIT_HEAD_BYTES: usize = 128;
+const TRUSTED_GIT_EXECUTABLE: &str = "/usr/bin/git";
+const GIT_NULL_DEVICE: &str = "/dev/null";
+
+#[derive(Debug)]
+struct GitExecutable {
+    path: PathBuf,
+    identity: ExecutableIdentity,
+    #[cfg(test)]
+    fixture: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExecutableIdentity {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+    mode: u32,
+    owner: u32,
+}
+
+impl GitExecutable {
+    fn resolve() -> Result<Self, LocalSnapshotError> {
+        let path = PathBuf::from(TRUSTED_GIT_EXECUTABLE);
+        let metadata = trusted_executable_metadata(&path)?;
+        Ok(Self {
+            path,
+            identity: ExecutableIdentity::new(&metadata),
+            #[cfg(test)]
+            fixture: false,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn verify(&self) -> Result<(), LocalSnapshotError> {
+        #[cfg(test)]
+        if self.fixture {
+            return Ok(());
+        }
+        let metadata = trusted_executable_metadata(&self.path)?;
+        if ExecutableIdentity::new(&metadata) != self.identity {
+            return Err(LocalSnapshotError::new(
+                LocalSnapshotErrorCode::GitExecutableChanged,
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn fixture(path: &Path) -> Self {
+        Self {
+            path: path.to_owned(),
+            identity: ExecutableIdentity {
+                device: 0,
+                inode: 0,
+                length: 0,
+                modified_seconds: 0,
+                modified_nanoseconds: 0,
+                changed_seconds: 0,
+                changed_nanoseconds: 0,
+                mode: 0,
+                owner: 0,
+            },
+            fixture: true,
+        }
+    }
+}
+
+impl ExecutableIdentity {
+    fn new(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+            mode: metadata.mode(),
+            owner: metadata.uid(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn trusted_executable_metadata(path: &Path) -> Result<fs::Metadata, LocalSnapshotError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if !path.is_absolute() {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::GitUnavailable,
+        ));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::GitUnavailable))?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o111 == 0
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::GitUnavailable,
+        ));
+    }
+    Ok(metadata)
+}
+
+fn check_cancelled(cancellation: &CancellationToken) -> Result<(), LocalSnapshotError> {
+    if cancellation.is_cancelled() {
+        Err(LocalSnapshotError::new(LocalSnapshotErrorCode::Cancelled))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_local_snapshot_limits(
+    limits: RepositoryWorkflowDiscoveryLimits,
+) -> Result<(), LocalSnapshotError> {
+    let maximum = local_snapshot_limits();
+    if limits.maximum_compressed_bytes() > maximum.maximum_compressed_bytes()
+        || limits.maximum_decompressed_bytes() > maximum.maximum_decompressed_bytes()
+        || limits.maximum_entries() > maximum.maximum_entries()
+        || limits.maximum_expanded_bytes() > maximum.maximum_expanded_bytes()
+        || limits.maximum_entry_path_bytes() > maximum.maximum_entry_path_bytes()
+        || limits.maximum_workflows() > maximum.maximum_workflows()
+        || limits.maximum_workflow_bytes() > maximum.maximum_workflow_bytes()
+    {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::ResourceLimit,
+        ));
+    }
+    Ok(())
+}
 
 /// Request to seal one live Git worktree into a bounded immutable snapshot.
 #[derive(Clone, Debug)]
-pub struct LocalSnapshotRequest {
+pub(crate) struct LocalSnapshotRequest {
     directory: PathBuf,
     limits: RepositoryWorkflowDiscoveryLimits,
 }
@@ -45,7 +184,10 @@ pub struct LocalSnapshotRequest {
 impl LocalSnapshotRequest {
     /// Creates a request rooted at a worktree or any directory beneath it.
     #[must_use]
-    pub fn new(directory: impl Into<PathBuf>, limits: RepositoryWorkflowDiscoveryLimits) -> Self {
+    pub(crate) fn new(
+        directory: impl Into<PathBuf>,
+        limits: RepositoryWorkflowDiscoveryLimits,
+    ) -> Self {
         Self {
             directory: directory.into(),
             limits,
@@ -54,19 +196,18 @@ impl LocalSnapshotRequest {
 
     /// Returns the caller-supplied worktree search directory.
     #[must_use]
-    pub fn directory(&self) -> &Path {
+    pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
 
     /// Returns the shared snapshot-construction and workflow-discovery limits.
     #[must_use]
-    pub const fn limits(&self) -> RepositoryWorkflowDiscoveryLimits {
+    pub(crate) const fn limits(&self) -> RepositoryWorkflowDiscoveryLimits {
         self.limits
     }
 }
 
-/// One sealed local source archive and the workflow bytes discovered from that
-/// exact archive.
+/// One private sealed local source archive.
 ///
 /// The inventory is Git's tracked index names plus non-ignored untracked names.
 /// Tracked deletions are absent, staged additions are present, and all regular
@@ -76,75 +217,72 @@ impl LocalSnapshotRequest {
 /// submodules fail closed, as do sparse-checkout and assume-unchanged flags
 /// that can hide live state. No source operation updates the index or invokes
 /// hooks or automatic maintenance.
-#[derive(Clone, Debug)]
-pub struct LocalSnapshot {
-    root: PathBuf,
+pub(crate) struct LocalSnapshot {
     head: String,
     dirty: bool,
     digest: Sha256Digest,
-    archive: Bytes,
+    archive: Vec<u8>,
     entry_count: usize,
     expanded_bytes: u64,
-    workflow_location: Option<RepositoryWorkflowLocation>,
-    workflows: Vec<RepositoryWorkflowDiscoveryOutcome>,
+}
+
+impl std::fmt::Debug for LocalSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LocalSnapshot")
+            .field("head", &self.head)
+            .field("dirty", &self.dirty)
+            .field("digest", &self.digest)
+            .field("entry_count", &self.entry_count)
+            .field("expanded_bytes", &self.expanded_bytes)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LocalSnapshot {
-    /// Returns the absolute, pinned worktree root reported by Git.
-    #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
     /// Returns the exact commit at `HEAD` while the worktree was sealed.
     #[must_use]
-    pub fn head(&self) -> &str {
+    pub(crate) fn head(&self) -> &str {
         &self.head
     }
 
     /// Returns whether Git reported staged, unstaged, or non-ignored untracked
     /// worktree state while the snapshot was sealed.
     #[must_use]
-    pub const fn dirty(&self) -> bool {
+    pub(crate) const fn dirty(&self) -> bool {
         self.dirty
     }
 
     /// Returns SHA-256 over the exact deterministic gzip bytes retained here.
     #[must_use]
-    pub const fn digest(&self) -> Sha256Digest {
+    pub(crate) const fn digest(&self) -> Sha256Digest {
         self.digest
     }
 
     /// Returns the exact immutable tar.gz bytes consumed by workflow discovery.
+    #[cfg(test)]
     #[must_use]
-    pub const fn archive_bytes(&self) -> &Bytes {
+    pub(crate) fn archive_bytes(&self) -> &[u8] {
         &self.archive
+    }
+
+    /// Consumes the private snapshot into the exact archive passed to the
+    /// sealed workflow-analysis boundary.
+    pub(crate) fn into_archive(self) -> Vec<u8> {
+        self.archive
     }
 
     /// Returns the number of regular-file and symbolic-link entries in the
     /// sealed live-worktree inventory.
     #[must_use]
-    pub const fn entry_count(&self) -> usize {
+    pub(crate) const fn entry_count(&self) -> usize {
         self.entry_count
     }
 
     /// Returns the sum of regular-file bytes retained in the archive.
     #[must_use]
-    pub const fn expanded_bytes(&self) -> u64 {
+    pub(crate) const fn expanded_bytes(&self) -> u64 {
         self.expanded_bytes
-    }
-
-    /// Returns the one explicit workflow namespace present in the worktree.
-    /// Repositories containing both namespaces are rejected during capture.
-    #[must_use]
-    pub const fn workflow_location(&self) -> Option<RepositoryWorkflowLocation> {
-        self.workflow_location
-    }
-
-    /// Returns deterministic path outcomes decoded from the retained archive.
-    #[must_use]
-    pub fn workflows(&self) -> &[RepositoryWorkflowDiscoveryOutcome] {
-        &self.workflows
     }
 }
 
@@ -160,84 +298,128 @@ impl LocalSnapshot {
 /// opened without following a link, a path or file type is unsafe, a resource
 /// bound is exceeded, or the inventory mutates while it is being read. Windows
 /// reparse points, including junctions, are not admitted.
-pub async fn capture_snapshot(
+pub(crate) async fn capture_snapshot(
     request: LocalSnapshotRequest,
+    cancellation: &CancellationToken,
 ) -> Result<LocalSnapshot, LocalSnapshotError> {
-    capture_snapshot_with_git(request, Path::new("git")).await
+    let git = GitExecutable::resolve()?;
+    capture_snapshot_with_executable(request, &git, cancellation).await
 }
 
-async fn capture_snapshot_with_git(
+async fn capture_snapshot_with_executable(
     request: LocalSnapshotRequest,
-    git: &Path,
+    git: &GitExecutable,
+    cancellation: &CancellationToken,
 ) -> Result<LocalSnapshot, LocalSnapshotError> {
+    check_cancelled(cancellation)?;
+    validate_local_snapshot_limits(request.limits())?;
     let requested_path = std::path::absolute(request.directory())
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::NotGitWorktree))?;
     let requested = PinnedDirectory::open(&requested_path)?;
-    let coordinates = discover_git_coordinates(git, &requested_path).await?;
+    let coordinates = discover_git_coordinates(git, &requested_path, cancellation).await?;
     requested.verify_ambient_path(&requested_path)?;
     let authority = GitAuthority::pin(coordinates, &requested)?;
-    verify_bound_git_coordinates(git, &authority, LocalSnapshotErrorCode::NotGitWorktree).await?;
+    verify_bound_git_coordinates(
+        git,
+        &authority,
+        LocalSnapshotErrorCode::NotGitWorktree,
+        cancellation,
+    )
+    .await?;
     let path_validator =
         RepositoryPathValidator::new(SNAPSHOT_ROOT, request.limits().maximum_entry_path_bytes())
             .map_err(local_path_validation_error)?;
-    let initial = capture_git_state(git, &authority, request.limits()).await?;
+    let initial = capture_git_state(git, &authority, request.limits(), cancellation).await?;
     let inventory = parse_inventory(&initial, request.limits(), path_validator)?;
-    let initial_scan = scan_worktree(git, &authority, request.limits(), path_validator).await?;
-    let captured = capture_entries(
-        &authority.worktree,
-        &inventory,
+    let initial_scan = scan_worktree(
+        git,
+        &authority,
         request.limits(),
         path_validator,
-    )?;
-    let workflow_location = workflow_location(&captured.entries)?;
-    let final_state = capture_git_state(git, &authority, request.limits()).await?;
-    let final_scan = scan_worktree(git, &authority, request.limits(), path_validator).await?;
+        cancellation,
+    )
+    .await?;
+    let capture_worktree = authority.worktree.clone_pinned()?;
+    let capture_cancellation = cancellation.clone();
+    let limits = request.limits();
+    let captured = run_blocking(LocalSnapshotErrorCode::ConcurrentMutation, move || {
+        capture_entries(
+            &capture_worktree,
+            &inventory,
+            limits,
+            path_validator,
+            &capture_cancellation,
+        )
+    })
+    .await?;
+    let final_state = capture_git_state(git, &authority, request.limits(), cancellation).await?;
+    let final_scan = scan_worktree(
+        git,
+        &authority,
+        request.limits(),
+        path_validator,
+        cancellation,
+    )
+    .await?;
     verify_git_state(&initial, &final_state)?;
     if initial_scan != final_scan {
         return Err(LocalSnapshotError::new(
             LocalSnapshotErrorCode::ConcurrentMutation,
         ));
     }
-    verify_deleted_paths(&authority.worktree, &captured.deleted_paths)?;
-    verify_bound_git_coordinates(git, &authority, LocalSnapshotErrorCode::ConcurrentMutation)
-        .await?;
+    let CapturedInventory {
+        entries,
+        deleted_paths,
+        expanded_bytes,
+    } = captured;
+    let deletion_worktree = authority.worktree.clone_pinned()?;
+    let deletion_cancellation = cancellation.clone();
+    run_blocking(LocalSnapshotErrorCode::ConcurrentMutation, move || {
+        verify_deleted_paths(&deletion_worktree, &deleted_paths, &deletion_cancellation)
+    })
+    .await?;
+    verify_bound_git_coordinates(
+        git,
+        &authority,
+        LocalSnapshotErrorCode::ConcurrentMutation,
+        cancellation,
+    )
+    .await?;
     requested.verify_ambient_path(&requested_path)?;
     authority.verify(LocalSnapshotErrorCode::ConcurrentMutation)?;
+    git.verify()?;
+    check_cancelled(cancellation)?;
 
-    let archive = build_archive(&captured.entries, request.limits())?;
-    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
-    let workflows = discover_repository_workflows(
-        &archive,
-        request.limits(),
-        RepositoryWorkflowDiscoveryPolicy::LocalSnapshot { workflow_location },
-    )
-    .map_err(local_discovery_error)?;
-
+    let entry_count = entries.len();
+    let archive_cancellation = cancellation.clone();
+    let limits = request.limits();
+    let (archive, digest) = run_blocking(LocalSnapshotErrorCode::ArchiveEncoding, move || {
+        let archive = build_archive(&entries, limits, &archive_cancellation)?;
+        let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+        Ok((archive, digest))
+    })
+    .await?;
     Ok(LocalSnapshot {
-        root: authority.worktree_path,
         head: initial.head,
         dirty: !initial.status.is_empty(),
         digest,
-        archive: Bytes::from(archive),
-        entry_count: captured.entries.len(),
-        expanded_bytes: captured.expanded_bytes,
-        workflow_location,
-        workflows,
+        archive,
+        entry_count,
+        expanded_bytes,
     })
 }
 
-fn local_discovery_error(error: RepositoryWorkflowDiscoveryError) -> LocalSnapshotError {
-    LocalSnapshotError::new(match error {
-        RepositoryWorkflowDiscoveryError::ResourceLimit => LocalSnapshotErrorCode::ResourceLimit,
-        RepositoryWorkflowDiscoveryError::UnsafePath => LocalSnapshotErrorCode::UnsafePath,
-        RepositoryWorkflowDiscoveryError::UnsafeLink
-        | RepositoryWorkflowDiscoveryError::NamespaceAlias => LocalSnapshotErrorCode::UnsafeSymlink,
-        RepositoryWorkflowDiscoveryError::PathAlias => LocalSnapshotErrorCode::CaseCollision,
-        RepositoryWorkflowDiscoveryError::PathTypeConflict => {
-            LocalSnapshotErrorCode::PathTypeConflict
-        }
-        _ => LocalSnapshotErrorCode::WorkflowDiscovery,
-    })
+#[cfg(test)]
+async fn capture_snapshot_with_git(
+    request: LocalSnapshotRequest,
+    git: &Path,
+) -> Result<LocalSnapshot, LocalSnapshotError> {
+    capture_snapshot_with_executable(
+        request,
+        &GitExecutable::fixture(git),
+        &CancellationToken::new(),
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -249,9 +431,10 @@ struct GitState {
 }
 
 async fn capture_git_state(
-    git: &Path,
+    git: &GitExecutable,
     authority: &GitAuthority,
     limits: RepositoryWorkflowDiscoveryLimits,
+    cancellation: &CancellationToken,
 ) -> Result<GitState, LocalSnapshotError> {
     let inventory_limit = git_inventory_output_limit(limits)?;
     let index_limit = git_index_output_limit(limits)?;
@@ -261,6 +444,7 @@ async fn capture_git_state(
         authority,
         &["rev-parse", "--verify", "HEAD^{commit}"],
         MAX_GIT_HEAD_BYTES,
+        cancellation,
     )
     .await?;
     let index = capture_bound_git(
@@ -268,6 +452,7 @@ async fn capture_git_state(
         authority,
         &["ls-files", "--cached", "--stage", "-v", "-z"],
         index_limit,
+        cancellation,
     )
     .await?;
     let inventory = capture_bound_git(
@@ -281,6 +466,7 @@ async fn capture_git_state(
             "-z",
         ],
         inventory_limit,
+        cancellation,
     )
     .await?;
     let status = capture_bound_git(
@@ -288,6 +474,7 @@ async fn capture_git_state(
         authority,
         &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
         status_limit,
+        cancellation,
     )
     .await?;
     Ok(GitState {
@@ -299,21 +486,32 @@ async fn capture_git_state(
 }
 
 async fn capture_bound_git(
-    git: &Path,
+    git: &GitExecutable,
     authority: &GitAuthority,
     arguments: &[&str],
     maximum_stdout_bytes: usize,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, LocalSnapshotError> {
-    capture_bound_git_request(git, authority, arguments, None, maximum_stdout_bytes, false).await
+    capture_bound_git_request(
+        git,
+        authority,
+        arguments,
+        None,
+        maximum_stdout_bytes,
+        false,
+        cancellation,
+    )
+    .await
 }
 
 async fn capture_bound_git_with_input(
-    git: &Path,
+    git: &GitExecutable,
     authority: &GitAuthority,
     arguments: &[&str],
     input: &[u8],
     maximum_stdout_bytes: usize,
     allow_no_matches: bool,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, LocalSnapshotError> {
     capture_bound_git_request(
         git,
@@ -322,18 +520,22 @@ async fn capture_bound_git_with_input(
         Some(input),
         maximum_stdout_bytes,
         allow_no_matches,
+        cancellation,
     )
     .await
 }
 
 async fn capture_bound_git_request(
-    git: &Path,
+    git: &GitExecutable,
     authority: &GitAuthority,
     arguments: &[&str],
     input: Option<&[u8]>,
     maximum_stdout_bytes: usize,
     allow_no_matches: bool,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, LocalSnapshotError> {
+    check_cancelled(cancellation)?;
+    git.verify()?;
     authority.verify(LocalSnapshotErrorCode::ConcurrentMutation)?;
     let captured = capture_git_request(
         git,
@@ -342,17 +544,20 @@ async fn capture_bound_git_request(
         input,
         maximum_stdout_bytes,
         allow_no_matches,
+        cancellation,
     )
     .await;
     authority.verify(LocalSnapshotErrorCode::ConcurrentMutation)?;
+    git.verify()?;
     captured
 }
 
 async fn capture_discovery_git(
-    git: &Path,
+    git: &GitExecutable,
     directory: &Path,
     arguments: &[&str],
     maximum_stdout_bytes: usize,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, LocalSnapshotError> {
     capture_git_request(
         git,
@@ -361,6 +566,7 @@ async fn capture_discovery_git(
         None,
         maximum_stdout_bytes,
         false,
+        cancellation,
     )
     .await
 }
@@ -372,37 +578,17 @@ enum GitInvocation<'a> {
 }
 
 async fn capture_git_request(
-    git: &Path,
+    git: &GitExecutable,
     invocation: GitInvocation<'_>,
     arguments: &[&str],
     input: Option<&[u8]>,
     maximum_stdout_bytes: usize,
     allow_no_matches: bool,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, LocalSnapshotError> {
-    let mut command = ProcessCommand::new(git);
-    command
-        .arg("--no-optional-locks")
-        .args(["-c", "core.fsmonitor=false"])
-        .args(["-c", "core.untrackedCache=false"])
-        .args(["-c", "core.preloadIndex=false"])
-        .args(["-c", "maintenance.auto=false"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    configure_git_invocation(&mut command, invocation);
-    command.args(arguments);
+    check_cancelled(cancellation)?;
+    git.verify()?;
+    let command = configured_git_command(git, invocation, arguments, input.is_some());
     let (mut child, mut containment) = spawn_contained(command).map_err(|failure| {
         LocalSnapshotError::new(if failure == CommandFailure::NotFound {
             LocalSnapshotErrorCode::GitUnavailable
@@ -419,7 +605,7 @@ async fn capture_git_request(
         return Err(LocalSnapshotError::new(LocalSnapshotErrorCode::GitCommand));
     };
     let mut stdin = child.stdin.take();
-    let captured = timeout(GIT_COMMAND_TIMEOUT, async {
+    let mut operation = Box::pin(timeout(GIT_COMMAND_TIMEOUT, async {
         tokio::try_join!(
             read_bounded(stdout, maximum_stdout_bytes),
             read_bounded(stderr, MAX_COMMAND_STREAM_BYTES),
@@ -439,8 +625,17 @@ async fn capture_git_request(
             },
             async { child.wait().await.map_err(|_error| CaptureFailure::Io) }
         )
-    })
-    .await;
+    }));
+    let captured = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => None,
+        captured = &mut operation => Some(captured),
+    };
+    drop(operation);
+    let Some(captured) = captured else {
+        terminate_process_tree(&mut child, &mut containment).await;
+        return Err(LocalSnapshotError::new(LocalSnapshotErrorCode::Cancelled));
+    };
     let (stdout, stderr, (), status) = match captured {
         Ok(Ok(value)) => value,
         Ok(Err(CaptureFailure::OutputTooLarge)) => {
@@ -459,11 +654,75 @@ async fn capture_git_request(
         }
     };
     terminate_remaining_process_tree(&mut containment);
-    drop(stderr);
     if !(status.success() || allow_no_matches && status.code() == Some(1)) {
         return Err(LocalSnapshotError::new(LocalSnapshotErrorCode::GitCommand));
     }
+    drop(stderr);
+    git.verify()?;
+    check_cancelled(cancellation)?;
     Ok(stdout)
+}
+
+fn configured_git_command(
+    git: &GitExecutable,
+    invocation: GitInvocation<'_>,
+    arguments: &[&str],
+    input_present: bool,
+) -> ProcessCommand {
+    let mut command = ProcessCommand::new(git.path());
+    let hooks_path = format!("core.hooksPath={GIT_NULL_DEVICE}");
+    let excludes_file = format!("core.excludesFile={GIT_NULL_DEVICE}");
+    let attributes_file = format!("core.attributesFile={GIT_NULL_DEVICE}");
+    command
+        .env_clear()
+        .arg("--no-optional-locks")
+        .arg("--no-pager")
+        .arg("--no-replace-objects")
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "core.untrackedCache=false"])
+        .args(["-c", "core.preloadIndex=false"])
+        .args(["-c", hooks_path.as_str()])
+        .args(["-c", excludes_file.as_str()])
+        .args(["-c", attributes_file.as_str()])
+        .args(["-c", "credential.helper="])
+        .args(["-c", "credential.interactive=never"])
+        .args(["-c", "protocol.allow=never"])
+        .args(["-c", "protocol.file.allow=never"])
+        .args(["-c", "core.useReplaceRefs=false"])
+        .args(["-c", "gc.auto=0"])
+        .args(["-c", "maintenance.auto=false"])
+        .env("LC_ALL", "C")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_SYSTEM", GIT_NULL_DEVICE)
+        .env("GIT_CONFIG_GLOBAL", GIT_NULL_DEVICE)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PROTOCOL_FROM_USER", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_PAGER", "")
+        .env("GIT_TRACE", "0")
+        .env("GIT_TRACE_PACKET", "0")
+        .env("GIT_TRACE_PERFORMANCE", "0")
+        .env("GIT_TRACE_SETUP", "0")
+        .env("GIT_TRACE_SHALLOW", "0")
+        .env("GIT_TRACE_CURL", "0")
+        .env("GIT_TRACE_FSMONITOR", "0")
+        .env("GIT_TRACE_PACK_ACCESS", "0")
+        .env("GIT_TRACE_REFS", "0")
+        .env("GIT_TRACE2", "0")
+        .env("GIT_TRACE2_EVENT", "0")
+        .env("GIT_TRACE2_PERF", "0")
+        .stdin(if input_present {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_git_invocation(&mut command, invocation);
+    command.args(arguments);
+    command
 }
 
 fn configure_git_invocation(command: &mut ProcessCommand, invocation: GitInvocation<'_>) {
@@ -478,8 +737,7 @@ fn configure_git_invocation(command: &mut ProcessCommand, invocation: GitInvocat
                 .arg("--work-tree")
                 .arg(&authority.worktree_path)
                 .arg("-C")
-                .arg(&authority.worktree_path)
-                .env("GIT_COMMON_DIR", &authority.common_directory_path);
+                .arg(&authority.worktree_path);
         }
     }
 }
@@ -493,8 +751,9 @@ struct GitCoordinates {
 }
 
 async fn discover_git_coordinates(
-    git: &Path,
+    git: &GitExecutable,
     directory: &Path,
+    cancellation: &CancellationToken,
 ) -> Result<GitCoordinates, LocalSnapshotError> {
     let output = capture_discovery_git(
         git,
@@ -508,6 +767,7 @@ async fn discover_git_coordinates(
             "--show-prefix",
         ],
         MAX_GIT_COORDINATES_BYTES,
+        cancellation,
     )
     .await?;
     parse_git_coordinates(&output)
@@ -605,9 +865,10 @@ fn parse_git_prefix(value: &str) -> Result<Vec<String>, LocalSnapshotError> {
 }
 
 async fn verify_bound_git_coordinates(
-    git: &Path,
+    git: &GitExecutable,
     authority: &GitAuthority,
     failure: LocalSnapshotErrorCode,
+    cancellation: &CancellationToken,
 ) -> Result<(), LocalSnapshotError> {
     let output = capture_bound_git(
         git,
@@ -621,6 +882,7 @@ async fn verify_bound_git_coordinates(
             "--show-prefix",
         ],
         MAX_GIT_COORDINATES_BYTES,
+        cancellation,
     )
     .await?;
     let coordinates = parse_git_coordinates(&output)?;
@@ -975,6 +1237,13 @@ impl PinnedDirectory {
         self.clone_handle(LocalSnapshotErrorCode::ConcurrentMutation)
     }
 
+    fn clone_pinned(&self) -> Result<Self, LocalSnapshotError> {
+        Ok(Self {
+            handle: self.clone_handle(LocalSnapshotErrorCode::ConcurrentMutation)?,
+            identity: self.identity,
+        })
+    }
+
     fn clone_handle(&self, failure: LocalSnapshotErrorCode) -> Result<Dir, LocalSnapshotError> {
         self.handle
             .try_clone()
@@ -1017,6 +1286,19 @@ impl PinnedDirectory {
         }
         Err(LocalSnapshotError::new(LocalSnapshotErrorCode::UnsafePath))
     }
+}
+
+async fn run_blocking<T, F>(
+    join_failure: LocalSnapshotErrorCode,
+    operation: F,
+) -> Result<T, LocalSnapshotError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, LocalSnapshotError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| LocalSnapshotError::new(join_failure))?
 }
 
 struct GitAuthority {
@@ -1082,7 +1364,6 @@ impl GitLocator {
             .handle
             .symlink_metadata(".git")
             .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::NotGitWorktree))?;
-        require_no_windows_reparse(&metadata)?;
         if metadata.is_dir() {
             let directory = open_git_locator_directory(
                 worktree,
@@ -1126,7 +1407,6 @@ impl GitLocator {
                     .handle
                     .symlink_metadata(".git")
                     .map_err(|_| LocalSnapshotError::new(failure))?;
-                require_no_windows_reparse(&metadata)?;
                 if !metadata.is_dir() {
                     return Err(LocalSnapshotError::new(failure));
                 }
@@ -1179,7 +1459,6 @@ fn capture_git_file(
         .handle
         .symlink_metadata(".git")
         .map_err(|_| LocalSnapshotError::new(failure))?;
-    require_no_windows_reparse(&before)?;
     if !before.is_file() {
         return Err(LocalSnapshotError::new(failure));
     }
@@ -1194,7 +1473,6 @@ fn capture_git_file(
     let opened = file
         .metadata()
         .map_err(|_| LocalSnapshotError::new(failure))?;
-    require_no_windows_reparse(&opened)?;
     if !opened.is_file() || MetadataStamp::new(&opened) != stamp {
         return Err(LocalSnapshotError::new(failure));
     }
@@ -1217,8 +1495,6 @@ fn capture_git_file(
         .handle
         .symlink_metadata(".git")
         .map_err(|_| LocalSnapshotError::new(failure))?;
-    require_no_windows_reparse(&opened_after)?;
-    require_no_windows_reparse(&ambient_after)?;
     if !opened_after.is_file()
         || !ambient_after.is_file()
         || MetadataStamp::new(&opened_after) != stamp
@@ -1300,7 +1576,6 @@ fn require_directory(
     metadata: &Metadata,
     code: LocalSnapshotErrorCode,
 ) -> Result<(), LocalSnapshotError> {
-    require_no_windows_reparse(metadata)?;
     if !metadata.is_dir() {
         return Err(LocalSnapshotError::new(code));
     }
@@ -1311,7 +1586,6 @@ fn require_ambient_directory(
     metadata: &fs::Metadata,
     code: LocalSnapshotErrorCode,
 ) -> Result<(), LocalSnapshotError> {
-    require_no_ambient_windows_reparse(metadata)?;
     if !metadata.is_dir() {
         return Err(LocalSnapshotError::new(code));
     }
@@ -1319,24 +1593,54 @@ fn require_ambient_directory(
 }
 
 async fn scan_worktree(
-    git: &Path,
+    git: &GitExecutable,
     authority: &GitAuthority,
     limits: RepositoryWorkflowDiscoveryLimits,
     path_validator: RepositoryPathValidator,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<WorktreeScanEntry>, LocalSnapshotError> {
+    check_cancelled(cancellation)?;
+    let worktree = authority.worktree.clone_pinned()?;
+    let worker_cancellation = cancellation.clone();
+    let mut scanned = run_blocking(LocalSnapshotErrorCode::ConcurrentMutation, move || {
+        scan_worktree_filesystem(&worktree, limits, path_validator, &worker_cancellation)
+    })
+    .await?;
+    let ignored = ignored_paths(git, authority, &scanned, limits, cancellation).await?;
+    scanned.retain(|entry| !ignored.contains(&entry.path));
+    if scanned
+        .iter()
+        .any(|entry| entry.kind == WorktreeScanEntryKind::Unsupported)
+    {
+        return Err(LocalSnapshotError::new(
+            LocalSnapshotErrorCode::UnsupportedEntry,
+        ));
+    }
+    Ok(scanned)
+}
+
+fn scan_worktree_filesystem(
+    worktree: &PinnedDirectory,
+    limits: RepositoryWorkflowDiscoveryLimits,
+    path_validator: RepositoryPathValidator,
+    cancellation: &CancellationToken,
+) -> Result<Vec<WorktreeScanEntry>, LocalSnapshotError> {
+    check_cancelled(cancellation)?;
     let maximum_observed = limits.maximum_path_graph_nodes();
     let mut observed = 0_usize;
     let mut directories = vec![ScanDirectory {
-        handle: authority.worktree.root_handle()?,
+        handle: worktree.root_handle()?,
         path: None,
     }];
     let mut scanned = Vec::new();
     while let Some(directory) = directories.pop() {
+        check_cancelled(cancellation)?;
         let children = directory
             .handle
             .entries()
             .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
         for child in children {
+            check_cancelled(cancellation)?;
             let child = child
                 .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
             let name = child.file_name();
@@ -1362,7 +1666,6 @@ async fn scan_worktree(
                 .handle
                 .symlink_metadata(&name)
                 .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
-            require_no_windows_reparse(&metadata)?;
             validate_scanned_path(&path, &metadata, path_validator)?;
             let file_type = metadata.file_type();
             let stamp = MetadataStamp::new(&metadata);
@@ -1395,16 +1698,6 @@ async fn scan_worktree(
         }
     }
     scanned.sort_by(|left, right| left.path.cmp(&right.path));
-    let ignored = ignored_paths(git, authority, &scanned, limits).await?;
-    scanned.retain(|entry| !ignored.contains(&entry.path));
-    if scanned
-        .iter()
-        .any(|entry| entry.kind == WorktreeScanEntryKind::Unsupported)
-    {
-        return Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedEntry,
-        ));
-    }
     Ok(scanned)
 }
 
@@ -1424,10 +1717,11 @@ fn validate_scanned_path(
 }
 
 async fn ignored_paths(
-    git: &Path,
+    git: &GitExecutable,
     authority: &GitAuthority,
     scanned: &[WorktreeScanEntry],
     limits: RepositoryWorkflowDiscoveryLimits,
+    cancellation: &CancellationToken,
 ) -> Result<BTreeSet<String>, LocalSnapshotError> {
     if scanned.is_empty() {
         return Ok(BTreeSet::new());
@@ -1435,6 +1729,7 @@ async fn ignored_paths(
     let mut input = Vec::new();
     let maximum_input_bytes = checked_output_limit(limits, 1)?;
     for entry in scanned {
+        check_cancelled(cancellation)?;
         let next_length = input
             .len()
             .checked_add(entry.path.len())
@@ -1455,6 +1750,7 @@ async fn ignored_paths(
         &input,
         input.len(),
         true,
+        cancellation,
     )
     .await?;
     let candidates = scanned
@@ -1496,11 +1792,13 @@ fn capture_entries(
     inventory: &GitInventory,
     limits: RepositoryWorkflowDiscoveryLimits,
     path_validator: RepositoryPathValidator,
+    cancellation: &CancellationToken,
 ) -> Result<CapturedInventory, LocalSnapshotError> {
     let mut entries = Vec::with_capacity(inventory.paths.len());
     let mut deleted_paths = Vec::new();
     let mut expanded_bytes = 0_u64;
     for path in &inventory.paths {
+        check_cancelled(cancellation)?;
         let tracked = inventory.tracked_modes.get(path).copied();
         let Some((parent, name)) = worktree.locate_parent(path)? else {
             if tracked.is_some() {
@@ -1526,15 +1824,19 @@ fn capture_entries(
                 ));
             }
         };
-        require_no_windows_reparse(&before)?;
         let before_stamp = MetadataStamp::new(&before);
         let payload = match tracked {
             Some(TrackedMode::Symlink) if before.file_type().is_symlink() => {
                 capture_filesystem_symlink(&parent, name, path_validator)?
             }
-            Some(TrackedMode::Symlink) if before.is_file() => {
-                capture_symlink_placeholder(&parent, name, &before, before_stamp, path_validator)?
-            }
+            Some(TrackedMode::Symlink) if before.is_file() => capture_symlink_placeholder(
+                &parent,
+                name,
+                &before,
+                before_stamp,
+                path_validator,
+                cancellation,
+            )?,
             Some(TrackedMode::Symlink) => {
                 return Err(LocalSnapshotError::new(
                     LocalSnapshotErrorCode::UnsupportedEntry,
@@ -1551,14 +1853,15 @@ fn capture_entries(
                 capture_filesystem_symlink(&parent, name, path_validator)?
             }
             _ if before.is_file() => {
-                let remaining = limits
-                    .maximum_expanded_bytes()
-                    .checked_sub(expanded_bytes)
-                    .ok_or_else(|| {
-                        LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit)
-                    })?;
-                let (payload, read_bytes) =
-                    capture_regular_file(&parent, name, &before, before_stamp, remaining, tracked)?;
+                let (payload, read_bytes) = capture_regular_file(
+                    &parent,
+                    name,
+                    &before,
+                    before_stamp,
+                    remaining_expanded_bytes(limits, expanded_bytes)?,
+                    tracked,
+                    cancellation,
+                )?;
                 expanded_bytes = expanded_bytes.checked_add(read_bytes).ok_or_else(|| {
                     LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit)
                 })?;
@@ -1573,7 +1876,6 @@ fn capture_entries(
         let after = parent
             .symlink_metadata(name)
             .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
-        require_no_windows_reparse(&after)?;
         if MetadataStamp::new(&after) != before_stamp {
             return Err(LocalSnapshotError::new(
                 LocalSnapshotErrorCode::ConcurrentMutation,
@@ -1591,6 +1893,16 @@ fn capture_entries(
     })
 }
 
+fn remaining_expanded_bytes(
+    limits: RepositoryWorkflowDiscoveryLimits,
+    expanded_bytes: u64,
+) -> Result<u64, LocalSnapshotError> {
+    limits
+        .maximum_expanded_bytes()
+        .checked_sub(expanded_bytes)
+        .ok_or_else(|| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))
+}
+
 fn capture_regular_file(
     parent: &Dir,
     name: &str,
@@ -1598,6 +1910,7 @@ fn capture_regular_file(
     before_stamp: MetadataStamp,
     remaining: u64,
     tracked: Option<TrackedMode>,
+    cancellation: &CancellationToken,
 ) -> Result<(CapturedPayload, u64), LocalSnapshotError> {
     if before.len() > remaining {
         return Err(LocalSnapshotError::new(
@@ -1620,10 +1933,7 @@ fn capture_regular_file(
         usize::try_from(before.len())
             .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?,
     );
-    std::io::Read::by_ref(&mut file)
-        .take(maximum_read)
-        .read_to_end(&mut bytes)
-        .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
+    read_file_cancellable(&mut file, maximum_read, &mut bytes, cancellation)?;
     let read_bytes = u64::try_from(bytes.len())
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?;
     if read_bytes > remaining {
@@ -1648,6 +1958,39 @@ fn capture_regular_file(
     ))
 }
 
+fn read_file_cancellable(
+    file: &mut File,
+    maximum_bytes: u64,
+    output: &mut Vec<u8>,
+    cancellation: &CancellationToken,
+) -> Result<(), LocalSnapshotError> {
+    const READ_CHUNK_BYTES: usize = 64 * 1_024;
+
+    let mut buffer = vec![0_u8; READ_CHUNK_BYTES].into_boxed_slice();
+    while u64::try_from(output.len())
+        .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?
+        < maximum_bytes
+    {
+        check_cancelled(cancellation)?;
+        let remaining = maximum_bytes
+            .checked_sub(
+                u64::try_from(output.len())
+                    .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?,
+            )
+            .ok_or_else(|| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?;
+        let read_limit = usize::try_from(remaining.min(READ_CHUNK_BYTES as u64))
+            .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?;
+        let read = file
+            .read(&mut buffer[..read_limit])
+            .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
+        if read == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+    check_cancelled(cancellation)
+}
+
 fn capture_filesystem_symlink(
     parent: &Dir,
     name: &str,
@@ -1668,6 +2011,7 @@ fn capture_symlink_placeholder(
     before: &Metadata,
     before_stamp: MetadataStamp,
     validator: RepositoryPathValidator,
+    cancellation: &CancellationToken,
 ) -> Result<CapturedPayload, LocalSnapshotError> {
     let mut file = open_regular_nofollow(parent, name)?;
     let opened = file
@@ -1681,10 +2025,7 @@ fn capture_symlink_placeholder(
     let maximum = u64::try_from(automata_ci_workflow_github::USTAR_LINK_NAME_BYTES)
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?;
     let mut bytes = Vec::new();
-    std::io::Read::by_ref(&mut file)
-        .take(maximum + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
+    read_file_cancellable(&mut file, maximum + 1, &mut bytes, cancellation)?;
     if bytes.len() > automata_ci_workflow_github::USTAR_LINK_NAME_BYTES {
         return Err(LocalSnapshotError::new(
             LocalSnapshotErrorCode::ResourceLimit,
@@ -1721,29 +2062,6 @@ fn local_link_validation_error(error: RepositoryPathValidationError) -> LocalSna
     })
 }
 
-fn workflow_location(
-    entries: &[CapturedEntry],
-) -> Result<Option<RepositoryWorkflowLocation>, LocalSnapshotError> {
-    let mut automata = false;
-    let mut github = false;
-    for entry in entries {
-        let mut components = entry.path.split('/');
-        match (components.next(), components.next()) {
-            (Some(".ci"), Some("workflows")) => automata = true,
-            (Some(".github"), Some("workflows")) => github = true,
-            _ => {}
-        }
-    }
-    match (automata, github) {
-        (true, true) => Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::AmbiguousWorkflowLocation,
-        )),
-        (true, false) => Ok(Some(RepositoryWorkflowLocation::Automata)),
-        (false, true) => Ok(Some(RepositoryWorkflowLocation::Github)),
-        (false, false) => Ok(None),
-    }
-}
-
 fn verify_git_state(initial: &GitState, final_state: &GitState) -> Result<(), LocalSnapshotError> {
     if initial.head != final_state.head
         || initial.index != final_state.index
@@ -1760,8 +2078,10 @@ fn verify_git_state(initial: &GitState, final_state: &GitState) -> Result<(), Lo
 fn verify_deleted_paths(
     worktree: &PinnedDirectory,
     deleted_paths: &[String],
+    cancellation: &CancellationToken,
 ) -> Result<(), LocalSnapshotError> {
     for path in deleted_paths {
+        check_cancelled(cancellation)?;
         if let Some((parent, name)) = worktree.locate_parent(path)? {
             match parent.symlink_metadata(name) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1779,7 +2099,9 @@ fn verify_deleted_paths(
 fn build_archive(
     entries: &[CapturedEntry],
     limits: RepositoryWorkflowDiscoveryLimits,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<u8>, LocalSnapshotError> {
+    check_cancelled(cancellation)?;
     if entries.len() >= limits.maximum_entries() {
         return Err(LocalSnapshotError::new(
             LocalSnapshotErrorCode::ResourceLimit,
@@ -1797,15 +2119,20 @@ fn build_archive(
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ResourceLimit))?;
     let writer = BoundedWriter::new(encoder, maximum_decompressed_bytes);
     let mut archive = TarBuilder::new(writer);
-    append_root(&mut archive).map_err(|error| archive_error(&error))?;
+    append_root(&mut archive).map_err(|error| archive_error(&error, cancellation))?;
     for entry in entries {
-        append_entry(&mut archive, entry).map_err(|error| archive_error(&error))?;
+        check_cancelled(cancellation)?;
+        append_entry(&mut archive, entry, cancellation)
+            .map_err(|error| archive_error(&error, cancellation))?;
     }
     let writer = archive
         .into_inner()
-        .map_err(|error| archive_error(&error))?;
+        .map_err(|error| archive_error(&error, cancellation))?;
     let encoder = writer.into_inner();
-    let writer = encoder.finish().map_err(|error| archive_error(&error))?;
+    let writer = encoder
+        .finish()
+        .map_err(|error| archive_error(&error, cancellation))?;
+    check_cancelled(cancellation)?;
     Ok(writer.into_inner())
 }
 
@@ -1816,7 +2143,11 @@ fn append_root<W: Write>(archive: &mut TarBuilder<W>) -> io::Result<()> {
     archive.append(&header, io::empty())
 }
 
-fn append_entry<W: Write>(archive: &mut TarBuilder<W>, entry: &CapturedEntry) -> io::Result<()> {
+fn append_entry<W: Write>(
+    archive: &mut TarBuilder<W>,
+    entry: &CapturedEntry,
+    cancellation: &CancellationToken,
+) -> io::Result<()> {
     let archive_path = format!("{SNAPSHOT_ROOT}/{}", entry.path);
     match &entry.payload {
         CapturedPayload::File { bytes, executable } => {
@@ -1826,7 +2157,10 @@ fn append_entry<W: Write>(archive: &mut TarBuilder<W>, entry: &CapturedEntry) ->
             let mut header = deterministic_header(EntryType::Regular, size, mode);
             header.set_path(archive_path)?;
             header.set_cksum();
-            archive.append(&header, Cursor::new(bytes))
+            archive.append(
+                &header,
+                CancellableReader::new(Cursor::new(bytes), cancellation),
+            )
         }
         CapturedPayload::Symlink { target } => {
             let mut header = deterministic_header(EntryType::Symlink, 0, 0o777);
@@ -1835,6 +2169,29 @@ fn append_entry<W: Write>(archive: &mut TarBuilder<W>, entry: &CapturedEntry) ->
             header.set_cksum();
             archive.append(&header, io::empty())
         }
+    }
+}
+
+struct CancellableReader<'a, R> {
+    inner: R,
+    cancellation: &'a CancellationToken,
+}
+
+impl<'a, R> CancellableReader<'a, R> {
+    const fn new(inner: R, cancellation: &'a CancellationToken) -> Self {
+        Self {
+            inner,
+            cancellation,
+        }
+    }
+}
+
+impl<R: io::Read> io::Read for CancellableReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(io::Error::other("cancelled"));
+        }
+        self.inner.read(buffer)
     }
 }
 
@@ -1849,8 +2206,10 @@ fn deterministic_header(entry_type: EntryType, size: u64, mode: u32) -> Header {
     header
 }
 
-fn archive_error(error: &io::Error) -> LocalSnapshotError {
-    LocalSnapshotError::new(if error.kind() == io::ErrorKind::FileTooLarge {
+fn archive_error(error: &io::Error, cancellation: &CancellationToken) -> LocalSnapshotError {
+    LocalSnapshotError::new(if cancellation.is_cancelled() {
+        LocalSnapshotErrorCode::Cancelled
+    } else if error.kind() == io::ErrorKind::FileTooLarge {
         LocalSnapshotErrorCode::ResourceLimit
     } else {
         LocalSnapshotErrorCode::ArchiveEncoding
@@ -1942,7 +2301,6 @@ fn open_regular_nofollow(parent: &Dir, name: &str) -> Result<File, LocalSnapshot
     let metadata = file
         .metadata()
         .map_err(|_| LocalSnapshotError::new(LocalSnapshotErrorCode::ConcurrentMutation))?;
-    require_no_windows_reparse(&metadata)?;
     if !metadata.is_file() {
         return Err(LocalSnapshotError::new(
             LocalSnapshotErrorCode::ConcurrentMutation,
@@ -1951,21 +2309,12 @@ fn open_regular_nofollow(parent: &Dir, name: &str) -> Result<File, LocalSnapshot
     Ok(file)
 }
 
-#[cfg(unix)]
 fn configure_regular_open(options: &mut OpenOptions) {
     use cap_std::fs::OpenOptionsExt as _;
 
     let flags = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits())
         .expect("Unix nonblocking flag must fit c_int");
     options.custom_flags(flags);
-}
-
-#[cfg(windows)]
-fn configure_regular_open(options: &mut OpenOptions) {
-    use cap_std::fs::OpenOptionsExt as _;
-
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    options.share_mode(FILE_SHARE_READ);
 }
 
 fn executable(metadata: &Metadata, tracked: Option<TrackedMode>) -> bool {
@@ -1975,64 +2324,10 @@ fn executable(metadata: &Metadata, tracked: Option<TrackedMode>) -> bool {
     )
 }
 
-#[cfg(unix)]
 fn untracked_executable(metadata: &Metadata) -> bool {
     use cap_std::fs::MetadataExt as _;
 
     metadata.mode() & 0o111 != 0
-}
-
-#[cfg(windows)]
-const fn untracked_executable(_metadata: &Metadata) -> bool {
-    false
-}
-
-fn require_no_windows_reparse(metadata: &Metadata) -> Result<(), LocalSnapshotError> {
-    if metadata_is_windows_reparse(metadata) {
-        return Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedEntry,
-        ));
-    }
-    Ok(())
-}
-
-fn require_no_ambient_windows_reparse(metadata: &fs::Metadata) -> Result<(), LocalSnapshotError> {
-    if ambient_metadata_is_windows_reparse(metadata) {
-        return Err(LocalSnapshotError::new(
-            LocalSnapshotErrorCode::UnsupportedEntry,
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-const fn metadata_is_windows_reparse(_metadata: &Metadata) -> bool {
-    false
-}
-
-#[cfg(windows)]
-fn metadata_is_windows_reparse(metadata: &Metadata) -> bool {
-    use cap_std::fs::MetadataExt as _;
-
-    windows_reparse_attributes(metadata.file_attributes())
-}
-
-#[cfg(unix)]
-const fn ambient_metadata_is_windows_reparse(_metadata: &fs::Metadata) -> bool {
-    false
-}
-
-#[cfg(windows)]
-fn ambient_metadata_is_windows_reparse(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt as _;
-
-    windows_reparse_attributes(metadata.file_attributes())
-}
-
-#[cfg(any(test, windows))]
-const fn windows_reparse_attributes(attributes: u32) -> bool {
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2052,7 +2347,6 @@ impl DirectoryIdentity {
     }
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MetadataStamp {
     device: u64,
@@ -2065,7 +2359,6 @@ struct MetadataStamp {
     changed_nanoseconds: i64,
 }
 
-#[cfg(unix)]
 impl MetadataStamp {
     fn new(metadata: &Metadata) -> Self {
         use cap_std::fs::MetadataExt as _;
@@ -2083,41 +2376,16 @@ impl MetadataStamp {
     }
 }
 
-#[cfg(windows)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MetadataStamp {
-    device: u64,
-    inode: u64,
-    attributes: u32,
-    created: u64,
-    modified: u64,
-    length: u64,
-}
-
-#[cfg(windows)]
-impl MetadataStamp {
-    fn new(metadata: &Metadata) -> Self {
-        use cap_fs_ext::MetadataExt as _;
-        use cap_std::fs::MetadataExt as _;
-
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            attributes: metadata.file_attributes(),
-            created: metadata.creation_time(),
-            modified: metadata.last_write_time(),
-            length: metadata.file_size(),
-        }
-    }
-}
-
 /// Stable fail-closed class for local snapshot construction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum LocalSnapshotErrorCode {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalSnapshotErrorCode {
+    /// This checkpoint has not qualified exact mutation evidence on the host platform.
+    /// Cooperative shutdown interrupted snapshot construction.
+    Cancelled,
     /// The Git executable was unavailable.
     GitUnavailable,
+    /// The pinned trusted Git executable changed during capture.
+    GitExecutableChanged,
     /// Git did not complete a required read-only query.
     GitCommand,
     /// A Git query exceeded its deadline.
@@ -2132,7 +2400,7 @@ pub enum LocalSnapshotErrorCode {
     UnsafePath,
     /// The requested directory or one selected path has an unsafe ancestor.
     UnsafeAncestor,
-    /// A symlink escapes, cycles, aliases a workflow namespace, or is nonportable.
+    /// A symlink target is noncanonical, absolute, or nonportable.
     UnsafeSymlink,
     /// An index conflict or unsupported staged mode made the source ambiguous.
     IndexAmbiguity,
@@ -2145,12 +2413,6 @@ pub enum LocalSnapshotErrorCode {
     /// A requested ancestor or selected entry is a socket, device, FIFO,
     /// Windows reparse point, or another unsafe filesystem type.
     UnsupportedEntry,
-    /// Two selected paths differ only by case.
-    CaseCollision,
-    /// A selected file or link is also an ancestor of another selected path.
-    PathTypeConflict,
-    /// Both `.ci/workflows` and `.github/workflows` namespaces were present.
-    AmbiguousWorkflowLocation,
     /// A pinned directory, Git authority, index, inventory, status, or `HEAD`
     /// changed during capture.
     ConcurrentMutation,
@@ -2158,16 +2420,18 @@ pub enum LocalSnapshotErrorCode {
     ResourceLimit,
     /// Deterministic tar.gz encoding failed.
     ArchiveEncoding,
-    /// The retained archive failed the shared workflow discovery contract.
-    WorkflowDiscovery,
 }
 
 impl LocalSnapshotErrorCode {
     /// Returns one sanitized actionable failure description.
     #[must_use]
-    pub const fn message(self) -> &'static str {
+    pub(crate) const fn message(self) -> &'static str {
         match self {
-            Self::GitUnavailable => "install Git and make it available on PATH",
+            Self::Cancelled => "local snapshot construction was cancelled",
+            Self::GitUnavailable => "install Git at the trusted system executable path",
+            Self::GitExecutableChanged => {
+                "the trusted Git executable changed while the worktree was inspected"
+            }
             Self::GitCommand => "Git could not inspect the requested worktree",
             Self::GitTimeout => "Git worktree inspection timed out",
             Self::GitOutput => "Git returned an unsupported worktree response",
@@ -2179,7 +2443,7 @@ impl LocalSnapshotErrorCode {
             Self::UnsafeAncestor => {
                 "the requested directory or a selected path has an unsafe ancestor"
             }
-            Self::UnsafeSymlink => "the worktree contains an escaping or unsafe symlink",
+            Self::UnsafeSymlink => "the worktree contains a noncanonical or unsafe symlink target",
             Self::IndexAmbiguity => "resolve the Git index conflict or unsupported staged mode",
             Self::SparseCheckout => {
                 "disable sparse checkout before sealing an exact local snapshot"
@@ -2191,19 +2455,11 @@ impl LocalSnapshotErrorCode {
             Self::UnsupportedEntry => {
                 "the requested path or worktree contains a reparse point or unsupported entry"
             }
-            Self::CaseCollision => "the Git inventory contains case-colliding paths",
-            Self::PathTypeConflict => {
-                "the Git inventory contains conflicting file and directory paths"
-            }
-            Self::AmbiguousWorkflowLocation => {
-                "keep workflows in exactly one of .github/workflows or .ci/workflows"
-            }
             Self::ConcurrentMutation => {
                 "the worktree or Git authority changed while its snapshot was being sealed"
             }
             Self::ResourceLimit => "the worktree snapshot exceeds a configured resource limit",
             Self::ArchiveEncoding => "the worktree could not be encoded deterministically",
-            Self::WorkflowDiscovery => "the sealed archive failed workflow discovery",
         }
     }
 }
@@ -2217,7 +2473,7 @@ impl std::fmt::Display for LocalSnapshotErrorCode {
 /// Sanitized local snapshot failure.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("{code}")]
-pub struct LocalSnapshotError {
+pub(crate) struct LocalSnapshotError {
     code: LocalSnapshotErrorCode,
 }
 
@@ -2228,7 +2484,7 @@ impl LocalSnapshotError {
 
     /// Returns the stable failure class.
     #[must_use]
-    pub const fn code(self) -> LocalSnapshotErrorCode {
+    pub(crate) const fn code(self) -> LocalSnapshotErrorCode {
         self.code
     }
 }
@@ -2244,18 +2500,71 @@ mod tests {
 
     use automata_ci_core::Sha256Digest;
     use automata_ci_workflow_github::{
-        RepositoryWorkflowDiscoveryLimits, RepositoryWorkflowLocation,
+        GithubWorkflowDispatchInputs, RepositoryWorkflowDiscoveryLimits,
+    };
+    use automata_ci_workflow_service::{
+        LocalGithubArchiveAnalysisFailureKind, ReusableWorkflowLimits, analyze_local_github_archive,
     };
     use flate2::read::MultiGzDecoder;
     use sha2::{Digest as _, Sha256};
+    use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
     #[cfg(unix)]
     use super::capture_snapshot_with_git;
-    use super::{LocalSnapshotErrorCode, LocalSnapshotRequest, capture_snapshot};
+    use super::{
+        LocalSnapshotErrorCode, LocalSnapshotRequest, capture_snapshot, local_snapshot_limits,
+        validate_local_snapshot_limits,
+    };
 
     const WORKFLOW: &str =
         "on: push\njobs:\n  check:\n    runs-on: linux\n    steps:\n      - run: true\n";
+
+    #[test]
+    fn archive_cancellation_is_terminal_not_retryable_io() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut reader =
+            super::CancellableReader::new(std::io::Cursor::new(b"payload"), &cancellation);
+        let error = std::io::copy(&mut reader, &mut std::io::sink())
+            .expect_err("cancellation must terminate the copy");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            super::archive_error(&error, &cancellation).code(),
+            LocalSnapshotErrorCode::Cancelled
+        );
+    }
+
+    fn assert_archive_policy_rejects(snapshot: &super::LocalSnapshot) {
+        let error = analyze_local_github_archive(
+            snapshot.archive_bytes(),
+            None,
+            GithubWorkflowDispatchInputs::try_new(std::iter::empty::<(String, String)>())
+                .expect("empty dispatch inputs"),
+            local_snapshot_limits(),
+            ReusableWorkflowLimits::default(),
+            &|| false,
+        )
+        .expect_err("unsafe archive graph must fail before workflow selection");
+        assert_eq!(error.kind(), LocalGithubArchiveAnalysisFailureKind::Archive);
+    }
+
+    #[test]
+    fn local_snapshot_peak_shape_has_fixed_materially_lower_bounds() {
+        let limits = local_snapshot_limits();
+        assert_eq!(limits.maximum_compressed_bytes(), 32 * 1024 * 1024);
+        assert_eq!(limits.maximum_decompressed_bytes(), 64 * 1024 * 1024);
+        assert_eq!(limits.maximum_expanded_bytes(), 32 * 1024 * 1024);
+        assert_eq!(limits.maximum_entries(), 20_000);
+        assert_eq!(limits.maximum_workflow_bytes(), 1024 * 1024);
+        assert!(validate_local_snapshot_limits(limits).is_ok());
+        assert_eq!(
+            validate_local_snapshot_limits(RepositoryWorkflowDiscoveryLimits::default()),
+            Err(super::LocalSnapshotError::new(
+                LocalSnapshotErrorCode::ResourceLimit
+            ))
+        );
+    }
 
     #[tokio::test]
     async fn clean_dirty_ignored_and_cloned_worktrees_have_deterministic_exact_archives() {
@@ -2271,13 +2580,6 @@ mod tests {
         assert_eq!(clean.digest(), repeated.digest());
         assert_eq!(clean.archive_bytes(), repeated.archive_bytes());
         assert!(!clean.dirty());
-        assert_eq!(
-            clean.workflow_location(),
-            Some(RepositoryWorkflowLocation::Github)
-        );
-        assert_eq!(clean.workflows().len(), 1);
-        assert_eq!(clean.workflows()[0].path(), ".github/workflows/ci.yml");
-        assert_eq!(clean.workflows()[0].result().unwrap(), WORKFLOW.as_bytes());
         assert_eq!(
             clean.digest(),
             Sha256Digest::from_bytes(Sha256::digest(clean.archive_bytes()).into())
@@ -2314,13 +2616,12 @@ mod tests {
         fixture.commit_all("subdirectory invocation");
 
         let root = fixture.capture().await.expect("root snapshot");
-        let nested = capture_snapshot(LocalSnapshotRequest::new(
-            fixture.path().join("nested"),
-            RepositoryWorkflowDiscoveryLimits::default(),
-        ))
+        let nested = capture_snapshot(
+            LocalSnapshotRequest::new(fixture.path().join("nested"), local_snapshot_limits()),
+            &CancellationToken::new(),
+        )
         .await
         .expect("nested invocation");
-        assert_eq!(nested.root(), fixture.path());
         assert_eq!(nested.archive_bytes(), root.archive_bytes());
 
         let nested_repository = fixture.path().join("nested");
@@ -2342,13 +2643,13 @@ mod tests {
             "--message",
             "nested repository",
         ]);
-        let nested_authority = capture_snapshot(LocalSnapshotRequest::new(
-            &nested_repository,
-            RepositoryWorkflowDiscoveryLimits::default(),
-        ))
+        let nested_authority = capture_snapshot(
+            LocalSnapshotRequest::new(&nested_repository, local_snapshot_limits()),
+            &CancellationToken::new(),
+        )
         .await
         .expect("nested repository authority");
-        assert_eq!(nested_authority.root(), nested_repository);
+        assert!(!nested_authority.archive_bytes().is_empty());
 
         fixture.git(&[
             "-C",
@@ -2358,10 +2659,10 @@ mod tests {
             fixture.path().to_str().expect("Unicode fixture path"),
         ]);
         assert_eq!(
-            capture_snapshot(LocalSnapshotRequest::new(
-                &nested_repository,
-                RepositoryWorkflowDiscoveryLimits::default(),
-            ))
+            capture_snapshot(
+                LocalSnapshotRequest::new(&nested_repository, local_snapshot_limits(),),
+                &CancellationToken::new(),
+            )
             .await
             .unwrap_err()
             .code(),
@@ -2404,8 +2705,9 @@ mod tests {
             "HEAD",
         ]);
         let linked = Fixture { root: linked_root };
+        let primary_snapshot = primary.capture().await.expect("primary worktree snapshot");
         let linked_snapshot = linked.capture().await.expect("linked worktree snapshot");
-        assert_eq!(linked_snapshot.root(), linked.path());
+        assert_eq!(linked_snapshot.digest(), primary_snapshot.digest());
 
         let symlink_locator = Fixture::new();
         symlink_locator.write("tracked.txt", "tracked\n");
@@ -2472,7 +2774,7 @@ mod tests {
         fs::set_permissions(&linked_wrapper, fs::Permissions::from_mode(0o700))
             .expect("make linked-worktree Git wrapper executable");
         let linked_error = capture_snapshot_with_git(
-            LocalSnapshotRequest::new(linked.path(), RepositoryWorkflowDiscoveryLimits::default()),
+            LocalSnapshotRequest::new(linked.path(), local_snapshot_limits()),
             &linked_wrapper,
         )
         .await
@@ -2525,10 +2827,7 @@ mod tests {
         fs::set_permissions(&admin_wrapper, fs::Permissions::from_mode(0o700))
             .expect("make linked Git-directory wrapper executable");
         let admin_error = capture_snapshot_with_git(
-            LocalSnapshotRequest::new(
-                admin_linked.path(),
-                RepositoryWorkflowDiscoveryLimits::default(),
-            ),
+            LocalSnapshotRequest::new(admin_linked.path(), local_snapshot_limits()),
             &admin_wrapper,
         )
         .await
@@ -2561,7 +2860,7 @@ mod tests {
         fs::set_permissions(&direct_wrapper, fs::Permissions::from_mode(0o700))
             .expect("make direct-worktree Git wrapper executable");
         let direct_error = capture_snapshot_with_git(
-            LocalSnapshotRequest::new(direct.path(), RepositoryWorkflowDiscoveryLimits::default()),
+            LocalSnapshotRequest::new(direct.path(), local_snapshot_limits()),
             &direct_wrapper,
         )
         .await
@@ -2587,7 +2886,7 @@ mod tests {
         let error = capture_snapshot_with_git(
             LocalSnapshotRequest::new(
                 alias_host.path().join("alias/nested"),
-                RepositoryWorkflowDiscoveryLimits::default(),
+                local_snapshot_limits(),
             ),
             Path::new("/definitely-not-an-automata-test-git"),
         )
@@ -2650,56 +2949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn case_collisions_and_dual_workflow_namespaces_fail_closed() {
-        let case_fixture = Fixture::new();
-        case_fixture.write("README", "upper\n");
-        case_fixture.write("readme", "lower\n");
-        case_fixture.commit_all("case collision");
-        assert_eq!(
-            case_fixture.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::CaseCollision
-        );
-
-        let namespace_fixture = Fixture::new();
-        namespace_fixture.write(".github/workflows/ci.yml", WORKFLOW);
-        namespace_fixture.write(".ci/workflows/ci.yml", WORKFLOW);
-        namespace_fixture.commit_all("dual namespaces");
-        assert_eq!(
-            namespace_fixture.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::AmbiguousWorkflowLocation
-        );
-
-        let automata_fixture = Fixture::new();
-        automata_fixture.write(".ci/workflows/ci.yml", WORKFLOW);
-        automata_fixture.commit_all("Automata authority");
-        let automata = automata_fixture
-            .capture()
-            .await
-            .expect("explicit Automata workflow location");
-        assert_eq!(
-            automata.workflow_location(),
-            Some(RepositoryWorkflowLocation::Automata)
-        );
-        assert_eq!(automata.workflows()[0].path(), ".ci/workflows/ci.yml");
-
-        let sigma_fixture = Fixture::new();
-        sigma_fixture.write("Σ/one", "one\n");
-        sigma_fixture.write("ς/two", "two\n");
-        sigma_fixture.commit_all("Unicode sigma collision");
-        assert_eq!(
-            sigma_fixture.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::CaseCollision
-        );
-
-        let normalization_fixture = Fixture::new();
-        normalization_fixture.write("caf\u{e9}/one", "one\n");
-        normalization_fixture.write("cafe\u{301}/two", "two\n");
-        normalization_fixture.commit_all("Unicode normalization collision");
-        assert_eq!(
-            normalization_fixture.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::CaseCollision
-        );
-
+    async fn noncanonical_workflow_namespace_spelling_fails_closed() {
         let namespace_spelling = Fixture::new();
         namespace_spelling.write(".github/WORKFLOWS/ci.yml", WORKFLOW);
         namespace_spelling.commit_all("noncanonical workflow namespace");
@@ -2717,10 +2967,13 @@ mod tests {
 
         let expanded = limits(1_024 * 1_024, 4, 10);
         assert_eq!(
-            capture_snapshot(LocalSnapshotRequest::new(fixture.path(), expanded))
-                .await
-                .unwrap_err()
-                .code(),
+            capture_snapshot(
+                LocalSnapshotRequest::new(fixture.path(), expanded),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .code(),
             LocalSnapshotErrorCode::ResourceLimit
         );
 
@@ -2731,10 +2984,13 @@ mod tests {
             .expect("one root and one file fit the exact entry bound");
         fixture.write("second.txt", "x");
         assert_eq!(
-            capture_snapshot(LocalSnapshotRequest::new(fixture.path(), exact_entries))
-                .await
-                .unwrap_err()
-                .code(),
+            capture_snapshot(
+                LocalSnapshotRequest::new(fixture.path(), exact_entries),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .code(),
             LocalSnapshotErrorCode::ResourceLimit
         );
 
@@ -2750,19 +3006,25 @@ mod tests {
         )
         .expect("decompressed-byte test limits");
         assert_eq!(
-            capture_snapshot(LocalSnapshotRequest::new(fixture.path(), decompressed))
-                .await
-                .unwrap_err()
-                .code(),
+            capture_snapshot(
+                LocalSnapshotRequest::new(fixture.path(), decompressed),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .code(),
             LocalSnapshotErrorCode::ResourceLimit
         );
 
         let encoded = limits(1, 1_024 * 1_024, 10);
         assert_eq!(
-            capture_snapshot(LocalSnapshotRequest::new(fixture.path(), encoded))
-                .await
-                .unwrap_err()
-                .code(),
+            capture_snapshot(
+                LocalSnapshotRequest::new(fixture.path(), encoded),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err()
+            .code(),
             LocalSnapshotErrorCode::ResourceLimit
         );
     }
@@ -2784,7 +3046,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn safe_symlinks_are_preserved_and_escaping_symlinks_are_rejected() {
+    async fn symlinks_are_captured_exactly_and_archive_policy_rejects_escapes() {
         use std::os::unix::fs::symlink;
 
         let fixture = Fixture::new();
@@ -2804,10 +3066,11 @@ mod tests {
         fs::remove_file(fixture.path().join("links/value")).expect("remove safe symlink");
         symlink("../../../outside", fixture.path().join("links/value"))
             .expect("create escaping symlink");
-        assert_eq!(
-            fixture.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::UnsafeSymlink
-        );
+        let escaping = fixture
+            .capture()
+            .await
+            .expect("exact escaping-link snapshot");
+        assert_archive_policy_rejects(&escaping);
     }
 
     #[cfg(unix)]
@@ -2875,20 +3138,19 @@ mod tests {
         namespace.write(".ci/workflows/ci.yml", WORKFLOW);
         symlink(".ci", namespace.path().join("alternate")).expect("alias workflow namespace");
         namespace.commit_all("namespace alias");
-        assert_eq!(
-            namespace.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::UnsafeSymlink
-        );
+        let namespace = namespace
+            .capture()
+            .await
+            .expect("exact namespace-link snapshot");
+        assert_archive_policy_rejects(&namespace);
 
         let cycle = Fixture::new();
         symlink("two", cycle.path().join("one")).expect("first cycle link");
         symlink("one", cycle.path().join("two")).expect("second cycle link");
         cycle.write("tracked", "tracked\n");
         cycle.commit_all("symlink cycle");
-        assert_eq!(
-            cycle.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::UnsafeSymlink
-        );
+        let cycle = cycle.capture().await.expect("exact cyclic-link snapshot");
+        assert_archive_policy_rejects(&cycle);
     }
 
     #[tokio::test]
@@ -2918,10 +3180,10 @@ mod tests {
         aliases.write("Directory/one", "one\n");
         aliases.write("directory/two", "two\n");
         aliases.commit_all("component aliases");
-        assert_eq!(
-            aliases.capture().await.unwrap_err().code(),
-            LocalSnapshotErrorCode::CaseCollision
-        );
+        let alias_snapshot = aliases.capture().await.expect("exact alias archive");
+        let alias_files = archive_files(alias_snapshot.archive_bytes());
+        assert_eq!(alias_files.get("Directory/one").unwrap(), b"one\n");
+        assert_eq!(alias_files.get("directory/two").unwrap(), b"two\n");
 
         let deletion = Fixture::new();
         deletion.write("nested/deleted", "delete me\n");
@@ -2932,15 +3194,6 @@ mod tests {
         let files = archive_files(snapshot.archive_bytes());
         assert!(!files.contains_key("nested/deleted"));
         assert_eq!(files.get("retained").unwrap(), b"retain me\n");
-    }
-
-    #[test]
-    fn windows_reparse_attribute_is_fail_closed() {
-        use super::windows_reparse_attributes;
-
-        assert!(!windows_reparse_attributes(0));
-        assert!(windows_reparse_attributes(0x0000_0400));
-        assert!(windows_reparse_attributes(0xffff_ffff));
     }
 
     #[cfg(unix)]
@@ -3079,7 +3332,7 @@ mod tests {
             .expect("make fake Git executable");
 
         let error = capture_snapshot_with_git(
-            LocalSnapshotRequest::new(fixture.path(), RepositoryWorkflowDiscoveryLimits::default()),
+            LocalSnapshotRequest::new(fixture.path(), local_snapshot_limits()),
             &wrapper,
         )
         .await
@@ -3238,15 +3491,18 @@ mod tests {
         }
 
         async fn capture(&self) -> Result<super::LocalSnapshot, super::LocalSnapshotError> {
-            self.capture_with_limits(RepositoryWorkflowDiscoveryLimits::default())
-                .await
+            self.capture_with_limits(local_snapshot_limits()).await
         }
 
         async fn capture_with_limits(
             &self,
             limits: RepositoryWorkflowDiscoveryLimits,
         ) -> Result<super::LocalSnapshot, super::LocalSnapshotError> {
-            capture_snapshot(LocalSnapshotRequest::new(&self.root, limits)).await
+            capture_snapshot(
+                LocalSnapshotRequest::new(&self.root, limits),
+                &CancellationToken::new(),
+            )
+            .await
         }
 
         fn git_tree_evidence(&self) -> Vec<(String, Vec<u8>, Option<std::time::SystemTime>)> {

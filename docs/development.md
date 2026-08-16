@@ -296,22 +296,45 @@ and the worker composition remain planned; follow the
 [local installation and deployment roadmap](maintainers/roadmaps/local-installation.md) for
 their merge and host-qualification gates.
 
-The internal local-source foundation seals tracked and non-ignored live bytes
-through pinned, no-follow ancestor handles and feeds every exact digest-bound
-archive through source-policy-specific workflow discovery. Git mode normalizes
-tracked symlinks across native Unix links and Windows placeholders; Windows
-reparse points and junctions fail closed. Sparse and assume-unchanged index
-flags cannot hide live bytes, ignored paths are classified in bounded batches,
-and portable path identity uses a bounded Unicode-normalized full-case-folded
-component trie. Its adversarial fixture suite is available with:
+The local-source path seals tracked and non-ignored live bytes through pinned,
+no-follow ancestor handles and feeds the exact digest-bound archive through the
+shared workflow discovery policy. Git mode normalizes tracked symlinks across
+native Unix links and placeholders. Sparse and assume-unchanged index flags
+cannot hide live bytes, ignored paths are classified in bounded batches, and
+portable path identity uses a bounded Unicode-normalized full-case-folded
+component trie. The current checkpoint fails closed on Windows until exact
+native mutation evidence is qualified. Its adversarial fixture suite is
+available with:
 
 ```console
 cargo test --locked -p automata-ci-local snapshot::tests
 ```
 
-There is deliberately no `automata local check` command yet. Exact local event
-semantics, same-tree reusable-workflow compilation, and admission must land
-together before that public validation surface is truthful.
+Use the same source path without starting Docker or mutating Git:
+
+```console
+cargo run --locked -p automata-ci -- local check
+cargo run --locked -p automata-ci -- local check .github/workflows/ci.yml \
+  --input target=staging --json
+```
+
+`local check` captures the archive once and accepts only direct canonical
+`.github/workflows/*.{yml,yaml}` members. When more than one workflow exists,
+pass its exact repository-relative path; filename, stem, display-name, and
+`.ci/workflows` fallbacks do not exist. The root must explicitly declare
+`workflow_dispatch`. Reachable reusable calls are recompiled only from members
+of that same archive, while remote, dynamic, missing, and cyclic calls fail
+closed. The shared traversal validates typed inputs, secret forwarding,
+outputs, propagation, and expansion bounds. Reports contain external secret
+and variable names plus closed built-in requirements such as `github_token`,
+but never input values, secret values, absolute paths, archive bytes, or a
+repository identity. `github_token` is not a promptable user secret, and this
+read-only checkpoint does not claim it can supply one for execution.
+
+The command is independent of `local doctor`, Docker, network access, and a
+GitHub token. It never admits, schedules, or runs work, contacts GitHub, or
+creates a Check Run; local admission and execution remain later roadmap
+checkpoints.
 
 The opt-in live adapter contract creates one randomly named identity volume,
 adopts the same UUID through the public adapter, then re-inspects and removes

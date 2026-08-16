@@ -7,6 +7,7 @@ mod decode;
 mod diagnostic;
 mod expression;
 mod frontend;
+mod local_archive;
 mod model;
 mod repository_archive;
 mod repository_path;
@@ -30,6 +31,11 @@ pub use frontend::{
     FrontendReport, GithubFrontendReport, GithubWorkflowFrontend, ParseWorkflowRequest,
     WorkflowFrontend,
 };
+pub use local_archive::{
+    LocalGithubArchiveCompilation, LocalGithubArchiveCompilationFailure,
+    LocalGithubArchiveCompilationFailureKind, LocalGithubCompiledReusableWorkflow,
+    compile_local_github_archive,
+};
 pub use model::{
     ActionStep, BooleanValue, Concurrency, ConcurrencyQueue, ContainerCredentials,
     ContainerEnvironment, ContainerSequence, Defaults, DetailedConcurrency, DetailedContainer,
@@ -52,7 +58,7 @@ pub use repository_archive::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError,
     RepositoryWorkflowDiscoveryFailure, RepositoryWorkflowDiscoveryLimits,
     RepositoryWorkflowDiscoveryLimitsError, RepositoryWorkflowDiscoveryOutcome,
-    RepositoryWorkflowDiscoveryPolicy, RepositoryWorkflowLocation, discover_repository_workflows,
+    RepositoryWorkflowLocation, discover_github_delivery_workflows,
 };
 pub use repository_path::{
     RepositoryPathValidationError, RepositoryPathValidator, USTAR_LINK_NAME_BYTES,

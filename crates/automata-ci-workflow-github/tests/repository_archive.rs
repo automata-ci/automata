@@ -3,8 +3,7 @@ use std::io::Write as _;
 use automata_ci_workflow_github::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError as DiscoveryError,
     RepositoryWorkflowDiscoveryFailure as DiscoveryFailure, RepositoryWorkflowDiscoveryLimits,
-    RepositoryWorkflowDiscoveryOutcome, RepositoryWorkflowDiscoveryPolicy,
-    RepositoryWorkflowLocation, discover_repository_workflows,
+    RepositoryWorkflowDiscoveryOutcome, discover_github_delivery_workflows,
 };
 use flate2::{Compression, write::GzEncoder};
 
@@ -88,66 +87,6 @@ fn rejects_the_github_actions_workflow_directory_as_a_second_runtime_authority()
 }
 
 #[test]
-fn workflow_locations_are_explicit_and_never_fall_back() {
-    let github_archive = archive(&[
-        directory(ROOT),
-        regular(
-            b"repository-deadbeef/.github/workflows/ci.yml",
-            b"name: github\n",
-        ),
-    ]);
-    let discovered = discover_repository_workflows(
-        &github_archive,
-        limits(),
-        RepositoryWorkflowDiscoveryPolicy::LocalSnapshot {
-            workflow_location: Some(RepositoryWorkflowLocation::Github),
-        },
-    )
-    .expect("explicit GitHub workflow location");
-    assert_eq!(discovered.len(), 1);
-    assert_eq!(discovered[0].path(), ".github/workflows/ci.yml");
-    assert_eq!(discovered[0].result(), Ok(b"name: github\n".as_slice()));
-    assert_eq!(
-        discover_automata_workflows(&github_archive, limits()),
-        Err(DiscoveryError::UnsupportedWorkflowLocation)
-    );
-
-    let automata_archive = archive(&[
-        directory(ROOT),
-        regular(
-            b"repository-deadbeef/.ci/workflows/ci.yml",
-            b"name: automata\n",
-        ),
-    ]);
-    assert_eq!(
-        discover_repository_workflows(
-            &automata_archive,
-            limits(),
-            RepositoryWorkflowDiscoveryPolicy::LocalSnapshot {
-                workflow_location: Some(RepositoryWorkflowLocation::Github),
-            },
-        ),
-        Err(DiscoveryError::UnsupportedWorkflowLocation)
-    );
-    assert_eq!(
-        discover_automata_workflows(&automata_archive, limits())
-            .expect("explicit Automata workflow location")[0]
-            .path(),
-        ".ci/workflows/ci.yml"
-    );
-    assert_eq!(
-        discover_repository_workflows(
-            &automata_archive,
-            limits(),
-            RepositoryWorkflowDiscoveryPolicy::LocalSnapshot {
-                workflow_location: None,
-            },
-        ),
-        Err(DiscoveryError::UnsupportedWorkflowLocation)
-    );
-}
-
-#[test]
 fn a_root_only_repository_has_no_workflows() {
     let archive = archive(&[directory(ROOT)]);
     assert!(
@@ -215,7 +154,7 @@ fn rejects_directories_and_special_entries_at_workflow_paths() {
 }
 
 #[test]
-fn remote_archives_reject_links_while_local_archives_validate_contained_targets() {
+fn github_delivery_archives_reject_links() {
     let safe = archive(&[
         directory(ROOT),
         link(b"repository-deadbeef/dir/link", b'2', b"../target"),
@@ -223,11 +162,6 @@ fn remote_archives_reject_links_while_local_archives_validate_contained_targets(
     assert_eq!(
         discover(&safe),
         Err(DiscoveryError::UnsupportedArchiveEntry)
-    );
-    assert!(
-        discover_local(&safe, RepositoryWorkflowLocation::Automata)
-            .expect("contained local symlink")
-            .is_empty()
     );
 
     let workflow = archive(&[
@@ -242,10 +176,6 @@ fn remote_archives_reject_links_while_local_archives_validate_contained_targets(
         discover(&workflow),
         Err(DiscoveryError::UnsupportedArchiveEntry)
     );
-    assert_eq!(
-        discover_local(&workflow, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::UnsupportedWorkflowEntry)
-    );
 
     let hardlink = archive(&[
         directory(ROOT),
@@ -255,44 +185,19 @@ fn remote_archives_reject_links_while_local_archives_validate_contained_targets(
         discover(&hardlink),
         Err(DiscoveryError::UnsupportedArchiveEntry)
     );
-
-    for target in [
-        b"../../outside".as_slice(),
-        b"/absolute",
-        b"bad\\target",
-        b"non-utf8-\xff",
-        b"",
-    ] {
-        let archive = archive(&[
-            directory(ROOT),
-            link(b"repository-deadbeef/link", b'2', target),
-        ]);
-        assert_eq!(
-            discover_local(&archive, RepositoryWorkflowLocation::Automata),
-            Err(DiscoveryError::UnsafeLink)
-        );
-    }
 }
 
 #[test]
 fn rejects_prefix_type_conflicts_and_portable_path_aliases() {
-    for entries in [
-        vec![
-            directory(ROOT),
-            regular(b"repository-deadbeef/node", b"file"),
-            regular(b"repository-deadbeef/node/child", b"child"),
-        ],
-        vec![
-            directory(ROOT),
-            regular(b"repository-deadbeef/node/child", b"child"),
-            link(b"repository-deadbeef/node", b'2', b"target"),
-        ],
-    ] {
-        assert_eq!(
-            discover_local(&archive(&entries), RepositoryWorkflowLocation::Automata),
-            Err(DiscoveryError::PathTypeConflict)
-        );
-    }
+    let prefix_conflict = archive(&[
+        directory(ROOT),
+        regular(b"repository-deadbeef/node", b"file"),
+        regular(b"repository-deadbeef/node/child", b"child"),
+    ]);
+    assert_eq!(
+        discover(&prefix_conflict),
+        Err(DiscoveryError::PathTypeConflict)
+    );
 
     let case_alias = archive(&[
         directory(ROOT),
@@ -354,182 +259,6 @@ fn derived_path_graph_node_limit_has_an_exact_amplification_boundary() {
     assert_eq!(
         discover_automata_workflows(&amplified, exact_limits),
         Err(DiscoveryError::ResourceLimit)
-    );
-}
-
-#[test]
-fn local_link_graph_rejects_namespace_aliases_case_aliases_and_cycles() {
-    let namespace_alias = archive(&[
-        directory(ROOT),
-        directory(b"repository-deadbeef/.ci/"),
-        directory(b"repository-deadbeef/.ci/workflows/"),
-        regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"name: ci\n"),
-        link(b"repository-deadbeef/alternate", b'2', b".ci"),
-    ]);
-    assert_eq!(
-        discover_local(&namespace_alias, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::NamespaceAlias)
-    );
-
-    let namespace_descendant_alias = archive(&[
-        directory(ROOT),
-        regular(b"repository-deadbeef/.ci/workflows/ci.yml", b"name: ci\n"),
-        link(
-            b"repository-deadbeef/alternate",
-            b'2',
-            b".ci/workflows/ci.yml",
-        ),
-    ]);
-    assert_eq!(
-        discover_local(
-            &namespace_descendant_alias,
-            RepositoryWorkflowLocation::Automata
-        ),
-        Err(DiscoveryError::NamespaceAlias)
-    );
-
-    let target_case_alias = archive(&[
-        directory(ROOT),
-        regular(b"repository-deadbeef/Target", b"target"),
-        link(b"repository-deadbeef/link", b'2', b"target"),
-    ]);
-    assert_eq!(
-        discover_local(&target_case_alias, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::PathAlias)
-    );
-
-    let cycle = archive(&[
-        directory(ROOT),
-        link(b"repository-deadbeef/one", b'2', b"two"),
-        link(b"repository-deadbeef/two", b'2', b"one"),
-    ]);
-    assert_eq!(
-        discover_local(&cycle, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::UnsafeLink)
-    );
-
-    let target_traverses_file = archive(&[
-        directory(ROOT),
-        regular(b"repository-deadbeef/file", b"file"),
-        link(b"repository-deadbeef/link", b'2', b"file/child"),
-    ]);
-    assert_eq!(
-        discover_local(&target_traverses_file, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::PathTypeConflict)
-    );
-
-    let suffix = "x".repeat(94);
-    let first_target = format!("two/{suffix}");
-    let second_target = format!("three/{suffix}");
-    let third_target = format!("four/{suffix}");
-    let expanding_chain = archive(&[
-        directory(ROOT),
-        link(b"repository-deadbeef/one", b'2', first_target.as_bytes()),
-        link(b"repository-deadbeef/two", b'2', second_target.as_bytes()),
-        link(b"repository-deadbeef/three", b'2', third_target.as_bytes()),
-        link(b"repository-deadbeef/four", b'2', b"target"),
-    ]);
-    assert_eq!(
-        discover_local(&expanding_chain, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::ResourceLimit)
-    );
-}
-
-#[test]
-fn local_link_graph_rejects_directory_containment_cycles() {
-    let directory_self_cycle = archive(&[
-        directory(ROOT),
-        directory(b"repository-deadbeef/dir/"),
-        link(b"repository-deadbeef/dir/self", b'2', b"."),
-    ]);
-    assert_eq!(
-        discover_local(&directory_self_cycle, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::UnsafeLink)
-    );
-
-    let indirect_directory_cycle = archive(&[
-        directory(ROOT),
-        directory(b"repository-deadbeef/dir/"),
-        link(b"repository-deadbeef/bridge", b'2', b"dir"),
-        link(b"repository-deadbeef/dir/self", b'2', b"../bridge"),
-    ]);
-    assert_eq!(
-        discover_local(
-            &indirect_directory_cycle,
-            RepositoryWorkflowLocation::Automata
-        ),
-        Err(DiscoveryError::UnsafeLink)
-    );
-
-    let mutual_directory_cycle = archive(&[
-        directory(ROOT),
-        directory(b"repository-deadbeef/one/"),
-        directory(b"repository-deadbeef/two/"),
-        link(b"repository-deadbeef/one/to-two", b'2', b"../two"),
-        link(b"repository-deadbeef/two/to-one", b'2', b"../one"),
-    ]);
-    assert_eq!(
-        discover_local(
-            &mutual_directory_cycle,
-            RepositoryWorkflowLocation::Automata
-        ),
-        Err(DiscoveryError::UnsafeLink)
-    );
-}
-
-#[test]
-fn parent_components_apply_after_intermediate_link_expansion() {
-    let namespace_alias = archive(&[
-        directory(ROOT),
-        directory(b"repository-deadbeef/safe/"),
-        directory(b"repository-deadbeef/target/"),
-        link(b"repository-deadbeef/safe/alias", b'2', b"../target"),
-        link(
-            b"repository-deadbeef/safe/link",
-            b'2',
-            b"alias/../.ci/workflows",
-        ),
-    ]);
-    assert_eq!(
-        discover_local(&namespace_alias, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::NamespaceAlias)
-    );
-
-    let escape = archive(&[
-        directory(ROOT),
-        directory(b"repository-deadbeef/safe/"),
-        directory(b"repository-deadbeef/target/"),
-        link(b"repository-deadbeef/safe/alias", b'2', b"../target"),
-        link(
-            b"repository-deadbeef/safe/link",
-            b'2',
-            b"alias/../../outside",
-        ),
-    ]);
-    assert_eq!(
-        discover_local(&escape, RepositoryWorkflowLocation::Automata),
-        Err(DiscoveryError::UnsafeLink)
-    );
-}
-
-#[test]
-fn each_link_resolution_has_an_independent_hop_bound() {
-    let shared_chain = archive(&[
-        directory(ROOT),
-        directory(b"repository-deadbeef/destination/"),
-        regular(b"repository-deadbeef/destination/a", b"a"),
-        regular(b"repository-deadbeef/destination/b", b"b"),
-        regular(b"repository-deadbeef/destination/c", b"c"),
-        link(b"repository-deadbeef/bridge-one", b'2', b"bridge-two"),
-        link(b"repository-deadbeef/bridge-two", b'2', b"destination"),
-        link(b"repository-deadbeef/one", b'2', b"bridge-one/a"),
-        link(b"repository-deadbeef/two", b'2', b"bridge-one/b"),
-        link(b"repository-deadbeef/three", b'2', b"bridge-one/c"),
-    ]);
-    assert!(
-        discover_local(&shared_chain, RepositoryWorkflowLocation::Automata)
-            .expect("independent valid link chains")
-            .is_empty()
     );
 }
 
@@ -871,24 +600,7 @@ fn discover_automata_workflows(
     bytes: &[u8],
     limits: RepositoryWorkflowDiscoveryLimits,
 ) -> Result<Vec<RepositoryWorkflowDiscoveryOutcome>, DiscoveryError> {
-    discover_repository_workflows(
-        bytes,
-        limits,
-        RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
-    )
-}
-
-fn discover_local(
-    bytes: &[u8],
-    location: RepositoryWorkflowLocation,
-) -> Result<Vec<RepositoryWorkflowDiscoveryOutcome>, DiscoveryError> {
-    discover_repository_workflows(
-        bytes,
-        limits(),
-        RepositoryWorkflowDiscoveryPolicy::LocalSnapshot {
-            workflow_location: Some(location),
-        },
-    )
+    discover_github_delivery_workflows(bytes, limits)
 }
 
 fn limits() -> RepositoryWorkflowDiscoveryLimits {

@@ -48,7 +48,7 @@ use automata_ci_store::{
 use automata_ci_workflow_github::{
     RepositoryWorkflowDiscoveryError, RepositoryWorkflowDiscoveryFailure,
     RepositoryWorkflowDiscoveryLimits, RepositoryWorkflowDiscoveryOutcome,
-    RepositoryWorkflowDiscoveryPolicy, discover_repository_workflows,
+    discover_github_delivery_workflows,
 };
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -1421,10 +1421,9 @@ impl GithubDeliveryWorker {
         let evidence = prepared.resolved_evidence().ok_or_else(|| {
             ProcessingFailure::reject("github.repository_dispatch.unresolved_source")
         })?;
-        let workflows = discover_repository_workflows(
+        let workflows = discover_github_delivery_workflows(
             source.bytes(),
             manifest_discovery_limits(evidence.manifest())?,
-            RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
         )
         .map_err(|error| ProcessingFailure::reject(discovery_failure_kind(error)))?;
         self.all_direct_workflow_outcomes(

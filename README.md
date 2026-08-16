@@ -46,7 +46,7 @@ secrets, OIDC, and Buildx/BuildKit have narrower experimental or component-only
 boundaries. Check [Compatibility](docs/compatibility.md) before evaluating a
 workflow.
 
-## Check a local host
+## Check a local host and workflow
 
 Automata includes a read-only preflight for the planned disposable local
 installation. It checks the supported host tuple, Docker Engine, Docker Compose
@@ -57,9 +57,25 @@ cargo run --locked -p automata-ci -- local doctor
 cargo run --locked -p automata-ci -- local doctor --json
 ```
 
-`automata local up` is planned and is not present in the command. The durable
-development assembly remains the supported way to exercise the complete
-control plane from a source checkout.
+From a Git worktree, the source-only check seals tracked and non-ignored live
+bytes once, selects an explicit local `workflow_dispatch`, compiles reachable
+same-snapshot reusable workflows, validates their typed call contracts and call
+graph, propagates mapped or inherited root secret requirements, and reports
+static secret and variable names without admitting or running anything:
+
+```console
+cargo run --locked -p automata-ci -- local check
+cargo run --locked -p automata-ci -- local check .github/workflows/ci.yml \
+  --input target=staging --json
+```
+
+Omit the canonical repository-relative workflow path only when the repository
+contains exactly one direct workflow. Input values are used only in the
+bounded in-process compiler and are excluded from reports and debug output.
+
+`automata local run` and `automata local up` are planned and are not present in
+the command. The durable development assembly remains the supported way to
+exercise the complete control plane from a source checkout.
 
 ## How it works
 

@@ -1,8 +1,9 @@
 //! Cross-platform boundary for disposable local Automata installations.
 //!
-//! The crate owns Docker Engine discovery without depending on the product CLI.
-//! Lifecycle mutation is added in separately reviewed slices; [`inspect`] is
-//! read-only and creates no engine resources or host state.
+//! The crate owns Docker Engine discovery and exact local workflow inspection
+//! without depending on the product CLI. Lifecycle mutation is added in
+//! separately reviewed slices; [`inspect`] and [`check_workflow`] are read-only
+//! and create no engine resources, admission records, or host state.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -16,18 +17,24 @@ use tokio::{
     time::timeout,
 };
 
+mod check;
 mod engine;
 mod installation;
+#[cfg(unix)]
 mod snapshot;
+#[cfg(not(unix))]
+#[path = "snapshot_unsupported.rs"]
+mod snapshot;
+mod snapshot_limits;
 
+pub use check::{
+    LocalCheckDiagnostic, LocalCheckIssue, LocalCheckIssueCode, LocalCheckReport,
+    LocalCheckRequest, LocalCheckSource, LocalCheckedJob, LocalCheckedWorkflow, check_workflow,
+};
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
 pub use installation::{
     ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
     InstallationSelectorKey,
-};
-pub use snapshot::{
-    LocalSnapshot, LocalSnapshotError, LocalSnapshotErrorCode, LocalSnapshotRequest,
-    capture_snapshot,
 };
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);

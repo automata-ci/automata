@@ -236,6 +236,16 @@ jobs:
         "    secrets:\n      token: ${{ secrets.ROOT_TOKEN }}\n",
         "    secrets: inherit\n",
     );
+    let available_required = BTreeSet::from(["TOKEN".to_owned()]);
+    let satisfied = expand_with_secrets(
+        &required_inherit,
+        &required_catalog,
+        &available_required,
+        None,
+    )
+    .expect("case-insensitive inherited secret satisfies the declared contract");
+    assert_eq!(satisfied.invocations()[1].secrets()[0].target(), "token");
+    assert_eq!(satisfied.invocations()[1].secrets()[0].source(), "TOKEN");
     assert_eq!(
         expand_with_secrets(&required_inherit, &required_catalog, &BTreeSet::new(), None,),
         Err(ReusableWorkflowExpansionError::MissingRequiredSecret(
