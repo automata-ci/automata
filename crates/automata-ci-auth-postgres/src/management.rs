@@ -49,7 +49,7 @@ pub use runner_enrollment::{
     PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment, PreparedRunnerEnrollment,
     RenewRunnerCertificate, RunnerCertificateRenewalOutcome, RunnerCertificateRenewalRequestError,
     RunnerCertificateRenewalSigningError, RunnerEnrollmentConsumeOutcome,
-    RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord,
+    RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord, WindowsRunnerAdmissionRecord,
 };
 
 const ACTION_ROLE_CREATE: &str = "rbac.role.create";

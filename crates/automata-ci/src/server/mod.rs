@@ -24,6 +24,7 @@ mod secret_loop_support;
 mod secret_management;
 mod secret_mutation_recovery;
 mod state_metrics;
+mod windows_runner_admission;
 mod workflow_dispatch;
 mod workflow_rerun;
 
@@ -102,6 +103,10 @@ pub use metrics::ControlPlaneMetrics;
 pub use readiness::{
     Readiness, ReadinessMonitor, ReadinessMonitorError, ReadinessProbe, ReadinessProbeError,
     ReadinessSnapshot,
+};
+pub use windows_runner_admission::{
+    MAX_WINDOWS_RUNNER_ADMISSION_CONFIG_BYTES, WindowsRunnerAdmissionConfigError,
+    WindowsRunnerAdmissionPolicy,
 };
 
 const RESULTS_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_mins(5);

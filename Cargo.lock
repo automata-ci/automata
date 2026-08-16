@@ -352,6 +352,7 @@ dependencies = [
  "automata-ci-key-management",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "static_assertions",
  "tokio",

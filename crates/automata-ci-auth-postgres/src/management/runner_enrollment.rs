@@ -4,7 +4,11 @@ use automata_ci_auth::machine::AuthenticatedMachine;
 use automata_ci_auth::management::{
     ManagementActor, ManagementMutationOutcome, ManagementRepositoryError,
 };
-use automata_ci_core::{MAX_REGISTERED_RUNNERS, RunnerCapabilities, RunnerGroup};
+use automata_ci_core::{
+    IsolationLevel, MAX_REGISTERED_RUNNERS, OperatingSystem, RunnerCapabilities, RunnerFeature,
+    RunnerGroup, SandboxFeature, Sha256Digest,
+};
+use sha2::{Digest as _, Sha256};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -26,6 +30,12 @@ const RUNNER_CERTIFICATE_RENEWAL_OPERATION_LOCK_SALT: i64 = 0x4345_5254_5245_4e5
 const MAX_NAME_BYTES: usize = 255;
 const MAX_GROUP_CHARACTERS: usize = 256;
 const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
+const MAX_WINDOWS_ADMISSION_PAYLOAD_BYTES: usize = 64 * 1_024;
+const MAX_WINDOWS_ADMISSION_ID_BYTES: usize = 128;
+const MAX_WINDOWS_ADMISSION_ORIGIN_BYTES: usize = 2_048;
+const MAX_WINDOWS_IMAGE_REFERENCE_BYTES: usize = 2_048;
+const WINDOWS_ADMISSION_SCHEMA_VERSION: u16 = 1;
+const WINDOWS_ADMISSION_SANDBOX_PROVIDER_ID: &str = "windows-hyperv";
 
 /// A runner may request renewal only inside this fixed interval before its
 /// currently presented certificate expires.
@@ -296,6 +306,9 @@ pub struct ConsumeRunnerEnrollment {
     pub certificate_expires_at_seconds: i64,
     /// Exact bounded JSON response committed with runner registration.
     pub response: Vec<u8>,
+    /// Server-verified broker authority required for every Windows runner and
+    /// forbidden for every other platform.
+    pub windows_admission: Option<WindowsRunnerAdmissionRecord>,
 }
 
 impl std::fmt::Debug for ConsumeRunnerEnrollment {
@@ -312,6 +325,211 @@ impl std::fmt::Debug for ConsumeRunnerEnrollment {
             )
             .finish_non_exhaustive()
     }
+}
+
+/// Flattened, non-secret evidence from one server-verified Windows admission
+/// envelope. The management adapter consumes the nonce and advances promotion
+/// rollback floors in the same transaction that registers the runner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsRunnerAdmissionRecord {
+    /// Exact canonical schema authenticated by the broker.
+    pub schema_version: u16,
+    /// Runner identity authenticated by the admission receipt.
+    pub runner_id: Uuid,
+    /// Enrollment operation authenticated by the admission receipt.
+    pub operation_id: Uuid,
+    /// Server-configured broker admission signing-key identity.
+    pub issuer_key_id: String,
+    /// Globally one-use broker receipt nonce.
+    pub nonce: Sha256Digest,
+    /// Domain-separated digest of the complete signed envelope.
+    pub envelope_sha256: Sha256Digest,
+    /// Exact canonical claims bytes covered by the signature.
+    pub signed_payload: Vec<u8>,
+    /// Exact Ed25519 signature bytes.
+    pub authenticator: Vec<u8>,
+    /// Broker-owned host identity scoped by server trust.
+    pub broker_host_id: String,
+    /// Fixed sandbox provider identity authenticated by the broker.
+    pub sandbox_provider_id: String,
+    /// Exact control origin bound by the receipt.
+    pub control_origin: String,
+    /// Exact public enrollment origin bound by the receipt.
+    pub enrollment_origin: String,
+    /// Digest of the human-readable runner name.
+    pub runner_name_sha256: Sha256Digest,
+    /// Digest of the broker-custodied one-time enrollment token.
+    pub enrollment_token_sha256: Sha256Digest,
+    /// Digest of the broker-custodied key's certificate request.
+    pub csr_sha256: Sha256Digest,
+    /// Digest of the complete broker admission request.
+    pub request_binding_sha256: Sha256Digest,
+    /// Stable environment profile identity.
+    pub environment_profile_id: String,
+    /// Exact environment profile digest.
+    pub environment_profile_sha256: Sha256Digest,
+    /// Immutable digest-qualified Windows image reference.
+    pub image_reference: String,
+    /// Exact Windows image digest.
+    pub image_sha256: Sha256Digest,
+    /// Shared live-probe contract digest.
+    pub probe_contract_sha256: Sha256Digest,
+    /// Whether the broker attested sealed immutable action trees.
+    pub sealed_action_trees: bool,
+    /// Whether the admitted profile is strictly network-disabled.
+    pub network_disabled: bool,
+    /// Broker/control-owned promotion trust-bundle identity.
+    pub promotion_trust_bundle_id: String,
+    /// Exact promotion signing-key identity.
+    pub promotion_key_id: String,
+    /// Canonical promotion payload digest.
+    pub promotion_payload_sha256: Sha256Digest,
+    /// Complete promotion envelope digest.
+    pub promotion_envelope_sha256: Sha256Digest,
+    /// Monotonic promotion serial.
+    pub promotion_serial: u64,
+    /// Monotonic revocation generation.
+    pub revocation_generation: u64,
+    /// Signed promotion issue time.
+    pub promotion_issued_at_ms: u64,
+    /// Signed promotion expiry time.
+    pub promotion_expires_at_ms: u64,
+    /// Short-lived admission receipt issue time.
+    pub receipt_issued_at_ms: u64,
+    /// Short-lived admission receipt expiry time.
+    pub receipt_expires_at_ms: u64,
+    /// Digest of the exact capabilities serialized in the receipt.
+    pub capabilities_sha256: Sha256Digest,
+    /// Commitment to the opaque broker custody handle.
+    pub custody_handle_sha256: Sha256Digest,
+    /// Commitment to the idempotent broker completion nonce.
+    pub completion_nonce_sha256: Sha256Digest,
+    /// Ordered authenticated broker/authority evidence digests.
+    pub evidence_sha256: [Sha256Digest; 9],
+}
+
+impl WindowsRunnerAdmissionRecord {
+    fn valid_for(&self, request: &ConsumeRunnerEnrollment) -> bool {
+        let Some(profile) = request.capabilities.environment_profiles().iter().next() else {
+            return false;
+        };
+        let features = request.capabilities.features();
+        let node_action = [
+            &RunnerFeature::NODE12_ACTIONS,
+            &RunnerFeature::NODE16_ACTIONS,
+            &RunnerFeature::NODE20_ACTIONS,
+            &RunnerFeature::NODE24_ACTIONS,
+        ]
+        .into_iter()
+        .any(|feature| features.contains(feature));
+        let action_feature = node_action
+            || features.contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
+            || features.contains(&RunnerFeature::COMPOSITE_ACTIONS)
+            || features.contains(&RunnerFeature::REPOSITORY_ACTIONS);
+        let Ok(capabilities) = serde_json::to_vec(&request.capabilities) else {
+            return false;
+        };
+        let runner_name_sha256 =
+            Sha256Digest::from_bytes(Sha256::digest(request.runner_name.as_bytes()).into());
+        let capabilities_sha256 = Sha256Digest::from_bytes(Sha256::digest(capabilities).into());
+        let image_suffix = format!("@sha256:{}", self.image_sha256);
+        self.schema_version == WINDOWS_ADMISSION_SCHEMA_VERSION
+            && self.runner_id == request.runner_id
+            && self.operation_id == request.operation_id
+            && request.capabilities.environment_profiles().len() == 1
+            && request.capabilities.sandbox().maximum_isolation() == IsolationLevel::VirtualMachine
+            && request
+                .capabilities
+                .sandbox()
+                .features()
+                .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+            && !features.contains(&RunnerFeature::LOCAL_ACTIONS)
+            && node_action == features.contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
+            && (!action_feature || features.contains(&RunnerFeature::REPOSITORY_ACTIONS))
+            && (!action_feature || self.sealed_action_trees)
+            && valid_admission_id(&self.issuer_key_id)
+            && self.nonce != Sha256Digest::from_bytes([0; 32])
+            && self.envelope_sha256 != Sha256Digest::from_bytes([0; 32])
+            && !self.signed_payload.is_empty()
+            && self.signed_payload.len() <= MAX_WINDOWS_ADMISSION_PAYLOAD_BYTES
+            && self.authenticator.len() == 64
+            && is_lower_hex_64(&self.broker_host_id)
+            && self.sandbox_provider_id == WINDOWS_ADMISSION_SANDBOX_PROVIDER_ID
+            && valid_origin_text(&self.control_origin)
+            && valid_origin_text(&self.enrollment_origin)
+            && self.runner_name_sha256 == runner_name_sha256
+            && self.enrollment_token_sha256 == Sha256Digest::from_bytes(request.token_sha256)
+            && self.request_binding_sha256 != Sha256Digest::from_bytes([0; 32])
+            && self.csr_sha256 != Sha256Digest::from_bytes([0; 32])
+            && self.environment_profile_id == profile.id().as_str()
+            && self.environment_profile_sha256 == profile.digest()
+            && !self.image_reference.is_empty()
+            && self.image_reference.len() <= MAX_WINDOWS_IMAGE_REFERENCE_BYTES
+            && self.image_reference.ends_with(&image_suffix)
+            && self.image_sha256 != Sha256Digest::from_bytes([0; 32])
+            && self.probe_contract_sha256 != Sha256Digest::from_bytes([0; 32])
+            && self.network_disabled
+            && valid_admission_id(&self.promotion_trust_bundle_id)
+            && valid_admission_id(&self.promotion_key_id)
+            && self.promotion_serial > 0
+            && self.revocation_generation > 0
+            && i64::try_from(self.promotion_serial).is_ok()
+            && i64::try_from(self.revocation_generation).is_ok()
+            && valid_unsigned_window(
+                self.promotion_issued_at_ms,
+                self.promotion_expires_at_ms,
+                7 * 24 * 60 * 60 * 1_000,
+            )
+            && valid_unsigned_window(
+                self.receipt_issued_at_ms,
+                self.receipt_expires_at_ms,
+                15 * 60 * 1_000,
+            )
+            && self.capabilities_sha256 == capabilities_sha256
+            && [
+                self.promotion_payload_sha256,
+                self.promotion_envelope_sha256,
+                self.custody_handle_sha256,
+                self.completion_nonce_sha256,
+            ]
+            .into_iter()
+            .chain(self.evidence_sha256)
+            .all(|digest| digest != Sha256Digest::from_bytes([0; 32]))
+    }
+}
+
+fn valid_unsigned_window(issued_at_ms: u64, expires_at_ms: u64, maximum_ms: u64) -> bool {
+    issued_at_ms > 0
+        && expires_at_ms
+            .checked_sub(issued_at_ms)
+            .is_some_and(|lifetime| (1..=maximum_ms).contains(&lifetime))
+        && i64::try_from(expires_at_ms).is_ok()
+}
+
+fn valid_admission_id(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && (3..=MAX_WINDOWS_ADMISSION_ID_BYTES).contains(&value.len())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+}
+
+fn is_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_origin_text(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_WINDOWS_ADMISSION_ORIGIN_BYTES
+        && value.is_ascii()
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 /// Result of atomically consuming a token and registering its runner.
@@ -562,6 +780,12 @@ impl PostgresRunnerEnrollmentRepository {
         &self,
         request: ConsumeRunnerEnrollment,
     ) -> Result<RunnerEnrollmentConsumeOutcome, ManagementRepositoryError> {
+        let windows_platform =
+            request.capabilities.platform().operating_system() == &OperatingSystem::Windows;
+        let windows_admission_valid = match &request.windows_admission {
+            Some(admission) => windows_platform && admission.valid_for(&request),
+            None => !windows_platform,
+        };
         if request.token_sha256 == [0; 32]
             || request.operation_id.is_nil()
             || request.request_sha256 == [0; 32]
@@ -574,6 +798,7 @@ impl PostgresRunnerEnrollmentRepository {
             || request.certificate_expires_at_seconds <= request.certificate_issued_at_seconds
             || request.response.is_empty()
             || request.response.len() > MAX_REDEEM_RESPONSE_BYTES
+            || !windows_admission_valid
         {
             return Err(ManagementRepositoryError::InvalidRequest);
         }
@@ -660,6 +885,31 @@ impl PostgresRunnerEnrollmentRepository {
             commit(transaction).await?;
             return Ok(RunnerEnrollmentConsumeOutcome::AlreadyExists);
         }
+        let mut admitted_at_ms = now_ms;
+        if let Some(admission) = &request.windows_admission {
+            if !reserve_windows_admission_nonce(
+                &mut transaction,
+                prepared.enrollment_id,
+                admission,
+                now_ms,
+            )
+            .await?
+            {
+                commit(transaction).await?;
+                return Ok(RunnerEnrollmentConsumeOutcome::Rejected);
+            }
+            if !advance_windows_promotion_high_water(&mut transaction, admission, now_ms).await? {
+                transaction.rollback().await.map_err(map_database_error)?;
+                return Ok(RunnerEnrollmentConsumeOutcome::Rejected);
+            }
+            admitted_at_ms = database_time_milliseconds(&mut transaction)
+                .await
+                .map_err(map_database_error)?;
+            if !windows_admission_is_current(admission, admitted_at_ms) {
+                transaction.rollback().await.map_err(map_database_error)?;
+                return Ok(RunnerEnrollmentConsumeOutcome::Rejected);
+            }
+        }
         let labels = request
             .capabilities
             .labels()
@@ -715,6 +965,17 @@ impl PostgresRunnerEnrollmentRepository {
         .map_err(map_database_error)?;
         if consumed.rows_affected() != 1 {
             return Err(ManagementRepositoryError::CorruptData);
+        }
+        if let Some(admission) = &request.windows_admission {
+            persist_windows_runner_admission(
+                &mut transaction,
+                prepared.enrollment_id,
+                &prepared.tenant_id,
+                &request,
+                admission,
+                admitted_at_ms,
+            )
+            .await?;
         }
         sqlx::query(
             r"
@@ -1022,6 +1283,209 @@ async fn delete_expired_runner_certificate_state(
     .execute(&mut **transaction)
     .await
     .map_err(map_database_error)?;
+    Ok(())
+}
+
+async fn reserve_windows_admission_nonce(
+    transaction: &mut Transaction<'_, Postgres>,
+    enrollment_id: Uuid,
+    admission: &WindowsRunnerAdmissionRecord,
+    now_ms: i64,
+) -> Result<bool, ManagementRepositoryError> {
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO windows_runner_admission_nonces (
+            nonce,enrollment_id,issuer_key_id,envelope_sha256,reserved_at_ms
+        ) VALUES ($1,$2,$3,$4,$5)
+        ON CONFLICT DO NOTHING
+        ",
+    )
+    .bind(admission.nonce.as_bytes().as_slice())
+    .bind(enrollment_id)
+    .bind(&admission.issuer_key_id)
+    .bind(admission.envelope_sha256.as_bytes().as_slice())
+    .bind(now_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    Ok(inserted.rows_affected() == 1)
+}
+
+async fn advance_windows_promotion_high_water(
+    transaction: &mut Transaction<'_, Postgres>,
+    admission: &WindowsRunnerAdmissionRecord,
+    now_ms: i64,
+) -> Result<bool, ManagementRepositoryError> {
+    let promotion_serial = i64::try_from(admission.promotion_serial)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let revocation_generation = i64::try_from(admission.revocation_generation)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let advanced = sqlx::query(
+        r"
+        INSERT INTO windows_image_promotion_high_water (
+            trust_bundle_id,promotion_key_id,promotion_trust_bundle_sha256,
+            promotion_public_key_sha256,promotion_serial,
+            revocation_generation,updated_at_ms
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+        ON CONFLICT (trust_bundle_id,promotion_key_id) DO UPDATE
+        SET promotion_serial=EXCLUDED.promotion_serial,
+            revocation_generation=EXCLUDED.revocation_generation,
+            updated_at_ms=EXCLUDED.updated_at_ms
+        WHERE windows_image_promotion_high_water.promotion_trust_bundle_sha256
+                  = EXCLUDED.promotion_trust_bundle_sha256
+          AND windows_image_promotion_high_water.promotion_public_key_sha256
+                  = EXCLUDED.promotion_public_key_sha256
+          AND windows_image_promotion_high_water.promotion_serial
+                  <= EXCLUDED.promotion_serial
+          AND windows_image_promotion_high_water.revocation_generation
+                  <= EXCLUDED.revocation_generation
+        ",
+    )
+    .bind(&admission.promotion_trust_bundle_id)
+    .bind(&admission.promotion_key_id)
+    .bind(admission.evidence_sha256[6].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[7].as_bytes().as_slice())
+    .bind(promotion_serial)
+    .bind(revocation_generation)
+    .bind(now_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    Ok(advanced.rows_affected() == 1)
+}
+
+fn windows_admission_is_current(
+    admission: &WindowsRunnerAdmissionRecord,
+    database_now_ms: i64,
+) -> bool {
+    let Ok(receipt_issued_at_ms) = i64::try_from(admission.receipt_issued_at_ms) else {
+        return false;
+    };
+    let Ok(receipt_expires_at_ms) = i64::try_from(admission.receipt_expires_at_ms) else {
+        return false;
+    };
+    let Ok(promotion_issued_at_ms) = i64::try_from(admission.promotion_issued_at_ms) else {
+        return false;
+    };
+    let Ok(promotion_expires_at_ms) = i64::try_from(admission.promotion_expires_at_ms) else {
+        return false;
+    };
+    receipt_issued_at_ms <= database_now_ms
+        && database_now_ms < receipt_expires_at_ms
+        && promotion_issued_at_ms <= database_now_ms
+        && database_now_ms < promotion_expires_at_ms
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the insert keeps every authenticated Windows admission field visibly bound"
+)]
+async fn persist_windows_runner_admission(
+    transaction: &mut Transaction<'_, Postgres>,
+    enrollment_id: Uuid,
+    tenant_id: &str,
+    request: &ConsumeRunnerEnrollment,
+    admission: &WindowsRunnerAdmissionRecord,
+    admitted_at_ms: i64,
+) -> Result<(), ManagementRepositoryError> {
+    let capabilities = serde_json::to_value(&request.capabilities)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let promotion_serial = i64::try_from(admission.promotion_serial)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let revocation_generation = i64::try_from(admission.revocation_generation)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let promotion_issued_at_ms = i64::try_from(admission.promotion_issued_at_ms)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let promotion_expires_at_ms = i64::try_from(admission.promotion_expires_at_ms)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let receipt_issued_at_ms = i64::try_from(admission.receipt_issued_at_ms)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let receipt_expires_at_ms = i64::try_from(admission.receipt_expires_at_ms)
+        .map_err(|_| ManagementRepositoryError::InvalidRequest)?;
+    let inserted = sqlx::query(
+        r"
+        INSERT INTO windows_runner_admissions (
+            enrollment_id,tenant_id,runner_id,operation_id,request_sha256,
+            schema_version,issuer_key_id,nonce,envelope_sha256,signed_payload,
+            authenticator,broker_host_id,sandbox_provider_id,control_origin,enrollment_origin,
+            runner_name_sha256,enrollment_token_sha256,csr_sha256,
+            request_binding_sha256,environment_profile_id,
+            environment_profile_sha256,image_reference,image_sha256,
+            probe_contract_sha256,sealed_action_trees,network_disabled,
+            promotion_trust_bundle_id,promotion_key_id,
+            promotion_payload_sha256,promotion_envelope_sha256,
+            promotion_serial,revocation_generation,promotion_issued_at_ms,
+            promotion_expires_at_ms,receipt_issued_at_ms,receipt_expires_at_ms,
+            capabilities,capabilities_sha256,custody_handle_sha256,
+            completion_nonce_sha256,broker_attestation_sha256,
+            host_input_attestation_sha256,image_attestation_sha256,
+            network_attestation_sha256,profile_contract_sha256,
+            authority_attestation_sha256,promotion_trust_bundle_sha256,
+            promotion_public_key_sha256,cleanup_receipt_sha256,admitted_at_ms
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
+            $31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,
+            $45,$46,$47,$48,$49,$50
+        )
+        ",
+    )
+    .bind(enrollment_id)
+    .bind(tenant_id)
+    .bind(request.runner_id)
+    .bind(request.operation_id)
+    .bind(request.request_sha256.as_slice())
+    .bind(i16::try_from(admission.schema_version).unwrap_or_default())
+    .bind(&admission.issuer_key_id)
+    .bind(admission.nonce.as_bytes().as_slice())
+    .bind(admission.envelope_sha256.as_bytes().as_slice())
+    .bind(&admission.signed_payload)
+    .bind(&admission.authenticator)
+    .bind(&admission.broker_host_id)
+    .bind(&admission.sandbox_provider_id)
+    .bind(&admission.control_origin)
+    .bind(&admission.enrollment_origin)
+    .bind(admission.runner_name_sha256.as_bytes().as_slice())
+    .bind(admission.enrollment_token_sha256.as_bytes().as_slice())
+    .bind(admission.csr_sha256.as_bytes().as_slice())
+    .bind(admission.request_binding_sha256.as_bytes().as_slice())
+    .bind(&admission.environment_profile_id)
+    .bind(admission.environment_profile_sha256.as_bytes().as_slice())
+    .bind(&admission.image_reference)
+    .bind(admission.image_sha256.as_bytes().as_slice())
+    .bind(admission.probe_contract_sha256.as_bytes().as_slice())
+    .bind(admission.sealed_action_trees)
+    .bind(admission.network_disabled)
+    .bind(&admission.promotion_trust_bundle_id)
+    .bind(&admission.promotion_key_id)
+    .bind(admission.promotion_payload_sha256.as_bytes().as_slice())
+    .bind(admission.promotion_envelope_sha256.as_bytes().as_slice())
+    .bind(promotion_serial)
+    .bind(revocation_generation)
+    .bind(promotion_issued_at_ms)
+    .bind(promotion_expires_at_ms)
+    .bind(receipt_issued_at_ms)
+    .bind(receipt_expires_at_ms)
+    .bind(capabilities)
+    .bind(admission.capabilities_sha256.as_bytes().as_slice())
+    .bind(admission.custody_handle_sha256.as_bytes().as_slice())
+    .bind(admission.completion_nonce_sha256.as_bytes().as_slice())
+    .bind(admission.evidence_sha256[0].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[1].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[2].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[3].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[4].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[5].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[6].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[7].as_bytes().as_slice())
+    .bind(admission.evidence_sha256[8].as_bytes().as_slice())
+    .bind(admitted_at_ms)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+    if inserted.rows_affected() != 1 {
+        return Err(ManagementRepositoryError::CorruptData);
+    }
     Ok(())
 }
 
