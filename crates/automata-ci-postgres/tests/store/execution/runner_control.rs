@@ -1793,6 +1793,79 @@ async fn lease_response_and_reported_lifecycle_are_atomic_fenced_and_replayed() 
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn committed_lease_acceptance_replays_after_attempt_expiry() -> TestResult {
+    run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
+        let (seed, lease, metadata, slot, request_operation_id, request_digest) =
+            active_lease_with_duration(&database, EXPIRING_LEASE_DURATION_MILLIS).await?;
+        let fence = seed.session_fences[0];
+        database
+            .store()
+            .publish_lease_offer(offer(
+                fence,
+                &lease,
+                &metadata,
+                slot,
+                request_operation_id,
+                request_digest,
+                OperationId::new(),
+            )?)
+            .await?;
+
+        let acceptance = CommitLeaseResponse::new(
+            operation_request(
+                fence,
+                OperationId::new(),
+                "automata.runner.lease-response.v1",
+                [64; 32],
+            )?,
+            CommandCursor::initial(),
+            lease.attempt_id(),
+            slot,
+            lease.guard(),
+            LeaseResponseAction::Accept,
+            database_now(&database).await?,
+            response(b"accepted before expiry")?,
+        );
+        let committed = database
+            .store()
+            .commit_lease_response(acceptance.clone())
+            .await?;
+        assert!(!committed.was_replayed());
+
+        wait_until_database_time(&clock, lease.expires_at()).await?;
+        let maintenance = database
+            .store()
+            .maintain_control_plane(maintenance_request(&database).await?)
+            .await?;
+        assert_eq!(maintenance.expired_attempts().len(), 1);
+        assert_eq!(
+            maintenance.expired_attempts()[0].attempt_id(),
+            lease.attempt_id()
+        );
+        let lifecycle: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(lease.attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle, "queued");
+
+        let replayed = database.store().commit_lease_response(acceptance).await?;
+        assert!(replayed.was_replayed());
+        assert_eq!(replayed.response(), committed.response());
+        let lifecycle_after_replay: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(lease.attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle_after_replay, "queued");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(
     clippy::too_many_lines,
     reason = "the delivery, replay, acknowledgement, revocation, and schema assertions form one custody transaction"

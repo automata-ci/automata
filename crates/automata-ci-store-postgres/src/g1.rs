@@ -2029,14 +2029,13 @@ impl RunnerControlTransactionRepository for PostgresStore {
         )
         .await?
         {
+            // The exact receipt closes this operation; later attempt state cannot
+            // reinterpret an already-committed response.
             let receipt = receipt.into_live()?;
-            if request.action() == LeaseResponseAction::Accept {
-                verify_exact_published_offer(&mut transaction, &request, true).await?;
-            }
             transaction.commit().await.map_err(operation_error)?;
             return Ok(receipt);
         }
-        let decision_now = verify_exact_published_offer(&mut transaction, &request, false).await?;
+        let decision_now = verify_exact_published_offer(&mut transaction, &request).await?;
         update_session_liveness(
             &mut transaction,
             fence,
@@ -2360,7 +2359,6 @@ fn decode_fencing(value: i64) -> Result<FencingToken, StoreError> {
 async fn verify_exact_published_offer(
     transaction: &mut Transaction<'_, Postgres>,
     request: &CommitLeaseResponse,
-    replay: bool,
 ) -> Result<UnixMillis, StoreError> {
     let fence = request.request().session();
     let row = sqlx::query(
@@ -2408,19 +2406,7 @@ async fn verify_exact_published_offer(
     .ok_or(StoreError::AttemptFenceRejected(request.attempt_id()))?;
     let lifecycle = parse_lifecycle(row.try_get("lifecycle").map_err(operation_error)?)
         .map_err(StoreError::from)?;
-    let lifecycle_is_eligible = if replay {
-        matches!(
-            lifecycle,
-            JobLifecycle::Leased
-                | JobLifecycle::Preparing
-                | JobLifecycle::Running
-                | JobLifecycle::Cancelling
-                | JobLifecycle::Finalizing
-        )
-    } else {
-        lifecycle == JobLifecycle::Leased
-    };
-    if !lifecycle_is_eligible {
+    if lifecycle != JobLifecycle::Leased {
         return Err(StoreError::AttemptFenceRejected(request.attempt_id()));
     }
     let database_now = super::runner_attempt_database_now(transaction).await?;
@@ -2429,26 +2415,20 @@ async fn verify_exact_published_offer(
     if database_now < publication_created_at {
         return Err(StoreError::AttemptFenceRejected(request.attempt_id()));
     }
-    if !replay {
-        super::validate_runner_attempt_caller_clock(request.observed_at(), database_now)?;
-    }
+    super::validate_runner_attempt_caller_clock(request.observed_at(), database_now)?;
     let current_lease_expires_at = UnixMillis::new(
         row.try_get("lease_expires_at_ms")
             .map_err(operation_error)?,
     );
-    if !replay && database_now >= current_lease_expires_at {
+    if database_now >= current_lease_expires_at {
         return Err(StoreError::Attempt(AttemptStoreError::LeaseExpired(
             request.attempt_id(),
         )));
     }
-    let acceptance_expires_at = if replay {
-        current_lease_expires_at
-    } else {
-        UnixMillis::new(
-            row.try_get("offer_valid_until_ms")
-                .map_err(operation_error)?,
-        )
-    };
+    let acceptance_expires_at = UnixMillis::new(
+        row.try_get("offer_valid_until_ms")
+            .map_err(operation_error)?,
+    );
     if request.action() == LeaseResponseAction::Accept && database_now >= acceptance_expires_at {
         return Err(StoreError::Attempt(AttemptStoreError::LeaseExpired(
             request.attempt_id(),
