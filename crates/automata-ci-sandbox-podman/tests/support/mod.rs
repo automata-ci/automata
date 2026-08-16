@@ -103,6 +103,7 @@ struct FakeState {
     next_container_id: u64,
     next_service_address: u8,
     keep_health_starting: bool,
+    require_active_healthcheck: bool,
     omit_health_configuration: bool,
     port_output: Option<CommandOutput>,
     fail_once: Option<Vec<String>>,
@@ -379,6 +380,13 @@ impl FakePodman {
 
     pub(crate) fn keep_health_starting(&self) {
         self.state.lock().expect("fake lock").keep_health_starting = true;
+    }
+
+    pub(crate) fn require_active_healthcheck(&self) {
+        self.state
+            .lock()
+            .expect("fake lock")
+            .require_active_healthcheck = true;
     }
 
     pub(crate) fn omit_health_configuration(&self) {
@@ -923,6 +931,23 @@ fn execute_fake_inspection(state: &FakeState, command: &[String]) -> Option<Comm
 
 fn execute_fake_lifecycle(state: &mut FakeState, command: &[String]) -> Option<CommandOutput> {
     let output = match command {
+        [healthcheck, run, token] if healthcheck == "healthcheck" && run == "run" => {
+            let Some(name) = container_name(state, token) else {
+                return Some(CommandOutput::failure(1, Vec::new()));
+            };
+            let keep_starting = state.keep_health_starting;
+            let Some(container) = state.containers.get_mut(&name) else {
+                return Some(CommandOutput::failure(1, Vec::new()));
+            };
+            if !container.health_configured {
+                CommandOutput::failure(125, Vec::new())
+            } else if keep_starting {
+                CommandOutput::failure(1, b"unhealthy\n".to_vec())
+            } else {
+                container.health = Some("healthy".to_owned());
+                CommandOutput::success(b"healthy\n".to_vec())
+            }
+        }
         [kind, action, rest @ ..] if action == "create" && kind == "network" => {
             let mut resource = new_resource(rest, None);
             state.next_container_id = state.next_container_id.saturating_add(1);
@@ -948,7 +973,10 @@ fn execute_fake_lifecycle(state: &mut FakeState, command: &[String]) -> Option<C
                 return Some(CommandOutput::failure(1, Vec::new()));
             };
             container.state = Some("running".to_owned());
-            if !state.keep_health_starting && container.health.as_deref() == Some("starting") {
+            if !state.keep_health_starting
+                && !state.require_active_healthcheck
+                && container.health.as_deref() == Some("starting")
+            {
                 container.health = Some("healthy".to_owned());
             }
             CommandOutput::success(Vec::new())

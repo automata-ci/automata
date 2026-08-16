@@ -734,6 +734,36 @@ fn health_readiness_obeys_the_aggregate_deadline_and_retains_recovery() {
 }
 
 #[test]
+fn provider_drives_healthchecks_inside_its_delegated_cgroup() {
+    let fixture = Fixture::new_with_service_proxy("service-active-healthcheck");
+    fixture.fake.require_active_healthcheck();
+    let spec = service_spec(OperationId::new());
+    let created = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("provider-owned healthcheck makes the service ready");
+    assert!(
+        fixture
+            .fake
+            .commands()
+            .iter()
+            .any(|command| { podman_command(command).starts_with(&["healthcheck", "run"]) })
+    );
+    fixture
+        .provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                created.handle().clone(),
+                spec.generation(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("cleanup actively checked service");
+    assert!(fixture.fake.is_empty());
+}
+
+#[test]
 fn override_health_policy_fails_closed_when_backend_omits_the_healthcheck() {
     let fixture = Fixture::new_with_service_proxy("service-health-config-drift");
     fixture.fake.omit_health_configuration();
