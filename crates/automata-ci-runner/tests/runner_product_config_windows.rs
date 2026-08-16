@@ -28,6 +28,12 @@ use serde::Serialize;
 static NEXT_EVIDENCE_ROOT: AtomicUsize = AtomicUsize::new(0);
 const BROKER_HOST_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+fn write_secure_fixture(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("write Windows evidence fixture");
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(path)
+        .expect("restrict Windows evidence fixture DACL");
+}
+
 fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) {
     for feature in [
         RunnerFeature::JAVASCRIPT_ACTIONS,
@@ -136,7 +142,7 @@ impl EvidenceFixture {
                 )[..],
             ),
         ] {
-            fs::write(root.join(name), bytes).expect("write evidence fixture");
+            write_secure_fixture(&root.join(name), bytes);
         }
         let mut config = baseline();
         for (field, name) in [
@@ -155,11 +161,8 @@ impl EvidenceFixture {
 
     fn write_config(&self, name: &str) -> PathBuf {
         let path = self.root.join(name);
-        fs::write(
-            &path,
-            serde_json::to_vec(&self.config).expect("serialize evidence configuration"),
-        )
-        .expect("write evidence configuration");
+        let bytes = serde_json::to_vec(&self.config).expect("serialize evidence configuration");
+        write_secure_fixture(&path, &bytes);
         path
     }
 }
@@ -227,11 +230,8 @@ fn add_promotion(fixture: &mut EvidenceFixture) {
         "signature_base64": encoder.encode(key.sign(&payload).as_ref())
     });
     let envelope_path = fixture.root.join("promotion.json");
-    fs::write(
-        &envelope_path,
-        serde_json::to_vec(&envelope).expect("serialize promotion envelope"),
-    )
-    .expect("write promotion envelope");
+    let envelope_bytes = serde_json::to_vec(&envelope).expect("serialize promotion envelope");
+    write_secure_fixture(&envelope_path, &envelope_bytes);
     fixture.config["windows_hyperv"]["image_contract"]["promotion"] = serde_json::json!({
         "envelope_path": envelope_path.to_string_lossy(),
         "key_id": "test.windows-image-promotion.v1",
@@ -529,11 +529,9 @@ fn evidence_verification_fails_closed_on_missing_evidence_and_bad_signature() {
             .expect("parse promotion envelope");
     envelope["signature_base64"] =
         serde_json::json!(base64::engine::general_purpose::STANDARD.encode([0_u8; 64]));
-    fs::write(
-        &envelope_path,
-        serde_json::to_vec(&envelope).expect("serialize corrupt promotion envelope"),
-    )
-    .expect("write corrupt promotion envelope");
+    let envelope_bytes =
+        serde_json::to_vec(&envelope).expect("serialize corrupt promotion envelope");
+    write_secure_fixture(&envelope_path, &envelope_bytes);
     assert_eq!(
         RunnerProductConfig::load(&fixture.write_config("bad-signature-runner.json"))
             .expect_err("an invalid promotion signature must fail closed"),
