@@ -3425,8 +3425,8 @@ mod observer_tests {
     }
 
     fn temporary_backend_socket() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "automata-podman-backend-{}-{}.sock",
+        PathBuf::from("/tmp").join(format!(
+            "automata-podman-{}-{}.sock",
             std::process::id(),
             NEXT_BACKEND_SOCKET.fetch_add(1, AtomicOrdering::Relaxed),
         ))
