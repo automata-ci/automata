@@ -45,9 +45,9 @@ use automata_ci_store::{
     ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
     ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
     RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
     WorkflowAdmissionIdempotency,
@@ -59,8 +59,8 @@ use uuid::Uuid;
 
 use super::subject_evidence::fixture_subject_evidence;
 use super::support::{
-    AFTER, BEFORE, INSTALLATION_ID, OWNER, REPOSITORY, REPOSITORY_ID, REPOSITORY_OWNER_ID, archive,
-    provider_event_envelope, push_body,
+    AFTER, BEFORE, INSTALLATION_ID, OWNER, ProviderDeliveryLedger, REPOSITORY, REPOSITORY_ID,
+    REPOSITORY_OWNER_ID, archive, provider_event_envelope, push_body,
 };
 
 const DELIVERY: &str = "delivery-workflow-processor-1";
@@ -174,21 +174,24 @@ impl LogicalWorkflowAdmissionRepository for LogicalAdmissions {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct DeliveryOutcomes {
-    completions: Mutex<Vec<CompleteProviderDelivery>>,
-    retries: Mutex<Vec<RetryProviderDelivery>>,
-    inventory: Mutex<Option<ProviderDeliveryWorkflowInventory>>,
-    progress: Mutex<Vec<ProviderDeliveryWorkflowOutcome>>,
+    ledger: ProviderDeliveryLedger,
 }
 
 impl DeliveryOutcomes {
+    fn new(attempts: u16, accepted_at: UnixMillis) -> Self {
+        Self {
+            ledger: ProviderDeliveryLedger::new(attempts, accepted_at),
+        }
+    }
+
     fn completions(&self) -> Vec<CompleteProviderDelivery> {
-        self.completions.lock().expect("completions lock").clone()
+        self.ledger.completions()
     }
 
     fn retry_count(&self) -> usize {
-        self.retries.lock().expect("retries lock").len()
+        self.ledger.retries().len()
     }
 }
 
@@ -212,11 +215,11 @@ impl ProviderDeliveryRepository for DeliveryOutcomes {
         &self,
         request: CompleteProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        let receipt = transition_receipt(request.claim(), ProviderDeliveryState::Completed);
-        self.completions
-            .lock()
-            .expect("completions lock")
-            .push(request);
+        let receipt = self.ledger.receipt(
+            request.claim().delivery_id(),
+            ProviderDeliveryState::Completed,
+        );
+        self.ledger.record_completion(request);
         Ok(receipt)
     }
 
@@ -224,58 +227,25 @@ impl ProviderDeliveryRepository for DeliveryOutcomes {
         &self,
         request: RegisterProviderDeliveryWorkflowInventory,
     ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
-        let mut inventory = self.inventory.lock().expect("inventory lock");
-        match inventory.as_ref() {
-            Some(existing) if existing != request.inventory() => {
-                return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-            }
-            Some(_) => {}
-            None => *inventory = Some(request.inventory().clone()),
-        }
-        ProviderDeliveryWorkflowInventoryReceipt::new(
-            inventory.as_ref().expect("inventory initialized").clone(),
-            self.progress.lock().expect("progress lock").clone(),
-        )
-        .map_err(|_| ProviderDeliveryStoreError::WorkflowProgressRejected)
+        self.ledger.register_workflow_inventory(&request)
     }
 
     async fn record_provider_delivery_workflow_progress(
         &self,
         request: RecordProviderDeliveryWorkflowProgress,
     ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
-        let inventory = self.inventory.lock().expect("inventory lock");
-        let Some(inventory) = inventory.as_ref() else {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        };
-        if inventory.digest() != request.inventory_digest()
-            || !inventory
-                .entries()
-                .iter()
-                .any(|entry| entry.workflow_path() == request.outcome().workflow_path())
-        {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        }
-        let mut progress = self.progress.lock().expect("progress lock");
-        if let Some(existing) = progress
-            .iter()
-            .find(|existing| existing.workflow_path() == request.outcome().workflow_path())
-        {
-            return if existing == request.outcome() {
-                Ok(existing.clone())
-            } else {
-                Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
-            };
-        }
-        progress.push(request.outcome().clone());
-        Ok(request.outcome().clone())
+        self.ledger.record_workflow_progress(&request)
     }
 
     async fn retry_provider_delivery(
         &self,
         request: RetryProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        let receipt = transition_receipt(request.claim(), ProviderDeliveryState::RetryPending);
-        self.retries.lock().expect("retries lock").push(request);
+        let receipt = self.ledger.receipt(
+            request.claim().delivery_id(),
+            ProviderDeliveryState::RetryPending,
+        );
+        self.ledger.record_retry(request);
         Ok(receipt)
     }
 
@@ -283,8 +253,8 @@ impl ProviderDeliveryRepository for DeliveryOutcomes {
         &self,
         request: RejectProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        Ok(transition_receipt(
-            request.claim(),
+        Ok(self.ledger.receipt(
+            request.claim().delivery_id(),
             ProviderDeliveryState::Rejected,
         ))
     }
@@ -372,14 +342,6 @@ impl GithubSubjectEvidenceRepository for FixtureSubjectEvidence {
     ) -> Result<GithubWorkflowRunSubjectEvidence, GithubSubjectEvidenceStoreError> {
         panic!("run evidence is outside the processor test")
     }
-}
-
-fn transition_receipt(
-    claim: ProviderDeliveryClaimFence,
-    state: ProviderDeliveryState,
-) -> ProviderDeliveryReceipt {
-    ProviderDeliveryReceipt::from_durable_parts(claim.delivery_id(), state, 1, UnixMillis::new(50))
-        .expect("transition receipt")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -675,7 +637,7 @@ async fn harness_with_visibility(
         ArchiveFormat::TarGzip,
         archive(files),
     );
-    let deliveries = Arc::new(DeliveryOutcomes::default());
+    let deliveries = Arc::new(DeliveryOutcomes::new(1, UnixMillis::new(50)));
     let credentials = Arc::new(DiffCredentials::default());
     let subject_evidence = Arc::new(FixtureSubjectEvidence::from_claimed(&claimed));
     let worker = GithubDeliveryWorker::new(
@@ -752,7 +714,7 @@ async fn pull_request_harness_with_visibility(
         ArchiveFormat::TarGzip,
         archive(files),
     );
-    let deliveries = Arc::new(DeliveryOutcomes::default());
+    let deliveries = Arc::new(DeliveryOutcomes::new(1, UnixMillis::new(50)));
     let credentials = Arc::new(DiffCredentials::default());
     let subject_evidence = Arc::new(FixtureSubjectEvidence::authenticated_event(
         &claimed,

@@ -9,10 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
-use automata_ci_blob::{
-    BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    MediaType, PutBlobOutcome, VerifiedBlob,
-};
+use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
@@ -49,9 +46,9 @@ use automata_ci_store::{
     ProviderDeliveryFailureKind, ProviderDeliveryId, ProviderDeliveryIdentity,
     ProviderDeliveryReceipt, ProviderDeliveryRepository, ProviderDeliveryState,
     ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
     RejectProviderDelivery, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
     RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
@@ -67,8 +64,8 @@ use super::subject_evidence::{
     fixture_check_head_sha, fixture_subject_evidence, fixture_subject_evidence_with_head,
 };
 use super::support::{
-    AFTER, BEFORE, INSTALLATION_ID, OWNER, REPOSITORY, REPOSITORY_ID, REPOSITORY_OWNER_ID, ZERO,
-    archive, provider_event_envelope, push_body,
+    AFTER, BEFORE, INSTALLATION_ID, OWNER, ProviderDeliveryLedger, REPOSITORY, REPOSITORY_ID,
+    REPOSITORY_OWNER_ID, VerifiedBlobStore, ZERO, archive, provider_event_envelope, push_body,
 };
 
 const DELIVERY: &str = "delivery-service-1";
@@ -169,34 +166,6 @@ impl GithubDeliveryClock for BlockingClock {
             }
         }
         UnixMillis::new(self.now.load(Ordering::SeqCst))
-    }
-}
-
-#[derive(Debug)]
-struct FixtureBlobStore {
-    descriptor: BlobDescriptor,
-    bytes: Bytes,
-    reads: AtomicUsize,
-}
-
-#[async_trait]
-impl ImmutableBlobStore for FixtureBlobStore {
-    async fn put_if_absent(&self, _payload: BlobPayload) -> Result<PutBlobOutcome, BlobStoreError> {
-        panic!("the delivery service never writes its authenticated raw object")
-    }
-
-    async fn get_verified(
-        &self,
-        descriptor: &BlobDescriptor,
-        maximum_bytes: u64,
-    ) -> Result<VerifiedBlob, BlobStoreError> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        if descriptor != &self.descriptor || descriptor.size() > maximum_bytes {
-            return Err(BlobStoreError::new(BlobStoreErrorKind::Integrity));
-        }
-        let payload = BlobPayload::verify(descriptor.clone(), self.bytes.clone())
-            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
-        Ok(VerifiedBlob::from_payload(payload))
     }
 }
 
@@ -927,17 +896,13 @@ struct RecordingRepository {
     template: DeliveryTemplate,
     renewal_behavior: RenewalBehavior,
     terminal_behavior: TerminalBehavior,
+    ledger: ProviderDeliveryLedger,
     claim_calls: Mutex<Vec<ClaimProviderDelivery>>,
     claim_count: AtomicUsize,
     reclaim_enabled: AtomicBool,
     claimed_at: Mutex<Option<UnixMillis>>,
     renewals: Mutex<Vec<RenewProviderDeliveryClaim>>,
     renewal_called: Notify,
-    completions: Mutex<Vec<CompleteProviderDelivery>>,
-    retries: Mutex<Vec<RetryProviderDelivery>>,
-    rejections: Mutex<Vec<RejectProviderDelivery>>,
-    inventory: Mutex<Option<ProviderDeliveryWorkflowInventory>>,
-    progress: Mutex<Vec<ProviderDeliveryWorkflowOutcome>>,
     terminal_entered: Notify,
     terminal_release: CancellationToken,
     renewal_apply_gate: Arc<RenewalApplyGate>,
@@ -945,19 +910,11 @@ struct RecordingRepository {
 
 impl RecordingRepository {
     fn receipt(&self, state: ProviderDeliveryState) -> ProviderDeliveryReceipt {
-        ProviderDeliveryReceipt::from_durable_parts(
-            self.template.delivery_id,
-            state,
-            1,
-            UnixMillis::new(50),
-        )
-        .expect("transition receipt")
+        self.ledger.receipt(self.template.delivery_id, state)
     }
 
     fn transition_count(&self) -> usize {
-        self.completions.lock().expect("completions lock").len()
-            + self.retries.lock().expect("retries lock").len()
-            + self.rejections.lock().expect("rejections lock").len()
+        self.ledger.transition_count()
     }
 }
 
@@ -1039,10 +996,7 @@ impl ProviderDeliveryRepository for RecordingRepository {
         &self,
         request: CompleteProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        self.completions
-            .lock()
-            .expect("completions lock")
-            .push(request);
+        self.ledger.record_completion(request);
         if self.terminal_behavior == TerminalBehavior::BlockThenSucceed {
             self.terminal_entered.notify_one();
             self.terminal_release.cancelled().await;
@@ -1057,57 +1011,21 @@ impl ProviderDeliveryRepository for RecordingRepository {
         &self,
         request: RegisterProviderDeliveryWorkflowInventory,
     ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
-        let mut inventory = self.inventory.lock().expect("inventory lock");
-        match inventory.as_ref() {
-            Some(existing) if existing != request.inventory() => {
-                return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-            }
-            Some(_) => {}
-            None => *inventory = Some(request.inventory().clone()),
-        }
-        ProviderDeliveryWorkflowInventoryReceipt::new(
-            inventory.as_ref().expect("inventory initialized").clone(),
-            self.progress.lock().expect("progress lock").clone(),
-        )
-        .map_err(|_| ProviderDeliveryStoreError::WorkflowProgressRejected)
+        self.ledger.register_workflow_inventory(&request)
     }
 
     async fn record_provider_delivery_workflow_progress(
         &self,
         request: RecordProviderDeliveryWorkflowProgress,
     ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
-        let inventory = self.inventory.lock().expect("inventory lock");
-        let Some(inventory) = inventory.as_ref() else {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        };
-        if inventory.digest() != request.inventory_digest()
-            || !inventory
-                .entries()
-                .iter()
-                .any(|entry| entry.workflow_path() == request.outcome().workflow_path())
-        {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        }
-        let mut progress = self.progress.lock().expect("progress lock");
-        if let Some(existing) = progress
-            .iter()
-            .find(|existing| existing.workflow_path() == request.outcome().workflow_path())
-        {
-            return if existing == request.outcome() {
-                Ok(existing.clone())
-            } else {
-                Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
-            };
-        }
-        progress.push(request.outcome().clone());
-        Ok(request.outcome().clone())
+        self.ledger.record_workflow_progress(&request)
     }
 
     async fn retry_provider_delivery(
         &self,
         request: RetryProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        self.retries.lock().expect("retries lock").push(request);
+        self.ledger.record_retry(request);
         Ok(self.receipt(ProviderDeliveryState::RetryPending))
     }
 
@@ -1115,10 +1033,7 @@ impl ProviderDeliveryRepository for RecordingRepository {
         &self,
         request: RejectProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        self.rejections
-            .lock()
-            .expect("rejections lock")
-            .push(request);
+        self.ledger.record_rejection(request);
         if self.terminal_behavior == TerminalBehavior::BlockThenSucceed {
             self.terminal_entered.notify_one();
             self.terminal_release.cancelled().await;
@@ -1275,7 +1190,7 @@ fn database_issued_at(behavior: RenewalBehavior, requested_at: UnixMillis) -> Un
 
 struct Harness {
     service: Arc<GithubDeliveryService>,
-    objects: Arc<FixtureBlobStore>,
+    objects: Arc<VerifiedBlobStore>,
     repository: Arc<RecordingRepository>,
     credentials: Arc<RecordingCredentialProvider>,
     source: Arc<RecordingSourcePort>,
@@ -1304,17 +1219,13 @@ fn blocking_clock_harness(
         template,
         renewal_behavior: RenewalBehavior::NeverReturns,
         terminal_behavior: TerminalBehavior::Succeed,
+        ledger: ProviderDeliveryLedger::new(1, UnixMillis::new(50)),
         claim_calls: Mutex::new(Vec::new()),
         claim_count: AtomicUsize::new(0),
         reclaim_enabled: AtomicBool::new(false),
         claimed_at: Mutex::new(None),
         renewals: Mutex::new(Vec::new()),
         renewal_called: Notify::new(),
-        completions: Mutex::new(Vec::new()),
-        retries: Mutex::new(Vec::new()),
-        rejections: Mutex::new(Vec::new()),
-        inventory: Mutex::new(None),
-        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate,
@@ -1326,11 +1237,7 @@ fn blocking_clock_harness(
     ));
     let worker_id =
         ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
-    let objects = Arc::new(FixtureBlobStore {
-        descriptor,
-        bytes: body,
-        reads: AtomicUsize::new(0),
-    });
+    let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let service = GithubDeliveryService::new_public_only(
         objects,
         source,
@@ -1430,17 +1337,13 @@ fn harness_with_stored_visibility(
         template,
         renewal_behavior,
         terminal_behavior,
+        ledger: ProviderDeliveryLedger::new(1, UnixMillis::new(50)),
         claim_calls: Mutex::new(Vec::new()),
         claim_count: AtomicUsize::new(0),
         reclaim_enabled: AtomicBool::new(false),
         claimed_at: Mutex::new(None),
         renewals: Mutex::new(Vec::new()),
         renewal_called: Notify::new(),
-        completions: Mutex::new(Vec::new()),
-        retries: Mutex::new(Vec::new()),
-        rejections: Mutex::new(Vec::new()),
-        inventory: Mutex::new(None),
-        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1453,11 +1356,7 @@ fn harness_with_stored_visibility(
     let clock = Arc::new(ManualClock::new(INITIAL_NOW));
     let worker_id =
         ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
-    let objects = Arc::new(FixtureBlobStore {
-        descriptor,
-        bytes: body,
-        reads: AtomicUsize::new(0),
-    });
+    let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let service = if private_source_enabled {
         GithubDeliveryService::new_with_private_source_credentials(
             objects.clone(),
@@ -1525,17 +1424,13 @@ fn snapshot_processor_harness_with_config(
         template,
         renewal_behavior,
         terminal_behavior: TerminalBehavior::Succeed,
+        ledger: ProviderDeliveryLedger::new(1, UnixMillis::new(50)),
         claim_calls: Mutex::new(Vec::new()),
         claim_count: AtomicUsize::new(0),
         reclaim_enabled: AtomicBool::new(false),
         claimed_at: Mutex::new(None),
         renewals: Mutex::new(Vec::new()),
         renewal_called: Notify::new(),
-        completions: Mutex::new(Vec::new()),
-        retries: Mutex::new(Vec::new()),
-        rejections: Mutex::new(Vec::new()),
-        inventory: Mutex::new(None),
-        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1563,11 +1458,7 @@ fn snapshot_processor_harness_with_config(
     let clock = Arc::new(ManualClock::new(INITIAL_NOW));
     let worker_id =
         ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
-    let objects = Arc::new(FixtureBlobStore {
-        descriptor,
-        bytes: body,
-        reads: AtomicUsize::new(0),
-    });
+    let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let service = GithubDeliveryService::new_with_private_source_credentials(
         objects.clone(),
         source.clone(),
@@ -1610,17 +1501,13 @@ fn changed_files_renewal_harness(
         template,
         renewal_behavior: RenewalBehavior::BlockCommittedThenSucceed,
         terminal_behavior: TerminalBehavior::Succeed,
+        ledger: ProviderDeliveryLedger::new(1, UnixMillis::new(50)),
         claim_calls: Mutex::new(Vec::new()),
         claim_count: AtomicUsize::new(0),
         reclaim_enabled: AtomicBool::new(false),
         claimed_at: Mutex::new(None),
         renewals: Mutex::new(Vec::new()),
         renewal_called: Notify::new(),
-        completions: Mutex::new(Vec::new()),
-        retries: Mutex::new(Vec::new()),
-        rejections: Mutex::new(Vec::new()),
-        inventory: Mutex::new(None),
-        progress: Mutex::new(Vec::new()),
         terminal_entered: Notify::new(),
         terminal_release: CancellationToken::new(),
         renewal_apply_gate: renewal_apply_gate.clone(),
@@ -1643,11 +1530,7 @@ fn changed_files_renewal_harness(
     let clock = Arc::new(ManualClock::new(INITIAL_NOW));
     let worker_id =
         ProviderDeliveryClaimOwnerId::from_uuid(Uuid::from_u128(2)).expect("worker identity");
-    let objects = Arc::new(FixtureBlobStore {
-        descriptor,
-        bytes: body,
-        reads: AtomicUsize::new(0),
-    });
+    let objects = Arc::new(VerifiedBlobStore::exact(descriptor, body));
     let changed_files = Arc::new(match first_disposition {
         Some(disposition) => {
             RenewalRacingChangedFiles::new(disposition, renewal_apply_gate.clone())
@@ -1723,11 +1606,7 @@ async fn wait_for_renewal_count(repository: &RecordingRepository, expected: usiz
 }
 
 fn assert_single_skipped_completion(harness: &Harness, fence: u64) {
-    let completions = harness
-        .repository
-        .completions
-        .lock()
-        .expect("completions lock");
+    let completions = harness.repository.ledger.completions();
     assert_eq!(completions.len(), 1);
     assert_eq!(completions[0].claim().fence(), fence);
     assert_eq!(completions[0].outcomes().len(), 1);
@@ -1737,22 +1616,8 @@ fn assert_single_skipped_completion(harness: &Harness, fence: u64) {
             if reason.as_str() == "github.workflow.event_filters_not_matched"
     ));
     drop(completions);
-    assert!(
-        harness
-            .repository
-            .retries
-            .lock()
-            .expect("retries lock")
-            .is_empty()
-    );
-    assert!(
-        harness
-            .repository
-            .rejections
-            .lock()
-            .expect("rejections lock")
-            .is_empty()
-    );
+    assert!(harness.repository.ledger.retries().is_empty());
+    assert!(harness.repository.ledger.rejections().is_empty());
 }
 
 async fn advance_successful_renewals(
@@ -1940,11 +1805,7 @@ async fn success_uses_one_stable_worker_and_exact_request_scoped_credential() {
         );
     }
     {
-        let completions = harness
-            .repository
-            .completions
-            .lock()
-            .expect("completions lock");
+        let completions = harness.repository.ledger.completions();
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].outcomes().len(), 1);
     }
@@ -2000,7 +1861,7 @@ async fn public_delivery_ignores_retained_private_credentials_and_fetches_anonym
                     .is_empty()
             );
         }
-        assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(harness.objects.read_count(), 1);
         assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
         assert!(!harness.source.credential_present.load(Ordering::SeqCst));
         assert!(!harness.source.credential_matched.load(Ordering::SeqCst));
@@ -2031,15 +1892,11 @@ async fn public_only_service_terminally_rejects_private_delivery_without_credent
         outcome,
         GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
     ));
-    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.objects.read_count(), 1);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.repository.transition_count(), 1);
-    let rejections = harness
-        .repository
-        .rejections
-        .lock()
-        .expect("rejections lock");
+    let rejections = harness.repository.ledger.rejections();
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
@@ -2068,15 +1925,11 @@ async fn public_only_service_rejects_envelope_visibility_mismatch_before_blob_io
         outcome,
         GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
     ));
-    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.objects.read_count(), 0);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.repository.transition_count(), 1);
-    let rejections = harness
-        .repository
-        .rejections
-        .lock()
-        .expect("rejections lock");
+    let rejections = harness.repository.ledger.rejections();
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
@@ -2105,15 +1958,11 @@ async fn public_only_service_rejects_private_envelope_before_anonymous_source() 
         outcome,
         GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
     ));
-    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.objects.read_count(), 0);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.repository.transition_count(), 1);
-    let rejections = harness
-        .repository
-        .rejections
-        .lock()
-        .expect("rejections lock");
+    let rejections = harness.repository.ledger.rejections();
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
@@ -2141,23 +1990,12 @@ async fn public_only_service_rejects_private_deletion_before_empty_completion() 
         outcome,
         GithubDeliveryServiceOutcome::Processed(GithubDeliveryWorkerOutcome::Rejected(_))
     ));
-    assert_eq!(harness.objects.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.objects.read_count(), 1);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.repository.transition_count(), 1);
-    assert!(
-        harness
-            .repository
-            .completions
-            .lock()
-            .expect("completions lock")
-            .is_empty()
-    );
-    let rejections = harness
-        .repository
-        .rejections
-        .lock()
-        .expect("rejections lock");
+    assert!(harness.repository.ledger.completions().is_empty());
+    let rejections = harness.repository.ledger.rejections();
     assert_eq!(rejections.len(), 1);
     assert_eq!(
         rejections[0].failure_kind().as_str(),
@@ -2184,23 +2022,8 @@ async fn public_only_private_rejection_preserves_terminal_fence_loss() {
     ));
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        harness
-            .repository
-            .rejections
-            .lock()
-            .expect("rejections lock")
-            .len(),
-        1
-    );
-    assert!(
-        harness
-            .repository
-            .completions
-            .lock()
-            .expect("completions lock")
-            .is_empty()
-    );
+    assert_eq!(harness.repository.ledger.rejections().len(), 1);
+    assert!(harness.repository.ledger.completions().is_empty());
 }
 
 #[tokio::test]
@@ -2247,11 +2070,7 @@ async fn renewal_during_revision_fetch_discards_stale_source_and_reinvokes() {
     )
     .expect("renewed claim fence");
     drop(renewals);
-    let completions = harness
-        .repository
-        .completions
-        .lock()
-        .expect("completions lock");
+    let completions = harness.repository.ledger.completions();
     assert_eq!(
         completions[0].completed_at(),
         UnixMillis::new(AFTER_INITIAL_EXPIRY)
@@ -2309,11 +2128,7 @@ async fn renewal_during_revision_release_reuses_the_completed_source() {
     assert_eq!(harness.source.calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
-    let completions = harness
-        .repository
-        .completions
-        .lock()
-        .expect("completions lock");
+    let completions = harness.repository.ledger.completions();
     assert_eq!(completions.len(), 1);
     assert_eq!(completions[0].claim().fence(), 8);
 }
@@ -2542,11 +2357,7 @@ async fn sequential_renewals_rotate_the_latest_terminal_fence() {
     assert_eq!(renewals[1].claim().fence(), 8);
     assert_eq!(renewals[1].observed_at(), UnixMillis::new(RENEWED_NOW + 20));
     drop(renewals);
-    let completions = harness
-        .repository
-        .completions
-        .lock()
-        .expect("completions lock");
+    let completions = harness.repository.ledger.completions();
     assert_eq!(completions.len(), 1);
     assert_eq!(completions[0].claim().fence(), 9);
 }
@@ -2614,14 +2425,7 @@ async fn stale_processor_failure_waits_for_renewal_and_is_reinvoked() {
     assert_eq!(snapshots[0].claim().fence(), 7);
     assert_eq!(snapshots[1].claim().fence(), 8);
     assert_eq!(harness.repository.transition_count(), 1);
-    assert!(
-        harness
-            .repository
-            .rejections
-            .lock()
-            .expect("rejections lock")
-            .is_empty()
-    );
+    assert!(harness.repository.ledger.rejections().is_empty());
 }
 
 #[tokio::test]
@@ -3492,14 +3296,10 @@ async fn credential_authority_failures_have_closed_retry_or_terminal_outcomes() 
         assert_eq!(outcome.receipt().state(), expected_state);
         assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
         if expected_state == ProviderDeliveryState::RetryPending {
-            let retries = harness.repository.retries.lock().expect("retries lock");
+            let retries = harness.repository.ledger.retries();
             assert_eq!(retries[0].failure_kind().as_str(), expected_kind);
         } else {
-            let rejections = harness
-                .repository
-                .rejections
-                .lock()
-                .expect("rejections lock");
+            let rejections = harness.repository.ledger.rejections();
             assert_eq!(rejections[0].failure_kind().as_str(), expected_kind);
         }
     }
@@ -3538,11 +3338,7 @@ async fn credential_identity_and_expiry_mismatch_reject_before_source_io() {
             ))
         );
         assert_eq!(harness.source.calls.load(Ordering::SeqCst), 0);
-        let rejections = harness
-            .repository
-            .rejections
-            .lock()
-            .expect("rejections lock");
+        let rejections = harness.repository.ledger.rejections();
         assert_eq!(
             rejections[0].failure_kind().as_str(),
             "github.repository_source.credential_invalid"
@@ -3563,15 +3359,7 @@ async fn terminal_fence_loss_is_reported_as_nonfatal_claim_loss() {
         run_once(harness.service, CancellationToken::new()).await,
         Err(GithubDeliveryServiceError::ClaimLost)
     ));
-    assert_eq!(
-        harness
-            .repository
-            .completions
-            .lock()
-            .expect("completions lock")
-            .len(),
-        1
-    );
+    assert_eq!(harness.repository.ledger.completions().len(), 1);
 }
 
 #[tokio::test]
