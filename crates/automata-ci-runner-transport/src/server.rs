@@ -1105,6 +1105,8 @@ const fn request_matches_route(route: ControlRoute, message: &RunnerToServer) ->
                 ControlRoute::Sync,
                 RunnerToServer::LeaseRequest(_)
                     | RunnerToServer::LeaseResponse(_)
+                    | RunnerToServer::RuntimeAuthorityRequest(_)
+                    | RunnerToServer::RuntimeAuthorityAck(_)
                     | RunnerToServer::Heartbeat(_)
                     | RunnerToServer::JobState(_)
                     | RunnerToServer::JobResult(_)
@@ -1321,6 +1323,48 @@ fn error_response(status: StatusCode) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn runtime_authority_binding() -> automata_ci_protocol::RuntimeAuthorityDeliveryBinding {
+        automata_ci_protocol::RuntimeAuthorityDeliveryBinding::new(
+            automata_ci_core::AttemptId::new(),
+            automata_ci_protocol::RunnerSlotOrdinal::new(1).expect("slot"),
+            automata_ci_core::LeaseGuard::new(
+                automata_ci_core::LeaseId::new(),
+                automata_ci_core::FencingToken::new(1).expect("fencing token"),
+            ),
+            automata_ci_core::OperationId::new(),
+            automata_ci_protocol::CommandSequence::new(1).expect("command sequence"),
+            automata_ci_core::Sha256Digest::from_bytes([0x51; 32]),
+            automata_ci_protocol::INITIAL_RUNTIME_AUTHORITY_GENERATION,
+        )
+    }
+
+    fn request_header() -> automata_ci_protocol::MessageHeader {
+        automata_ci_protocol::MessageHeader::request(
+            automata_ci_protocol::SUPPORTED_PROTOCOL_RANGE.max(),
+            automata_ci_core::RunnerSessionId::new(),
+            automata_ci_core::OperationId::new(),
+        )
+    }
+
+    #[test]
+    fn runtime_authority_messages_belong_to_the_sync_route() {
+        let binding = runtime_authority_binding();
+        let request = RunnerToServer::RuntimeAuthorityRequest(
+            automata_ci_protocol::RuntimeAuthorityRequest::new(request_header(), binding),
+        );
+        let acknowledgement =
+            RunnerToServer::RuntimeAuthorityAck(automata_ci_protocol::RuntimeAuthorityAck::new(
+                request_header(),
+                binding,
+                automata_ci_core::Sha256Digest::from_bytes([0x52; 32]),
+            ));
+
+        for message in [&request, &acknowledgement] {
+            assert!(request_matches_route(ControlRoute::Sync, message));
+            assert!(!request_matches_route(ControlRoute::Handshake, message));
+        }
+    }
 
     fn request(uri: &str) -> Request<()> {
         let mut request = Request::new(());
