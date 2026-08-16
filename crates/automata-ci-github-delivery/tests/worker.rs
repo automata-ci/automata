@@ -13,12 +13,7 @@ use automata_ci_blob::{
     MediaType, PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_core::{Sha256Digest, UnixMillis};
-use automata_ci_github::{
-    GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind,
-    GithubRepositoryVisibility as GithubRepositoryVisibilityFact, GithubSealedEventEnvelopeV1,
-    GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
-    rehydrate_stored_authenticated_github_webhook,
-};
+use automata_ci_github::{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock, GithubDeliverySourceAuthority,
     GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerConfigurationError,
@@ -58,25 +53,19 @@ use automata_ci_store::{
 };
 use automata_ci_workflow_github::RepositoryWorkflowDiscoveryLimits;
 use bytes::Bytes;
-use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest as _, Sha256};
-use tar::{Builder, EntryType, Header};
 use uuid::Uuid;
 
 use super::subject_evidence::{
     fixture_all_direct_subject_evidence, fixture_check_head_sha, fixture_github_runtime_policy,
     fixture_subject_evidence, fixture_subject_evidence_with_head,
 };
+use super::support::{
+    AFTER, BEFORE, INSTALLATION_ID, OWNER, REPOSITORY, REPOSITORY_ID, REPOSITORY_OWNER_ID, ZERO,
+    archive, provider_event_envelope, push_body,
+};
 
-const BEFORE: &str = "fedcba9876543210fedcba9876543210fedcba98";
-const AFTER: &str = "0123456789abcdef0123456789abcdef01234567";
 const STALE_MERGE: &str = "89abcdef0123456789abcdef0123456789abcdef";
-const ZERO: &str = "0000000000000000000000000000000000000000";
-const OWNER: &str = "octo-private";
-const REPOSITORY: &str = "private-repository";
-const REPOSITORY_ID: u64 = 9_001;
-const REPOSITORY_OWNER_ID: u64 = 8_001;
-const INSTALLATION_ID: u64 = 4_242;
 const DELIVERY: &str = "delivery-worker-1";
 const CREDENTIAL_MARKER: &str = "installation-token-private-marker";
 
@@ -904,45 +893,6 @@ struct ClaimedFixture {
     check_head_sha: GithubCheckHeadSha,
 }
 
-fn provider_event_envelope(
-    body: &Bytes,
-    descriptor: &BlobDescriptor,
-    event_name: &str,
-    delivery_id: &str,
-    visibility: ProviderRepositoryVisibility,
-) -> ProviderDeliveryEventEnvelope {
-    let visibility = match visibility {
-        ProviderRepositoryVisibility::Public => GithubRepositoryVisibilityFact::Public,
-        ProviderRepositoryVisibility::Private => GithubRepositoryVisibilityFact::Private,
-    };
-    let stored = StoredAuthenticatedGithubWebhook::from_durable_coordinates(
-        body.clone(),
-        GithubWebhookBodyDigest::from_bytes(*descriptor.digest().as_bytes()),
-        descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
-        event_name,
-        delivery_id,
-        INSTALLATION_ID,
-        REPOSITORY_ID,
-        REPOSITORY_OWNER_ID,
-        visibility,
-        OWNER,
-        REPOSITORY,
-    );
-    let event =
-        rehydrate_stored_authenticated_github_webhook(stored).expect("verified webhook fixture");
-    let sealed = GithubSealedEventEnvelopeV1::seal(&event, descriptor.clone())
-        .expect("sealed event envelope fixture");
-    ProviderDeliveryEventEnvelope::new(
-        sealed.schema(),
-        sealed.registry_schema(),
-        sealed.digest(),
-        sealed.canonical_bytes().to_vec(),
-        GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
-    )
-    .expect("durable event envelope fixture")
-}
-
 fn claimed_with_event_envelope(
     claimed: &ClaimedProviderDelivery,
     event_envelope: ProviderDeliveryEventEnvelope,
@@ -976,7 +926,7 @@ fn claimed_fixture_with_visibility(
     visibility: ProviderRepositoryVisibility,
 ) -> ClaimedFixture {
     let after = if deleted { ZERO } else { AFTER };
-    let body = push_body(git_ref, after, deleted, visibility);
+    let body = push_body(git_ref, after, deleted, 0, visibility);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
     let key_text = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let descriptor = BlobDescriptor::new(
@@ -1206,21 +1156,6 @@ fn pending_repository_dispatch_evidence(
     .expect("pending repository dispatch")
 }
 
-fn push_body(
-    git_ref: &str,
-    after: &str,
-    deleted: bool,
-    visibility: ProviderRepositoryVisibility,
-) -> Bytes {
-    let (private, visibility) = match visibility {
-        ProviderRepositoryVisibility::Public => (false, "public"),
-        ProviderRepositoryVisibility::Private => (true, "private"),
-    };
-    Bytes::from(format!(
-        r#"{{"ref":"{git_ref}","before":"{BEFORE}","after":"{after}","created":false,"deleted":{deleted},"forced":false,"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"commits":[]}}"#,
-    ))
-}
-
 fn repository_source(archive: Bytes) -> RepositorySource {
     RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
@@ -1320,41 +1255,6 @@ fn skipped() -> ProviderDeliveryWorkflowConclusion {
         reason: ProviderDeliveryFailureKind::new("github.workflow.not_selected")
             .expect("failure kind"),
     }
-}
-
-fn archive(files: BTreeMap<&str, Vec<u8>>) -> Bytes {
-    let encoder = GzEncoder::new(Vec::new(), Compression::default());
-    let mut builder = Builder::new(encoder);
-    append_archive_entry(&mut builder, "repository-root", EntryType::Directory, &[]);
-    for (path, bytes) in files {
-        append_archive_entry(
-            &mut builder,
-            &format!("repository-root/{path}"),
-            EntryType::Regular,
-            &bytes,
-        );
-    }
-    let encoder = builder.into_inner().expect("finish tar");
-    Bytes::from(encoder.finish().expect("finish gzip"))
-}
-
-fn append_archive_entry(
-    builder: &mut Builder<GzEncoder<Vec<u8>>>,
-    path: &str,
-    entry_type: EntryType,
-    bytes: &[u8],
-) {
-    let mut header = Header::new_gnu();
-    header.set_entry_type(entry_type);
-    header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    header.set_size(u64::try_from(bytes.len()).expect("entry size"));
-    header.set_cksum();
-    builder
-        .append_data(&mut header, path, bytes)
-        .expect("append archive entry");
 }
 
 #[tokio::test]
@@ -1751,7 +1651,7 @@ async fn public_repository_dispatch_resolution_is_credential_free() {
 async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
     let fixture = repository_dispatch_claimed_fixture(ProviderRepositoryVisibility::Private);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::new(),
+        BTreeMap::<&str, Vec<u8>>::new(),
     ))));
     let resolver = Arc::new(RecordingResolver::failing(ScmError::new(
         automata_ci_scm::ScmErrorKind::Unavailable,
@@ -2033,7 +1933,7 @@ async fn pinned_manifest_exceeding_a_local_ceiling_rejects_before_source_io() {
 async fn deleted_pinned_branch_completes_without_source_authority_or_processing() {
     let fixture = claimed_fixture("refs/heads/main", true, 1);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::new(),
+        BTreeMap::<&str, Vec<u8>>::new(),
     ))));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -2103,7 +2003,7 @@ async fn non_pinned_git_ref_rejects_before_source_or_workflow_processing() {
 async fn private_live_ref_rejects_public_authority_before_provider_io() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::new(),
+        BTreeMap::<&str, Vec<u8>>::new(),
     ))));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -2136,7 +2036,7 @@ async fn rehydrated_push_head_must_match_the_pinned_check_before_source_io() {
         fixture.body.clone(),
     ));
     let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-        BTreeMap::new(),
+        BTreeMap::<&str, Vec<u8>>::new(),
     ))));
     let processor = Arc::new(RecordingProcessor::returning(skipped()));
     let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -2207,6 +2107,7 @@ async fn invalid_or_rebound_event_envelopes_reject_before_blob_or_source_io() {
                     "refs/heads/other",
                     AFTER,
                     false,
+                    0,
                     ProviderRepositoryVisibility::Private,
                 );
                 let other_digest = Sha256Digest::from_bytes(Sha256::digest(&other_body).into());
@@ -2239,7 +2140,7 @@ async fn invalid_or_rebound_event_envelopes_reject_before_blob_or_source_io() {
         };
         fixture.claimed = claimed_with_event_envelope(&fixture.claimed, event_envelope);
         let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-            BTreeMap::new(),
+            BTreeMap::<&str, Vec<u8>>::new(),
         ))));
         let processor = Arc::new(RecordingProcessor::returning(skipped()));
         let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -2303,7 +2204,7 @@ async fn immutable_object_failures_are_durably_classified_before_source_io() {
             failure,
         ));
         let source = Arc::new(RecordingSourcePort::returning(repository_source(archive(
-            BTreeMap::new(),
+            BTreeMap::<&str, Vec<u8>>::new(),
         ))));
         let processor = Arc::new(RecordingProcessor::returning(skipped()));
         let deliveries = Arc::new(RecordingDeliveries::new(fixture.receipt));
@@ -2489,7 +2390,7 @@ fn configuration_rejects_unrepresentable_outcome_and_provider_bounds() {
     ));
     let source = Arc::new(RecordingSourcePort::with_provider(
         "gitlab",
-        repository_source(archive(BTreeMap::new())),
+        repository_source(archive(BTreeMap::<&str, Vec<u8>>::new())),
     ));
     let result = GithubDeliveryWorker::new(
         Arc::new(FixtureBlobStore::exact(fixture.descriptor, fixture.body)),

@@ -12,12 +12,7 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
 use automata_ci_core::{Sha256Digest, UnixMillis, WorkflowPlan};
-use automata_ci_github::{
-    GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
-    GithubRepositoryVisibility as GithubRepositoryVisibilityFact, GithubSealedEventEnvelopeV1,
-    GithubWebhookBodyDigest, StoredAuthenticatedGithubWebhook,
-    rehydrate_stored_authenticated_github_webhook,
-};
+use automata_ci_github::GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX;
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
     GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
@@ -59,20 +54,15 @@ use automata_ci_store::{
 };
 use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
-use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest as _, Sha256};
-use tar::{Builder, EntryType, Header};
 use uuid::Uuid;
 
 use super::subject_evidence::fixture_subject_evidence;
+use super::support::{
+    AFTER, BEFORE, INSTALLATION_ID, OWNER, REPOSITORY, REPOSITORY_ID, REPOSITORY_OWNER_ID, archive,
+    provider_event_envelope, push_body,
+};
 
-const BEFORE: &str = "fedcba9876543210fedcba9876543210fedcba98";
-const AFTER: &str = "0123456789abcdef0123456789abcdef01234567";
-const OWNER: &str = "octo-private";
-const REPOSITORY: &str = "private-repository";
-const REPOSITORY_ID: u64 = 9_001;
-const REPOSITORY_OWNER_ID: u64 = 8_001;
-const INSTALLATION_ID: u64 = 4_242;
 const DELIVERY: &str = "delivery-workflow-processor-1";
 const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 const ALTERNATE_WORKFLOW_PATH: &str = ".ci/workflows/alternate.yml";
@@ -645,7 +635,7 @@ async fn harness_with_visibility(
     visibility: ProviderRepositoryVisibility,
 ) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
-    let body = push_body(commit_count, visibility);
+    let body = push_body("refs/heads/main", AFTER, false, commit_count, visibility);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
     let raw_key = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let raw_payload = BlobPayload::from_bytes(
@@ -665,7 +655,8 @@ async fn harness_with_visibility(
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
-    let event_envelope = provider_event_envelope(&body, &raw_descriptor, "push", visibility);
+    let event_envelope =
+        provider_event_envelope(&body, &raw_descriptor, "push", DELIVERY, visibility);
     let claimed = claimed(raw_event, event_envelope, visibility);
     let logical = Arc::new(LogicalAdmissions::default());
     let admission = WorkflowAdmissionService::with_system_ports(
@@ -746,7 +737,7 @@ async fn pull_request_harness_with_visibility(
     )
     .expect("raw event");
     let event_envelope =
-        provider_event_envelope(&body, &raw_descriptor, "pull_request", visibility);
+        provider_event_envelope(&body, &raw_descriptor, "pull_request", DELIVERY, visibility);
     let claimed = claimed(raw_event, event_envelope, visibility);
     let logical = Arc::new(LogicalAdmissions::default());
     let admission = WorkflowAdmissionService::with_system_ports(
@@ -790,44 +781,6 @@ async fn pull_request_harness_with_visibility(
         deliveries,
         credentials,
     }
-}
-
-fn provider_event_envelope(
-    body: &Bytes,
-    descriptor: &BlobDescriptor,
-    event_name: &str,
-    visibility: ProviderRepositoryVisibility,
-) -> ProviderDeliveryEventEnvelope {
-    let visibility = match visibility {
-        ProviderRepositoryVisibility::Public => GithubRepositoryVisibilityFact::Public,
-        ProviderRepositoryVisibility::Private => GithubRepositoryVisibilityFact::Private,
-    };
-    let stored = StoredAuthenticatedGithubWebhook::from_durable_coordinates(
-        body.clone(),
-        GithubWebhookBodyDigest::from_bytes(*descriptor.digest().as_bytes()),
-        descriptor.size(),
-        GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
-        event_name,
-        DELIVERY,
-        INSTALLATION_ID,
-        REPOSITORY_ID,
-        REPOSITORY_OWNER_ID,
-        visibility,
-        OWNER,
-        REPOSITORY,
-    );
-    let event =
-        rehydrate_stored_authenticated_github_webhook(stored).expect("verified webhook fixture");
-    let sealed = GithubSealedEventEnvelopeV1::seal(&event, descriptor.clone())
-        .expect("sealed event envelope fixture");
-    ProviderDeliveryEventEnvelope::new(
-        sealed.schema(),
-        sealed.registry_schema(),
-        sealed.digest(),
-        sealed.canonical_bytes().to_vec(),
-        GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
-    )
-    .expect("durable event envelope fixture")
 }
 
 fn claimed(
@@ -877,20 +830,6 @@ fn claimed(
     .expect("claimed delivery")
 }
 
-fn push_body(commit_count: usize, visibility: ProviderRepositoryVisibility) -> Bytes {
-    let commits = (1..=commit_count)
-        .map(|value| format!(r#"{{"id":"{value:040x}"}}"#))
-        .collect::<Vec<_>>()
-        .join(",");
-    let (private, visibility) = match visibility {
-        ProviderRepositoryVisibility::Public => (false, "public"),
-        ProviderRepositoryVisibility::Private => (true, "private"),
-    };
-    Bytes::from(format!(
-        r#"{{"ref":"refs/heads/main","before":"{BEFORE}","after":"{AFTER}","created":false,"deleted":false,"forced":false,"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"commits":[{commits}]}}"#,
-    ))
-}
-
 fn pull_request_body() -> Bytes {
     pull_request_body_with_visibility(ProviderRepositoryVisibility::Private)
 }
@@ -903,41 +842,6 @@ fn pull_request_body_with_visibility(visibility: ProviderRepositoryVisibility) -
     Bytes::from(format!(
         r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{AFTER}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ))
-}
-
-fn archive(files: BTreeMap<&str, &[u8]>) -> Bytes {
-    let encoder = GzEncoder::new(Vec::new(), Compression::default());
-    let mut builder = Builder::new(encoder);
-    append_entry(&mut builder, "repository-root", EntryType::Directory, &[]);
-    for (path, bytes) in files {
-        append_entry(
-            &mut builder,
-            &format!("repository-root/{path}"),
-            EntryType::Regular,
-            bytes,
-        );
-    }
-    let encoder = builder.into_inner().expect("finish tar");
-    Bytes::from(encoder.finish().expect("finish gzip"))
-}
-
-fn append_entry(
-    builder: &mut Builder<GzEncoder<Vec<u8>>>,
-    path: &str,
-    entry_type: EntryType,
-    bytes: &[u8],
-) {
-    let mut header = Header::new_gnu();
-    header.set_entry_type(entry_type);
-    header.set_mode(if entry_type.is_dir() { 0o755 } else { 0o644 });
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(0);
-    header.set_size(u64::try_from(bytes.len()).expect("entry size"));
-    header.set_cksum();
-    builder
-        .append_data(&mut header, path, bytes)
-        .expect("append archive entry");
 }
 
 async fn process(
@@ -1021,7 +925,16 @@ async fn accepted_path_replays_durable_progress_without_readmission() {
     let source = read_admission_object(&harness.blobs, first.source()).await;
     assert_eq!(source.as_ref(), ACCEPTED_WORKFLOW);
     let event = read_admission_object(&harness.blobs, first.event()).await;
-    assert_eq!(event, push_body(0, ProviderRepositoryVisibility::Private));
+    assert_eq!(
+        event,
+        push_body(
+            "refs/heads/main",
+            AFTER,
+            false,
+            0,
+            ProviderRepositoryVisibility::Private,
+        )
+    );
 
     let completions = harness.deliveries.completions();
     assert_eq!(completions.len(), 2);
