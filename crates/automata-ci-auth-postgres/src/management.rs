@@ -44,9 +44,11 @@ use super::{
 mod runner_enrollment;
 
 pub use runner_enrollment::{
-    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresRunnerEnrollmentRepository,
-    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
+    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, IssuedRunnerCertificateRenewal,
+    MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
+    PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment, PreparedRunnerEnrollment,
+    RenewRunnerCertificate, RunnerCertificateRenewalOutcome, RunnerCertificateRenewalRequestError,
+    RunnerCertificateRenewalSigningError, RunnerEnrollmentConsumeOutcome,
     RunnerEnrollmentPrepareOutcome, RunnerEnrollmentTokenRecord,
 };
 

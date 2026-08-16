@@ -29,10 +29,13 @@ use tower_service::Service;
 use zeroize::Zeroizing;
 
 use crate::{
+    CERTIFICATE_RENEWAL_CONTENT_TYPE, CERTIFICATE_RENEWAL_PATH, CertificateRenewalClientFuture,
     ClientError, ClientErrorKind, ClientFuture, ClientTlsConfig, ConfigurationError, ControlReply,
     ControlRoute, EPHEMERAL_SECRETS_CONTENT_TYPE, EPHEMERAL_SECRETS_PATH, EphemeralClientFuture,
+    MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES, MAX_CERTIFICATE_RENEWAL_RESPONSE_BYTES,
     MAX_EPHEMERAL_REQUEST_BYTES, MAX_EPHEMERAL_RESPONSE_BYTES, NoopRunnerControlClientObserver,
-    PROTOBUF_CONTENT_TYPE, PreparedEphemeralRequest, PreparedRequest, RetryClass,
+    PROTOBUF_CONTENT_TYPE, PreparedCertificateRenewalRequest, PreparedEphemeralRequest,
+    PreparedRequest, RetryClass, RunnerCertificateRenewalClient, RunnerCertificateRenewalResponse,
     RunnerControlClient, RunnerControlClientByteDirection, RunnerControlClientObserver,
     RunnerEphemeralClient, RunnerEphemeralResponse, TransportLimits,
 };
@@ -41,7 +44,7 @@ type RustlsConnector = HttpsConnector<HttpConnector>;
 type ConnectorResponse = <RustlsConnector as Service<Uri>>::Response;
 type ConnectorError = <RustlsConnector as Service<Uri>>::Error;
 type InnerClient = Client<H2OnlyConnector, Full<Bytes>>;
-type EphemeralInnerClient = Client<H2OnlyConnector, Full<SensitiveBytes>>;
+type SensitiveInnerClient = Client<H2OnlyConnector, Full<SensitiveBytes>>;
 
 struct SensitiveBytes {
     storage: Zeroizing<Vec<u8>>,
@@ -377,10 +380,7 @@ impl fmt::Debug for HyperRunnerControlClient {
 
 /// Outbound rustls/hyper HTTP/2 client for the private ephemeral-value route.
 pub struct HyperRunnerEphemeralClient {
-    inner: EphemeralInnerClient,
-    exchange_uri: Uri,
-    transport_limits: TransportLimits,
-    admission: Arc<Semaphore>,
+    route: SensitiveRouteClient,
 }
 
 impl HyperRunnerEphemeralClient {
@@ -399,13 +399,126 @@ impl HyperRunnerEphemeralClient {
         tls: &ClientTlsConfig,
         transport_limits: TransportLimits,
     ) -> Result<Self, ConfigurationError> {
+        Ok(Self {
+            route: SensitiveRouteClient::new(
+                endpoint,
+                tls,
+                &transport_limits,
+                EPHEMERAL_SECRETS_PATH,
+                EPHEMERAL_SECRETS_CONTENT_TYPE,
+                MAX_EPHEMERAL_REQUEST_BYTES,
+                MAX_EPHEMERAL_RESPONSE_BYTES,
+            )?,
+        })
+    }
+}
+
+impl RunnerEphemeralClient for HyperRunnerEphemeralClient {
+    fn exchange<'a>(
+        &'a self,
+        request: &'a PreparedEphemeralRequest,
+        cancellation: CancellationToken,
+    ) -> EphemeralClientFuture<'a> {
+        Box::pin(async move {
+            self.route
+                .exchange(request.body(), cancellation)
+                .await
+                .map(RunnerEphemeralResponse::new)
+        })
+    }
+}
+
+impl fmt::Debug for HyperRunnerEphemeralClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HyperRunnerEphemeralClient")
+            .field("transport_limits", &self.route.transport_limits)
+            .field("http_version", &"h2")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Outbound h2-only client for authenticated runner-certificate renewal.
+pub struct HyperRunnerCertificateRenewalClient {
+    route: SensitiveRouteClient,
+}
+
+impl HyperRunnerCertificateRenewalClient {
+    /// Creates a client using the runner's current mTLS identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigurationError`] when the endpoint is not one exact HTTPS origin.
+    pub fn new(
+        endpoint: &Uri,
+        tls: &ClientTlsConfig,
+        transport_limits: TransportLimits,
+    ) -> Result<Self, ConfigurationError> {
+        Ok(Self {
+            route: SensitiveRouteClient::new(
+                endpoint,
+                tls,
+                &transport_limits,
+                CERTIFICATE_RENEWAL_PATH,
+                CERTIFICATE_RENEWAL_CONTENT_TYPE,
+                MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES,
+                MAX_CERTIFICATE_RENEWAL_RESPONSE_BYTES,
+            )?,
+        })
+    }
+}
+
+impl RunnerCertificateRenewalClient for HyperRunnerCertificateRenewalClient {
+    fn exchange<'a>(
+        &'a self,
+        request: &'a PreparedCertificateRenewalRequest,
+        cancellation: CancellationToken,
+    ) -> CertificateRenewalClientFuture<'a> {
+        Box::pin(async move {
+            self.route
+                .exchange(request.body(), cancellation)
+                .await
+                .map(RunnerCertificateRenewalResponse::new)
+        })
+    }
+}
+
+impl fmt::Debug for HyperRunnerCertificateRenewalClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HyperRunnerCertificateRenewalClient")
+            .field("transport_limits", &self.route.transport_limits)
+            .field("http_version", &"h2")
+            .finish_non_exhaustive()
+    }
+}
+
+struct SensitiveRouteClient {
+    inner: SensitiveInnerClient,
+    exchange_uri: Uri,
+    media_type: &'static str,
+    request_maximum: usize,
+    response_maximum: usize,
+    transport_limits: TransportLimits,
+    admission: Arc<Semaphore>,
+}
+
+impl SensitiveRouteClient {
+    fn new(
+        endpoint: &Uri,
+        tls: &ClientTlsConfig,
+        transport_limits: &TransportLimits,
+        path: &'static str,
+        media_type: &'static str,
+        request_maximum: usize,
+        response_maximum: usize,
+    ) -> Result<Self, ConfigurationError> {
         validate_endpoint(endpoint)?;
         let authority = endpoint
             .authority()
             .cloned()
             .ok_or(ConfigurationError::InvalidEndpoint)?;
-        let exchange_uri = fixed_route_uri(authority, EPHEMERAL_SECRETS_PATH)?;
-
+        let exchange_uri = fixed_route_uri(authority, path)?;
         let mut tcp = HttpConnector::new();
         tcp.enforce_http(false);
         tcp.set_connect_timeout(Some(transport_limits.connect_timeout()));
@@ -416,7 +529,6 @@ impl HyperRunnerEphemeralClient {
             .enable_http2()
             .wrap_connector(tcp);
         let connector = H2OnlyConnector { inner: https };
-
         let mut builder = Client::builder(TokioExecutor::new());
         builder
             .http2_only(true)
@@ -429,24 +541,44 @@ impl HyperRunnerEphemeralClient {
             .pool_timer(TokioTimer::new())
             .pool_max_idle_per_host(1)
             .retry_canceled_requests(false);
-
         Ok(Self {
             inner: builder.build(connector),
             exchange_uri,
-            transport_limits,
+            media_type,
+            request_maximum,
+            response_maximum,
+            transport_limits: *transport_limits,
             admission: Arc::new(Semaphore::new(
                 transport_limits.concurrent_client_requests(),
             )),
         })
     }
 
-    async fn exchange_bounded(
+    async fn exchange(
         &self,
-        prepared: &PreparedEphemeralRequest,
-    ) -> Result<RunnerEphemeralResponse, ClientError> {
-        let request_length = prepared.body().len();
-        if request_length > MAX_EPHEMERAL_REQUEST_BYTES
-            || request_length > self.transport_limits.request_body_bytes()
+        body: &[u8],
+        cancellation: CancellationToken,
+    ) -> Result<Zeroizing<Vec<u8>>, ClientError> {
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(ClientError::new(
+                ClientErrorKind::Cancelled,
+                RetryClass::Never,
+            )),
+            result = timeout(
+                self.transport_limits.total_request_timeout(),
+                self.exchange_bounded(body),
+            ) => result.unwrap_or_else(|_| Err(ClientError::new(
+                ClientErrorKind::Timeout,
+                RetryClass::RetrySameRequest,
+            ))),
+        }
+    }
+
+    async fn exchange_bounded(&self, body: &[u8]) -> Result<Zeroizing<Vec<u8>>, ClientError> {
+        if body.is_empty()
+            || body.len() > self.request_maximum
+            || body.len() > self.transport_limits.request_body_bytes()
         {
             return Err(ClientError::new(
                 ClientErrorKind::Transport,
@@ -473,10 +605,9 @@ impl HyperRunnerEphemeralClient {
                 ));
             }
         };
-
         let response = self
             .inner
-            .request(self.http_request(prepared))
+            .request(self.http_request(body))
             .await
             .map_err(|_| {
                 ClientError::new(ClientErrorKind::Transport, RetryClass::RetrySameRequest)
@@ -484,73 +615,39 @@ impl HyperRunnerEphemeralClient {
         if response.status() != StatusCode::OK {
             return Err(status_error(response.status()));
         }
-        let declared_length = validate_ephemeral_response_head(&response, &self.transport_limits)?;
-        let (_, body) = response.into_parts();
-        let body = timeout(
+        let declared_length = validate_sensitive_response_head(
+            &response,
+            &self.transport_limits,
+            self.media_type,
+            self.response_maximum,
+        )?;
+        let (_, response_body) = response.into_parts();
+        timeout(
             self.transport_limits.response_body_timeout(),
-            read_ephemeral_response_body(body, declared_length),
+            read_sensitive_response_body(response_body, declared_length),
         )
         .await
-        .map_err(|_| ClientError::new(ClientErrorKind::Timeout, RetryClass::RetrySameRequest))??;
-        Ok(RunnerEphemeralResponse::new(body))
+        .map_err(|_| ClientError::new(ClientErrorKind::Timeout, RetryClass::RetrySameRequest))?
     }
 
-    fn http_request(&self, prepared: &PreparedEphemeralRequest) -> Request<Full<SensitiveBytes>> {
-        let body = SensitiveBytes::new(prepared.body().to_vec());
-        let mut request = Request::new(Full::new(body));
+    fn http_request(&self, bytes: &[u8]) -> Request<Full<SensitiveBytes>> {
+        let mut request = Request::new(Full::new(SensitiveBytes::new(bytes.to_vec())));
         *request.method_mut() = Method::POST;
         *request.uri_mut() = self.exchange_uri.clone();
         *request.version_mut() = Version::HTTP_2;
-        request.headers_mut().insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE),
-        );
-        request.headers_mut().insert(
-            ACCEPT,
-            HeaderValue::from_static(EPHEMERAL_SECRETS_CONTENT_TYPE),
-        );
         request
             .headers_mut()
-            .insert(CONTENT_LENGTH, HeaderValue::from(prepared.body().len()));
+            .insert(CONTENT_TYPE, HeaderValue::from_static(self.media_type));
+        request
+            .headers_mut()
+            .insert(ACCEPT, HeaderValue::from_static(self.media_type));
+        request
+            .headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
         request
             .headers_mut()
             .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         request
-    }
-}
-
-impl RunnerEphemeralClient for HyperRunnerEphemeralClient {
-    fn exchange<'a>(
-        &'a self,
-        request: &'a PreparedEphemeralRequest,
-        cancellation: CancellationToken,
-    ) -> EphemeralClientFuture<'a> {
-        Box::pin(async move {
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => Err(ClientError::new(
-                    ClientErrorKind::Cancelled,
-                    RetryClass::Never,
-                )),
-                result = timeout(
-                    self.transport_limits.total_request_timeout(),
-                    self.exchange_bounded(request),
-                ) => result.unwrap_or_else(|_| Err(ClientError::new(
-                    ClientErrorKind::Timeout,
-                    RetryClass::RetrySameRequest,
-                ))),
-            }
-        })
-    }
-}
-
-impl fmt::Debug for HyperRunnerEphemeralClient {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HyperRunnerEphemeralClient")
-            .field("transport_limits", &self.transport_limits)
-            .field("http_version", &"h2")
-            .finish_non_exhaustive()
     }
 }
 
@@ -641,9 +738,11 @@ fn validate_exact_media_type(headers: &HeaderMap, media_type: &str) -> Result<()
     Ok(())
 }
 
-fn validate_ephemeral_response_head(
+fn validate_sensitive_response_head(
     response: &http::Response<Incoming>,
     limits: &TransportLimits,
+    media_type: &str,
+    route_maximum: usize,
 ) -> Result<usize, ClientError> {
     if response.version() != Version::HTTP_2
         || response.headers().contains_key(CONTENT_ENCODING)
@@ -654,7 +753,7 @@ fn validate_ephemeral_response_head(
             RetryClass::Never,
         ));
     }
-    validate_exact_media_type(response.headers(), EPHEMERAL_SECRETS_CONTENT_TYPE)?;
+    validate_exact_media_type(response.headers(), media_type)?;
     validate_exact_header(response.headers(), CACHE_CONTROL, b"no-store, private")?;
     let length = strict_content_length(response.headers())?;
     if length == 0 {
@@ -663,7 +762,7 @@ fn validate_ephemeral_response_head(
             RetryClass::Never,
         ));
     }
-    if length > MAX_EPHEMERAL_RESPONSE_BYTES || length > limits.response_body_bytes() {
+    if length > route_maximum || length > limits.response_body_bytes() {
         return Err(ClientError::new(
             ClientErrorKind::ResponseTooLarge,
             RetryClass::Never,
@@ -743,7 +842,7 @@ async fn read_response_body(
     Ok(collected.freeze())
 }
 
-async fn read_ephemeral_response_body(
+async fn read_sensitive_response_body(
     mut body: Incoming,
     declared_length: usize,
 ) -> Result<Zeroizing<Vec<u8>>, ClientError> {

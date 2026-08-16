@@ -8,7 +8,10 @@ use bytes::Bytes;
 use thiserror::Error;
 use zeroize::{Zeroize as _, Zeroizing};
 
-use crate::{ControlRoute, MAX_EPHEMERAL_REQUEST_BYTES, SessionBinding};
+use crate::{
+    ControlRoute, MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES, MAX_EPHEMERAL_REQUEST_BYTES,
+    SessionBinding,
+};
 
 /// Failure while preparing a deterministic outbound runner request.
 #[derive(Debug, Error)]
@@ -28,6 +31,47 @@ pub enum PrepareError {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 #[error("ephemeral runner request is empty or exceeds its byte bound")]
 pub struct PrepareEphemeralError;
+
+/// Invalid bounded payload for the runner certificate-renewal route.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("runner certificate renewal request is empty or exceeds its byte bound")]
+pub struct PrepareCertificateRenewalError;
+
+/// Retry-stable application payload for one certificate-renewal operation.
+pub struct PreparedCertificateRenewalRequest {
+    body: Zeroizing<Vec<u8>>,
+}
+
+impl PreparedCertificateRenewalRequest {
+    /// Takes ownership of one non-empty request within the renewal ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects and zeroizes empty or oversized input.
+    pub fn new(mut body: Vec<u8>) -> Result<Self, PrepareCertificateRenewalError> {
+        if body.is_empty() || body.len() > MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES {
+            body.zeroize();
+            return Err(PrepareCertificateRenewalError);
+        }
+        Ok(Self {
+            body: Zeroizing::new(body),
+        })
+    }
+
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.body
+    }
+}
+
+impl fmt::Debug for PreparedCertificateRenewalRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedCertificateRenewalRequest")
+            .field("body", &"[REDACTED]")
+            .field("byte_count", &self.body.len())
+            .finish()
+    }
+}
 
 /// Retry-stable application payload for the private mTLS value route.
 ///

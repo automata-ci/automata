@@ -9,7 +9,10 @@ use bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use crate::{ApplicationError, ClientError, PreparedEphemeralRequest, PreparedRequest};
+use crate::{
+    ApplicationError, ClientError, PreparedCertificateRenewalRequest, PreparedEphemeralRequest,
+    PreparedRequest,
+};
 
 /// Immutable protocol, `JobIR`, and session identity selected by a successful handshake.
 ///
@@ -325,6 +328,125 @@ pub trait RunnerEphemeralClient: fmt::Debug + Send + Sync {
         request: &'a PreparedEphemeralRequest,
         cancellation: CancellationToken,
     ) -> EphemeralClientFuture<'a>;
+}
+
+/// Freshly authenticated request on the certificate-renewal route.
+///
+/// The bounded body is zeroized on drop and diagnostics expose neither its
+/// contents nor the authenticated machine identity.
+pub struct AuthenticatedRunnerCertificateRenewalRequest {
+    machine: AuthenticatedMachine,
+    body: Zeroizing<Vec<u8>>,
+    cancellation: CancellationToken,
+}
+
+impl AuthenticatedRunnerCertificateRenewalRequest {
+    pub(crate) const fn new(
+        machine: AuthenticatedMachine,
+        body: Zeroizing<Vec<u8>>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            machine,
+            body,
+            cancellation,
+        }
+    }
+
+    /// Decomposes the request without copying authenticated or body state.
+    #[must_use]
+    pub fn into_parts(self) -> (AuthenticatedMachine, Zeroizing<Vec<u8>>, CancellationToken) {
+        (self.machine, self.body, self.cancellation)
+    }
+}
+
+impl fmt::Debug for AuthenticatedRunnerCertificateRenewalRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedRunnerCertificateRenewalRequest")
+            .field("body", &"[REDACTED]")
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Bounded exact certificate-renewal response retained in zeroizing memory.
+pub struct RunnerCertificateRenewalReply(Zeroizing<Vec<u8>>);
+
+impl RunnerCertificateRenewalReply {
+    /// Creates one non-empty response inside the fixed route ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects and zeroizes empty or oversized bytes.
+    pub fn new(mut body: Vec<u8>) -> Result<Self, ApplicationError> {
+        if body.is_empty() || body.len() > crate::MAX_CERTIFICATE_RENEWAL_RESPONSE_BYTES {
+            use zeroize::Zeroize as _;
+            body.zeroize();
+            return Err(ApplicationError::new(crate::ApplicationErrorKind::Internal));
+        }
+        Ok(Self(Zeroizing::new(body)))
+    }
+
+    pub(crate) fn into_body(mut self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(std::mem::take(&mut *self.0))
+    }
+}
+
+impl fmt::Debug for RunnerCertificateRenewalReply {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RunnerCertificateRenewalReply([REDACTED])")
+    }
+}
+
+/// Boxed future returned by [`RunnerCertificateRenewalHandler`].
+pub type CertificateRenewalHandlerFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<RunnerCertificateRenewalReply, ApplicationError>> + Send + 'a>,
+>;
+
+/// Application port for the authenticated certificate-renewal route.
+pub trait RunnerCertificateRenewalHandler: fmt::Debug + Send + Sync {
+    /// Handles one freshly authenticated, bounded, opaque request.
+    fn handle(
+        &self,
+        request: AuthenticatedRunnerCertificateRenewalRequest,
+    ) -> CertificateRenewalHandlerFuture<'_>;
+}
+
+/// Bounded response returned by the certificate-renewal client.
+pub struct RunnerCertificateRenewalResponse(Zeroizing<Vec<u8>>);
+
+impl RunnerCertificateRenewalResponse {
+    pub(crate) const fn new(body: Zeroizing<Vec<u8>>) -> Self {
+        Self(body)
+    }
+
+    /// Transfers the response into the next zeroizing custody boundary.
+    #[must_use]
+    pub fn into_body(mut self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(std::mem::take(&mut *self.0))
+    }
+}
+
+impl fmt::Debug for RunnerCertificateRenewalResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RunnerCertificateRenewalResponse([REDACTED])")
+    }
+}
+
+/// Boxed future returned by [`RunnerCertificateRenewalClient`].
+pub type CertificateRenewalClientFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<RunnerCertificateRenewalResponse, ClientError>> + Send + 'a>,
+>;
+
+/// Object-safe client for exact certificate-renewal retries.
+pub trait RunnerCertificateRenewalClient: fmt::Debug + Send + Sync {
+    /// Exchanges the same durably prepared request bytes until one outcome is known.
+    fn exchange<'a>(
+        &'a self,
+        request: &'a PreparedCertificateRenewalRequest,
+        cancellation: CancellationToken,
+    ) -> CertificateRenewalClientFuture<'a>;
 }
 
 /// Validated server response together with its canonical protobuf bytes.

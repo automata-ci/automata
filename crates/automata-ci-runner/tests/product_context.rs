@@ -910,7 +910,7 @@ fn fixture_runner_config_with_github(
     allow_insecure_http: bool,
 ) -> RunnerProductConfig {
     #[cfg(windows)]
-    let config_bytes = include_bytes!("../config/runner.windows.example.json").as_slice();
+    let config_bytes = include_bytes!("fixtures/runner.windows.product.json").as_slice();
     #[cfg(target_os = "linux")]
     let config_bytes = include_bytes!("../config/runner.local-1.example.json").as_slice();
     #[cfg(target_os = "macos")]

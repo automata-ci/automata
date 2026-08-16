@@ -181,6 +181,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0044_publish_runner_redacted_logs.sql",
         "c507be6b296266570b3a3d35708c95376ebb1fd07f8bcbbf1bf40ef1d4bbcf058dfbde58e4c02992100a8d13d27e17fc",
     ),
+    (
+        "0045_runner_certificate_renewal.sql",
+        "ee79d5ee0481d72ba62d527da49817cf97b8340203ec8fa8be2cc0abcf615fade1f5854bf155487535666cd956e1181a",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -439,6 +443,37 @@ fn provider_delivery_event_envelope_is_complete_bounded_and_legacy_nullable() {
         32_768,
         "product and durable provider-envelope byte limits diverged"
     );
+}
+
+#[test]
+fn runner_certificate_renewal_is_bounded_exact_and_immutable_while_replayable() {
+    let source = include_str!("../migrations/0045_runner_certificate_renewal.sql");
+
+    for required in [
+        "UNIQUE (runner_id, leaf_sha256)",
+        "CREATE TABLE runner_certificate_renewal_receipts",
+        "operation_id uuid PRIMARY KEY",
+        "UNIQUE (presented_leaf_sha256)",
+        "UNIQUE (renewed_leaf_sha256)",
+        "octet_length(response) BETWEEN 1 AND 524288",
+        "FOREIGN KEY (runner_id, presented_leaf_sha256)",
+        "FOREIGN KEY (runner_id, renewed_leaf_sha256)",
+        "REFERENCES security_audit_events (event_id)",
+        "runner_certificate_renewal_receipts_immutable",
+        "runner_certificate_renewal_receipts_live_delete",
+        "BEFORE TRUNCATE ON runner_certificate_renewal_receipts",
+    ] {
+        assert!(
+            source.contains(required),
+            "runner-certificate renewal migration lost required contract: {required}"
+        );
+    }
+    for forbidden in ["IF NOT EXISTS", "DEFAULT", "ON DELETE CASCADE"] {
+        assert!(
+            !source.contains(forbidden),
+            "runner-certificate renewal migration retained compatibility surface: {forbidden}"
+        );
+    }
 }
 
 fn migration_paths() -> Vec<PathBuf> {

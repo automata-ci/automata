@@ -39,6 +39,8 @@ pub enum RunnerTransportRoute {
     Sync,
     /// Private ephemeral-value exchange on the same authenticated listener.
     EphemeralSecrets,
+    /// Authenticated runner-certificate renewal.
+    CertificateRenewal,
 }
 
 /// Bounded connection-lifecycle events emitted by the server.
@@ -137,6 +139,8 @@ pub enum RunnerTransportDecodeRejection {
 pub enum RunnerTransportApplicationRejection {
     /// The authenticated runner was forbidden.
     Forbidden,
+    /// The authenticated operation is valid but not due yet.
+    TooEarly,
     /// The application rejected a stale session or durable conflict.
     Conflict,
     /// Shared application state was unavailable.

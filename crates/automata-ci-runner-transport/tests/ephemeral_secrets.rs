@@ -848,6 +848,7 @@ async fn typed_application_failures_timeout_and_release_the_request_permit() {
     let verifier = RecordingVerifier::accepting();
     let kinds = [
         ApplicationErrorKind::Forbidden,
+        ApplicationErrorKind::TooEarly,
         ApplicationErrorKind::StaleSession,
         ApplicationErrorKind::Conflict,
         ApplicationErrorKind::Unavailable,
@@ -874,6 +875,7 @@ async fn typed_application_failures_timeout_and_release_the_request_permit() {
 
     for expected in [
         StatusCode::FORBIDDEN,
+        StatusCode::TOO_EARLY,
         StatusCode::CONFLICT,
         StatusCode::CONFLICT,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -905,8 +907,8 @@ async fn typed_application_failures_timeout_and_release_the_request_permit() {
         .await,
         StatusCode::OK
     );
-    assert_eq!(handler.calls(), 7);
-    assert_eq!(verifier.calls(), 7);
+    assert_eq!(handler.calls(), 8);
+    assert_eq!(verifier.calls(), 8);
 
     connection.abort();
     running.stop().await;
