@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "sbom",
+  "candidate_fixture": true,
+  "profile_id": "automata.dev/windows-2025-x64-hyperv-v1",
+  "image": "registry.example/automata/windows-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "subject": {
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "media_type": "application/spdx+json"
+  },
+  "statement": "Candidate SPDX-interface fixture only; an externally generated image SBOM is required for promotion."
+}

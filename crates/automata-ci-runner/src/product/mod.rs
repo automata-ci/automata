@@ -13,6 +13,8 @@ mod resource_metrics;
 mod spool_crypto;
 mod state;
 mod tls;
+mod windows_enrollment_admission;
+mod windows_image;
 
 pub use composition::{
     RunnerProductError, RunnerShutdown, load_s3_credentials, load_spool_key, load_spool_keyring,
@@ -32,3 +34,16 @@ pub(crate) use files::{
 pub use files::{SecretSource, SecureInputError};
 pub use state::ProductStateRootError;
 pub use tls::ClientTlsMaterialError;
+pub use windows_enrollment_admission::{
+    ValidatedWindowsEnrollmentAdmission, WindowsEnrollmentAdmissionBinding,
+    WindowsEnrollmentAdmissionError, WindowsEnrollmentAdmissionEvidence,
+    WindowsEnrollmentAdmissionHandle, WindowsEnrollmentAdmissionPort,
+    WindowsEnrollmentAdmissionReceipt, WindowsEnrollmentAdmissionRequest, WindowsEnrollmentIntent,
+    WindowsEnrollmentProbePolicy, WindowsHostInputDescriptor, WindowsHostInputKind,
+    current_unix_seconds, probe_windows_enrollment_request, windows_enrollment_admission_request,
+};
+pub use windows_image::{
+    FilesystemWindowsImageEvidenceVerifier, WindowsImageAdmission, WindowsImageContractConfig,
+    WindowsImageEvidenceVerifier, WindowsImagePromotionConfig, WindowsImageVerification,
+    WindowsImageVerificationError, WindowsImageVerificationRequest,
+};

@@ -4,6 +4,7 @@ use std::io::{self, Cursor, Read as _};
 
 use automata_ci_action::{
     ActionArchiveError, ActionBundleLimits, ActionDefinitionKind, ActionSubpath, inspect_archive,
+    validate_windows_materialization_archive,
 };
 use automata_ci_scm::ArchiveLimits;
 use bytes::Bytes;
@@ -471,6 +472,108 @@ fn traversal_links_special_entries_duplicates_and_multiple_roots_are_rejected() 
         .unwrap_err(),
         ActionArchiveError::UnsafePath
     );
+}
+
+#[test]
+fn windows_materialization_rejects_links_ambiguous_names_and_case_collisions() {
+    let valid = build_archive(&[
+        TestEntry::File("root/action.yml", ACTION_DEFINITION),
+        TestEntry::File("root/dist/index.js", b"console.log('ok')"),
+        TestEntry::File("root/.gitignore", b"target"),
+        TestEntry::File("root/.github/workflows/metadata.yml", b"name: metadata"),
+    ]);
+    validate_windows_materialization_archive(&valid, ActionBundleLimits::default())
+        .expect("ordinary ASCII action tree is safe to materialize on Windows");
+    let defaults = ActionBundleLimits::default();
+    let undersized = ActionBundleLimits::new(
+        ArchiveLimits::new(u64::try_from(valid.len() - 1).unwrap()).unwrap(),
+        defaults.maximum_entries(),
+        defaults.maximum_expanded_bytes(),
+        defaults.maximum_definition_bytes(),
+        defaults.maximum_entry_path_bytes(),
+        defaults.maximum_path_index_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        validate_windows_materialization_archive(&valid, undersized),
+        Err(ActionArchiveError::ResourceLimit)
+    );
+
+    let link = build_archive(&[
+        TestEntry::File("root/action.yml", ACTION_DEFINITION),
+        TestEntry::Symlink("root/dist/current", "index.js"),
+    ]);
+    assert_eq!(
+        validate_windows_materialization_archive(&link, ActionBundleLimits::default()),
+        Err(ActionArchiveError::UnsupportedEntry)
+    );
+
+    for path in [
+        "root/CON.txt",
+        "root/CON .txt",
+        "root/CONOUT$.txt",
+        "root/LONGFI~1.JS",
+        "root/name:stream",
+        "root/trailing. ",
+        "root/naïve.txt",
+    ] {
+        let archive = build_archive(&[
+            TestEntry::File("root/action.yml", ACTION_DEFINITION),
+            TestEntry::File(path, b"unsafe"),
+        ]);
+        assert_eq!(
+            validate_windows_materialization_archive(&archive, ActionBundleLimits::default()),
+            Err(ActionArchiveError::UnsafePath),
+            "unexpectedly accepted {path}"
+        );
+    }
+
+    let collision = build_archive(&[
+        TestEntry::File("root/action.yml", ACTION_DEFINITION),
+        TestEntry::File("root/dist/Index.js", b"first"),
+        TestEntry::File("root/dist/index.js", b"second"),
+    ]);
+    assert_eq!(
+        validate_windows_materialization_archive(&collision, ActionBundleLimits::default()),
+        Err(ActionArchiveError::DuplicatePath)
+    );
+
+    let prefix_collision = build_archive(&[
+        TestEntry::File("root/Foo/first.js", b"first"),
+        TestEntry::File("root/foo/second.js", b"second"),
+    ]);
+    assert_eq!(
+        validate_windows_materialization_archive(&prefix_collision, ActionBundleLimits::default()),
+        Err(ActionArchiveError::DuplicatePath)
+    );
+
+    for entries in [
+        vec![
+            TestEntry::File("root/action.yml", ACTION_DEFINITION),
+            TestEntry::File("root/dist", b"file"),
+            TestEntry::File("root/dist/index.js", b"child"),
+        ],
+        vec![
+            TestEntry::File("root/action.yml", ACTION_DEFINITION),
+            TestEntry::File("root/dist/index.js", b"child"),
+            TestEntry::File("root/dist", b"file"),
+        ],
+        vec![
+            TestEntry::File("root", b"file"),
+            TestEntry::File("root/action.yml", ACTION_DEFINITION),
+        ],
+        vec![
+            TestEntry::File("root/action.yml", ACTION_DEFINITION),
+            TestEntry::File("root", b"file"),
+        ],
+    ] {
+        let conflict = build_archive(&entries);
+        assert_eq!(
+            validate_windows_materialization_archive(&conflict, ActionBundleLimits::default()),
+            Err(ActionArchiveError::DuplicatePath),
+            "file/directory prefix conflict must be order-independent"
+        );
+    }
 }
 
 #[test]

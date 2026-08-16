@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
+    io::Cursor,
     sync::{
         Arc, Mutex,
         atomic::{AtomicI64, AtomicUsize, Ordering},
@@ -69,7 +70,9 @@ use automata_ci_runner_runtime::{
 use automata_ci_runner_spool::ProtectionId;
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
+use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest as _, Sha256};
+use tar::{Builder as TarBuilder, Header as TarHeader};
 
 pub const SECRET: &str = "super-secret-value";
 pub const CONTEXT_SECRET: &str = "context-only-token";
@@ -169,7 +172,7 @@ impl Fixture {
         responses: Vec<PhaseResponse>,
         default_environment: ExecutionEnvironment,
     ) -> Self {
-        Self::with_platform_components_and_timeout(
+        Self::with_platform_components_and_timeout_and_node(
             Vec::new(),
             responses,
             default_environment,
@@ -178,6 +181,21 @@ impl Fixture {
             Arc::new(FakeContexts::windows_secretless()),
             Duration::from_mins(5),
             TargetPlatform::Windows,
+            false,
+        )
+    }
+
+    pub fn windows_actions(actions: Vec<PreparedAction>, responses: Vec<PhaseResponse>) -> Self {
+        Self::with_platform_components_and_timeout_and_node(
+            actions,
+            responses,
+            ExecutionEnvironment::empty(),
+            false,
+            Arc::new(FakeJobContent::default()),
+            Arc::new(FakeContexts::windows_secretless()),
+            Duration::from_mins(5),
+            TargetPlatform::Windows,
+            true,
         )
     }
 
@@ -550,16 +568,33 @@ impl Fixture {
                     toolchain
                 }
             }
-            TargetPlatform::Windows => StaticGithubToolchain::windows(
-                windows_target(r"C:\Program Files\PowerShell\7\pwsh.exe"),
-                windows_target(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
-                windows_target(r"C:\Windows\System32\cmd.exe"),
-            )
-            .expect("valid Windows tools")
-            .with_python(windows_target(
-                r"C:\hostedtoolcache\windows\Python\3.13.0\x64\python.exe",
-            ))
-            .expect("valid Windows python"),
+            TargetPlatform::Windows => {
+                let toolchain = StaticGithubToolchain::windows(
+                    windows_target(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+                    windows_target(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                    windows_target(r"C:\Windows\System32\cmd.exe"),
+                )
+                .expect("valid Windows tools")
+                .with_python(windows_target(
+                    r"C:\hostedtoolcache\windows\Python\3.13.0\x64\python.exe",
+                ))
+                .expect("valid Windows python");
+                if configure_node {
+                    toolchain
+                        .with_windows_action_materializer(
+                            windows_target(r"C:\automata\tools\tar\tar.exe"),
+                            windows_target(r"C:\automata\tools\hash\automata-sha256.exe"),
+                        )
+                        .expect("valid Windows action materializer")
+                        .with_node(
+                            JavascriptRuntime::Node24,
+                            windows_target(r"C:\automata\externals\node24\node.exe"),
+                        )
+                        .expect("valid Windows node")
+                } else {
+                    toolchain
+                }
+            }
         };
         let ports = GithubJobExecutorPorts::new(
             provider.clone(),
@@ -1018,6 +1053,41 @@ pub fn prepared_node24_action() -> PreparedAction {
     prepared_node24_action_with_post_condition("always()")
 }
 
+pub fn prepared_windows_namespace_unsafe_node24_action() -> PreparedAction {
+    let compiler = GithubConditionCompiler::default();
+    let pre_condition = compiler
+        .compile_condition(Some("always()"), GithubConditionPhase::Step)
+        .expect("valid pre condition");
+    let post_condition = compiler
+        .compile_condition(Some("always()"), GithubConditionPhase::Step)
+        .expect("valid post condition");
+    let javascript = PreparedJavascriptAction::new(
+        JavascriptRuntime::Node24,
+        "dist/index.js",
+        None,
+        pre_condition,
+        None,
+        post_condition,
+    )
+    .expect("valid JavaScript action");
+    let archive = test_action_archive(&[
+        (
+            "action.yml",
+            b"runs:\n  using: node24\n  main: dist/index.js\n",
+        ),
+        ("dist/index.js", b"console.log('must not run')\n"),
+        ("CON.txt", b"unsafe Windows namespace entry\n"),
+    ]);
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+    let definition = PreparedActionDefinition::new(
+        Vec::new(),
+        Vec::new(),
+        PreparedActionExecution::Javascript(Box::new(javascript)),
+    )
+    .expect("valid JavaScript definition");
+    PreparedAction::with_definition(digest, archive, "", definition).expect("valid action")
+}
+
 pub fn prepared_node24_action_with_post_condition(post_condition: &str) -> PreparedAction {
     let compiler = GithubConditionCompiler::default();
     let always = compiler
@@ -1038,7 +1108,13 @@ pub fn prepared_node24_action_with_post_condition(post_condition: &str) -> Prepa
         post_condition,
     )
     .expect("valid JavaScript action");
-    let archive = Bytes::from_static(b"validated-action-archive");
+    let archive = test_action_archive(&[
+        (
+            "action.yml",
+            b"runs:\n  using: node24\n  main: dist/index.js\n",
+        ),
+        ("dist/index.js", b"console.log('main')\n"),
+    ]);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
     let definition = PreparedActionDefinition::new(
         vec![
@@ -1080,7 +1156,15 @@ pub fn prepared_node24_action_with_pre_condition(pre_condition: &str) -> Prepare
         always,
     )
     .expect("valid JavaScript action");
-    let archive = Bytes::from_static(b"validated-pre-action-archive");
+    let archive = test_action_archive(&[
+        (
+            "action.yml",
+            b"runs:\n  using: node24\n  main: dist/main.js\n",
+        ),
+        ("dist/pre.js", b"console.log('pre')\n"),
+        ("dist/main.js", b"console.log('main')\n"),
+        ("dist/post.js", b"console.log('post')\n"),
+    ]);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
     let definition = PreparedActionDefinition::new(
         Vec::new(),
@@ -1089,6 +1173,22 @@ pub fn prepared_node24_action_with_pre_condition(pre_condition: &str) -> Prepare
     )
     .expect("valid JavaScript definition");
     PreparedAction::with_definition(digest, archive, "", definition).expect("valid action")
+}
+
+fn test_action_archive(entries: &[(&str, &[u8])]) -> Bytes {
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut archive = TarBuilder::new(encoder);
+    for (path, bytes) in entries {
+        let mut header = TarHeader::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(u64::try_from(bytes.len()).expect("test entry size"));
+        header.set_cksum();
+        archive
+            .append_data(&mut header, format!("root/{path}"), Cursor::new(*bytes))
+            .expect("append test action entry");
+    }
+    let encoder = archive.into_inner().expect("finish test tar");
+    Bytes::from(encoder.finish().expect("finish test gzip"))
 }
 
 pub fn profile() -> EnvironmentProfile {
@@ -1434,6 +1534,7 @@ impl ExecutionEndpoint for FakeEndpoint {
         &self.capabilities
     }
 
+    #[allow(clippy::too_many_lines)]
     fn exec(
         &self,
         request: &ExecutionCommand,
@@ -1446,7 +1547,57 @@ impl ExecutionEndpoint for FakeEndpoint {
             return execution_output(ExecutionTermination::Cancelled, Vec::new(), false)
                 .map_err(|_| execution_error(ExecutionStage::Exec));
         }
-        if matches!(program, "/usr/bin/install" | "/usr/bin/tar") {
+        if request
+            .argv()
+            .arguments()
+            .iter()
+            .any(|argument| argument.contains("automata-local-action-metadata"))
+        {
+            let arguments = request.argv().arguments();
+            let environment_value = |name: &str| {
+                request
+                    .environment()
+                    .values()
+                    .iter()
+                    .find(|variable| variable.name().as_str() == name)
+                    .map(|variable| variable.value().expose())
+            };
+            let candidates = if program == "/usr/bin/sh" {
+                arguments
+                    .get(3)
+                    .zip(arguments.get(4))
+                    .map(|(preferred, fallback)| (preferred.as_str(), fallback.as_str()))
+            } else if program.eq_ignore_ascii_case(r"C:\Program Files\PowerShell\7\pwsh.exe") {
+                environment_value("AUTOMATA_INTERNAL_LOCAL_ACTION_YML")
+                    .zip(environment_value("AUTOMATA_INTERNAL_LOCAL_ACTION_YAML"))
+            } else {
+                None
+            };
+            let selected = candidates.and_then(|(preferred, fallback)| {
+                if state.files.contains_key(preferred) {
+                    Some(b"yml".to_vec())
+                } else if state.files.contains_key(fallback) {
+                    Some(b"yaml".to_vec())
+                } else {
+                    None
+                }
+            });
+            return execution_output(
+                selected
+                    .as_ref()
+                    .map_or(ExecutionTermination::Exited(44), |_| {
+                        ExecutionTermination::Exited(0)
+                    }),
+                selected
+                    .map(|bytes| vec![(ExecutionOutputStream::Stdout, bytes)])
+                    .unwrap_or_default(),
+                false,
+            )
+            .map_err(|_| execution_error(ExecutionStage::Exec));
+        }
+        if matches!(program, "/usr/bin/install" | "/usr/bin/tar")
+            || program.eq_ignore_ascii_case(r"C:\automata\tools\tar\tar.exe")
+        {
             return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
                 .map_err(|_| execution_error(ExecutionStage::Exec));
         }
@@ -1460,35 +1611,36 @@ impl ExecutionEndpoint for FakeEndpoint {
             return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
                 .map_err(|_| execution_error(ExecutionStage::Exec));
         }
-        if program == "/usr/bin/sh"
+        if program.eq_ignore_ascii_case(r"C:\Program Files\PowerShell\7\pwsh.exe")
             && request
                 .argv()
                 .arguments()
-                .get(1)
-                .is_some_and(|argument| argument.contains("automata-local-action-metadata"))
+                .iter()
+                .any(|argument| argument.contains("FileAttributes]::ReparsePoint"))
         {
-            let arguments = request.argv().arguments();
-            let preferred = arguments.get(3).expect("preferred metadata path");
-            let fallback = arguments.get(4).expect("fallback metadata path");
-            let selected = if state.files.contains_key(preferred) {
-                Some(b"yml".to_vec())
-            } else if state.files.contains_key(fallback) {
-                Some(b"yaml".to_vec())
-            } else {
-                None
-            };
-            return execution_output(
-                selected
-                    .as_ref()
-                    .map_or(ExecutionTermination::Exited(44), |_| {
-                        ExecutionTermination::Exited(0)
-                    }),
-                selected
-                    .map(|bytes| vec![(ExecutionOutputStream::Stdout, bytes)])
-                    .unwrap_or_default(),
-                false,
-            )
-            .map_err(|_| execution_error(ExecutionStage::Exec));
+            return execution_output(ExecutionTermination::Exited(0), Vec::new(), false)
+                .map_err(|_| execution_error(ExecutionStage::Exec));
+        }
+        if program.eq_ignore_ascii_case(r"C:\automata\tools\hash\automata-sha256.exe") {
+            let archive = request
+                .argv()
+                .arguments()
+                .first()
+                .expect("Windows action archive path");
+            let (termination, output) = state.files.get(archive).map_or_else(
+                || (ExecutionTermination::Exited(44), Vec::new()),
+                |bytes| {
+                    (
+                        ExecutionTermination::Exited(0),
+                        vec![(
+                            ExecutionOutputStream::Stdout,
+                            sha256_hex(bytes).into_bytes(),
+                        )],
+                    )
+                },
+            );
+            return execution_output(termination, output, false)
+                .map_err(|_| execution_error(ExecutionStage::Exec));
         }
         if let Some(output) = artifact_hash_output(request, &state.files) {
             return output;

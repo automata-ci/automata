@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "kind": "patch_report",
+  "candidate_fixture": true,
+  "profile_id": "automata.dev/windows-2025-x64-hyperv-v1",
+  "image": "registry.example/automata/windows-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "subject": {
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "media_type": "application/vnd.automata.windows-patch-report+json"
+  },
+  "statement": "Candidate patch-metadata interface fixture only; external security acceptance is required for promotion."
+}

@@ -646,6 +646,10 @@ pub enum OperationPurpose {
     ReadArtifactsFile = 11,
     /// Evaluates one runner-local `hashFiles` call inside the fenced sandbox.
     HashFiles = 12,
+    /// Re-hashes one copied immutable action archive before extraction.
+    VerifyActionArchive = 13,
+    /// Verifies the extracted Windows action tree contains no reparse point.
+    VerifyActionTree = 14,
 }
 
 /// Derives deterministic IDs for retryable endpoint operations.

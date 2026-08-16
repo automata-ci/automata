@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "kind": "revocations",
+  "candidate_fixture": true,
+  "profile_id": "automata.dev/windows-2025-x64-hyperv-v1",
+  "image": "registry.example/automata/windows-runner@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "subject": {
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "media_type": "application/vnd.automata.image-revocations+json"
+  },
+  "statement": "Candidate revocation-metadata interface fixture only; an externally accepted generation is required for promotion.",
+  "generation": 1,
+  "revoked_images": []
+}

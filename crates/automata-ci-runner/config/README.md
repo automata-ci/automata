@@ -163,9 +163,12 @@ or kubelet verification.
 > Unix file-backed TLS custody. `automata-runner run` renews that identity
 > before expiry, durably recovers an interrupted rotation, drains the old
 > runner generation, and reloads the new files itself. The macOS example uses
-> that exact file-backed TLS contract. Windows has no deployment example until
-> native atomic rotation is qualified. There is no manual, static-registration,
-> or alternate-protocol fallback.
+> that exact file-backed TLS contract. The Windows source path requires the
+> restricted broker for active profile admission, opaque receipt and
+> enrollment-secret custody, and final credential publication. Windows has no
+> deployment example until native atomic renewal custody, external image
+> promotion, authenticated placement, and the physical-host gate are qualified.
+> There is no local-secret, manual-registration, or alternate-protocol fallback.
 
 Configure the control plane with the
 [`automata` reference](https://github.com/automata-ci/automata/blob/main/crates/automata-ci/README.md),
@@ -173,15 +176,85 @@ then provision the runner host according to the requirements below.
 
 ## Windows Hyper-V-isolated component boundary
 
-The Hyper-V provider remains exercised by an internal product-schema fixture,
-but no checked-in Windows deployment configuration or `automata-runner run`
-path is published. Native atomic TLS renewal custody, a promoted immutable
-image, authenticated placement evidence, and the physical-host acceptance gate
-must land together before that surface can become current. The component still
-rejects process isolation, networking, host mounts, administrator identity,
-mutable images, and every action other than supported `run:` shells; see the
-[Windows isolation plan](../../../docs/platforms/windows.md). There is no
-environment-backed or static-certificate deployment fallback.
+The internal Windows product fixture is an unprovisionable source-build path for the implemented
+Hyper-V container provider. It requires one absolute SHA-256-pinned container
+runtime executable, one immutable Windows image reference, and the exact guest
+agent path baked into that image. Every job receives a fresh container with
+`--isolation hyperv`, no network, no host mounts, a writable disposable root,
+and `ContainerUser` identity. Configuration rejects every host-network,
+host-filesystem, administrator, native-process, process-isolated-container, or
+mutable-image alternative.
+
+`windows_hyperv.image_contract` also names bounded, no-follow files for the
+exact Windows Server 2025 Server Core manifest, image lock, and typed reference
+records for provenance, SPDX SBOM, patch-report, and revocation artifacts. Each
+reference record has the Automata reference-record media type and binds the
+native artifact's exact media type and digest; the verifier never treats a
+reference record as an in-toto or SPDX document. The manifest and lock digests
+are pinned in runner configuration. All evidence must bind the configured profile,
+base image, output image, guest path, workspace, and exact x86-64 Hyper-V,
+offline, unprivileged policy. The manifest's tool entries must exactly match
+the configured `pwsh.exe`, `powershell.exe`, `cmd.exe`, `tar.exe`,
+`automata-sha256.exe`, and each configured Node 12/16/20/24 executable. Missing,
+malformed, revoked, substituted, or digest-mismatched material stops startup.
+
+The resulting inventory advertises
+`automata.core/windows-hyperv-container@v1` only for `windows_hyperv`. GitHub
+Windows projection requires that exact launch capability together with
+`IsolationLevel::VirtualMachine`; a generic VM advertisement, including the
+macOS VM provider, cannot match. Registered and live-observed capabilities are
+intersected before scheduler matching, and the match is repeated before a
+placement can become a lease.
+
+Without an external promotion envelope the verified candidate's durable
+inventory contains only
+PowerShell and `cmd.exe` shell steps plus command files, with optional support
+for one absolute standalone Python interpreter. A production image may enable
+JavaScript, composite, repository, and local-action capabilities only after a
+canonical Ed25519-signed promotion payload accepts all evidence digests and
+revocation generation. Startup exercises every configured shell, archive,
+hash, Node, and optional Python executable through a copied probe in one fresh
+container. The required Windows enrollment adapter must run the same exact
+profile/tool contract and retain a short-lived authenticated receipt under an
+opaque broker-custody handle. The request binds the shared probe-contract schema
+and digest, and the supplied helper executes the same lifecycle, argv, and
+output checks as startup. This component supplies that request/receipt port;
+the restricted-broker caller and credential-publication integration remain a
+separate deployment gate. Once composed, the enrollment request must use the
+broker-attested ordered host-input set (configuration, executable, manifest,
+lock, evidence records, and promotion envelope), including protected DACL,
+owner, non-reparse, stable file/volume identity, and exact digest proof, and the
+receipt's exact capability set and a staged retry must resolve the identical
+receipt digest and binding. Missing, stale, expired, or tampered custody fails
+closed. The
+`capabilities` command remains a passive shell-only diagnostic and cannot mint
+action authority. Startup independently repeats the probes before opening a
+runtime session, and action/Node features remain schedulable only when the
+registered and live-observed sets agree. There is no `PATH` or Node-generation
+fallback. Docker actions, job
+containers, service containers, and active Podman doctor checks remain
+unsupported. The host state root contains provider ownership and recovery
+metadata only; no runner state or credential path is mounted into a job
+container.
+
+The checked-in runtime digest and the files under
+[`images/windows-server-2025-hyperv-candidate`](../../../images/windows-server-2025-hyperv-candidate/README.md)
+are explicit candidate fixtures, not promoted artifacts. They exercise the
+contract and verifier interfaces but do not claim that an image was built,
+signed, scanned, patched, or run on physical Windows hardware. No promotion
+envelope is checked in. Unit and injected-runtime tests do not prove HCS/HCN
+behavior, patch compatibility, or nested Job Object enforcement. Keep this
+runner out of production until the external image pipeline supplies real
+evidence and signature and the physical-host acceptance gate is published. The
+exact launch requirement also does not by itself satisfy every AUTH-02 and
+broker acceptance requirement.
+
+The internal
+[`runner.windows.product.json`](../tests/fixtures/runner.windows.product.json)
+exists only for schema and component testing. It is not a deployment example
+and must not be copied into production. Follow the
+[Windows isolation plan](../../../docs/platforms/windows.md); no supported
+`automata-runner run` Windows path is published yet.
 
 ## macOS virtual-machine example
 

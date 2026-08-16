@@ -15,6 +15,7 @@ use automata_ci_execution::{
     SandboxState, TargetPath, TargetPlatform,
 };
 use automata_ci_job_executor_github::{WindowsScriptShell, windows_script_arguments};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::podman_probe::ProbeCancellation;
@@ -26,6 +27,36 @@ const SHELL_PROBE_OUTPUT_BYTES: usize = 4 * 1024;
 #[cfg(test)]
 const WINDOWS_SHELL_PROBE_COUNT: usize = 3;
 const MAX_SHELL_PROBE_COUNT: usize = 11;
+pub(super) const WINDOWS_PROFILE_PROBE_SCHEMA_VERSION: u16 = 1;
+// This canonical descriptor is the compatibility boundary for the shared
+// enrollment/runtime probe below. Any semantic change to the lifecycle,
+// command construction, or acceptance rules must update this descriptor and
+// increment the schema version so retained enrollment receipts fail closed.
+const WINDOWS_PROFILE_PROBE_CONTRACT_V1: &[u8] = b"automata.windows-profile-probe/v1\n\
+lifecycle=validate-provider-policy,create,inspect-running,attach,copy-script,exec,destroy,inspect-absent\n\
+cleanup=signal-on-cancel,destroy-with-reconciliation,inspect-absent\n\
+pwsh-script=ErrorActionPreference-Stop,Console.Out.Write-exact-operation-marker\n\
+powershell-script=ErrorActionPreference-Stop,Console.Out.Write-exact-operation-marker\n\
+pwsh-argv=-command,dot-source-single-quoted-exact-script-path\n\
+powershell-argv=-command,dot-source-single-quoted-exact-script-path\n\
+cmd-script=echo-off,nul-set-p-exact-operation-marker,exit-B-0\n\
+cmd-argv=/D,/E:ON,/V:OFF,/C,exact-script-path\n\
+python-script=sys.stdout.write-exact-operation-marker,SystemExit-0\n\
+python-argv=exact-script-path\n\
+tar-argv=--version;stdout-prefix=tar (GNU tar) \n\
+sha256-argv=--version;stdout-prefix=automata-sha256 \n\
+node12-argv=--input-type=commonjs,--eval,exact-major-12,exact-operation-marker\n\
+node16-argv=--input-type=commonjs,--eval,exact-major-16,exact-operation-marker\n\
+node20-argv=--input-type=commonjs,--eval,exact-major-20,exact-operation-marker\n\
+node24-argv=--input-type=commonjs,--eval,exact-major-24,exact-operation-marker\n\
+exec=workspace,default-environment,timeout-15-seconds,output-limit-4096\n\
+accept=exit-0,complete-not-truncated,stdout-exact-or-version-prefix,stderr-empty";
+
+pub(super) fn windows_profile_probe_contract_sha256() -> automata_ci_core::Sha256Digest {
+    automata_ci_core::Sha256Digest::from_bytes(
+        Sha256::digest(WINDOWS_PROFILE_PROBE_CONTRACT_V1).into(),
+    )
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ProfileAdmissionPolicy {
@@ -48,7 +79,7 @@ struct ShellProbe {
     program: TargetPath,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum ShellKind {
     Bash,
     Sh,
@@ -206,6 +237,9 @@ impl ShellProbe {
         match self.kind {
             ShellKind::Install => stdout.starts_with(b"install (GNU coreutils) "),
             ShellKind::Tar => stdout.starts_with(b"tar (GNU tar) "),
+            ShellKind::Sha256sum if self.program.platform() == TargetPlatform::Windows => {
+                stdout.starts_with(b"automata-sha256 ")
+            }
             ShellKind::Sha256sum => stdout.starts_with(b"sha256sum (GNU coreutils) "),
             _ => stdout == self.marker(operation_id).as_bytes(),
         }
@@ -315,6 +349,48 @@ impl ProfileAdmissionPolicy {
         Ok(self)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn with_windows_hyperv_tools(
+        self,
+        pwsh: TargetPath,
+        powershell: TargetPath,
+        cmd: TargetPath,
+        python: Option<TargetPath>,
+        tar: TargetPath,
+        sha256: TargetPath,
+        node12: Option<TargetPath>,
+        node16: Option<TargetPath>,
+        node20: Option<TargetPath>,
+        node24: Option<TargetPath>,
+    ) -> Result<Self, ProfileAdmissionError> {
+        let mut policy = self.with_windows_hyperv_shells(pwsh, powershell, cmd, python)?;
+        let probes = &mut policy
+            .shell_probes
+            .as_mut()
+            .ok_or_else(invalid_catalog)?
+            .probes;
+        probes.extend([
+            ShellProbe::new(ShellKind::Tar, tar),
+            ShellProbe::new(ShellKind::Sha256sum, sha256),
+        ]);
+        for (kind, program) in [
+            (ShellKind::Node12, node12),
+            (ShellKind::Node16, node16),
+            (ShellKind::Node20, node20),
+            (ShellKind::Node24, node24),
+        ] {
+            if let Some(program) = program {
+                probes.push(ShellProbe::new(kind, program));
+            }
+        }
+        if probes.len() > MAX_SHELL_PROBE_COUNT
+            || probes.iter().any(|probe| !valid_windows_probe(probe))
+        {
+            return Err(invalid_catalog());
+        }
+        Ok(policy)
+    }
+
     pub(super) fn with_virtualized_macos_shells(
         mut self,
         scratch_root: TargetPath,
@@ -380,6 +456,27 @@ fn valid_linux_probe(probe: &ShellProbe) -> bool {
             basename == "node"
         }
         ShellKind::WindowsPowerShell | ShellKind::Cmd => false,
+    }
+}
+
+fn valid_windows_probe(probe: &ShellProbe) -> bool {
+    if probe.program.platform() != TargetPlatform::Windows {
+        return false;
+    }
+    let Some(basename) = probe.program.as_str().rsplit('\\').next() else {
+        return false;
+    };
+    match probe.kind {
+        ShellKind::Pwsh => basename.eq_ignore_ascii_case("pwsh.exe"),
+        ShellKind::WindowsPowerShell => basename.eq_ignore_ascii_case("powershell.exe"),
+        ShellKind::Cmd => basename.eq_ignore_ascii_case("cmd.exe"),
+        ShellKind::Python => basename.eq_ignore_ascii_case("python.exe"),
+        ShellKind::Tar => basename.eq_ignore_ascii_case("tar.exe"),
+        ShellKind::Sha256sum => basename.eq_ignore_ascii_case("automata-sha256.exe"),
+        ShellKind::Node12 | ShellKind::Node16 | ShellKind::Node20 | ShellKind::Node24 => {
+            basename.eq_ignore_ascii_case("node.exe")
+        }
+        ShellKind::Bash | ShellKind::Sh | ShellKind::Install => false,
     }
 }
 
@@ -1487,11 +1584,14 @@ mod tests {
             Some(ShellKind::Python)
         } else if basename == "install" {
             Some(ShellKind::Install)
-        } else if basename == "tar" {
+        } else if basename.eq_ignore_ascii_case("tar") || basename.eq_ignore_ascii_case("tar.exe") {
             Some(ShellKind::Tar)
-        } else if basename == "sha256sum" {
+        } else if basename.eq_ignore_ascii_case("sha256sum")
+            || basename.eq_ignore_ascii_case("automata-sha256.exe")
+        {
             Some(ShellKind::Sha256sum)
-        } else if basename == "node" {
+        } else if basename.eq_ignore_ascii_case("node") || basename.eq_ignore_ascii_case("node.exe")
+        {
             let evaluation = request.argv().arguments().last()?;
             [
                 ("!== '12'", ShellKind::Node12),
@@ -1545,6 +1645,11 @@ mod tests {
                 match kind {
                     ShellKind::Install => b"install (GNU coreutils) 9.4\n".to_vec(),
                     ShellKind::Tar => b"tar (GNU tar) 1.35\n".to_vec(),
+                    ShellKind::Sha256sum
+                        if request.argv().program().platform() == TargetPlatform::Windows =>
+                    {
+                        b"automata-sha256 1.0.0\n".to_vec()
+                    }
                     ShellKind::Sha256sum => b"sha256sum (GNU coreutils) 9.4\n".to_vec(),
                     _ => ShellProbe::new(kind, request.argv().program().clone())
                         .marker(request.operation_id())
@@ -1999,6 +2104,53 @@ mod tests {
         assert_eq!(
             probes.last().map(|probe| probe.kind),
             Some(ShellKind::Python)
+        );
+    }
+
+    #[test]
+    fn windows_action_tools_and_every_configured_node_generation_are_probed() {
+        let resources = ResourceLimits::new(256 * 1024 * 1024, 1_000, 16).expect("resources");
+        let policy = ProfileAdmissionPolicy::new(
+            NetworkPolicy::Disabled,
+            RootFilesystemPolicy::Writable,
+            SandboxPrivilegePolicy::Unprivileged,
+            resources,
+            resource_allocation(resources),
+        )
+        .with_windows_hyperv_tools(
+            TargetPath::windows(r"C:\Program Files\PowerShell\7\pwsh.exe").expect("pwsh"),
+            TargetPath::windows(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+                .expect("powershell"),
+            TargetPath::windows(r"C:\Windows\System32\cmd.exe").expect("cmd"),
+            None,
+            TargetPath::windows(r"C:\automata\tools\tar\tar.exe").expect("tar"),
+            TargetPath::windows(r"C:\automata\tools\hash\automata-sha256.exe").expect("hash"),
+            Some(TargetPath::windows(r"C:\automata\externals\node12\node.exe").expect("node12")),
+            Some(TargetPath::windows(r"C:\automata\externals\node16\node.exe").expect("node16")),
+            Some(TargetPath::windows(r"C:\automata\externals\node20\node.exe").expect("node20")),
+            Some(TargetPath::windows(r"C:\automata\externals\node24\node.exe").expect("node24")),
+        )
+        .expect("complete Windows tool policy");
+        let kinds = policy
+            .shell_probes
+            .expect("tool probes")
+            .probes
+            .into_iter()
+            .map(|probe| probe.kind)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                ShellKind::Pwsh,
+                ShellKind::WindowsPowerShell,
+                ShellKind::Cmd,
+                ShellKind::Tar,
+                ShellKind::Sha256sum,
+                ShellKind::Node12,
+                ShellKind::Node16,
+                ShellKind::Node20,
+                ShellKind::Node24,
+            ])
         );
     }
 

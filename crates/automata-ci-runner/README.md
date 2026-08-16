@@ -3,8 +3,8 @@
 The provisioned `automata-runner` command targets Linux and macOS execution
 hosts. Its only Windows execution provider uses Hyper-V-isolated containers;
 the component is implemented, but it
-remains a source-build path without a production enrollment flow, promoted
-runner image, or physical-host release gate. On supported hosts the command
+remains a source-build path without a production-qualified broker deployment,
+promoted runner image, or physical-host release gate. On supported hosts the command
 validates the host and opens an mTLS session to
 the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
@@ -96,20 +96,46 @@ image inspection adds it to the live inventory. A missing value
 disables the feature, and an invalid or unavailable configured image stops
 startup. Mutable tags are rejected.
 
-The Windows profile supports PowerShell and `cmd.exe` `run:` steps, plus an
-optional explicitly configured standalone Python interpreter. Startup probes
-each configured interpreter through a copied script before advertising the
-profile. Every `uses:` action, including JavaScript, composite, local,
-repository, and container actions, fails closed. Job containers, service
-containers, administrator profiles, and host-network or host-filesystem policy
-are unsupported.
+The Windows profile always supports exact configured PowerShell and `cmd.exe`
+`run:` steps, plus an optional standalone Python interpreter. Its action-ready
+  component path additionally binds a Windows Server 2025 Server Core image
+  manifest and lock to typed reference records for provenance, SPDX SBOM,
+  patch, and revocation evidence and to exact `tar.exe`, hash-helper, and Node
+  12/16/20/24 paths. Each record binds the native artifact media type and digest;
+  it is not parsed as though it were the referenced native format. Candidate evidence
+without an external Ed25519 promotion envelope remains shell-only. The Windows
+enrollment component defines a receipt contract requiring the same exact
+fresh-container probes before registration and authenticated, short-lived
+receipt retention only through opaque broker custody. The request binds a
+versioned digest of those shared lifecycle, argv, output, and cleanup semantics;
+the broker caller invokes the same helper as runtime admission instead of
+duplicating probe scripts. The restricted-broker
+caller and Windows credential publication are a separate integration gate; until
+they are composed, enrollment remains unavailable rather than registering a
+shell-only or action-ready runner. Only an externally promoted image whose
+ordered config, broker executable, manifest, evidence, and promotion-envelope
+paths and digests receive fresh broker owner/protected-DACL/file-ID/local-volume
+attestation, and whose
+pre-enrollment probes all succeed can register JavaScript, composite,
+repository, local-action, and exact Node-generation capabilities. Startup
+independently repeats admission before reporting the live inventory, so
+registered/live capability intersection retains only abilities proved at both
+boundaries. Missing, stale, tampered, revoked, or mismatched receipt, image,
+tool, or runtime evidence fails closed. Docker
+actions, job containers, service containers, administrator profiles, and
+host-network or host-filesystem policy remain unsupported.
 
 Hosted Windows CI is currently disabled because Automata does not yet operate
 Windows runners. Unit and injected-runtime provider tests do not constitute a
-release gate; there is deliberately no Windows enrollment or static-registration
-fallback. Do not deploy it until secure Windows credential publication, a
-promoted digest-pinned Windows image, and the physical Windows end-to-end gate
-are implemented together.
+release gate; there is deliberately no static-registration or unsigned-receipt
+fallback. The source contract requires broker-owned enrollment-secret and
+admission-receipt custody and writes neither secret to runner-local staging.
+Do not deploy it until that broker is installed under its restricted service
+identity, secure Windows credential publication is qualified, a
+real externally promoted digest-pinned Windows image, and the physical Windows
+end-to-end gate are implemented together. The checked-in candidate image
+contract is deliberately unsigned and is not evidence of a built or tested
+image.
 
 The macOS profile supports Bash and `sh` `run:` steps, plus optional explicitly
 configured Python and PowerShell Core interpreters. Startup probes every
