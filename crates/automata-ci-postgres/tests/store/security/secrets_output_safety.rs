@@ -754,7 +754,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 requested_visibility, effective_visibility,
                 publication_safety_reason
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, 7, 'unsafe-artifact', 1,
+                $1, $2, $3, $4, $5, $6, 7, 'unsafe-artifact', 7,
                 'application/octet-stream', 1, 'readable_secret',
                 'public', 'public', 'secret_exposure'
             )
@@ -780,7 +780,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 requested_visibility, effective_visibility,
                 publication_safety_reason
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, 8, 'forged-safe-artifact', 1,
+                $1, $2, $3, $4, $5, $6, 8, 'forged-safe-artifact', 7,
                 'application/octet-stream', 1, 'secretless',
                 'public', 'public', 'repository_policy'
             )
@@ -809,7 +809,7 @@ async fn public_output_is_allowed_only_with_a_compatible_safety_snapshot() -> Te
                 requested_visibility, effective_visibility,
                 publication_safety_reason
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, 7, 'public-artifact', 1,
+                $1, $2, $3, $4, $5, $6, 7, 'public-artifact', 7,
                 'application/octet-stream', 1, 'secretless',
                 'public', 'public', 'repository_policy'
             ) RETURNING id
