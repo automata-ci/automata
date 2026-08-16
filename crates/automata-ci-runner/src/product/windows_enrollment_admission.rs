@@ -542,7 +542,13 @@ pub fn probe_windows_enrollment_request(
     .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
     let environment = request.environment();
     let environments = BTreeMap::from([(environment.attestation().clone(), environment.clone())]);
-    match admit_environment_profiles(provider, &environments, policy, cancellation) {
+    match admit_environment_profiles(
+        provider,
+        request.binding().runner_id(),
+        &environments,
+        policy,
+        cancellation,
+    ) {
         Ok(ProfileAdmissionOutcome::Admitted) => Ok(()),
         Ok(ProfileAdmissionOutcome::Cancelled) => Err(WindowsEnrollmentAdmissionError::Unavailable),
         Err(_) => Err(WindowsEnrollmentAdmissionError::ProbeFailed),

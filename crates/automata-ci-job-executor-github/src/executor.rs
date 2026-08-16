@@ -3975,7 +3975,7 @@ impl GithubJobExecutor {
                 128,
             )?;
             let output = endpoint
-                .exec(&command, &CancellationBridge(cancellation))
+                .exec(&command, &ProviderCancellationBridge(cancellation))
                 .map_err(map_execution_error)?;
             require_success(&output)?;
             let stdout = output
@@ -4020,7 +4020,7 @@ impl GithubJobExecutor {
                 self.config.maximum_output_bytes(),
             )?;
             let output = endpoint
-                .exec(&command, &CancellationBridge(cancellation))
+                .exec(&command, &ProviderCancellationBridge(cancellation))
                 .map_err(map_execution_error)?;
             require_success(&output)?;
             if !output.stdout().is_empty() || !output.stderr().is_empty() {

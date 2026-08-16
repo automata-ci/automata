@@ -25,6 +25,13 @@ const HOST_CONFIG: &str = "config/runner.local-1.example.json";
 static NEXT_EVIDENCE_ROOT: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(windows)]
+fn write_secure_windows_fixture(path: &std::path::Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("write Windows evidence fixture");
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(path)
+        .expect("restrict Windows evidence fixture DACL");
+}
+
+#[cfg(windows)]
 struct WindowsEvidenceFixture {
     root: PathBuf,
     config_path: PathBuf,
@@ -77,7 +84,7 @@ impl WindowsEvidenceFixture {
                 )[..],
             ),
         ] {
-            fs::write(root.join(name), bytes).expect("write Windows evidence fixture");
+            write_secure_windows_fixture(&root.join(name), bytes);
         }
         let mut config: serde_json::Value =
             serde_json::from_slice(include_bytes!("fixtures/runner.windows.product.json"))
@@ -94,11 +101,9 @@ impl WindowsEvidenceFixture {
                 serde_json::json!(root.join(name).to_string_lossy());
         }
         let config_path = root.join("runner.json");
-        fs::write(
-            &config_path,
-            serde_json::to_vec(&config).expect("serialize Windows evidence configuration"),
-        )
-        .expect("write Windows evidence configuration");
+        let config_bytes =
+            serde_json::to_vec(&config).expect("serialize Windows evidence configuration");
+        write_secure_windows_fixture(&config_path, &config_bytes);
         Self { root, config_path }
     }
 }
