@@ -978,6 +978,9 @@ norlX3KEHNe7cTke5cP4OA==";
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
                 .expect("owner-only test key");
         }
+        #[cfg(windows)]
+        automata_ci_windows_file_security::restrict_file_to_current_user_for_test(&path)
+            .expect("owner-only test key DACL");
         path
     }
 

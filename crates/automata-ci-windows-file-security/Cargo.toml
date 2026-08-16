@@ -1,0 +1,26 @@
+[package]
+name = "automata-ci-windows-file-security"
+description = "Safe Windows handle-bound file custody checks for Automata"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+thiserror.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+stellar-agent-windows-identity.workspace = true
+windows-permissions.workspace = true
+winapi-util.workspace = true
+
+[lints]
+workspace = true

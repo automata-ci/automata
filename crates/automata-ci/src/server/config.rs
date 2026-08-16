@@ -11,6 +11,11 @@ use std::{
 #[cfg(unix)]
 use std::{fs::File, io::Read as _, path::Component};
 
+#[cfg(windows)]
+use automata_ci_windows_file_security::{
+    AttestedFileError, ReadAccess, ReadOptions, read_attested_file,
+};
+
 use http::{Uri, uri::Authority};
 use thiserror::Error;
 use url::Url;
@@ -1703,7 +1708,25 @@ fn read_bounded_file(
     Ok(bytes)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn read_bounded_file(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
+    let options = ReadOptions::new(maximum_bytes, true, ReadAccess::Private);
+    read_attested_file(path, &options).map_err(|error| match error {
+        AttestedFileError::InvalidLimit => SecretLoadError::InvalidLimit,
+        AttestedFileError::InvalidSize => SecretLoadError::TooLarge {
+            maximum: maximum_bytes,
+        },
+        AttestedFileError::InvalidPath
+        | AttestedFileError::PathSecurity
+        | AttestedFileError::AccessSecurity
+        | AttestedFileError::Unstable => SecretLoadError::FileSecurity,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn read_bounded_file(
     _path: &Path,
     _maximum_bytes: usize,

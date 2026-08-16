@@ -86,6 +86,9 @@ zeroize.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+automata-ci-windows-file-security.workspace = true
+
 [build-dependencies]
 automata-ci-build-support.workspace = true
 
@@ -98,6 +101,9 @@ ring.workspace = true
 sqlx.workspace = true
 tar.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+automata-ci-windows-file-security = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

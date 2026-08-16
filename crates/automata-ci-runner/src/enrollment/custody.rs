@@ -957,6 +957,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use super::remove_durable;
+    #[cfg(windows)]
+    use super::validate_destination_set;
     #[cfg(unix)]
     use super::{CredentialDestinations, persist_exact_file};
     use super::{EnrollmentStage, STAGE_SCHEMA, validate_certificate_response};
@@ -1000,6 +1002,22 @@ mod tests {
             &serde_json::to_vec(&document).expect("runner configuration JSON"),
         )
         .expect("runner product configuration")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn durable_windows_enrollment_custody_remains_unavailable() {
+        let destination = std::env::temp_dir().join(format!(
+            "automata-windows-enrollment-must-not-write-{}",
+            Uuid::new_v4()
+        ));
+        let error = validate_destination_set(std::slice::from_ref(&destination))
+            .expect_err("Windows enrollment must remain broker-owned and unavailable here");
+        assert_eq!(
+            error.to_string(),
+            "durable runner enrollment is supported only on Unix hosts"
+        );
+        assert!(!destination.exists());
     }
 
     #[test]

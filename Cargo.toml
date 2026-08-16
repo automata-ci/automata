@@ -52,6 +52,7 @@ members = [
     "crates/automata-ci-ui-renderer",
     "crates/automata-ci-workflow-github",
     "crates/automata-ci-workflow-service",
+    "crates/automata-ci-windows-file-security",
 ]
 exclude = ["ui/renderer/vendor/rquickjs-macro-0.10.0"]
 default-members = [
@@ -124,6 +125,7 @@ automata-ci-tls = { path = "crates/automata-ci-tls", version = "0.1.0" }
 automata-ci-ui-renderer = { path = "crates/automata-ci-ui-renderer", version = "0.1.0" }
 automata-ci-workflow-github = { path = "crates/automata-ci-workflow-github", version = "0.1.0" }
 automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", version = "0.1.0" }
+automata-ci-windows-file-security = { path = "crates/automata-ci-windows-file-security", version = "0.1.0" }
 axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
 base64 = "0.23.1"
 bytes = "=1.12.1"
@@ -154,6 +156,7 @@ ring = { version = "=0.17.14", default-features = false, features = ["std"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 security-framework = "3.7.0"
+stellar-agent-windows-identity = "=0.1.0-alpha.6"
 saphyr-parser = { version = "0.0.11", default-features = false }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.143", features = ["raw_value"] }
@@ -180,6 +183,8 @@ url = { version = "2.5.4", features = ["serde"] }
 uuid = { version = "1.18.0", features = ["serde", "v4"] }
 wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
 wasmtime-wasi = { version = "=47.0.3", default-features = false, features = ["p2"] }
+windows-permissions = "=0.2.4"
+winapi-util = "=0.1.11"
 x509-parser = { version = "=0.18.1", default-features = false, features = ["verify"] }
 xmlparser = "=0.13.6"
 zeroize = { version = "1.8.1", features = ["derive"] }

@@ -25,6 +25,9 @@ fn write_secret_file(path: &PathBuf, contents: impl AsRef<[u8]>) {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .expect("secret fixture permissions must be owner-only");
     }
+    #[cfg(windows)]
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(path)
+        .expect("secret fixture DACL must be owner-only");
 }
 
 fn configured_human_auth_args() -> automata_ci::cli::ServerArgs {
@@ -199,6 +202,49 @@ fn secret_file_loading_rejects_unsafe_paths_and_permissions() {
         SecretSource::File(PathBuf::from("relative-secret.txt")).load_bytes(64),
         Err(SecretLoadError::FileSecurity)
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn secret_file_loading_uses_the_attested_windows_custody_seam() {
+    let insecure_path = test_file(&format!(
+        "windows-inherited-secret-marker-{}.txt",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&insecure_path);
+    fs::write(&insecure_path, b"must-not-load").expect("fixture must be writable");
+    let error = SecretSource::File(insecure_path.clone())
+        .load_bytes(64)
+        .expect_err("an inherited, unprotected DACL must fail closed");
+    assert!(matches!(error, SecretLoadError::FileSecurity));
+    assert!(!format!("{error:?}").contains("windows-inherited-secret-marker"));
+
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(&insecure_path)
+        .expect("fixture DACL must become protected and owner-only");
+    assert_eq!(
+        SecretSource::File(insecure_path.clone())
+            .load_bytes(64)
+            .expect("attested file must load")
+            .as_slice(),
+        b"must-not-load"
+    );
+
+    let hardlink_path = test_file(&format!(
+        "windows-hardlink-secret-{}.txt",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&hardlink_path);
+    fs::hard_link(&insecure_path, &hardlink_path).expect("fixture hardlink must be creatable");
+    assert!(matches!(
+        SecretSource::File(insecure_path.clone()).load_bytes(64),
+        Err(SecretLoadError::FileSecurity)
+    ));
+    assert!(matches!(
+        SecretSource::File(PathBuf::from("relative-secret.txt")).load_bytes(64),
+        Err(SecretLoadError::FileSecurity)
+    ));
+    fs::remove_file(hardlink_path).expect("remove fixture hardlink");
+    fs::remove_file(insecure_path).expect("remove fixture target");
 }
 
 #[test]
