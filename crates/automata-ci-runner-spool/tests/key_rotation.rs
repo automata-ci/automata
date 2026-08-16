@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use automata_ci_core::Sha256Digest;
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentRef, DurableContentStore,
-    FileSpool, ProtectionId, SpoolError,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentRef, DurableContentStore, FileSpool, ProtectionId, SpoolError,
 };
 use sha2::{Digest as _, Sha256};
 use support::{Scratch, StaticRetainSet, TestProtector, adopt};
@@ -45,6 +45,24 @@ impl ContentProtector for TestKeyring {
         self.exact(protection_id).is_some()
     }
 
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        self.exact(protection_id)
+            .ok_or(ContentProtectionError::KeyUnavailable)?
+            .keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        self.active.endpoint_result_protected_bytes(plaintext_bytes)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,
@@ -69,7 +87,7 @@ fn keyring(active: (&str, u8), decrypt_only: &[(&str, u8)]) -> Arc<TestKeyring> 
 }
 
 fn reference(id: &str, plaintext: &[u8]) -> DurableContentRef {
-    DurableContentRef::after_commit(
+    DurableContentRef::after_public_commit(
         ContentKind::JobIr,
         u64::try_from(plaintext.len()).expect("fixture size"),
         Sha256Digest::from_bytes(Sha256::digest(plaintext).into()),

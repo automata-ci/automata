@@ -530,7 +530,7 @@ mod tests {
             PlatformDirectory::open(&root),
             Err(SpoolError::AlreadyLocked)
         ));
-        let reference = DurableContentRef::after_commit(
+        let reference = DurableContentRef::after_public_commit(
             ContentKind::LogSpool,
             7,
             Sha256Digest::from_bytes([7; 32]),

@@ -77,7 +77,7 @@ fn roots_and_content_are_owner_only_and_symlinks_are_never_followed() {
     drop(spool);
 
     let digest = Sha256Digest::from_bytes(Sha256::digest(b"other content").into());
-    let malicious_ref = DurableContentRef::after_commit(
+    let malicious_ref = DurableContentRef::after_public_commit(
         ContentKind::JobIr,
         13,
         digest,

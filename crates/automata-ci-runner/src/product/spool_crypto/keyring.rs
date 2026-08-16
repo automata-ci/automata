@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, fmt};
 
 use automata_ci_runner_spool::{
-    ContentProtectionError, ContentProtector, DurableContentRef, ProtectionId,
+    ContentCommitmentDomain, ContentProtectionError, ContentProtector, DurableContentRef,
+    ProtectionId,
 };
 
 use super::{aes_gcm::Aes256GcmContentProtector, error::ContentProtectorConfigurationError};
@@ -95,6 +96,23 @@ impl ContentProtector for Aes256GcmContentKeyring {
     fn supports_protection_id(&self, protection_id: &ProtectionId) -> bool {
         protection_id == self.active.protection_id()
             || self.decrypt_only.contains_key(protection_id)
+    }
+
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        self.protector_for(protection_id)?
+            .keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        self.active.endpoint_result_protected_bytes(plaintext_bytes)
     }
 
     fn protect(

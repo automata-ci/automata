@@ -24,6 +24,7 @@ automata-ci-core.workspace = true
 rustix.workspace = true
 serde.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

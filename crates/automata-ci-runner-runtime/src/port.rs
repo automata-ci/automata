@@ -10,7 +10,9 @@ use automata_ci_core::{
     AttemptId, JobIrEnvelope, JobLifecycle, JobResult, Lease, LeaseGuard, LogChannel, OperationId,
     RunnerId, RunnerSessionId, UnixMillis,
 };
-use automata_ci_execution::{SandboxCustody, SandboxEnvironment};
+use automata_ci_execution::{
+    ExecutionEndpoint, SandboxCustody, SandboxEnvironment, SandboxInspection, SandboxProvider,
+};
 use automata_ci_protocol::{JobRuntimeAuthorities, ManagedSecretBindingOverlay};
 use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal};
 use automata_ci_runner_journal::{
@@ -437,6 +439,22 @@ impl CapacityReclaimError for ExecutionEventError {
 
 /// Narrow callback surface for durable executor progress and provider sagas.
 pub trait ExecutionEvents: fmt::Debug + Send + Sync {
+    /// Installs durable endpoint replay on one freshly inspected attachment.
+    ///
+    /// The inspection must bind the endpoint handle to the exact live sandbox
+    /// generation, custody, and current environment-profile attestation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExecutionEventError`] when attachment evidence conflicts with
+    /// the durable slot or the replay boundary cannot be constructed.
+    fn bind_endpoint(
+        &self,
+        provider: Arc<dyn SandboxProvider>,
+        inspection: SandboxInspection,
+        endpoint: Box<dyn ExecutionEndpoint>,
+    ) -> Result<Box<dyn ExecutionEndpoint>, ExecutionEventError>;
+
     /// Commits a non-terminal lifecycle transition.
     ///
     /// # Errors

@@ -16,7 +16,7 @@ fn protector(id: &str, marker: u8) -> Aes256GcmContentProtector {
 }
 
 fn reference(id: &str, plaintext: &[u8]) -> DurableContentRef {
-    DurableContentRef::after_commit(
+    DurableContentRef::after_public_commit(
         ContentKind::RuntimeAuthority,
         u64::try_from(plaintext.len()).expect("fixture size"),
         Sha256Digest::from_bytes(Sha256::digest(plaintext).into()),

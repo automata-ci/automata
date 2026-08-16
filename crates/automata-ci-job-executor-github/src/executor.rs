@@ -4782,6 +4782,9 @@ impl GithubJobExecutor {
             .provider
             .attach(&handle, &cancellation)
             .map_err(|error| map_provider_error(&error))?;
+        let endpoint = events
+            .bind_endpoint(self.ports.provider.clone(), inspection, endpoint)
+            .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
         Ok(ObtainedSandbox { endpoint, services })
     }
 

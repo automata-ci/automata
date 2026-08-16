@@ -194,12 +194,12 @@ impl LogSegment {
             .checked_sub(self.first_sequence.get())
             .and_then(|span| span.checked_add(1))
             .ok_or(JournalInvariantError::InvalidLogSegment)?;
-        if self.content.size() == 0
+        if self.content.accounted_bytes() == 0
             || self.frame_count == 0
             || usize::try_from(self.frame_count).unwrap_or(usize::MAX) > MAX_LOG_SEGMENT_FRAMES
             || u64::from(self.frame_count) != expected_frames
             || self.payload_bytes > MAX_LOG_SPOOL_CONTENT_BYTES
-            || self.payload_bytes > self.content.size()
+            || self.payload_bytes > self.content.accounted_bytes()
             || (self.end_of_stream && !self.sealed)
         {
             return Err(JournalInvariantError::InvalidLogSegment);
@@ -400,7 +400,7 @@ impl LogDeliveryCursor {
     #[must_use]
     pub fn backlog_content_bytes(&self) -> u64 {
         self.segments.iter().fold(0_u64, |total, segment| {
-            total.saturating_add(segment.content().size())
+            total.saturating_add(segment.content().accounted_bytes())
         })
     }
 
@@ -442,14 +442,14 @@ impl LogDeliveryCursor {
                 || candidate.last_sequence() != expected_last
                 || candidate.frame_count() != current.frame_count().saturating_add(1)
                 || candidate.payload_bytes() < current.payload_bytes()
-                || candidate.content().size() <= current.content().size()
+                || candidate.content().accounted_bytes() <= current.content().accounted_bytes()
             {
                 return Err(JournalInvariantError::InvalidLogSegment);
             }
             let retained = self
                 .backlog_content_bytes()
-                .checked_sub(current.content().size())
-                .and_then(|bytes| bytes.checked_add(candidate.content().size()))
+                .checked_sub(current.content().accounted_bytes())
+                .and_then(|bytes| bytes.checked_add(candidate.content().accounted_bytes()))
                 .ok_or(JournalInvariantError::LogBacklogLimit)?;
             if retained > MAX_LOG_SPOOL_CONTENT_BYTES {
                 return Err(JournalInvariantError::LogBacklogLimit);
@@ -473,7 +473,7 @@ impl LogDeliveryCursor {
             }
             let retained = self
                 .backlog_content_bytes()
-                .checked_add(candidate.content().size())
+                .checked_add(candidate.content().accounted_bytes())
                 .ok_or(JournalInvariantError::LogBacklogLimit)?;
             if retained > MAX_LOG_SPOOL_CONTENT_BYTES {
                 return Err(JournalInvariantError::LogBacklogLimit);
@@ -572,7 +572,7 @@ impl LogDeliveryCursor {
                 .checked_next()
                 .map_err(|_| JournalInvariantError::DecodedStateInvalid)?;
             total = total
-                .checked_add(segment.content().size())
+                .checked_add(segment.content().accounted_bytes())
                 .ok_or(JournalInvariantError::DecodedStateInvalid)?;
         }
         if total > MAX_LOG_SPOOL_CONTENT_BYTES {
@@ -606,7 +606,9 @@ impl LogDeliveryCursor {
 }
 
 fn validate_log_content(content: &DurableContentRef) -> Result<(), JournalInvariantError> {
-    if content.kind() != ContentKind::LogSpool || content.size() > MAX_LOG_SPOOL_CONTENT_BYTES {
+    if content.kind() != ContentKind::LogSpool
+        || content.accounted_bytes() > MAX_LOG_SPOOL_CONTENT_BYTES
+    {
         Err(JournalInvariantError::InvalidLogSpoolContent)
     } else {
         Ok(())
@@ -622,7 +624,7 @@ mod tests {
     use crate::{JournalInvariantError, MAX_LOG_SEGMENTS_PER_SLOT, MAX_LOG_SPOOL_CONTENT_BYTES};
 
     fn content(size: u64, marker: u8) -> DurableContentRef {
-        DurableContentRef::after_commit(
+        DurableContentRef::after_public_commit(
             ContentKind::LogSpool,
             size,
             Sha256Digest::from_bytes([marker; 32]),

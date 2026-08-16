@@ -312,7 +312,7 @@ impl RuntimeAuthorityDeliveryRecord {
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
         self.content.validate()?;
         if self.binding.generation().get() == 0
-            || self.content.content().sha256() != self.bundle_digest
+            || self.content.content().public_plaintext_sha256() != Some(self.bundle_digest)
         {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
         }

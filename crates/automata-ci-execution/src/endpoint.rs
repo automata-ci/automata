@@ -55,6 +55,23 @@ impl Cancellation for NeverCancelled {
     }
 }
 
+/// Endpoint calls made before the first workflow step.
+const ENDPOINT_JOB_SETUP_OPERATIONS: usize = 2;
+
+/// Maximum endpoint calls made by one admitted literal run step.
+const ENDPOINT_OPERATIONS_PER_RUN_STEP: usize = 15;
+
+/// Hard shared endpoint-operation budget for one admitted job.
+///
+/// The budget admits the current maximum-size run-only job with no dynamically
+/// declared artifact subjects. Composite/action phases and artifact hashing
+/// consume this same non-evicting budget; expansions beyond it fail closed
+/// before the next provider invocation. This is an execution admission bound,
+/// not an independently selected cache size.
+pub const MAX_ENDPOINT_OPERATIONS_PER_JOB: usize = automata_ci_core::MAX_LOGICAL_STEPS
+    * ENDPOINT_OPERATIONS_PER_RUN_STEP
+    + ENDPOINT_JOB_SETUP_OPERATIONS;
+
 /// Validated executable plus literal arguments. No shell command string exists
 /// in the execution contract.
 #[derive(Clone, Eq, PartialEq)]
@@ -900,8 +917,9 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
     /// [`CopyFromRequest::byte_limit`]. A trusted native provider serving a
     /// `HostFilesystem` capability may resolve the target against the host
     /// only after proving that it remains within the sandbox-owned workspace
-    /// or scratch root. Returned bytes may contain secrets and must not pass
-    /// through durable host-side staging.
+    /// or scratch root. Returned bytes may contain secrets. A durable replay
+    /// layer must protect and authenticate them before storage and may journal
+    /// only their opaque protected-content identity.
     ///
     /// # Errors
     ///

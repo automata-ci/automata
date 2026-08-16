@@ -18,8 +18,10 @@ use automata_ci_runner_journal::{
     LogSegment, LogSegmentPublication, RunnerJournal, RuntimeAuthorityContentRef,
     RuntimeAuthorityDeliveryRecord, SessionBinding, StateRoot, TerminalResultRecord,
 };
-use automata_ci_runner_spool::ProtectionId;
-use automata_ci_runner_spool::{ContentProtectionError, ContentProtector, SpoolRoot};
+use automata_ci_runner_spool::{
+    ContentCommitmentDomain, ContentProtectionError, ContentProtector, OpaqueContentIdentity,
+    ProtectionId, SpoolRoot, endpoint_result_allocation,
+};
 use sha2::{Digest as _, Sha256};
 
 pub struct Scratch {
@@ -88,6 +90,29 @@ impl fmt::Debug for TestProtector {
 impl ContentProtector for TestProtector {
     fn protection_id(&self) -> &ProtectionId {
         &self.id
+    }
+
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        if protection_id != &self.id {
+            return Err(ContentProtectionError::KeyUnavailable);
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.key);
+        digest.update(domain.separator());
+        digest.update(material_digest);
+        Ok(digest.finalize().into())
+    }
+
+    fn endpoint_result_protected_bytes(
+        &self,
+        _plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        Err(ContentProtectionError::Failed)
     }
 
     fn protect(
@@ -198,13 +223,32 @@ impl Fixture {
     }
 
     pub fn content(kind: ContentKind, size: u64, marker: u8) -> DurableContentRef {
-        DurableContentRef::after_commit(
-            kind,
-            size,
-            Sha256Digest::from_bytes([marker; 32]),
-            ProtectionId::new("test-aead-key-v1").expect("valid protection identifier"),
-        )
-        .expect("valid durable content reference")
+        Self::content_with_protection_id(kind, size, marker, "test-aead-key-v1")
+    }
+
+    pub fn content_with_protection_id(
+        kind: ContentKind,
+        size: u64,
+        marker: u8,
+        protection_id: &str,
+    ) -> DurableContentRef {
+        let protection_id = ProtectionId::new(protection_id).expect("valid protection identifier");
+        if kind == ContentKind::EndpointResult {
+            DurableContentRef::after_endpoint_result_commit(
+                endpoint_result_allocation(size).expect("bounded endpoint result allocation"),
+                OpaqueContentIdentity::from_bytes([marker; 32]),
+                protection_id,
+            )
+            .expect("valid opaque endpoint-result reference")
+        } else {
+            DurableContentRef::after_public_commit(
+                kind,
+                size,
+                Sha256Digest::from_bytes([marker; 32]),
+                protection_id,
+            )
+            .expect("valid public durable content reference")
+        }
     }
 
     pub fn runtime_authority() -> RuntimeAuthorityContentRef {
@@ -231,12 +275,19 @@ impl Fixture {
                 self.lease.guard(),
                 offer.command().operation_id(),
                 offer.command().sequence(),
-                offer.job_ir().content().sha256(),
+                offer
+                    .job_ir()
+                    .content()
+                    .public_plaintext_sha256()
+                    .expect("job IR has a public digest"),
                 INITIAL_RUNTIME_AUTHORITY_GENERATION,
             ),
             OperationId::new(),
             OperationId::new(),
-            content.content().sha256(),
+            content
+                .content()
+                .public_plaintext_sha256()
+                .expect("runtime authority has a public digest"),
             content,
         )
         .expect("valid runtime-authority delivery")
