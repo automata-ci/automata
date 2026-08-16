@@ -772,6 +772,7 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
     let path = "/opt/tool/bin:/usr/bin";
     let temporary = "/__w/target/task-tmp/ci";
     let preload = "/__w/not-a-host-library.so";
+    let multiline = "/opt/cargo/registry/cache\n/opt/cargo/registry/index";
     let environment = environment_with_secrets(
         &[
             ("TOKEN", secret),
@@ -780,8 +781,9 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
             ("TMPDIR", temporary),
             ("LD_PRELOAD", preload),
             ("AUTOMATA_EMPTY", ""),
+            ("INPUT_PATH", multiline),
         ],
-        &["TOKEN", "HOME"],
+        &["TOKEN", "HOME", "INPUT_PATH"],
     );
     let command = ExecutionCommand::new(
         OperationId::new(),
@@ -807,7 +809,14 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
         Some(preload)
     );
     assert_eq!(captured.get("AUTOMATA_EMPTY").map(String::as_str), Some(""));
-    assert!(fixture.fake.last_dynamic_environment_names().is_empty());
+    assert_eq!(
+        captured.get("INPUT_PATH").map(String::as_str),
+        Some(multiline)
+    );
+    assert_eq!(
+        fixture.fake.last_dynamic_environment_names(),
+        ["INPUT_PATH"]
+    );
     let commands = fixture.fake.commands();
     let exec = commands
         .iter()
@@ -831,6 +840,7 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
             && argument != path
             && argument != temporary
             && argument != preload
+            && argument != multiline
     }));
     assert!(persistent_transfer_state_is_absent(&fixture));
 

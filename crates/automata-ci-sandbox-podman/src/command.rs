@@ -681,7 +681,12 @@ impl<'a> Iterator for CommandInputSegments<'a, '_> {
             }
             CommandInput::Bytes(_) => None,
             CommandInput::Environment(document) => {
-                let variable = document.variables().get(self.segment_index / 4)?;
+                let variable_index = self.segment_index / 4;
+                let variable = document.variables().get(variable_index)?;
+                if crate::endpoint::requires_process_inheritance(variable.value().expose()) {
+                    self.segment_index = (variable_index + 1) * 4;
+                    return self.next();
+                }
                 let segment = match self.segment_index % 4 {
                     0 => variable.name().as_str().as_bytes(),
                     1 => b"=",
@@ -806,6 +811,21 @@ impl<'input> CommandRequest<'input> {
     /// and report an incomplete input if any byte cannot be written.
     pub fn stdin_segments(&self) -> impl Iterator<Item = &[u8]> {
         self.input.iter().flat_map(CommandInput::segments)
+    }
+
+    /// Iterates workload values carried only in the anonymous Podman client
+    /// environment because env-file framing cannot represent them.
+    ///
+    /// Values may be secret and must never enter logs or durable diagnostics.
+    pub fn inherited_environment(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.input
+            .iter()
+            .filter_map(|input| match input {
+                CommandInput::Environment(document) => Some(document),
+                CommandInput::Bytes(_) => None,
+            })
+            .flat_map(|document| document.inherited_variables())
+            .map(|variable| (variable.name().as_str(), variable.value().expose()))
     }
 
     fn has_stdin_input(&self) -> bool {
@@ -1424,6 +1444,9 @@ fn spawn_child(
 > {
     let mut command = Command::new(request.program());
     environment.apply_to_command(&mut command);
+    for (name, value) in request.inherited_environment() {
+        command.env(name, value);
+    }
     command
         .args(request.arguments())
         .stdin(if request.has_stdin_input() {
@@ -1967,6 +1990,41 @@ mod input_writer_tests {
                 .arguments()
                 .iter()
                 .any(|argument| argument.to_string_lossy().contains(SENTINEL))
+        );
+    }
+
+    #[test]
+    fn multiline_environment_is_inherited_without_entering_stdin_or_diagnostics() {
+        const MULTILINE: &str = "first\nsecond";
+        let environment = environment(&[("PLAIN", "scalar"), ("INPUT_PATH", MULTILINE)]);
+        let document = environment_document(&environment).expect("Podman environment document");
+        let request = CommandRequest::new(
+            PathBuf::from("/bin/true"),
+            Vec::new(),
+            Duration::from_secs(1),
+            deadline(),
+            1,
+        )
+        .with_environment_stdin(document);
+
+        assert_eq!(
+            request
+                .stdin_segments()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>(),
+            b"PLAIN=scalar\n"
+        );
+        assert_eq!(
+            request.inherited_environment().collect::<Vec<_>>(),
+            [("INPUT_PATH", MULTILINE)]
+        );
+        assert!(!format!("{request:?}").contains(MULTILINE));
+        assert!(
+            request
+                .arguments()
+                .iter()
+                .all(|argument| argument != MULTILINE)
         );
     }
 

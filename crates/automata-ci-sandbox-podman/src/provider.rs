@@ -838,8 +838,11 @@ impl PodmanInner {
                 ProviderStage::CreateContainer,
             )
         })?;
-        if !environment_document.is_empty() {
+        if environment_document.has_env_file() {
             arguments.extend(os_args(["--env-file", "/dev/stdin"]));
+        }
+        for variable in environment_document.inherited_variables() {
+            arguments.extend(os_args(["--env", variable.name().as_str()]));
         }
         push_service_health_options(&mut arguments, service.health());
         arguments.push(service.image().reference().into());

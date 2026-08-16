@@ -19,6 +19,7 @@ use crate::{
 };
 
 const MAX_PODMAN_ENV_DOCUMENT_LINE_BYTES: usize = 64 * 1024 - 1;
+const MAX_PODMAN_INHERITED_ENVIRONMENT_BYTES: usize = 64 * 1024;
 const PODMAN_STDIN_ENVIRONMENT_PATH: &str = "/dev/stdin";
 const TAR_BLOCK_BYTES: usize = 512;
 const TAR_END_BLOCKS: usize = 2;
@@ -38,8 +39,18 @@ impl EnvironmentDocument<'_> {
         self.byte_len
     }
 
+    pub(crate) const fn has_env_file(&self) -> bool {
+        self.byte_len != 0
+    }
+
     pub(crate) fn variables(&self) -> &[EnvironmentVariable] {
         self.variables
+    }
+
+    pub(crate) fn inherited_variables(&self) -> impl Iterator<Item = &EnvironmentVariable> {
+        self.variables
+            .iter()
+            .filter(|variable| requires_process_inheritance(variable.value().expose()))
     }
 }
 
@@ -251,9 +262,13 @@ impl ExecutionEndpoint for PodmanExecutionEndpoint {
         })?;
         let mut arguments = self.inner.base_arguments();
         arguments.push("exec".into());
-        if !environment_document.is_empty() {
+        if environment_document.has_env_file() {
             arguments.push("--env-file".into());
             arguments.push(PODMAN_STDIN_ENVIRONMENT_PATH.into());
+        }
+        for variable in environment_document.inherited_variables() {
+            arguments.push("--env".into());
+            arguments.push(variable.name().as_str().into());
         }
         arguments.push("--workdir".into());
         arguments.push(request.working_directory().as_str().into());
@@ -429,26 +444,44 @@ pub(crate) fn environment_document(
     environment: &ExecutionEnvironment,
 ) -> Result<EnvironmentDocument<'_>, ()> {
     let mut byte_len = 0_usize;
+    let mut inherited_bytes = 0_usize;
     for variable in environment.values() {
         let name = variable.name().as_str();
+        let value = variable.value().expose();
         if matches!(name.as_bytes().first(), Some(b' ' | b'\t' | b'#'))
             || provider_control_environment_name(name)
         {
             return Err(());
         }
-        byte_len = checked_environment_document_length(
-            byte_len,
-            name.len(),
-            variable.value().expose().len(),
-        )?;
-        if variable.value().expose().contains(['\0', '\r', '\n']) {
-            return Err(());
+        if requires_process_inheritance(value) {
+            if provider_process_environment_name(name) {
+                return Err(());
+            }
+            inherited_bytes = inherited_bytes
+                .checked_add(name.len())
+                .and_then(|bytes| bytes.checked_add(value.len()))
+                .and_then(|bytes| bytes.checked_add(2))
+                .filter(|bytes| *bytes <= MAX_PODMAN_INHERITED_ENVIRONMENT_BYTES)
+                .ok_or(())?;
+        } else {
+            byte_len = checked_environment_document_length(byte_len, name.len(), value.len())?;
         }
     }
     Ok(EnvironmentDocument {
         variables: environment.values(),
         byte_len,
     })
+}
+
+pub(crate) fn requires_process_inheritance(value: &str) -> bool {
+    value.contains(['\r', '\n'])
+}
+
+fn provider_process_environment_name(name: &str) -> bool {
+    matches!(
+        name,
+        "HOME" | "PATH" | "TMPDIR" | "DBUS_SESSION_BUS_ADDRESS"
+    )
 }
 
 fn checked_environment_document_length(
@@ -752,7 +785,11 @@ mod tests {
 
     fn document_bytes(document: &EnvironmentDocument) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(document.byte_len());
-        for variable in document.variables() {
+        for variable in document
+            .variables()
+            .iter()
+            .filter(|variable| !requires_process_inheritance(variable.value().expose()))
+        {
             bytes.extend_from_slice(variable.name().as_str().as_bytes());
             bytes.push(b'=');
             bytes.extend_from_slice(variable.value().expose().as_bytes());
@@ -816,11 +853,10 @@ mod tests {
             MAX_PODMAN_ENV_DOCUMENT_LINE_BYTES + 1
         );
 
-        for value in [format!("{exact}x"), "first\nsecond".to_owned()] {
-            let environment = ExecutionEnvironment::new(vec![variable("NAME", &value, false)])
-                .expect("core-valid environment");
-            assert!(environment_document(&environment).is_err());
-        }
+        let oversized = format!("{exact}x");
+        let environment = ExecutionEnvironment::new(vec![variable("NAME", &oversized, false)])
+            .expect("core-valid environment");
+        assert!(environment_document(&environment).is_err());
     }
 
     #[test]
@@ -839,8 +875,38 @@ mod tests {
         for value in ["carriage\rreturn", "line\nfeed"] {
             let environment = ExecutionEnvironment::new(vec![variable("VALUE", value, false)])
                 .expect("core-valid framing value");
-            assert!(environment_document(&environment).is_err());
+            let document = environment_document(&environment).expect("inherited environment");
+            assert_eq!(document.byte_len(), 0);
+            assert_eq!(
+                document
+                    .inherited_variables()
+                    .map(|variable| variable.value().expose())
+                    .collect::<Vec<_>>(),
+                [value]
+            );
         }
+    }
+
+    #[test]
+    fn inherited_environment_is_bounded_and_cannot_replace_podman_process_control() {
+        for name in ["HOME", "PATH", "TMPDIR", "DBUS_SESSION_BUS_ADDRESS"] {
+            let environment =
+                ExecutionEnvironment::new(vec![variable(name, "first\nsecond", true)])
+                    .expect("core-valid environment");
+            assert!(environment_document(&environment).is_err(), "{name}");
+        }
+
+        let exact = "x".repeat(MAX_PODMAN_INHERITED_ENVIRONMENT_BYTES - "VALUE".len() - 2);
+        let environment =
+            ExecutionEnvironment::new(vec![variable("VALUE", &format!("{exact}\n"), true)])
+                .expect("bounded environment");
+        assert!(environment_document(&environment).is_err());
+
+        let exact = "x".repeat(MAX_PODMAN_INHERITED_ENVIRONMENT_BYTES - "VALUE".len() - 3);
+        let environment =
+            ExecutionEnvironment::new(vec![variable("VALUE", &format!("{exact}\n"), true)])
+                .expect("bounded environment");
+        assert!(environment_document(&environment).is_ok());
     }
 
     #[test]
