@@ -27,6 +27,7 @@ mod runtime_authority;
 mod runtime_authority_lifecycle;
 mod server_service_authority;
 mod signer;
+mod supervised_custody;
 
 pub use adapter::{GithubAppBrokerConstructionError, GithubAppCredentialBroker};
 pub use authority_coordinator::{
