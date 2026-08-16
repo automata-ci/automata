@@ -43,7 +43,7 @@ const RUNNER_POLICY: &[u8] = br#"{
 }"#;
 
 #[derive(sqlx::FromRow)]
-struct StoredProviderRevision {
+struct StoredProviderConfiguration {
     revision: i64,
     app_configuration_revision: i64,
     app_private_key_ciphertext: Vec<u8>,
@@ -175,24 +175,30 @@ async fn provider_credentials_are_encrypted_and_revisions_are_idempotent() -> Te
             .apply(provider_request(Uuid::new_v4(), 3, b"rotated private key"))
             .await?;
 
-        let rows: Vec<StoredProviderRevision> = sqlx::query_as(
+        let rows: Vec<StoredProviderConfiguration> = sqlx::query_as(
             r"
             SELECT revision, app_configuration_revision,
                    app_private_key_ciphertext, webhook_secret_ciphertext,
                    app_private_key_sha256
-            FROM github_provider_configuration_revisions ORDER BY revision
+            FROM github_provider_configuration_current
             ",
         )
         .fetch_all(database.pool())
         .await?;
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].revision, 1);
-        assert_eq!(rows[0].app_configuration_revision, 1);
-        assert_eq!(rows[1].revision, 3);
-        assert_eq!(rows[1].app_configuration_revision, 2);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].revision, 3);
+        assert_eq!(rows[0].app_configuration_revision, 2);
         assert_ne!(rows[0].app_private_key_ciphertext.as_slice(), PRIVATE_KEY);
         assert_ne!(rows[0].webhook_secret_ciphertext.as_slice(), WEBHOOK_SECRET);
         assert_eq!(rows[0].app_private_key_sha256.len(), 32);
+        let receipt_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM github_provider_configuration_operations")
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(
+            receipt_count, 2,
+            "successful operations retain replay receipts"
+        );
 
         let desired = reader.load().await?.expect("provider desired state");
         assert_eq!(desired.shard_id().as_str(), SHARD);
@@ -211,7 +217,7 @@ async fn provider_credentials_are_encrypted_and_revisions_are_idempotent() -> Te
 
         sqlx::query(
             r"
-            UPDATE github_provider_configuration_revisions
+            UPDATE github_provider_configuration_current
             SET webhook_secret_ciphertext=set_byte(
                 webhook_secret_ciphertext,
                 0,
@@ -317,18 +323,15 @@ async fn workspace_repository_omission_is_an_authoritative_revision() -> TestRes
         let workspace_text = workspace_id.hyphenated().to_string();
         let current_count: i64 = sqlx::query_scalar(
             r"
-            SELECT count(*) FROM workspace_github_repository_selections AS selection
-            JOIN workspace_github_repository_heads AS head
-              ON head.workspace_id=selection.workspace_id
-             AND head.revision=selection.revision
-            WHERE head.workspace_id=$1
+            SELECT count(*) FROM workspace_github_repository_selections
+            WHERE workspace_id=$1
             ",
         )
         .bind(&workspace_text)
         .fetch_one(database.pool())
         .await?;
-        let historical_count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM workspace_github_repository_selections WHERE workspace_id=$1",
+        let receipt_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM workspace_github_repository_operations WHERE workspace_id=$1",
         )
         .bind(&workspace_text)
         .fetch_one(database.pool())
@@ -338,12 +341,169 @@ async fn workspace_repository_omission_is_an_authoritative_revision() -> TestRes
             "empty revision disconnects every repository"
         );
         assert_eq!(
-            historical_count, 2,
-            "prior desired evidence remains immutable"
+            receipt_count, 2,
+            "successful replacements retain replay receipts"
         );
         let desired = reader.load().await?.expect("provider desired state");
         assert!(desired.workspaces()[0].repositories().is_empty());
         assert_eq!(desired.workspaces()[0].revision().get(), 2);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn shard_registry_rejects_cross_workspace_duplicates_and_excess() -> TestResult {
+    run_with_database(|database| async move {
+        let key_provider: Arc<dyn KeyEncryptionProvider> = test_runner_payload_key_provider();
+        PostgresGithubProviderConfigurationApplier::new(
+            database.pool().clone(),
+            Arc::clone(&key_provider),
+        )
+        .apply(provider_request(Uuid::new_v4(), 1, PRIVATE_KEY))
+        .await?;
+        let first_workspace = Uuid::new_v4();
+        let second_workspace = Uuid::new_v4();
+        let provisioner = PostgresWorkspaceProvisioner::new(database.pool().clone());
+        provisioner
+            .provision(workspace_provisioning(first_workspace))
+            .await?;
+        provisioner
+            .provision(workspace_provisioning(second_workspace))
+            .await?;
+        let applier = PostgresWorkspaceGithubRepositoriesApplier::new(database.pool().clone());
+        applier
+            .apply(workspace_request(
+                AUTHORITY,
+                Uuid::new_v4(),
+                first_workspace,
+                1,
+                vec![selected_repository(301, "octo/shared")],
+            ))
+            .await?;
+
+        let duplicate = applier
+            .apply(workspace_request(
+                AUTHORITY,
+                Uuid::new_v4(),
+                second_workspace,
+                1,
+                vec![selected_repository(301, "octo/other-name")],
+            ))
+            .await
+            .expect_err("one repository cannot belong to two shard workspaces");
+        assert_eq!(
+            duplicate.kind(),
+            WorkspaceGithubRepositoriesFailureKind::ShardRegistryConflict
+        );
+
+        let full_registry = (1_u64..=256)
+            .map(|id| selected_repository(1_000 + id, &format!("octo/repository-{id}")))
+            .collect();
+        applier
+            .apply(workspace_request(
+                AUTHORITY,
+                Uuid::new_v4(),
+                first_workspace,
+                2,
+                full_registry,
+            ))
+            .await?;
+        let excessive = applier
+            .apply(workspace_request(
+                AUTHORITY,
+                Uuid::new_v4(),
+                second_workspace,
+                1,
+                vec![selected_repository(2_000, "octo/over-capacity")],
+            ))
+            .await
+            .expect_err("accepted shard state must remain startup-loadable");
+        assert_eq!(
+            excessive.kind(),
+            WorkspaceGithubRepositoriesFailureKind::ShardRegistryConflict
+        );
+
+        let desired =
+            PostgresGithubProviderDesiredStateReader::new(database.pool().clone(), key_provider)
+                .load()
+                .await?
+                .expect("provider desired state");
+        assert_eq!(desired.workspaces().len(), 1);
+        assert_eq!(
+            desired.workspaces()[0].workspace_id().as_uuid(),
+            first_workspace
+        );
+        assert_eq!(desired.workspaces()[0].revision().get(), 2);
+        assert_eq!(desired.workspaces()[0].repositories().len(), 256);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn concurrent_workspace_updates_serialize_shard_capacity() -> TestResult {
+    run_with_database(|database| async move {
+        let key_provider: Arc<dyn KeyEncryptionProvider> = test_runner_payload_key_provider();
+        PostgresGithubProviderConfigurationApplier::new(
+            database.pool().clone(),
+            Arc::clone(&key_provider),
+        )
+        .apply(provider_request(Uuid::new_v4(), 1, PRIVATE_KEY))
+        .await?;
+        let first_workspace = Uuid::new_v4();
+        let second_workspace = Uuid::new_v4();
+        let provisioner = PostgresWorkspaceProvisioner::new(database.pool().clone());
+        provisioner
+            .provision(workspace_provisioning(first_workspace))
+            .await?;
+        provisioner
+            .provision(workspace_provisioning(second_workspace))
+            .await?;
+        let first_repositories = (1_u64..=256)
+            .map(|id| selected_repository(1_000 + id, &format!("octo/first-{id}")))
+            .collect();
+        let second_repositories = (1_u64..=256)
+            .map(|id| selected_repository(2_000 + id, &format!("octo/second-{id}")))
+            .collect();
+        let applier = PostgresWorkspaceGithubRepositoriesApplier::new(database.pool().clone());
+        let (first, second) = tokio::join!(
+            applier.apply(workspace_request(
+                AUTHORITY,
+                Uuid::new_v4(),
+                first_workspace,
+                1,
+                first_repositories,
+            )),
+            applier.apply(workspace_request(
+                AUTHORITY,
+                Uuid::new_v4(),
+                second_workspace,
+                1,
+                second_repositories,
+            )),
+        );
+        let rejected = match (first, second) {
+            (Ok(_), Err(rejected)) | (Err(rejected), Ok(_)) => rejected,
+            (Ok(_), Ok(_)) => panic!("concurrent updates exceeded shard capacity"),
+            (Err(first), Err(second)) => {
+                panic!("both concurrent updates failed: {first:?}, {second:?}")
+            }
+        };
+        assert_eq!(
+            rejected.kind(),
+            WorkspaceGithubRepositoriesFailureKind::ShardRegistryConflict
+        );
+
+        let desired =
+            PostgresGithubProviderDesiredStateReader::new(database.pool().clone(), key_provider)
+                .load()
+                .await?
+                .expect("provider desired state");
+        assert_eq!(desired.workspaces().len(), 1);
+        assert_eq!(desired.workspaces()[0].repositories().len(), 256);
         Ok(())
     })
     .await

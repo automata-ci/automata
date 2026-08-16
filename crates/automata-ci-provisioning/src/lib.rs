@@ -35,9 +35,9 @@ pub use github_provider::{
     GithubProviderDesiredState, GithubProviderDesiredStateFailure,
     GithubProviderDesiredStateFailureKind, GithubProviderRepositorySelection,
     GithubProviderSchedulePolicy, GithubProviderSecret, GithubProviderTimestamp,
-    GithubProviderValueError, WorkspaceGithubRepositoriesDesiredState,
-    WorkspaceGithubRepositoriesFailure, WorkspaceGithubRepositoriesFailureKind,
-    WorkspaceGithubRepositoriesRevision,
+    GithubProviderValueError, MAX_GITHUB_PROVIDER_REPOSITORIES,
+    WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
+    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision,
 };
 pub use model::{
     AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,

@@ -16,8 +16,10 @@ use crate::{OperationId, ProvisioningAuthority, ShardId, WorkspaceId};
 
 /// Maximum private-key PEM accepted through the management boundary.
 pub const MAX_GITHUB_PROVIDER_PRIVATE_KEY_BYTES: usize = 32 * 1_024;
+/// Maximum repositories served by one shard-wide GitHub provider runtime.
+pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
 /// Maximum repositories in one workspace desired-set revision.
-pub const MAX_WORKSPACE_GITHUB_REPOSITORIES: usize = 256;
+pub const MAX_WORKSPACE_GITHUB_REPOSITORIES: usize = MAX_GITHUB_PROVIDER_REPOSITORIES;
 
 const PROTOBUF_TIMESTAMP_MIN_SECONDS: i64 = -62_135_596_800;
 const PROTOBUF_TIMESTAMP_MAX_SECONDS: i64 = 253_402_300_799;
@@ -1091,6 +1093,8 @@ pub enum WorkspaceGithubRepositoriesFailureKind {
     StaleRevision,
     /// The workspace is absent or managed by another authority.
     WorkspaceUnavailable,
+    /// The resulting shard registry would duplicate a repository or exceed capacity.
+    ShardRegistryConflict,
     /// Durable storage is temporarily unavailable.
     TemporarilyUnavailable,
     /// Core failed without a safer specific classification.

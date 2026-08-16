@@ -809,6 +809,11 @@ fn workspace_repositories_status(error: &WorkspaceGithubRepositoriesFailure) -> 
             wire::ApplyWorkspaceGithubRepositoriesFailureReason::WorkspaceUnavailable,
             "workspace is unavailable to this management authority",
         ),
+        WorkspaceGithubRepositoriesFailureKind::ShardRegistryConflict => (
+            Code::FailedPrecondition,
+            wire::ApplyWorkspaceGithubRepositoriesFailureReason::ShardRegistryConflict,
+            "workspace repositories conflict with the shard registry",
+        ),
         WorkspaceGithubRepositoriesFailureKind::Internal => (
             Code::Internal,
             wire::ApplyWorkspaceGithubRepositoriesFailureReason::InternalError,

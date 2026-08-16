@@ -171,7 +171,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0042_github_provider_desired_state.sql",
-        "6bd9b200b39885ec827405117156ec19cbc6eff9d4dc6153dbd581b831604c2c15ca39b8f9a7f5c095770eceb899c3bc",
+        "5276d0877686f09d9c05c50b4675c2b82a9b93588d7865f3e4910d1daf7d39bd01c2826eb15edfcfd41b42e14269df98",
     ),
 ];
 

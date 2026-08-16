@@ -15,10 +15,10 @@ use automata_ci_provisioning::{
     GithubProviderDesiredStateFailure, GithubProviderDesiredStateFailureKind,
     GithubProviderDesiredStateLoadFuture, GithubProviderDesiredStateReader,
     GithubProviderRepositorySelection, GithubProviderSchedulePolicy, GithubProviderSecret,
-    GithubProviderTimestamp, ShardId, WorkspaceGithubRepositoriesApplicationFuture,
-    WorkspaceGithubRepositoriesApplier, WorkspaceGithubRepositoriesDesiredState,
-    WorkspaceGithubRepositoriesFailure, WorkspaceGithubRepositoriesFailureKind,
-    WorkspaceGithubRepositoriesRevision, WorkspaceId,
+    GithubProviderTimestamp, MAX_GITHUB_PROVIDER_REPOSITORIES, ShardId,
+    WorkspaceGithubRepositoriesApplicationFuture, WorkspaceGithubRepositoriesApplier,
+    WorkspaceGithubRepositoriesDesiredState, WorkspaceGithubRepositoriesFailure,
+    WorkspaceGithubRepositoriesFailureKind, WorkspaceGithubRepositoriesRevision, WorkspaceId,
 };
 use automata_ci_store::{
     GithubCheckName, GithubRepositoryName, GithubServerServiceAppClientId,
@@ -116,13 +116,16 @@ impl PostgresGithubProviderConfigurationApplier {
             .map_err(|_| provider_internal())?;
 
         let mut transaction = self.pool.begin().await.map_err(provider_database_failure)?;
+        lock_provider_registry(&mut transaction)
+            .await
+            .map_err(provider_database_failure)?;
         let current_revision: Option<i64> = sqlx::query_scalar(
             r"
-            SELECT revision FROM github_provider_configuration_head
-            WHERE singleton=true FOR UPDATE
+            SELECT revision FROM github_provider_configuration_current
+            WHERE singleton=true
             ",
         )
-        .fetch_one(&mut *transaction)
+        .fetch_optional(&mut *transaction)
         .await
         .map_err(provider_database_failure)?;
 
@@ -151,7 +154,7 @@ impl PostgresGithubProviderConfigurationApplier {
         }
 
         let current = match current_revision {
-            Some(current) => Some(load_current_provider_evidence(&mut transaction, current).await?),
+            Some(_) => Some(load_current_provider_evidence(&mut transaction).await?),
             None => None,
         };
         let configuration = command.configuration();
@@ -189,10 +192,14 @@ impl PostgresGithubProviderConfigurationApplier {
         let schedule = configuration.schedule();
         let private_key = EnvelopeParts::from(private_key);
         let webhook_secret = EnvelopeParts::from(webhook_secret);
+        sqlx::query("DELETE FROM github_provider_configuration_current WHERE singleton=true")
+            .execute(&mut *transaction)
+            .await
+            .map_err(provider_database_failure)?;
         sqlx::query(
             r"
-            INSERT INTO github_provider_configuration_revisions (
-                revision, authority_id, operation_id, dashboard_url,
+            INSERT INTO github_provider_configuration_current (
+                singleton, shard_id, revision, authority_id, operation_id, dashboard_url,
                 github_app_id, github_app_client_id, github_app_jwt_issuer_kind,
                 app_configuration_revision, app_private_key_sha256,
                 app_private_key_envelope_schema, app_private_key_wrapping_key_id,
@@ -207,11 +214,12 @@ impl PostgresGithubProviderConfigurationApplier {
                 schedule_maximum_manifests, schedule_maximum_fires_per_pass,
                 applied_at_ms
             ) VALUES (
-                $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31
+                true,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32
             )
             ",
         )
+        .bind(shard_id.as_str())
         .bind(revision_i64)
         .bind(authority_id)
         .bind(operation_id.as_uuid())
@@ -243,13 +251,6 @@ impl PostgresGithubProviderConfigurationApplier {
         .bind(i32::from(schedule.maximum_manifests()))
         .bind(i32::from(schedule.maximum_fires_per_pass()))
         .bind(applied_at_ms)
-        .execute(&mut *transaction)
-        .await
-        .map_err(provider_database_failure)?;
-        sqlx::query(
-            "UPDATE github_provider_configuration_head SET revision=$1 WHERE singleton=true",
-        )
-        .bind(revision_i64)
         .execute(&mut *transaction)
         .await
         .map_err(provider_database_failure)?;
@@ -354,7 +355,7 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
             );
         }
         let current_revision: Option<i64> = sqlx::query_scalar(
-            "SELECT revision FROM workspace_github_repository_heads WHERE workspace_id=$1",
+            "SELECT revision FROM workspace_github_repository_current WHERE workspace_id=$1",
         )
         .bind(&workspace_text)
         .fetch_optional(&mut *transaction)
@@ -365,6 +366,16 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
                 WorkspaceGithubRepositoriesFailureKind::StaleRevision,
             ));
         }
+        lock_provider_registry(&mut transaction)
+            .await
+            .map_err(workspace_database_failure)?;
+        validate_shard_registry(
+            &mut transaction,
+            shard_id,
+            workspace_id,
+            command.repositories(),
+        )
+        .await?;
         let applied_at_ms = database_time_milliseconds(&mut transaction)
             .await
             .map_err(workspace_database_failure)?;
@@ -387,14 +398,20 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
         .execute(&mut *transaction)
         .await
         .map_err(workspace_database_failure)?;
+        sqlx::query("DELETE FROM workspace_github_repository_current WHERE workspace_id=$1")
+            .bind(&workspace_text)
+            .execute(&mut *transaction)
+            .await
+            .map_err(workspace_database_failure)?;
         sqlx::query(
             r"
-            INSERT INTO workspace_github_repository_revisions (
-                workspace_id, revision, authority_id, operation_id, applied_at_ms
-            ) VALUES ($1,$2,$3,$4,$5)
+            INSERT INTO workspace_github_repository_current (
+                workspace_id, shard_id, revision, authority_id, operation_id, applied_at_ms
+            ) VALUES ($1,$2,$3,$4,$5,$6)
             ",
         )
         .bind(&workspace_text)
+        .bind(shard_id.as_str())
         .bind(revision_i64)
         .bind(authority_id)
         .bind(operation_id.as_uuid())
@@ -406,24 +423,13 @@ impl PostgresWorkspaceGithubRepositoriesApplier {
             insert_repository_selection(
                 &mut transaction,
                 &workspace_text,
+                shard_id,
                 revision_i64,
                 i32::try_from(ordinal).map_err(|_| workspace_internal())?,
                 repository,
             )
             .await?;
         }
-        sqlx::query(
-            r"
-            INSERT INTO workspace_github_repository_heads (workspace_id, revision)
-            VALUES ($1,$2)
-            ON CONFLICT (workspace_id) DO UPDATE SET revision=EXCLUDED.revision
-            ",
-        )
-        .bind(&workspace_text)
-        .bind(revision_i64)
-        .execute(&mut *transaction)
-        .await
-        .map_err(workspace_database_failure)?;
         sqlx::query(
             r"
             INSERT INTO security_audit_events (
@@ -497,15 +503,9 @@ impl PostgresGithubProviderDesiredStateReader {
             .map_err(desired_database_failure)?;
         let provider = sqlx::query_as::<_, ProviderDesiredStateRow>(
             r"
-            SELECT operations.shard_id, configuration.*
-            FROM github_provider_configuration_head AS head
-            JOIN github_provider_configuration_revisions AS configuration
-              ON configuration.revision=head.revision
-            JOIN github_provider_configuration_operations AS operations
-              ON operations.authority_id=configuration.authority_id
-             AND operations.operation_id=configuration.operation_id
-             AND operations.revision=configuration.revision
-            WHERE head.singleton=true
+            SELECT configuration.*
+            FROM github_provider_configuration_current AS configuration
+            WHERE configuration.singleton=true
             ",
         )
         .fetch_optional(&mut *transaction)
@@ -518,14 +518,12 @@ impl PostgresGithubProviderDesiredStateReader {
                 .map_err(desired_database_failure)?;
             return Ok(None);
         };
-        let workspace_heads = sqlx::query_as::<_, WorkspaceHeadRow>(
+        let workspace_states = sqlx::query_as::<_, WorkspaceCurrentRow>(
             r"
-            SELECT heads.workspace_id, heads.revision
-            FROM workspace_github_repository_heads AS heads
-            JOIN workspace_management_bindings AS bindings
-              ON bindings.workspace_id=heads.workspace_id
-            WHERE bindings.shard_id=$1
-            ORDER BY heads.workspace_id
+            SELECT current.workspace_id, current.revision
+            FROM workspace_github_repository_current AS current
+            WHERE current.shard_id=$1
+            ORDER BY current.workspace_id
             ",
         )
         .bind(&provider.shard_id)
@@ -540,13 +538,12 @@ impl PostgresGithubProviderDesiredStateReader {
                    selections.provider_repository_owner_id,
                    selections.repository_name, selections.default_branch,
                    selections.repository_visibility, selections.authority_profile
-            FROM workspace_github_repository_heads AS heads
-            JOIN workspace_management_bindings AS bindings
-              ON bindings.workspace_id=heads.workspace_id
+            FROM workspace_github_repository_current AS current
             JOIN workspace_github_repository_selections AS selections
-              ON selections.workspace_id=heads.workspace_id
-             AND selections.revision=heads.revision
-            WHERE bindings.shard_id=$1
+              ON selections.workspace_id=current.workspace_id
+             AND selections.shard_id=current.shard_id
+             AND selections.revision=current.revision
+            WHERE current.shard_id=$1
             ORDER BY selections.workspace_id, selections.ordinal
             ",
         )
@@ -558,7 +555,7 @@ impl PostgresGithubProviderDesiredStateReader {
             .commit()
             .await
             .map_err(desired_database_failure)?;
-        self.decode_desired_state(provider, workspace_heads, selections)
+        self.decode_desired_state(provider, workspace_states, selections)
             .await
             .map(Some)
     }
@@ -566,7 +563,7 @@ impl PostgresGithubProviderDesiredStateReader {
     async fn decode_desired_state(
         &self,
         provider: ProviderDesiredStateRow,
-        workspace_heads: Vec<WorkspaceHeadRow>,
+        workspace_states: Vec<WorkspaceCurrentRow>,
         selections: Vec<RepositorySelectionRow>,
     ) -> Result<GithubProviderDesiredState, GithubProviderDesiredStateFailure> {
         let revision = positive_u64(provider.revision)?;
@@ -627,14 +624,14 @@ impl PostgresGithubProviderDesiredStateReader {
                 .or_default()
                 .push(selection.decode()?);
         }
-        let mut workspaces = Vec::with_capacity(workspace_heads.len());
-        for head in workspace_heads {
+        let mut workspaces = Vec::with_capacity(workspace_states.len());
+        for state in workspace_states {
             let workspace_id =
-                WorkspaceId::parse(&head.workspace_id).map_err(|_| desired_corrupt())?;
-            let revision = WorkspaceGithubRepositoriesRevision::new(positive_u64(head.revision)?)
+                WorkspaceId::parse(&state.workspace_id).map_err(|_| desired_corrupt())?;
+            let revision = WorkspaceGithubRepositoriesRevision::new(positive_u64(state.revision)?)
                 .map_err(|_| desired_corrupt())?;
             let selected = repositories
-                .remove(&(head.workspace_id, head.revision))
+                .remove(&(state.workspace_id, state.revision))
                 .unwrap_or_default();
             workspaces.push(
                 WorkspaceGithubRepositoriesDesiredState::new(workspace_id, revision, selected)
@@ -728,7 +725,7 @@ impl ProviderDesiredStateRow {
 }
 
 #[derive(FromRow)]
-struct WorkspaceHeadRow {
+struct WorkspaceCurrentRow {
     workspace_id: String,
     revision: i64,
 }
@@ -957,17 +954,15 @@ struct CurrentProviderEvidence {
 
 async fn load_current_provider_evidence(
     transaction: &mut Transaction<'_, Postgres>,
-    revision: i64,
 ) -> Result<CurrentProviderEvidence, GithubProviderConfigurationFailure> {
     sqlx::query_as(
         r"
         SELECT github_app_id, github_app_client_id, github_app_jwt_issuer_kind,
                app_configuration_revision, app_private_key_sha256,
                webhook_verifier_revision, webhook_secret_sha256
-        FROM github_provider_configuration_revisions WHERE revision=$1
+        FROM github_provider_configuration_current WHERE singleton=true
         ",
     )
-    .bind(revision)
     .fetch_one(&mut **transaction)
     .await
     .map_err(provider_database_failure)
@@ -1049,9 +1044,82 @@ async fn load_workspace_operation(
     .map_err(workspace_database_failure)
 }
 
+async fn lock_provider_registry(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT singleton FROM github_provider_registry_lock WHERE singleton=true FOR UPDATE",
+    )
+    .fetch_one(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn validate_shard_registry(
+    transaction: &mut Transaction<'_, Postgres>,
+    shard_id: &ShardId,
+    workspace_id: WorkspaceId,
+    repositories: &[GithubProviderRepositorySelection],
+) -> Result<(), WorkspaceGithubRepositoriesFailure> {
+    let workspace_text = workspace_id.to_string();
+    let existing_count: i64 = sqlx::query_scalar(
+        r"
+        SELECT count(*) FROM workspace_github_repository_selections
+        WHERE shard_id=$1 AND workspace_id<>$2
+        ",
+    )
+    .bind(shard_id.as_str())
+    .bind(&workspace_text)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(workspace_database_failure)?;
+    let existing_count = usize::try_from(existing_count).map_err(|_| workspace_internal())?;
+    if existing_count
+        .checked_add(repositories.len())
+        .is_none_or(|count| count > MAX_GITHUB_PROVIDER_REPOSITORIES)
+    {
+        return Err(workspace_registry_conflict());
+    }
+
+    let repository_ids = repositories
+        .iter()
+        .map(|repository| {
+            i64::try_from(repository.repository_id().get()).map_err(|_| workspace_internal())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let repository_names = repositories
+        .iter()
+        .map(|repository| repository.repository_name().as_str().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let conflicts: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1 FROM workspace_github_repository_selections
+            WHERE shard_id=$1 AND workspace_id<>$2
+              AND (
+                  provider_repository_id=ANY($3::bigint[])
+                  OR lower(repository_name)=ANY($4::text[])
+              )
+        )
+        ",
+    )
+    .bind(shard_id.as_str())
+    .bind(&workspace_text)
+    .bind(repository_ids)
+    .bind(repository_names)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(workspace_database_failure)?;
+    if conflicts {
+        return Err(workspace_registry_conflict());
+    }
+    Ok(())
+}
+
 async fn insert_repository_selection(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: &str,
+    shard_id: &ShardId,
     revision: i64,
     ordinal: i32,
     repository: &GithubProviderRepositorySelection,
@@ -1067,14 +1135,15 @@ async fn insert_repository_selection(
     sqlx::query(
         r"
         INSERT INTO workspace_github_repository_selections (
-            workspace_id, revision, ordinal, provider_installation_id,
+            workspace_id, shard_id, revision, ordinal, provider_installation_id,
             provider_repository_id, provider_repository_owner_id,
             repository_name, default_branch, repository_visibility,
             authority_profile
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         ",
     )
     .bind(workspace_id)
+    .bind(shard_id.as_str())
     .bind(revision)
     .bind(ordinal)
     .bind(i64::try_from(repository.installation_id().get()).map_err(|_| workspace_internal())?)
@@ -1250,6 +1319,10 @@ fn workspace_failure(
 
 fn workspace_internal() -> WorkspaceGithubRepositoriesFailure {
     workspace_failure(WorkspaceGithubRepositoriesFailureKind::Internal)
+}
+
+fn workspace_registry_conflict() -> WorkspaceGithubRepositoriesFailure {
+    workspace_failure(WorkspaceGithubRepositoriesFailureKind::ShardRegistryConflict)
 }
 
 fn workspace_database_failure(_: sqlx::Error) -> WorkspaceGithubRepositoriesFailure {

@@ -184,9 +184,9 @@ pub type WorkspaceGithubRepositoriesApplicationFuture<'a> = Pin<
 /// Atomic, idempotent application port for one complete workspace repository set.
 ///
 /// Omission is authoritative: a successful revision replaces the complete
-/// desired set for that workspace. Implementations retain historical revisions
-/// for reconciliation and audit while exposing only the current head to the
-/// provider runtime.
+/// desired set for that workspace. Implementations retain durable operation
+/// receipts for replay while exposing only current desired state to the provider
+/// runtime.
 pub trait WorkspaceGithubRepositoriesApplier: fmt::Debug + Send + Sync {
     /// Applies one authorized complete workspace repository selection.
     fn apply(

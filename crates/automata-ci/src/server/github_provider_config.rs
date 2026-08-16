@@ -28,7 +28,7 @@ use super::SecretSource;
 
 const MAX_GITHUB_PROVIDER_TEST_FIXTURE_BYTES: usize = 512 * 1_024;
 /// Maximum exact repositories served by one shared GitHub webhook authority.
-pub const MAX_GITHUB_PROVIDER_REPOSITORIES: usize = 256;
+pub use automata_ci_provisioning::MAX_GITHUB_PROVIDER_REPOSITORIES;
 
 const CONFIG_SCHEMA: u16 = 4;
 const DATABASE_CONNECTION_ID_DOMAIN: &[u8] =

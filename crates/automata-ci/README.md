@@ -342,8 +342,9 @@ App private keys and webhook secrets are envelope-encrypted before their
 transaction commits, using the mandatory control-plane key provider. PostgreSQL
 stores ciphertext and authenticated envelope metadata, never plaintext.
 Management operation IDs are idempotent and revisions must advance. Current
-heads and immutable historical revisions are retained separately for replica
-recovery and reconciliation.
+desired state is retained separately from durable operation receipts used to
+answer retries. Superseded configuration and repository selections are replaced
+rather than accumulated without a current rollback or audit consumer.
 
 At startup, every control-plane replica loads one repeatable-read snapshot,
 decrypts the current credentials, validates the runner and repository policy,
