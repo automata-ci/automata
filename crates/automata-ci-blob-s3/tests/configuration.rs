@@ -1,12 +1,9 @@
 use std::time::Duration;
 
 use automata_ci_blob_s3::{
-    MAX_S3_PRIVATE_CA_PEM_BYTES, S3AtRestEncryption, S3BlobStoreConfig, S3BlobStoreConfigError,
-    S3TlsTrust, StaticS3Credentials,
+    S3AtRestEncryption, S3BlobStoreConfig, S3BlobStoreConfigError, S3TlsTrust, StaticS3Credentials,
 };
-use rcgen::{
-    BasicConstraints, CertificateParams, CustomExtension, DnType, IsCa, KeyPair, KeyUsagePurpose,
-};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
 use url::Url;
 
 #[test]
@@ -217,52 +214,17 @@ fn encryption_at_rest_is_mandatory_and_kms_identity_is_exact() {
 }
 
 #[test]
-fn private_ca_trust_accepts_exactly_one_valid_ca_and_redacts_it() {
+fn private_ca_trust_consumes_the_shared_validated_ca_and_redacts_it() {
     let ca_pem = certificate_pem(true);
-    let trust = S3TlsTrust::private_ca(ca_pem.clone()).expect("one exact private CA");
+    let trust = S3TlsTrust::private_ca(ca_pem).expect("one exact private CA");
     assert_eq!(
         format!("{trust:?}"),
         "S3TlsTrust::PrivateCa([certificate redacted])"
     );
-    S3TlsTrust::private_ca(certificate_pem_with_usage(true, Vec::new()))
-        .expect("a CA without KeyUsage remains a valid trust anchor");
-
-    let mut bundle = ca_pem.clone();
-    bundle.extend_from_slice(&certificate_pem(true));
-    let mut preamble = b"deployment preamble\n".to_vec();
-    preamble.extend_from_slice(&ca_pem);
-    let mut trailing_data = ca_pem.clone();
-    trailing_data.extend_from_slice(b"trailing data");
-    let mut trailing_newline = ca_pem.clone();
-    trailing_newline.push(b'\n');
-    let mut missing_terminal_newline = ca_pem.clone();
-    assert_eq!(missing_terminal_newline.pop(), Some(b'\n'));
-    let crlf = String::from_utf8(ca_pem.clone())
-        .expect("certificate PEM is ASCII")
-        .replace('\n', "\r\n")
-        .into_bytes();
-    let ca_with_malformed_key_usage =
-        certificate_pem_with_usage(true, vec![KeyUsagePurpose::DigitalSignature]);
-    let ca_with_malformed_key_usage_encoding = certificate_pem_with_malformed_key_usage();
-    for invalid in [
-        Vec::new(),
-        b"not a PEM certificate".to_vec(),
-        certificate_pem(false),
-        ca_with_malformed_key_usage,
-        ca_with_malformed_key_usage_encoding,
-        bundle,
-        preamble,
-        trailing_data,
-        trailing_newline,
-        missing_terminal_newline,
-        crlf,
-        vec![b'x'; MAX_S3_PRIVATE_CA_PEM_BYTES + 1],
-    ] {
-        assert_eq!(
-            S3TlsTrust::private_ca(invalid),
-            Err(S3BlobStoreConfigError::InvalidPrivateCa)
-        );
-    }
+    assert_eq!(
+        S3TlsTrust::private_ca(certificate_pem(false)),
+        Err(S3BlobStoreConfigError::InvalidPrivateCa)
+    );
 }
 
 #[test]
@@ -335,24 +297,6 @@ fn certificate_pem_with_usage(is_ca: bool, key_usages: Vec<KeyUsagePurpose>) -> 
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     }
     params.key_usages = key_usages;
-    params
-        .self_signed(&key)
-        .expect("self-signed certificate")
-        .pem()
-        .into_bytes()
-}
-
-fn certificate_pem_with_malformed_key_usage() -> Vec<u8> {
-    let key = KeyPair::generate().expect("certificate key");
-    let mut params = CertificateParams::new(Vec::<String>::new()).expect("certificate params");
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params
-        .custom_extensions
-        .push(CustomExtension::from_oid_content(
-            &[2, 5, 29, 15],
-            // KeyUsage's extnValue must contain a DER BIT STRING, not BOOLEAN.
-            vec![0x01, 0x01, 0xff],
-        ));
     params
         .self_signed(&key)
         .expect("self-signed certificate")
