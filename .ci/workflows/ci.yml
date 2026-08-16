@@ -40,6 +40,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
       - name: Configure shared Rust compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -58,7 +61,6 @@ jobs:
 
       - name: Show pinned toolchain
         run: |
-          install -d -m 0700 -- "$TMPDIR"
           rustc --version --verbose
           cargo --version --verbose
 
@@ -132,6 +134,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
       - name: Configure shared Rust compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -172,6 +177,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
       - name: Configure shared Rust compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -209,6 +217,9 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
 
       - name: Configure shared Rust compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -275,6 +286,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
       - name: Configure shared Rust compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -293,9 +307,6 @@ jobs:
           restore-keys: |
             cargo-ubuntu-24.04-rust-1.97.1-llvm-cov-0.8.7-
             cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
 
       - name: Install PostgreSQL client
         run: |
@@ -439,7 +450,7 @@ jobs:
             --env RUSTFS_ADDRESS=0.0.0.0:9000 \
             docker.io/rustfs/rustfs:1.0.0-beta.11@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c \
             /data
-          for attempt in $(seq 1 30); do
+          for ((attempt = 1; attempt <= 30; attempt += 1)); do
             if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
               exit 0
             fi
@@ -499,6 +510,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
+
       - name: Configure shared Rust compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -514,9 +528,6 @@ jobs:
           key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
 
       - name: Test Rust renderer
         run: |
@@ -603,6 +614,9 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Prepare job scratch directory
+        run: install -d -m 0700 -- "$TMPDIR"
 
       - name: Configure shared Rust compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
