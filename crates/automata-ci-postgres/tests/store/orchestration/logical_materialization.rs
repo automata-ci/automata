@@ -70,7 +70,7 @@ use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::support::{TestDatabase, TestResult, run_with_database};
+use crate::support::{TestDatabase, TestResult, lower_hex, run_with_database};
 
 struct Fixture {
     tenant: String,
@@ -2168,16 +2168,6 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
             .fetch_one(database.pool())
             .await?,
     )
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
 }
 
 async fn wait_until_database_after(database: &TestDatabase, target_ms: i64) -> TestResult {
