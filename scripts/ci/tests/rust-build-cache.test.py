@@ -17,6 +17,7 @@ CACHE_ACTION = (
     "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5"
 )
 SCRATCH_PREPARATION = 'run: install -d -m 0700 -- "$TMPDIR"'
+SHORT_ABSTRACT_SOCKET = "SCCACHE_SERVER_UDS: '\\x00automata-sccache'"
 RUST_JOBS = (
     "verify",
     "rust_lint",
@@ -40,6 +41,9 @@ def job_body(workflow: str, job: str) -> str:
 
 def main() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert workflow.count(SHORT_ABSTRACT_SOCKET) == 1, (
+        "sccache must use one short abstract socket independent of workspace depth"
+    )
     for job in RUST_JOBS:
         body = job_body(workflow, job)
         assert "RUSTC_WRAPPER: sccache" in body, f"{job} lost the rustc wrapper"
