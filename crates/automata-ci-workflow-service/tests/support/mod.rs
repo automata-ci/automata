@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use automata_ci_core::{JobRuntimeContext, OperationId, WorkflowEventProvenance};
+use automata_ci_core::{
+    JobRuntimeContext, Located, OperationId, PlanSourceLocation, PlanSourceSpan,
+    WorkflowEventProvenance,
+};
 use automata_ci_store::{TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_github::{
     CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
@@ -34,6 +37,19 @@ pub const GIT_REF: &str = "refs/heads/main";
 pub const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
 pub const SECOND_WORKFLOW_PATH: &str = ".ci/workflows/secondary.yml";
 pub const DELIVERY: &str = "delivery-workflow-admission-42";
+
+pub(crate) fn span() -> PlanSourceSpan {
+    PlanSourceSpan::new(
+        "synthetic.yml",
+        PlanSourceLocation::new(0, 1, 1).expect("start"),
+        PlanSourceLocation::new(1, 1, 2).expect("end"),
+    )
+    .expect("span")
+}
+
+pub(crate) fn located<T>(value: T) -> Located<T> {
+    Located::new(value, span())
+}
 
 pub fn ci_request(
     tenant: &str,

@@ -1,13 +1,15 @@
+use crate::support::{located, span};
+
 use std::{collections::BTreeMap, sync::Arc, thread};
 
 use automata_ci_core::{
     CompiledBooleanTemplate, CompiledExpressionTemplate, CompiledPositiveIntegerTemplate,
     CompiledValueTemplate, ContextValue, ExpressionContext, ExpressionProgram, ExpressionSegment,
-    JobConclusion, Located, LogicalJobKind, LogicalRunStepTemplate, LogicalRunnerTemplate,
-    LogicalStepKind, LogicalStepTemplate, MatrixTemplate, NeedContext, NeedOutput,
-    OutputSensitivity, PlanEvaluationPhase, PlanExpression, PlanSourceLocation, PlanSourceOrigin,
-    PlanSourceSpan, StepJobTemplate, WorkflowEventProvenance, WorkflowJobKey, WorkflowPlan,
-    WorkflowSourceProvenance, WorkflowStepKey, WorkflowStrategyTemplate,
+    JobConclusion, LogicalJobKind, LogicalRunStepTemplate, LogicalRunnerTemplate, LogicalStepKind,
+    LogicalStepTemplate, MatrixTemplate, NeedContext, NeedOutput, OutputSensitivity,
+    PlanEvaluationPhase, PlanExpression, PlanSourceOrigin, StepJobTemplate,
+    WorkflowEventProvenance, WorkflowJobKey, WorkflowPlan, WorkflowSourceProvenance,
+    WorkflowStepKey, WorkflowStrategyTemplate,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
@@ -16,19 +18,6 @@ use automata_ci_workflow_service::{
     GithubActivationEvaluationError, GithubLogicalActivationEvaluator, LogicalActivationError,
     LogicalJobActivation, LogicalJobActivator, ValidatedLogicalPlan,
 };
-
-fn span() -> PlanSourceSpan {
-    PlanSourceSpan::new(
-        "synthetic.yml",
-        PlanSourceLocation::new(0, 1, 1).expect("start"),
-        PlanSourceLocation::new(1, 1, 2).expect("end"),
-    )
-    .expect("span")
-}
-
-fn located<T>(value: T) -> Located<T> {
-    Located::new(value, span())
-}
 
 fn compiled(
     source: &str,
