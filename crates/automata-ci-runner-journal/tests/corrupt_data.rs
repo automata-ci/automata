@@ -129,6 +129,29 @@ fn previous_schema_is_rejected_without_rewrite() {
 }
 
 #[test]
+fn current_schema_requires_endpoint_operation_collection() {
+    let scratch = Scratch::new("missing-endpoint-operations");
+    let fixture = Fixture::new();
+    let root = scratch.state_root();
+    let journal = fixture.open(&scratch);
+    journal.begin_session(fixture.binding()).expect("session");
+    journal
+        .record_lease_offer(fixture.session_id, fixture.offer(1))
+        .expect("offer");
+    drop(journal);
+
+    let path = journal_file(root.as_path());
+    let current = fs::read_to_string(&path).expect("current journal");
+    let missing = current.replacen("\"endpoint_operations\":[],", "", 1);
+    assert_ne!(missing, current, "endpoint collection fixture must apply");
+    fs::write(path, missing).expect("write missing endpoint collection");
+    assert!(matches!(
+        FileJournal::open(root, fixture.runner_id),
+        Err(JournalError::Corrupt)
+    ));
+}
+
+#[test]
 fn current_schema_requires_segment_collection_metadata() {
     let scratch = Scratch::new("missing-log-segments");
     let fixture = Fixture::new();

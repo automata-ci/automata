@@ -113,6 +113,53 @@ fn operations_protection_reclaim_and_bytes_are_observed_without_identity() {
 }
 
 #[test]
+fn endpoint_result_observation_reports_only_the_padded_allocation_class() {
+    let scratch = Scratch::new("endpoint-result-observability");
+    let observer = Arc::new(CapturingObserver::default());
+    let spool = FileSpool::open_with_options(
+        scratch.spool_root(),
+        protector(),
+        FileSpoolOptions::new().with_observer(observer.clone()),
+    )
+    .expect("open observed spool");
+    let short = adopt(
+        spool
+            .reserve_endpoint_result(128)
+            .expect("reserve short result")
+            .persist(b"x")
+            .expect("persist short result"),
+    );
+    let longer = adopt(
+        spool
+            .reserve_endpoint_result(128)
+            .expect("reserve longer result")
+            .persist(&[b'y'; 128])
+            .expect("persist longer result"),
+    );
+    assert_eq!(spool.load(&short).expect("load short result"), b"x");
+    assert_eq!(
+        spool.load(&longer).expect("load longer result"),
+        [b'y'; 128]
+    );
+
+    let endpoint_bytes: Vec<_> = observer
+        .events()
+        .into_iter()
+        .filter_map(|event| match event {
+            SpoolEvent::ContentBytes {
+                content_kind: ContentKind::EndpointResult,
+                bytes,
+                ..
+            } => Some(bytes),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(endpoint_bytes, vec![65_536; 4]);
+    assert!(!endpoint_bytes.contains(&1));
+    assert!(!endpoint_bytes.contains(&128));
+}
+
+#[test]
 fn capacity_and_typed_failures_are_terminal_and_identifier_free() {
     let scratch = Scratch::new("observability-capacity");
     let observer = Arc::new(CapturingObserver::default());

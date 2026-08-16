@@ -1,5 +1,6 @@
 mod support;
 
+mod endpoint_results;
 mod fault_recovery;
 mod key_rotation;
 mod observability;

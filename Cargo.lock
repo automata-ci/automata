@@ -939,8 +939,10 @@ name = "automata-ci-runner-spool"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "automata-ci-execution",
  "rustix",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "static_assertions",
  "subtle",

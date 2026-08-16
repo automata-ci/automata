@@ -15,9 +15,10 @@ use automata_ci_protocol::{
     SUPPORTED_PROTOCOL_RANGE, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
 };
 use automata_ci_runner_journal::{
-    CommandDisposition, CommandIgnoredReason, ProviderFailureKind, ProviderFailureOutcome,
+    CommandDisposition, CommandIgnoredReason, EndpointOperation, EndpointOperationKind,
+    EndpointRequestContentRef, ProviderFailureKind, ProviderFailureOutcome, ProviderName,
     ProviderOperation, ProviderOperationKind, RunnerJournal, RuntimeAuthorityDeliveryRecord,
-    SessionBinding,
+    SandboxHandle, SandboxIdentity, SessionBinding,
 };
 use automata_ci_runner_runtime::{
     AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
@@ -27,7 +28,9 @@ use automata_ci_runner_runtime::{
     RuntimeControlErrorKind, RuntimeControlFuture, RuntimeControlReply, RuntimeControlRetry,
     SystemRuntimeIds, TokioRuntimeSleeper,
 };
-use automata_ci_runner_spool::{DurableContentStore, FileSpool};
+use automata_ci_runner_spool::{
+    ContentCommitmentDomain, ContentKind, DurableContentStore, FileSpool,
+};
 use automata_ci_runner_transport::PreparedRequest;
 use tokio_util::sync::CancellationToken;
 
@@ -1435,6 +1438,148 @@ async fn cancellation_timeout_quiesces_executor_before_sandbox_cleanup() {
             .slot(fixture.slot)
             .is_none()
     );
+}
+
+fn seed_ambiguous_endpoint_and_sandbox(
+    journal: &dyn RunnerJournal,
+    spool: &dyn DurableContentStore,
+    fixture: &support::AcceptedFixture,
+    cancellation_requested: bool,
+) -> OperationId {
+    let create = OperationId::new();
+    journal
+        .record_provider_intent(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            ProviderOperation::intent(create, ProviderOperationKind::CreateSandbox),
+        )
+        .expect("seed create intent");
+    journal
+        .record_sandbox_created(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            create,
+            SandboxIdentity::new(
+                ProviderName::new("endpoint-recovery-provider").expect("provider"),
+                SandboxHandle::new("generation-7").expect("sandbox handle"),
+            ),
+        )
+        .expect("seed exact sandbox identity");
+
+    let operation_id = OperationId::new();
+    let request_digest = [0x47; 32];
+    let commitment = spool
+        .create_keyed_commitment(ContentCommitmentDomain::EndpointRequest, &request_digest)
+        .expect("keyed request commitment");
+    let publication = spool
+        .persist(ContentKind::EndpointRequest, commitment.as_bytes())
+        .expect("persist request commitment");
+    let adopted = publication.commit_with(|content| {
+        let request = EndpointRequestContentRef::new(content.clone())?;
+        let operation =
+            EndpointOperation::accepted(operation_id, EndpointOperationKind::Wait, request, 64)?;
+        journal.accept_endpoint_operation(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            operation,
+        )
+    });
+    if let Err(failure) = adopted {
+        let (error, publication) = failure.into_parts();
+        publication.abort();
+        panic!("accept endpoint operation: {error}");
+    }
+    journal
+        .commit_endpoint_invocation(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            operation_id,
+        )
+        .expect("seed invocation ambiguity");
+    if cancellation_requested {
+        journal
+            .record_endpoint_cancellation(
+                fixture.session_id,
+                fixture.slot,
+                fixture.lease.guard(),
+                operation_id,
+            )
+            .expect("seed cancellation ambiguity");
+    }
+    operation_id
+}
+
+#[tokio::test]
+async fn restarted_endpoint_ambiguity_is_destroyed_resolved_terminalized_and_released() {
+    for cancellation_requested in [false, true] {
+        let scratch = support::Scratch::new(if cancellation_requested {
+            "endpoint-cancellation-recovery"
+        } else {
+            "endpoint-abandonment-recovery"
+        });
+        let runner_id = RunnerId::new();
+        let (seed_journal, seed_spool) = support::durable_ports(&scratch, runner_id);
+        let fixture =
+            support::seed_accepted_offer(seed_journal.as_ref(), seed_spool.as_ref(), runner_id);
+        seed_ambiguous_endpoint_and_sandbox(
+            seed_journal.as_ref(),
+            seed_spool.as_ref(),
+            &fixture,
+            cancellation_requested,
+        );
+        drop(seed_journal);
+        drop(seed_spool);
+
+        let (journal, spool) = support::durable_ports(&scratch, runner_id);
+        let executor = Arc::new(support::EndpointRecoveryExecutor::default());
+        let client = Arc::new(support::FailureIsolationClient::new(fixture.session_id));
+        let shutdown = CancellationToken::new();
+        let runtime = RunnerSessionSupervisor::new(
+            support::config(runner_id),
+            RunnerRuntimePorts::new(
+                client.clone(),
+                journal.clone(),
+                spool,
+                executor.clone(),
+                Arc::new(support::FixedClock::new(10_000, 50)),
+                Arc::new(support::ImmediateSleeper),
+                Arc::new(SystemRuntimeIds),
+            ),
+        );
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
+
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            client.wait_for_released_slot_poll(),
+        )
+        .await
+        .expect("recovered endpoint slot reaches durable release");
+        assert_eq!(executor.execute_calls(), 1);
+        assert_eq!(executor.cleanup_calls(), 1);
+        assert_eq!(
+            client.terminal_results(),
+            vec![(fixture.lease.attempt_id(), JobConclusion::Failure)]
+        );
+        assert!(
+            journal
+                .snapshot()
+                .expect("released recovery snapshot")
+                .slot(fixture.slot)
+                .is_none()
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(15), task)
+            .await
+            .expect("runtime shutdown")
+            .expect("runtime task")
+            .expect("clean shutdown after endpoint recovery");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
