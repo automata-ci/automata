@@ -1,16 +1,15 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+mod fixture_support;
 
-use automata_ci_core::{AttemptId, FencingToken, JobId, RunId};
+use std::sync::Arc;
+
+use automata_ci_core::{JobId, RunId};
 use automata_ci_results_github::{
-    ArtifactId, CacheAccessScope, CacheAuthority, CacheEntryId, CachePermission,
-    ExecutionAuthority, HmacResultsAuthority, HmacResultsAuthorityConfig, ResultsClock,
+    ArtifactId, CacheEntryId, CachePermission, HmacResultsAuthority, HmacResultsAuthorityConfig,
     ResultsPublicEndpoint, RuntimeTokenIssuer as _, RuntimeTokenVerifier, SignedCacheCapability,
     SignedDownloadCapability, SignedUploadCapability, TokenError, UploadId,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use fixture_support::{MutableClock, cache_authority, fresh_execution_authority};
 use ring::hmac;
 use serde_json::{Value, json};
 use url::Url;
@@ -18,25 +17,11 @@ use uuid::Uuid;
 
 const SECRET: &[u8] = b"automata-results-test-key-material-32-bytes-minimum";
 const RUNTIME_LABEL: &[u8] = b"automata/results/runtime-jwt/hs256/v1";
-
-#[derive(Debug)]
-struct MutableClock(AtomicU64);
-
-impl MutableClock {
-    fn new(now: u64) -> Self {
-        Self(AtomicU64::new(now))
-    }
-
-    fn set(&self, now: u64) {
-        self.0.store(now, Ordering::SeqCst);
-    }
-}
-
-impl ResultsClock for MutableClock {
-    fn now_seconds(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
+const CACHE_REPOSITORY: &str = "automata-ci/automata";
+const CACHE_SCOPES: &[(&str, CachePermission)] = &[
+    ("refs/heads/feature", CachePermission::ReadWrite),
+    ("refs/heads/main", CachePermission::Read),
+];
 
 fn authority(clock: Arc<MutableClock>) -> HmacResultsAuthority {
     let config = HmacResultsAuthorityConfig::new(
@@ -56,35 +41,13 @@ fn authority(clock: Arc<MutableClock>) -> HmacResultsAuthority {
     HmacResultsAuthority::new(SECRET, config, clock).expect("valid authority")
 }
 
-fn execution() -> ExecutionAuthority {
-    ExecutionAuthority::new(
-        RunId::new(),
-        JobId::new(),
-        AttemptId::new(),
-        FencingToken::new(7).expect("positive fence"),
-    )
-}
-
-fn cache_authority() -> CacheAuthority {
-    CacheAuthority::new(
-        "automata-ci/automata",
-        vec![
-            CacheAccessScope::new("refs/heads/feature", CachePermission::ReadWrite)
-                .expect("cache scope"),
-            CacheAccessScope::new("refs/heads/main", CachePermission::Read)
-                .expect("default-branch cache scope"),
-        ],
-    )
-    .expect("cache authority")
-}
-
 #[test]
 fn issued_runtime_token_has_exact_results_scope_and_round_trips() {
     let clock = Arc::new(MutableClock::new(10_000));
     let authority = authority(clock);
-    let execution = execution();
+    let execution = fresh_execution_authority(7);
 
-    let cache = cache_authority();
+    let cache = cache_authority(CACHE_REPOSITORY, CACHE_SCOPES);
     let token = authority
         .issue(execution, cache.clone(), 600)
         .expect("token issued");
@@ -123,7 +86,11 @@ fn signature_tampering_and_expiry_are_rejected() {
     let clock = Arc::new(MutableClock::new(20_000));
     let authority = authority(Arc::clone(&clock));
     let token = authority
-        .issue(execution(), cache_authority(), 60)
+        .issue(
+            fresh_execution_authority(7),
+            cache_authority(CACHE_REPOSITORY, CACHE_SCOPES),
+            60,
+        )
         .expect("token issued");
     let mut parts = token
         .expose_secret()
@@ -148,7 +115,7 @@ fn signature_tampering_and_expiry_are_rejected() {
 fn validly_signed_ambiguous_scope_and_algorithm_confusion_are_rejected() {
     let clock = Arc::new(MutableClock::new(30_000));
     let authority = authority(clock);
-    let execution = execution();
+    let execution = fresh_execution_authority(7);
     let common = json!({
         "iss": "automata-tests",
         "aud": "actions-results",
@@ -194,7 +161,7 @@ fn validly_signed_ambiguous_scope_and_algorithm_confusion_are_rejected() {
 #[test]
 fn missing_or_invalid_current_cache_access_controls_are_rejected() {
     let authority = authority(Arc::new(MutableClock::new(35_000)));
-    let execution = execution();
+    let execution = fresh_execution_authority(7);
     let header = json!({"alg":"HS256", "typ":"JWT", "kid":"test-v1"});
     let base = json!({
         "iss": "automata-tests",

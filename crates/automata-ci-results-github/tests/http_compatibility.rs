@@ -1,3 +1,4 @@
+mod fixture_support;
 mod http_support;
 
 use std::{
@@ -7,19 +8,18 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType, MemoryBlobStore};
-use automata_ci_core::{AttemptId, FencingToken, JobId, RunId, Sha256Digest};
+use automata_ci_core::{AttemptId, FencingToken, JobId, Sha256Digest};
 use automata_ci_results_github::{
     ArtifactBlock, ArtifactBlockReservation, ArtifactFinalizationClaim,
     ArtifactFinalizationReservation, ArtifactFinalizationWork, ArtifactId, ArtifactRepository,
     ArtifactRepositoryError, ArtifactRepositoryErrorKind, ArtifactService,
-    BeginArtifactFinalization, CacheAccessScope, CacheAuthority, CachePermission,
-    CommitArtifactBlocks, CommittedArtifact, CompleteArtifactBlock, CompleteArtifactFinalization,
-    CreateArtifact, CreateArtifactOutcome, ExecutionAuthority, FinalizeArtifactOutcome,
-    GithubResultsApi, GithubResultsHttpLimits, HmacResultsAuthority, HmacResultsAuthorityConfig,
-    ListArtifacts, LoadArtifactFinalization, PublishedArtifactMetadata, RecordArtifactVerification,
-    RenewArtifactFinalization, ReserveArtifactBlock, ResolveArtifactDownload, ResultsClock,
-    ResultsIdGenerator, ResultsLimits, ResultsPublicEndpoint, RuntimeTokenIssuer as _, UploadId,
-    VerifiedArtifactFinalization,
+    BeginArtifactFinalization, CommitArtifactBlocks, CommittedArtifact, CompleteArtifactBlock,
+    CompleteArtifactFinalization, CreateArtifact, CreateArtifactOutcome, ExecutionAuthority,
+    FinalizeArtifactOutcome, GithubResultsApi, GithubResultsHttpLimits, HmacResultsAuthority,
+    HmacResultsAuthorityConfig, ListArtifacts, LoadArtifactFinalization, PublishedArtifactMetadata,
+    RecordArtifactVerification, RenewArtifactFinalization, ReserveArtifactBlock,
+    ResolveArtifactDownload, ResultsLimits, ResultsPublicEndpoint, RuntimeTokenIssuer as _,
+    UploadId, VerifiedArtifactFinalization,
 };
 use axum::{
     body::Body,
@@ -27,41 +27,15 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use fixture_support::{
+    FixedClock, FixedIds, fresh_execution_authority, read_write_cache_authority,
+};
 use http_body_util::BodyExt as _;
 use http_support::{assert_private_rejection, isolated_node_command, path_and_query};
 use sha2::Digest as _;
 use tower::ServiceExt as _;
 use url::Url;
 use uuid::Uuid;
-
-#[derive(Debug)]
-struct FixedClock(u64);
-
-fn cache_authority() -> CacheAuthority {
-    CacheAuthority::new(
-        "automata-ci/automata",
-        vec![
-            CacheAccessScope::new("refs/heads/main", CachePermission::ReadWrite)
-                .expect("cache scope"),
-        ],
-    )
-    .expect("cache authority")
-}
-
-impl ResultsClock for FixedClock {
-    fn now_seconds(&self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Debug)]
-struct FixedIds(UploadId);
-
-impl ResultsIdGenerator for FixedIds {
-    fn next_upload_id(&self) -> UploadId {
-        self.0
-    }
-}
 
 #[derive(Debug)]
 struct FakeRepository {
@@ -506,14 +480,13 @@ fn fixture_with_url_and_limits(public_url: &str, limits: GithubResultsHttpLimits
         )
         .expect("token authority"),
     );
-    let execution = ExecutionAuthority::new(
-        RunId::new(),
-        JobId::new(),
-        AttemptId::new(),
-        FencingToken::new(3).expect("fence"),
-    );
+    let execution = fresh_execution_authority(3);
     let token = token_authority
-        .issue(execution, cache_authority(), 600)
+        .issue(
+            execution,
+            read_write_cache_authority("automata-ci/automata", "refs/heads/main"),
+            600,
+        )
         .expect("runtime token")
         .expose_secret()
         .to_owned();
@@ -877,7 +850,11 @@ async fn exact_v7_twirp_and_azure_block_upload_flow_succeeds() {
     );
     let consumer_token = fixture
         .token_authority
-        .issue(consumer, cache_authority(), 600)
+        .issue(
+            consumer,
+            read_write_cache_authority("automata-ci/automata", "refs/heads/main"),
+            600,
+        )
         .expect("consumer runtime token")
         .expose_secret()
         .to_owned();

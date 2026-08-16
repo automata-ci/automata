@@ -20,7 +20,10 @@ use automata_ci_results_github::{
 use automata_ci_store::StableRunnerSlot;
 use bytes::Bytes;
 use sqlx::PgPool;
-use support::postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane};
+use support::{
+    fixtures::{database_now_millis, database_now_seconds},
+    postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane},
+};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -1572,22 +1575,6 @@ fn list_digest(ids: &[String]) -> Sha256Digest {
         hasher.update(id.as_bytes());
     }
     Sha256Digest::from_bytes(hasher.finalize().into())
-}
-
-async fn database_now_seconds(database: &TestDatabase) -> TestResult<u64> {
-    let database_now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT")
-            .fetch_one(database.pool())
-            .await?;
-    Ok(u64::try_from(database_now)?)
-}
-
-async fn database_now_millis(database: &TestDatabase) -> TestResult<UnixMillis> {
-    let database_now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT")
-            .fetch_one(database.pool())
-            .await?;
-    Ok(UnixMillis::new(database_now))
 }
 
 async fn expire_finalization_claim(database: &TestDatabase, upload_id: UploadId) -> TestResult {

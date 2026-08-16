@@ -1,3 +1,4 @@
+mod fixture_support;
 mod support;
 
 use std::{io, time::Duration};
@@ -11,15 +12,19 @@ use automata_ci_core::{
 };
 use automata_ci_postgres::test_support::TestClock;
 use automata_ci_results_github::{
-    CacheAccessScope, CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation,
-    CacheKey, CachePermission, CacheRepository as _, CacheRepositoryErrorKind, CacheVersion,
-    CommitCacheBlocks, CompleteCacheBlock, CompleteCacheFinalization, CreateCacheEntry,
-    ExecutionAuthority, LookupCacheEntry, PostgresCacheRepository, PrepareCacheFinalization,
-    ReserveCacheBlock, ResolveCacheDownload,
+    CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation, CacheKey,
+    CacheRepository as _, CacheRepositoryErrorKind, CacheVersion, CommitCacheBlocks,
+    CompleteCacheBlock, CompleteCacheFinalization, CreateCacheEntry, ExecutionAuthority,
+    LookupCacheEntry, PostgresCacheRepository, PrepareCacheFinalization, ReserveCacheBlock,
+    ResolveCacheDownload,
 };
 use automata_ci_store::{RunnerSessionFence, StableRunnerSlot};
+use fixture_support::read_write_cache_authority;
 use sqlx::PgPool;
-use support::postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane};
+use support::{
+    fixtures::{database_now_millis, database_now_seconds, database_now_seconds_from_pool},
+    postgres::{TestDatabase, TestResult, run_with_database, seed_control_plane},
+};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -28,7 +33,7 @@ use uuid::Uuid;
 async fn cache_transactions_are_immutable_fenced_and_cross_run_readable() -> TestResult {
     run_with_database(|database| async move {
         let (repository, execution, session_fence, lease_guard) = active_attempt(&database).await?;
-        let cache = cache_authority("automata/results-test", "refs/heads/main");
+        let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
         let entry_id = CacheEntryId::new(Uuid::new_v4())?;
         let creation_database_before = database_now_seconds(&database).await?;
         let forged_fast_creation = creation_database_before + 30;
@@ -383,7 +388,7 @@ async fn cache_transactions_are_immutable_fenced_and_cross_run_readable() -> Tes
         let wrong_repository = repository
             .lookup(LookupCacheEntry {
                 execution: reader,
-                cache: cache_authority("sibling/repository", "refs/heads/main"),
+                cache: read_write_cache_authority("sibling/repository", "refs/heads/main"),
                 key: CacheKey::new("cargo-linux")?,
                 restore_keys: Vec::new(),
                 version: CacheVersion::new("version-1")?,
@@ -428,7 +433,7 @@ async fn cache_retention_and_touch_use_database_time_under_caller_skew() -> Test
         const INACTIVITY_SECONDS: u64 = 40;
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
-        let cache = cache_authority("automata/results-test", "refs/heads/main");
+        let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
         let (live_id, _live_digest) = finalize_small_entry(
             &repository,
             execution,
@@ -592,7 +597,7 @@ async fn cache_touch_rechecks_exact_expiry_after_the_entry_lock_wait() -> TestRe
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
-        let cache = cache_authority("automata/results-test", "refs/heads/main");
+        let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
         let (entry_id, digest) = finalize_small_entry(
             &repository,
             execution,
@@ -701,7 +706,7 @@ async fn cache_entry_cardinality_is_bounded_even_for_zero_byte_entries() -> Test
     run_with_database(|database| async move {
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
-        let cache = cache_authority("automata/results-test", "refs/heads/main");
+        let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
         // Keep the target after the injected `1000...` cohort when database-second
         // timestamps tie, so the UUID tiebreak deterministically evicts row two.
         let target = CacheEntryId::new(Uuid::parse_str("f0000000-0000-4000-8000-000000000000")?)?;
@@ -847,7 +852,7 @@ async fn concurrent_creates_respect_the_exact_cap_with_repeatable_read_sessions(
     run_with_database(|database| async move {
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
-        let cache = cache_authority("automata/results-test", "refs/heads/main");
+        let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
         let seed = CacheEntryId::new(Uuid::new_v4())?;
         repository
             .create(create_request(execution, cache.clone(), seed, "cap-seed"))
@@ -924,7 +929,7 @@ async fn concurrent_finalizations_include_the_serialized_predecessor_in_quota() 
     run_with_database(|database| async move {
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
-        let cache = cache_authority("automata/results-test", "refs/heads/main");
+        let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
         let (first_id, first_digest) = prepare_small_entry(
             &repository,
             execution,
@@ -1018,7 +1023,7 @@ async fn a_touch_commits_before_eviction_selects_the_current_lru_entry() -> Test
     run_with_database(|database| async move {
         let (repository, execution, _session_fence, _lease_guard) =
             active_attempt(&database).await?;
-        let cache = cache_authority("automata/results-test", "refs/heads/main");
+        let cache = read_write_cache_authority("automata/results-test", "refs/heads/main");
         let (oldest_id, _oldest_digest) = finalize_small_entry(
             &repository,
             execution,
@@ -1488,14 +1493,6 @@ async fn second_run_attempt(
     ))
 }
 
-fn cache_authority(repository: &str, cache_ref: &str) -> CacheAuthority {
-    CacheAuthority::new(
-        repository,
-        vec![CacheAccessScope::new(cache_ref, CachePermission::ReadWrite).expect("cache scope")],
-    )
-    .expect("cache authority")
-}
-
 fn create_request(
     execution: ExecutionAuthority,
     cache: CacheAuthority,
@@ -1669,24 +1666,4 @@ fn assert_database_timestamp_window(
         "{label} must persist database time, not the future caller observation"
     );
     Ok(())
-}
-
-async fn database_now_seconds(database: &TestDatabase) -> TestResult<u64> {
-    database_now_seconds_from_pool(database.pool()).await
-}
-
-async fn database_now_seconds_from_pool(pool: &PgPool) -> TestResult<u64> {
-    let database_now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()))::BIGINT")
-            .fetch_one(pool)
-            .await?;
-    Ok(u64::try_from(database_now)?)
-}
-
-async fn database_now_millis(database: &TestDatabase) -> TestResult<UnixMillis> {
-    let database_now: i64 =
-        sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT")
-            .fetch_one(database.pool())
-            .await?;
-    Ok(UnixMillis::new(database_now))
 }
