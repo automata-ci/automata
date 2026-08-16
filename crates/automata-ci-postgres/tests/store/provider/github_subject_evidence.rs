@@ -498,6 +498,16 @@ async fn authenticated_event_readers_reject_forward_envelope_schemas() -> TestRe
                 .await,
             Err(GithubSubjectEvidenceStoreError::CorruptData)
         ));
+        let pending_claim = claim_delivery(&database, pending.delivery_id(), 0x183, 60_000).await?;
+        let rejected = database
+            .store()
+            .reject_provider_delivery(RejectProviderDelivery::new(
+                pending_claim.claim(),
+                ProviderDeliveryFailureKind::new("github.subject_evidence.invalid")?,
+                pending_claim.claimed_at(),
+            )?)
+            .await?;
+        assert_eq!(rejected.state(), ProviderDeliveryState::Rejected);
 
         let resolved_request = repository_dispatch_acceptance(
             &fixture,
@@ -509,7 +519,7 @@ async fn authenticated_event_readers_reject_forward_envelope_schemas() -> TestRe
             .store()
             .accept_manifest_pinned_github_repository_dispatch(resolved_request)
             .await?;
-        let claim = claim_delivery(&database, accepted.delivery_id(), 0x183, 60_000).await?;
+        let claim = claim_delivery(&database, accepted.delivery_id(), 0x184, 60_000).await?;
         let resolution = GithubRepositoryDispatchResolution::new(
             GithubCheckHeadSha::new(HEAD_SHA)?,
             GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
