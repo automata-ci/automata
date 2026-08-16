@@ -267,6 +267,35 @@ async fn apply_expired_attempt(
         ));
     }
 
+    if mutation.disposition == ExpiredAttemptDisposition::Lost {
+        let terminal_rows = sqlx::query(
+            r"
+            INSERT INTO attempt_terminal_results (
+                attempt_id, terminal_authority, conclusion,
+                completed_at_ms, committed_at_ms
+            )
+            SELECT id, 'server_lease_expiry', 'failure', changed_at_ms, changed_at_ms
+            FROM job_attempts
+            WHERE id = $1
+              AND lifecycle = 'lost'
+              AND changed_at_ms = $2
+              AND lease_failures = $3
+            ",
+        )
+        .bind(attempt_id.as_uuid())
+        .bind(mutation.decided_at.get())
+        .bind(mutation.next_failures)
+        .execute(&mut **transaction)
+        .await
+        .map_err(StoreError::operation)?
+        .rows_affected();
+        if terminal_rows != 1 {
+            return Err(StoreError::corrupt_data(
+                "lost attempt did not create exact lease-expiry terminal evidence",
+            ));
+        }
+    }
+
     Ok(())
 }
 

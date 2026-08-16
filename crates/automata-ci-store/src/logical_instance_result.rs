@@ -32,6 +32,8 @@ pub const MAX_LOGICAL_INSTANCE_RESULT_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 const DESCRIPTOR_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-descriptor.v1\0";
 const SERVER_CANCELLATION_DESCRIPTOR_DOMAIN: &[u8] =
     b"automata.store.logical-instance-result.server-cancellation.v1\0";
+const SERVER_LEASE_EXPIRY_DESCRIPTOR_DOMAIN: &[u8] =
+    b"automata.store.logical-instance-result.server-lease-expiry.v1\0";
 const OUTPUTS_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-outputs.v1\0";
 const COMMIT_DIGEST_DOMAIN: &[u8] = b"automata.store.logical-instance-result-commit.v1\0";
 
@@ -391,6 +393,9 @@ pub enum LogicalInstanceTerminalAuthority {
     Runner(LogicalTerminalResultObject),
     /// The server cancelled an exact queued attempt before runner assignment.
     ServerCancellation(LogicalServerCancellationTerminal),
+    /// The control plane proved that an active lease expired and the runner
+    /// can no longer authoritatively finish the attempt.
+    ServerLeaseExpiry,
 }
 
 /// Store-authenticated terminal attempt and immutable object descriptors.
@@ -505,6 +510,51 @@ impl LogicalInstanceResultDescriptor {
             job_ir_object,
             maximum_secret_exposure,
             JobConclusion::Cancelled,
+            result_completed_at,
+            result_committed_at,
+        )
+    }
+
+    /// Rehydrates control-plane lease-expiry authority without a result blob.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid identities, matrix coordinates, object descriptors, or
+    /// terminal timestamps.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_server_lease_expiry(
+        target: LogicalInstanceResultTarget,
+        run_id: RunId,
+        invocation_id: LogicalWorkflowInvocationId,
+        logical_job_id: LogicalWorkflowJobId,
+        instance_id: LogicalWorkflowInstanceId,
+        job_id: JobId,
+        logical_key: WorkflowJobKey,
+        matrix_index: u32,
+        matrix_total: u32,
+        matrix_digest: Sha256Digest,
+        terminal_ordinal: LogicalInstanceTerminalOrdinal,
+        job_ir_object: LogicalActivationObject,
+        maximum_secret_exposure: JobSecretExposure,
+        result_completed_at: UnixMillis,
+        result_committed_at: UnixMillis,
+    ) -> Result<Self, LogicalInstanceResultValueError> {
+        Self::new_with_authority(
+            target,
+            run_id,
+            invocation_id,
+            logical_job_id,
+            instance_id,
+            job_id,
+            logical_key,
+            matrix_index,
+            matrix_total,
+            matrix_digest,
+            terminal_ordinal,
+            LogicalInstanceTerminalAuthority::ServerLeaseExpiry,
+            job_ir_object,
+            maximum_secret_exposure,
+            JobConclusion::Failure,
             result_completed_at,
             result_committed_at,
         )
@@ -665,7 +715,8 @@ impl LogicalInstanceResultDescriptor {
     pub const fn terminal_result(&self) -> Option<&LogicalTerminalResultObject> {
         match &self.terminal_authority {
             LogicalInstanceTerminalAuthority::Runner(result) => Some(result),
-            LogicalInstanceTerminalAuthority::ServerCancellation(_) => None,
+            LogicalInstanceTerminalAuthority::ServerCancellation(_)
+            | LogicalInstanceTerminalAuthority::ServerLeaseExpiry => None,
         }
     }
 
@@ -673,11 +724,21 @@ impl LogicalInstanceResultDescriptor {
     #[must_use]
     pub const fn server_cancellation(&self) -> Option<&LogicalServerCancellationTerminal> {
         match &self.terminal_authority {
-            LogicalInstanceTerminalAuthority::Runner(_) => None,
             LogicalInstanceTerminalAuthority::ServerCancellation(cancellation) => {
                 Some(cancellation)
             }
+            LogicalInstanceTerminalAuthority::Runner(_)
+            | LogicalInstanceTerminalAuthority::ServerLeaseExpiry => None,
         }
+    }
+
+    /// Returns whether the control plane terminalized an expired active lease.
+    #[must_use]
+    pub const fn is_server_lease_expiry(&self) -> bool {
+        matches!(
+            self.terminal_authority,
+            LogicalInstanceTerminalAuthority::ServerLeaseExpiry
+        )
     }
 
     /// Returns the immutable `JobIR` object descriptor.
@@ -1195,6 +1256,70 @@ impl CommitLogicalInstanceResult {
         })
     }
 
+    /// Builds a zero-output infrastructure failure from exact lease-expiry authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-expiry authority, invalid `JobIR`, identity drift, or a
+    /// commit outside the live claim.
+    pub fn new_server_lease_expiry(
+        claimed: &ClaimedLogicalInstanceResult,
+        encoded_job_ir: &[u8],
+        envelope: &JobIrEnvelope,
+        finalized_at: UnixMillis,
+    ) -> Result<Self, LogicalInstanceResultValueError> {
+        let descriptor = claimed.descriptor();
+        let claim = claimed.claim().clone();
+        if !descriptor.is_server_lease_expiry()
+            || descriptor.raw_conclusion() != JobConclusion::Failure
+        {
+            return Err(LogicalInstanceResultValueError::TerminalAuthorityMismatch);
+        }
+        if finalized_at < claim.claimed_at() || finalized_at >= claim.expires_at() {
+            return Err(LogicalInstanceResultValueError::CommitOutsideClaim);
+        }
+        validate_blob(
+            encoded_job_ir,
+            descriptor.job_ir().encoded_size(),
+            descriptor.job_ir().digest(),
+            LogicalInstanceResultValueError::JobIrBlobMismatch,
+        )?;
+        envelope
+            .validate()
+            .map_err(|_| LogicalInstanceResultValueError::InvalidJobIr)?;
+        if envelope.schema_version() != JOB_IR_SCHEMA_VERSION {
+            return Err(LogicalInstanceResultValueError::InvalidJobIr);
+        }
+        validate_job_ir_identity(descriptor, envelope)?;
+        let outputs = Vec::new();
+        let outputs_digest = output_set_digest(&outputs);
+        // Infrastructure loss is outside job-authored failure semantics and
+        // therefore cannot be masked by `continue-on-error`.
+        let continue_on_error = false;
+        let effective_conclusion = JobConclusion::Failure;
+        let secret_exposure = descriptor.maximum_secret_exposure();
+        let commit_digest = result_commit_digest(
+            &claim,
+            descriptor,
+            effective_conclusion,
+            continue_on_error,
+            secret_exposure,
+            outputs_digest,
+            finalized_at,
+        );
+        Ok(Self {
+            claim,
+            raw_conclusion: JobConclusion::Failure,
+            effective_conclusion,
+            continue_on_error,
+            secret_exposure,
+            outputs,
+            outputs_digest,
+            commit_digest,
+            finalized_at,
+        })
+    }
+
     /// Returns the exact live claim proof.
     #[must_use]
     pub const fn claim(&self) -> &LogicalInstanceResultClaimFence {
@@ -1663,6 +1788,9 @@ fn descriptor_digest(
             hasher.update(SERVER_CANCELLATION_DESCRIPTOR_DOMAIN);
             hasher.update(cancellation.operation_id().as_uuid().as_bytes());
             hasher.update(cancellation.digest().as_bytes());
+        }
+        LogicalInstanceTerminalAuthority::ServerLeaseExpiry => {
+            hasher.update(SERVER_LEASE_EXPIRY_DESCRIPTOR_DOMAIN);
         }
     }
     hash_job_ir_object(&mut hasher, job_ir_object);

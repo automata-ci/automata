@@ -173,6 +173,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0042_github_provider_desired_state.sql",
         "5276d0877686f09d9c05c50b4675c2b82a9b93588d7865f3e4910d1daf7d39bd01c2826eb15edfcfd41b42e14269df98",
     ),
+    (
+        "0043_terminalize_expired_active_leases.sql",
+        "b4caf908ce785d736293e16c864320e9ea098e3cc76843539e91339f85c859f1482f57609ed865060e43aad0183c0ce1",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
