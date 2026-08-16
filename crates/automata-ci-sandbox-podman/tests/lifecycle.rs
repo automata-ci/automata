@@ -749,6 +749,7 @@ fn same_profile_id_with_a_different_attestation_digest_cannot_replay() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One adversarial transcript proves environment isolation end to end.
 fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() {
     let fixture = Fixture::new("environment");
     let created = fixture

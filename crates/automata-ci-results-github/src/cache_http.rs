@@ -4,7 +4,7 @@ use automata_ci_core::Sha256Digest;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, MatchedPath, Path, Query, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, MatchedPath, Path, Query, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -12,6 +12,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt as _, stream};
+use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -206,16 +207,43 @@ struct CreateCacheResponse {
     message: String,
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoCacheMetadata {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoCreateCacheRequest {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<ProtoCacheMetadata>,
+    #[prost(string, tag = "2")]
+    key: String,
+    #[prost(string, tag = "3")]
+    version: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoCreateCacheResponse {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(string, tag = "2")]
+    signed_upload_url: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TwirpEncoding {
+    Json,
+    Protobuf,
+}
+
 async fn create_cache(
     State(state): State<CacheApiState>,
     headers: HeaderMap,
-    request: Result<Json<CreateCacheRequest>, JsonRejection>,
+    body: Bytes,
 ) -> Response {
     let claims = match authenticate(&state, &headers) {
         Ok(claims) => claims,
         Err(error) => return twirp_token_error(error),
     };
-    let Ok(Json(request)) = request else {
+    let Ok((encoding, request)) = decode_create_request(&headers, &body) else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
     };
     let created = match state
@@ -237,11 +265,42 @@ async fn create_cache(
     else {
         return twirp_error(TwirpErrorClass::Internal);
     };
-    no_store(Json(CreateCacheResponse {
-        ok: true,
-        signed_upload_url: signed_url.to_string(),
-        message: String::new(),
-    }))
+    create_cache_response(encoding, signed_url.to_string())
+}
+
+fn decode_create_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(TwirpEncoding, CreateCacheRequest), ()> {
+    let encoding = twirp_encoding(headers)?;
+    let request = match encoding {
+        TwirpEncoding::Json => serde_json::from_slice(body).map_err(|_| ())?,
+        TwirpEncoding::Protobuf => {
+            let request = ProtoCreateCacheRequest::decode(body).map_err(|_| ())?;
+            if request.metadata.is_some() {
+                return Err(());
+            }
+            CreateCacheRequest {
+                key: request.key,
+                version: request.version,
+            }
+        }
+    };
+    Ok((encoding, request))
+}
+
+fn create_cache_response(encoding: TwirpEncoding, signed_upload_url: String) -> Response {
+    match encoding {
+        TwirpEncoding::Json => no_store(Json(CreateCacheResponse {
+            ok: true,
+            signed_upload_url,
+            message: String::new(),
+        })),
+        TwirpEncoding::Protobuf => protobuf_response(&ProtoCreateCacheResponse {
+            ok: true,
+            signed_upload_url,
+        }),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,16 +319,36 @@ struct FinalizeCacheResponse {
     message: String,
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoFinalizeCacheRequest {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<ProtoCacheMetadata>,
+    #[prost(string, tag = "2")]
+    key: String,
+    #[prost(int64, tag = "3")]
+    size_bytes: i64,
+    #[prost(string, tag = "4")]
+    version: String,
+}
+
+#[derive(Clone, Copy, PartialEq, prost::Message)]
+struct ProtoFinalizeCacheResponse {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(int64, tag = "2")]
+    entry_id: i64,
+}
+
 async fn finalize_cache(
     State(state): State<CacheApiState>,
     headers: HeaderMap,
-    request: Result<Json<FinalizeCacheRequest>, JsonRejection>,
+    body: Bytes,
 ) -> Response {
     let claims = match authenticate(&state, &headers) {
         Ok(claims) => claims,
         Err(error) => return twirp_token_error(error),
     };
-    let Ok(Json(request)) = request else {
+    let Ok((encoding, request)) = decode_finalize_request(&headers, &body) else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
     };
     match state
@@ -283,12 +362,43 @@ async fn finalize_cache(
         )
         .await
     {
-        Ok(entry) => no_store(Json(FinalizeCacheResponse {
+        Ok(entry) => finalize_cache_response(encoding, entry.protocol_entry_id.get()),
+        Err(error) => twirp_service_error(error),
+    }
+}
+
+fn decode_finalize_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(TwirpEncoding, FinalizeCacheRequest), ()> {
+    let encoding = twirp_encoding(headers)?;
+    let request = match encoding {
+        TwirpEncoding::Json => serde_json::from_slice(body).map_err(|_| ())?,
+        TwirpEncoding::Protobuf => {
+            let request = ProtoFinalizeCacheRequest::decode(body).map_err(|_| ())?;
+            if request.metadata.is_some() {
+                return Err(());
+            }
+            FinalizeCacheRequest {
+                key: request.key,
+                version: request.version,
+                size_bytes: u64::try_from(request.size_bytes).map_err(|_| ())?,
+            }
+        }
+    };
+    Ok((encoding, request))
+}
+
+fn finalize_cache_response(encoding: TwirpEncoding, entry_id: i64) -> Response {
+    match encoding {
+        TwirpEncoding::Json => no_store(Json(FinalizeCacheResponse {
             ok: true,
-            entry_id: entry.protocol_entry_id.get().to_string(),
+            entry_id: entry_id.to_string(),
             message: String::new(),
         })),
-        Err(error) => twirp_service_error(error),
+        TwirpEncoding::Protobuf => {
+            protobuf_response(&ProtoFinalizeCacheResponse { ok: true, entry_id })
+        }
     }
 }
 
@@ -327,16 +437,38 @@ struct GetCacheResponse {
     matched_key: String,
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoGetCacheRequest {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<ProtoCacheMetadata>,
+    #[prost(string, tag = "2")]
+    key: String,
+    #[prost(string, repeated, tag = "3")]
+    restore_keys: Vec<String>,
+    #[prost(string, tag = "4")]
+    version: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoGetCacheResponse {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(string, tag = "2")]
+    signed_download_url: String,
+    #[prost(string, tag = "3")]
+    matched_key: String,
+}
+
 async fn get_cache(
     State(state): State<CacheApiState>,
     headers: HeaderMap,
-    request: Result<Json<GetCacheRequest>, JsonRejection>,
+    body: Bytes,
 ) -> Response {
     let claims = match authenticate(&state, &headers) {
         Ok(claims) => claims,
         Err(error) => return twirp_token_error(error),
     };
-    let Ok(Json(request)) = request else {
+    let Ok((encoding, request)) = decode_get_request(&headers, &body) else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
     };
     let entry = match state
@@ -354,11 +486,7 @@ async fn get_cache(
         Err(error) => return twirp_service_error(error),
     };
     let Some(entry) = entry else {
-        return no_store(Json(GetCacheResponse {
-            ok: false,
-            signed_download_url: String::new(),
-            matched_key: String::new(),
-        }));
+        return get_cache_response(encoding, false, String::new(), String::new());
     };
     let Ok(signed_url) = state.capabilities.issue_cache_download_url(
         entry.entry_id,
@@ -367,11 +495,74 @@ async fn get_cache(
     ) else {
         return twirp_error(TwirpErrorClass::Internal);
     };
-    no_store(Json(GetCacheResponse {
-        ok: true,
-        signed_download_url: signed_url.to_string(),
-        matched_key: entry.key.as_str().to_owned(),
-    }))
+    get_cache_response(
+        encoding,
+        true,
+        signed_url.to_string(),
+        entry.key.as_str().to_owned(),
+    )
+}
+
+fn decode_get_request(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(TwirpEncoding, GetCacheRequest), ()> {
+    let encoding = twirp_encoding(headers)?;
+    let request = match encoding {
+        TwirpEncoding::Json => serde_json::from_slice(body).map_err(|_| ())?,
+        TwirpEncoding::Protobuf => {
+            let request = ProtoGetCacheRequest::decode(body).map_err(|_| ())?;
+            if request.metadata.is_some() {
+                return Err(());
+            }
+            GetCacheRequest {
+                key: request.key,
+                version: request.version,
+                restore_keys: request.restore_keys,
+            }
+        }
+    };
+    Ok((encoding, request))
+}
+
+fn get_cache_response(
+    encoding: TwirpEncoding,
+    ok: bool,
+    signed_download_url: String,
+    matched_key: String,
+) -> Response {
+    match encoding {
+        TwirpEncoding::Json => no_store(Json(GetCacheResponse {
+            ok,
+            signed_download_url,
+            matched_key,
+        })),
+        TwirpEncoding::Protobuf => protobuf_response(&ProtoGetCacheResponse {
+            ok,
+            signed_download_url,
+            matched_key,
+        }),
+    }
+}
+
+fn twirp_encoding(headers: &HeaderMap) -> Result<TwirpEncoding, ()> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .ok_or(())?
+        .to_str()
+        .map_err(|_| ())?;
+    match content_type {
+        "application/json" => Ok(TwirpEncoding::Json),
+        "application/protobuf" => Ok(TwirpEncoding::Protobuf),
+        _ => Err(()),
+    }
+}
+
+fn protobuf_response(message: &impl prost::Message) -> Response {
+    no_store((
+        [(header::CONTENT_TYPE, "application/protobuf")],
+        message.encode_to_vec(),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

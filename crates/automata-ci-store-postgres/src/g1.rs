@@ -4715,10 +4715,8 @@ async fn lock_runtime_authority_delivery_admission(
     }
     match lock_runtime_authority_attempt(transaction, &offer).await? {
         RuntimeAuthorityAttemptStatus::Accepted => {}
-        RuntimeAuthorityAttemptStatus::AwaitingAcceptance => {
-            return Err(StoreError::AttemptFenceRejected(offer.lease().attempt_id()));
-        }
-        RuntimeAuthorityAttemptStatus::Rejected => {
+        RuntimeAuthorityAttemptStatus::AwaitingAcceptance
+        | RuntimeAuthorityAttemptStatus::Rejected => {
             return Err(StoreError::AttemptFenceRejected(offer.lease().attempt_id()));
         }
         RuntimeAuthorityAttemptStatus::Stale => {
@@ -5202,6 +5200,7 @@ async fn load_lease_offer_publication_by_command(
     Ok(publication)
 }
 
+#[allow(clippy::too_many_lines)] // One snapshot query closes every offer field under the same lock.
 async fn load_runtime_authority_offer_by_command(
     transaction: &mut Transaction<'_, Postgres>,
     identity: LeaseOfferCommandIdentity,

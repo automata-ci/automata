@@ -479,7 +479,7 @@ impl PreparedInput {
         name: impl Into<String>,
         default: Option<PreparedValue>,
         required: Option<String>,
-        deprecation_message: Option<String>,
+        deprecation_message: Option<&str>,
     ) -> Result<Self, PreparedActionError> {
         let name = name.into();
         if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
@@ -529,7 +529,7 @@ impl PreparedInput {
     }
 }
 
-fn normalize_deprecation_message(value: String) -> Result<String, PreparedActionError> {
+fn normalize_deprecation_message(value: &str) -> Result<String, PreparedActionError> {
     if value.len() > MAX_INPUT_DEPRECATION_BYTES {
         return Err(PreparedActionError::InvalidInput);
     }

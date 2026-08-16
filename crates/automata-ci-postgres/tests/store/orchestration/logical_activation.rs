@@ -721,7 +721,7 @@ async fn concurrent_claim_takeover_and_stale_generation_are_fenced() -> TestResu
         let mut fixture = fixture(&database, "activation-claim", 1_000).await?;
         seed_tenant(&database, &fixture.tenant).await?;
         admit_authenticated_fixture(&database, &mut fixture).await?;
-        let first_claim = claim_first_logical_job(&database, &fixture).await?;
+        let first_claim = Box::pin(claim_first_logical_job(&database, &fixture)).await?;
         take_over_and_publish_logical_job(&database, &fixture, &first_claim).await?;
         Ok(())
     })

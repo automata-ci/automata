@@ -2184,21 +2184,11 @@ impl PodmanInner {
     ) -> Result<(Option<ServiceManifest>, bool), ProviderError> {
         let manifest = self.load_service_manifest(names, ProviderStage::DestroyContainer)?;
         let Some(current) = manifest.as_ref() else {
-            for kind in [
-                ResourceKind::Network,
-                ResourceKind::Pod,
-                ResourceKind::Container,
-            ] {
-                if self.resource_exists(
-                    kind,
-                    names,
-                    deadline,
-                    cancellation,
-                    ProviderStage::DestroySandbox,
-                )? {
-                    return Err(provider_error::invalid_state(ProviderStage::DestroySandbox));
-                }
-            }
+            // A crash may leave any subset of the core sandbox resources after
+            // the service manifest has disappeared. The main destroy path
+            // inspects every exact name and verifies its immutable ownership
+            // labels before removal, so partial cleanup remains safely
+            // idempotent without the manifest.
             return Ok((None, false));
         };
         self.verify_manifest_core_fingerprint(

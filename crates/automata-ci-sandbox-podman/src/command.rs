@@ -824,7 +824,7 @@ impl<'input> CommandRequest<'input> {
                 CommandInput::Environment(document) => Some(document),
                 CommandInput::Bytes(_) => None,
             })
-            .flat_map(|document| document.inherited_variables())
+            .flat_map(super::endpoint::EnvironmentDocument::inherited_variables)
             .map(|variable| (variable.name().as_str(), variable.value().expose()))
     }
 
