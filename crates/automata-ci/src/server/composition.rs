@@ -454,6 +454,7 @@ impl ProductionComponents {
                 Ok(delegated_actor_api_router(
                     Arc::new(verifier),
                     resolver,
+                    Arc::clone(&web_data),
                     Arc::clone(&live_log_service),
                     origin,
                 ))

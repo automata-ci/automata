@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    str::FromStr as _,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -25,12 +26,20 @@ use uuid::Uuid;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse as _, Response},
     routing::{get, post},
 };
 
+use super::web::{
+    ArtifactSummary, CollectionVisibility, JobLogPage, JobLogRequest, JobSummary,
+    LOG_PAGE_DECODED_BYTES, LOG_PAGE_SIZE, LogChannel, LogLine, REPOSITORY_PAGE_SIZE,
+    RUN_JOB_PAGE_SIZE, RUN_PAGE_SIZE, Repository, RepositoryDirectoryItem, RepositoryDirectoryPage,
+    RepositoryDirectoryRequest, RepositorySettingsDestination, RunDetailPage, RunDetailRequest,
+    RunListPage, RunListRequest, RunSummary, Status, StatusFilter, WebData, WebDataError, Workflow,
+    WorkflowDefinition,
+};
 use super::{
     live_log::{
         LiveLogService, issued_response, parse_job_id, parse_run_id, repository_path,
@@ -38,10 +47,22 @@ use super::{
     },
     web::{RequestContext, Viewer},
 };
+use automata_ci_core::WorkflowId;
 use automata_ci_store::HumanLiveLogBrowserOrigin;
 
 /// Protected Core endpoint used by Cloud to resolve the current viewer.
 pub const DELEGATED_ACTOR_VIEWER_PATH: &str = "/internal/v1/workspaces/{workspace_id}/viewer";
+/// Protected Core endpoint used by Cloud to list repositories visible to one actor.
+pub const DELEGATED_ACTOR_REPOSITORIES_PATH: &str =
+    "/internal/v1/workspaces/{workspace_id}/repositories";
+/// Protected Core endpoint used by Cloud to list repository workflow runs.
+pub const DELEGATED_ACTOR_RUNS_PATH: &str =
+    "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs";
+/// Protected Core endpoint used by Cloud to read one run and its current jobs.
+pub const DELEGATED_ACTOR_RUN_PATH: &str =
+    "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}";
+/// Protected Core endpoint used by Cloud to read one durable job-log snapshot.
+pub const DELEGATED_ACTOR_JOB_LOG_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}";
 /// Protected Core endpoint used by Cloud to authorize one browser log tail.
 pub const DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket";
 
@@ -361,6 +382,7 @@ pub(crate) enum DelegatedActorVerificationError {
 struct DelegatedActorApiState {
     verifier: Arc<DelegatedActorVerifier>,
     resolver: Arc<dyn DelegatedActorResolver>,
+    web_data: Arc<dyn WebData>,
     live_logs: Arc<LiveLogService>,
     browser_origin: HumanLiveLogBrowserOrigin,
 }
@@ -371,6 +393,7 @@ impl std::fmt::Debug for DelegatedActorApiState {
             .debug_struct("DelegatedActorApiState")
             .field("verifier", &self.verifier)
             .field("resolver", &self.resolver)
+            .field("web_data", &self.web_data)
             .field("live_logs", &self.live_logs)
             .field("browser_origin", &self.browser_origin)
             .finish()
@@ -386,15 +409,201 @@ struct WorkspaceViewerResponse {
     authorization_revision: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepositoryDirectoryQuery {
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunListQuery {
+    workflow_id: Option<String>,
+    workflow_cursor: Option<String>,
+    status: Option<String>,
+    branch: Option<String>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunDetailQuery {
+    job_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobLogQuery {
+    cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RepositoryDirectoryResponse {
+    protocol_version: u8,
+    workspace_id: String,
+    repositories: Vec<RepositoryDirectoryItemResponse>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RepositoryDirectoryItemResponse {
+    repository: RepositoryResponse,
+    actions_visible: bool,
+    settings_destination: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct RepositoryResponse {
+    id: String,
+    scm_provider: String,
+    owner: String,
+    name: String,
+    settings_visible: bool,
+}
+
+#[derive(Serialize)]
+struct RunListResponse {
+    protocol_version: u8,
+    workspace_id: String,
+    repository: RepositoryResponse,
+    workflows: Vec<WorkflowDefinitionResponse>,
+    selected_workflow: Option<WorkflowDefinitionResponse>,
+    workflow_previous_cursor: Option<String>,
+    workflow_next_cursor: Option<String>,
+    runs: Vec<RunSummaryResponse>,
+    previous_cursor: Option<String>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WorkflowDefinitionResponse {
+    id: String,
+    name: String,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct WorkflowResponse {
+    id: String,
+    name: String,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct RunSummaryResponse {
+    id: String,
+    number: String,
+    attempt: u32,
+    title: Option<String>,
+    workflow: WorkflowResponse,
+    status: &'static str,
+    git_ref: Option<String>,
+    event: String,
+    actor: Option<String>,
+    head_sha: String,
+    commit_subject: Option<String>,
+    created_at_ms: i64,
+    finished_at_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct RunDetailResponse {
+    protocol_version: u8,
+    workspace_id: String,
+    repository: RepositoryResponse,
+    run: RunSummaryResponse,
+    jobs: VisibleCollectionResponse<JobSummaryResponse>,
+    job_previous_cursor: Option<String>,
+    job_next_cursor: Option<String>,
+    artifacts: VisibleCollectionResponse<ArtifactSummaryResponse>,
+}
+
+#[derive(Serialize)]
+struct VisibleCollectionResponse<T> {
+    visibility: &'static str,
+    items: Vec<T>,
+}
+
+#[derive(Serialize)]
+struct JobSummaryResponse {
+    id: String,
+    name: String,
+    attempt: Option<u32>,
+    runner_label: Option<String>,
+    status: &'static str,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    logs_available: bool,
+}
+
+#[derive(Serialize)]
+struct ArtifactSummaryResponse {
+    id: String,
+    name: String,
+    size_bytes: String,
+    digest: String,
+    expires_at_seconds: Option<i64>,
+    downloadable: bool,
+}
+
+#[derive(Serialize)]
+struct JobLogResponse {
+    protocol_version: u8,
+    workspace_id: String,
+    repository: RepositoryResponse,
+    run: RunSummaryResponse,
+    jobs: Vec<JobNavigationItemResponse>,
+    previous_navigation_job_id: Option<String>,
+    next_navigation_job_id: Option<String>,
+    job: JobSummaryResponse,
+    log_visibility: &'static str,
+    lines: Vec<LogLineResponse>,
+    previous_cursor: Option<String>,
+    next_cursor: Option<String>,
+    live: Option<JobLogLiveResponse>,
+}
+
+#[derive(Serialize)]
+struct JobNavigationItemResponse {
+    id: String,
+    name: String,
+    status: &'static str,
+    logs_available: bool,
+}
+
+#[derive(Serialize)]
+struct LogLineResponse {
+    sequence: String,
+    fragment: Option<u32>,
+    emitted_at_ms: i64,
+    channel: &'static str,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct JobLogLiveResponse {
+    checkpoint: Option<String>,
+    stream_closed: bool,
+    more_available: bool,
+}
+
 /// Builds the Cloud-authenticated hosted Core API surface.
 pub(crate) fn router(
     verifier: Arc<DelegatedActorVerifier>,
     resolver: Arc<dyn DelegatedActorResolver>,
+    web_data: Arc<dyn WebData>,
     live_logs: Arc<LiveLogService>,
     browser_origin: HumanLiveLogBrowserOrigin,
 ) -> Router {
     Router::new()
         .route(DELEGATED_ACTOR_VIEWER_PATH, get(workspace_viewer))
+        .route(
+            DELEGATED_ACTOR_REPOSITORIES_PATH,
+            get(workspace_repositories),
+        )
+        .route(DELEGATED_ACTOR_RUNS_PATH, get(workspace_runs))
+        .route(DELEGATED_ACTOR_RUN_PATH, get(workspace_run))
+        .route(DELEGATED_ACTOR_JOB_LOG_PATH, get(workspace_job_log))
         .route(
             DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
             post(workspace_live_log_ticket),
@@ -402,6 +611,7 @@ pub(crate) fn router(
         .with_state(DelegatedActorApiState {
             verifier,
             resolver,
+            web_data,
             live_logs,
             browser_origin,
         })
@@ -440,6 +650,156 @@ async fn workspace_viewer(
         }),
     )
         .into_response()
+}
+
+async fn workspace_repositories(
+    State(state): State<DelegatedActorApiState>,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<RepositoryDirectoryQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !valid_cursor(query.cursor.as_deref()) {
+        return status_response(StatusCode::BAD_REQUEST);
+    }
+    let context = match resolve_context(&state, &workspace_id, &headers).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let request = RepositoryDirectoryRequest {
+        cursor: query.cursor,
+        limit: REPOSITORY_PAGE_SIZE,
+    };
+    match state.web_data.repository_page(&context, &request).await {
+        Ok(page) => json_response(repository_directory_response(workspace_id, page)),
+        Err(error) => web_data_error_response(error),
+    }
+}
+
+async fn workspace_runs(
+    State(state): State<DelegatedActorApiState>,
+    Path((workspace_id, owner, repository)): Path<(String, String, String)>,
+    Query(query): Query<RunListQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(repository) = repository_path(owner, repository) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    if !valid_cursor(query.workflow_cursor.as_deref())
+        || !valid_cursor(query.cursor.as_deref())
+        || !valid_branch(query.branch.as_deref())
+    {
+        return status_response(StatusCode::BAD_REQUEST);
+    }
+    let workflow_id = match query.workflow_id.as_deref() {
+        Some(value) => match parse_workflow_id(value) {
+            Some(value) => Some(value),
+            None => return status_response(StatusCode::BAD_REQUEST),
+        },
+        None => None,
+    };
+    let status = match query.status.as_deref().unwrap_or("all") {
+        "all" => StatusFilter::All,
+        "queued" => StatusFilter::Queued,
+        "in_progress" => StatusFilter::InProgress,
+        "completed" => StatusFilter::Completed,
+        _ => return status_response(StatusCode::BAD_REQUEST),
+    };
+    let context = match resolve_context(&state, &workspace_id, &headers).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let request = RunListRequest {
+        workflow_id,
+        workflow_cursor: query.workflow_cursor,
+        status,
+        git_ref: query.branch,
+        cursor: query.cursor,
+        limit: RUN_PAGE_SIZE,
+    };
+    match state
+        .web_data
+        .list_runs(&context, &repository, &request)
+        .await
+    {
+        Ok(Some(page)) => json_response(run_list_response(workspace_id, page)),
+        Ok(None) => status_response(StatusCode::NOT_FOUND),
+        Err(error) => web_data_error_response(error),
+    }
+}
+
+async fn workspace_run(
+    State(state): State<DelegatedActorApiState>,
+    Path((workspace_id, owner, repository, run_id)): Path<(String, String, String, String)>,
+    Query(query): Query<RunDetailQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(repository) = repository_path(owner, repository) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let Some(run_id) = parse_run_id(&run_id) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    if !valid_cursor(query.job_cursor.as_deref()) {
+        return status_response(StatusCode::BAD_REQUEST);
+    }
+    let context = match resolve_context(&state, &workspace_id, &headers).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let request = RunDetailRequest {
+        job_cursor: query.job_cursor,
+        limit: RUN_JOB_PAGE_SIZE,
+    };
+    match state
+        .web_data
+        .run_detail(&context, &repository, run_id, &request)
+        .await
+    {
+        Ok(Some(page)) => json_response(run_detail_response(workspace_id, page)),
+        Ok(None) => status_response(StatusCode::NOT_FOUND),
+        Err(error) => web_data_error_response(error),
+    }
+}
+
+async fn workspace_job_log(
+    State(state): State<DelegatedActorApiState>,
+    Path((workspace_id, owner, repository, run_id, job_id)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
+    Query(query): Query<JobLogQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(repository) = repository_path(owner, repository) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let (Some(run_id), Some(job_id)) = (parse_run_id(&run_id), parse_job_id(&job_id)) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    if !valid_cursor(query.cursor.as_deref()) {
+        return status_response(StatusCode::BAD_REQUEST);
+    }
+    let context = match resolve_context(&state, &workspace_id, &headers).await {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let request = JobLogRequest {
+        cursor: query.cursor,
+        limit: LOG_PAGE_SIZE,
+        maximum_decoded_bytes: LOG_PAGE_DECODED_BYTES,
+    };
+    match state
+        .web_data
+        .job_log(&context, &repository, run_id, job_id, &request)
+        .await
+    {
+        Ok(Some(page)) => json_response(job_log_response(workspace_id, page)),
+        Ok(None) => status_response(StatusCode::NOT_FOUND),
+        Err(error) => web_data_error_response(error),
+    }
 }
 
 async fn workspace_live_log_ticket(
@@ -494,6 +854,275 @@ async fn workspace_live_log_ticket(
         Ok(None) => status_response(StatusCode::NOT_FOUND),
         Err(error) => service_error_response(error),
     }
+}
+
+async fn resolve_context(
+    state: &DelegatedActorApiState,
+    workspace_id: &str,
+    headers: &HeaderMap,
+) -> Result<RequestContext, Response> {
+    let workspace_uuid =
+        canonical_uuid(workspace_id).map_err(|_| status_response(StatusCode::NOT_FOUND))?;
+    let snapshot = resolve_actor(state, workspace_uuid, headers).await?;
+    let tenant_id = TenantId::new(workspace_id.to_owned())
+        .map_err(|_| status_response(StatusCode::NOT_FOUND))?;
+    RequestContext::new(
+        tenant_id,
+        snapshot.authorization().clone(),
+        Some(Viewer {
+            display_name: snapshot.viewer().display_name().to_owned(),
+        }),
+        None,
+    )
+    .map_err(|_| status_response(StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+fn repository_directory_response(
+    workspace_id: String,
+    page: RepositoryDirectoryPage,
+) -> RepositoryDirectoryResponse {
+    RepositoryDirectoryResponse {
+        protocol_version: 1,
+        workspace_id,
+        repositories: page
+            .repositories
+            .into_iter()
+            .map(repository_directory_item_response)
+            .collect(),
+        next_cursor: page.next_cursor,
+    }
+}
+
+fn repository_directory_item_response(
+    item: RepositoryDirectoryItem,
+) -> RepositoryDirectoryItemResponse {
+    RepositoryDirectoryItemResponse {
+        repository: repository_response(item.repository),
+        actions_visible: item.actions_visible,
+        settings_destination: item
+            .settings_destination
+            .map(|destination| match destination {
+                RepositorySettingsDestination::Access => "access",
+                RepositorySettingsDestination::Secrets => "secrets",
+            }),
+    }
+}
+
+fn repository_response(repository: Repository) -> RepositoryResponse {
+    RepositoryResponse {
+        id: repository.id,
+        scm_provider: repository.scm_provider,
+        owner: repository.owner,
+        name: repository.name,
+        settings_visible: repository.settings_visible,
+    }
+}
+
+fn run_list_response(workspace_id: String, page: RunListPage) -> RunListResponse {
+    RunListResponse {
+        protocol_version: 1,
+        workspace_id,
+        repository: repository_response(page.repository),
+        workflows: page
+            .workflows
+            .into_iter()
+            .map(workflow_definition_response)
+            .collect(),
+        selected_workflow: page.selected_workflow.map(workflow_definition_response),
+        workflow_previous_cursor: page.workflow_previous_cursor,
+        workflow_next_cursor: page.workflow_next_cursor,
+        runs: page.runs.into_iter().map(run_summary_response).collect(),
+        previous_cursor: page.previous_cursor,
+        next_cursor: page.next_cursor,
+    }
+}
+
+fn workflow_definition_response(workflow: WorkflowDefinition) -> WorkflowDefinitionResponse {
+    WorkflowDefinitionResponse {
+        id: workflow.id.to_string(),
+        name: workflow.name,
+        enabled: workflow.enabled,
+    }
+}
+
+fn workflow_response(workflow: Workflow) -> WorkflowResponse {
+    WorkflowResponse {
+        id: workflow.id.to_string(),
+        name: workflow.name,
+        path: workflow.path,
+    }
+}
+
+fn run_summary_response(run: RunSummary) -> RunSummaryResponse {
+    RunSummaryResponse {
+        id: run.id.to_string(),
+        number: run.number.to_string(),
+        attempt: run.attempt,
+        title: run.title,
+        workflow: workflow_response(run.workflow),
+        status: status_name(run.status),
+        git_ref: run.git_ref,
+        event: run.event,
+        actor: run.actor,
+        head_sha: run.head_sha,
+        commit_subject: run.commit_subject,
+        created_at_ms: run.created_at.get(),
+        finished_at_ms: run.finished_at.map(automata_ci_core::UnixMillis::get),
+    }
+}
+
+fn run_detail_response(workspace_id: String, page: RunDetailPage) -> RunDetailResponse {
+    RunDetailResponse {
+        protocol_version: 1,
+        workspace_id,
+        repository: repository_response(page.repository),
+        run: run_summary_response(page.run),
+        jobs: VisibleCollectionResponse {
+            visibility: collection_visibility(page.jobs.visibility),
+            items: page
+                .jobs
+                .items
+                .into_iter()
+                .map(job_summary_response)
+                .collect(),
+        },
+        job_previous_cursor: page.job_previous_cursor,
+        job_next_cursor: page.job_next_cursor,
+        artifacts: VisibleCollectionResponse {
+            visibility: collection_visibility(page.artifacts.visibility),
+            items: page
+                .artifacts
+                .items
+                .into_iter()
+                .map(artifact_summary_response)
+                .collect(),
+        },
+    }
+}
+
+fn job_summary_response(job: JobSummary) -> JobSummaryResponse {
+    JobSummaryResponse {
+        id: job.id.to_string(),
+        name: job.name,
+        attempt: job.attempt,
+        runner_label: job.runner_label,
+        status: status_name(job.status),
+        started_at_ms: job.started_at.map(automata_ci_core::UnixMillis::get),
+        finished_at_ms: job.finished_at.map(automata_ci_core::UnixMillis::get),
+        logs_available: job.logs_available,
+    }
+}
+
+fn artifact_summary_response(artifact: ArtifactSummary) -> ArtifactSummaryResponse {
+    ArtifactSummaryResponse {
+        id: artifact.id.to_string(),
+        name: artifact.name,
+        size_bytes: artifact.size.to_string(),
+        digest: artifact.digest,
+        expires_at_seconds: artifact.expires_at_seconds,
+        downloadable: artifact.downloadable,
+    }
+}
+
+fn job_log_response(workspace_id: String, page: JobLogPage) -> JobLogResponse {
+    JobLogResponse {
+        protocol_version: 1,
+        workspace_id,
+        repository: repository_response(page.repository),
+        run: run_summary_response(page.run),
+        jobs: page
+            .jobs
+            .into_iter()
+            .map(|job| JobNavigationItemResponse {
+                id: job.id.to_string(),
+                name: job.name,
+                status: status_name(job.status),
+                logs_available: job.logs_available,
+            })
+            .collect(),
+        previous_navigation_job_id: page.previous_navigation_job_id.map(|id| id.to_string()),
+        next_navigation_job_id: page.next_navigation_job_id.map(|id| id.to_string()),
+        job: job_summary_response(page.job),
+        log_visibility: collection_visibility(page.log_visibility),
+        lines: page.lines.into_iter().map(log_line_response).collect(),
+        previous_cursor: page.previous_cursor,
+        next_cursor: page.next_cursor,
+        live: page.live.map(|live| JobLogLiveResponse {
+            checkpoint: live.checkpoint,
+            stream_closed: live.stream_closed,
+            more_available: live.more_available,
+        }),
+    }
+}
+
+fn log_line_response(line: LogLine) -> LogLineResponse {
+    LogLineResponse {
+        sequence: line.sequence.to_string(),
+        fragment: line.fragment,
+        emitted_at_ms: line.emitted_at.get(),
+        channel: match line.channel {
+            LogChannel::Stdout => "stdout",
+            LogChannel::Stderr => "stderr",
+            LogChannel::System => "system",
+        },
+        text: line.text,
+    }
+}
+
+const fn status_name(status: Status) -> &'static str {
+    match status {
+        Status::Queued => "queued",
+        Status::InProgress => "in_progress",
+        Status::Succeeded => "succeeded",
+        Status::Failed => "failed",
+        Status::Cancelled => "cancelled",
+        Status::TimedOut => "timed_out",
+        Status::Skipped => "skipped",
+        Status::Lost => "lost",
+    }
+}
+
+const fn collection_visibility(visibility: CollectionVisibility) -> &'static str {
+    match visibility {
+        CollectionVisibility::Full => "full",
+        CollectionVisibility::Restricted => "restricted",
+    }
+}
+
+fn parse_workflow_id(value: &str) -> Option<WorkflowId> {
+    let id = WorkflowId::from_str(value).ok()?;
+    (id.to_string() == value).then_some(id)
+}
+
+fn valid_cursor(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        !value.is_empty() && value.len() <= 4_096 && !value.chars().any(char::is_control)
+    })
+}
+
+fn valid_branch(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        !value.is_empty() && value.len() <= 1_024 && !value.chars().any(char::is_control)
+    })
+}
+
+fn json_response(value: impl Serialize) -> Response {
+    (
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::CONTENT_TYPE, "application/json"),
+        ],
+        Json(value),
+    )
+        .into_response()
+}
+
+fn web_data_error_response(error: WebDataError) -> Response {
+    status_response(match error {
+        WebDataError::InvalidRequest => StatusCode::BAD_REQUEST,
+        WebDataError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        WebDataError::Corrupt => StatusCode::INTERNAL_SERVER_ERROR,
+    })
 }
 
 async fn resolve_actor(
@@ -570,6 +1199,7 @@ fn unix_time() -> UnixTimestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use automata_ci_core::{RunId, UnixMillis};
     use ring::{
         rand::SystemRandom,
         signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair as _},
@@ -615,6 +1245,77 @@ mod tests {
         assert!(canonical_uuid(canonical).is_ok());
         assert!(canonical_uuid(&canonical.to_uppercase()).is_err());
         assert!(canonical_uuid("00000000-0000-0000-0000-000000000000").is_err());
+    }
+
+    #[test]
+    fn delegated_read_projection_keeps_large_values_lossless() {
+        let workflow_id = WorkflowId::new();
+        let run_id = RunId::new();
+        let run = RunSummary {
+            id: run_id,
+            number: u64::MAX,
+            attempt: 2,
+            title: Some("Release".to_owned()),
+            workflow: Workflow {
+                id: workflow_id,
+                name: "CI".to_owned(),
+                path: ".github/workflows/ci.yml".to_owned(),
+            },
+            status: Status::InProgress,
+            git_ref: Some("refs/heads/main".to_owned()),
+            event: "push".to_owned(),
+            actor: Some("octocat".to_owned()),
+            head_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            commit_subject: Some("Ship it".to_owned()),
+            created_at: UnixMillis::new(1_765_000_000_000),
+            finished_at: None,
+        };
+        let response = serde_json::to_value(run_summary_response(run)).expect("run JSON");
+        assert_eq!(response["id"], run_id.to_string());
+        assert_eq!(response["number"], u64::MAX.to_string());
+        assert_eq!(response["status"], "in_progress");
+        assert_eq!(response["workflow"]["id"], workflow_id.to_string());
+
+        let artifact = ArtifactSummary {
+            id: i64::MAX,
+            name: "release".to_owned(),
+            size: u64::MAX,
+            digest: "sha256:fixture".to_owned(),
+            expires_at_seconds: None,
+            downloadable: true,
+        };
+        let response =
+            serde_json::to_value(artifact_summary_response(artifact)).expect("artifact JSON");
+        assert_eq!(response["id"], i64::MAX.to_string());
+        assert_eq!(response["size_bytes"], u64::MAX.to_string());
+
+        let line = LogLine {
+            sequence: u64::MAX,
+            fragment: Some(3),
+            emitted_at: UnixMillis::new(1_765_000_000_001),
+            channel: LogChannel::Stderr,
+            text: "failure".to_owned(),
+        };
+        let response = serde_json::to_value(log_line_response(line)).expect("line JSON");
+        assert_eq!(response["sequence"], u64::MAX.to_string());
+        assert_eq!(response["channel"], "stderr");
+    }
+
+    #[test]
+    fn delegated_read_query_values_are_canonical_and_bounded() {
+        let workflow_id = WorkflowId::new().to_string();
+        assert_eq!(
+            parse_workflow_id(&workflow_id).map(|id| id.to_string()),
+            Some(workflow_id.clone())
+        );
+        assert!(parse_workflow_id(&workflow_id.to_uppercase()).is_none());
+        assert!(valid_cursor(None));
+        assert!(valid_cursor(Some("opaque-page-position")));
+        assert!(!valid_cursor(Some("")));
+        assert!(!valid_cursor(Some("line\nbreak")));
+        assert!(!valid_cursor(Some(&"x".repeat(4_097))));
+        assert!(valid_branch(Some("refs/heads/main")));
+        assert!(!valid_branch(Some("")));
     }
 
     #[tokio::test]

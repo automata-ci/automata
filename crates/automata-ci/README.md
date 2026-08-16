@@ -47,6 +47,29 @@ bounded certificate-rotation overlap. This listener connects the public
 workspace-provisioning gRPC contract directly to the same PostgreSQL database
 used by the other replicas in the shard, reusing this replica's existing pool.
 
+The management authority also enables a versioned delegated-actor HTTP surface
+on the human listener. A hosted control plane signs a short-lived ES256 actor
+assertion; Core verifies the configured issuer and audience, resolves current
+workspace membership and RBAC from PostgreSQL, and performs every read through
+the same authorization-enforcing data boundary as self-hosted SSR. Version 1
+provides:
+
+| Method | Path | Result |
+| --- | --- | --- |
+| `GET` | `/internal/v1/workspaces/{workspace_id}/viewer` | Current Core principal and authorization revision |
+| `GET` | `/internal/v1/workspaces/{workspace_id}/repositories` | Authorized repository directory |
+| `GET` | `/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs` | Filtered workflow and run page |
+| `GET` | `/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}` | Run, job, and artifact snapshot |
+| `GET` | `/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}` | Durable job-log snapshot and live checkpoint |
+| `POST` | `/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket` | One-time, origin-bound direct log capability |
+
+Responses are `no-store` JSON and carry `protocol_version: 1` plus the exact
+workspace ID. Opaque pagination cursors must be returned unchanged. Run
+numbers, artifact IDs and sizes, and log sequence numbers are decimal strings
+so JavaScript clients cannot silently lose integer precision. Missing and
+unauthorized repository resources remain indistinguishable as `404`; a valid
+assertion does not move authorization policy into the hosted layer.
+
 When managed-secret encryption is configured, `--runner-public-url` is also
 required. It is the exact HTTPS origin configured as each runner's
 `control_endpoint`; the private value route rejects any different HTTP/2
