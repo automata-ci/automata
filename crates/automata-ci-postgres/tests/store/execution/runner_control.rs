@@ -1887,40 +1887,49 @@ async fn committed_lease_acceptance_replays_after_attempt_expiry() -> TestResult
                 .await?;
         assert_eq!(lifecycle_after_replay, "queued");
 
-        let stale_authorization = AuthorizeRuntimeAuthorityDelivery::new(
-            operation_request(
-                fence,
-                OperationId::new(),
-                RUNTIME_AUTHORITY_REQUEST_KIND,
-                [65; 32],
-            )?,
-            RunnerProtocolVersion::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
-            authority_binding,
-            database_now(&database).await?,
-        )?;
-        assert!(matches!(
-            database
-                .store()
-                .authorize_runtime_authority_delivery(stale_authorization)
-                .await,
-            Err(StoreError::SessionClosed(session_id)) if session_id == fence.session_id()
-        ));
-        let closed: (Option<i64>, String) = sqlx::query_as(
-            r"
-            SELECT session.disconnected_at_ms, runner.status
-            FROM runner_sessions AS session
-            JOIN runners AS runner ON runner.id = session.runner_id
-            WHERE session.id = $1
-            ",
-        )
-        .bind(fence.session_id().as_uuid())
-        .fetch_one(database.pool())
-        .await?;
-        assert!(closed.0.is_some());
-        assert_eq!(closed.1, "offline");
+        assert_stale_runtime_authority_closes_session(&database, fence, authority_binding).await?;
         Ok(())
     })
     .await
+}
+
+async fn assert_stale_runtime_authority_closes_session(
+    database: &TestDatabase,
+    fence: automata_ci_store::RunnerSessionFence,
+    authority_binding: RuntimeAuthorityDeliveryBinding,
+) -> TestResult {
+    let stale_authorization = AuthorizeRuntimeAuthorityDelivery::new(
+        operation_request(
+            fence,
+            OperationId::new(),
+            RUNTIME_AUTHORITY_REQUEST_KIND,
+            [65; 32],
+        )?,
+        RunnerProtocolVersion::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
+        authority_binding,
+        database_now(database).await?,
+    )?;
+    assert!(matches!(
+        database
+            .store()
+            .authorize_runtime_authority_delivery(stale_authorization)
+            .await,
+        Err(StoreError::SessionClosed(session_id)) if session_id == fence.session_id()
+    ));
+    let closed: (Option<i64>, String) = sqlx::query_as(
+        r"
+        SELECT session.disconnected_at_ms, runner.status
+        FROM runner_sessions AS session
+        JOIN runners AS runner ON runner.id = session.runner_id
+        WHERE session.id = $1
+        ",
+    )
+    .bind(fence.session_id().as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert!(closed.0.is_some());
+    assert_eq!(closed.1, "offline");
+    Ok(())
 }
 
 #[tokio::test]
