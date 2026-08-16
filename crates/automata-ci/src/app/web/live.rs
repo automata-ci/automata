@@ -271,15 +271,14 @@ impl LiveWebData {
         context: &RequestContext,
         tenant: &TenantScope,
         repository: &HumanRepository,
-        publication: Option<&HumanOutputPublication>,
+        visibility: OutputVisibility,
     ) -> Result<bool, WebDataError> {
-        let visibility = publication.map(|publication| publication.effective_visibility);
         self.allowed(
             context,
             tenant,
             repository,
             repository_read_permissions::LOG_READ,
-            visibility,
+            Some(visibility),
             SecretExposureClass::Secretless,
         )
         .await
@@ -290,19 +289,16 @@ impl LiveWebData {
         context: &RequestContext,
         tenant: &TenantScope,
         repository: &HumanRepository,
-        cache: &mut Vec<(HumanOutputPublication, bool)>,
-        publication: Option<&HumanOutputPublication>,
+        cache: &mut Vec<(OutputVisibility, bool)>,
+        visibility: OutputVisibility,
     ) -> Result<bool, WebDataError> {
-        let Some(publication) = publication else {
-            return Ok(false);
-        };
-        if let Some((_, decision)) = cache.iter().find(|(cached, _)| cached == publication) {
+        if let Some((_, decision)) = cache.iter().find(|(cached, _)| *cached == visibility) {
             return Ok(*decision);
         }
         let decision = self
-            .log_access_allowed(context, tenant, repository, Some(publication))
+            .log_access_allowed(context, tenant, repository, visibility)
             .await?;
-        cache.push((publication.clone(), decision));
+        cache.push((visibility, decision));
         Ok(decision)
     }
 
@@ -1309,6 +1305,20 @@ fn publication_target(
     )
 }
 
+fn durable_job_log_visibility(
+    run: &HumanRun,
+    publication: Option<&HumanOutputPublication>,
+) -> Result<OutputVisibility, WebDataError> {
+    let requested = run.publication.requested_log_visibility;
+    match publication {
+        None => Ok(requested),
+        Some(publication) if publication.requested_visibility == requested => {
+            Ok(publication.effective_visibility)
+        }
+        Some(_) => Err(WebDataError::Corrupt),
+    }
+}
+
 fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> bool {
     automata_ci_store::human_output_publication_safety_schema_is_current(i32::from(
         stream.publication.safety_schema,
@@ -1724,13 +1734,15 @@ impl LiveWebData {
         let mut jobs = Vec::with_capacity(end.saturating_sub(start));
         let mut log_access_cache = Vec::new();
         for job in &detail.jobs[start..end] {
+            let log_visibility =
+                durable_job_log_visibility(&detail.run, job.log_publication.as_ref())?;
             let logs_available = self
                 .cached_log_access_allowed(
                     context,
                     tenant,
                     repository,
                     &mut log_access_cache,
-                    job.log_publication.as_ref(),
+                    log_visibility,
                 )
                 .await?;
             jobs.push(map_job(job, logs_available)?);
@@ -1907,7 +1919,7 @@ impl LiveWebData {
             } else {
                 (vec![selected_navigation], None, None)
             };
-        if !selected_log_access_allowed {
+        if !selected_log_access_allowed || detail.log_stream.is_none() {
             if request.cursor.is_some() {
                 return Ok(None);
             }
@@ -1920,7 +1932,11 @@ impl LiveWebData {
                 previous_navigation_job_id,
                 next_navigation_job_id,
                 job: selected_job,
-                log_visibility: CollectionVisibility::Restricted,
+                log_visibility: if selected_log_access_allowed {
+                    CollectionVisibility::Full
+                } else {
+                    CollectionVisibility::Restricted
+                },
                 lines: Vec::new(),
                 previous_cursor: None,
                 next_cursor: None,
@@ -2635,29 +2651,24 @@ impl WebData for LiveWebData {
                 detail.run.publication.effective_dashboard_visibility,
             )
             .await?;
-        let selected_log_access_allowed = match detail.log_stream.as_ref() {
-            Some(log_stream) => {
-                if detail.job.log_publication.as_ref() != Some(&log_stream.publication)
-                    || !log_stream_safety_is_valid(log_stream)
-                {
-                    return Err(WebDataError::Corrupt);
-                }
-                let Some(attempt) = detail.job.latest_attempt.as_ref() else {
-                    return Err(WebDataError::Corrupt);
-                };
-                if log_stream.attempt_id != attempt.id {
-                    return Err(WebDataError::Corrupt);
-                }
-                self.log_access_allowed(
-                    context,
-                    &tenant,
-                    &repository,
-                    Some(&log_stream.publication),
-                )
-                .await?
+        let selected_log_visibility =
+            durable_job_log_visibility(&detail.run, detail.job.log_publication.as_ref())?;
+        if let Some(log_stream) = detail.log_stream.as_ref() {
+            if detail.job.log_publication.as_ref() != Some(&log_stream.publication)
+                || !log_stream_safety_is_valid(log_stream)
+            {
+                return Err(WebDataError::Corrupt);
             }
-            None => false,
-        };
+            let Some(attempt) = detail.job.latest_attempt.as_ref() else {
+                return Err(WebDataError::Corrupt);
+            };
+            if log_stream.attempt_id != attempt.id {
+                return Err(WebDataError::Corrupt);
+            }
+        }
+        let selected_log_access_allowed = self
+            .log_access_allowed(context, &tenant, &repository, selected_log_visibility)
+            .await?;
         if !dashboard_metadata_allowed && !selected_log_access_allowed {
             return Ok(None);
         }
@@ -2713,7 +2724,12 @@ impl WebData for LiveWebData {
             return Err(WebDataError::Corrupt);
         }
         if !self
-            .log_access_allowed(context, &tenant, &repository, Some(&stream.publication))
+            .log_access_allowed(
+                context,
+                &tenant,
+                &repository,
+                durable_job_log_visibility(&detail.run, Some(&stream.publication))?,
+            )
             .await?
         {
             return Ok(None);
@@ -3800,6 +3816,21 @@ mod tests {
         JobId,
         Arc<Mutex<Vec<HumanAuthorizationTarget>>>,
     ) {
+        fake_live_data_with_policy_and_stream(policy, payload, true).await
+    }
+
+    async fn fake_live_data_with_policy_and_stream(
+        policy: FakeLivePolicy,
+        payload: Option<Vec<u8>>,
+        has_log_stream: bool,
+    ) -> (
+        LiveWebData,
+        RequestContext,
+        RepositoryPath,
+        RunId,
+        JobId,
+        Arc<Mutex<Vec<HumanAuthorizationTarget>>>,
+    ) {
         let tenant_id = TenantId::new("tenant-1").expect("tenant ID");
         let repository_id = RepositoryId::from_uuid(RunId::new().as_uuid());
         let mut repository = fixture_repository(&tenant_id, repository_id);
@@ -3820,13 +3851,25 @@ mod tests {
                 "repository_policy"
             },
         );
-        let (detail, log_stream) = fixture_job_detail(
-            fixture_run(run_id, policy.dashboard_visibility),
+        let mut run = fixture_run(run_id, policy.dashboard_visibility);
+        run.publication.requested_log_visibility = policy.log_visibility;
+        let (mut detail, log_stream) = fixture_job_detail(
+            run,
             job_id,
             attempt_id,
             policy.raw_log_disposition,
             log_publication,
         );
+        if !has_log_stream {
+            detail.job.log_publication = None;
+            detail.log_stream = None;
+            let selected = detail
+                .navigation
+                .iter_mut()
+                .find(|job| job.id == job_id)
+                .expect("selected job navigation");
+            selected.log_publication = None;
+        }
         let (objects, segment) = match payload {
             Some(payload) => fixture_log_storage_with_payload(&log_stream, payload).await,
             None => fixture_log_storage(&log_stream).await,
@@ -4256,6 +4299,51 @@ mod tests {
         assert_eq!(page.log_visibility, CollectionVisibility::Full);
         assert_eq!(page.lines.len(), 1);
         assert_eq!(page.lines[0].text, "checkout ok");
+        assert!(
+            calls
+                .lock()
+                .expect("authorization calls")
+                .iter()
+                .any(|target| {
+                    target.request.permission().as_str() == repository_read_permissions::LOG_READ
+                        && target.request.secret_exposure() == SecretExposureClass::Secretless
+                        && target.durable_visibility == Some(OutputVisibility::Public)
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn anonymous_public_job_without_a_log_stream_has_visible_empty_logs() {
+        let policy = FakeLivePolicy {
+            dashboard_visibility: OutputVisibility::Public,
+            log_visibility: OutputVisibility::Public,
+            log_exposure: SecretExposureClass::Secretless,
+            raw_log_disposition: HumanRawLogDisposition::Persist,
+            allow_dashboard: true,
+            allow_logs: true,
+            allow_settings_read: false,
+            allow_settings_update: false,
+        };
+        let (data, anonymous, repository, run_id, job_id, calls) =
+            fake_live_data_with_policy_and_stream(policy, None, false).await;
+        let page = WebData::job_log(
+            &data,
+            &anonymous,
+            &repository,
+            run_id,
+            job_id,
+            &first_log_page_request(),
+        )
+        .await
+        .expect("anonymous public empty-log lookup")
+        .expect("public empty-log page");
+
+        assert_eq!(page.log_visibility, CollectionVisibility::Full);
+        assert!(page.job.logs_available);
+        assert!(page.lines.is_empty());
+        assert!(page.previous_cursor.is_none());
+        assert!(page.next_cursor.is_none());
+        assert!(page.live.is_none());
         assert!(
             calls
                 .lock()
