@@ -667,10 +667,8 @@ set -e
     -d "${entrypoint_temporary}" && -d "${entrypoint_state}/active" ]]
 
 set +e
-/usr/bin/env \
-    -u CARGO_BUILD_JOBS \
-    -u CARGO_PROFILE_DEV_DEBUG \
-    -u CARGO_PROFILE_TEST_DEBUG \
+/usr/bin/env -i \
+    PATH=/usr/bin:/bin \
     CARGO_HOME=/noncanonical/cargo \
     RUSTUP_HOME=/noncanonical/rustup \
     bash "${entrypoint_repository}/scripts/ui/regenerate-renderer.sh" \
