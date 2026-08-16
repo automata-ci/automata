@@ -348,8 +348,8 @@ impl ProductionComponents {
         let workflow_activations: Arc<dyn LogicalActivationRepository> = store.clone();
         let workflow_materializations: Arc<dyn LogicalMaterializationRepository> = store.clone();
         let workflow_executor: Arc<dyn AutonomousWorkflowPhaseExecutor> =
-            if let Some(github) = config.github_provider() {
-                let endpoint = provider_http_endpoint(github.transport())?;
+            if let Some(github) = github_provider_config.as_ref() {
+                let endpoint = provider_http_endpoint(github.config().transport())?;
                 let scm: Arc<dyn ScmProvider> = Arc::new(endpoint);
                 let resolver: Arc<dyn ActionResolver> =
                     Arc::new(ImmutableActionResolver::new(scm, Arc::clone(&blob_store)));
