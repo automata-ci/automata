@@ -12,12 +12,12 @@ use crate::{
 use super::{
     DeviceAuthorization, DeviceAuthorizationParts, DeviceAuthorizationStatus, GithubEndpoints,
     WebAuthorizationTransaction, WebAuthorizationTransactionParts,
+    flow::MAX_DEVICE_POLL_INTERVAL_SECONDS,
 };
 
 const WEB_HEADER: &[u8; 8] = b"AUTWST02";
 const DEVICE_HEADER: &[u8; 8] = b"AUTDST02";
 const MAX_DEVICE_CODE_BYTES: usize = 4_096;
-const MAX_DEVICE_POLL_INTERVAL_SECONDS: u64 = 300;
 
 /// Single current-format codec for provider state held under repository encryption.
 #[derive(Clone, Copy, Debug, Default)]
