@@ -11,7 +11,7 @@ use automata_ci_auth::{
     time::UnixTimestamp,
     vault::TokenVersion,
 };
-use automata_ci_postgres::auth::PostgresGithubMembershipRepository;
+use automata_ci_auth_postgres::PostgresGithubMembershipRepository;
 use sqlx::PgPool;
 use uuid::Uuid;
 

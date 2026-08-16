@@ -3,11 +3,11 @@ use std::sync::Arc;
 use automata_ci_key_management::{
     KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
-use automata_ci_postgres::store::PostgresSecretCustodyRepository;
 use automata_ci_store::{
     SECRET_CUSTODY_CANARY_GENERATION, SecretCustodyKeySet, SecretCustodyRepository as _,
     SecretCustodyRepositoryError, VerifySecretCustody, VerifySecretCustodyOutcome,
 };
+use automata_ci_store_postgres::PostgresSecretCustodyRepository;
 
 use crate::support::{TestDatabase, TestResult, run_with_database};
 

@@ -12,9 +12,6 @@ use automata_ci_key_management::{
     LocalKeyMaterial, SecretBytes, WrappedDataKey,
 };
 use automata_ci_postgres::test_support::TestClock;
-use automata_ci_postgres::{
-    secret::PostgresSecretProvider, store::PostgresSecretCustodyRepository,
-};
 use automata_ci_secret::{
     CreateSecretVersionRequest, CreatedSecretVersion, ExistingSecretVersion, ProviderCapability,
     ProviderErrorKind, ProviderOperationContext, ProviderRequestId, ProviderSecretLocator,
@@ -22,10 +19,12 @@ use automata_ci_secret::{
     RepositoryScopeId, SecretDescriptor, SecretId, SecretName, SecretProvider, SecretScope,
     SecretValue, TenantScopeId,
 };
+use automata_ci_secret_postgres::PostgresSecretProvider;
 use automata_ci_store::{
     SECRET_MUTATION_CONFIRMATION_TTL_MILLIS, SecretCustodyKeySet, SecretCustodyRepository as _,
     VerifySecretCustody, VerifySecretCustodyOutcome,
 };
+use automata_ci_store_postgres::PostgresSecretCustodyRepository;
 use sqlx::PgPool;
 use uuid::Uuid;
 

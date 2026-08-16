@@ -11,6 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 async-trait.workspace = true
 automata-ci-auth.workspace = true

@@ -24,7 +24,6 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobId, JobIrVersion, LeaseGuard, LeaseId, OperationId, QueuePolicy,
     RunId, RunnerRequirements, Sha256Digest, UnixMillis, WorkflowId,
 };
-use automata_ci_postgres::store::PostgresStore;
 use automata_ci_store::{
     AcknowledgeRunnerCommands, AdmissionObject, AdmissionRepository, AdmitWorkflowRun,
     AdmittedWorkflowJob, CommandCursor, CommandReplayLimit, DocumentSchema, HumanRunScope,
@@ -34,6 +33,7 @@ use automata_ci_store::{
     WorkflowAdmissionRepository as _, WorkflowAdmissionStoreError, WorkflowConcurrency,
     WorkflowSnapshotId,
 };
+use automata_ci_store_postgres::PostgresStore;
 
 const GROUP: &str = "deploy-main";
 const CANCELLATION_REASON: &str = "superseded by a newer workflow run";

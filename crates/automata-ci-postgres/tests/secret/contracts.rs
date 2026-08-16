@@ -1,13 +1,13 @@
 use std::{fmt::Debug, sync::Arc};
 
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::secret::{BUILTIN_POSTGRES_PROVIDER_ID, PostgresSecretProvider};
 use automata_ci_secret::{
     ProviderCapability, ProviderErrorKind, ProviderOperationContext, ProviderRequestId,
     ProviderSecretLocator, ProviderVersionId, RepositoryScopeId, ResolveSecretVersionRequest,
     SecretAtRestProtection, SecretDescriptor, SecretId, SecretName, SecretProvider, SecretScope,
     TenantScopeId, WorkloadContext, WorkloadId,
 };
+use automata_ci_secret_postgres::{BUILTIN_POSTGRES_PROVIDER_ID, PostgresSecretProvider};
 use sqlx::postgres::PgPoolOptions;
 use static_assertions::assert_impl_all;
 

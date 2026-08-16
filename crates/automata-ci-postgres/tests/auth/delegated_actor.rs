@@ -6,7 +6,7 @@ use automata_ci_auth::{
     human::TenantId,
     time::UnixTimestamp,
 };
-use automata_ci_postgres::auth::PostgresDelegatedActorResolver;
+use automata_ci_auth_postgres::PostgresDelegatedActorResolver;
 use sqlx::PgPool;
 use uuid::Uuid;
 

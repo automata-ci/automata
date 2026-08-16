@@ -7,10 +7,6 @@ use automata_ci_auth::{
     time::UnixTimestamp,
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::{
-    secret::PostgresSecretProvider,
-    store::{PostgresSecretCustodyRepository, PostgresSecretManagementRepository},
-};
 use automata_ci_secret::{
     CreateSecretVersionRequest, CreatedSecretVersion, DestroySecretVersionRequest,
     ExistingSecretVersion, ProviderErrorKind, ProviderHealth, ProviderOperationContext,
@@ -19,6 +15,7 @@ use automata_ci_secret::{
     ResolveSecretVersionRequest, SecretDescriptor, SecretId, SecretName, SecretProvider,
     SecretScope, SecretValue, TenantScopeId, WorkloadContext, WorkloadId,
 };
+use automata_ci_secret_postgres::PostgresSecretProvider;
 use automata_ci_store::{
     ActivateBuiltinSecretProvider, ActivateBuiltinSecretProviderOutcome,
     BuiltinRepositorySecretVersion, BuiltinSecretCleanupRepository, BuiltinSecretCleanupTask,
@@ -31,6 +28,9 @@ use automata_ci_store::{
     RepositorySecretVersionMutationReservation, ReserveRepositorySecretVersionMutation,
     ReserveRepositorySecretVersionMutationOutcome, SecretCleanupWorkerId, SecretCustodyKeySet,
     SecretCustodyRepository as _, VerifySecretCustody, VerifySecretCustodyOutcome,
+};
+use automata_ci_store_postgres::{
+    PostgresSecretCustodyRepository, PostgresSecretManagementRepository,
 };
 use sqlx::PgPool;
 use uuid::Uuid;

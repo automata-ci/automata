@@ -13,7 +13,7 @@ use automata_ci_auth::{
     },
     time::UnixTimestamp,
 };
-use automata_ci_postgres::auth::{
+use automata_ci_auth_postgres::{
     PostgresHumanSessionRepository, PostgresRequestAuthenticationResolver,
 };
 use automata_ci_postgres::test_support::TestClock;

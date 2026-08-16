@@ -11,9 +11,6 @@ use automata_ci_key_management::{
     EnvelopeCodec, KeyEncryptionContext, KeyEncryptionProvider, KeyId, KeyPurpose,
     LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
-use automata_ci_postgres::store::{
-    PostgresSecretCustodyRepository, PostgresSecretManagementRepository,
-};
 use automata_ci_store::{
     ActivateBuiltinSecretProvider, ActivateBuiltinSecretProviderOutcome,
     BUILTIN_SECRET_PROVIDER_ID, BuiltinRepositorySecretVersion, BuiltinSecretCleanupRepository,
@@ -35,6 +32,9 @@ use automata_ci_store::{
     SecretCleanupWorkerId, SecretCustodyKeySet, SecretCustodyRepository as _,
     SecretMetadataPageSize, SecretMutationRecoveryFence, SecretMutationRecoveryReconciliation,
     SecretMutationRecoveryRepository, VerifySecretCustody, VerifySecretCustodyOutcome,
+};
+use automata_ci_store_postgres::{
+    PostgresSecretCustodyRepository, PostgresSecretManagementRepository,
 };
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;

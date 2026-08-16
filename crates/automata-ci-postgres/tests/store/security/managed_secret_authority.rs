@@ -26,9 +26,6 @@ use automata_ci_key_management::{
     EnvelopeCodec, KeyEncryptionContext, KeyEncryptionProvider, KeyId, KeyPurpose,
     LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes,
 };
-use automata_ci_postgres::store::{
-    PostgresSecretCustodyRepository, PostgresSecretManagementRepository,
-};
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AcknowledgeManagedSecretDelivery,
     ActivatedLogicalInstanceDescriptor, AdmissionObject, AdmissionRepository,
@@ -70,6 +67,9 @@ use automata_ci_store::{
     RunnerProtocolVersion, RunnerSessionFence, SecretCustodyKeySet, SecretCustodyRepository as _,
     SecretWorkloadGrantId, StableRunnerSlot, TenantScope, VerifySecretCustody,
     VerifySecretCustodyOutcome, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+};
+use automata_ci_store_postgres::{
+    PostgresSecretCustodyRepository, PostgresSecretManagementRepository,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};

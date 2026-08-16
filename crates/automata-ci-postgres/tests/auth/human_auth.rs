@@ -21,10 +21,10 @@ use automata_ci_auth::{
     },
     time::UnixTimestamp,
 };
-use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::auth::{
+use automata_ci_auth_postgres::{
     PostgresHumanSessionRepository, PostgresLoginTransactionRepository,
 };
+use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
 use automata_ci_postgres::test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;

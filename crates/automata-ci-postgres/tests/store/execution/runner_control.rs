@@ -40,7 +40,6 @@ use automata_ci_core::{
     AttemptId, AttemptNumber, FencingToken, JobConclusion, JobLifecycle, Lease, LeaseGuard,
     LeaseId, LogSequence, LogStreamId, OperationId, Sha256Digest, UnixMillis,
 };
-use automata_ci_postgres::store::PostgresLogCommitListener;
 use automata_ci_protocol::{
     CommandSequence as ProtocolCommandSequence, INITIAL_RUNTIME_AUTHORITY_GENERATION,
     RunnerSlotOrdinal, RuntimeAuthorityDeliveryBinding,
@@ -52,6 +51,7 @@ use automata_ci_store::{
     RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
     RunnerProtocolVersion, StableRunnerSlot, StoreError,
 };
+use automata_ci_store_postgres::PostgresLogCommitListener;
 
 use crate::support::{
     SeedData, TestClock, TestDatabase, TestResult, run_with_database, runner_capability_document,

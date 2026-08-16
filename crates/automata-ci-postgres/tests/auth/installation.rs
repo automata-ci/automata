@@ -36,14 +36,14 @@ use automata_ci_auth::{
         ProviderTokenMetadata, ProviderTokenSet, ProviderTokenVault,
     },
 };
+use automata_ci_auth_postgres::{
+    PostgresHumanSessionRepository, PostgresInstallationRepository,
+    PostgresLoginTransactionRepository, PostgresProviderTokenVault,
+};
 use automata_ci_key_management::{
     KeyEncryptionContext, KeyEncryptionError, KeyEncryptionProvider, WrappedDataKey,
 };
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::auth::{
-    PostgresHumanSessionRepository, PostgresInstallationRepository,
-    PostgresLoginTransactionRepository, PostgresProviderTokenVault,
-};
 use automata_ci_postgres::test_support::TestClock;
 use uuid::Uuid;
 

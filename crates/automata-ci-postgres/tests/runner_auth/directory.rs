@@ -19,9 +19,9 @@ use automata_ci_control::runner_control::{
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
-use automata_ci_postgres::runner_auth::PostgresRunnerMachineDirectory;
 use automata_ci_postgres::test_support::TestClock;
 use automata_ci_protocol::SUPPORTED_PROTOCOL_RANGE;
+use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
 use automata_ci_store::{CommandCursor, HeartbeatRunnerSession, RunnerGeneration, StoreError};
 use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;

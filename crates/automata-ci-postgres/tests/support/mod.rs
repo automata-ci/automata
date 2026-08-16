@@ -11,7 +11,6 @@ use automata_ci_key_management::{
     EncryptedEnvelope, KeyEncryptionProvider, KeyId, LocalAes256GcmKeyring, LocalKeyMaterial,
     SecretBytes, WrappedDataKey,
 };
-use automata_ci_postgres::store::PostgresStore;
 #[allow(unused_imports)] // Consolidated binaries consume different fixture subsets.
 pub use automata_ci_postgres::test_support::{
     PostgresTestDatabase as TestDatabase, TestClock, TestResult,
@@ -35,6 +34,7 @@ use automata_ci_store::{
     RegisterProviderDeliveryWorkflowInventory, ReleaseGithubServerServiceHandoff, RoutingDocument,
     RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence,
 };
+use automata_ci_store_postgres::PostgresStore;
 use sqlx::PgPool;
 use uuid::Uuid;
 

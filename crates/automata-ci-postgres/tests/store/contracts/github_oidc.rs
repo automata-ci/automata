@@ -2,13 +2,13 @@ use std::sync::Arc;
 
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_oidc_github::{OidcIssuanceRepository, OidcKeyId};
-use automata_ci_postgres::store::{
-    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository, PostgresStore,
-};
 use automata_ci_store::{
     GithubOidcAuthorityRepository, GithubOidcCurrentPolicy, GithubOidcCurrentnessClock,
     GithubOidcCurrentnessClockError, GithubOidcKeyRetentionRepository, GithubOidcKeyUse,
     GithubOidcLoadedKey, GithubOidcSubjectPolicyMode, GithubOidcSubjectPolicyRevision,
+};
+use automata_ci_store_postgres::{
+    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository, PostgresStore,
 };
 use sqlx::postgres::PgPoolOptions;
 

@@ -461,9 +461,9 @@ impl PostgresStore {
         })
     }
 
-    /// Creates the concrete adapter from an existing `sqlx` `PostgreSQL`
-    /// pool. This is an adapter-specific integration hook, not a portable
-    /// storage port.
+    /// Creates the concrete adapter from an existing `sqlx` `PostgreSQL` pool
+    /// for integration tests.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn from_postgres_pool(pool: PgPool) -> Self {
         Self {
@@ -495,9 +495,10 @@ impl PostgresStore {
             .ok_or(automata_ci_store::StoreError::RunnerPayloadEncryptionUnavailable)
     }
 
-    /// Returns the adapter's raw `sqlx` `PostgreSQL` pool for concrete
-    /// integration and migration tests. Portable callers should depend on
-    /// [`InternalAttemptRepository`] or [`TenantAttemptQuery`] instead.
+    /// Returns the adapter's raw `sqlx` `PostgreSQL` pool so the product can
+    /// compose the domain-specific adapters that share this exact connection
+    /// authority. Portable callers should depend on their narrow repository
+    /// ports instead.
     #[must_use]
     pub const fn postgres_pool(&self) -> &PgPool {
         &self.pool
