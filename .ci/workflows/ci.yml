@@ -490,6 +490,7 @@ jobs:
           cargo test --locked -p automata-ci-results-github --test cache_http --all-features -- --ignored --test-threads=1
 
       - name: Run exact clients across PostgreSQL and production object storage
+        timeout-minutes: 10
         run: >-
           cargo test --locked -p automata-ci-results-github --test exact_client_real_store
           --all-features exact_clients_cross_real_http_postgres_and_object_storage
