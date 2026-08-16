@@ -22,6 +22,8 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 - Opt-in GitHub browser login and device-flow server endpoints with
   envelope-encrypted login/provider state, hashed session credentials, fresh
   numeric membership authority, and the RBAC management HTTP API.
+- Hosted delegated-actor reads for authorized repository directories, workflow
+  runs, run details, durable job-log snapshots, and direct live-log tickets.
 - Configured signed GitHub webhook ingress, public and private source delivery,
   fenced Check Runs, scoped App credentials, and lease-bound repository
   authority.
