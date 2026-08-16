@@ -418,7 +418,7 @@ fn success_response(outcome: WorkflowDispatchApiOutcome) -> Response {
         },
         &DispatchResponseDocument {
             run_id: outcome.run_id().as_uuid(),
-            run_number: outcome.run_number(),
+            run_number: outcome.run_number().to_string(),
             replay: outcome.is_replay(),
         },
     )
@@ -489,7 +489,7 @@ impl DispatchInputDocument {
 #[derive(Debug, Serialize)]
 struct DispatchResponseDocument {
     run_id: Uuid,
-    run_number: u64,
+    run_number: String,
     replay: bool,
 }
 
@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(
             response_json(response).await,
-            json!({"run_id": RUN_ID, "run_number": 17, "replay": false})
+            json!({"run_id": RUN_ID, "run_number": "17", "replay": false})
         );
         let requests = backend.requests();
         let [captured] = requests.as_slice() else {
@@ -757,7 +757,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response_json(response).await,
-            json!({"run_id": RUN_ID, "run_number": 17, "replay": true})
+            json!({"run_id": RUN_ID, "run_number": "17", "replay": true})
         );
     }
 
