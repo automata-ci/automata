@@ -1,12 +1,24 @@
 use automata_ci_core::{JobContentReference, RunId, Sha256Digest, UnixMillis};
 use automata_ci_store::{
     AdmissionObject, AdmitLogicalWorkflowRun, LogicalActivationObject, LogicalWorkflowInvocationId,
-    LogicalWorkflowJobId, ObjectKey,
+    LogicalWorkflowJobId, ObjectKey, WorkflowAdmissionIdempotency,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::support::TestResult;
+
+pub(super) fn authenticated_github_idempotency(
+    command: &AdmitLogicalWorkflowRun,
+) -> TestResult<WorkflowAdmissionIdempotency> {
+    let delivery_key = command.idempotency().key();
+    Ok(WorkflowAdmissionIdempotency::namespaced_provider_delivery(
+        command.repository().provider(),
+        command.repository().provider_repository_id(),
+        &delivery_key,
+        command.workflow_path(),
+    )?)
+}
 
 pub(super) fn retime_logical_admission(
     command: &AdmitLogicalWorkflowRun,
@@ -14,7 +26,7 @@ pub(super) fn retime_logical_admission(
 ) -> TestResult<AdmitLogicalWorkflowRun> {
     let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
-        command.idempotency().clone(),
+        authenticated_github_idempotency(command)?,
         command.request_digest(),
         command.repository().clone(),
         command.workflow_id(),

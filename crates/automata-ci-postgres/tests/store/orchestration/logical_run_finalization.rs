@@ -1,4 +1,5 @@
 use crate::github_manifest_fixture;
+use crate::store::fixture::authenticated_github_idempotency;
 
 use automata_ci_core::{
     CompiledValueTemplate, JobAuthorityProfile, JobConclusion, Located, LogicalJobKind,
@@ -567,7 +568,7 @@ fn logical_command_at(
 ) -> TestResult<AdmitLogicalWorkflowRun> {
     let mut builder = AdmitLogicalWorkflowRun::builder(
         command.tenant().clone(),
-        command.idempotency().clone(),
+        authenticated_github_idempotency(command)?,
         command.request_digest(),
         command.repository().clone(),
         command.workflow_id(),
