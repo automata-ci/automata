@@ -68,6 +68,73 @@ runs:
         .expect("identity action")
 }
 
+fn prepared_hash_files_input_action() -> PreparedAction {
+    let source = r"
+inputs:
+  key:
+    default: ${{ hashFiles('Cargo.lock') }}
+runs:
+  using: node24
+  main: dist/index.js
+";
+    let reference = ActionReference::Local {
+        path: "./hash-files".to_owned(),
+    };
+    let local = CheckedOutLocalActionPreparer::new(
+        Arc::new(GithubActionMetadataDecoder::default()),
+        GithubConditionCompiler::default(),
+    )
+    .prepare(LocalActionPreparationRequest::new(
+        &reference,
+        Some(source.as_bytes()),
+        None,
+    ))
+    .expect("hashFiles fixture prepares");
+    let archive = Bytes::copy_from_slice(source.as_bytes());
+    let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
+    PreparedAction::with_definition(digest, archive, "", local.definition().clone())
+        .expect("hashFiles action")
+}
+
+#[tokio::test]
+async fn hash_files_inputs_are_evaluated_inside_the_fenced_sandbox() {
+    let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let fixture = Fixture::new(
+        vec![prepared_hash_files_input_action()],
+        vec![
+            PhaseResponse::success().with_stdout(digest),
+            PhaseResponse::success(),
+        ],
+    );
+    let job = envelope(vec![action_step("cache", "actions/cache")]);
+    let request = fixture.request(job);
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    let result = fixture
+        .executor
+        .execute(request, events, ExecutionCancellation::new())
+        .await
+        .expect("hashFiles action executes");
+
+    assert_eq!(result.conclusion(), JobConclusion::Success);
+    let state = fixture.endpoint_state.lock().expect("endpoint lock");
+    let commands = state
+        .commands
+        .iter()
+        .filter(|command| command.argv().program().as_str() == "/opt/node24/bin/node")
+        .collect::<Vec<_>>();
+    assert_eq!(commands.len(), 2, "hash helper runs before the action");
+    assert!(
+        commands[0]
+            .argv()
+            .arguments()
+            .iter()
+            .any(|argument| argument.contains("automata-hash-files"))
+    );
+    assert_eq!(commands[0].argv().arguments().last().unwrap(), "Cargo.lock");
+    assert_eq!(environment_map(commands[1])["INPUT_KEY"], digest);
+}
+
 #[tokio::test]
 async fn invocation_identity_defaults_missing_required_and_deprecations_match_action_contract() {
     let fixture = Fixture::new(

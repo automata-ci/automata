@@ -4,11 +4,14 @@ use std::{
     future::Future,
     ops::Deref,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant},
 };
 
-use automata_ci_action_github::GithubActionMetadataDecoder;
+use automata_ci_action_github::{GithubActionMetadataDecoder, JavascriptRuntime};
 use automata_ci_core::{
     ActionReference, AttemptId, JOB_RUNTIME_CONTEXT_MEDIA_TYPE, JobAuthorityProfile, JobConclusion,
     JobIrEnvelope, JobLifecycle, JobResult, JobResultOutput, JobResultValidationError,
@@ -26,8 +29,8 @@ use automata_ci_execution::{
     SandboxState, ServiceContainerBindings, ServiceContainerSpecs, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
-    GithubEvaluationContext, GithubExpressionEvaluator, GithubExpressionFunctionProvider,
-    GithubObject, GithubStatus, GithubValue,
+    ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
+    GithubExpressionFunctionProvider, GithubObject, GithubStatus, GithubValue,
 };
 use automata_ci_github_runtime::{
     ActionInvocationId, ArtifactDeclaration, ArtifactDeclarationCommandFile, ArtifactSubject,
@@ -88,6 +91,11 @@ const WINDOWS_ARTIFACT_HASH_SCRIPT: &str = "# automata-artifact-sha256\n$ErrorAc
 const WINDOWS_ARTIFACT_PATH_ENVIRONMENT: &str = "AUTOMATA_INTERNAL_ARTIFACT_PATH";
 const ARTIFACT_HASH_OUTPUT_BYTES: usize = 128;
 const ARTIFACT_HASH_TIMEOUT: Duration = Duration::from_mins(5);
+const HASH_FILES_OUTPUT_BYTES: usize = 65;
+const HASH_FILES_TIMEOUT: Duration = Duration::from_mins(5);
+const MAX_HASH_FILES_PATTERN_BYTES: usize = 4_096;
+const MAX_HASH_FILES_AGGREGATE_PATTERN_BYTES: usize = 65_536;
+const HASH_FILES_SCRIPT: &str = r#"/*automata-hash-files*/const fs=require('node:fs/promises');const crypto=require('node:crypto');const path=require('node:path');(async()=>{const root=await fs.realpath(process.cwd());const raw=process.argv.slice(1);const includes=[];const excludes=[];for(const value of raw){if(value.startsWith('!')){if(value.length>1)excludes.push(value.slice(1));}else{includes.push(value);}}const files=new Map();for(const pattern of includes){for await(const candidate of fs.glob(pattern,{cwd:root,exclude:excludes,withFileTypes:false})){const absolute=path.resolve(root,candidate);let resolved;try{resolved=await fs.realpath(absolute);}catch{continue;}const relative=path.relative(root,resolved);if(relative===''||relative==='..'||relative.startsWith('..'+path.sep)||path.isAbsolute(relative))continue;let metadata;try{metadata=await fs.stat(resolved);}catch{continue;}if(metadata.isFile())files.set(relative.split(path.sep).join('/'),resolved);}}const ordered=[...files].sort((left,right)=>left[0]<right[0]?-1:left[0]>right[0]?1:0);const aggregate=crypto.createHash('sha256');for(const[,file]of ordered){aggregate.update(crypto.createHash('sha256').update(await fs.readFile(file)).digest());}process.stdout.write(ordered.length===0?'':aggregate.digest('hex'));})().catch(()=>process.exit(44));"#;
 const ARTIFACTS_LIST_ENVIRONMENT: &str = "GITHUB_ARTIFACTS_LIST";
 const COMMAND_FILE_KINDS: [CommandFileKind; 5] = [
     CommandFileKind::Environment,
@@ -178,6 +186,7 @@ pub struct GithubJobExecutor {
 struct HydratedExecutionRequest<'a> {
     request: &'a ExecutionRequest,
     runtime_context: &'a JobRuntimeContext,
+    execution_functions: Option<&'a Arc<dyn GithubExpressionFunctionProvider>>,
 }
 
 impl<'a> HydratedExecutionRequest<'a> {
@@ -185,11 +194,24 @@ impl<'a> HydratedExecutionRequest<'a> {
         Self {
             request,
             runtime_context,
+            execution_functions: None,
         }
     }
 
     const fn runtime_context(self) -> &'a JobRuntimeContext {
         self.runtime_context
+    }
+
+    const fn with_execution_functions(
+        mut self,
+        functions: &'a Arc<dyn GithubExpressionFunctionProvider>,
+    ) -> Self {
+        self.execution_functions = Some(functions);
+        self
+    }
+
+    const fn execution_functions(self) -> Option<&'a Arc<dyn GithubExpressionFunctionProvider>> {
+        self.execution_functions
     }
 }
 
@@ -198,6 +220,125 @@ impl Deref for HydratedExecutionRequest<'_> {
 
     fn deref(&self) -> &Self::Target {
         self.request
+    }
+}
+
+struct SandboxExpressionFunctions {
+    endpoint: Arc<dyn ExecutionEndpoint>,
+    workspace: TargetPath,
+    node: TargetPath,
+    attempt_id: AttemptId,
+    operation_ids: Arc<dyn ExecutionOperationIds>,
+    cancellation: ExecutionCancellation,
+    next_hash_files_ordinal: AtomicU32,
+}
+
+impl SandboxExpressionFunctions {
+    fn new(
+        endpoint: Arc<dyn ExecutionEndpoint>,
+        workspace: TargetPath,
+        node: TargetPath,
+        attempt_id: AttemptId,
+        operation_ids: Arc<dyn ExecutionOperationIds>,
+        cancellation: ExecutionCancellation,
+    ) -> Self {
+        Self {
+            endpoint,
+            workspace,
+            node,
+            attempt_id,
+            operation_ids,
+            cancellation,
+            next_hash_files_ordinal: AtomicU32::new(0),
+        }
+    }
+
+    fn hash_files(&self, arguments: &[GithubValue]) -> Option<String> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        let mut aggregate_bytes = 0_usize;
+        let mut patterns = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let pattern = argument.coerce_to_string();
+            if pattern.is_empty()
+                || pattern.len() > MAX_HASH_FILES_PATTERN_BYTES
+                || pattern.chars().any(char::is_control)
+            {
+                return None;
+            }
+            aggregate_bytes = aggregate_bytes.checked_add(pattern.len())?;
+            if aggregate_bytes > MAX_HASH_FILES_AGGREGATE_PATTERN_BYTES {
+                return None;
+            }
+            patterns.push(pattern);
+        }
+        let ordinal = self
+            .next_hash_files_ordinal
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .ok()?;
+        let mut argv = vec![
+            "--eval".to_owned(),
+            HASH_FILES_SCRIPT.to_owned(),
+            "--".to_owned(),
+        ];
+        argv.extend(patterns);
+        let argv = ExecutionArgv::new(self.node.clone(), argv).ok()?;
+        let command = ExecutionCommand::new(
+            self.operation_ids
+                .operation_id(self.attempt_id, OperationPurpose::HashFiles, ordinal),
+            argv,
+            self.workspace.clone(),
+            automata_ci_execution::ExecutionEnvironment::empty(),
+            HASH_FILES_TIMEOUT,
+            HASH_FILES_OUTPUT_BYTES,
+        )
+        .ok()?;
+        let output = self
+            .endpoint
+            .exec(&command, &CancellationBridge(&self.cancellation))
+            .ok()?;
+        if self.cancellation.is_cancelled()
+            || output.was_truncated()
+            || output.termination() != ExecutionTermination::Exited(0)
+            || !output.stderr().is_empty()
+        {
+            return None;
+        }
+        let digest = std::str::from_utf8(output.stdout()).ok()?;
+        if digest.is_empty() {
+            return Some(String::new());
+        }
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(digest.to_ascii_lowercase())
+    }
+}
+
+impl GithubExpressionFunctionProvider for SandboxExpressionFunctions {
+    fn call(&self, name: &str, arguments: &[GithubValue]) -> ExtensionFunctionResult {
+        if name != "hashfiles" {
+            return None;
+        }
+        self.hash_files(arguments)
+            .map(|digest| Ok(GithubValue::string(digest)))
+    }
+}
+
+impl fmt::Debug for SandboxExpressionFunctions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SandboxExpressionFunctions")
+            .field("endpoint", &self.endpoint)
+            .field("workspace", &self.workspace)
+            .field("node", &self.node)
+            .field("attempt_id", &self.attempt_id)
+            .field("operation_ids", &self.operation_ids)
+            .field("cancelled", &self.cancellation.is_cancelled())
+            .finish_non_exhaustive()
     }
 }
 
@@ -715,8 +856,28 @@ impl GithubJobExecutor {
         let Some(sandbox) = reconcile_cancelled_operation(sandbox, &cancellation)? else {
             return self.cancelled_job_result(attempt_id, &masker);
         };
-        let endpoint = sandbox.endpoint;
+        let endpoint: Arc<dyn ExecutionEndpoint> = Arc::from(sandbox.endpoint);
         let services = sandbox.services;
+        let execution_functions = self
+            .ports
+            .toolchain
+            .node(JavascriptRuntime::Node24)
+            .cloned()
+            .map(|node| {
+                Arc::new(SandboxExpressionFunctions::new(
+                    endpoint.clone(),
+                    workspace.clone(),
+                    node,
+                    attempt_id,
+                    self.ports.operation_ids.clone(),
+                    cancellation.clone(),
+                )) as Arc<dyn GithubExpressionFunctionProvider>
+            });
+        let request = if let Some(execution_functions) = &execution_functions {
+            request.with_execution_functions(execution_functions)
+        } else {
+            request
+        };
         let prepared = self.prepare_attempt_directories(
             endpoint.as_ref(),
             &paths,
@@ -4302,6 +4463,11 @@ impl GithubJobExecutor {
                 .with_services(services),
             )
             .map_err(|error| map_port_error(error.kind()))?;
+        let snapshot = if let Some(functions) = request.execution_functions() {
+            snapshot.with_execution_functions((*functions).clone())
+        } else {
+            snapshot
+        };
         if request.job().job().authority_profile() == JobAuthorityProfile::CredentialFree
             && (!snapshot.secret_masks().is_empty()
                 || snapshot
