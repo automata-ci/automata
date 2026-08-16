@@ -129,7 +129,6 @@ struct FakeState {
     wrong_proxy_identifier_once: bool,
     drift_health_configuration_once: bool,
     replace_network_before_remove: bool,
-    normalize_tagged_digest_image_names: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -156,13 +155,6 @@ impl std::fmt::Debug for FakePodman {
 impl FakePodman {
     pub(crate) fn commands(&self) -> Vec<Vec<String>> {
         self.state.lock().expect("fake lock").commands.clone()
-    }
-
-    pub(crate) fn normalize_tagged_digest_image_names(&self) {
-        self.state
-            .lock()
-            .expect("fake lock")
-            .normalize_tagged_digest_image_names = true;
     }
 
     pub(crate) fn fail_once(&self, command: &[&str]) {
@@ -1180,9 +1172,6 @@ fn create_fake_container(state: &mut FakeState, arguments: &[String]) -> Command
         .find(|value| value.contains("@sha256:"))
         .cloned()
         .unwrap_or_default();
-    if state.normalize_tagged_digest_image_names {
-        resource.image_name = podman_normalized_digest_reference(&resource.image_name);
-    }
     if arguments.iter().any(|value| value == "--network-alias") {
         state.next_service_address = state.next_service_address.max(10).saturating_add(1);
         resource.network_address = Some(format!("10.89.0.{}", state.next_service_address));
@@ -1276,18 +1265,6 @@ fn create_fake_container(state: &mut FakeState, arguments: &[String]) -> Command
     } else {
         CommandOutput::success(format!("{identifier}\n").into_bytes())
     }
-}
-
-fn podman_normalized_digest_reference(reference: &str) -> String {
-    let Some((name, digest)) = reference.rsplit_once('@') else {
-        return reference.to_owned();
-    };
-    let final_slash = name.rfind('/');
-    let repository = match name.rfind(':') {
-        Some(tag) if final_slash.is_none_or(|slash| tag > slash) => &name[..tag],
-        _ => name,
-    };
-    format!("{repository}@{digest}")
 }
 
 fn execute_fake_copy(

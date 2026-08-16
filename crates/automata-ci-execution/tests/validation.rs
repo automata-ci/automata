@@ -59,6 +59,36 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         ),
         Err(ValueError::InvalidImmutableImage)
     ));
+    for invalid in [
+        "library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "Registry.Example/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/Team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example:05000/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team//alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team/alpine_@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team/alpine___edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team/alpine..edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team/alpine:stable@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert_eq!(
+            ImmutableImage::new(invalid),
+            Err(ValueError::InvalidImmutableImage),
+            "invalid image reference was accepted: {invalid}"
+        );
+    }
+    for valid in [
+        "localhost/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "localhost:5000/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team/a_b/a__b.c--d@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "[2001:db8::1]:5000/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert_eq!(
+            ImmutableImage::new(valid)
+                .expect("valid registry-qualified immutable image")
+                .reference(),
+            valid
+        );
+    }
 
     let spec = SandboxSpec::new(
         OperationId::new(),
@@ -93,6 +123,47 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         IMAGE
     );
     assert_eq!(spec.resources().cpu_millis(), 2_000);
+}
+
+#[test]
+fn immutable_image_enforces_docker_name_boundary_and_canonical_ipv6() {
+    const DIGEST: &str = "@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let maximum_remote_name = "a".repeat(255);
+    let maximum_reference = format!("r.io/{maximum_remote_name}{DIGEST}");
+    assert_eq!(
+        ImmutableImage::new(&maximum_reference)
+            .expect("255-byte Docker remote name")
+            .reference(),
+        maximum_reference
+    );
+
+    let overlong_remote_name = "a".repeat(256);
+    assert_eq!(
+        ImmutableImage::new(format!("r.io/{overlong_remote_name}{DIGEST}")),
+        Err(ValueError::InvalidImmutableImage)
+    );
+
+    let canonical = format!("[2001:db8::1]/team/alpine{DIGEST}");
+    assert_eq!(
+        ImmutableImage::new(&canonical)
+            .expect("canonical bracketed IPv6 registry")
+            .reference(),
+        canonical
+    );
+    for alias in [
+        "[2001:DB8::1]",
+        "[2001:0db8:0000:0000:0000:0000:0000:0001]",
+        "[::192.0.2.1]",
+        "[::ffff:192.0.2.1]",
+        "[::ffff:c000:201]",
+    ] {
+        assert_eq!(
+            ImmutableImage::new(format!("{alias}/team/alpine{DIGEST}")),
+            Err(ValueError::InvalidImmutableImage),
+            "noncanonical IPv6 registry alias was accepted: {alias}"
+        );
+    }
 }
 
 #[test]

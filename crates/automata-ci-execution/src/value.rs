@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    net::Ipv6Addr,
     num::{NonZeroU32, NonZeroU64},
     str::FromStr as _,
 };
@@ -12,6 +13,8 @@ use crate::{
 };
 
 const MAX_IDENTIFIER_BYTES: usize = 64;
+// Distribution limits the remote-name path, excluding the registry, to 255 bytes.
+const MAX_DOCKER_REMOTE_NAME_BYTES: usize = 255;
 const MAX_TARGET_PATH_BYTES: usize = 4_096;
 const MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MIN_MEMORY_BYTES: u64 = 16 * 1024 * 1024;
@@ -139,12 +142,13 @@ pub struct ImmutableImage {
 }
 
 impl ImmutableImage {
-    /// Parses `registry/repository@sha256:<64 lowercase hex>`.
+    /// Parses a canonical `registry/repository@sha256:<64 lowercase hex>`.
     ///
     /// # Errors
     ///
-    /// Rejects mutable tags, uppercase/non-hex digests, whitespace, and
-    /// oversized or ambiguous references.
+    /// Rejects mutable tags, non-canonical registry or Docker repository
+    /// names, uppercase/non-hex digests, whitespace, and oversized or
+    /// ambiguous references.
     pub fn new(reference: impl Into<String>) -> Result<Self, ValueError> {
         let reference = reference.into();
         if reference.is_empty()
@@ -159,13 +163,7 @@ impl ImmutableImage {
             .ok_or(ValueError::InvalidImmutableImage)?;
         if repository.is_empty()
             || repository.contains('@')
-            || !repository.contains('/')
-            || repository
-                .split('/')
-                .any(|component| component.is_empty() || matches!(component, "." | ".."))
-            || !repository
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"./:_-".contains(&byte))
+            || !valid_registry_qualified_repository(repository)
             || digest.len() != 64
             || !digest
                 .bytes()
@@ -189,6 +187,112 @@ impl ImmutableImage {
     pub const fn digest(&self) -> Sha256Digest {
         self.digest
     }
+}
+
+fn valid_registry_qualified_repository(repository: &str) -> bool {
+    let Some((registry, repository_name)) = repository.split_once('/') else {
+        return false;
+    };
+    valid_registry(registry)
+        && !repository_name.is_empty()
+        && repository_name.len() <= MAX_DOCKER_REMOTE_NAME_BYTES
+        && repository_name.split('/').all(valid_repository_component)
+}
+
+fn valid_registry(value: &str) -> bool {
+    if let Some(rest) = value.strip_prefix('[') {
+        let Some((address, port)) = rest.split_once(']') else {
+            return false;
+        };
+        if !address
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b':')
+        {
+            return false;
+        }
+        let Ok(address_value) = Ipv6Addr::from_str(address) else {
+            return false;
+        };
+        return address_value.to_ipv4_mapped().is_none()
+            && address_value.to_string() == address
+            && (port.is_empty() || port.strip_prefix(':').is_some_and(valid_canonical_port));
+    }
+
+    let (host, port) = match value.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (value, None),
+    };
+    if host.is_empty()
+        || host.len() > 253
+        || !host.is_ascii()
+        || host.bytes().any(|byte| byte.is_ascii_uppercase())
+        || port.is_some_and(|port| !valid_canonical_port(port))
+    {
+        return false;
+    }
+    let explicitly_registry_qualified = host == "localhost" || host.contains('.') || port.is_some();
+    explicitly_registry_qualified
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
+}
+
+fn valid_canonical_port(value: &str) -> bool {
+    value
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .is_some_and(|port| port.to_string() == value)
+}
+
+fn valid_repository_component(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let run_start = offset;
+        while offset < bytes.len()
+            && (bytes[offset].is_ascii_lowercase() || bytes[offset].is_ascii_digit())
+        {
+            offset += 1;
+        }
+        if offset == run_start {
+            return false;
+        }
+        if offset == bytes.len() {
+            return true;
+        }
+        match bytes[offset] {
+            b'.' => offset += 1,
+            b'_' => {
+                offset += 1;
+                if bytes.get(offset) == Some(&b'_') {
+                    offset += 1;
+                }
+            }
+            b'-' => {
+                while bytes.get(offset) == Some(&b'-') {
+                    offset += 1;
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 impl fmt::Debug for ImmutableImage {
