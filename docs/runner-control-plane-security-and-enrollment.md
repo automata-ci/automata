@@ -37,8 +37,10 @@ are independent of transport TLS.
    The server stores and returns only non-secret metadata; token plaintext stays in the operator
    process and is never echoed by the API.
 3. The token is transferred once through a protected operator channel. It is never accepted in
-   runner argv. `automata-runner enroll` reads an owner-only file, a dedicated environment value,
-   or redirected stdin.
+   runner argv. `automata-runner enroll` requires one explicit `--token-source`: an owner-only
+   `file:PATH`, a named `env:NAME`, or `stdin`. There is no ambient source, precedence chain, or
+   fallback. File and stdin framing accept only the canonical token, that token plus one LF, or
+   that token plus one CRLF; environment values must contain exactly the canonical token.
 4. The runner loads its strict configuration, generates an ECDSA P-256 key locally, and sends
    only a signed CSR, canonical capabilities, runner name, stable operation ID, and token to the
    human HTTPS listener. It durably stages the operation, one-time token, and local key in one

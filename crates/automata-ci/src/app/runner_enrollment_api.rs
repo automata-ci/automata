@@ -7,6 +7,7 @@ use automata_ci_auth::{
         ManagementActor, ManagementMutationOutcome, ManagementRepositoryError, ManagementRevision,
     },
     request_auth::AuthenticatedRequestSnapshot,
+    secret::{RunnerEnrollmentToken, SecretString},
     session::SessionKind,
     time::Clock,
 };
@@ -26,7 +27,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::StreamExt as _;
 use rcgen::{
     CertificateSigningRequestParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -47,11 +47,6 @@ use zeroize::Zeroizing;
 pub(crate) const RUNNER_ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 pub(crate) const RUNNER_ENROLLMENT_REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
 
-const TOKEN_PREFIX: &str = "atm_re_";
-const TOKEN_BYTES: usize = 32;
-const TOKEN_ENCODED_BYTES: usize = 43;
-const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
-const TOKEN_DOMAIN: &[u8] = b"automata.runner-enrollment-token.v1\0";
 const REDEEM_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-request.v1\0";
 const MAX_REQUEST_BYTES: usize = 384 * 1_024;
 const INITIAL_REQUEST_CAPACITY_BYTES: usize = 8 * 1_024;
@@ -371,14 +366,13 @@ async fn create_enrollment(
     let Ok(runner_group) = RunnerGroup::new(&document.runner_group) else {
         return ApiError::InvalidRequest.into_response();
     };
-    let token_sha256 = match token_digest(document.token.as_bytes()) {
-        Ok(digest) => digest,
-        Err(error) => return error.into_response(),
+    let Ok(token) = RunnerEnrollmentToken::from_secret(document.token) else {
+        return ApiError::EnrollmentRejected.into_response();
     };
     let request = CreateRunnerEnrollmentToken {
         actor,
         enrollment_id: document.operation_id,
-        token_sha256,
+        token_sha256: token.digest(),
         runner_group: runner_group.as_str().to_owned(),
         lifetime_ms: i64::try_from(document.expires_in_seconds)
             .ok()
@@ -420,18 +414,17 @@ async fn redeem_enrollment(
     if !valid_redeem_document(&document) {
         return ApiError::InvalidRequest.into_response();
     }
-    let token_sha256 = match token_digest(document.token.as_bytes()) {
-        Ok(digest) => digest,
-        Err(error) => return error.into_response(),
-    };
     let request_sha256 = match redeem_request_digest(&document) {
         Ok(digest) => digest,
         Err(error) => return error.into_response(),
     };
+    let Ok(token) = RunnerEnrollmentToken::from_secret(document.token) else {
+        return ApiError::EnrollmentRejected.into_response();
+    };
     let outcome = match state
         .repository
         .prepare_runner_enrollment(PrepareRunnerEnrollment {
-            token_sha256,
+            token_sha256: token.digest(),
             operation_id: document.operation_id,
             request_sha256,
         })
@@ -480,7 +473,7 @@ async fn redeem_enrollment(
         return ApiError::Internal.into_response();
     }
     let consume = ConsumeRunnerEnrollment {
-        token_sha256,
+        token_sha256: token.digest(),
         operation_id: document.operation_id,
         request_sha256,
         runner_id,
@@ -617,26 +610,6 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
         })
 }
 
-fn token_digest(token: &[u8]) -> Result<[u8; 32], ApiError> {
-    let encoded = token
-        .strip_prefix(TOKEN_PREFIX.as_bytes())
-        .ok_or(ApiError::EnrollmentRejected)?;
-    if encoded.len() != TOKEN_ENCODED_BYTES {
-        return Err(ApiError::EnrollmentRejected);
-    }
-    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
-    let decoded_length = URL_SAFE_NO_PAD
-        .decode_slice(encoded, &mut *decoded)
-        .map_err(|_| ApiError::EnrollmentRejected)?;
-    if decoded_length != TOKEN_BYTES {
-        return Err(ApiError::EnrollmentRejected);
-    }
-    let mut digest = Sha256::new();
-    digest.update(TOKEN_DOMAIN);
-    digest.update(token);
-    Ok(digest.finalize().into())
-}
-
 fn redeem_request_digest(document: &RedeemEnrollmentDocument) -> Result<[u8; 32], ApiError> {
     let receipt = RedeemRequestReceipt {
         operation_id: document.operation_id,
@@ -672,8 +645,7 @@ fn exact_json_response(status: StatusCode, body: Vec<u8>) -> Response {
 #[serde(deny_unknown_fields)]
 struct CreateEnrollmentDocument {
     operation_id: Uuid,
-    #[serde(deserialize_with = "deserialize_zeroizing")]
-    token: Zeroizing<String>,
+    token: SecretString,
     runner_group: String,
     expires_in_seconds: u64,
 }
@@ -686,19 +658,11 @@ struct CreateEnrollmentResponse<'a> {
     redeem_url: &'a str,
 }
 
-fn deserialize_zeroizing<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    String::deserialize(deserializer).map(Zeroizing::new)
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RedeemEnrollmentDocument {
     operation_id: Uuid,
-    #[serde(deserialize_with = "deserialize_zeroizing")]
-    token: Zeroizing<String>,
+    token: SecretString,
     runner_name: String,
     capabilities: RunnerCapabilities,
     csr_pem: String,
@@ -835,17 +799,6 @@ mod tests {
     }
 
     #[test]
-    fn token_hash_is_domain_separated_and_exact() {
-        let token = format!(
-            "{TOKEN_PREFIX}{}",
-            URL_SAFE_NO_PAD.encode([7_u8; TOKEN_BYTES])
-        );
-        let digest = token_digest(token.as_bytes()).expect("valid enrollment token");
-        assert_ne!(digest, Sha256::digest(token.as_bytes()).as_slice());
-        assert!(token_digest(b"plain-secret").is_err());
-    }
-
-    #[test]
     fn token_create_response_never_echoes_the_client_generated_secret() {
         let response = CreateEnrollmentResponse {
             enrollment_id: Uuid::new_v4(),
@@ -871,13 +824,13 @@ mod tests {
         );
         let mut document = RedeemEnrollmentDocument {
             operation_id,
-            token: Zeroizing::new("first-secret".to_owned()),
+            token: SecretString::new("first-secret").expect("bounded secret"),
             runner_name: "runner-one".to_owned(),
             capabilities,
             csr_pem: "csr".to_owned(),
         };
         let first = redeem_request_digest(&document).expect("request digest");
-        document.token = Zeroizing::new("different-secret".to_owned());
+        document.token = SecretString::new("different-secret").expect("bounded secret");
         assert_eq!(
             redeem_request_digest(&document).expect("request digest"),
             first

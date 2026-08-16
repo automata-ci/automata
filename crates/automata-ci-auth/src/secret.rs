@@ -9,6 +9,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const GENERATED_SECRET_BYTES: usize = 32;
 const MAX_SECRET_LENGTH: usize = 65_536;
+const RUNNER_ENROLLMENT_TOKEN_PREFIX: &str = "atm_re_";
+const RUNNER_ENROLLMENT_TOKEN_BYTES: usize = 32;
+const RUNNER_ENROLLMENT_TOKEN_ENCODED_BYTES: usize = 43;
+const RUNNER_ENROLLMENT_TOKEN_DECODE_BUFFER_BYTES: usize =
+    RUNNER_ENROLLMENT_TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
+const RUNNER_ENROLLMENT_TOKEN_DIGEST_DOMAIN: &[u8] = b"automata.runner-enrollment-token.v1\0";
 
 /// An owned UTF-8 secret that is redacted from debug output and zeroized on drop.
 ///
@@ -316,6 +322,95 @@ macro_rules! opaque_token {
 
 opaque_token!(CsrfToken);
 opaque_token!(OAuthState);
+
+/// A canonical one-use runner-enrollment bearer credential.
+///
+/// The plaintext is exactly `atm_re_` followed by the unpadded URL-safe
+/// base64 encoding of 256 bits. The owned allocation is zeroized on drop and
+/// plaintext is available only through [`Self::expose_secret`].
+pub struct RunnerEnrollmentToken(SecretString);
+
+impl RunnerEnrollmentToken {
+    /// Exact UTF-8 byte length of this token.
+    pub const BYTE_LENGTH: usize =
+        RUNNER_ENROLLMENT_TOKEN_PREFIX.len() + RUNNER_ENROLLMENT_TOKEN_ENCODED_BYTES;
+
+    /// Generates a new canonical token from 256 bits of cryptographically
+    /// secure randomness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the secure random source is unavailable.
+    pub fn generate(random: &dyn SecureRandom) -> Result<Self, RandomnessError> {
+        let mut entropy = Zeroizing::new([0_u8; RUNNER_ENROLLMENT_TOKEN_BYTES]);
+        random.fill(entropy.as_mut())?;
+        let mut token = String::with_capacity(Self::BYTE_LENGTH);
+        token.push_str(RUNNER_ENROLLMENT_TOKEN_PREFIX);
+        URL_SAFE_NO_PAD.encode_string(entropy.as_ref(), &mut token);
+        SecretString::new(token)
+            .map(Self)
+            .map_err(|_| RandomnessError)
+    }
+
+    /// Validates and takes custody of an existing enrollment token.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every value outside the exact current `atm_re_` grammar.
+    pub fn from_secret(secret: SecretString) -> Result<Self, RunnerEnrollmentTokenError> {
+        let Some(encoded) = secret
+            .expose_secret()
+            .strip_prefix(RUNNER_ENROLLMENT_TOKEN_PREFIX)
+            .filter(|encoded| encoded.len() == RUNNER_ENROLLMENT_TOKEN_ENCODED_BYTES)
+        else {
+            return Err(RunnerEnrollmentTokenError);
+        };
+        let mut decoded = Zeroizing::new([0_u8; RUNNER_ENROLLMENT_TOKEN_DECODE_BUFFER_BYTES]);
+        if !matches!(
+            URL_SAFE_NO_PAD.decode_slice(encoded, decoded.as_mut()),
+            Ok(RUNNER_ENROLLMENT_TOKEN_BYTES)
+        ) {
+            return Err(RunnerEnrollmentTokenError);
+        }
+        Ok(Self(secret))
+    }
+
+    /// Exposes the raw credential at an explicit custody boundary.
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        self.0.expose_secret()
+    }
+
+    /// Derives the fixed domain-separated SHA-256 lookup digest.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(RUNNER_ENROLLMENT_TOKEN_DIGEST_DOMAIN);
+        digest.update(self.expose_secret().as_bytes());
+        digest.finalize().into()
+    }
+}
+
+impl<'de> Deserialize<'de> for RunnerEnrollmentToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let secret = SecretString::deserialize(deserializer)?;
+        Self::from_secret(secret).map_err(serde::de::Error::custom)
+    }
+}
+
+impl fmt::Debug for RunnerEnrollmentToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RunnerEnrollmentToken([REDACTED])")
+    }
+}
+
+/// Sanitized rejection of a noncanonical runner-enrollment token.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("runner enrollment token is invalid")]
+pub struct RunnerEnrollmentTokenError;
 
 /// Validation failures for persisted opaque credentials.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
