@@ -20,8 +20,7 @@ use automata_ci_runner::{
     podman_probe::{
         ActiveProbeLimits, ActiveProbePlan, CommandExecutor, CommandOutput, CommandRequest,
         CommandTermination, ProbeCancellation, ReadinessProbe, ScratchCompatibility,
-        ScratchExecutableInspector, SystemCommandExecutor, run_active_podman_probe_with,
-        run_active_podman_probe_with_control,
+        ScratchExecutableInspector, SystemCommandExecutor, run_active_podman_probe_with_control,
     },
 };
 use uuid::Uuid;
@@ -493,7 +492,7 @@ fn successful_probe_uses_isolated_owned_resources_and_cleans_everything() {
     let commands = FakeCommandExecutor::default();
     let readiness = FakeReadinessProbe::default();
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &plan,
         &commands,
         &readiness,
@@ -593,7 +592,7 @@ fn disabled_network_policy_is_created_and_verified_as_internal() {
     let plan = fixture.plan_with_network(NetworkPolicy::Disabled);
     let commands = FakeCommandExecutor::default();
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &plan,
         &commands,
         &FakeReadinessProbe::default(),
@@ -624,7 +623,7 @@ fn unexpected_container_network_membership_is_rejected_before_readiness() {
     let commands = FakeCommandExecutor::with_mode(FakeMode::ContainerExtraNetwork);
     let readiness = FakeReadinessProbe::default();
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &readiness,
@@ -646,7 +645,7 @@ fn dynamic_payload_is_rejected_before_podman_is_touched() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::default();
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -668,7 +667,7 @@ fn network_creation_failure_is_structured_and_still_cleans_the_context() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::FailNetworkCreate);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -689,7 +688,7 @@ fn network_creation_requires_the_exact_requested_name_before_inspection() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::UnexpectedNetworkCreateName);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -711,7 +710,7 @@ fn command_timeout_is_reported_and_owned_resources_are_removed() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::TimeoutContainerRun);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -736,7 +735,7 @@ fn primary_failure_retains_a_structured_cleanup_failure() {
     let commands =
         FakeCommandExecutor::with_mode(FakeMode::TimeoutContainerRunAndFailNetworkCleanup);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -758,7 +757,7 @@ fn cleanup_failure_prevents_capability_advertisement() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::FailNetworkCleanup);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -780,7 +779,7 @@ fn successful_noop_cleanup_prevents_capability_advertisement() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::SuccessfulNoOpNetworkCleanup);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -803,7 +802,7 @@ fn local_context_cleanup_rejects_unexpected_entries_without_recursive_deletion()
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::UnexpectedContextEntry);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -831,7 +830,7 @@ fn local_context_cleanup_refuses_a_name_replacement() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::ContextNameReplacement);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -860,7 +859,7 @@ fn container_start_rejects_a_rootfs_name_replacement_before_readiness() {
     let commands = FakeCommandExecutor::with_mode(FakeMode::ContextNameReplacementDuringRun);
     let readiness = FakeReadinessProbe::default();
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &readiness,
@@ -894,7 +893,7 @@ fn container_start_rejects_same_length_payload_mutation_before_readiness() {
     let commands = FakeCommandExecutor::with_mode(FakeMode::PayloadMutationDuringRun);
     let readiness = FakeReadinessProbe::default();
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &readiness,
@@ -1103,7 +1102,7 @@ fn cleanup_refuses_a_resource_if_either_ownership_label_mismatches() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::NetworkOwnerMismatch);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -1124,7 +1123,7 @@ fn cleanup_rejects_an_inspected_identifier_that_could_be_parsed_as_an_option() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::NetworkIdentifierLooksLikeAnOption);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -1145,7 +1144,7 @@ fn cleanup_does_not_delete_a_name_replacement_with_copied_labels() {
     let fixture = ExecutableFixture::new();
     let commands = FakeCommandExecutor::with_mode(FakeMode::NetworkIdentifierChangedBeforeCleanup);
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &fixture.plan(),
         &commands,
         &FakeReadinessProbe::default(),
@@ -1396,7 +1395,7 @@ fn active_probe_resolves_a_safe_symlinked_parent_before_using_it() {
     .expect("safe symlinked parent must be accepted by the lexical plan");
     let commands = FakeCommandExecutor::default();
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &plan,
         &commands,
         &FakeReadinessProbe::default(),
@@ -1436,7 +1435,7 @@ fn active_probe_rejects_a_symlink_as_the_scratch_root() {
     )
     .expect("lexical plan construction does not access the filesystem");
 
-    let probe = run_active_podman_probe_with(
+    let probe = active_probe_with_default_control(
         &plan,
         &FakeCommandExecutor::default(),
         &FakeReadinessProbe::default(),
@@ -1462,6 +1461,22 @@ fn real_elf_inspector_never_accepts_the_dynamic_test_executable() {
         !matches!(result, ScratchCompatibility::Compatible),
         "an oversized or dynamically linked test executable must never be accepted for scratch"
     );
+}
+
+fn active_probe_with_default_control(
+    plan: &ActiveProbePlan,
+    commands: &dyn CommandExecutor,
+    readiness: &dyn ReadinessProbe,
+    executable_inspector: &dyn ScratchExecutableInspector,
+) -> automata_ci_runner::capability_probe::CapabilityProbe {
+    run_active_podman_probe_with_control(
+        plan,
+        commands,
+        readiness,
+        executable_inspector,
+        &ProbeCancellation::default(),
+        ActiveProbeLimits::default(),
+    )
 }
 
 fn controlled_probe(
