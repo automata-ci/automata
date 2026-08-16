@@ -5,8 +5,7 @@ use automata_ci_core::{
     RunnerRequirements, SandboxFeature, Sha256Digest,
 };
 use automata_ci_runner::product::{
-    ObjectStoreTlsTrust, RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig,
-    RunnerProductConfigError,
+    RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
 };
 #[cfg(unix)]
 use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
@@ -214,11 +213,6 @@ fn validated_config_preserves_exact_runner_and_profile_inventory() {
             .features()
             .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
     );
-    assert!(config.object_store().force_path_style());
-    assert!(matches!(
-        config.object_store().tls_trust(),
-        ObjectStoreTlsTrust::WebPki
-    ));
     assert!(
         config
             .podman()
@@ -337,11 +331,7 @@ fn object_store_tls_trust_is_mandatory_current_and_transport_exact() {
         serde_json::json!("https://objects.internal.example/");
     private_https["object_store"]["loopback_development"] = serde_json::json!(false);
     private_https["object_store"]["tls_trust"] = private_ca.clone();
-    let parsed = parse_value(&private_https).expect("exact private CA over HTTPS");
-    assert!(matches!(
-        parsed.object_store().tls_trust(),
-        ObjectStoreTlsTrust::PrivateCa { .. }
-    ));
+    parse_value(&private_https).expect("exact private CA over HTTPS");
 
     let mut private_http = original.clone();
     private_http["object_store"]["tls_trust"] = private_ca;

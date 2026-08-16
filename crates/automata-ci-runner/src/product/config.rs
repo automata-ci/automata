@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use automata_ci_blob_s3::S3BlobStoreConfig;
 use automata_ci_core::{
     Architecture, ContainerCapabilities, ContainerFeature, EnvironmentProfile,
     EnvironmentProfileId, IsolationLevel, OperatingSystem, ResourceCapacity, RunnerCapabilities,
@@ -214,7 +215,7 @@ impl RunnerProductConfig {
 
     /// Returns immutable action-bundle object-store policy and credential sources.
     #[must_use]
-    pub const fn object_store(&self) -> &ObjectStoreProductConfig {
+    pub(crate) const fn object_store(&self) -> &ObjectStoreProductConfig {
         &self.object_store
     }
 
@@ -830,100 +831,39 @@ impl ToolchainConfig {
     }
 }
 
-/// S3-compatible immutable action-bundle store configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ObjectStoreProductConfig {
-    endpoint: Url,
-    region: String,
-    bucket: String,
-    prefix: Option<String>,
-    force_path_style: bool,
-    loopback_development: bool,
+pub(crate) struct ObjectStoreProductConfig {
+    store_config: S3BlobStoreConfig,
     tls_trust: ObjectStoreTlsTrust,
-    operation_timeout: Duration,
     access_key_id: SecretSource,
     secret_access_key: SecretSource,
     session_token: Option<SecretSource>,
 }
 
-/// Closed HTTPS trust policy for the runner's S3-compatible object store.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ObjectStoreTlsTrust {
-    /// Authenticate the endpoint through the platform Web PKI root store.
+pub(crate) enum ObjectStoreTlsTrust {
     WebPki,
-    /// Authenticate the endpoint through exactly one bounded private CA source.
-    PrivateCa {
-        /// Source containing one PEM-encoded X.509 CA certificate.
-        certificate_source: SecretSource,
-    },
+    PrivateCa { certificate_source: SecretSource },
 }
 
 impl ObjectStoreProductConfig {
-    /// Returns the validated S3-compatible API endpoint.
-    #[must_use]
-    pub const fn endpoint(&self) -> &Url {
-        &self.endpoint
+    pub(crate) const fn store_config(&self) -> &S3BlobStoreConfig {
+        &self.store_config
     }
 
-    /// Returns the signing region.
-    #[must_use]
-    pub fn region(&self) -> &str {
-        &self.region
-    }
-
-    /// Returns the bucket containing immutable action bundles.
-    #[must_use]
-    pub fn bucket(&self) -> &str {
-        &self.bucket
-    }
-
-    /// Returns the optional object-key namespace prefix.
-    #[must_use]
-    pub fn prefix(&self) -> Option<&str> {
-        self.prefix.as_deref()
-    }
-
-    /// Reports whether requests use path-style bucket addressing.
-    ///
-    /// This is always true for loopback development mode.
-    #[must_use]
-    pub const fn force_path_style(&self) -> bool {
-        self.force_path_style
-    }
-
-    /// Reports whether explicitly loopback-only development transport is enabled.
-    #[must_use]
-    pub const fn loopback_development(&self) -> bool {
-        self.loopback_development
-    }
-
-    /// Returns the exact object-store HTTPS trust policy.
-    #[must_use]
-    pub const fn tls_trust(&self) -> &ObjectStoreTlsTrust {
+    pub(crate) const fn tls_trust(&self) -> &ObjectStoreTlsTrust {
         &self.tls_trust
     }
 
-    /// Returns the deadline applied to each object-store operation.
-    #[must_use]
-    pub const fn operation_timeout(&self) -> Duration {
-        self.operation_timeout
-    }
-
-    /// Returns the source of the S3 access-key identifier.
-    #[must_use]
-    pub const fn access_key_id(&self) -> &SecretSource {
+    pub(crate) const fn access_key_id(&self) -> &SecretSource {
         &self.access_key_id
     }
 
-    /// Returns the source of the S3 secret access key.
-    #[must_use]
-    pub const fn secret_access_key(&self) -> &SecretSource {
+    pub(crate) const fn secret_access_key(&self) -> &SecretSource {
         &self.secret_access_key
     }
 
-    /// Returns the optional source of a temporary S3 session token.
-    #[must_use]
-    pub const fn session_token(&self) -> Option<&SecretSource> {
+    pub(crate) const fn session_token(&self) -> Option<&SecretSource> {
         self.session_token.as_ref()
     }
 }
@@ -2785,22 +2725,19 @@ impl RawObjectStoreProductConfig {
             Url::parse(&self.endpoint).map_err(|_| RunnerProductConfigError::InvalidObjectStore)?;
         let tls_trust = self.tls_trust.validate()?;
         let operation_timeout = Duration::from_secs(self.operation_timeout_seconds);
-        let effective_force_path_style = self.force_path_style || self.loopback_development;
-        match (endpoint.scheme(), self.loopback_development, &tls_trust) {
-            ("http", true, ObjectStoreTlsTrust::WebPki) => {
-                automata_ci_blob_s3::S3BlobStoreConfig::loopback_development(
-                    endpoint.clone(),
-                    self.region.clone(),
-                    self.bucket.clone(),
-                    self.prefix.clone(),
-                    operation_timeout,
-                )
-            }
-            ("https", false, _) => automata_ci_blob_s3::S3BlobStoreConfig::new(
-                endpoint.clone(),
-                self.region.clone(),
-                self.bucket.clone(),
-                self.prefix.clone(),
+        let store_config = match (endpoint.scheme(), self.loopback_development, &tls_trust) {
+            ("http", true, ObjectStoreTlsTrust::WebPki) => S3BlobStoreConfig::loopback_development(
+                endpoint,
+                self.region,
+                self.bucket,
+                self.prefix,
+                operation_timeout,
+            ),
+            ("https", false, _) => S3BlobStoreConfig::new(
+                endpoint,
+                self.region,
+                self.bucket,
+                self.prefix,
                 self.force_path_style,
                 automata_ci_blob_s3::S3TlsTrust::web_pki(),
                 operation_timeout,
@@ -2809,14 +2746,8 @@ impl RawObjectStoreProductConfig {
         }
         .map_err(|_| RunnerProductConfigError::InvalidObjectStore)?;
         Ok(ObjectStoreProductConfig {
-            endpoint,
-            region: self.region,
-            bucket: self.bucket,
-            prefix: self.prefix,
-            force_path_style: effective_force_path_style,
-            loopback_development: self.loopback_development,
+            store_config,
             tls_trust,
-            operation_timeout,
             access_key_id: self.access_key_id,
             secret_access_key: self.secret_access_key,
             session_token: self.session_token,

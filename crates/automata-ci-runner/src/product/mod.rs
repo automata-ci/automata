@@ -14,16 +14,15 @@ mod state;
 mod tls;
 
 pub use composition::{
-    RunnerProductError, RunnerShutdown, load_s3_credentials, load_s3_tls_trust, load_spool_key,
-    load_spool_keyring, run,
+    RunnerProductError, RunnerShutdown, load_s3_credentials, load_spool_key, load_spool_keyring,
+    run,
 };
 pub use config::{
     ClientTlsSources, ExecutorProductConfig, GithubProductConfig, KubernetesProductConfig,
     LocalDockerProductConfig, MacosVirtualizationProductConfig, MetricsProductConfig,
-    ObjectStoreProductConfig, ObjectStoreTlsTrust, PodmanProductConfig,
-    RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig, RunnerProductConfigError,
-    RunnerProviderConfig, SpoolProtectionConfig, StateRoots, ToolchainConfig,
-    WindowsHyperVProductConfig,
+    PodmanProductConfig, RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig,
+    RunnerProductConfigError, RunnerProviderConfig, SpoolProtectionConfig, StateRoots,
+    ToolchainConfig, WindowsHyperVProductConfig,
 };
 pub use context::StandardGithubContext;
 pub(crate) use files::{

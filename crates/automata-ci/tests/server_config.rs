@@ -202,7 +202,7 @@ fn secret_file_loading_rejects_unsafe_paths_and_permissions() {
 }
 
 #[test]
-fn server_configuration_validates_non_secret_endpoint_fields() {
+fn server_configuration_validates_complete_non_secret_s3_shape() {
     let cli = Cli::try_parse_from(["automata", "server", "--s3-endpoint", "not an endpoint"])
         .expect("endpoint validation belongs to server configuration");
     let Command::Server(args) = cli.command else {
@@ -211,6 +211,16 @@ fn server_configuration_validates_non_secret_endpoint_fields() {
     assert!(matches!(
         ServerConfig::from_args(&args),
         Err(ServerConfigError::InvalidS3Endpoint)
+    ));
+
+    let cli = Cli::try_parse_from(["automata", "server", "--s3-prefix", "/absolute"])
+        .expect("namespace validation belongs to server configuration");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidS3Configuration)
     ));
 }
 

@@ -446,6 +446,23 @@ impl S3BlobStoreConfig {
         self
     }
 
+    /// Rebinds this already-validated target to one exact TLS trust policy.
+    ///
+    /// This preserves the validated endpoint, namespace, addressing, deadline,
+    /// and encryption policy. It exists for products that validate their
+    /// non-secret S3 shape before loading a bounded private-CA source.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a private-CA policy for a plaintext loopback configuration.
+    pub fn with_tls_trust(mut self, tls_trust: S3TlsTrust) -> Result<Self, S3BlobStoreConfigError> {
+        if self.endpoint.scheme() != "https" && tls_trust.is_private_ca() {
+            return Err(S3BlobStoreConfigError::PrivateCaRequiresHttps);
+        }
+        self.tls_trust = tls_trust;
+        Ok(self)
+    }
+
     /// Returns the encryption policy verified on every object read.
     #[must_use]
     pub const fn at_rest_encryption(&self) -> &S3AtRestEncryption {

@@ -1968,12 +1968,7 @@ impl ReadinessProbe for ImmutableBlobReadinessProbe {
 fn build_blob_store(
     config: &ServerConfig,
 ) -> Result<Arc<dyn ImmutableBlobStore>, ServerCompositionError> {
-    let store = crate::object_store::connect(
-        &config.s3,
-        config.s3_prefix.clone(),
-        config.s3_at_rest_encryption.clone(),
-    )
-    .map_err(|error| match error {
+    let store = crate::object_store::connect(&config.s3).map_err(|error| match error {
         crate::object_store::ObjectStoreConnectionError::Secret(error) => {
             ServerCompositionError::Secret(error)
         }

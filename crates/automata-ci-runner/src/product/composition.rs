@@ -5,9 +5,7 @@ use automata_ci_action_github::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
 use automata_ci_blob::ImmutableBlobStore;
-use automata_ci_blob_s3::{
-    MAX_S3_PRIVATE_CA_PEM_BYTES, S3BlobStoreConfig, S3TlsTrust, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{MAX_S3_PRIVATE_CA_PEM_BYTES, S3TlsTrust, StaticS3Credentials};
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
 use automata_ci_job_executor_github::{
@@ -63,9 +61,9 @@ use super::managed_secret_delivery::ManagedSecretJobExecutor;
 #[cfg(not(target_os = "linux"))]
 use super::state::RuntimeMountSnapshot;
 use super::{
-    ClientTlsMaterialError, ObjectStoreTlsTrust, ProductStateRootError, RunnerProductConfig,
-    RunnerProductConfigError, RunnerProviderConfig, SecretSource, StandardGithubContext,
-    config::required_podman_state_root,
+    ClientTlsMaterialError, ProductStateRootError, RunnerProductConfig, RunnerProductConfigError,
+    RunnerProviderConfig, SecretSource, StandardGithubContext,
+    config::{ObjectStoreTlsTrust, required_podman_state_root},
     metrics::RunnerMetrics,
     profile_admission::{
         ProfileAdmissionError, ProfileAdmissionOutcome, ProfileAdmissionPolicy,
@@ -1289,25 +1287,13 @@ fn build_object_store(
     config: &RunnerProductConfig,
 ) -> Result<Arc<dyn ImmutableBlobStore>, RunnerProductError> {
     let object_store = config.object_store();
-    let store_config = if object_store.loopback_development() {
-        S3BlobStoreConfig::loopback_development(
-            object_store.endpoint().clone(),
-            object_store.region(),
-            object_store.bucket(),
-            object_store.prefix().map(str::to_owned),
-            object_store.operation_timeout(),
-        )
-    } else {
-        S3BlobStoreConfig::new(
-            object_store.endpoint().clone(),
-            object_store.region(),
-            object_store.bucket(),
-            object_store.prefix().map(str::to_owned),
-            object_store.force_path_style(),
-            load_s3_tls_trust(object_store.tls_trust())?,
-            object_store.operation_timeout(),
-        )
-    }?;
+    let store_config = match object_store.tls_trust() {
+        ObjectStoreTlsTrust::WebPki => object_store.store_config().clone(),
+        ObjectStoreTlsTrust::PrivateCa { certificate_source } => object_store
+            .store_config()
+            .clone()
+            .with_tls_trust(load_s3_private_ca(certificate_source)?)?,
+    };
     let credentials = load_s3_credentials(
         object_store.access_key_id(),
         object_store.secret_access_key(),
@@ -1322,15 +1308,10 @@ fn build_object_store(
 ///
 /// Returns a sanitized product error when a private CA source is unavailable,
 /// excessive, malformed, or not exactly one X.509 CA certificate.
-pub fn load_s3_tls_trust(policy: &ObjectStoreTlsTrust) -> Result<S3TlsTrust, RunnerProductError> {
-    match policy {
-        ObjectStoreTlsTrust::WebPki => Ok(S3TlsTrust::web_pki()),
-        ObjectStoreTlsTrust::PrivateCa { certificate_source } => {
-            let mut certificate_pem = certificate_source.read(MAX_S3_PRIVATE_CA_PEM_BYTES)?;
-            S3TlsTrust::private_ca(std::mem::take(&mut *certificate_pem))
-                .map_err(RunnerProductError::ObjectStore)
-        }
-    }
+fn load_s3_private_ca(certificate_source: &SecretSource) -> Result<S3TlsTrust, RunnerProductError> {
+    let mut certificate_pem = certificate_source.read(MAX_S3_PRIVATE_CA_PEM_BYTES)?;
+    S3TlsTrust::private_ca(std::mem::take(&mut *certificate_pem))
+        .map_err(RunnerProductError::ObjectStore)
 }
 
 fn build_toolchain(
@@ -1652,9 +1633,91 @@ mod tests {
         net::{IpAddr, Ipv4Addr, SocketAddr},
     };
 
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
+
     use automata_ci_metrics::OPENMETRICS_CONTENT_TYPE;
 
+    #[cfg(unix)]
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+
     use super::*;
+
+    #[cfg(unix)]
+    struct PrivateCaFixture {
+        root: PathBuf,
+        source: SecretSource,
+    }
+
+    #[cfg(unix)]
+    impl PrivateCaFixture {
+        fn new(bytes: &[u8]) -> Self {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("workspace root")
+                .join("target/runner-s3-private-ca-tests")
+                .join(uuid::Uuid::new_v4().simple().to_string());
+            fs::create_dir_all(&root).expect("create private CA fixture root");
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                .expect("restrict private CA fixture root");
+            let path = root.join("ca.pem");
+            fs::write(&path, bytes).expect("write private CA fixture");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .expect("restrict private CA fixture");
+            Self {
+                root,
+                source: SecretSource::File { path },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PrivateCaFixture {
+        fn drop(&mut self) {
+            let _ignored = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_ca_binding_loads_one_bounded_exact_redacted_source() {
+        let key = KeyPair::generate().expect("private CA key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("private CA params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let pem = params
+            .self_signed(&key)
+            .expect("self-signed private CA")
+            .pem();
+        let certificate = PrivateCaFixture::new(pem.as_bytes());
+        let trust = load_s3_private_ca(&certificate.source).expect("one exact private CA");
+        assert_eq!(
+            format!("{trust:?}"),
+            "S3TlsTrust::PrivateCa([certificate redacted])"
+        );
+        assert!(!format!("{trust:?}").contains(&pem));
+
+        let malformed = PrivateCaFixture::new(b"private CA content must never escape");
+        assert!(matches!(
+            load_s3_private_ca(&malformed.source),
+            Err(RunnerProductError::ObjectStore(
+                automata_ci_blob_s3::S3BlobStoreConfigError::InvalidPrivateCa
+            ))
+        ));
+
+        let oversized = PrivateCaFixture::new(&vec![
+            b'x';
+            automata_ci_blob_s3::MAX_S3_PRIVATE_CA_PEM_BYTES
+                + 1
+        ]);
+        assert!(matches!(
+            load_s3_private_ca(&oversized.source),
+            Err(RunnerProductError::SecureInput(
+                super::super::SecureInputError::InvalidSize
+            ))
+        ));
+    }
 
     #[derive(Debug, Default)]
     struct StartupEffects {

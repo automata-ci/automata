@@ -321,8 +321,6 @@ pub struct ServerConfig {
     pub(crate) database_max_connections: u32,
     pub(crate) database_transport_security: PostgresTransportSecurity,
     pub(crate) s3: S3ConnectionConfig,
-    pub(crate) s3_prefix: Option<String>,
-    pub(crate) s3_at_rest_encryption: S3AtRestEncryption,
     pub(crate) runner_client_ca_certificate: SecretSource,
     pub(crate) runner_client_ca_private_key: SecretSource,
     pub(crate) runner_server_ca: SecretSource,
@@ -340,12 +338,8 @@ pub struct ServerConfig {
 /// Shared validated S3 connection, trust, deadline, and credential sources.
 #[derive(Clone, Debug)]
 pub(crate) struct S3ConnectionConfig {
-    endpoint: Url,
-    region: String,
-    bucket: String,
-    force_path_style: bool,
+    store_config: S3BlobStoreConfig,
     transport: S3Transport,
-    operation_timeout: Duration,
     access_key: SecretSource,
     secret_key: SecretSource,
     session_token: Option<SecretSource>,
@@ -363,7 +357,11 @@ pub(crate) enum S3Transport {
 }
 
 impl S3ConnectionConfig {
-    pub(crate) fn from_args(args: &S3ConnectionArgs) -> Result<Self, ServerConfigError> {
+    pub(crate) fn from_args(
+        args: &S3ConnectionArgs,
+        prefix: Option<String>,
+        at_rest_encryption: S3AtRestEncryption,
+    ) -> Result<Self, ServerConfigError> {
         let sources = [
             Some(&args.s3_access_key_source),
             Some(&args.s3_secret_key_source),
@@ -399,12 +397,12 @@ impl S3ConnectionConfig {
             _ => return Err(ServerConfigError::InvalidS3Endpoint),
         };
         let operation_timeout = positive_seconds(args.s3_operation_timeout_seconds)?;
-        let validation = match &transport {
+        let store_config = match &transport {
             S3Transport::WebPki | S3Transport::PrivateCa { .. } => S3BlobStoreConfig::new(
                 endpoint.clone(),
                 args.s3_region.clone(),
                 args.s3_bucket.clone(),
-                None,
+                prefix,
                 args.s3_force_path_style,
                 S3TlsTrust::web_pki(),
                 operation_timeout,
@@ -413,19 +411,15 @@ impl S3ConnectionConfig {
                 endpoint.clone(),
                 args.s3_region.clone(),
                 args.s3_bucket.clone(),
-                None,
+                prefix,
                 operation_timeout,
             ),
-        };
-        validation.map_err(|_| ServerConfigError::InvalidS3Configuration)?;
+        }
+        .map_err(|_| ServerConfigError::InvalidS3Configuration)?
+        .with_at_rest_encryption(at_rest_encryption);
         Ok(Self {
-            endpoint,
-            region: args.s3_region.clone(),
-            bucket: args.s3_bucket.clone(),
-            force_path_style: args.s3_force_path_style
-                || matches!(&transport, S3Transport::LoopbackPlaintext),
+            store_config,
             transport,
-            operation_timeout,
             access_key: args.s3_access_key_source.clone(),
             secret_key: args.s3_secret_key_source.clone(),
             session_token: args.s3_session_token_source.clone(),
@@ -436,24 +430,8 @@ impl S3ConnectionConfig {
         &self.transport
     }
 
-    pub(crate) const fn endpoint(&self) -> &Url {
-        &self.endpoint
-    }
-
-    pub(crate) fn region(&self) -> &str {
-        &self.region
-    }
-
-    pub(crate) fn bucket(&self) -> &str {
-        &self.bucket
-    }
-
-    pub(crate) const fn force_path_style(&self) -> bool {
-        self.force_path_style
-    }
-
-    pub(crate) const fn operation_timeout(&self) -> Duration {
-        self.operation_timeout
+    pub(crate) const fn store_config(&self) -> &S3BlobStoreConfig {
+        &self.store_config
     }
 
     pub(crate) fn load_access_key(&self) -> Result<Zeroizing<String>, SecretLoadError> {
@@ -763,8 +741,9 @@ impl ServerConfig {
         validate_server_secret_sources(args)?;
         validate_local_listeners(args)?;
         validate_fallback_tenant(&args.fallback_tenant_id)?;
-        let s3 = S3ConnectionConfig::from_args(&args.s3)?;
         let s3_at_rest_encryption = s3_at_rest_encryption(args.s3_kms_key_id.as_deref())?;
+        let s3 =
+            S3ConnectionConfig::from_args(&args.s3, args.s3_prefix.clone(), s3_at_rest_encryption)?;
         if args.database_max_connections == 0 {
             return Err(ServerConfigError::InvalidDatabaseConnections);
         }
@@ -831,8 +810,6 @@ impl ServerConfig {
                 }
             },
             s3,
-            s3_prefix: args.s3_prefix.clone(),
-            s3_at_rest_encryption,
             runner_client_ca_certificate: args.runner_client_ca_certificate_source.clone(),
             runner_client_ca_private_key: args.runner_client_ca_key_source.clone(),
             runner_server_ca: args.runner_server_ca_source.clone(),

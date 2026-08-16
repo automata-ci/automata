@@ -267,16 +267,56 @@ fn private_ca_trust_accepts_exactly_one_valid_ca_and_redacts_it() {
 
 #[test]
 fn private_ca_trust_is_incompatible_with_plaintext() {
-    let result = S3BlobStoreConfig::new(
+    let trust = S3TlsTrust::private_ca(certificate_pem(true)).expect("private CA");
+    let direct = S3BlobStoreConfig::new(
         Url::parse("http://127.0.0.1:9000/").expect("URL"),
         "us-east-1",
         "automata-tests",
         None,
         true,
-        S3TlsTrust::private_ca(certificate_pem(true)).expect("private CA"),
+        trust.clone(),
         Duration::from_secs(10),
     );
+    assert_eq!(direct, Err(S3BlobStoreConfigError::PrivateCaRequiresHttps));
+    let result = S3BlobStoreConfig::loopback_development(
+        Url::parse("http://127.0.0.1:9000/").expect("URL"),
+        "us-east-1",
+        "automata-tests",
+        None,
+        Duration::from_secs(10),
+    )
+    .expect("loopback configuration")
+    .with_tls_trust(trust);
     assert_eq!(result, Err(S3BlobStoreConfigError::PrivateCaRequiresHttps));
+}
+
+#[test]
+fn validated_https_shape_can_bind_one_late_loaded_exact_trust_policy() {
+    let endpoint = Url::parse("https://objects.example.test/").expect("URL");
+    let trust = S3TlsTrust::private_ca(certificate_pem(true)).expect("private CA");
+    let rebound = S3BlobStoreConfig::new(
+        endpoint.clone(),
+        "us-east-1",
+        "automata-production",
+        Some("tenant-a".to_owned()),
+        true,
+        S3TlsTrust::web_pki(),
+        Duration::from_secs(10),
+    )
+    .expect("validated HTTPS shape")
+    .with_tls_trust(trust.clone())
+    .expect("late trust binding");
+    let direct = S3BlobStoreConfig::new(
+        endpoint,
+        "us-east-1",
+        "automata-production",
+        Some("tenant-a".to_owned()),
+        true,
+        trust,
+        Duration::from_secs(10),
+    )
+    .expect("direct exact configuration");
+    assert_eq!(rebound, direct);
 }
 
 fn certificate_pem(is_ca: bool) -> Vec<u8> {

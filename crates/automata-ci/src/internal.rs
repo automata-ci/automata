@@ -15,9 +15,9 @@ pub(crate) async fn execute(args: &InternalArgs) -> Result<()> {
 }
 
 async fn ensure_exact_bucket(args: &InternalEnsureBucketArgs) -> Result<()> {
-    let connection = S3ConnectionConfig::from_args(&args.s3)
+    let connection = S3ConnectionConfig::from_args(&args.s3, None, S3AtRestEncryption::aes256())
         .context("invalid object-store initialization configuration")?;
-    let store = crate::object_store::connect(&connection, None, S3AtRestEncryption::aes256())
+    let store = crate::object_store::connect(&connection)
         .context("failed to configure object-store initialization")?;
     store
         .ensure_bucket()
