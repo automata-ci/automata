@@ -208,9 +208,13 @@ renderer runs as a resource-limited WASI component without filesystem, network,
 environment, or subprocess access. Node.js is a build dependency, not a server
 dependency.
 
-Every route returns complete HTML. Browser JavaScript adds small conveniences
-such as theme preference, log filtering, and form state; it does not own page
-data or live log transport.
+Every initial route returns complete server-rendered HTML. Browser JavaScript
+adds theme preference, log filtering, and form state, and active job logs
+revalidate bounded JSON snapshots. For resumable delivery, the shared UI
+selects advertised transports, strictly decodes SSE, advances checkpoints,
+reconnects, and falls back to snapshot polling. Rust retains authentication,
+authorization, and durable log-data authority. See
+[ADR 0004](architecture-decisions/0004-resumable-live-log-delivery.md).
 
 ## Planned providers and topology
 
