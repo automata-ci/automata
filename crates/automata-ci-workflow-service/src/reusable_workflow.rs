@@ -2385,12 +2385,12 @@ fn recompile_root_source(
         revision,
         path,
         source,
-        ReusableCompilationSelection::GithubPreselected(event),
+        ReusableCompilationSelection::GithubPreselected(Box::new(event)),
     )
 }
 
 enum ReusableCompilationSelection {
-    GithubPreselected(automata_ci_core::WorkflowEventProvenance),
+    GithubPreselected(Box<automata_ci_core::WorkflowEventProvenance>),
     GithubWorkflowCall,
 }
 
@@ -2423,7 +2423,7 @@ fn compile_source(
         .ok_or_else(|| ReusableWorkflowExpansionError::FrontendRejected("no plan".to_owned()))?;
     let request = match selection {
         ReusableCompilationSelection::GithubPreselected(event) => {
-            CompileWorkflowRequest::for_preselected_event(source_plan, event)
+            CompileWorkflowRequest::for_preselected_event(source_plan, *event)
         }
         ReusableCompilationSelection::GithubWorkflowCall => CompileWorkflowRequest::new(
             source_plan,
