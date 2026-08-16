@@ -239,6 +239,15 @@ async fn stage_authenticated_admission(
             UnixMillis::new(configured_at),
         )?)
         .await?;
+    stage_authenticated_delivery(database, &manifest, command, namespace).await
+}
+
+async fn stage_authenticated_delivery(
+    database: &TestDatabase,
+    manifest: &GithubProviderManifest,
+    command: &AdmitLogicalWorkflowRun,
+    namespace: u128,
+) -> TestResult<(AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim)> {
     let delivery_observed_at = database_now_ms(database).await?;
     let accepted = database
         .store()
@@ -285,7 +294,7 @@ async fn stage_authenticated_admission(
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
     crate::support::register_provider_delivery_workflow_inventory(
         database,
-        &manifest,
+        manifest,
         command,
         claimed.claim(),
         claimed.claimed_at(),
@@ -455,6 +464,104 @@ fn fixture_at(
     ))
     .build()
     .expect("logical admission fixture")
+}
+
+fn fixture_for_same_workflow(
+    workflow: &AdmitLogicalWorkflowRun,
+    idempotency_key: &str,
+    request_digest: u8,
+    namespace: u128,
+) -> AdmitLogicalWorkflowRun {
+    let distinct = fixture(
+        workflow.tenant().as_str(),
+        idempotency_key,
+        request_digest,
+        namespace,
+    );
+    AdmitLogicalWorkflowRun::builder(
+        workflow.tenant().clone(),
+        distinct.idempotency().clone(),
+        distinct.request_digest(),
+        workflow.repository().clone(),
+        workflow.workflow_id(),
+        workflow.workflow_path(),
+        workflow.workflow_name(),
+        workflow.git_ref(),
+        workflow.snapshot_id(),
+        workflow.source().clone(),
+        workflow.plan().clone(),
+        distinct.run_id(),
+        distinct.run_attempt(),
+        distinct.root_invocation_id(),
+        distinct.event_name(),
+        distinct.event().clone(),
+        distinct.head_sha().to_vec(),
+        distinct.jobs().to_vec(),
+        distinct.admitted_at(),
+    )
+    .actor(distinct.actor().expect("provider admission actor"))
+    .trust_snapshot(workflow.trust_snapshot().clone())
+    .base_context(
+        distinct
+            .base_context()
+            .expect("provider admission base context")
+            .clone(),
+    )
+    .build()
+    .expect("same-workflow logical admission fixture")
+}
+
+async fn assert_workflow_enable_state_history(
+    database: &TestDatabase,
+    command: &AdmitLogicalWorkflowRun,
+    expected: &[(i64, &str)],
+) -> TestResult {
+    let history: Vec<(i64, String)> = sqlx::query_as(
+        r"
+        SELECT state_revision, enable_state::text
+        FROM workflow_enable_state_revisions
+        WHERE tenant_id = $1
+          AND repository_id = $2
+          AND workflow_id = $3
+        ORDER BY state_revision
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.workflow_id().as_uuid())
+    .fetch_all(database.pool())
+    .await?;
+    assert_eq!(
+        history,
+        expected
+            .iter()
+            .map(|(revision, state)| (*revision, (*state).to_owned()))
+            .collect::<Vec<_>>()
+    );
+    let current: (i64, String) = sqlx::query_as(
+        r"
+        SELECT current.state_revision, revision.enable_state::text
+        FROM workflow_enable_state_current AS current
+        JOIN workflow_enable_state_revisions AS revision
+          ON revision.tenant_id = current.tenant_id
+         AND revision.repository_id = current.repository_id
+         AND revision.workflow_id = current.workflow_id
+         AND revision.state_revision = current.state_revision
+        WHERE current.tenant_id = $1
+          AND current.repository_id = $2
+          AND current.workflow_id = $3
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(command.workflow_id().as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    let expected_current = expected
+        .last()
+        .ok_or("expected enable-state history is empty")?;
+    assert_eq!(current, (expected_current.0, expected_current.1.to_owned()));
+    Ok(())
 }
 
 async fn assert_logical_admission_shape(
@@ -910,6 +1017,136 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One sequential proof covers initialization, reuse, and disable.
+async fn distinct_provider_admissions_reuse_exact_workflow_enable_state() -> TestResult {
+    run_with_database(|database| async move {
+        const TENANT: &str = "logical-enable-state-reuse";
+        const WORKFLOW_NAMESPACE: u128 = 2_450;
+
+        seed_tenant(&database, TENANT).await?;
+        let first_fixture = fixture(TENANT, "delivery-enable-first", 0xa1, WORKFLOW_NAMESPACE);
+        let second_fixture = fixture_for_same_workflow(
+            &first_fixture,
+            "delivery-enable-second",
+            0xa2,
+            WORKFLOW_NAMESPACE + 10,
+        );
+        let disabled_fixture = fixture_for_same_workflow(
+            &first_fixture,
+            "delivery-enable-disabled",
+            0xa3,
+            WORKFLOW_NAMESPACE + 20,
+        );
+        let manifest = fixture_manifest(first_fixture.tenant().clone(), WORKFLOW_NAMESPACE);
+
+        let (first_command, first_claim) =
+            stage_authenticated_admission(&database, &first_fixture, WORKFLOW_NAMESPACE).await?;
+        let first = database
+            .store()
+            .admit_authenticated_github_delivery(
+                first_command.clone(),
+                first_claim,
+                first_command.admitted_at(),
+            )
+            .await?;
+        assert!(!first.is_replay());
+
+        let (second_command, second_claim) =
+            stage_authenticated_delivery(&database, &manifest, &second_fixture, WORKFLOW_NAMESPACE)
+                .await?;
+        let second = database
+            .store()
+            .admit_authenticated_github_delivery(
+                second_command.clone(),
+                second_claim,
+                second_command.admitted_at(),
+            )
+            .await?;
+        assert!(!second.is_replay());
+        assert_ne!(first.run_id(), second.run_id());
+        assert_workflow_enable_state_history(&database, &first_command, &[(1, "enabled")]).await?;
+
+        let disabled = WorkflowEnableStateRecord::new(
+            first_command.tenant().clone(),
+            first_command.repository().id(),
+            first_command.workflow_id(),
+            first_command.workflow_path(),
+            WorkflowEnableStateRevision::new(2)?,
+            WorkflowEnableState::Disabled,
+            UnixMillis::new(database_now_ms(&database).await?),
+        )?;
+        let disabled_state = database
+            .store()
+            .set_workflow_enable_state(SetWorkflowEnableState::new(
+                disabled,
+                Some(WorkflowEnableStateRevision::new(1)?),
+            )?)
+            .await?;
+        assert!(!disabled_state.is_replay());
+
+        let (disabled_command, disabled_claim) = stage_authenticated_delivery(
+            &database,
+            &manifest,
+            &disabled_fixture,
+            WORKFLOW_NAMESPACE,
+        )
+        .await?;
+        let disabled_delivery_id = disabled_claim.claim().delivery_id();
+        assert!(matches!(
+            database
+                .store()
+                .admit_authenticated_github_delivery(
+                    disabled_command.clone(),
+                    disabled_claim,
+                    disabled_command.admitted_at(),
+                )
+                .await,
+            Err(LogicalWorkflowAdmissionStoreError::WorkflowDisabled)
+        ));
+        let disabled_run_counts: (i64, i64) = sqlx::query_as(
+            r"
+            SELECT (SELECT count(*) FROM workflow_runs WHERE id = $1),
+                   (SELECT count(*) FROM workflow_admission_receipts WHERE run_id = $1)
+            ",
+        )
+        .bind(disabled_command.run_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(disabled_run_counts, (0, 0));
+        let terminal: (i64, String, Option<Uuid>, Option<String>) = sqlx::query_as(
+            r"
+            SELECT count(*) OVER (), progress.outcome_kind, progress.run_id, progress.reason
+            FROM event_subject_selections AS selection
+            JOIN event_subject_progress AS progress
+              ON progress.tenant_id = selection.tenant_id
+             AND progress.subject_id = selection.subject_id
+             AND progress.selection_digest = selection.selection_digest
+            WHERE selection.origin_kind_name = 'provider_delivery'
+              AND selection.origin_id = $1
+              AND selection.workflow_path = $2
+            ",
+        )
+        .bind(disabled_delivery_id.as_uuid())
+        .bind(disabled_command.workflow_path())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(
+            terminal,
+            (1, "skipped".into(), None, Some("workflow.disabled".into()))
+        );
+        assert_workflow_enable_state_history(
+            &database,
+            &first_command,
+            &[(1, "enabled"), (2, "disabled")],
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(clippy::too_many_lines)] // One proof covers disable CAS, concurrent terminalization, and SQL guards.
 async fn disabled_state_blocks_new_event_admission_but_remains_versioned() -> TestResult {
     run_with_database(|database| async move {
@@ -1292,6 +1529,7 @@ async fn concurrent_replay_has_one_insert_and_changed_digest_conflicts() -> Test
         assert_ne!(left.is_replay(), right.is_replay());
         assert_eq!(left.run_id(), right.run_id());
         assert_eq!(left.run_number(), right.run_number());
+        assert_workflow_enable_state_history(&database, &command, &[(1, "enabled")]).await?;
 
         let conflicting_trust_snapshot =
             crate::support::authenticated_github_trust_snapshot_for_actor(
