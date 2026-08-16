@@ -891,20 +891,38 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
         .exec(&command, &NeverCancelled)
         .expect("environment injection");
 
+    assert_exact_environment_custody(
+        &fixture,
+        &[
+            ("TOKEN", secret),
+            ("HOME", home),
+            ("PATH", path),
+            ("TMPDIR", temporary),
+            ("LD_PRELOAD", preload),
+            ("AUTOMATA_EMPTY", ""),
+            ("INPUT_PATH", multiline),
+        ],
+    );
+    assert!(persistent_transfer_state_is_absent(&fixture));
+
+    fixture.fake.set_exec_output(CommandOutput::terminated(
+        automata_ci_sandbox_podman::CommandTermination::Cancelled,
+    ));
+    let output = endpoint
+        .exec(&command, &NeverCancelled)
+        .expect("cancelled exec is a terminal result");
+    assert_eq!(
+        output.termination(),
+        automata_ci_execution::ExecutionTermination::Cancelled
+    );
+    assert!(persistent_transfer_state_is_absent(&fixture));
+}
+
+fn assert_exact_environment_custody(fixture: &Fixture, expected: &[(&str, &str)]) {
     let captured = fixture.fake.last_exec_environment();
-    assert_eq!(captured.get("TOKEN").map(String::as_str), Some(secret));
-    assert_eq!(captured.get("HOME").map(String::as_str), Some(home));
-    assert_eq!(captured.get("PATH").map(String::as_str), Some(path));
-    assert_eq!(captured.get("TMPDIR").map(String::as_str), Some(temporary));
-    assert_eq!(
-        captured.get("LD_PRELOAD").map(String::as_str),
-        Some(preload)
-    );
-    assert_eq!(captured.get("AUTOMATA_EMPTY").map(String::as_str), Some(""));
-    assert_eq!(
-        captured.get("INPUT_PATH").map(String::as_str),
-        Some(multiline)
-    );
+    for (name, value) in expected {
+        assert_eq!(captured.get(*name).map(String::as_str), Some(*value));
+    }
     assert_eq!(
         fixture.fake.last_dynamic_environment_names(),
         ["INPUT_PATH"]
@@ -927,26 +945,10 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
         Some(fixture.scratch.path().join("process-transient"))
     );
     assert!(commands.iter().flatten().all(|argument| {
-        argument != secret
-            && argument != home
-            && argument != path
-            && argument != temporary
-            && argument != preload
-            && argument != multiline
+        expected
+            .iter()
+            .all(|(_, value)| value.is_empty() || argument != value)
     }));
-    assert!(persistent_transfer_state_is_absent(&fixture));
-
-    fixture.fake.set_exec_output(CommandOutput::terminated(
-        automata_ci_sandbox_podman::CommandTermination::Cancelled,
-    ));
-    let output = endpoint
-        .exec(&command, &NeverCancelled)
-        .expect("cancelled exec is a terminal result");
-    assert_eq!(
-        output.termination(),
-        automata_ci_execution::ExecutionTermination::Cancelled
-    );
-    assert!(persistent_transfer_state_is_absent(&fixture));
 }
 
 #[test]
