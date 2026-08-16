@@ -1372,16 +1372,31 @@ async fn lock_materialization_eligibility_graph(
     transaction: &mut Transaction<'_, Postgres>,
     row: &PgRow,
 ) -> Result<bool, LogicalWorkSelectionStoreError> {
+    let tenant_id: String = row.try_get("tenant_id").map_err(operation_error)?;
+    let repository_id: Uuid = row.try_get("repository_id").map_err(operation_error)?;
     let instance_id: Uuid = row.try_get("instance_id").map_err(operation_error)?;
     let run_id: Uuid = row.try_get("run_id").map_err(operation_error)?;
     let invocation_id: Uuid = row.try_get("invocation_id").map_err(operation_error)?;
     let logical_job_id: Uuid = row.try_get("logical_job_id").map_err(operation_error)?;
-    if sqlx::query("SELECT id FROM workflow_runs WHERE id = $1 FOR UPDATE SKIP LOCKED")
-        .bind(run_id)
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(operation_error)?
-        .is_none()
+    if sqlx::query(
+        r"
+        SELECT run.id
+        FROM repositories AS repository
+        JOIN workflow_runs AS run ON run.repository_id = repository.id
+        WHERE repository.tenant_id = $1
+          AND repository.id = $2
+          AND run.id = $3
+        FOR SHARE OF repository SKIP LOCKED
+        FOR UPDATE OF run SKIP LOCKED
+        ",
+    )
+    .bind(tenant_id)
+    .bind(repository_id)
+    .bind(run_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?
+    .is_none()
     {
         return Ok(false);
     }
