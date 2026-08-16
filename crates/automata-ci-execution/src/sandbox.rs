@@ -354,6 +354,10 @@ pub enum DestroyDisposition {
 }
 
 /// Provider-neutral, object-safe whole-job isolation port.
+///
+/// Termination is provider-specific authority observed at adapter cancellation
+/// checkpoints. The disposition or a provider return is not evidence that
+/// remotely initiated work has quiesced.
 pub trait SandboxProvider: fmt::Debug + Send + Sync {
     /// Returns the stable identifier for this provider implementation.
     fn provider_id(&self) -> &ProviderId;

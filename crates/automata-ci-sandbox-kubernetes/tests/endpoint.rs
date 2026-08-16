@@ -59,8 +59,12 @@ impl TestCancellation {
 }
 
 impl Cancellation for TestCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+    fn disposition(&self) -> automata_ci_execution::CancellationDisposition {
+        if self.0.load(Ordering::SeqCst) {
+            automata_ci_execution::CancellationDisposition::Terminate
+        } else {
+            automata_ci_execution::CancellationDisposition::Active
+        }
     }
 }
 

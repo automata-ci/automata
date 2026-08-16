@@ -507,7 +507,7 @@ impl ProviderInner {
         fingerprint: &str,
         cancellation: &dyn Cancellation,
     ) -> Result<SandboxRecord, ProviderError> {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(error::known(
                 ProviderErrorKind::Cancelled,
                 ProviderStage::CreateSandbox,
@@ -1060,7 +1060,7 @@ if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 91}
         names: &ResourceName,
         cancellation: &dyn Cancellation,
     ) -> Result<DestroyDisposition, ProviderError> {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(error::known(
                 ProviderErrorKind::Cancelled,
                 ProviderStage::DestroySandbox,

@@ -12,15 +12,37 @@ const MAX_ENVIRONMENT_NAME_BYTES: usize = 128;
 const MAX_ENVIRONMENT_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_ENVIRONMENT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Meaning of a cooperative cancellation observation at a provider boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancellationDisposition {
+    /// No cancellation has been requested.
+    Active,
+    /// Request provider-specific termination handling at a checkpoint.
+    ///
+    /// The durable runner may still require exact sandbox destruction before
+    /// it records cancellation as complete.
+    Terminate,
+}
+
+impl CancellationDisposition {
+    /// Reports whether the provider is authorized to terminate backend work.
+    #[must_use]
+    pub const fn requires_termination(self) -> bool {
+        matches!(self, Self::Terminate)
+    }
+}
+
 /// Cooperative cancellation source shared across provider boundaries.
 pub trait Cancellation: Send + Sync {
-    /// Returns whether the caller has requested cancellation.
+    /// Returns the current cancellation meaning.
     ///
-    /// Adapters should check this between bounded backend phases. A `true`
-    /// result requests prompt termination; it does not prove that an in-flight
-    /// backend mutation was rolled back.
+    /// Adapters observe this at their cancellation checkpoints. Termination
+    /// authorizes provider-specific handling; the disposition or an adapter
+    /// return does not prove remote work quiesced or an in-flight mutation
+    /// rolled back. Durable cancellation is complete only after the exact
+    /// sandbox is proven absent.
     #[must_use]
-    fn is_cancelled(&self) -> bool;
+    fn disposition(&self) -> CancellationDisposition;
 }
 
 /// Cancellation source that never requests cancellation.
@@ -28,8 +50,8 @@ pub trait Cancellation: Send + Sync {
 pub struct NeverCancelled;
 
 impl Cancellation for NeverCancelled {
-    fn is_cancelled(&self) -> bool {
-        false
+    fn disposition(&self) -> CancellationDisposition {
+        CancellationDisposition::Active
     }
 }
 
@@ -374,16 +396,19 @@ impl fmt::Debug for ExecutionCommand {
     }
 }
 
-/// How an execution command terminated.
+/// Adapter-reported outcome of an execution command.
+///
+/// This value records the endpoint's observation; it is not evidence that a
+/// remotely initiated process has quiesced.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionTermination {
     /// The process exited normally with the supplied platform exit status.
     Exited(i32),
     /// The process terminated because it received a signal.
     Signalled,
-    /// The endpoint stopped the process after the command deadline elapsed.
+    /// The endpoint observed the command deadline and reported a timeout.
     TimedOut,
-    /// The endpoint stopped the process after cooperative cancellation.
+    /// The endpoint observed cooperative cancellation and reported it.
     Cancelled,
 }
 
@@ -551,7 +576,7 @@ impl ExecutionOutput {
         })
     }
 
-    /// Returns how the command terminated.
+    /// Returns the endpoint's reported command outcome.
     #[must_use]
     pub const fn termination(&self) -> ExecutionTermination {
         self.termination
@@ -797,7 +822,10 @@ impl CopyFromRequest {
 }
 
 /// Attached execution port. Capabilities are explicit; unsupported operations
-/// return [`crate::ExecutionErrorKind::UnsupportedCapability`].
+/// return [`crate::ExecutionErrorKind::UnsupportedCapability`]. Termination is
+/// provider-specific authority observed at adapter cancellation checkpoints;
+/// the disposition or an endpoint return is not evidence that remotely
+/// initiated work has quiesced.
 pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
     /// Returns the exact opaque sandbox handle to which this endpoint is bound.
     fn handle(&self) -> &SandboxHandle;

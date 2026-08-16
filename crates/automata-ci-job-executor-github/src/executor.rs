@@ -22,11 +22,12 @@ use automata_ci_core::{
     UnixMillis, ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
 };
 use automata_ci_execution::{
-    Cancellation, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv, ExecutionCommand,
-    ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionTermination,
-    NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind, RootFilesystemPolicy,
-    SandboxCapability, SandboxGeneration, SandboxHandle, SandboxLaunch, SandboxProvider,
-    SandboxState, ServiceContainerBindings, ServiceContainerSpecs, TargetPath, TargetPlatform,
+    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, DestroySandbox,
+    ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionError, ExecutionErrorKind,
+    ExecutionOutput, ExecutionTermination, NetworkPolicy, ProviderCapabilities, ProviderError,
+    ProviderErrorKind, RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle,
+    SandboxLaunch, SandboxProvider, SandboxState, ServiceContainerBindings, ServiceContainerSpecs,
+    TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -298,7 +299,7 @@ impl SandboxExpressionFunctions {
         .ok()?;
         let output = self
             .endpoint
-            .exec(&command, &CancellationBridge(&self.cancellation))
+            .exec(&command, &ProviderCancellationBridge(&self.cancellation))
             .ok()?;
         if self.cancellation.is_cancelled()
             || output.was_truncated()
@@ -3034,7 +3035,7 @@ impl GithubJobExecutor {
         )
         .map_err(|_| ActionLoadError::Executor(invalid_job()))?;
         let output = endpoint
-            .exec(&command, &CancellationBridge(cancellation))
+            .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)
             .map_err(ActionLoadError::Executor)?;
         let selected = match (
@@ -3074,7 +3075,7 @@ impl GithubJobExecutor {
         )
         .map_err(|_| ActionLoadError::Executor(invalid_job()))?;
         let bytes = endpoint
-            .copy_from(&copy, &CancellationBridge(cancellation))
+            .copy_from(&copy, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)
             .map_err(ActionLoadError::Executor)?;
         let (preferred_bytes, fallback_bytes) = if selected == candidates.action_yml() {
@@ -3874,7 +3875,7 @@ impl GithubJobExecutor {
             self.config.maximum_output_bytes(),
         )?;
         let output = endpoint
-            .exec(&command, &CancellationBridge(cancellation))
+            .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         require_success(&output)?;
         let request = action_content::copy_archive_request(
@@ -3887,7 +3888,7 @@ impl GithubJobExecutor {
             action.archive(),
         )?;
         endpoint
-            .copy_to(&request, &CancellationBridge(cancellation))
+            .copy_to(&request, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         let command = action_content::extract_archive_command(
             self.ports.operation_ids.operation_id(
@@ -3903,7 +3904,7 @@ impl GithubJobExecutor {
             self.config.maximum_output_bytes(),
         )?;
         let output = endpoint
-            .exec(&command, &CancellationBridge(cancellation))
+            .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         require_success(&output)?;
         Ok(action_paths)
@@ -4702,7 +4703,7 @@ impl GithubJobExecutor {
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &dyn ExecutorCancellation,
     ) -> Result<ObtainedSandbox, ExecutorAdapterError> {
-        let cancellation = CancellationBridge(cancellation);
+        let cancellation = ProviderCancellationBridge(cancellation);
         let generation = SandboxGeneration::new(request.lease().fencing_token().get())
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
         let handle = if let Some(recovered) = request.recovered_sandbox() {
@@ -4836,7 +4837,7 @@ impl GithubJobExecutor {
         )
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
         let output = endpoint
-            .exec(&command, &CancellationBridge(cancellation))
+            .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         require_success(&output)
     }
@@ -4861,7 +4862,7 @@ impl GithubJobExecutor {
         )
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::ResourceExhausted))?;
         endpoint
-            .copy_to(&request, &CancellationBridge(cancellation))
+            .copy_to(&request, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)
     }
 
@@ -4910,7 +4911,7 @@ impl GithubJobExecutor {
                 observe_phase_failure(error, attempt_id, execution.phase, "build_phase_command")
             })?;
         let output = endpoint
-            .exec(&command, &CancellationBridge(cancellation))
+            .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)
             .map_err(|error| {
                 observe_phase_failure(error, attempt_id, execution.phase, "execute_phase")
@@ -5184,16 +5185,17 @@ impl GithubJobExecutor {
                 limit,
             )
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-            let bytes = match endpoint.copy_from(&request, &CancellationBridge(cancellation)) {
-                Ok(bytes) => bytes,
-                Err(error)
-                    if *kind == CommandFileKind::StepSummary
-                        && error.kind() == ExecutionErrorKind::NotFound =>
-                {
-                    Vec::new()
-                }
-                Err(error) => return Err(map_execution_error(error)),
-            };
+            let bytes =
+                match endpoint.copy_from(&request, &ProviderCancellationBridge(cancellation)) {
+                    Ok(bytes) => bytes,
+                    Err(error)
+                        if *kind == CommandFileKind::StepSummary
+                            && error.kind() == ExecutionErrorKind::NotFound =>
+                    {
+                        Vec::new()
+                    }
+                    Err(error) => return Err(map_execution_error(error)),
+                };
             if cancellation.is_cancelled() {
                 return Err(ExecutorAdapterError::new(
                     ExecutorAdapterErrorKind::Cancelled,
@@ -5275,7 +5277,7 @@ impl GithubJobExecutor {
         )
         .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
         let bytes = endpoint
-            .copy_from(&request, &CancellationBridge(cancellation))
+            .copy_from(&request, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         if cancellation.is_cancelled() {
             return Err(ExecutorAdapterError::new(
@@ -5394,7 +5396,7 @@ impl GithubJobExecutor {
         )
         .map_err(|_| invalid_job())?;
         let output = endpoint
-            .exec(&command, &CancellationBridge(cancellation))
+            .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         if cancellation.is_cancelled() || output.termination() == ExecutionTermination::Cancelled {
             return Err(cancelled());
@@ -5468,7 +5470,7 @@ impl GithubJobExecutor {
         match self
             .ports
             .provider
-            .destroy(&destroy, &CancellationBridge(cancellation))
+            .destroy(&destroy, &ProviderCancellationBridge(cancellation))
         {
             Ok(_) => events
                 .provider_operation_completed(operation_id)
@@ -5690,11 +5692,15 @@ fn reconcile_execution_cancellation(
     }
 }
 
-struct CancellationBridge<'a>(&'a dyn ExecutorCancellation);
+struct ProviderCancellationBridge<'a>(&'a dyn ExecutorCancellation);
 
-impl Cancellation for CancellationBridge<'_> {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
+impl Cancellation for ProviderCancellationBridge<'_> {
+    fn disposition(&self) -> CancellationDisposition {
+        if self.0.is_cancelled() {
+            CancellationDisposition::Terminate
+        } else {
+            CancellationDisposition::Active
+        }
     }
 }
 
@@ -7706,7 +7712,10 @@ mod tests {
     };
 
     use automata_ci_core::AttemptId;
-    use automata_ci_execution::{ExecutionOutputRecord, ExecutionOutputStream, TargetPath};
+    use automata_ci_execution::{
+        Cancellation, CancellationDisposition, ExecutionOutputRecord, ExecutionOutputStream,
+        TargetPath,
+    };
     use automata_ci_expression_github::GithubValue;
     use automata_ci_github_runtime::{
         CommandFileDecoder, CommandFileKind, CommandFilePlatform, GithubCommandFileDecoder,
@@ -7718,11 +7727,28 @@ mod tests {
         ActionBudgetRejection, ActionExecutionBudget, AttemptPaths, CleanupCancellation,
         ExecutorAdapterErrorKind, GithubStatus, JobConclusion, MAX_ACTION_INVOCATIONS,
         MAX_ACTION_NESTING_DEPTH, MAX_COMPOSITE_CHILD_STEPS, MAX_COMPOSITE_DERIVED_BYTES,
-        MAX_EVENT_DEPTH, SecretMasker, action_invocation_count_rejection,
-        composite_child_step_rejection, composite_derived_bytes_rejection, encode_action_outputs,
-        event_depth_rejection, github_value_from_json, parse_output_with_cancellation,
-        reconcile_cancelled_operation, reconcile_post_operation, resource_exhausted,
+        MAX_EVENT_DEPTH, ProviderCancellationBridge, SecretMasker,
+        action_invocation_count_rejection, composite_child_step_rejection,
+        composite_derived_bytes_rejection, encode_action_outputs, event_depth_rejection,
+        github_value_from_json, parse_output_with_cancellation, reconcile_cancelled_operation,
+        reconcile_post_operation, resource_exhausted,
     };
+
+    #[test]
+    fn shutdown_authorizes_endpoint_and_provider_termination_handling() {
+        let cancellation = ExecutionCancellation::new();
+        assert_eq!(
+            ProviderCancellationBridge(&cancellation).disposition(),
+            CancellationDisposition::Active
+        );
+
+        cancellation.signal(ExecutionCancellationReason::Shutdown);
+
+        assert_eq!(
+            ProviderCancellationBridge(&cancellation).disposition(),
+            CancellationDisposition::Terminate
+        );
+    }
 
     #[test]
     fn command_file_paths_are_stable_for_recovery_and_isolated_by_phase_and_attempt() {

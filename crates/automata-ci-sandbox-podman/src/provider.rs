@@ -950,7 +950,7 @@ impl PodmanInner {
         let mut next_health_check = Instant::now();
         let mut health_interval = None;
         loop {
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 return Err(provider_error::known(
                     ProviderErrorKind::Cancelled,
                     ProviderStage::Start,
@@ -1874,7 +1874,7 @@ impl PodmanInner {
         stage: ProviderStage,
     ) -> Result<Vec<u16>, ProviderError> {
         loop {
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 return Err(provider_error::known(ProviderErrorKind::Cancelled, stage));
             }
             if Instant::now() >= deadline {
