@@ -1856,21 +1856,22 @@ fn canonical_local_return_path(origin: &HumanAuthOrigin, path: &str) -> Option<L
 }
 
 fn valid_login_initiation(headers: &HeaderMap, expected: &HumanAuthOrigin) -> bool {
-    let Some(origin) = exactly_one_header(headers, &ORIGIN) else {
-        return false;
-    };
-    if origin != expected.as_str() {
-        return false;
-    }
     let mut fetch_sites = headers.get_all(&SEC_FETCH_SITE).iter();
     let fetch_site = fetch_sites.next();
     if fetch_sites.next().is_some() {
         return false;
     }
-    fetch_site.is_none_or(|site| {
-        site.to_str()
-            .is_ok_and(|site| !site.eq_ignore_ascii_case("cross-site"))
-    })
+    match fetch_site.and_then(|site| site.to_str().ok()) {
+        // Fetch Metadata is browser-controlled and cannot be forged by a
+        // cross-origin form. Prefer it when the browser provides the exact
+        // same-origin signal; privacy modes are permitted to omit or redact
+        // Origin independently.
+        Some(site) if site.eq_ignore_ascii_case("same-origin") => true,
+        Some(site) if site.eq_ignore_ascii_case("cross-site") => false,
+        Some(_) | None => {
+            exactly_one_header(headers, &ORIGIN).is_some_and(|origin| origin == expected.as_str())
+        }
+    }
 }
 
 fn exactly_one_header<'a>(headers: &'a HeaderMap, name: &HeaderName) -> Option<&'a str> {
@@ -3220,6 +3221,30 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(backend.web_start.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn browser_login_initiation_accepts_either_browser_same_origin_or_exact_origin() {
+        let expected = HumanAuthOrigin::new(&Url::parse("https://ci.example/").unwrap()).unwrap();
+
+        let mut fetch_metadata = HeaderMap::new();
+        fetch_metadata.insert(SEC_FETCH_SITE, HeaderValue::from_static("same-origin"));
+        assert!(valid_login_initiation(&fetch_metadata, &expected));
+
+        let mut origin_fallback = HeaderMap::new();
+        origin_fallback.insert(ORIGIN, HeaderValue::from_static("https://ci.example"));
+        assert!(valid_login_initiation(&origin_fallback, &expected));
+
+        let mut cross_site = origin_fallback.clone();
+        cross_site.insert(SEC_FETCH_SITE, HeaderValue::from_static("cross-site"));
+        assert!(!valid_login_initiation(&cross_site, &expected));
+
+        let mut same_site = HeaderMap::new();
+        same_site.insert(SEC_FETCH_SITE, HeaderValue::from_static("same-site"));
+        same_site.insert(ORIGIN, HeaderValue::from_static("https://other.example"));
+        assert!(!valid_login_initiation(&same_site, &expected));
+
+        assert!(!valid_login_initiation(&HeaderMap::new(), &expected));
     }
 
     #[tokio::test]
