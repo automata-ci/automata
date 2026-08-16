@@ -35,6 +35,14 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   stable JSON schema 3 and human output report its bounded name. The internal
   adapter can strictly inspect or create-and-adopt a repository-agnostic
   installation identity anchor without exposing a product mutation command.
+- Internal `LocalSnapshot` foundation for tracked and non-ignored live-worktree
+  source. It hashes the exact deterministic archive consumed by the existing
+  bounded workflow discovery, pins filesystem ancestors without following
+  links, normalizes tracked symlinks from Git mode, rejects Windows reparse
+  points, sparse or assume-unchanged index state, and bounded
+  Unicode-normalized portable path-graph aliases, supports exactly one explicit
+  `.github/workflows` or `.ci/workflows` namespace, and exposes no partial
+  admission, execution, GitHub authentication, or Check Run path.
 
 ### Known limitations
 

@@ -2,7 +2,8 @@
 
 - Roadmap status: Active
 - Available slice: read-only `automata local doctor` from a reviewed source checkout
-- Current implementation checkpoint: 2B.1, pinned Docker context and immutable identity anchor
+- Current implementation checkpoints: 2B.1 pinned Docker context and immutable
+  identity anchor, plus the internal source-sealing foundation of 3B
 - Date: 2026-08-15
 
 This roadmap owns the work required to make Automata easy to evaluate on one
@@ -182,6 +183,7 @@ onboarding path:
 | Existing path | Reusable capability | Remaining local gap |
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
+| `automata-ci-local` snapshot foundation | Deterministic bounded live-worktree archive, explicit workflow-location policy, and shared archive discovery | It remains an internal library seam until truthful local event compilation, same-tree reusable workflows, repository identity, and admission are composed |
 | `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
@@ -454,9 +456,10 @@ maps aliases to those exact profiles and records the mapping as run provenance.
 
 The new source boundary builds a deterministic, bounded archive from Git's
 tracked and non-ignored worktree inventory. It rejects unsafe file types,
-escaping symlinks, submodule ambiguity, case collisions, and concurrent
-mutation. The archive digest—not a possibly dirty HEAD—is the execution source
-identity. The source adapter also derives the canonical repository identity
+escaping symlinks, submodule ambiguity, sparse or assume-unchanged index state,
+Unicode-normalization and full-case-fold collisions, and concurrent mutation.
+The archive digest—not a possibly dirty HEAD—is the execution source identity.
+The source adapter also derives the canonical repository identity
 used by local admission. Before assigning that provenance contract version 1,
 its exact versioned byte preimage must define Git worktrees, symlinks,
 non-Unicode paths, case behavior, checkout moves, and clones on Linux, macOS,
@@ -774,6 +777,20 @@ workflow service, admission transaction, scheduler, cancellation, logs, and
 history. Define and retain the exact canonical repository identity as admitted
 source provenance here, not as an engine installation binding. Add
 `automata local check` as a read-only view of that path.
+
+Status: internal foundation available, checkpoint gate incomplete. The library
+seals Git's tracked plus non-ignored live-worktree inventory through pinned
+no-follow ancestor handles, normalizes tracked symlinks from Git mode, detects
+mutation, and hashes the exact deterministic gzip bytes consumed by shared
+repository archive discovery. Windows reparse points and junctions, portable
+component-trie bounds and aliases, link cycles, sparse or assume-unchanged
+index flags, and workflow-namespace aliases fail closed. Ignored paths are
+classified through one bounded NUL-safe batch per worktree scan.
+`.github/workflows` and `.ci/workflows` are explicit first-class policies; if
+both namespaces are present the source fails as ambiguous. There is deliberately
+no partial `automata local check` command before event compilation, same-tree
+reusable-workflow loading, canonical repository identity, and local source
+provenance can be validated together.
 
 Gate: clean and dirty worktrees produce deterministic digests; ignored files,
 `.git`, sockets, devices, escaping symlinks, submodule ambiguity, concurrent

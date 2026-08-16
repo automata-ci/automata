@@ -9,6 +9,7 @@ mod expression;
 mod frontend;
 mod model;
 mod repository_archive;
+mod repository_path;
 mod runner_profile;
 mod schedule;
 mod source;
@@ -51,7 +52,10 @@ pub use repository_archive::{
     MAX_REPOSITORY_WORKFLOW_PATH_BYTES, RepositoryWorkflowDiscoveryError,
     RepositoryWorkflowDiscoveryFailure, RepositoryWorkflowDiscoveryLimits,
     RepositoryWorkflowDiscoveryLimitsError, RepositoryWorkflowDiscoveryOutcome,
-    discover_repository_workflows,
+    RepositoryWorkflowDiscoveryPolicy, RepositoryWorkflowLocation, discover_repository_workflows,
+};
+pub use repository_path::{
+    RepositoryPathValidationError, RepositoryPathValidator, USTAR_LINK_NAME_BYTES,
 };
 pub use runner_profile::{
     GithubRunnerProfileCatalog, GithubRunnerProfileError, GithubRunnerProfileMapping,

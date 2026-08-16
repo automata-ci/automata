@@ -606,12 +606,18 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-core",
+ "automata-ci-workflow-github",
  "bollard",
+ "bytes",
+ "cap-fs-ext",
+ "cap-std",
+ "flate2",
  "processkit",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "thiserror",
  "tokio",
  "uuid",
@@ -1152,11 +1158,13 @@ dependencies = [
  "automata-ci-github-permissions",
  "automata-ci-schedule",
  "flate2",
+ "focaccia",
  "jiff",
  "saphyr-parser",
  "serde_json",
  "tar",
  "thiserror",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -2385,6 +2393,12 @@ name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+
+[[package]]
+name = "focaccia"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ef16690750b6e9a238378f57d3c1325d42e2d82e29b7dfd75f6d387d753b050"
 
 [[package]]
 name = "foldhash"

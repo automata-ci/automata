@@ -40,9 +40,9 @@ use automata_ci_store::{
 };
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
-    GithubWorkflowFrontend, ParseWorkflowRequest, RepositoryWorkflowDiscoveryLimits, SourceId,
-    SourceOrigin, SourceProvenance, WorkflowFrontend as _, discover_repository_workflows,
-    extract_github_schedule_entries,
+    GithubWorkflowFrontend, ParseWorkflowRequest, RepositoryWorkflowDiscoveryLimits,
+    RepositoryWorkflowDiscoveryPolicy, SourceId, SourceOrigin, SourceProvenance,
+    WorkflowFrontend as _, discover_repository_workflows, extract_github_schedule_entries,
 };
 use automata_ci_workflow_service::{
     AUTOMATA_GITHUB_SCHEDULE_EVIDENCE_V1_MEDIA_TYPE, AdmissionRepositoryCoordinates,
@@ -1049,6 +1049,7 @@ impl GithubScheduleService {
         let workflows = discover_repository_workflows(
             &archive,
             discovery_limits(manifest).map_err(|()| FireFailure::InvalidRegistry)?,
+            RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
         )
         .map_err(|_| FireFailure::InvalidRegistry)?;
         let mut available = Vec::new();
@@ -1293,8 +1294,12 @@ fn registry_entries(
     archive: &[u8],
     _archive_digest: Sha256Digest,
 ) -> Result<Vec<GithubScheduleRegistryEntry>, ()> {
-    let workflows =
-        discover_repository_workflows(archive, discovery_limits(manifest)?).map_err(|_| ())?;
+    let workflows = discover_repository_workflows(
+        archive,
+        discovery_limits(manifest)?,
+        RepositoryWorkflowDiscoveryPolicy::GithubDelivery,
+    )
+    .map_err(|_| ())?;
     let mut definitions = Vec::new();
     for workflow in workflows {
         let (path, source) = workflow.into_parts();
