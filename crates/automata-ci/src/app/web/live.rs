@@ -1317,10 +1317,6 @@ fn log_stream_safety_is_valid(stream: &automata_ci_store::HumanLogStream) -> boo
     automata_ci_store::human_output_publication_safety_schema_is_current(i32::from(
         stream.publication.safety_schema,
     )) && stream.raw_log_disposition == HumanRawLogDisposition::Persist
-        && (!matches!(
-            stream.publication.secret_exposure,
-            SecretExposureClass::ReadableSecret
-        ) || stream.publication.effective_visibility == OutputVisibility::Private)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4435,6 +4431,25 @@ mod tests {
             stream.publication.safety_schema = schema;
             assert!(!log_stream_safety_is_valid(&stream));
         }
+    }
+
+    #[test]
+    fn log_stream_reader_accepts_public_runner_redacted_logs() {
+        let run_id = RunId::new();
+        let run = fixture_run(run_id, OutputVisibility::Public);
+        let (_, stream) = fixture_job_detail(
+            run,
+            JobId::new(),
+            AttemptId::new(),
+            HumanRawLogDisposition::Persist,
+            fixture_output_publication(
+                OutputVisibility::Public,
+                SecretExposureClass::ReadableSecret,
+                "repository_policy",
+            ),
+        );
+
+        assert!(log_stream_safety_is_valid(&stream));
     }
 
     #[tokio::test]
