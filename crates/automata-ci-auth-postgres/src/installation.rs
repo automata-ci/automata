@@ -760,9 +760,6 @@ impl InstallationRepository for PostgresInstallationRepository {
                     .fetch_one(&mut *transaction)
                     .await
                     .map_err(map_database_error)?;
-            if stored_tenant_display_name != tenant.display_name() {
-                return Err(InstallationRepositoryError::IdentityConflict);
-            }
             let existing_memberships: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM tenant_human_memberships WHERE tenant_id=$1)",
             )
@@ -772,6 +769,27 @@ impl InstallationRepository for PostgresInstallationRepository {
             .map_err(map_database_error)?;
             if existing_memberships {
                 return Err(InstallationRepositoryError::IdentityConflict);
+            }
+            if stored_tenant_display_name != tenant.display_name() {
+                if stored_tenant_display_name != tenant.tenant_id().as_str() {
+                    return Err(InstallationRepositoryError::IdentityConflict);
+                }
+                let claimed = sqlx::query(
+                    r"
+                    UPDATE tenants
+                    SET display_name=$2, updated_at_ms=$3
+                    WHERE id=$1 AND display_name=id
+                    ",
+                )
+                .bind(tenant.tenant_id().as_str())
+                .bind(tenant.display_name())
+                .bind(now_ms)
+                .execute(&mut *transaction)
+                .await
+                .map_err(map_database_error)?;
+                if claimed.rows_affected() != 1 {
+                    return Err(InstallationRepositoryError::IdentityConflict);
+                }
             }
 
             let principal_uuid = Uuid::new_v4();

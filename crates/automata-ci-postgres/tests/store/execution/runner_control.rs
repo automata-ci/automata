@@ -1793,6 +1793,125 @@ async fn lease_response_and_reported_lifecycle_are_atomic_fenced_and_replayed() 
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+async fn committed_lease_acceptance_replays_after_attempt_expiry() -> TestResult {
+    run_with_database(|database| async move {
+        let clock = TestClock::freeze_at_database_now(database.pool()).await?;
+        let (seed, lease, metadata, slot, request_operation_id, request_digest) =
+            active_lease_with_duration_and_protocol(
+                &database,
+                EXPIRING_LEASE_DURATION_MILLIS,
+                Some(RUNTIME_AUTHORITY_PROTOCOL_VERSION),
+            )
+            .await?;
+        let fence = seed.session_fences[0];
+        let published = database
+            .store()
+            .publish_lease_offer(runtime_authority_offer(
+                fence,
+                &lease,
+                &metadata,
+                slot,
+                request_operation_id,
+                request_digest,
+                OperationId::new(),
+            )?)
+            .await?;
+        let authority_binding = RuntimeAuthorityDeliveryBinding::new(
+            lease.attempt_id(),
+            RunnerSlotOrdinal::new(slot.ordinal())?,
+            lease.guard(),
+            published.command().request().operation_id(),
+            ProtocolCommandSequence::new(published.command().sequence().get())?,
+            published.job_ir().digest(),
+            INITIAL_RUNTIME_AUTHORITY_GENERATION,
+        );
+
+        let acceptance = CommitLeaseResponse::new(
+            operation_request(
+                fence,
+                OperationId::new(),
+                "automata.runner.lease-response.v1",
+                [64; 32],
+            )?,
+            CommandCursor::initial(),
+            lease.attempt_id(),
+            slot,
+            lease.guard(),
+            LeaseResponseAction::Accept,
+            database_now(&database).await?,
+            response(b"accepted before expiry")?,
+        );
+        let committed = database
+            .store()
+            .commit_lease_response(acceptance.clone())
+            .await?;
+        assert!(!committed.was_replayed());
+
+        wait_until_database_time(&clock, lease.expires_at()).await?;
+        let maintenance = database
+            .store()
+            .maintain_control_plane(maintenance_request(&database).await?)
+            .await?;
+        assert_eq!(maintenance.expired_attempts().len(), 1);
+        assert_eq!(
+            maintenance.expired_attempts()[0].attempt_id(),
+            lease.attempt_id()
+        );
+        let lifecycle: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(lease.attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle, "queued");
+
+        let replayed = database.store().commit_lease_response(acceptance).await?;
+        assert!(replayed.was_replayed());
+        assert_eq!(replayed.response(), committed.response());
+        let lifecycle_after_replay: String =
+            sqlx::query_scalar("SELECT lifecycle FROM job_attempts WHERE id = $1")
+                .bind(lease.attempt_id().as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(lifecycle_after_replay, "queued");
+
+        let stale_authorization = AuthorizeRuntimeAuthorityDelivery::new(
+            operation_request(
+                fence,
+                OperationId::new(),
+                RUNTIME_AUTHORITY_REQUEST_KIND,
+                [65; 32],
+            )?,
+            RunnerProtocolVersion::new(RUNTIME_AUTHORITY_PROTOCOL_VERSION)?,
+            authority_binding,
+            database_now(&database).await?,
+        )?;
+        assert!(matches!(
+            database
+                .store()
+                .authorize_runtime_authority_delivery(stale_authorization)
+                .await,
+            Err(StoreError::SessionClosed(session_id)) if session_id == fence.session_id()
+        ));
+        let closed: (Option<i64>, String) = sqlx::query_as(
+            r"
+            SELECT session.disconnected_at_ms, runner.status
+            FROM runner_sessions AS session
+            JOIN runners AS runner ON runner.id = session.runner_id
+            WHERE session.id = $1
+            ",
+        )
+        .bind(fence.session_id().as_uuid())
+        .fetch_one(database.pool())
+        .await?;
+        assert!(closed.0.is_some());
+        assert_eq!(closed.1, "offline");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(
     clippy::too_many_lines,
     reason = "the delivery, replay, acknowledgement, revocation, and schema assertions form one custody transaction"
@@ -1865,6 +1984,31 @@ async fn runtime_authority_delivery_is_post_accept_value_free_exact_and_replayab
                 response(b"accepted without authority values")?,
             ))
             .await?;
+        database
+            .store()
+            .commit_command_acknowledgement(CommitCommandAcknowledgement::new(
+                operation_request(
+                    fence,
+                    OperationId::new(),
+                    "automata.runner.command-ack.v1",
+                    [89; 32],
+                )?,
+                AcknowledgeRunnerCommands::new(
+                    fence,
+                    CommandCursor::through(published.command().sequence()),
+                    database_now(&database).await?,
+                ),
+                response(b"offer payload durably adopted")?,
+            )?)
+            .await?;
+        let command_tombstone: Option<String> = sqlx::query_scalar(
+            "SELECT payload_tombstone_reason FROM runner_command_outbox WHERE runner_session_id = $1 AND command_sequence = $2",
+        )
+        .bind(fence.session_id().as_uuid())
+        .bind(i64::try_from(published.command().sequence().get())?)
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(command_tombstone.as_deref(), Some("acknowledged"));
 
         let mismatched_job_ir_digest = [86_u8; 32];
         let mismatched_request_digest = [87_u8; 32];
@@ -1934,14 +2078,17 @@ async fn runtime_authority_delivery_is_post_accept_value_free_exact_and_replayab
             published.offer_valid_until()
         );
         assert_eq!(
-            admission.offer().command().request(),
-            published.command().request()
+            admission.offer().command().operation_id(),
+            published.command().request().operation_id()
         );
         assert_eq!(
             admission.offer().command().sequence(),
             published.command().sequence()
         );
-        assert!(admission.offer().was_replayed());
+        assert_eq!(
+            admission.offer().command().created_at(),
+            published.command().request().created_at()
+        );
         assert_eq!(admission.committed_bundle_digest(), None);
         let bundle_digest = Sha256Digest::from_bytes([83; 32]);
         let commit = CommitRuntimeAuthorityDelivery::new(

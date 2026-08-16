@@ -728,12 +728,18 @@ async fn run_autonomous_workflow(
     let workflow_cancellation = cancellation.child_token();
     let combined = async move {
         tokio::try_join!(
-            async move { service.run(workflow_cancellation).await.map_err(|_| ()) },
+            async move {
+                service.run(workflow_cancellation).await.map_err(|error| {
+                    warn!(%error, component = "logical_workflow", "autonomous workflow runtime failed");
+                })
+            },
             async move {
                 reusable_workflow
                     .run(reusable_cancellation)
                     .await
-                    .map_err(|_| ())
+                    .map_err(|error| {
+                        warn!(%error, component = "reusable_workflow", "autonomous workflow runtime failed");
+                    })
             },
         )
         .map(|_| ())

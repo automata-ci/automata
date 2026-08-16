@@ -3,8 +3,9 @@ use std::{fmt, io::Write as _, sync::Arc, time::Instant};
 use crate::attempt::RenewLease;
 use crate::lease::{
     AuthenticatedRunnerSession, BeginLeaseRequest, ClaimedLeasePoll, CompleteLeaseRequest,
-    LeaseClock, LeasePollError, LeasePollOutcome, LeaseRequestCompletion, LeaseRequestKey,
-    RevokedLeaseOfferFallback, repository::RunnerLeaseRequestRepository,
+    LeaseClock, LeasePollConfig, LeasePollError, LeasePollOutcome, LeaseRequestCompletion,
+    LeaseRequestKey, LeaseTimeToLive, RevokedLeaseOfferFallback, RunnableScanLimit,
+    repository::RunnerLeaseRequestRepository,
 };
 use automata_ci_auth::machine::AuthenticatedMachine;
 use automata_ci_blob::{
@@ -46,10 +47,10 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use super::durable::{
-    AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
-    CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-    CommitRunnerLogSegment, CommitRunnerTerminalResult, CommitRuntimeAuthorityDelivery,
-    LeaseResponseAction, PublishedLeaseOffer, RunnerControlTransactionRepository,
+    AcceptedRuntimeAuthorityOffer, AcknowledgeRuntimeAuthorityDelivery,
+    AuthorizeRuntimeAuthorityDelivery, CommitCommandAcknowledgement, CommitLeaseHeartbeat,
+    CommitLeaseResponse, CommitRunnerLogSegment, CommitRunnerTerminalResult,
+    CommitRuntimeAuthorityDelivery, LeaseResponseAction, RunnerControlTransactionRepository,
     RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryRepository,
 };
 use super::observer::NoopRunnerControlObserver;
@@ -69,7 +70,7 @@ use super::{
     LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
     RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerLeaseRequestStage,
+    RunnerLeaseRequestStage, RunnerRuntimeAuthorityRequestStage,
 };
 
 const HEARTBEAT_KIND: &str = "automata.runner.lease-heartbeat.v1";
@@ -97,6 +98,14 @@ pub const MAX_HEARTBEAT_INTERVAL_MILLIS: u32 = 5 * 60 * 1_000;
 pub const MAX_LEASE_DURATION_MILLIS: u32 = 30 * 60 * 1_000;
 /// Largest supported no-work backoff: five minutes.
 pub const MAX_NO_WORK_RETRY_AFTER_MILLIS: u32 = 5 * 60 * 1_000;
+
+const DEFAULT_HEARTBEAT_INTERVAL_MILLIS: u32 = 15_000;
+// Runtime-authority renewal is deliberately gated on a ready, exact durable
+// authority. The initial lease therefore owns authority acquisition itself and
+// needs a bounded window that remains useful during provider and database
+// contention; subsequent heartbeats retain the same five-minute runway.
+const DEFAULT_LEASE_DURATION_MILLIS: u32 = 5 * 60 * 1_000;
+const DEFAULT_NO_WORK_RETRY_AFTER_MILLIS: u32 = 1_000;
 
 /// Validated server timing and response limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -177,12 +186,30 @@ impl RunnerControlConfig {
     pub const fn protocol_limits(self) -> ProtocolLimits {
         self.protocol_limits
     }
+
+    /// Constructs the durable claim policy from this control protocol's lease duration.
+    ///
+    /// The initial database claim and every protocol renewal must share one lifetime. Keeping
+    /// construction here prevents a runner from being promised a different lease runway than the
+    /// durable scheduler actually granted.
+    #[must_use]
+    pub fn lease_poll_config(self, scan_limit: RunnableScanLimit) -> LeasePollConfig {
+        let lease_time_to_live =
+            LeaseTimeToLive::from_millis(i64::from(self.lease_duration_millis))
+                .expect("validated runner-control lease duration is positive");
+        LeasePollConfig::new(scan_limit, lease_time_to_live)
+    }
 }
 
 impl Default for RunnerControlConfig {
     fn default() -> Self {
-        Self::new(15_000, 60_000, 1_000, ProtocolLimits::default())
-            .expect("default runner-control timing policy is valid")
+        Self::new(
+            DEFAULT_HEARTBEAT_INTERVAL_MILLIS,
+            DEFAULT_LEASE_DURATION_MILLIS,
+            DEFAULT_NO_WORK_RETRY_AFTER_MILLIS,
+            ProtocolLimits::default(),
+        )
+        .expect("default runner-control timing policy is valid")
     }
 }
 
@@ -1410,93 +1437,120 @@ impl DurableRunnerControlHandler {
         digest: Sha256Digest,
         cancellation: &CancellationToken,
     ) -> Result<ServerToRunner, ApplicationError> {
-        Self::not_cancelled(cancellation)?;
-        let durable_request = receipt_request(
-            fence,
-            request.header().operation_id(),
-            RUNTIME_AUTHORITY_REQUEST_KIND,
-            digest,
-        )?;
-        let protocol_version =
-            RunnerProtocolVersion::new(request.header().protocol_version().get())
-                .map_err(|_| app(ApplicationErrorKind::Internal))?;
-        let authorization = AuthorizeRuntimeAuthorityDelivery::new(
-            durable_request,
-            protocol_version,
-            request.binding(),
-            self.ports.clock.now(),
-        )
-        .map_err(|_| app(ApplicationErrorKind::Conflict))?;
-        let admission = self
-            .ports
-            .durability
-            .runtime_authority_deliveries
-            .authorize_runtime_authority_delivery(authorization)
-            .await
-            .map_err(store_application_error)?;
-        Self::not_cancelled(cancellation)?;
+        let mut stage = RunnerRuntimeAuthorityRequestStage::RequestValidation;
+        let result = async {
+            Self::not_cancelled(cancellation)?;
+            let durable_request = receipt_request(
+                fence,
+                request.header().operation_id(),
+                RUNTIME_AUTHORITY_REQUEST_KIND,
+                digest,
+            )?;
+            let protocol_version =
+                RunnerProtocolVersion::new(request.header().protocol_version().get())
+                    .map_err(|_| app(ApplicationErrorKind::Internal))?;
+            let authorization = AuthorizeRuntimeAuthorityDelivery::new(
+                durable_request,
+                protocol_version,
+                request.binding(),
+                self.ports.clock.now(),
+            )
+            .map_err(|_| app(ApplicationErrorKind::Conflict))?;
 
-        let metadata = admission.offer().job_ir();
-        let bytes = self
-            .ports
-            .lease
-            .job_ir_objects
-            .read_job_ir(metadata, metadata.encoded_size())
-            .await
-            .map_err(port_application_error)?;
-        let job = verify_job_ir_blob(
-            metadata,
-            &bytes,
-            automata_ci_core::JobIrVersion::current(),
-            &self.config.protocol_limits,
-        )
-        .map_err(|_| app(ApplicationErrorKind::Internal))?;
-        Self::not_cancelled(cancellation)?;
-        let offer = admission.offer();
-        let authorities = self.issue_runtime_authorities(&job, offer).await?;
-        authorities
-            .validate_for(&job, offer.lease())
-            .map_err(|_| app(ApplicationErrorKind::Internal))?;
-        let encoded = Zeroizing::new(
-            encode_runtime_authorities(
-                &authorities,
-                &job,
-                offer.lease(),
+            stage = RunnerRuntimeAuthorityRequestStage::DurableAuthorization;
+            let admission = self
+                .ports
+                .durability
+                .runtime_authority_deliveries
+                .authorize_runtime_authority_delivery(authorization)
+                .await
+                .map_err(store_application_error)?;
+            Self::not_cancelled(cancellation)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::JobIrRead;
+            let metadata = admission.offer().job_ir();
+            let bytes = self
+                .ports
+                .lease
+                .job_ir_objects
+                .read_job_ir(metadata, metadata.encoded_size())
+                .await
+                .map_err(port_application_error)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::JobIrVerification;
+            let job = verify_job_ir_blob(
+                metadata,
+                &bytes,
+                automata_ci_core::JobIrVersion::current(),
                 &self.config.protocol_limits,
             )
-            .map_err(|_| app(ApplicationErrorKind::Internal))?,
-        );
-        let bundle_digest = sha256(&encoded);
-        if admission
-            .committed_bundle_digest()
-            .is_some_and(|committed| committed != bundle_digest)
-        {
-            return Err(app(ApplicationErrorKind::Internal));
-        }
-        let commit =
-            CommitRuntimeAuthorityDelivery::new(admission, bundle_digest, self.ports.clock.now())
-                .map_err(|_| app(ApplicationErrorKind::Conflict))?;
-        Self::not_cancelled(cancellation)?;
-        self.ports
-            .durability
-            .runtime_authority_deliveries
-            .commit_runtime_authority_delivery(commit)
-            .await
-            .map_err(store_application_error)?;
-        Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
-            RuntimeAuthorityGrant::new(
-                self.reply_header(request.header()),
-                request.binding(),
+            .map_err(|_| app(ApplicationErrorKind::Internal))?;
+            Self::not_cancelled(cancellation)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::AuthorityIssue;
+            let offer = admission.offer();
+            let authorities = self.issue_runtime_authorities(&job, offer).await?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::AuthorityValidation;
+            authorities
+                .validate_for(&job, offer.lease())
+                .map_err(|_| app(ApplicationErrorKind::Internal))?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::BundleEncoding;
+            let encoded = Zeroizing::new(
+                encode_runtime_authorities(
+                    &authorities,
+                    &job,
+                    offer.lease(),
+                    &self.config.protocol_limits,
+                )
+                .map_err(|_| app(ApplicationErrorKind::Internal))?,
+            );
+            let bundle_digest = sha256(&encoded);
+            if admission
+                .committed_bundle_digest()
+                .is_some_and(|committed| committed != bundle_digest)
+            {
+                return Err(app(ApplicationErrorKind::Internal));
+            }
+
+            stage = RunnerRuntimeAuthorityRequestStage::CommitConstruction;
+            let commit = CommitRuntimeAuthorityDelivery::new(
+                admission,
                 bundle_digest,
-                authorities,
-            ),
-        )))
+                self.ports.clock.now(),
+            )
+            .map_err(|_| app(ApplicationErrorKind::Conflict))?;
+            Self::not_cancelled(cancellation)?;
+
+            stage = RunnerRuntimeAuthorityRequestStage::DurableCommit;
+            self.ports
+                .durability
+                .runtime_authority_deliveries
+                .commit_runtime_authority_delivery(commit)
+                .await
+                .map_err(store_application_error)?;
+            Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
+                RuntimeAuthorityGrant::new(
+                    self.reply_header(request.header()),
+                    request.binding(),
+                    bundle_digest,
+                    authorities,
+                ),
+            )))
+        }
+        .await;
+        if let Err(error) = &result {
+            self.observer
+                .observe_runtime_authority_request_failure(stage, control_failure(error.kind()));
+        }
+        result
     }
 
     async fn issue_runtime_authorities(
         &self,
         job: &JobIrEnvelope,
-        offer: &PublishedLeaseOffer,
+        offer: &AcceptedRuntimeAuthorityOffer,
     ) -> Result<JobRuntimeAuthorities, ApplicationError> {
         let issuance = RuntimeAuthorityIssueRequest::new(
             job,

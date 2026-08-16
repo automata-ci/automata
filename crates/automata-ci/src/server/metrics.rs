@@ -12,7 +12,7 @@ use automata_ci_control::runner_control::{
     LeaseOfferObservation, RunnerControlFailure, RunnerControlMessageKind,
     RunnerControlMessageOutcome, RunnerControlObserver, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerLeaseRequestStage,
+    RunnerLeaseRequestStage, RunnerRuntimeAuthorityRequestStage,
 };
 use automata_ci_metrics::{
     BuildInfo as MetricsBuildInfo, BuildInfoError, Counter, ExporterLimits, Family, Gauge,
@@ -1616,6 +1616,18 @@ impl RunnerControlObserver for ControlPlaneMetrics {
             ?stage,
             ?failure,
             "runner lease request failed at application stage"
+        );
+    }
+
+    fn observe_runtime_authority_request_failure(
+        &self,
+        stage: RunnerRuntimeAuthorityRequestStage,
+        failure: RunnerControlFailure,
+    ) {
+        tracing::warn!(
+            ?stage,
+            ?failure,
+            "runner runtime-authority request failed at application stage"
         );
     }
 }

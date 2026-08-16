@@ -56,8 +56,6 @@ const AUTHENTICATED_WORKFLOW_DISPATCH_REQUEST_DIGEST_DOMAIN_V8: &[u8] =
     b"automata.workflow-admission.request.v8.run-name.control-plane-dispatch\0";
 const SCHEDULED_GITHUB_REQUEST_DIGEST_DOMAIN_V8: &[u8] =
     b"automata.workflow-admission.request.v8.run-name.scheduled-github\0";
-const PROVIDER_DELIVERY_NAMESPACE_DOMAIN: &[u8] =
-    b"automata.workflow-admission.provider-delivery\0";
 const ADMISSION_GITHUB_PROPERTIES: &[&str] = &[
     "actor",
     "event",
@@ -1671,19 +1669,13 @@ fn namespace_idempotency(
 ) -> Result<WorkflowAdmissionIdempotency, WorkflowAdmissionError> {
     match request.idempotency() {
         WorkflowAdmissionIdempotency::ProviderDelivery(delivery) => {
-            let mut digest = Sha256::new();
-            digest.update(PROVIDER_DELIVERY_NAMESPACE_DOMAIN);
-            for field in [
+            WorkflowAdmissionIdempotency::namespaced_provider_delivery(
                 request.repository().provider(),
                 request.repository().provider_repository_id(),
                 delivery,
                 request.workflow_path(),
-            ] {
-                digest_field(&mut digest, field.as_bytes());
-            }
-            let digest = Sha256Digest::from_bytes(digest.finalize().into());
-            WorkflowAdmissionIdempotency::provider_delivery(format!("provider-delivery:{digest}"))
-                .map_err(WorkflowAdmissionError::AdmissionValue)
+            )
+            .map_err(WorkflowAdmissionError::AdmissionValue)
         }
         WorkflowAdmissionIdempotency::Operation(operation_id) => {
             Ok(WorkflowAdmissionIdempotency::operation(*operation_id))

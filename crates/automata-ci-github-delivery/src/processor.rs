@@ -810,6 +810,7 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             Err(error) => {
                 warn!(
                     stage = admission_error_stage(&error),
+                    error = %error,
                     "GitHub workflow admission rejected inconsistent state"
                 );
                 Err(admission_error(&error))

@@ -177,6 +177,29 @@ fn checkout_setup_and_artifact_fixtures_preserve_runner_input_contracts() {
 }
 
 #[test]
+fn multiline_deprecation_metadata_is_canonicalized_for_one_line_diagnostics() {
+    let reference = ActionReference::Local {
+        path: "./.github/actions/cache-shape".to_owned(),
+    };
+    let prepared = preparer()
+        .prepare(LocalActionPreparationRequest::new(
+            &reference,
+            Some(
+                b"inputs:\n  save-always:\n    deprecationMessage: |\n      save-always does not work as intended and will be removed.\n      Use actions/cache/restore instead.\nruns:\n  using: node24\n  main: index.js\n",
+            ),
+            None,
+        ))
+        .expect("ordinary metadata line breaks are safe after canonicalization");
+    let input = &prepared.definition().inputs()[0];
+    assert_eq!(
+        input.deprecation_message(),
+        Some(
+            "save-always does not work as intended and will be removed. Use actions/cache/restore instead."
+        )
+    );
+}
+
+#[test]
 fn unsafe_deprecation_metadata_fails_preparation_without_becoming_a_log_record() {
     let reference = ActionReference::Local {
         path: "./.github/actions/unsafe-message".to_owned(),
@@ -185,7 +208,7 @@ fn unsafe_deprecation_metadata_fails_preparation_without_becoming_a_log_record()
         .prepare(LocalActionPreparationRequest::new(
             &reference,
             Some(
-                b"inputs:\n  old:\n    deprecationMessage: \"first\\nforged\"\nruns:\n  using: node24\n  main: index.js\n",
+                b"inputs:\n  old:\n    deprecationMessage: \"first\\u001bforged\"\nruns:\n  using: node24\n  main: index.js\n",
             ),
             None,
         ))

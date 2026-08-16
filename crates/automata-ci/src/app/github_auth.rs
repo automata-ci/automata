@@ -1429,6 +1429,10 @@ async fn complete_web_inner(state: &GithubAuthHttpState, request: Request) -> Re
         ) => web_completion_response(state, &completion),
         Err(WebCallbackError::SignIn(error)) => login_error_response(error, state.clock.now()),
         Err(WebCallbackError::InstallationSetup(error)) => {
+            tracing::warn!(
+                error_kind = ?error,
+                "GitHub installation setup callback failed"
+            );
             setup_error_response(error, state.clock.now())
         }
     }
@@ -2114,9 +2118,10 @@ fn setup_error_response(error: InstallationSetupError, now: UnixTimestamp) -> Re
             error_response(StatusCode::FORBIDDEN, "setup_proof_rejected")
         }
         InstallationSetupError::NotArmed => error_response(StatusCode::CONFLICT, "setup_not_armed"),
-        InstallationSetupError::StateConflict | InstallationSetupError::Replay => {
-            error_response(StatusCode::CONFLICT, "request_replayed")
+        InstallationSetupError::StateConflict => {
+            error_response(StatusCode::CONFLICT, "setup_state_conflict")
         }
+        InstallationSetupError::Replay => error_response(StatusCode::CONFLICT, "request_replayed"),
         InstallationSetupError::Expired => error_response(StatusCode::GONE, "request_expired"),
         InstallationSetupError::Denied => {
             error_response(StatusCode::FORBIDDEN, "authorization_denied")
@@ -3641,6 +3646,27 @@ mod tests {
             to_bytes(response.into_body(), 1_024).await.unwrap(),
             r#"{"error":"setup_complete"}"#
         );
+    }
+
+    #[tokio::test]
+    async fn setup_state_conflict_is_distinct_from_callback_replay() {
+        for (error, expected) in [
+            (
+                InstallationSetupError::StateConflict,
+                r#"{"error":"setup_state_conflict"}"#,
+            ),
+            (
+                InstallationSetupError::Replay,
+                r#"{"error":"request_replayed"}"#,
+            ),
+        ] {
+            let response = setup_error_response(error, UnixTimestamp::from_seconds(NOW));
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                to_bytes(response.into_body(), 1_024).await.unwrap(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]

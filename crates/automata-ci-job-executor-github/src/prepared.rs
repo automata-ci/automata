@@ -487,11 +487,12 @@ impl PreparedInput {
         }
         if required.as_ref().is_some_and(|value| {
             value.len() > MAX_INPUT_REQUIRED_BYTES || value.chars().any(char::is_control)
-        }) || deprecation_message.as_ref().is_some_and(|value| {
-            value.len() > MAX_INPUT_DEPRECATION_BYTES || value.chars().any(char::is_control)
         }) {
             return Err(PreparedActionError::InvalidInput);
         }
+        let deprecation_message = deprecation_message
+            .map(normalize_deprecation_message)
+            .transpose()?;
         Ok(Self {
             name,
             default,
@@ -526,6 +527,29 @@ impl PreparedInput {
     pub fn deprecation_message(&self) -> Option<&str> {
         self.deprecation_message.as_deref()
     }
+}
+
+fn normalize_deprecation_message(value: String) -> Result<String, PreparedActionError> {
+    if value.len() > MAX_INPUT_DEPRECATION_BYTES {
+        return Err(PreparedActionError::InvalidInput);
+    }
+    let mut normalized = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for character in value.chars() {
+        if character.is_control() && !character.is_whitespace() {
+            return Err(PreparedActionError::InvalidInput);
+        }
+        if character.is_whitespace() {
+            pending_space = !normalized.is_empty();
+        } else {
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.push(character);
+        }
+    }
+    Ok(normalized)
 }
 
 /// Validated metadata-driven JavaScript execution plan.

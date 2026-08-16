@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use automata_ci_core::{AttemptId, JobId, OperationId, QueuePolicy, RunId, UnixMillis, WorkflowId};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -16,6 +17,8 @@ pub const MAX_ADMISSION_EVENT_BYTES: u64 = 25 * 1024 * 1024;
 
 const MAX_TEXT_BYTES: usize = 1_024;
 const MAX_MEDIA_TYPE_BYTES: usize = 128;
+const PROVIDER_DELIVERY_NAMESPACE_DOMAIN: &[u8] =
+    b"automata.workflow-admission.provider-delivery\0";
 
 macro_rules! uuid_value {
     ($(#[$meta:meta])* $name:ident) => {
@@ -163,6 +166,44 @@ impl WorkflowAdmissionIdempotency {
         let key = key.into();
         validate_text(&key, "provider delivery key")?;
         Ok(Self::ProviderDelivery(key))
+    }
+
+    /// Derives the one durable provider-delivery identity for an exact workflow.
+    ///
+    /// A provider delivery may select several workflows, so its external key is
+    /// not itself a logical-admission identity. This constructor is the sole
+    /// derivation shared by admission and durable authority validation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects blank, control-bearing, or oversized namespace coordinates.
+    pub fn namespaced_provider_delivery(
+        provider: &str,
+        provider_repository_id: &str,
+        delivery_key: &str,
+        workflow_path: &str,
+    ) -> Result<Self, WorkflowAdmissionValueError> {
+        for (value, field) in [
+            (provider, "provider"),
+            (provider_repository_id, "provider repository ID"),
+            (delivery_key, "provider delivery key"),
+            (workflow_path, "workflow path"),
+        ] {
+            validate_text(value, field)?;
+        }
+        let mut digest = Sha256::new();
+        digest.update(PROVIDER_DELIVERY_NAMESPACE_DOMAIN);
+        for field in [
+            provider,
+            provider_repository_id,
+            delivery_key,
+            workflow_path,
+        ] {
+            digest.update(u64::try_from(field.len()).unwrap_or(u64::MAX).to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+        let digest = Sha256Digest::from_bytes(digest.finalize().into());
+        Self::provider_delivery(format!("provider-delivery:{digest}"))
     }
 
     #[must_use]

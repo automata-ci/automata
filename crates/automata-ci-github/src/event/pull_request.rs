@@ -94,7 +94,11 @@ impl GithubPullRequestEventFacts {
             merged: event.merged(),
             source_revision: event.head_revision().clone(),
             target_revision: event.base_revision().clone(),
-            execution_revision: event.merge_revision().clone(),
+            // Delivery source ingestion and GitHub Checks are bound to the
+            // signed head revision. A synchronize webhook may still carry the
+            // previous synthetic merge revision while GitHub rematerializes
+            // refs/pull/<n>/merge, so that value is not execution authority.
+            execution_revision: event.head_revision().clone(),
             source_ref: event.head_ref().into(),
             target_ref: event.base_ref().into(),
             execution_ref: event.git_ref().into(),

@@ -6,6 +6,7 @@ mod api_transport;
 mod changed_files;
 mod checks;
 mod configuration;
+mod event_envelope;
 mod memberships;
 mod oauth_flows;
 mod repository_snapshots;

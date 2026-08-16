@@ -10,7 +10,10 @@ use automata_ci_core::{
 use automata_ci_execution::{
     ExecutionArgv, SandboxEnvironment, ServiceContainerBindings, TargetPath, TargetPlatform,
 };
-use automata_ci_expression_github::{GithubEvaluationContext, GithubStatus, GithubValue};
+use automata_ci_expression_github::{
+    ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionFunctionProvider,
+    GithubStatus, GithubValue,
+};
 use automata_ci_github_runtime::JobCommandState;
 use automata_ci_protocol::JobRuntimeAuthorities;
 use automata_ci_runner_runtime::ExecutorError;
@@ -480,6 +483,20 @@ impl GithubContextSnapshot {
         self
     }
 
+    /// Adds execution-local extension functions while retaining any functions
+    /// already supplied by the product context.
+    #[must_use]
+    pub(crate) fn with_execution_functions(
+        mut self,
+        functions: Arc<dyn GithubExpressionFunctionProvider>,
+    ) -> Self {
+        self.expression = Arc::new(ExecutionFunctionContext {
+            base: self.expression,
+            functions,
+        });
+        self
+    }
+
     /// Returns the read-only expression context.
     #[must_use]
     pub fn expression(&self) -> &dyn GithubEvaluationContext {
@@ -497,6 +514,44 @@ impl GithubContextSnapshot {
     #[must_use]
     pub fn secret_masks(&self) -> &[SharedSensitiveString] {
         &self.secret_masks
+    }
+}
+
+struct ExecutionFunctionContext {
+    base: Arc<dyn GithubEvaluationContext>,
+    functions: Arc<dyn GithubExpressionFunctionProvider>,
+}
+
+impl GithubEvaluationContext for ExecutionFunctionContext {
+    fn named_value(&self, name: &str) -> Option<GithubValue> {
+        self.base.named_value(name)
+    }
+
+    fn status(&self) -> GithubStatus {
+        self.base.status()
+    }
+
+    fn functions(&self) -> &dyn GithubExpressionFunctionProvider {
+        self
+    }
+}
+
+impl GithubExpressionFunctionProvider for ExecutionFunctionContext {
+    fn call(&self, name: &str, arguments: &[GithubValue]) -> ExtensionFunctionResult {
+        self.base
+            .functions()
+            .call(name, arguments)
+            .or_else(|| self.functions.call(name, arguments))
+    }
+}
+
+impl fmt::Debug for ExecutionFunctionContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionFunctionContext")
+            .field("base", &self.base)
+            .field("functions", &self.functions)
+            .finish()
     }
 }
 
@@ -589,6 +644,8 @@ pub enum OperationPurpose {
     InitializeArtifactsList = 10,
     /// Reads one completed `GITHUB_ARTIFACTS` declaration file.
     ReadArtifactsFile = 11,
+    /// Evaluates one runner-local `hashFiles` call inside the fenced sandbox.
+    HashFiles = 12,
 }
 
 /// Derives deterministic IDs for retryable endpoint operations.

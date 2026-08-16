@@ -569,6 +569,14 @@ fn collect_exec_environment(
             }
         }
     }
+    for (name, value) in request.inherited_environment() {
+        if arguments
+            .windows(2)
+            .any(|window| window[0] == "--env" && window[1] == name)
+        {
+            values.insert(name.to_owned(), value.to_owned());
+        }
+    }
     values
 }
 

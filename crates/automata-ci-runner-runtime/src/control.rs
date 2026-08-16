@@ -171,6 +171,13 @@ impl RunnerRuntimeControlClient for TransportControlClientAdapter {
                 .await
                 .map(RuntimeControlReply::from_transport)
                 .map_err(|error| {
+                    let exchange = crate::RuntimeExchangeKind::from_prepared(request);
+                    tracing::warn!(
+                        ?exchange,
+                        failure = ?error.kind(),
+                        retry = ?error.retry_class(),
+                        "runner control exchange failed at transport boundary"
+                    );
                     let kind = match error.kind() {
                         ClientErrorKind::Timeout => RuntimeControlErrorKind::TimedOut,
                         ClientErrorKind::Cancelled => RuntimeControlErrorKind::Cancelled,

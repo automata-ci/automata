@@ -1473,10 +1473,18 @@ impl ExecutionEndpoint for FakeEndpoint {
         if let Some(output) = artifact_hash_output(request, &state.files) {
             return output;
         }
-        let phase_file_initial_contents = capture_phase_file_initial_contents(request, &state);
-        state
-            .phase_file_initial_contents
-            .push(phase_file_initial_contents);
+        let is_hash_files = program == "/opt/node24/bin/node"
+            && request
+                .argv()
+                .arguments()
+                .iter()
+                .any(|argument| argument.contains("automata-hash-files"));
+        if !is_hash_files {
+            let phase_file_initial_contents = capture_phase_file_initial_contents(request, &state);
+            state
+                .phase_file_initial_contents
+                .push(phase_file_initial_contents);
+        }
         let response = state
             .responses
             .pop_front()
@@ -1488,7 +1496,9 @@ impl ExecutionEndpoint for FakeEndpoint {
         if !response.delay.is_zero() {
             std::thread::sleep(response.delay);
         }
-        apply_phase_response_files(request, &mut state, &response);
+        if !is_hash_files {
+            apply_phase_response_files(request, &mut state, &response);
+        }
         state.cancellation_before_copy_from = response.cancellation_before_copy_from;
         execution_output(response.termination, response.output, response.truncated)
             .map_err(|_| execution_error(ExecutionStage::Exec))

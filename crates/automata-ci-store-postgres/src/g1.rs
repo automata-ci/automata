@@ -28,14 +28,15 @@ use automata_ci_control::{
     runner_control::{
         INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding,
         durable::{
-            AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
-            CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-            CommitRunnerLogSegment, CommitRunnerTerminalResult, CommitRuntimeAuthorityDelivery,
-            CurrentRunnerSession, CurrentRunnerSessionRepository, LeaseOfferClaim,
-            LeaseOfferClaimStatus, LeaseResponseAction, PublishLeaseOffer, PublishedLeaseOffer,
-            RawLogDisposition, RunnerControlTransactionRepository, RunnerLeaseOfferRepository,
-            RunnerLogAdmission, RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryAdmission,
-            RuntimeAuthorityDeliveryDisposition, RuntimeAuthorityDeliveryRepository,
+            AcceptedRuntimeAuthorityOffer, AcknowledgeRuntimeAuthorityDelivery,
+            AuthorizeRuntimeAuthorityDelivery, CommitCommandAcknowledgement, CommitLeaseHeartbeat,
+            CommitLeaseResponse, CommitRunnerLogSegment, CommitRunnerTerminalResult,
+            CommitRuntimeAuthorityDelivery, CurrentRunnerSession, CurrentRunnerSessionRepository,
+            LeaseOfferClaim, LeaseOfferClaimStatus, LeaseResponseAction, PublishLeaseOffer,
+            PublishedLeaseOffer, RawLogDisposition, RunnerControlTransactionRepository,
+            RunnerLeaseOfferRepository, RunnerLogAdmission, RunnerLogAdmissionRequest,
+            RuntimeAuthorityDeliveryAdmission, RuntimeAuthorityDeliveryDisposition,
+            RuntimeAuthorityDeliveryRepository, RuntimeAuthorityOfferCommand,
         },
         repository::{
             RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository,
@@ -76,6 +77,7 @@ use automata_ci_store::{
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
 const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
+const LEASE_OFFER_COMMAND_SCHEMA: u16 = 2;
 const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
 const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
@@ -671,49 +673,7 @@ impl RunnerSessionRepository for PostgresStore {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
         lock_runner_fence(&mut transaction, request.fence()).await?;
-        let snapshot = locked_session(&mut transaction, request.fence()).await?;
-        if let Some(disconnected_at) = snapshot.disconnected_at() {
-            cleanup_session_lease_request_state(&mut transaction, request.fence().session_id())
-                .await?;
-            tombstone_session_runner_payloads(
-                &mut transaction,
-                request.fence().session_id(),
-                RunnerPayloadTombstoneReason::SessionClosed,
-                disconnected_at,
-            )
-            .await?;
-            mark_runner_offline(&mut transaction, request.fence(), disconnected_at).await?;
-            transaction.commit().await.map_err(operation_error)?;
-            return Ok(());
-        }
-        let database_now = super::runner_attempt_database_now(&mut transaction).await?;
-        let decision_at = database_session_decision_at(database_now, [snapshot.heartbeat_at()])?;
-        sqlx::query(
-            r"
-            UPDATE runner_sessions
-            SET disconnected_at_ms = $5
-            WHERE id = $1 AND runner_id = $2
-              AND runner_generation = $3 AND session_epoch = $4
-              AND disconnected_at_ms IS NULL
-            ",
-        )
-        .bind(request.fence().session_id().as_uuid())
-        .bind(request.fence().runner_id().as_uuid())
-        .bind(generation_i64(request.fence().runner_generation())?)
-        .bind(epoch_i64(request.fence().session_epoch())?)
-        .bind(decision_at.get())
-        .execute(&mut *transaction)
-        .await
-        .map_err(operation_error)?;
-        cleanup_session_lease_request_state(&mut transaction, request.fence().session_id()).await?;
-        tombstone_session_runner_payloads(
-            &mut transaction,
-            request.fence().session_id(),
-            RunnerPayloadTombstoneReason::SessionClosed,
-            decision_at,
-        )
-        .await?;
-        mark_runner_offline(&mut transaction, request.fence(), decision_at).await?;
+        close_session_in_transaction(&mut transaction, request.fence()).await?;
         transaction.commit().await.map_err(operation_error)?;
         Ok(())
     }
@@ -1787,7 +1747,6 @@ impl RuntimeAuthorityDeliveryRepository for PostgresStore {
         &self,
         request: AuthorizeRuntimeAuthorityDelivery,
     ) -> Result<RuntimeAuthorityDeliveryAdmission, StoreError> {
-        let encryption = self.require_runner_payload_encryption()?;
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
         super::admission::lock_attempt_concurrency(
@@ -1795,14 +1754,19 @@ impl RuntimeAuthorityDeliveryRepository for PostgresStore {
             request.binding().attempt_id(),
         )
         .await?;
-        let (offer, delivery) = lock_runtime_authority_delivery_admission(
+        let Some((offer, delivery)) = lock_runtime_authority_delivery_admission(
             &mut transaction,
-            encryption,
             request.request().session(),
             request.protocol_version(),
             request.binding(),
         )
-        .await?;
+        .await?
+        else {
+            transaction.commit().await.map_err(operation_error)?;
+            return Err(StoreError::SessionClosed(
+                request.request().session().session_id(),
+            ));
+        };
         if request.request().kind().as_str() != RUNTIME_AUTHORITY_REQUEST_KIND {
             return Err(StoreError::OperationConflict {
                 session_id: request.request().session().session_id(),
@@ -1832,7 +1796,6 @@ impl RuntimeAuthorityDeliveryRepository for PostgresStore {
         &self,
         request: CommitRuntimeAuthorityDelivery,
     ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError> {
-        let encryption = self.require_runner_payload_encryption()?;
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
         let requested = request.admission().request();
@@ -1841,14 +1804,19 @@ impl RuntimeAuthorityDeliveryRepository for PostgresStore {
             requested.binding().attempt_id(),
         )
         .await?;
-        let (offer, delivery) = lock_runtime_authority_delivery_admission(
+        let Some((offer, delivery)) = lock_runtime_authority_delivery_admission(
             &mut transaction,
-            encryption,
             requested.request().session(),
             requested.protocol_version(),
             requested.binding(),
         )
-        .await?;
+        .await?
+        else {
+            transaction.commit().await.map_err(operation_error)?;
+            return Err(StoreError::SessionClosed(
+                requested.request().session().session_id(),
+            ));
+        };
         if requested.request().kind().as_str() != RUNTIME_AUTHORITY_REQUEST_KIND
             || &offer != request.admission().offer()
         {
@@ -1889,7 +1857,6 @@ impl RuntimeAuthorityDeliveryRepository for PostgresStore {
         &self,
         request: AcknowledgeRuntimeAuthorityDelivery,
     ) -> Result<RuntimeAuthorityDeliveryDisposition, StoreError> {
-        let encryption = self.require_runner_payload_encryption()?;
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
         super::admission::lock_attempt_concurrency(
@@ -1897,14 +1864,19 @@ impl RuntimeAuthorityDeliveryRepository for PostgresStore {
             request.binding().attempt_id(),
         )
         .await?;
-        let (_offer, delivery) = lock_runtime_authority_delivery_admission(
+        let Some((_offer, delivery)) = lock_runtime_authority_delivery_admission(
             &mut transaction,
-            encryption,
             request.request().session(),
             request.protocol_version(),
             request.binding(),
         )
-        .await?;
+        .await?
+        else {
+            transaction.commit().await.map_err(operation_error)?;
+            return Err(StoreError::SessionClosed(
+                request.request().session().session_id(),
+            ));
+        };
         if request.request().kind().as_str() != RUNTIME_AUTHORITY_ACK_KIND {
             return Err(StoreError::OperationConflict {
                 session_id: request.request().session().session_id(),
@@ -2029,14 +2001,13 @@ impl RunnerControlTransactionRepository for PostgresStore {
         )
         .await?
         {
+            // The exact receipt closes this operation; later attempt state cannot
+            // reinterpret an already-committed response.
             let receipt = receipt.into_live()?;
-            if request.action() == LeaseResponseAction::Accept {
-                verify_exact_published_offer(&mut transaction, &request, true).await?;
-            }
             transaction.commit().await.map_err(operation_error)?;
             return Ok(receipt);
         }
-        let decision_now = verify_exact_published_offer(&mut transaction, &request, false).await?;
+        let decision_now = verify_exact_published_offer(&mut transaction, &request).await?;
         update_session_liveness(
             &mut transaction,
             fence,
@@ -2360,7 +2331,6 @@ fn decode_fencing(value: i64) -> Result<FencingToken, StoreError> {
 async fn verify_exact_published_offer(
     transaction: &mut Transaction<'_, Postgres>,
     request: &CommitLeaseResponse,
-    replay: bool,
 ) -> Result<UnixMillis, StoreError> {
     let fence = request.request().session();
     let row = sqlx::query(
@@ -2408,19 +2378,7 @@ async fn verify_exact_published_offer(
     .ok_or(StoreError::AttemptFenceRejected(request.attempt_id()))?;
     let lifecycle = parse_lifecycle(row.try_get("lifecycle").map_err(operation_error)?)
         .map_err(StoreError::from)?;
-    let lifecycle_is_eligible = if replay {
-        matches!(
-            lifecycle,
-            JobLifecycle::Leased
-                | JobLifecycle::Preparing
-                | JobLifecycle::Running
-                | JobLifecycle::Cancelling
-                | JobLifecycle::Finalizing
-        )
-    } else {
-        lifecycle == JobLifecycle::Leased
-    };
-    if !lifecycle_is_eligible {
+    if lifecycle != JobLifecycle::Leased {
         return Err(StoreError::AttemptFenceRejected(request.attempt_id()));
     }
     let database_now = super::runner_attempt_database_now(transaction).await?;
@@ -2429,26 +2387,20 @@ async fn verify_exact_published_offer(
     if database_now < publication_created_at {
         return Err(StoreError::AttemptFenceRejected(request.attempt_id()));
     }
-    if !replay {
-        super::validate_runner_attempt_caller_clock(request.observed_at(), database_now)?;
-    }
+    super::validate_runner_attempt_caller_clock(request.observed_at(), database_now)?;
     let current_lease_expires_at = UnixMillis::new(
         row.try_get("lease_expires_at_ms")
             .map_err(operation_error)?,
     );
-    if !replay && database_now >= current_lease_expires_at {
+    if database_now >= current_lease_expires_at {
         return Err(StoreError::Attempt(AttemptStoreError::LeaseExpired(
             request.attempt_id(),
         )));
     }
-    let acceptance_expires_at = if replay {
-        current_lease_expires_at
-    } else {
-        UnixMillis::new(
-            row.try_get("offer_valid_until_ms")
-                .map_err(operation_error)?,
-        )
-    };
+    let acceptance_expires_at = UnixMillis::new(
+        row.try_get("offer_valid_until_ms")
+            .map_err(operation_error)?,
+    );
     if request.action() == LeaseResponseAction::Accept && database_now >= acceptance_expires_at {
         return Err(StoreError::Attempt(AttemptStoreError::LeaseExpired(
             request.attempt_id(),
@@ -4675,13 +4627,69 @@ struct LockedRuntimeAuthorityDelivery {
     acknowledged_at: Option<UnixMillis>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeAuthorityAttemptStatus {
+    Accepted,
+    AwaitingAcceptance,
+    Rejected,
+    Stale,
+}
+
+async fn close_session_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    fence: RunnerSessionFence,
+) -> Result<(), StoreError> {
+    let snapshot = locked_session(transaction, fence).await?;
+    let decision_at = if let Some(disconnected_at) = snapshot.disconnected_at() {
+        disconnected_at
+    } else {
+        let database_now = super::runner_attempt_database_now(transaction).await?;
+        let decision_at = database_session_decision_at(database_now, [snapshot.heartbeat_at()])?;
+        let updated = sqlx::query(
+            r"
+            UPDATE runner_sessions
+            SET disconnected_at_ms = $5
+            WHERE id = $1 AND runner_id = $2
+              AND runner_generation = $3 AND session_epoch = $4
+              AND disconnected_at_ms IS NULL
+            ",
+        )
+        .bind(fence.session_id().as_uuid())
+        .bind(fence.runner_id().as_uuid())
+        .bind(generation_i64(fence.runner_generation())?)
+        .bind(epoch_i64(fence.session_epoch())?)
+        .bind(decision_at.get())
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::SessionFenceRejected(fence.session_id()));
+        }
+        decision_at
+    };
+    cleanup_session_lease_request_state(transaction, fence.session_id()).await?;
+    tombstone_session_runner_payloads(
+        transaction,
+        fence.session_id(),
+        RunnerPayloadTombstoneReason::SessionClosed,
+        decision_at,
+    )
+    .await?;
+    mark_runner_offline(transaction, fence, decision_at).await
+}
+
 async fn lock_runtime_authority_delivery_admission(
     transaction: &mut Transaction<'_, Postgres>,
-    encryption: &RunnerPayloadEncryption,
     session: RunnerSessionFence,
     protocol_version: RunnerProtocolVersion,
     binding: RuntimeAuthorityDeliveryBinding,
-) -> Result<(PublishedLeaseOffer, Option<LockedRuntimeAuthorityDelivery>), StoreError> {
+) -> Result<
+    Option<(
+        AcceptedRuntimeAuthorityOffer,
+        Option<LockedRuntimeAuthorityDelivery>,
+    )>,
+    StoreError,
+> {
     let routing = lock_live_routing(transaction, session).await?;
     routing.require_online(session)?;
     if routing.protocol_version != protocol_version {
@@ -4693,7 +4701,7 @@ async fn lock_runtime_authority_delivery_admission(
     let sequence = CommandSequence::new(binding.offer_sequence().get())
         .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     let identity = LeaseOfferCommandIdentity::new(session, binding.offer_operation_id(), sequence);
-    let offer = load_lease_offer_publication_by_command(transaction, encryption, identity)
+    let offer = load_runtime_authority_offer_by_command(transaction, identity)
         .await?
         .ok_or_else(|| StoreError::OperationConflict {
             session_id: session.session_id(),
@@ -4705,40 +4713,47 @@ async fn lock_runtime_authority_delivery_admission(
             operation_id: binding.offer_operation_id(),
         });
     }
-    if !matches!(
-        classify_locked_published_lease_offer(transaction, &offer).await?,
-        LockedLeaseOfferDeliveryStatus::Live
-    ) || !lock_accepted_runtime_authority_attempt(transaction, &offer).await?
-    {
-        return Err(StoreError::AttemptFenceRejected(binding.attempt_id()));
+    match lock_runtime_authority_attempt(transaction, &offer).await? {
+        RuntimeAuthorityAttemptStatus::Accepted => {}
+        RuntimeAuthorityAttemptStatus::AwaitingAcceptance => {
+            return Err(StoreError::AttemptFenceRejected(offer.lease().attempt_id()));
+        }
+        RuntimeAuthorityAttemptStatus::Rejected => {
+            return Err(StoreError::AttemptFenceRejected(offer.lease().attempt_id()));
+        }
+        RuntimeAuthorityAttemptStatus::Stale => {
+            close_session_in_transaction(transaction, session).await?;
+            return Ok(None);
+        }
     }
     let delivery = lock_runtime_authority_delivery_row(transaction, &offer, binding).await?;
-    Ok((offer, delivery))
+    Ok(Some((offer, delivery)))
 }
 
 fn runtime_authority_binding_matches_offer(
     binding: RuntimeAuthorityDeliveryBinding,
     protocol_version: RunnerProtocolVersion,
-    offer: &PublishedLeaseOffer,
+    offer: &AcceptedRuntimeAuthorityOffer,
 ) -> bool {
     binding.generation() == INITIAL_RUNTIME_AUTHORITY_GENERATION
         && offer.protocol_version() == protocol_version
         && binding.attempt_id() == offer.lease().attempt_id()
         && binding.slot().get() == offer.slot().ordinal()
         && binding.guard() == offer.lease().guard()
-        && binding.offer_operation_id() == offer.command().request().operation_id()
+        && binding.offer_operation_id() == offer.command().operation_id()
         && binding.offer_sequence().get() == offer.command().sequence().get()
         && binding.job_ir_digest() == offer.job_ir().digest()
 }
 
-async fn lock_accepted_runtime_authority_attempt(
+async fn lock_runtime_authority_attempt(
     transaction: &mut Transaction<'_, Postgres>,
-    offer: &PublishedLeaseOffer,
-) -> Result<bool, StoreError> {
+    offer: &AcceptedRuntimeAuthorityOffer,
+) -> Result<RuntimeAuthorityAttemptStatus, StoreError> {
     let session = offer.request().session();
     let row = sqlx::query(
         r"
         SELECT attempt.lifecycle IN ('preparing', 'running') AS lifecycle_accepted,
+               attempt.lifecycle = 'leased' AS lifecycle_awaiting_acceptance,
                COALESCE(attempt.lease_id = $2
                    AND attempt.fencing_token = $3
                    AND attempt.runner_id = $4
@@ -4782,7 +4797,7 @@ async fn lock_accepted_runtime_authority_attempt(
     .await
     .map_err(operation_error)?;
     let Some(row) = row else {
-        return Ok(false);
+        return Ok(RuntimeAuthorityAttemptStatus::Stale);
     };
     if !row
         .try_get::<bool, _>("exact_job_ir")
@@ -4792,23 +4807,34 @@ async fn lock_accepted_runtime_authority_attempt(
             "accepted runtime-authority attempt disagrees with immutable JobIR",
         ));
     }
-    let accepted = row
+    let lifecycle_accepted = row
         .try_get::<bool, _>("lifecycle_accepted")
-        .map_err(operation_error)?
-        && row
-            .try_get::<bool, _>("exact_fence")
-            .map_err(operation_error)?;
-    if !accepted {
-        return Ok(false);
-    }
+        .map_err(operation_error)?;
+    let lifecycle_awaiting_acceptance = row
+        .try_get::<bool, _>("lifecycle_awaiting_acceptance")
+        .map_err(operation_error)?;
+    let exact_fence = row
+        .try_get::<bool, _>("exact_fence")
+        .map_err(operation_error)?;
     let database_now = super::runner_attempt_database_now(transaction).await?;
-    Ok(database_now >= offer.command().request().created_at()
-        && database_now < offer.offer_valid_until())
+    if database_now < offer.command().created_at() || database_now >= offer.offer_valid_until() {
+        return Ok(RuntimeAuthorityAttemptStatus::Stale);
+    }
+    if lifecycle_accepted && exact_fence {
+        return Ok(RuntimeAuthorityAttemptStatus::Accepted);
+    }
+    if lifecycle_awaiting_acceptance && exact_fence {
+        return Ok(RuntimeAuthorityAttemptStatus::AwaitingAcceptance);
+    }
+    if exact_fence {
+        return Ok(RuntimeAuthorityAttemptStatus::Rejected);
+    }
+    Ok(RuntimeAuthorityAttemptStatus::Stale)
 }
 
 async fn lock_runtime_authority_delivery_row(
     transaction: &mut Transaction<'_, Postgres>,
-    offer: &PublishedLeaseOffer,
+    offer: &AcceptedRuntimeAuthorityOffer,
     binding: RuntimeAuthorityDeliveryBinding,
 ) -> Result<Option<LockedRuntimeAuthorityDelivery>, StoreError> {
     let row = sqlx::query(
@@ -4846,7 +4872,7 @@ async fn lock_runtime_authority_delivery_row(
 
 fn validate_locked_runtime_authority_delivery_identity(
     row: &sqlx::postgres::PgRow,
-    offer: &PublishedLeaseOffer,
+    offer: &AcceptedRuntimeAuthorityOffer,
     binding: RuntimeAuthorityDeliveryBinding,
 ) -> Result<(), StoreError> {
     let session = offer.request().session();
@@ -4909,7 +4935,7 @@ fn validate_locked_runtime_authority_delivery_identity(
         || protocol_version != offer.protocol_version()
         || runner_slot != offer.slot().ordinal()
         || lease_id != offer.lease().lease_id()
-        || offer_operation_id != offer.command().request().operation_id()
+        || offer_operation_id != offer.command().operation_id()
         || offer_sequence != offer.command().sequence()
         || job_id != offer.job_ir().job_id()
         || run_id != offer.job_ir().run_id()
@@ -4927,12 +4953,10 @@ fn validate_locked_runtime_authority_delivery_identity(
 
 fn decode_locked_runtime_authority_delivery(
     row: &sqlx::postgres::PgRow,
-    offer: &PublishedLeaseOffer,
+    offer: &AcceptedRuntimeAuthorityOffer,
 ) -> Result<LockedRuntimeAuthorityDelivery, StoreError> {
     let committed_at = UnixMillis::new(row.try_get("committed_at_ms").map_err(operation_error)?);
-    if committed_at < offer.command().request().created_at()
-        || committed_at >= offer.offer_valid_until()
-    {
+    if committed_at < offer.command().created_at() || committed_at >= offer.offer_valid_until() {
         return Err(StoreError::corrupt_data(
             "runtime-authority delivery commit is outside its offer horizon",
         ));
@@ -5176,6 +5200,188 @@ async fn load_lease_offer_publication_by_command(
         ));
     }
     Ok(publication)
+}
+
+async fn load_runtime_authority_offer_by_command(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: LeaseOfferCommandIdentity,
+) -> Result<Option<AcceptedRuntimeAuthorityOffer>, StoreError> {
+    let session = identity.session();
+    let rows = sqlx::query(
+        r"
+        SELECT publication.request_operation_id, publication.runner_id,
+               publication.runner_session_epoch, publication.runner_generation,
+               publication.operation_kind, publication.request_digest,
+               publication.protocol_version, publication.runner_slot,
+               publication.attempt_id, publication.lease_id,
+               publication.fencing_token, publication.lease_issued_at_ms,
+               publication.lease_expires_at_ms, publication.offer_valid_until_ms,
+               publication.job_id, publication.run_id, publication.job_ir_schema,
+               publication.job_ir_size_bytes, publication.job_ir_digest,
+               publication.job_ir_object_key,
+               publication.created_at_ms AS publication_created_at_ms,
+               command.runner_session_id AS command_runner_session_id,
+               command.command_sequence, command.operation_id AS command_operation_id,
+               command.runner_id AS command_runner_id,
+               command.runner_session_epoch AS command_runner_session_epoch,
+               command.runner_generation AS command_runner_generation,
+               command.command_kind, command.command_schema, command.command_digest,
+               command.created_at_ms AS command_created_at_ms
+        FROM runner_lease_offer_publications AS publication
+        JOIN runner_command_outbox AS command
+          ON command.runner_session_id = publication.runner_session_id
+         AND command.command_sequence = publication.command_sequence
+        WHERE publication.runner_session_id = $1
+          AND publication.command_sequence = $2
+        LIMIT 2
+        FOR UPDATE OF publication, command
+        ",
+    )
+    .bind(session.session_id().as_uuid())
+    .bind(sequence_i64(identity.sequence())?)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    let [row] = rows.as_slice() else {
+        return if rows.is_empty() {
+            Ok(None)
+        } else {
+            Err(StoreError::corrupt_data(
+                "multiple runtime-authority offers reference one command",
+            ))
+        };
+    };
+
+    let publication_runner_id =
+        RunnerId::from_uuid(row.try_get("runner_id").map_err(operation_error)?);
+    let publication_epoch = decode_epoch(
+        row.try_get("runner_session_epoch")
+            .map_err(operation_error)?,
+    )?;
+    let publication_generation =
+        decode_generation(row.try_get("runner_generation").map_err(operation_error)?)?;
+    let command_session_id: Uuid = row
+        .try_get("command_runner_session_id")
+        .map_err(operation_error)?;
+    let command_runner_id =
+        RunnerId::from_uuid(row.try_get("command_runner_id").map_err(operation_error)?);
+    let command_epoch = decode_epoch(
+        row.try_get("command_runner_session_epoch")
+            .map_err(operation_error)?,
+    )?;
+    let command_generation = decode_generation(
+        row.try_get("command_runner_generation")
+            .map_err(operation_error)?,
+    )?;
+    if publication_runner_id != session.runner_id()
+        || publication_epoch != session.session_epoch()
+        || publication_generation != session.runner_generation()
+        || command_session_id != session.session_id().as_uuid()
+        || command_runner_id != session.runner_id()
+        || command_epoch != session.session_epoch()
+        || command_generation != session.runner_generation()
+    {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority offer has a mismatched session fence",
+        ));
+    }
+
+    let request_kind = RunnerOperationKind::new(
+        row.try_get::<String, _>("operation_kind")
+            .map_err(operation_error)?,
+    )
+    .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+    let command_kind: String = row.try_get("command_kind").map_err(operation_error)?;
+    let command_schema = decode_schema(row.try_get("command_schema").map_err(operation_error)?)?;
+    let _command_digest =
+        decode_sha256_digest(row.try_get("command_digest").map_err(operation_error)?)
+            .map_err(|error| StoreError::corrupt_data(error.clone()))?;
+    if request_kind.as_str() != LEASE_RPC_OPERATION_KIND
+        || !is_lease_offer_command_kind(&command_kind)
+    {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority offer has invalid command metadata",
+        ));
+    }
+
+    let command_operation_id = OperationId::from_uuid(
+        row.try_get("command_operation_id")
+            .map_err(operation_error)?,
+    );
+    let command_sequence =
+        decode_sequence(row.try_get("command_sequence").map_err(operation_error)?)?;
+    if command_operation_id != identity.operation_id() || command_sequence != identity.sequence() {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority offer resolved a different command identity",
+        ));
+    }
+    let command_created_at = UnixMillis::new(
+        row.try_get("command_created_at_ms")
+            .map_err(operation_error)?,
+    );
+    let publication_created_at = UnixMillis::new(
+        row.try_get("publication_created_at_ms")
+            .map_err(operation_error)?,
+    );
+    if command_created_at != publication_created_at {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority publication and command creation times disagree",
+        ));
+    }
+
+    let request_operation_id = OperationId::from_uuid(
+        row.try_get("request_operation_id")
+            .map_err(operation_error)?,
+    );
+    let request_digest =
+        decode_sha256_digest(row.try_get("request_digest").map_err(operation_error)?)
+            .map_err(|error| StoreError::corrupt_data(error.clone()))?;
+    let request =
+        RunnerOperationRequest::new(session, request_operation_id, request_kind, request_digest);
+    let protocol_version =
+        decode_protocol(row.try_get("protocol_version").map_err(operation_error)?)?;
+    if command_schema.get() != LEASE_OFFER_COMMAND_SCHEMA
+        || protocol_version.get() != LEASE_OFFER_COMMAND_SCHEMA
+    {
+        return Err(StoreError::corrupt_data(
+            "runtime-authority offer has invalid protocol metadata",
+        ));
+    }
+    let slot = u16::try_from(
+        row.try_get::<i32, _>("runner_slot")
+            .map_err(operation_error)?,
+    )
+    .ok()
+    .and_then(|value| StableRunnerSlot::new(value).ok())
+    .ok_or_else(|| StoreError::corrupt_data("invalid runtime-authority runner slot"))?;
+    let fencing = u64::try_from(
+        row.try_get::<i64, _>("fencing_token")
+            .map_err(operation_error)?,
+    )
+    .ok()
+    .and_then(|value| FencingToken::new(value).ok())
+    .ok_or_else(|| StoreError::corrupt_data("invalid runtime-authority fencing token"))?;
+    let lease = decode_lease_offer_lease(row, session.runner_id(), fencing)?;
+    let job_ir = decode_lease_offer_job_ir(row)?;
+    let offer_valid_until = UnixMillis::new(
+        row.try_get("offer_valid_until_ms")
+            .map_err(operation_error)?,
+    );
+    AcceptedRuntimeAuthorityOffer::new(
+        request,
+        protocol_version,
+        slot,
+        lease,
+        job_ir,
+        offer_valid_until,
+        RuntimeAuthorityOfferCommand::new(
+            command_operation_id,
+            command_sequence,
+            command_created_at,
+        ),
+    )
+    .map(Some)
+    .map_err(|error| StoreError::corrupt_data(error.to_string()))
 }
 
 async fn load_lease_offer_publication_by_receipt_binding(

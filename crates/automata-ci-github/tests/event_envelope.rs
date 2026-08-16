@@ -77,7 +77,7 @@ fn registry_and_envelopes_cover_every_workflow_event_exactly_once() {
 }
 
 #[test]
-fn pull_request_envelope_retains_auth02_actor_source_target_and_fork_facts() {
+fn pull_request_envelope_binds_execution_to_the_checked_head_revision() {
     let event = normalize(&pull_request_payload(), "pull_request");
     let envelope = seal(&event);
     let GithubEventFacts::PullRequest(facts) = envelope.event() else {
@@ -96,7 +96,11 @@ fn pull_request_envelope_retains_auth02_actor_source_target_and_fork_facts() {
     assert_eq!(facts.target_ref(), "main");
     assert_eq!(facts.source_revision().as_str(), HEAD_SHA);
     assert_eq!(facts.target_revision().as_str(), BASE_SHA);
-    assert_eq!(facts.execution_revision().as_str(), MERGE_SHA);
+    assert_ne!(
+        HEAD_SHA, MERGE_SHA,
+        "fixture must carry a stale merge revision"
+    );
+    assert_eq!(facts.execution_revision().as_str(), HEAD_SHA);
 
     let trust_facts =
         GithubEventRegistryV1::entry(GithubWorkflowEventKind::PullRequest).trust_facts();
