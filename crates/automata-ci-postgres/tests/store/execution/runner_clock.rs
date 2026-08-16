@@ -57,7 +57,7 @@ use crate::support::{
 };
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
+const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v2";
 const HEARTBEAT_KIND: &str = "automata.runner.lease-heartbeat.v1";
 const LEASE_RESPONSE_KIND: &str = "automata.runner.lease-response.v1";
 const RUNNER_RESPONSE_KEY_PURPOSE: &str = "control-plane/runner-rpc-response:v1";
