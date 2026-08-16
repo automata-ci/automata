@@ -61,35 +61,6 @@ use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-macro_rules! forward_keyed_commitments {
-    () => {
-        fn create_keyed_commitment(
-            &self,
-            domain: ContentCommitmentDomain,
-            material_digest: &[u8; 32],
-        ) -> Result<KeyedContentCommitment, SpoolError> {
-            self.inner.create_keyed_commitment(domain, material_digest)
-        }
-
-        fn recreate_keyed_commitment(
-            &self,
-            protection_id: &ProtectionId,
-            domain: ContentCommitmentDomain,
-            material_digest: &[u8; 32],
-        ) -> Result<KeyedContentCommitment, SpoolError> {
-            self.inner
-                .recreate_keyed_commitment(protection_id, domain, material_digest)
-        }
-
-        fn reserve_endpoint_result(
-            &self,
-            maximum_plaintext_bytes: u64,
-        ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
-            self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
-        }
-    };
-}
-
 /// Deadlock guard for event-driven asynchronous tests.
 pub const TEST_WATCHDOG: Duration = Duration::from_secs(15);
 
@@ -173,7 +144,30 @@ impl AckCapacitySpool {
 }
 
 impl DurableContentStore for AckCapacitySpool {
-    forward_keyed_commitments!();
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
 
     fn persist(
         &self,
@@ -234,7 +228,30 @@ impl TerminalCapacityProbeSpool {
 }
 
 impl DurableContentStore for TerminalCapacityProbeSpool {
-    forward_keyed_commitments!();
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
 
     fn persist(
         &self,
@@ -322,7 +339,30 @@ impl NestedOfferCapacityProbeSpool {
 }
 
 impl DurableContentStore for NestedOfferCapacityProbeSpool {
-    forward_keyed_commitments!();
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
 
     fn persist(
         &self,
@@ -412,7 +452,30 @@ impl BlockingEosSpool {
 }
 
 impl DurableContentStore for BlockingEosSpool {
-    forward_keyed_commitments!();
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
 
     fn persist(
         &self,
@@ -510,7 +573,30 @@ impl BlockingSegmentLoadSpool {
 }
 
 impl DurableContentStore for BlockingSegmentLoadSpool {
-    forward_keyed_commitments!();
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
 
     fn persist(
         &self,
@@ -950,7 +1036,30 @@ impl ContentRaceSpool {
 }
 
 impl DurableContentStore for ContentRaceSpool {
-    forward_keyed_commitments!();
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
 
     fn persist(
         &self,

@@ -13,3 +13,4 @@ mod repository_snapshots;
 mod stored_push_rehydration;
 mod webhook_event_normalization;
 mod webhook_verification;
+mod workflow_permissions;
