@@ -59,7 +59,7 @@ use crate::support::{
 };
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v1";
+const LEASE_OFFER_KIND: &str = "automata.runner.lease-offer.v2";
 const RUNTIME_AUTHORITY_PROTOCOL_VERSION: u16 = 2;
 const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
 const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
@@ -1141,6 +1141,18 @@ async fn lease_offer_command_resolution_is_exact_optional_and_bounded() -> TestR
         sqlx::query(
             "ALTER TABLE runner_lease_offer_publications \
              DROP CONSTRAINT runner_lease_offer_publications_command_unique",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE runner_runtime_authority_deliveries \
+             DROP CONSTRAINT runtime_authority_deliveries_exact_offer_publication",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE runner_lease_offer_publications \
+             DROP CONSTRAINT lease_offer_publications_runtime_authority_binding_unique",
         )
         .execute(database.pool())
         .await?;
