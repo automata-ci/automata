@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    future::Future,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -1658,8 +1659,16 @@ impl RunnerSessionSupervisor {
                 .finish_terminal_slot(session, &durable, cancellation)
                 .await;
         }
+        let authority_delivery =
+            self.ensure_runtime_authority_delivery(session, &durable, cancellation.clone());
         let snapshot = self
-            .ensure_runtime_authority_delivery(session, &durable, cancellation.clone())
+            .maintain_lease_during(
+                session,
+                &durable,
+                JobLifecycle::Preparing,
+                cancellation.clone(),
+                authority_delivery,
+            )
             .await?;
         let durable = snapshot
             .slot(durable.slot())
@@ -1817,18 +1826,22 @@ impl RunnerSessionSupervisor {
                 .await
         });
 
-        let mut heartbeat_schedule = HeartbeatSchedule::new(
-            self.inner.ports.clock.monotonic_now(),
+        let heartbeat_stop = CancellationToken::new();
+        let heartbeat_task = self.spawn_heartbeat_loop(
+            session,
+            durable.slot(),
+            lease.guard(),
+            Arc::clone(&watchdog),
             heartbeat_interval,
-            watchdog.deadline(),
+            heartbeat_stop.clone(),
         );
+        tokio::pin!(heartbeat_task);
         let outcome = loop {
-            let control_cycle = self.maintain_active_control_slice(
+            let control_cycle = self.flush_active_log_slice(
                 session,
                 durable.slot(),
                 lease.guard(),
-                Arc::clone(&watchdog),
-                &mut heartbeat_schedule,
+                heartbeat_interval,
                 cancellation.clone(),
             );
             tokio::pin!(control_cycle);
@@ -1884,14 +1897,51 @@ impl RunnerSessionSupervisor {
                             reason: metric_reason,
                         });
                         let _ = self.await_cancelled_executor(&mut execution).await;
+                        heartbeat_stop.cancel();
+                        let _ = (&mut heartbeat_task).await;
                         watchdog_stop.cancel();
                         let _ = watchdog_task.await;
                         self.unregister_execution(lease.attempt_id());
                         return Err(error);
                     }
                 }
+                heartbeat_result = &mut heartbeat_task => {
+                    let error = match heartbeat_result {
+                        Ok(Err(error)) => error,
+                        Ok(Ok(())) | Err(_) => RunnerRuntimeError::ExecutorContract,
+                    };
+                    let (execution_reason, metric_reason) = match &error {
+                        RunnerRuntimeError::StaleSession => (
+                            ExecutionCancellationReason::SessionLost,
+                            RuntimeCancellationReason::SessionLost,
+                        ),
+                        RunnerRuntimeError::LeaseExpired => (
+                            ExecutionCancellationReason::LeaseExpired,
+                            RuntimeCancellationReason::LeaseExpired,
+                        ),
+                        RunnerRuntimeError::Shutdown if cancellation.is_cancelled() => (
+                            ExecutionCancellationReason::Shutdown,
+                            RuntimeCancellationReason::Shutdown,
+                        ),
+                        _ => (
+                            ExecutionCancellationReason::Shutdown,
+                            RuntimeCancellationReason::ControlFailure,
+                        ),
+                    };
+                    signal.signal(execution_reason);
+                    self.observe(RunnerRuntimeEvent::Cancellation {
+                        reason: metric_reason,
+                    });
+                    let _ = self.await_cancelled_executor(&mut execution).await;
+                    watchdog_stop.cancel();
+                    let _ = watchdog_task.await;
+                    self.unregister_execution(lease.attempt_id());
+                    return Err(error);
+                }
             }
         };
+        heartbeat_stop.cancel();
+        let _ = (&mut heartbeat_task).await;
         self.unregister_execution(lease.attempt_id());
         let cancellation_reason = signal.reason();
         match cancellation_reason {
@@ -2046,6 +2096,78 @@ impl RunnerSessionSupervisor {
             .remove(&attempt_id);
     }
 
+    async fn maintain_lease_during<T, F>(
+        &self,
+        session: RuntimeSession,
+        durable: &SlotSnapshot,
+        reported_lifecycle: JobLifecycle,
+        cancellation: CancellationToken,
+        operation: F,
+    ) -> Result<T, RunnerRuntimeError>
+    where
+        F: Future<Output = Result<T, RunnerRuntimeError>>,
+    {
+        let watchdog = Arc::new(LeaseWatchdog::new(self.local_lease_deadline(
+            session,
+            durable.offer().lease(),
+            durable.expires_at(),
+        )));
+        if watchdog.is_expired_at(self.inner.ports.clock.monotonic_now()) {
+            return Err(RunnerRuntimeError::LeaseExpired);
+        }
+        let lease_expired = CancellationToken::new();
+        let watchdog_stop = CancellationToken::new();
+        let watchdog_task = self.spawn_watchdog(
+            Arc::clone(&watchdog),
+            lease_expired.clone(),
+            watchdog_stop.clone(),
+        );
+        tokio::pin!(operation);
+        let heartbeat_interval =
+            Duration::from_millis(u64::from(session.timing.heartbeat_interval_millis()));
+        let mut heartbeat_schedule = HeartbeatSchedule::new(
+            self.inner.ports.clock.monotonic_now(),
+            heartbeat_interval,
+            watchdog.deadline(),
+        );
+        let result = loop {
+            heartbeat_schedule
+                .cap_to_lease(self.inner.ports.clock.monotonic_now(), watchdog.deadline());
+            let heartbeat_delay =
+                heartbeat_schedule.remaining_from(self.inner.ports.clock.monotonic_now());
+            let heartbeat = async {
+                sleep_or_shutdown(&self.inner.ports.sleeper, heartbeat_delay, &cancellation)
+                    .await?;
+                self.heartbeat_once(
+                    session,
+                    durable.slot(),
+                    durable.offer().lease().guard(),
+                    Arc::clone(&watchdog),
+                    Some(reported_lifecycle),
+                    cancellation.clone(),
+                )
+                .await
+            };
+            tokio::pin!(heartbeat);
+            tokio::select! {
+                biased;
+                result = &mut operation => break result,
+                () = cancellation.cancelled() => break Err(RunnerRuntimeError::Shutdown),
+                () = lease_expired.cancelled() => break Err(RunnerRuntimeError::LeaseExpired),
+                result = &mut heartbeat => {
+                    result?;
+                    heartbeat_schedule.renewed(
+                        self.inner.ports.clock.monotonic_now(),
+                        watchdog.deadline(),
+                    );
+                }
+            }
+        };
+        watchdog_stop.cancel();
+        let _ = watchdog_task.await;
+        result
+    }
+
     async fn await_cancelled_executor(
         &self,
         execution: &mut tokio::task::JoinHandle<Result<JobResult, crate::ExecutorError>>,
@@ -2111,6 +2233,73 @@ impl RunnerSessionSupervisor {
         stop: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         self.spawn_watchdog_inner(watchdog, expired, None, stop)
+    }
+
+    fn spawn_heartbeat_loop(
+        &self,
+        session: RuntimeSession,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        watchdog: Arc<LeaseWatchdog>,
+        heartbeat_interval: Duration,
+        stop: CancellationToken,
+    ) -> tokio::task::JoinHandle<Result<(), RunnerRuntimeError>> {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let mut schedule = HeartbeatSchedule::new(
+                runtime.inner.ports.clock.monotonic_now(),
+                heartbeat_interval,
+                watchdog.deadline(),
+            );
+            loop {
+                schedule.cap_to_lease(
+                    runtime.inner.ports.clock.monotonic_now(),
+                    watchdog.deadline(),
+                );
+                let delay = schedule.remaining_from(runtime.inner.ports.clock.monotonic_now());
+                let renewal = async {
+                    sleep_or_shutdown(&runtime.inner.ports.sleeper, delay, &stop).await?;
+                    info!(
+                        stage = "lease_heartbeat",
+                        runner_id = %runtime.inner.config.capabilities().runner_id(),
+                        session_id = %session.negotiated.session_id(),
+                        slot = slot.get(),
+                        action = "renewal_started",
+                        "active lease heartbeat became due"
+                    );
+                    runtime
+                        .heartbeat_once(
+                            session,
+                            slot,
+                            guard,
+                            Arc::clone(&watchdog),
+                            None,
+                            stop.clone(),
+                        )
+                        .await
+                };
+                tokio::pin!(renewal);
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return Ok(()),
+                    result = &mut renewal => {
+                        result?;
+                        schedule.renewed(
+                            runtime.inner.ports.clock.monotonic_now(),
+                            watchdog.deadline(),
+                        );
+                        info!(
+                            stage = "lease_heartbeat",
+                            runner_id = %runtime.inner.config.capabilities().runner_id(),
+                            session_id = %session.negotiated.session_id(),
+                            slot = slot.get(),
+                            action = "renewal_committed",
+                            "active lease heartbeat committed"
+                        );
+                    }
+                }
+            }
+        })
     }
 
     fn spawn_execution_watchdog(
@@ -2225,81 +2414,24 @@ impl RunnerSessionSupervisor {
         local_monotonic.saturating_add(remaining)
     }
 
-    async fn maintain_active_control_slice(
+    async fn flush_active_log_slice(
         &self,
         session: RuntimeSession,
         slot: RunnerSlotOrdinal,
         guard: LeaseGuard,
-        watchdog: Arc<LeaseWatchdog>,
-        heartbeat_schedule: &mut HeartbeatSchedule,
+        idle_delay: Duration,
         cancellation: CancellationToken,
     ) -> Result<(), RunnerRuntimeError> {
-        // Keep one exact log delivery alive while its independent heartbeat
-        // deadline advances. A retrying or stalled HTTP/2 stream therefore
-        // cannot withhold renewal, while a healthy backlog receives only one
-        // bounded batch before the execution/cancellation branches are polled
-        // again by the caller.
-        let log_flush = self.flush_log_batch(session, slot, guard, cancellation.clone());
-        tokio::pin!(log_flush);
-        let mut log_caught_up = false;
-
-        loop {
-            heartbeat_schedule
-                .cap_to_lease(self.inner.ports.clock.monotonic_now(), watchdog.deadline());
-            let heartbeat_delay =
-                heartbeat_schedule.remaining_from(self.inner.ports.clock.monotonic_now());
-            let heartbeat_due =
-                sleep_or_shutdown(&self.inner.ports.sleeper, heartbeat_delay, &cancellation);
-            tokio::pin!(heartbeat_due);
-
-            tokio::select! {
-                biased;
-                due = &mut heartbeat_due => {
-                    due?;
-                    info!(
-                        stage = "lease_heartbeat",
-                        runner_id = %self.inner.config.capabilities().runner_id(),
-                        session_id = %session.negotiated.session_id(),
-                        slot = slot.get(),
-                        action = "renewal_started",
-                        "active lease heartbeat became due"
-                    );
-                    self.heartbeat_once(
-                        session,
-                        slot,
-                        guard,
-                        Arc::clone(&watchdog),
-                        None,
-                        cancellation.clone(),
-                    )
-                    .await?;
-                    heartbeat_schedule.renewed(
-                        self.inner.ports.clock.monotonic_now(),
-                        watchdog.deadline(),
-                    );
-                    info!(
-                        stage = "lease_heartbeat",
-                        runner_id = %self.inner.config.capabilities().runner_id(),
-                        session_id = %session.negotiated.session_id(),
-                        slot = slot.get(),
-                        action = "renewal_committed",
-                        "active lease heartbeat committed"
-                    );
-                    if log_caught_up {
-                        return Ok(());
-                    }
-                }
-                status = &mut log_flush, if !log_caught_up => {
-                    match status? {
-                        LogFlushStatus::CaughtUp => log_caught_up = true,
-                        LogFlushStatus::MorePending => {
-                            tokio::task::yield_now().await;
-                            return Ok(());
-                        }
-                    }
-                }
+        match self
+            .flush_log_batch(session, slot, guard, cancellation.clone())
+            .await?
+        {
+            LogFlushStatus::MorePending => tokio::task::yield_now().await,
+            LogFlushStatus::CaughtUp => {
+                sleep_or_shutdown(&self.inner.ports.sleeper, idle_delay, &cancellation).await?;
             }
         }
+        Ok(())
     }
 
     async fn heartbeat_once(
