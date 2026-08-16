@@ -438,7 +438,8 @@ durable binding exists and may remain one during an outage.
 | `automata_ci_runner_control_retries_total` | counter | `kind` |
 
 Control kinds are exactly `handshake`, `lease_request`, `lease_response`,
-`heartbeat`, `job_state`, `job_result`, `log_batch`, and `command_ack`.
+`heartbeat`, `job_state`, `job_result`, `log_batch`, `command_ack`,
+`runtime_authority_request`, and `runtime_authority_ack`.
 Outcomes are `success`, `transport_error`, `timeout`, `cancelled`, `http_error`,
 or `invalid_response`. The supplied control-failure recording rule includes the
 four error outcomes and excludes deliberate cancellation.

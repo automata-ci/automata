@@ -150,7 +150,7 @@ impl RunnerControlServer {
         self
     }
 
-    /// Installs the only value-bearing route on this dedicated mTLS listener.
+    /// Installs the dedicated value-bearing managed-secret route on this mTLS listener.
     ///
     /// The route is absent unless explicitly composed. It reauthenticates the
     /// peer certificate for every request and receives no connection-cached
