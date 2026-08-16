@@ -381,19 +381,6 @@ impl RecordedTransportEventExpectation for Http2Terminal {
     }
 }
 
-macro_rules! recorded_values {
-    ($observer:expr, $pattern:pat => $value:expr) => {
-        $observer
-            .events()
-            .into_iter()
-            .filter_map(|event| match event {
-                $pattern => Some($value),
-                _ => None,
-            })
-            .collect()
-    };
-}
-
 #[derive(Debug, Default)]
 pub struct RecordingTransportObserver {
     events: Mutex<Vec<RecordedTransportEvent>>,
@@ -406,30 +393,47 @@ impl RecordingTransportObserver {
     }
 
     pub fn connection_events(&self) -> Vec<RunnerTransportConnectionEvent> {
-        recorded_values!(self, RecordedTransportEvent::Connection(event) => event)
+        self.project_events(|event| match event {
+            RecordedTransportEvent::Connection(event) => Some(event),
+            _ => None,
+        })
     }
 
     pub fn tls_outcomes(&self) -> Vec<RunnerTransportTlsOutcome> {
-        recorded_values!(self, RecordedTransportEvent::Tls(outcome, _) => outcome)
+        self.project_events(|event| match event {
+            RecordedTransportEvent::Tls(outcome, _) => Some(outcome),
+            _ => None,
+        })
     }
 
     pub fn request_observations(&self) -> Vec<RunnerTransportRequestObservation> {
-        recorded_values!(self, RecordedTransportEvent::Request(observation, _) => observation)
+        self.project_events(|event| match event {
+            RecordedTransportEvent::Request(observation, _) => Some(observation),
+            _ => None,
+        })
     }
 
     pub fn request_starts(&self) -> Vec<RunnerTransportRoute> {
-        recorded_values!(self, RecordedTransportEvent::RequestStarted(route) => route)
+        self.project_events(|event| match event {
+            RecordedTransportEvent::RequestStarted(route) => Some(route),
+            _ => None,
+        })
     }
 
     pub fn request_finishes(&self) -> Vec<RunnerTransportRoute> {
-        recorded_values!(self, RecordedTransportEvent::RequestFinished(route) => route)
+        self.project_events(|event| match event {
+            RecordedTransportEvent::RequestFinished(route) => Some(route),
+            _ => None,
+        })
     }
 
     pub fn bytes(&self) -> Vec<(RunnerTransportRoute, RunnerTransportByteDirection, u64)> {
-        recorded_values!(
-            self,
-            RecordedTransportEvent::Bytes(route, direction, bytes) => (route, direction, bytes)
-        )
+        self.project_events(|event| match event {
+            RecordedTransportEvent::Bytes(route, direction, bytes) => {
+                Some((route, direction, bytes))
+            }
+            _ => None,
+        })
     }
 
     pub async fn wait_for(
@@ -466,6 +470,13 @@ impl RecordingTransportObserver {
             .expect("transport event lock")
             .push(event);
         self.changed.notify_waiters();
+    }
+
+    fn project_events<T>(
+        &self,
+        project: impl FnMut(RecordedTransportEvent) -> Option<T>,
+    ) -> Vec<T> {
+        self.events().into_iter().filter_map(project).collect()
     }
 }
 
