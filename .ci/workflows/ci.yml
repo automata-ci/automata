@@ -263,7 +263,7 @@ jobs:
 
       - name: Audit dependencies
         run: |
-          cargo deny --locked --workspace --all-features check advisories bans licenses sources
+          cargo deny --locked --workspace --all-features check --hide-inclusion-graph advisories bans licenses sources
           crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh audit
 
   rust_coverage:

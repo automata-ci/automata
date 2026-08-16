@@ -124,5 +124,5 @@ esac
 if [[ "${mode}" == audit ]]; then
     TMPDIR="${scratch}/temp" CARGO_TARGET_DIR="${scratch}/cargo-target" \
         "${cargo_command}" deny --manifest-path "${scratch}/Cargo.toml" \
-        --config "${repository_root}/deny.toml" --locked check
+        --config "${repository_root}/deny.toml" --locked check --hide-inclusion-graph
 fi

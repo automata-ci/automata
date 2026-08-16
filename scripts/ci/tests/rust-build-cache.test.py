@@ -91,6 +91,16 @@ def main() -> None:
     for gate in ("rust_lint", "rust_docs", "dependency_audit"):
         assert f"- {gate}" in distribution, f"distribution no longer requires {gate}"
     assert "cargo-deny --version 0.20.2" in workflow
+    dependency_audit = job_body(workflow, "dependency_audit")
+    assert "check --hide-inclusion-graph advisories bans licenses sources" in dependency_audit, (
+        "dependency audit output must remain inside the runner command-output bound"
+    )
+    protobuf_audit = (
+        ROOT / ".." / "crates" / "automata-ci-protocol-protobuf" / "tools" / "protobuf-codegen.sh"
+    ).read_text(encoding="utf-8")
+    assert "--locked check --hide-inclusion-graph" in protobuf_audit, (
+        "protobuf dependency audit output must remain bounded"
+    )
     assert "cargo-llvm-cov --version 0.8.7" in workflow
     assert "cargo-cyclonedx --version 0.5.9" in workflow
     print("verified parallel Rust gates and bounded shared compiler caches")
