@@ -1195,6 +1195,23 @@ async fn disabled_state_blocks_new_event_admission_but_remains_versioned() -> Te
         let command = fixture("logical-disabled", "delivery-disabled", 43, 130);
         let (command, authenticated) =
             stage_authenticated_admission(&database, &command, 130).await?;
+        let workflow_id: Uuid = sqlx::query_scalar(
+            r"
+            INSERT INTO workflow_definitions (
+                id, repository_id, path, created_at_ms, updated_at_ms
+            ) VALUES ($1,$2,$3,$4,$4)
+            ON CONFLICT (repository_id, path)
+            DO UPDATE SET updated_at_ms = EXCLUDED.updated_at_ms
+            RETURNING id
+            ",
+        )
+        .bind(command.workflow_id().as_uuid())
+        .bind(command.repository().id().as_uuid())
+        .bind(command.workflow_path())
+        .bind(command.admitted_at().get())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(workflow_id, command.workflow_id().as_uuid());
         let disabled = WorkflowEnableStateRecord::new(
             command.tenant().clone(),
             command.repository().id(),
