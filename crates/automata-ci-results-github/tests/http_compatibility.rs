@@ -1,3 +1,5 @@
+mod http_support;
+
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -26,6 +28,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
+use http_support::{assert_private_rejection, isolated_node_command, path_and_query};
 use sha2::Digest as _;
 use tower::ServiceExt as _;
 use url::Url;
@@ -531,12 +534,6 @@ fn fixture_with_url_and_limits(public_url: &str, limits: GithubResultsHttpLimits
     }
 }
 
-fn assert_private_rejection(response: &axum::response::Response, status: StatusCode) {
-    assert_eq!(response.status(), status);
-    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-}
-
 #[tokio::test]
 async fn artifact_router_and_extractor_rejections_are_private() {
     let fixture = fixture_with_limits(
@@ -694,28 +691,6 @@ async fn run_official_artifact_clients(
         );
     }
     server.abort();
-}
-
-fn isolated_node_command() -> std::process::Command {
-    let mut command = std::process::Command::new("node");
-    command.env_clear();
-    for name in [
-        "PATH",
-        "PATHEXT",
-        "SystemRoot",
-        "WINDIR",
-        "ComSpec",
-        "HOME",
-        "USERPROFILE",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    command
 }
 
 #[tokio::test]
@@ -1120,11 +1095,4 @@ fn twirp_request(path: &str, token: &str, value: &serde_json::Value) -> Request<
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(value.to_string()))
         .expect("request")
-}
-
-fn path_and_query(url: &Url) -> String {
-    url.query().map_or_else(
-        || url.path().to_owned(),
-        |query| format!("{}?{query}", url.path()),
-    )
 }

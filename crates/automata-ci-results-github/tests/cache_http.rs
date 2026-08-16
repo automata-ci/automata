@@ -1,3 +1,5 @@
+mod http_support;
+
 use std::{
     collections::BTreeMap,
     path::PathBuf,
@@ -25,6 +27,7 @@ use axum::{
 };
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
+use http_support::{assert_private_rejection, isolated_node_command, path_and_query};
 use tower::ServiceExt as _;
 use url::Url;
 use uuid::Uuid;
@@ -562,12 +565,6 @@ fn fixture_with_url_observer_and_limits(
     }
 }
 
-fn assert_private_rejection(response: &axum::response::Response, status: StatusCode) {
-    assert_eq!(response.status(), status);
-    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-}
-
 #[tokio::test]
 async fn cache_router_and_extractor_rejections_are_private() {
     let fixture =
@@ -790,28 +787,6 @@ async fn official_actions_cache_5_0_5_client_completes_cache_v2_offline() {
         "official cache-v2 client exited with {}",
         output.status
     );
-}
-
-fn isolated_node_command() -> std::process::Command {
-    let mut command = std::process::Command::new("node");
-    command.env_clear();
-    for name in [
-        "PATH",
-        "PATHEXT",
-        "SystemRoot",
-        "WINDIR",
-        "ComSpec",
-        "HOME",
-        "USERPROFILE",
-        "TMPDIR",
-        "TMP",
-        "TEMP",
-    ] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    command
 }
 
 #[tokio::test]
@@ -1271,11 +1246,4 @@ async fn json_body(response: axum::response::Response) -> serde_json::Value {
             .to_bytes(),
     )
     .expect("JSON response")
-}
-
-fn path_and_query(url: &Url) -> String {
-    url.query().map_or_else(
-        || url.path().to_owned(),
-        |query| format!("{}?{query}", url.path()),
-    )
 }
