@@ -24,9 +24,6 @@ pub enum PodmanConfigurationError {
     /// The current operating system cannot provide this adapter's safety contract.
     #[error("Podman adapter has no implementation for this platform")]
     UnsupportedPlatform,
-    /// Private generated state could not be materialized or validated exactly.
-    #[error("Podman local state setup failed")]
-    StateSetup,
     /// The attempt-scoped Docker-compatible proxy could not be bound safely.
     #[error("attempt-scoped Docker API could not be started safely")]
     JobEngineUnavailable,

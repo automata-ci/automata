@@ -294,8 +294,6 @@ pub(crate) fn sha256_digest(bytes: &[u8]) -> automata_ci_core::Sha256Digest {
 /// Invalid values rejected before they reach a storage adapter.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum DurabilityValueError {
-    #[error("SHA-256 digest has {length} bytes; expected 32")]
-    InvalidDigestLength { length: usize },
     #[error("document schema must be positive")]
     ZeroSchema,
     #[error("runner protocol version must be positive")]

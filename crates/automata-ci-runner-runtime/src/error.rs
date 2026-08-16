@@ -79,9 +79,6 @@ pub enum RunnerRuntimeError {
     /// The server did not permit abandoning every undeliverable old-session item.
     #[error("old-session recovery is missing an explicit delivery permission")]
     OrphanRecoveryPermissionMissing,
-    /// A command addressed the wrong stable poll slot.
-    #[error("lease offer addressed an unexpected runner slot")]
-    SlotCorrelationMismatch,
     /// `JobIR` required environment and executor selection differed exactly.
     #[error("executor environment attestation does not exactly match JobIR requirements")]
     EnvironmentAttestationMismatch,

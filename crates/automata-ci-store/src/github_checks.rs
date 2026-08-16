@@ -2083,9 +2083,6 @@ pub enum GithubCheckStoreError {
     /// An outbox claim is stale, expired, or has the wrong action.
     #[error("the GitHub Check projection claim is stale or rejected")]
     ClaimRejected,
-    /// The desired-revision attempt limit is exhausted.
-    #[error("the GitHub Check projection attempt limit is exhausted")]
-    AttemptLimitReached,
     /// A different external suite or Check Run was already bound.
     #[error("the GitHub Check external identity conflicts with durable identity")]
     ExternalIdentityConflict,

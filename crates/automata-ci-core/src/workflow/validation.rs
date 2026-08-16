@@ -234,9 +234,6 @@ pub enum WorkflowPlanError {
         /// Duplicate step identifier.
         step: String,
     },
-    /// A named timeout is explicitly zero.
-    #[error("timeout cannot be zero for `{0}`")]
-    ZeroTimeout(String),
     /// A named positive integer field is zero.
     #[error("{field} must be greater than zero")]
     ZeroPositiveInteger {
@@ -252,9 +249,6 @@ pub enum WorkflowPlanError {
     /// A job runner profile specifies neither a group nor labels.
     #[error("runner profile for job `{0}` has neither a group nor labels")]
     EmptyRunnerProfile(String),
-    /// A value-map layer repeats one canonical key.
-    #[error("key `{0}` appears more than once in one value-map layer")]
-    DuplicateValueKey(String),
     /// A permissions map repeats one canonical permission name.
     #[error("permission `{0}` appears more than once")]
     DuplicatePermission(String),
@@ -354,9 +348,6 @@ pub enum WorkflowPlanError {
         /// Phase declared by the template.
         actual: &'static str,
     },
-    /// A literal template is marked for a non-admission evaluation phase.
-    #[error("literal value templates must use the admission phase")]
-    NonCanonicalLiteralPhase,
     /// A workflow strategy uses a schema this build cannot interpret safely.
     #[error("unsupported workflow-strategy schema {received}; this build supports {supported}")]
     UnsupportedStrategyVersion {

@@ -2441,9 +2441,6 @@ pub enum GithubServerServiceValueError {
     /// App JWT client identity is invalid.
     #[error("GitHub App client ID is invalid")]
     InvalidAppClientId,
-    /// Configured App JWT issuer choice is unknown.
-    #[error("GitHub App JWT issuer choice is invalid")]
-    InvalidJwtIssuer,
     /// Issuance generation is invalid.
     #[error("server-service issuance generation is invalid")]
     InvalidGeneration,
@@ -2456,9 +2453,6 @@ pub enum GithubServerServiceValueError {
     /// Service scope is unknown.
     #[error("server-service authority scope is invalid")]
     InvalidScope,
-    /// Consumer action is unknown.
-    #[error("server-service authority action is invalid")]
-    InvalidAction,
     /// Timestamp is before the Unix epoch.
     #[error("server-service authority timestamp is negative")]
     NegativeTimestamp,
