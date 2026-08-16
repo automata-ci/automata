@@ -131,6 +131,11 @@ async fn hash_files_inputs_are_evaluated_inside_the_fenced_sandbox() {
             .iter()
             .any(|argument| argument.contains("automata-hash-files"))
     );
+    assert_eq!(
+        commands[0].working_directory().as_str(),
+        "/__w/automata/automata"
+    );
+    assert!(commands[0].environment().values().is_empty());
     assert_eq!(commands[0].argv().arguments().last().unwrap(), "Cargo.lock");
     assert_eq!(environment_map(commands[1])["INPUT_KEY"], digest);
 }
