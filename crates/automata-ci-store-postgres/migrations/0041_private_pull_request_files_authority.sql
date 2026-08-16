@@ -1,4 +1,4 @@
--- Wave 1 EVT-02 append-only migration 0038. Earlier applied versions remain frozen.
+-- Wave 1 EVT-02 append-only migration 0041. Earlier applied versions remain frozen.
 
 ALTER TABLE github_server_service_authorities
     DROP CONSTRAINT github_server_service_authorities_permission_exact,

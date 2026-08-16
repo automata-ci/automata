@@ -18,8 +18,9 @@ use super::{CompileContext, CompiledEvent, CompiledWorkflowDispatch, WorkflowNot
 const DEFAULT_PULL_REQUEST_ACTIONS: &[&str] = &["opened", "synchronize", "reopened"];
 const MAX_PATTERN_BYTES: usize = 4_096;
 const MAX_CANDIDATE_BYTES: usize = 4_096;
-const MAX_CHANGED_FILES: usize = 300;
-const MAX_CHANGED_PATH_CANDIDATES: usize = MAX_CHANGED_FILES * 2;
+const MAX_PUSH_CHANGED_FILES: usize = 300;
+const MAX_PULL_REQUEST_CHANGED_FILES: usize = 3_000;
+const MAX_CHANGED_PATH_CANDIDATES: usize = MAX_PULL_REQUEST_CHANGED_FILES * 2;
 const MAX_CHANGED_FILE_BYTES: usize = MAX_CHANGED_PATH_CANDIDATES * MAX_CANDIDATE_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,8 +46,11 @@ const fn filter_candidate_byte_rejection(observed: usize) -> Option<TriggerLimit
     None
 }
 
-const fn changed_file_count_rejection(observed: usize) -> Option<TriggerLimitRejection> {
-    if observed > MAX_CHANGED_FILES {
+const fn changed_file_count_rejection(
+    observed: usize,
+    maximum: usize,
+) -> Option<TriggerLimitRejection> {
+    if observed > maximum {
         return Some(TriggerLimitRejection::ChangedFileCount);
     }
     None
@@ -1376,7 +1380,13 @@ fn push_matches(
                     filter.tags_configured() || filter.tags_ignore_configured(),
                 );
                 if reference_matches {
-                    match path_filter_matches(filter, changed_files, trigger_span, context) {
+                    match path_filter_matches(
+                        filter,
+                        changed_files,
+                        MAX_PUSH_CHANGED_FILES,
+                        trigger_span,
+                        context,
+                    ) {
                         PathFilterSelection::Matched(paths_match) => paths_match,
                         PathFilterSelection::RequiresChangedFiles => {
                             return TriggerSelection::RequiresChangedFiles;
@@ -1466,7 +1476,13 @@ fn pull_request_matches(
                     false,
                 );
             if reference_matches {
-                match path_filter_matches(filter, changed_files, trigger_span, context) {
+                match path_filter_matches(
+                    filter,
+                    changed_files,
+                    MAX_PULL_REQUEST_CHANGED_FILES,
+                    trigger_span,
+                    context,
+                ) {
                     PathFilterSelection::Matched(paths_match) => paths_match,
                     PathFilterSelection::RequiresChangedFiles => {
                         return TriggerSelection::RequiresChangedFiles;
@@ -1490,6 +1506,7 @@ fn pull_request_matches(
 fn path_filter_matches(
     filter: &PushPullRequestFilter,
     changed_files: Option<&GithubChangedFiles>,
+    maximum_changed_files: usize,
     trigger_span: &SourceSpan,
     context: &mut CompileContext<'_>,
 ) -> PathFilterSelection {
@@ -1505,7 +1522,7 @@ fn path_filter_matches(
     let Some(selected_file_count) = changed_files.selected_file_count() else {
         return PathFilterSelection::Rejected;
     };
-    if !valid_changed_files(files, selected_file_count) {
+    if !valid_changed_files(files, selected_file_count, maximum_changed_files) {
         context.semantic(
             "github.compile.invalid_changed_files_metadata",
             "changed-file metadata exceeds provider bounds or contains an invalid repository-relative path",
@@ -1533,11 +1550,15 @@ enum PathFilterSelection {
     Rejected,
 }
 
-fn valid_changed_files(files: &[String], selected_file_count: usize) -> bool {
+fn valid_changed_files(
+    files: &[String],
+    selected_file_count: usize,
+    maximum_changed_files: usize,
+) -> bool {
     let Some(maximum_path_candidates) = selected_file_count.checked_mul(2) else {
         return false;
     };
-    if changed_file_count_rejection(selected_file_count).is_some()
+    if changed_file_count_rejection(selected_file_count, maximum_changed_files).is_some()
         || changed_path_candidate_count_rejection(files.len()).is_some()
         || files.len() < selected_file_count
         || files.len() > maximum_path_candidates
@@ -1882,9 +1903,9 @@ impl ClassMember {
 #[cfg(test)]
 mod tests {
     use super::{
-        GithubGlob, MAX_CANDIDATE_BYTES, MAX_CHANGED_FILE_BYTES, MAX_CHANGED_FILES,
-        MAX_CHANGED_PATH_CANDIDATES, MAX_PATTERN_BYTES, TriggerLimitRejection,
-        changed_file_byte_rejection, changed_file_count_rejection,
+        GithubGlob, MAX_CANDIDATE_BYTES, MAX_CHANGED_FILE_BYTES, MAX_CHANGED_PATH_CANDIDATES,
+        MAX_PATTERN_BYTES, MAX_PULL_REQUEST_CHANGED_FILES, MAX_PUSH_CHANGED_FILES,
+        TriggerLimitRejection, changed_file_byte_rejection, changed_file_count_rejection,
         changed_path_candidate_count_rejection, filter_candidate_byte_rejection,
         filter_pattern_byte_rejection,
     };
@@ -1942,13 +1963,15 @@ mod tests {
     }
 
     #[test]
-    fn changed_file_count_limit_has_exact_boundaries() {
-        assert_eq!(changed_file_count_rejection(MAX_CHANGED_FILES - 1), None);
-        assert_eq!(changed_file_count_rejection(MAX_CHANGED_FILES), None);
-        assert_eq!(
-            changed_file_count_rejection(MAX_CHANGED_FILES + 1),
-            Some(TriggerLimitRejection::ChangedFileCount)
-        );
+    fn changed_file_count_limits_have_exact_event_boundaries() {
+        for maximum in [MAX_PUSH_CHANGED_FILES, MAX_PULL_REQUEST_CHANGED_FILES] {
+            assert_eq!(changed_file_count_rejection(maximum - 1, maximum), None);
+            assert_eq!(changed_file_count_rejection(maximum, maximum), None);
+            assert_eq!(
+                changed_file_count_rejection(maximum + 1, maximum),
+                Some(TriggerLimitRejection::ChangedFileCount)
+            );
+        }
     }
 
     #[test]

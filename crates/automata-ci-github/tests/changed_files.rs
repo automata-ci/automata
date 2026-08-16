@@ -10,7 +10,8 @@ use automata_ci_github::{
     GithubChangedFilesEvidenceDigest, GithubHttpEndpoint, GithubHttpLimits,
     GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome, GithubPullRequestDiffRequest,
     GithubPushDiffAuthority, GithubPushDiffIncompleteReason, GithubPushDiffOutcome,
-    GithubPushDiffRange, GithubPushDiffRequest, MAX_GITHUB_ACTIONS_PATH_FILTER_FILES,
+    GithubPushDiffRange, GithubPushDiffRequest, MAX_GITHUB_COMPARE_PATH_FILTER_FILES,
+    MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use axum::http::StatusCode;
@@ -271,9 +272,10 @@ async fn pull_request_transport_and_authority_failures_have_disjoint_disposition
 }
 
 #[tokio::test]
-async fn pull_request_selection_is_pinned_to_the_first_three_hundred_files() {
-    for reported_changed_files in [299_usize, 300, 301] {
-        let selected_file_count = reported_changed_files.min(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES);
+async fn pull_request_selection_is_pinned_to_the_first_three_thousand_files() {
+    for reported_changed_files in [2_999_usize, 3_000, 3_001] {
+        let selected_file_count =
+            reported_changed_files.min(MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES);
         let fixture = FixtureServer::spawn().await;
         fixture.enqueue(ResponseSpec::json(
             StatusCode::OK,
@@ -283,7 +285,7 @@ async fn pull_request_selection_is_pinned_to_the_first_three_hundred_files() {
             let page_start = page * 100;
             let page_end = (page_start + 100).min(selected_file_count);
             let files = (page_start..page_end)
-                .map(|index| pull_request_file(&format!("src/file-{index:03}.rs"), "modified"))
+                .map(|index| pull_request_file(&format!("src/file-{index:04}.rs"), "modified"))
                 .collect::<Vec<_>>();
             fixture.enqueue(ResponseSpec::json(
                 StatusCode::OK,
@@ -311,17 +313,20 @@ async fn pull_request_selection_is_pinned_to_the_first_three_hundred_files() {
         );
         assert_eq!(evidence.selected_file_count(), selected_file_count);
         assert_eq!(evidence.changed_paths().len(), selected_file_count);
-        assert_eq!(evidence.page_digests().len(), 3);
+        assert_eq!(evidence.page_digests().len(), 30);
         assert!(
             !evidence
                 .changed_paths()
                 .iter()
-                .any(|path| path == "src/file-300.rs")
+                .any(|path| path == "src/file-3000.rs")
         );
         let requests = fixture.requests();
-        assert_eq!(requests.len(), 5);
-        assert!(requests[3].uri.ends_with("per_page=100&page=3"));
-        assert_eq!(requests[4].uri, "/api/repos/octo-org/private-repo/pulls/17");
+        assert_eq!(requests.len(), 32);
+        assert!(requests[30].uri.ends_with("per_page=100&page=30"));
+        assert_eq!(
+            requests[31].uri,
+            "/api/repos/octo-org/private-repo/pulls/17"
+        );
     }
 }
 
@@ -756,7 +761,7 @@ async fn unsupported_push_shapes_are_typed_incomplete_without_provider_io() {
 
 #[tokio::test]
 async fn compare_selection_has_exact_299_300_301_boundaries() {
-    assert_eq!(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES, 300);
+    assert_eq!(MAX_GITHUB_COMPARE_PATH_FILTER_FILES, 300);
     for file_count in [299_usize, 300, 301] {
         let fixture = FixtureServer::spawn().await;
         let files = (0..file_count)
@@ -780,7 +785,7 @@ async fn compare_selection_has_exact_299_300_301_boundaries() {
             GithubPushDiffAuthority::PublicAnonymous,
         )
         .await;
-        if file_count <= MAX_GITHUB_ACTIONS_PATH_FILTER_FILES {
+        if file_count <= MAX_GITHUB_COMPARE_PATH_FILTER_FILES {
             let GithubPushDiffOutcome::Complete(evidence) = outcome else {
                 panic!("expected complete {file_count}-file selection");
             };

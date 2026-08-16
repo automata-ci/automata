@@ -24,17 +24,18 @@ const PULL_REQUEST_FILES_PER_PAGE: usize = 100;
 const MAX_ACTIONS_PUSH_COMMITS: usize = 1_000;
 const MAX_CHANGED_PATH_BYTES: usize = 4_096;
 
-/// Exact github.com Actions path-filter selection window.
+/// Maximum changed-file records exposed by GitHub's Compare REST response.
+pub const MAX_GITHUB_COMPARE_PATH_FILTER_FILES: usize = 300;
+/// Exact documented pull-request path-filter selection window.
 ///
-/// Compare REST exposes at most these first 300 files. Pull-request REST can
-/// expose up to 3,000, but github.com Actions evaluates only its first 300-file
-/// window; later files must never influence selection.
-pub const MAX_GITHUB_ACTIONS_PATH_FILTER_FILES: usize = 300;
+/// Pull-request Files REST exposes at most the first 3,000 records, matching
+/// the documented GitHub Actions path-filter evaluation window.
+pub const MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES: usize = 3_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GithubChangedFilesLimitRejection {
     ActionsPushCommitCount,
-    ActionsPathFilterFileCount,
+    CompareFileCount,
     ChangedPathBytes,
 }
 
@@ -47,11 +48,9 @@ const fn actions_push_commit_count_rejection(
     None
 }
 
-const fn actions_path_filter_file_count_rejection(
-    observed: usize,
-) -> Option<GithubChangedFilesLimitRejection> {
-    if observed > MAX_GITHUB_ACTIONS_PATH_FILTER_FILES {
-        return Some(GithubChangedFilesLimitRejection::ActionsPathFilterFileCount);
+const fn compare_file_count_rejection(observed: usize) -> Option<GithubChangedFilesLimitRejection> {
+    if observed > MAX_GITHUB_COMPARE_PATH_FILTER_FILES {
+        return Some(GithubChangedFilesLimitRejection::CompareFileCount);
     }
     None
 }
@@ -232,7 +231,7 @@ pub enum GithubPushDiffIncompleteReason {
     DeletedPush,
     /// A forced or divergent update cannot use merge-base results as a two-dot diff.
     DivergedPush,
-    /// The provider returned more than the documented 300-file selection window.
+    /// Compare REST returned more than its documented 300-record transport window.
     FileListCapped,
     /// Provider evidence was malformed or did not bind to the exact signed push.
     InvalidEvidence,
@@ -580,7 +579,7 @@ impl GithubHttpEndpoint {
     /// Existing non-forced updates are accepted only when Compare REST proves
     /// that the exact `before` commit is also the merge base, every paginated
     /// commit equals the signed webhook set, the final commit is exact `after`,
-    /// and the provider returns no more than Actions' first 300 file records.
+    /// and Compare REST returns no more than its 300 changed-file records.
     /// Renames contribute both their previous and current repository-relative
     /// paths. Other push shapes return an explicit incomplete disposition
     /// without inventing an empty path list.
@@ -631,9 +630,9 @@ impl GithubHttpEndpoint {
     /// comparison. This operation snapshots the exact pull-request number,
     /// base repository, head repository, base revision, and head revision on
     /// both sides of GitHub's paginated pull-request-files endpoint. It accepts
-    /// github.com Actions' exact first-300-file selection window only when all
-    /// three possible 100-file pages are present and globally duplicate-free.
-    /// A provider-reported 301st file is deliberately not fetched or matched.
+    /// GitHub Actions' exact first-3,000-file selection window only when all
+    /// required 100-file pages are present and globally duplicate-free. A
+    /// provider-reported 3,001st file is deliberately not fetched or matched.
     ///
     /// # Errors
     ///
@@ -733,8 +732,8 @@ impl GithubHttpEndpoint {
             .fetch_pull_request_snapshot(snapshot_endpoint, request.authority, deadline)
             .await?;
         validate_pull_request_snapshot(&initial, &request)?;
-        let maximum_pull_request_files =
-            u64::try_from(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES).map_err(|_| invalid_evidence())?;
+        let maximum_pull_request_files = u64::try_from(MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES)
+            .map_err(|_| invalid_evidence())?;
         let selected_count = usize::try_from(initial.changed_files.min(maximum_pull_request_files))
             .map_err(|_| invalid_evidence())?;
         let page_count = selected_count.div_ceil(PULL_REQUEST_FILES_PER_PAGE);
@@ -1258,7 +1257,7 @@ fn complete_changed_files(
 ) -> Result<Vec<GithubChangedFile>, CompareFailure> {
     let files = files.ok_or_else(invalid_evidence)?;
     let selected_file_count = files.len();
-    if actions_path_filter_file_count_rejection(selected_file_count).is_some() {
+    if compare_file_count_rejection(selected_file_count).is_some() {
         return Err(CompareFailure::Incomplete(
             GithubPushDiffIncompleteReason::FileListCapped,
         ));
@@ -1346,18 +1345,18 @@ mod limit_contract_tests {
     }
 
     #[test]
-    fn actions_path_filter_file_count_limit_has_exact_boundaries() {
+    fn compare_file_count_limit_has_exact_boundaries() {
         assert_eq!(
-            actions_path_filter_file_count_rejection(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES - 1),
+            compare_file_count_rejection(MAX_GITHUB_COMPARE_PATH_FILTER_FILES - 1),
             None
         );
         assert_eq!(
-            actions_path_filter_file_count_rejection(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES),
+            compare_file_count_rejection(MAX_GITHUB_COMPARE_PATH_FILTER_FILES),
             None
         );
         assert_eq!(
-            actions_path_filter_file_count_rejection(MAX_GITHUB_ACTIONS_PATH_FILTER_FILES + 1),
-            Some(GithubChangedFilesLimitRejection::ActionsPathFilterFileCount)
+            compare_file_count_rejection(MAX_GITHUB_COMPARE_PATH_FILTER_FILES + 1),
+            Some(GithubChangedFilesLimitRejection::CompareFileCount)
         );
     }
 

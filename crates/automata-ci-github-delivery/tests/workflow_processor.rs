@@ -1100,7 +1100,10 @@ async fn pull_request_metadata_and_raw_event_reach_logical_admission_exactly() {
 
 #[tokio::test]
 async fn public_pull_request_path_filters_admit_with_durable_selection_evidence() {
-    let changed = Arc::new(ChangedFiles::new(complete_changed_files(["src/lib.rs"])));
+    let files = (0..2_999)
+        .map(|index| format!("docs/file-{index}.md"))
+        .chain(std::iter::once("src/lib.rs".to_owned()));
+    let changed = Arc::new(ChangedFiles::new(complete_changed_files(files)));
     let harness = pull_request_harness_with_visibility(
         BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_PATH_WORKFLOW)]),
         Some(changed.clone()),

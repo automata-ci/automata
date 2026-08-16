@@ -33,7 +33,7 @@ Tasks:
 - [x] Select least authority for public, private, same-repository, and fork
   pull requests.
 - [ ] Match two-dot, three-dot, new-branch, forced/diverged, rename, deletion,
-  300-file, and 1,000-commit behavior.
+  3,000-file, and 1,000-commit behavior.
 - [x] Separate complete file evidence, provider-proven run-all behavior,
   retryable unavailability, and invalid evidence.
 - [x] Never turn transport failure into match or skip.
@@ -56,8 +56,8 @@ Current implementation boundary:
   `pulls/{number}/files` reads. Exact pre/post pull-request snapshots bind the
   base repository, head repository, pull-request number, base SHA, head SHA,
   state, and provider-reported file count. The github.com Actions product
-  target consumes exactly the first 300 provider file records in at most three
-  exact 100-file pages; a reported 301st file is neither fetched nor matched.
+  target consumes exactly the first 3,000 provider file records in at most 30
+  exact 100-file pages; a reported 3,001st file is neither fetched nor matched.
 - Each page is order-digested; the aggregate evidence digest also binds the
   canonical path set. A well-formed rename contributes both its previous and
   current path while retaining one provider-record count. Duplicate primary
@@ -76,14 +76,15 @@ Current implementation boundary:
   credential handoff. Acquisition happens only after the compiler demands
   path evidence, and the existing `contents: read` source selector cannot be
   substituted at the typed, adapter, or database boundary.
-- Existing-push Compare evidence accepts its documented first 300 file records;
-  rename records likewise contribute both old and new paths. Exact 299/300/301
-  fixtures pin the boundary and prove a 301st PR file cannot affect selection.
-- GitHub's [generic troubleshooting guidance](https://docs.github.com/en/actions/how-tos/troubleshoot-workflows#filtering-and-diff-limits)
-  currently says 300 files, while its [Enterprise Cloud trigger guidance](https://docs.github.com/en/enterprise-cloud@latest/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#using-filters-to-target-specific-paths-for-pull-request-or-push-events)
-  says 3,000. Automata pins github.com generic's 300-file behavior. This
-  documentation observation is not live differential evidence; a protected
-  provider run must resolve the contradiction before a broader compatibility
+- Existing-push Compare evidence retains the REST response's 300-record
+  boundary; rename records likewise contribute both old and new paths. Exact
+  299/300/301 Compare fixtures remain distinct from exact 2,999/3,000/3,001
+  pull-request fixtures, including a match whose first selected path is record
+  3,000.
+- GitHub's [canonical trigger guidance](https://docs.github.com/en/enterprise-cloud@latest/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#using-filters-to-target-specific-paths-for-pull-request-or-push-events)
+  and Pull-request Files REST contract define a 3,000-file pull-request
+  window. Automata fetches and evidence-binds that complete window. Protected
+  live differential evidence remains required before a broader compatibility
   claim.
 - New-branch and forced/diverged push comparisons remain fail-closed.
   Commit-message skip directives and live GitHub differential evidence also

@@ -167,7 +167,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0041_private_pull_request_files_authority.sql",
-        "ffe09b28f1cd13879c582df018b5fc663aa4bd0f8390466ed8bfc2a82fa5db74da721978c460c21607130e027ad2d848",
+        "8bdd45b0680b2f08e273c5b3f2386e293c946d63925af1a166df389884467f5eaa76535f3871b1cd0c723aa0fe794b44",
     ),
 ];
 

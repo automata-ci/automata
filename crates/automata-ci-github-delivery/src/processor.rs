@@ -8,7 +8,8 @@ use automata_ci_core::{
     WorkflowEventProvenance,
 };
 use automata_ci_github::{
-    GithubTrustDerivation, MAX_GITHUB_ACTIONS_PATH_FILTER_FILES, derive_github_trust_snapshot,
+    GithubTrustDerivation, MAX_GITHUB_COMPARE_PATH_FILTER_FILES,
+    MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES, derive_github_trust_snapshot,
 };
 use automata_ci_scm::{ArchiveFormat, RepositorySource};
 use automata_ci_store::{
@@ -367,7 +368,8 @@ pub enum GithubChangedFilesDisposition {
 /// Least-authority provider port for one exact GitHub push diff.
 ///
 /// Implementations must reproduce the provider's path-filter selection,
-/// return exactly github.com Actions' first-300-file window, and return
+/// retain Compare's 300-record push boundary and the documented 3,000-record
+/// pull-request window, and return
 /// [`GithubChangedFilesDisposition::ProviderRunAll`] only with affirmative
 /// provider evidence that path filters are bypassed. Returned paths must never
 /// enter diagnostics.
@@ -978,7 +980,7 @@ fn changed_files_result(
         GithubChangedFilesDisposition::Complete {
             files,
             evidence_digest,
-        } if files.len() <= MAX_GITHUB_ACTIONS_PATH_FILTER_FILES
+        } if provider_changed_file_limit(request).is_some_and(|limit| files.len() <= limit)
             && u64::try_from(files.len()).is_ok_and(|count| count <= maximum_changed_files) =>
         {
             let selected_file_count = files.len();
@@ -1004,6 +1006,18 @@ fn changed_files_result(
         GithubChangedFilesDisposition::Complete { .. } | GithubChangedFilesDisposition::Invalid => {
             Ok(None)
         }
+    }
+}
+
+fn provider_changed_file_limit(request: &GithubDeliveryWorkflowRequest<'_>) -> Option<usize> {
+    match request.event() {
+        automata_ci_github::VerifiedGithubWebhook::Push(_) => {
+            Some(MAX_GITHUB_COMPARE_PATH_FILTER_FILES)
+        }
+        automata_ci_github::VerifiedGithubWebhook::PullRequest(_) => {
+            Some(MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES)
+        }
+        _ => None,
     }
 }
 

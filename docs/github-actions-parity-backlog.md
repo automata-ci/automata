@@ -296,10 +296,10 @@ Additional event work:
 - [ ] Handle changed-file truncation and diff timeouts.
 - [x] Define fail-closed behavior when complete changed-file evidence cannot be
   obtained.
-- [ ] Differential-test the current 300-file filtering boundary. Focused
-  299/300/301 component fixtures are pinned, but protected live GitHub
-  evidence remains required because GitHub's generic and Enterprise Cloud
-  documentation currently disagree on 300 versus 3,000.
+- [ ] Differential-test the documented 3,000-file pull-request filtering
+  boundary. Focused 2,999/3,000/3,001 component fixtures are pinned, including
+  a first match at record 3,000, but protected live GitHub evidence remains
+  required before claiming production parity.
 - [ ] Implement branch, tag, and path filter ordering exactly.
 - [ ] Match behavior when both positive and negative patterns are present.
 - [ ] Match required-check behavior when path or branch filtering skips a

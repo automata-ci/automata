@@ -497,11 +497,11 @@ fn invalid_changed_file_metadata_is_bounded_and_sanitized() {
 }
 
 #[test]
-fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
-    let source = "on:\n  push:\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+fn changed_file_metadata_enforces_event_specific_provider_windows() {
+    let push_source = "on:\n  push:\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     let files = (0..300).map(|index| format!("src/file-{index}.rs"));
     let report = compile(
-        source,
+        push_source,
         event("push", "refs/heads/main"),
         Some(GithubEventMetadata::push_with_changed_files(
             false,
@@ -512,10 +512,35 @@ fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
 
     let files = (0..301).map(|index| format!("src/file-{index}.rs"));
     let report = compile(
-        source,
+        push_source,
         event("push", "refs/heads/main"),
         Some(GithubEventMetadata::push_with_changed_files(
             false,
+            GithubChangedFiles::complete(files),
+        )),
+    );
+    assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
+
+    let pull_request_source = "on:\n  pull_request:\n    paths: ['src/file-2999.rs']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let files = (0..3_000).map(|index| format!("src/file-{index}.rs"));
+    let report = compile(
+        pull_request_source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
+            GithubChangedFiles::complete(files),
+        )),
+    );
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+
+    let files = (0..3_001).map(|index| format!("src/file-{index}.rs"));
+    let report = compile(
+        pull_request_source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
             GithubChangedFiles::complete(files),
         )),
     );
