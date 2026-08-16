@@ -1,17 +1,11 @@
 use std::{
     collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
-use automata_ci_blob::{
-    BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    MediaType, PutBlobOutcome, VerifiedBlob,
-};
+use automata_ci_blob::{BlobDescriptor, BlobKey, BlobStoreErrorKind, MediaType};
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX, GithubPushRefKind};
 use automata_ci_github_delivery::{
@@ -44,9 +38,9 @@ use automata_ci_store::{
     ProviderDeliveryEventEnvelope, ProviderDeliveryFailureKind, ProviderDeliveryId,
     ProviderDeliveryIdentity, ProviderDeliveryReceipt, ProviderDeliveryRepository,
     ProviderDeliveryState, ProviderDeliveryStoreError, ProviderDeliveryWorkflowConclusion,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryReceipt,
-    ProviderDeliveryWorkflowOutcome, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryWorkflowOutcome,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
     RecordProviderDeliveryWorkflowProgress, RegisterProviderDeliveryWorkflowInventory,
     RejectProviderDelivery, RepositoryId as StoreRepositoryId, ResolveGithubRepositoryDispatch,
     RetryProviderDelivery, TenantScope,
@@ -61,8 +55,8 @@ use super::subject_evidence::{
     fixture_subject_evidence, fixture_subject_evidence_with_head,
 };
 use super::support::{
-    AFTER, BEFORE, INSTALLATION_ID, OWNER, REPOSITORY, REPOSITORY_ID, REPOSITORY_OWNER_ID, ZERO,
-    archive, provider_event_envelope, push_body,
+    AFTER, BEFORE, INSTALLATION_ID, OWNER, ProviderDeliveryLedger, REPOSITORY, REPOSITORY_ID,
+    REPOSITORY_OWNER_ID, VerifiedBlobStore, ZERO, archive, provider_event_envelope, push_body,
 };
 
 const STALE_MERGE: &str = "89abcdef0123456789abcdef0123456789abcdef";
@@ -75,62 +69,6 @@ struct FixedClock(UnixMillis);
 impl GithubDeliveryClock for FixedClock {
     fn now(&self) -> UnixMillis {
         self.0
-    }
-}
-
-#[derive(Debug)]
-struct FixtureBlobStore {
-    descriptor: BlobDescriptor,
-    bytes: Bytes,
-    failure: Option<BlobStoreErrorKind>,
-    reads: AtomicUsize,
-}
-
-impl FixtureBlobStore {
-    fn exact(descriptor: BlobDescriptor, bytes: Bytes) -> Self {
-        Self {
-            descriptor,
-            bytes,
-            failure: None,
-            reads: AtomicUsize::new(0),
-        }
-    }
-
-    fn failing(descriptor: BlobDescriptor, bytes: Bytes, failure: BlobStoreErrorKind) -> Self {
-        Self {
-            descriptor,
-            bytes,
-            failure: Some(failure),
-            reads: AtomicUsize::new(0),
-        }
-    }
-
-    fn read_count(&self) -> usize {
-        self.reads.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl ImmutableBlobStore for FixtureBlobStore {
-    async fn put_if_absent(&self, _payload: BlobPayload) -> Result<PutBlobOutcome, BlobStoreError> {
-        panic!("the delivery worker never writes raw objects")
-    }
-
-    async fn get_verified(
-        &self,
-        descriptor: &BlobDescriptor,
-        maximum_bytes: u64,
-    ) -> Result<VerifiedBlob, BlobStoreError> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        if let Some(failure) = self.failure {
-            return Err(BlobStoreError::new(failure));
-        }
-        if descriptor != &self.descriptor || descriptor.size() > maximum_bytes {
-            return Err(BlobStoreError::new(BlobStoreErrorKind::Integrity));
-        }
-        let payload = BlobPayload::verify(descriptor.clone(), self.bytes.clone())
-            .map_err(|_| BlobStoreError::new(BlobStoreErrorKind::Integrity))?;
-        Ok(VerifiedBlob::from_payload(payload))
     }
 }
 
@@ -415,54 +353,40 @@ impl GithubDeliveryWorkflowProcessor for RecordingProcessor {
 
 #[derive(Debug)]
 struct RecordingDeliveries {
-    claimed_receipt: ProviderDeliveryReceipt,
+    claimed_delivery_id: ProviderDeliveryId,
+    ledger: ProviderDeliveryLedger,
     reject_completion_outcome_run: bool,
-    completions: Mutex<Vec<CompleteProviderDelivery>>,
-    retries: Mutex<Vec<RetryProviderDelivery>>,
-    rejections: Mutex<Vec<RejectProviderDelivery>>,
-    inventory: Mutex<Option<ProviderDeliveryWorkflowInventory>>,
-    progress: Mutex<Vec<ProviderDeliveryWorkflowOutcome>>,
 }
 
 impl RecordingDeliveries {
     fn new(claimed_receipt: ProviderDeliveryReceipt) -> Self {
         Self {
-            claimed_receipt,
+            claimed_delivery_id: claimed_receipt.id(),
+            ledger: ProviderDeliveryLedger::new(
+                claimed_receipt.attempts(),
+                claimed_receipt.accepted_at(),
+            ),
             reject_completion_outcome_run: false,
-            completions: Mutex::new(Vec::new()),
-            retries: Mutex::new(Vec::new()),
-            rejections: Mutex::new(Vec::new()),
-            inventory: Mutex::new(None),
-            progress: Mutex::new(Vec::new()),
         }
     }
 
     fn rejecting_completion_outcome_run(claimed_receipt: ProviderDeliveryReceipt) -> Self {
         Self {
-            claimed_receipt,
+            claimed_delivery_id: claimed_receipt.id(),
+            ledger: ProviderDeliveryLedger::new(
+                claimed_receipt.attempts(),
+                claimed_receipt.accepted_at(),
+            ),
             reject_completion_outcome_run: true,
-            completions: Mutex::new(Vec::new()),
-            retries: Mutex::new(Vec::new()),
-            rejections: Mutex::new(Vec::new()),
-            inventory: Mutex::new(None),
-            progress: Mutex::new(Vec::new()),
         }
     }
 
     fn receipt(&self, state: ProviderDeliveryState) -> ProviderDeliveryReceipt {
-        ProviderDeliveryReceipt::from_durable_parts(
-            self.claimed_receipt.id(),
-            state,
-            self.claimed_receipt.attempts(),
-            self.claimed_receipt.accepted_at(),
-        )
-        .expect("transition receipt")
+        self.ledger.receipt(self.claimed_delivery_id, state)
     }
 
     fn transition_count(&self) -> usize {
-        self.completions.lock().expect("completions lock").len()
-            + self.retries.lock().expect("retries lock").len()
-            + self.rejections.lock().expect("rejections lock").len()
+        self.ledger.transition_count()
     }
 }
 
@@ -486,10 +410,7 @@ impl ProviderDeliveryRepository for RecordingDeliveries {
         &self,
         request: CompleteProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        self.completions
-            .lock()
-            .expect("completions lock")
-            .push(request);
+        self.ledger.record_completion(request);
         if self.reject_completion_outcome_run {
             return Err(ProviderDeliveryStoreError::OutcomeRunRejected);
         }
@@ -500,63 +421,27 @@ impl ProviderDeliveryRepository for RecordingDeliveries {
         &self,
         request: RegisterProviderDeliveryWorkflowInventory,
     ) -> Result<ProviderDeliveryWorkflowInventoryReceipt, ProviderDeliveryStoreError> {
-        if request.claim().delivery_id() != self.claimed_receipt.id() {
+        if request.claim().delivery_id() != self.claimed_delivery_id {
             return Err(ProviderDeliveryStoreError::ClaimRejected);
         }
-        let mut inventory = self.inventory.lock().expect("inventory lock");
-        match inventory.as_ref() {
-            Some(existing) if existing != request.inventory() => {
-                return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-            }
-            Some(_) => {}
-            None => *inventory = Some(request.inventory().clone()),
-        }
-        ProviderDeliveryWorkflowInventoryReceipt::new(
-            inventory.as_ref().expect("inventory initialized").clone(),
-            self.progress.lock().expect("progress lock").clone(),
-        )
-        .map_err(|_| ProviderDeliveryStoreError::WorkflowProgressRejected)
+        self.ledger.register_workflow_inventory(&request)
     }
 
     async fn record_provider_delivery_workflow_progress(
         &self,
         request: RecordProviderDeliveryWorkflowProgress,
     ) -> Result<ProviderDeliveryWorkflowOutcome, ProviderDeliveryStoreError> {
-        if request.claim().delivery_id() != self.claimed_receipt.id() {
+        if request.claim().delivery_id() != self.claimed_delivery_id {
             return Err(ProviderDeliveryStoreError::ClaimRejected);
         }
-        let inventory = self.inventory.lock().expect("inventory lock");
-        let Some(inventory) = inventory.as_ref() else {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        };
-        if inventory.digest() != request.inventory_digest()
-            || !inventory
-                .entries()
-                .iter()
-                .any(|entry| entry.workflow_path() == request.outcome().workflow_path())
-        {
-            return Err(ProviderDeliveryStoreError::WorkflowProgressRejected);
-        }
-        let mut progress = self.progress.lock().expect("progress lock");
-        if let Some(existing) = progress
-            .iter()
-            .find(|existing| existing.workflow_path() == request.outcome().workflow_path())
-        {
-            return if existing == request.outcome() {
-                Ok(existing.clone())
-            } else {
-                Err(ProviderDeliveryStoreError::WorkflowProgressRejected)
-            };
-        }
-        progress.push(request.outcome().clone());
-        Ok(request.outcome().clone())
+        self.ledger.record_workflow_progress(&request)
     }
 
     async fn retry_provider_delivery(
         &self,
         request: RetryProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        self.retries.lock().expect("retries lock").push(request);
+        self.ledger.record_retry(request);
         Ok(self.receipt(ProviderDeliveryState::RetryPending))
     }
 
@@ -564,10 +449,7 @@ impl ProviderDeliveryRepository for RecordingDeliveries {
         &self,
         request: RejectProviderDelivery,
     ) -> Result<ProviderDeliveryReceipt, ProviderDeliveryStoreError> {
-        self.rejections
-            .lock()
-            .expect("rejections lock")
-            .push(request);
+        self.ledger.record_rejection(request);
         Ok(self.receipt(ProviderDeliveryState::Rejected))
     }
 }
@@ -1183,7 +1065,7 @@ fn worker(
     processor: Arc<RecordingProcessor>,
     deliveries: Arc<RecordingDeliveries>,
     config: GithubDeliveryWorkerConfig,
-) -> (GithubDeliveryWorker, Arc<FixtureBlobStore>) {
+) -> (GithubDeliveryWorker, Arc<VerifiedBlobStore>) {
     let subject_evidence =
         FixtureSubjectEvidence::from_claimed(&fixture.claimed, fixture.check_head_sha);
     worker_with_evidence(
@@ -1203,8 +1085,8 @@ fn worker_with_evidence(
     deliveries: Arc<RecordingDeliveries>,
     config: GithubDeliveryWorkerConfig,
     subject_evidence: FixtureSubjectEvidence,
-) -> (GithubDeliveryWorker, Arc<FixtureBlobStore>) {
-    let objects = Arc::new(FixtureBlobStore::exact(
+) -> (GithubDeliveryWorker, Arc<VerifiedBlobStore>) {
+    let objects = Arc::new(VerifiedBlobStore::exact(
         fixture.descriptor.clone(),
         fixture.body.clone(),
     ));
@@ -1228,8 +1110,8 @@ fn repository_dispatch_worker(
     processor: Arc<RecordingProcessor>,
     deliveries: Arc<RecordingDeliveries>,
     evidence: Arc<RecordingRepositoryDispatchEvidence>,
-) -> (GithubDeliveryWorker, Arc<FixtureBlobStore>) {
-    let objects = Arc::new(FixtureBlobStore::exact(
+) -> (GithubDeliveryWorker, Arc<VerifiedBlobStore>) {
+    let objects = Arc::new(VerifiedBlobStore::exact(
         fixture.descriptor.clone(),
         fixture.body.clone(),
     ));
@@ -1339,7 +1221,7 @@ async fn exact_source_and_all_direct_workflows_complete_deterministically() {
             && !observation.debug.contains(OWNER)
     }));
 
-    let completions = deliveries.completions.lock().expect("completions lock");
+    let completions = deliveries.ledger.completions();
     assert_eq!(completions.len(), 2);
     assert_eq!(completions[0], completions[1]);
     let outcomes = completions[0].outcomes();
@@ -1401,14 +1283,8 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
         matches!(first, GithubDeliveryWorkerOutcome::RetryScheduled(_)),
         "unexpected first outcome: {first:?}"
     );
-    assert!(
-        deliveries
-            .completions
-            .lock()
-            .expect("completions lock")
-            .is_empty()
-    );
-    assert_eq!(deliveries.progress.lock().expect("progress lock").len(), 1);
+    assert!(deliveries.ledger.completions().is_empty());
+    assert_eq!(deliveries.ledger.progress().len(), 1);
 
     let second = worker
         .process_claimed(
@@ -1435,9 +1311,9 @@ async fn all_direct_retry_resumes_after_durable_per_workflow_progress() {
             ".ci/workflows/b.yaml",
         ]
     );
-    assert_eq!(deliveries.retries.lock().expect("retries lock").len(), 1);
-    assert_eq!(deliveries.progress.lock().expect("progress lock").len(), 3);
-    let completions = deliveries.completions.lock().expect("completions lock");
+    assert_eq!(deliveries.ledger.retries().len(), 1);
+    assert_eq!(deliveries.ledger.progress().len(), 3);
+    let completions = deliveries.ledger.completions();
     assert_eq!(completions.len(), 1);
     assert_eq!(
         completions[0]
@@ -1690,14 +1566,8 @@ async fn repository_dispatch_resolution_failure_creates_no_check_or_workflow() {
     assert_eq!(evidence.resolution_count(), 0);
     assert!(!evidence.has_resolved_evidence());
     assert!(processor.event_observations().is_empty());
-    assert!(
-        deliveries
-            .completions
-            .lock()
-            .expect("completions lock")
-            .is_empty()
-    );
-    assert_eq!(deliveries.retries.lock().expect("retries lock").len(), 1);
+    assert!(deliveries.ledger.completions().is_empty());
+    assert_eq!(deliveries.ledger.retries().len(), 1);
 }
 
 #[tokio::test]
@@ -1729,7 +1599,7 @@ async fn no_direct_workflows_completes_with_an_empty_outcome_set() {
 
     assert!(matches!(outcome, GithubDeliveryWorkerOutcome::Completed(_)));
     assert!(processor.observations().is_empty());
-    let completions = deliveries.completions.lock().expect("completions lock");
+    let completions = deliveries.ledger.completions();
     assert_eq!(completions.len(), 1);
     let outcomes = completions[0].outcomes();
     assert!(outcomes.is_empty());
@@ -1750,7 +1620,7 @@ async fn historical_manifest_evidence_survives_a_later_manifest_rotation() {
         historical.0.private_source_authority(),
         rotated_current.0.private_source_authority()
     );
-    let objects = Arc::new(FixtureBlobStore::exact(
+    let objects = Arc::new(VerifiedBlobStore::exact(
         fixture.descriptor.clone(),
         fixture.body.clone(),
     ));
@@ -1922,9 +1792,7 @@ async fn pinned_manifest_exceeding_a_local_ceiling_rejects_before_source_io() {
     assert!(source.observations().is_empty());
     assert!(processor.observations().is_empty());
     assert_eq!(
-        deliveries.rejections.lock().expect("rejections lock")[0]
-            .failure_kind()
-            .as_str(),
+        deliveries.ledger.rejections()[0].failure_kind().as_str(),
         "github.subject_evidence.mismatch"
     );
 }
@@ -1958,7 +1826,7 @@ async fn deleted_pinned_branch_completes_without_source_authority_or_processing(
     assert!(matches!(outcome, GithubDeliveryWorkerOutcome::Completed(_)));
     assert!(source.observations().is_empty());
     assert!(processor.observations().is_empty());
-    let completions = deliveries.completions.lock().expect("completions lock");
+    let completions = deliveries.ledger.completions();
     assert_eq!(completions.len(), 1);
     assert!(completions[0].outcomes().is_empty());
 }
@@ -2031,7 +1899,7 @@ async fn private_live_ref_rejects_public_authority_before_provider_io() {
 #[tokio::test]
 async fn rehydrated_push_head_must_match_the_pinned_check_before_source_io() {
     let fixture = claimed_fixture("refs/heads/main", false, 1);
-    let objects = Arc::new(FixtureBlobStore::exact(
+    let objects = Arc::new(VerifiedBlobStore::exact(
         fixture.descriptor.clone(),
         fixture.body.clone(),
     ));
@@ -2073,9 +1941,7 @@ async fn rehydrated_push_head_must_match_the_pinned_check_before_source_io() {
     assert!(processor.observations().is_empty());
     assert_eq!(deliveries.transition_count(), 1);
     assert_eq!(
-        deliveries.rejections.lock().expect("rejections lock")[0]
-            .failure_kind()
-            .as_str(),
+        deliveries.ledger.rejections()[0].failure_kind().as_str(),
         "github.subject_evidence.mismatch"
     );
 }
@@ -2174,9 +2040,7 @@ async fn invalid_or_rebound_event_envelopes_reject_before_blob_or_source_io() {
             _ => unreachable!("closed test cases"),
         };
         assert_eq!(
-            deliveries.rejections.lock().expect("rejections lock")[0]
-                .failure_kind()
-                .as_str(),
+            deliveries.ledger.rejections()[0].failure_kind().as_str(),
             expected_kind,
             "case {case}",
         );
@@ -2198,7 +2062,7 @@ async fn immutable_object_failures_are_durably_classified_before_source_io() {
         ),
     ] {
         let fixture = claimed_fixture("refs/heads/main", false, 1);
-        let objects = Arc::new(FixtureBlobStore::failing(
+        let objects = Arc::new(VerifiedBlobStore::failing(
             fixture.descriptor.clone(),
             fixture.body.clone(),
             failure,
@@ -2237,10 +2101,10 @@ async fn immutable_object_failures_are_durably_classified_before_source_io() {
         assert_eq!(outcome.receipt().state(), expected_state);
         assert!(source.observations().is_empty());
         if expected_state == ProviderDeliveryState::Rejected {
-            let rejections = deliveries.rejections.lock().expect("rejections lock");
+            let rejections = deliveries.ledger.rejections();
             assert_eq!(rejections[0].failure_kind().as_str(), expected_kind);
         } else {
-            let retries = deliveries.retries.lock().expect("retries lock");
+            let retries = deliveries.ledger.retries();
             assert_eq!(retries[0].failure_kind().as_str(), expected_kind);
             assert_eq!(retries[0].retry_at(), UnixMillis::new(1_734));
         }
@@ -2277,7 +2141,7 @@ async fn source_rate_limit_and_processor_prerequisite_never_commit_partial_paths
         GithubDeliveryWorkerOutcome::RetryScheduled(_)
     ));
     {
-        let retries = deliveries.retries.lock().expect("retries lock");
+        let retries = deliveries.ledger.retries();
         assert_eq!(retries[0].retry_at(), UnixMillis::new(9_500));
     }
 
@@ -2354,23 +2218,11 @@ async fn rejected_admitted_run_reuses_the_owned_terminal_operation() {
 
     assert!(matches!(outcome, GithubDeliveryWorkerOutcome::Rejected(_)));
     assert_eq!(
-        deliveries.rejections.lock().expect("rejections lock")[0]
-            .failure_kind()
-            .as_str(),
+        deliveries.ledger.rejections()[0].failure_kind().as_str(),
         "github.workflow.invalid_admitted_run"
     );
-    assert_eq!(
-        deliveries
-            .completions
-            .lock()
-            .expect("completions lock")
-            .len(),
-        1
-    );
-    assert_eq!(
-        deliveries.rejections.lock().expect("rejections lock").len(),
-        1
-    );
+    assert_eq!(deliveries.ledger.completions().len(), 1);
+    assert_eq!(deliveries.ledger.rejections().len(), 1);
 }
 
 #[test]
@@ -2393,7 +2245,7 @@ fn configuration_rejects_unrepresentable_outcome_and_provider_bounds() {
         repository_source(archive(BTreeMap::<&str, Vec<u8>>::new())),
     ));
     let result = GithubDeliveryWorker::new(
-        Arc::new(FixtureBlobStore::exact(fixture.descriptor, fixture.body)),
+        Arc::new(VerifiedBlobStore::exact(fixture.descriptor, fixture.body)),
         source,
         Arc::new(RecordingProcessor::returning(skipped())),
         Arc::new(RecordingDeliveries::new(fixture.receipt)),
