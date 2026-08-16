@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 use super::{
     AuthCommand, OutputFormat,
     credential_store::{CliAuthProcessLock, CliCredentialStore, SecretServiceCredentialStore},
+    output::escaped_table_value,
 };
 use crate::app::github_auth::{
     CLI_SESSION_PATH, GITHUB_DEVICE_BEGIN_PATH, GITHUB_DEVICE_POLL_PATH,
@@ -645,10 +646,6 @@ fn checked_poll_instant(delay: u64, deadline: Instant) -> Result<Instant> {
         bail!("GitHub device authorization expired");
     }
     Ok(poll_at)
-}
-
-fn escaped_table_value(value: &str) -> String {
-    value.chars().flat_map(char::escape_default).collect()
 }
 
 fn validate_verification_uri(value: &str) -> Result<Url, InvalidVerificationUri> {
