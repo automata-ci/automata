@@ -13,7 +13,8 @@ workflow source without inspecting Docker. Context discovery for `doctor` is
 completed first, subsequent daemon probes are pinned to that exact local
 Unix-socket or Windows-named-pipe endpoint, and JSON schema 3 reports the
 bounded context name. The private endpoint URI is retained only so the library
-adapter can connect to the same daemon and reverify its identity.
+can pin the remaining probes in that one doctor invocation; it is not retained
+in the report or exposed through a generic Engine adapter.
 
 The private local-snapshot foundation uses live bytes for staged additions
 and tracked modifications, omits tracked deletions and ignored files, and seals
@@ -51,12 +52,6 @@ does not supply it for execution. Local source and event provenance is distinct
 from GitHub delivery evidence. The command is independent of `local doctor`,
 Docker, network access, and GitHub tokens, and performs no admission, scheduling,
 execution, or Check publication.
-
-The installation adapter can inspect or create-and-adopt one immutable external
-identity volume for a named installation. It always post-inspects Docker's
-deterministic volume name, exact Automata-managed labels, local driver/scope,
-empty driver options, and container attachments. It exposes no generic Docker
-mutation, delete, prune, image-pull, helper-container, or Compose API.
 
 The crate also provides an evaluation-only `LocalDockerProvider` for the real
 runner composition. It connects only to `/run/automata-engine/docker.sock`,

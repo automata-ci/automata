@@ -1,32 +1,44 @@
 //! Exact-endpoint Docker Engine adapters for local installation resources.
 
-use std::{collections::BTreeMap, fmt, sync::Arc};
+#[cfg(unix)]
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
 #[cfg(unix)]
-use std::time::Duration;
-
 use async_trait::async_trait;
 use thiserror::Error;
 
-use crate::{
-    ApiVersion, DoctorReport, EngineSelection, Installation, InstallationId, InstallationName,
-    capped_adapter_api, normalize_architecture,
-};
+#[cfg(all(test, unix))]
+use crate::EngineSelection;
+#[cfg(unix)]
+use crate::{ApiVersion, Installation, InstallationId, InstallationName, normalize_architecture};
 
+#[cfg(unix)]
 mod http_engine;
+#[cfg(unix)]
 mod transport;
 
+#[cfg(unix)]
 use http_engine::HttpEngine;
 
+#[cfg(unix)]
 const MANAGED_LABEL_PREFIX: &str = "io.automata.local.";
+#[cfg(unix)]
 const LABEL_MANAGED: &str = "io.automata.local.managed";
+#[cfg(unix)]
 const LABEL_IDENTITY_SCHEMA: &str = "io.automata.local.identity-schema";
+#[cfg(unix)]
 const LABEL_INSTALLATION_ID: &str = "io.automata.local.installation-id";
+#[cfg(unix)]
 const LABEL_INSTALLATION_KEY: &str = "io.automata.local.installation-key";
+#[cfg(unix)]
 const LABEL_COMPOSE_PROJECT: &str = "io.automata.local.compose-project";
+#[cfg(unix)]
 const LABEL_RESOURCE_KIND: &str = "io.automata.local.resource-kind";
+#[cfg(unix)]
 const MANAGED_VALUE: &str = "true";
+#[cfg(unix)]
 const IDENTITY_SCHEMA: &str = "1";
+#[cfg(unix)]
 const IDENTITY_ANCHOR_KIND: &str = "identity-anchor";
 #[cfg(unix)]
 pub(super) const LOCAL_DOCKER_GUEST_ARCHIVE_BYTES: usize = 32 * 1024 * 1024;
@@ -39,8 +51,6 @@ pub(super) const LOCAL_DOCKER_SANDBOX_GUEST_BINARY: &str =
 /// Stable reason for a local Docker Engine adapter failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalEngineErrorCode {
-    /// The supplied doctor report did not pass every mandatory preflight gate.
-    PreflightRequired,
     /// An Engine API request failed or timed out.
     EngineRequestFailed,
     /// The endpoint no longer identifies the engine selected by preflight.
@@ -57,16 +67,12 @@ pub enum LocalEngineErrorCode {
     InvalidIdentityAnchor,
     /// A container is attached to the identity anchor.
     IdentityAnchorAttached,
-    /// A mutating request may have succeeded but its final state is indeterminate.
-    MutationOutcomeUncertain,
 }
 
 impl LocalEngineErrorCode {
+    #[cfg(unix)]
     const fn message(self) -> &'static str {
         match self {
-            Self::PreflightRequired => {
-                "local Docker preflight must be ready before engine mutation"
-            }
             Self::EngineRequestFailed => "the Docker Engine request failed",
             Self::EngineIdentityChanged => {
                 "the Docker Engine identity changed after preflight; run local doctor again"
@@ -89,9 +95,6 @@ impl LocalEngineErrorCode {
             Self::IdentityAnchorAttached => {
                 "the installation identity anchor is unexpectedly attached to a container"
             }
-            Self::MutationOutcomeUncertain => {
-                "the Docker mutation outcome is uncertain; inspect the installation before retrying"
-            }
         }
     }
 }
@@ -105,6 +108,7 @@ pub struct LocalEngineError {
 }
 
 impl LocalEngineError {
+    #[cfg(unix)]
     pub(crate) const fn new(code: LocalEngineErrorCode) -> Self {
         Self {
             code,
@@ -123,150 +127,7 @@ impl LocalEngineError {
     }
 }
 
-/// Docker Engine adapter restricted to local-installation identity operations.
-///
-/// It deliberately exposes no generic volume mutation, deletion, pruning,
-/// image pulling, container lifecycle, or Compose API.
-pub struct DockerInstallationAdapter {
-    engine: Arc<dyn VolumeEngineApi>,
-    selection: EngineSelection,
-}
-
-impl fmt::Debug for DockerInstallationAdapter {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DockerInstallationAdapter")
-            .field("selection", &self.selection)
-            .finish_non_exhaustive()
-    }
-}
-
-impl DockerInstallationAdapter {
-    /// Connects only to the exact local endpoint retained by a successful
-    /// [`crate::inspect`] result and verifies that the daemon identity still
-    /// agrees with preflight.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LocalEngineError`] when the first bounded request to the exact
-    /// endpoint fails or it no longer reports the selected engine facts.
-    pub async fn connect(report: &DoctorReport) -> Result<Self, LocalEngineError> {
-        if !report.ready() {
-            return Err(LocalEngineError::new(
-                LocalEngineErrorCode::PreflightRequired,
-            ));
-        }
-        let selection = report
-            .selected_engine()
-            .cloned()
-            .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::PreflightRequired))?;
-        let api = adapter_api_version(selection.api_version())?;
-        let engine = Arc::new(HttpEngine::connect(selection.connection(), api).map_err(
-            |_error| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse),
-        )?);
-        let adapter = Self { engine, selection };
-        adapter.verify_engine().await?;
-        Ok(adapter)
-    }
-
-    /// Inspects and verifies the deterministic identity anchor without
-    /// creating or changing any engine resource.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LocalEngineError`] for engine drift, failed requests, foreign
-    /// collisions, malformed ownership labels, unsafe volume configuration, or
-    /// any container attachment.
-    pub async fn inspect_identity(
-        &self,
-        name: &InstallationName,
-    ) -> Result<Option<Installation>, LocalEngineError> {
-        self.verify_engine().await?;
-        let installation = self.inspect_verified_identity(name).await?;
-        self.verify_engine().await?;
-        Ok(installation)
-    }
-
-    /// Creates an absent identity anchor or adopts an exact matching anchor.
-    ///
-    /// Docker's volume-create response is never trusted. The deterministic name
-    /// is freshly inspected after the request, including when the request
-    /// reports a transport failure or loses a concurrent create race.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LocalEngineError`] when engine identity changes, a foreign
-    /// collision is found, the resulting anchor is unsafe, or a mutation's
-    /// final outcome cannot be proven. This method never attempts rollback.
-    pub async fn create_or_adopt_identity(
-        &self,
-        name: &InstallationName,
-    ) -> Result<Installation, LocalEngineError> {
-        self.verify_engine().await?;
-        if let Some(installation) = self.inspect_verified_identity(name).await? {
-            self.verify_engine().await?;
-            return Ok(installation);
-        }
-
-        let requested = Installation::new(name.clone(), InstallationId::new());
-        let _create_outcome = self
-            .engine
-            .create_volume(CreateVolume {
-                name: requested.anchor_volume_name().to_owned(),
-                labels: identity_labels(&requested),
-            })
-            .await;
-
-        let inspected = self.inspect_verified_identity(name).await;
-        let Ok(Some(installation)) = inspected else {
-            return Err(LocalEngineError::new(
-                LocalEngineErrorCode::MutationOutcomeUncertain,
-            ));
-        };
-        if self.verify_engine().await.is_err() {
-            return Err(LocalEngineError::new(
-                LocalEngineErrorCode::MutationOutcomeUncertain,
-            ));
-        }
-        Ok(installation)
-    }
-
-    async fn verify_engine(&self) -> Result<(), LocalEngineError> {
-        let facts = self.engine.engine_facts().await.map_err(map_engine_call)?;
-        let expected_api = adapter_api_version(self.selection.api_version())?;
-        let minimum_api = ApiVersion::parse(&facts.minimum_api_version)
-            .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse))?;
-        let maximum_api = ApiVersion::parse(&facts.maximum_api_version)
-            .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse))?;
-        let architecture = normalize_architecture(&facts.architecture)
-            .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse))?;
-        if facts.engine_id != self.selection.engine_id()
-            || facts.server_version != self.selection.server_version()
-            || facts.operating_system != "linux"
-            || architecture != self.selection.architecture()
-            || minimum_api > expected_api
-            || maximum_api < expected_api
-        {
-            return Err(LocalEngineError::new(
-                LocalEngineErrorCode::EngineIdentityChanged,
-            ));
-        }
-        Ok(())
-    }
-
-    async fn inspect_verified_identity(
-        &self,
-        name: &InstallationName,
-    ) -> Result<Option<Installation>, LocalEngineError> {
-        inspect_verified_identity(self.engine.as_ref(), name).await
-    }
-
-    #[cfg(test)]
-    fn with_test_engine(selection: EngineSelection, engine: Arc<dyn VolumeEngineApi>) -> Self {
-        Self { engine, selection }
-    }
-}
-
+#[cfg(unix)]
 async fn inspect_verified_identity(
     engine: &dyn AnchorEngineApi,
     name: &InstallationName,
@@ -311,29 +172,7 @@ async fn inspect_verified_identity(
     }
 }
 
-fn identity_labels(installation: &Installation) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        (LABEL_MANAGED.to_owned(), MANAGED_VALUE.to_owned()),
-        (LABEL_IDENTITY_SCHEMA.to_owned(), IDENTITY_SCHEMA.to_owned()),
-        (
-            LABEL_INSTALLATION_ID.to_owned(),
-            installation.id().to_string(),
-        ),
-        (
-            LABEL_INSTALLATION_KEY.to_owned(),
-            installation.selector_key().to_string(),
-        ),
-        (
-            LABEL_COMPOSE_PROJECT.to_owned(),
-            installation.compose_project().to_string(),
-        ),
-        (
-            LABEL_RESOURCE_KIND.to_owned(),
-            IDENTITY_ANCHOR_KIND.to_owned(),
-        ),
-    ])
-}
-
+#[cfg(unix)]
 fn validate_identity_labels(
     labels: &BTreeMap<String, String>,
     expected: &crate::installation::ExpectedInstallation,
@@ -362,6 +201,7 @@ fn validate_identity_labels(
     Ok(id)
 }
 
+#[cfg(unix)]
 fn classify_label_failure(managed: &BTreeMap<&str, &str>) -> LocalEngineError {
     let owned = managed.get(LABEL_MANAGED).copied() == Some(MANAGED_VALUE)
         && managed.get(LABEL_RESOURCE_KIND).copied() == Some(IDENTITY_ANCHOR_KIND);
@@ -372,6 +212,7 @@ fn classify_label_failure(managed: &BTreeMap<&str, &str>) -> LocalEngineError {
     })
 }
 
+#[cfg(unix)]
 fn map_engine_call(error: EngineApiError) -> LocalEngineError {
     match error {
         EngineApiError::RequestFailed => {
@@ -387,6 +228,7 @@ fn map_engine_call(error: EngineApiError) -> LocalEngineError {
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EngineFacts {
     pub(crate) engine_id: String,
@@ -397,18 +239,13 @@ pub(crate) struct EngineFacts {
     pub(crate) architecture: String,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InspectedVolume {
     pub(crate) name: String,
     pub(crate) driver: String,
     pub(crate) scope: String,
     pub(crate) options: BTreeMap<String, String>,
-    pub(crate) labels: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CreateVolume {
-    pub(crate) name: String,
     pub(crate) labels: BTreeMap<String, String>,
 }
 
@@ -506,6 +343,7 @@ pub(crate) struct PreparedEngineExec {
     pub(crate) user: String,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EngineApiError {
     RequestFailed,
@@ -514,21 +352,18 @@ pub(crate) enum EngineApiError {
     OutputLimit,
 }
 
+#[cfg(unix)]
 #[async_trait]
 pub(crate) trait EngineApi: Send + Sync {
     async fn engine_facts(&self) -> Result<EngineFacts, EngineApiError>;
 }
 
+#[cfg(unix)]
 #[async_trait]
 pub(crate) trait AnchorEngineApi: EngineApi {
     async fn inspect_volume(&self, name: &str) -> Result<Option<InspectedVolume>, EngineApiError>;
 
     async fn volume_attachments(&self, name: &str) -> Result<Vec<String>, EngineApiError>;
-}
-
-#[async_trait]
-pub(crate) trait VolumeEngineApi: AnchorEngineApi {
-    async fn create_volume(&self, request: CreateVolume) -> Result<(), EngineApiError>;
 }
 
 #[cfg(unix)]
@@ -690,12 +525,3 @@ pub(crate) async fn verify_installation_identity(
         )),
     }
 }
-
-fn adapter_api_version(selected: &str) -> Result<ApiVersion, LocalEngineError> {
-    let selected = ApiVersion::parse(selected)
-        .ok_or_else(|| LocalEngineError::new(LocalEngineErrorCode::InvalidEngineResponse))?;
-    Ok(capped_adapter_api(selected))
-}
-
-#[cfg(test)]
-mod tests;

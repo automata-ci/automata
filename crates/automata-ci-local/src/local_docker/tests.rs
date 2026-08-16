@@ -26,8 +26,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
-    ComposeFrontend, DockerConnection, Engine, EngineArchitecture, EngineEndpoint, EngineSelection,
-    InstallationName,
+    ComposeFrontend, Engine, EngineArchitecture, EngineEndpoint, EngineSelection, InstallationName,
     engine::{
         AnchorEngineApi, EngineApi, EngineExecOutput, EngineFacts, InspectedVolume,
         PreparedEngineExec,
@@ -762,7 +761,8 @@ impl Fixture {
     fn new() -> Self {
         let installation = Installation::new(
             InstallationName::new("test").expect("installation name"),
-            InstallationId::new(),
+            InstallationId::parse_canonical("00000000-0000-4000-8000-000000000001")
+                .expect("canonical test installation ID"),
         );
         let engine = Arc::new(FakeEngine::new(&installation));
         let provider = LocalDockerProvider::with_test_engine(
@@ -801,11 +801,6 @@ fn selection() -> EngineSelection {
         api_version: "1.55".to_owned(),
         architecture: EngineArchitecture::Amd64,
         compose_version: "5.4.0".to_owned(),
-        connection: DockerConnection {
-            context_name: "default".to_owned(),
-            host: "unix:///var/run/docker.sock".to_owned(),
-            endpoint: EngineEndpoint::UnixSocket,
-        },
     }
 }
 

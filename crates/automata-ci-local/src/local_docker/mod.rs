@@ -49,8 +49,7 @@ use endpoint::LocalDockerEndpoint;
 #[cfg(test)]
 mod tests;
 
-/// Stable provider identifier for the evaluation-only local Docker adapter.
-pub const LOCAL_DOCKER_PROVIDER_ID: &str = "local-docker-v1";
+pub(crate) const LOCAL_DOCKER_PROVIDER_ID: &str = "local-docker-v1";
 
 const MANAGED_LABEL_PREFIX: &str = "io.automata.local.";
 const LABEL_MANAGED: &str = "io.automata.local.managed";

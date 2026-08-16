@@ -192,8 +192,8 @@ onboarding path:
 | --- | --- | --- |
 | `automata local doctor` | Cross-platform host, Docker, Compose, and architecture preflight | It is deliberately read-only; checkpoint 2A retired checkpoint 1's proposed native state-root input, and checkpoint 2B.1 makes installation identity engine-owned |
 | `automata local check` | Deterministic bounded live-worktree archive, exact `.github/workflows` selection, local-only manual event compilation, reachable same-snapshot reusable workflows with typed call-graph and root-secret propagation, and value-free external/built-in credential discovery | It is deliberately read-only and fails closed on Windows; repository identity, local admission, scheduling, execution, and GitHub Checks remain absent |
-| `automata-ci-local` Engine adapter | Exact-endpoint Docker connection plus strict identity-anchor inspect/create/adopt with fake and opt-in live tests | No product command calls the mutation API until desired intent and convergent lifecycle contracts land |
-| `automata-ci-sandbox-guest` | Protocol 4 bounded optional read and Unix durable compare-and-swap atomic commit, plus a non-root helper-image data mountpoint | No local adapter yet mounts a desired-spec volume or invokes these primitives |
+| `automata-ci-local` Docker boundary | Doctor pins every daemon probe to one validated local endpoint; `LocalDocker` uses only the fixed attested relay and revalidates an existing exact identity anchor | Convergent lifecycle must create the anchor and topology through consumed high-level operations; no generic direct-Engine mutation adapter is retained |
+| `automata-ci-sandbox-guest` | Current protocol 5 bounded optional read, durable compare-and-swap atomic commit, protected LocalDocker client, and non-evicting live replay | No local adapter yet mounts a desired-spec volume or invokes the file primitives |
 | Control-plane configuration and container build | Complete server configuration and product images | Configuration and bootstrap are manual and Unix-oriented |
 | GitHub workflow crates | Frontend, compiler, typed workflow contracts, reusable-workflow handling | They need a separately authorized local snapshot source |
 | Workflow service | Credential requirement discovery, admission, and orchestration boundaries | It needs local provenance as an additional source authority |
@@ -681,10 +681,11 @@ focused native and package-scoped cross-target checks pass. The diff contains
 no unconsumed engine identity API, host lifecycle journal, or new platform
 filesystem substrate.
 
-### 2B. Engine identity and desired-spec adapter
+### 2B. Engine identity and desired-spec lifecycle
 
-Land the first Docker Engine adapter and the engine-owned identity and desired
-intent contracts in independently reviewable, strictly ordered slices. The
+Land the engine-owned identity and desired-intent contracts in independently
+reviewable, strictly ordered slices, with each mutating operation introduced
+only beside its first product consumer. The
 shared guest primitive lands before a desired-spec schema; the schema lands only
 after renderer version one's complete input set is known; read-only volume I/O
 lands before locked mutation.
@@ -694,45 +695,42 @@ repository and snapshot identity remain questions for later local admission.
 Compose and fresh engine inspection are resource truth throughout, and no host
 manifest mirrors them.
 
-#### 2B.1. Pinned Docker context and immutable identity anchor
+#### 2B.1. Pinned Docker context and immutable identity contract
 
-Snapshot the selected Docker context before daemon probes, retain its exact
-validated local Unix-socket or Windows-named-pipe endpoint, pin subsequent
-daemon probes with that exact `--host` value, and connect the direct Engine API
-adapter only to that endpoint. Reverify the expected engine identity before
-mutation. Define the
+Snapshot the selected Docker context before daemon probes, validate its exact
+local Unix-socket or Windows-named-pipe endpoint, and pin the remaining daemon
+probes in that invocation with the exact `--host` value. Do not serialize or
+retain the private endpoint in the doctor report and do not expose a generic
+direct-Engine adapter before a lifecycle consumer exists. Define the
 exact versioned byte preimage from the canonical installation selector to the
 full selector key, deterministic Compose project, and deterministic anchor
-name. Create only the external immutable identity-anchor volume in this slice;
-do not create, label, mount, or otherwise anticipate the desired-spec volume or
-any realized topology.
+name. The convergent lifecycle later creates the external immutable
+identity-anchor volume before any desired-spec volume or realized topology.
 
 The anchor's exact managed-label allowlist contains only its managed marker,
 identity schema, installation UUID, full selector key, Compose project, and
 anchor resource kind. The selector preimage contains no repository, checkout,
-worktree, or source input. The adapter exposes only the high-level inspection
-and create-or-adopt operations consumed here; generic volume mutation, pull,
-remove, reset, and lifecycle APIs do not land speculatively.
+worktree, or source input. Generic volume mutation, pull, remove, reset, and
+lifecycle APIs do not land speculatively.
 
-Gate: create and adoption always re-inspect the deterministic anchor name after
-`volume create` and require local driver/scope, empty options, no bind, the
-exact anchor managed-label allowlist, and no container attachment. Foreign
+Gate for the consuming lifecycle: create and adoption always re-inspect the
+deterministic anchor name after `volume create` and require local driver/scope,
+empty options, no bind, the exact anchor managed-label allowlist, and no
+container attachment. Foreign
 name, full-key, project, resource-kind, or truncated-name collisions fail
-without a second mutation. Changing the active context cannot redirect an
-already pinned adapter; a changed engine identity at the retained endpoint
-fails closed.
-Stateful fake-daemon and ignored live-Docker tests exercise the public adapter,
-including a create response that cannot be trusted, rather than testing value
-objects in isolation. The slice creates no desired-spec volume, helper
-container, Compose topology, host manifest, or repository binding.
+without a second mutation. The high-level lifecycle operation owns fresh
+endpoint and engine-identity validation and has no unconsumed generic adapter
+surface. Stateful fake-daemon and ignored live-Docker tests exercise that
+consumer, including a create response that cannot be trusted, rather than
+testing value objects in isolation.
 Doctor JSON schema 3 reports the bounded selected context name without exposing
-the retained endpoint URI, and CLI process tests prove daemon probes receive the
+the endpoint URI, and CLI process tests prove daemon probes receive the
 exact validated `--host` value.
 
-#### 2B.2a. Shared sandbox-guest protocol v4 durable file primitives
+#### 2B.2a. Shared sandbox-guest protocol v5 durable file primitives
 
 Advance the existing shared sandbox guest and every in-tree consumer, template,
-and fixture to protocol version 4. Add `ReadOptionalFile`, whose closed response
+and fixture to protocol version 5. Add `ReadOptionalFile`, whose closed response
 distinguishes bounded present bytes from `NotFound`; every other I/O failure is
 a rejection, never a string-parsed absence signal. Add `AtomicCommitFile` with
 an expected state of either `Absent` or an exact SHA-256 of the prior file bytes
@@ -759,7 +757,7 @@ helper without a root fallback or an anonymous volume. Engine users must supply
 an already present, registry-qualified digest reference and use pull-never
 semantics; this slice adds no pull path.
 
-Gate: protocol 4 rejects every prior wire version. Guest wire tests cover
+Gate: protocol 5 rejects every prior wire version. Guest wire tests cover
 request/response framing, replay, redaction, bounds, paths, expectations, typed
 missing, idempotence, conflict, pre-rename cleanup, post-rename ambiguity, and
 committed bytes. Windows-targeted tests require the closed unsupported atomic
@@ -799,9 +797,9 @@ every renderer-v1 input participates according to the frozen rule, and equal
 documents render byte-identical value-free Compose configuration. This slice
 creates no Engine resource and exposes no lifecycle command.
 
-#### 2B.2c. Desired-spec volume and read adapter
+#### 2B.2c. Desired-spec volume and read operation
 
-Extend the pinned Engine adapter with the separate persistent desired-spec
+Add a consumed high-level operation for the separate persistent desired-spec
 config volume and the exact `desired-spec` persistent-volume role. Its immutable
 labels bind only the installation UUID, full selector key, Compose project,
 persistent-volume contract/resource kind, and exact role; they contain neither
@@ -815,7 +813,7 @@ pull disabled, its hardened non-root configuration, and the config volume as
 its sole read-only mount. `ReadOptionalFile` maps an empty new volume to a typed
 uninitialized result and present bytes to canonical schema validation; helper
 failure, malformed bytes, wrong installation binding, or indeterminate
-attachment state fails closed. The adapter removes and reinspects the exact
+attachment state fails closed. The operation removes and reinspects the exact
 helper by container ID.
 
 Gate: foreign config-volume name, key, project, role, label, driver, option, or

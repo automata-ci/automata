@@ -164,10 +164,6 @@ impl fmt::Display for ComposeProjectName {
 pub struct InstallationId(Uuid);
 
 impl InstallationId {
-    pub(crate) fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
     pub(crate) fn parse_canonical(value: &str) -> Option<Self> {
         let parsed = Uuid::parse_str(value).ok()?;
         (parsed.to_string() == value && parsed.get_version() == Some(Version::Random))
@@ -228,6 +224,7 @@ impl Installation {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn expected(name: &InstallationName) -> ExpectedInstallation {
         let selector_key = InstallationSelectorKey::for_name(name);
         let compose_project = ComposeProjectName::for_key(selector_key);
@@ -266,6 +263,7 @@ impl Installation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(unix)]
 pub(crate) struct ExpectedInstallation {
     pub(crate) selector_key: InstallationSelectorKey,
     pub(crate) compose_project: ComposeProjectName,
@@ -275,7 +273,7 @@ pub(crate) struct ExpectedInstallation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeProjectName, Installation, InstallationName, InstallationNameError,
+        ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
         InstallationSelectorKey,
     };
 
@@ -312,9 +310,13 @@ mod tests {
             ComposeProjectName::for_key(key).as_str(),
             "automata-local-df06ebed0fcba9b2d00b0476426924f3"
         );
-        let expected = Installation::expected(&name);
+        let expected = Installation::new(
+            name,
+            InstallationId::parse_canonical("00000000-0000-4000-8000-000000000001")
+                .expect("canonical test installation ID"),
+        );
         assert_eq!(
-            expected.anchor_volume_name,
+            expected.anchor_volume_name(),
             "automata-local-df06ebed0fcba9b2d00b0476426924f3-identity"
         );
     }

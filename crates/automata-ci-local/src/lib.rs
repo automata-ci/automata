@@ -33,13 +33,13 @@ pub use check::{
     LocalCheckDiagnostic, LocalCheckIssue, LocalCheckIssueCode, LocalCheckReport,
     LocalCheckRequest, LocalCheckSource, LocalCheckedJob, LocalCheckedWorkflow, check_workflow,
 };
-pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
+pub use engine::{LocalEngineError, LocalEngineErrorCode};
 pub use installation::{
     ComposeProjectName, Installation, InstallationId, InstallationIdError, InstallationName,
     InstallationNameError, InstallationSelectorKey,
 };
 #[cfg(unix)]
-pub use local_docker::{LOCAL_DOCKER_PROVIDER_ID, LocalDockerProvider};
+pub use local_docker::LocalDockerProvider;
 
 /// Reserved in-container directory used by the fixed-relay Docker provider's protected client.
 pub const LOCAL_DOCKER_CONTROL_DIRECTORY: &str = automata_ci_sandbox_guest::LOCAL_CONTROL_DIRECTORY;
@@ -365,16 +365,6 @@ impl fmt::Debug for DockerConnection {
     }
 }
 
-impl DockerConnection {
-    pub(crate) fn host(&self) -> &str {
-        &self.host
-    }
-
-    pub(crate) const fn endpoint(&self) -> EngineEndpoint {
-        self.endpoint
-    }
-}
-
 /// Supported Linux engine architecture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -397,8 +387,6 @@ pub struct EngineSelection {
     api_version: String,
     architecture: EngineArchitecture,
     compose_version: String,
-    #[serde(skip)]
-    connection: DockerConnection,
 }
 
 impl EngineSelection {
@@ -445,10 +433,6 @@ impl EngineSelection {
     /// Returns the exact Docker Compose plugin version.
     pub fn compose_version(&self) -> &str {
         &self.compose_version
-    }
-
-    pub(crate) const fn connection(&self) -> &DockerConnection {
-        &self.connection
     }
 }
 
@@ -801,7 +785,6 @@ fn evaluate_engine(
         api_version: version.as_ref()?.api_version.clone(),
         architecture: version.as_ref()?.architecture,
         compose_version: compose_version?,
-        connection: connection?,
     })
 }
 

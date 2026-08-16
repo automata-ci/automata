@@ -1,16 +1,13 @@
 use std::{collections::BTreeMap, time::Duration};
 
-#[cfg(unix)]
 use std::path::Path;
 
 use async_trait::async_trait;
 use http::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
 use serde::de::IgnoredAny;
 
-#[cfg(unix)]
 use super::{
     ContainerDefinition, EngineContainerState, EngineExecOutput, EngineExecRequest,
     InspectedContainer, InspectedImage, LOCAL_DOCKER_GUEST_ARCHIVE_BYTES,
@@ -18,13 +15,13 @@ use super::{
     SandboxEngineApi,
 };
 use super::{
-    CreateVolume, EngineApi, EngineApiError, EngineFacts, InspectedVolume,
+    EngineApi, EngineApiError, EngineFacts, InspectedVolume,
     transport::{
         BoundedMap, BoundedVec, DockerHttpTransport, TransportError, deadline,
         encode_path_component,
     },
 };
-use crate::{ApiVersion, DockerConnection, normalize_architecture};
+use crate::{ApiVersion, normalize_architecture};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const FACTS_BYTES: usize = 128 * 1024;
@@ -87,16 +84,6 @@ pub(super) struct HttpEngine {
 }
 
 impl HttpEngine {
-    pub(super) fn connect(
-        connection: &DockerConnection,
-        api: ApiVersion,
-    ) -> Result<Self, TransportError> {
-        Ok(Self {
-            transport: DockerHttpTransport::connect(connection, api)?,
-        })
-    }
-
-    #[cfg(unix)]
     pub(super) fn connect_unix_socket(
         socket: &Path,
         api: ApiVersion,
@@ -104,18 +91,6 @@ impl HttpEngine {
         Ok(Self {
             transport: DockerHttpTransport::connect_unix_socket(socket, api)?,
         })
-    }
-
-    #[cfg(test)]
-    pub(super) async fn remove_volume_for_test(&self, name: &str) -> Result<(), EngineApiError> {
-        let path = format!("/volumes/{}?force=false", encode_path_component(name));
-        deadline(
-            REQUEST_TIMEOUT,
-            self.transport
-                .empty_or_not_found(Method::DELETE, &path, StatusCode::NO_CONTENT),
-        )
-        .await
-        .map_err(map_transport)
     }
 }
 
@@ -220,35 +195,6 @@ impl super::AnchorEngineApi for HttpEngine {
     }
 }
 
-#[async_trait]
-impl super::VolumeEngineApi for HttpEngine {
-    async fn create_volume(&self, request: CreateVolume) -> Result<(), EngineApiError> {
-        let body = VolumeCreateRequest {
-            name: request.name,
-            driver: "local",
-            driver_options: BTreeMap::new(),
-            labels: request.labels,
-        };
-        let created: VolumeResponse = deadline(
-            REQUEST_TIMEOUT,
-            self.transport.json(
-                Method::POST,
-                "/volumes/create",
-                Some(&body),
-                StatusCode::CREATED,
-                VOLUME_BYTES,
-            ),
-        )
-        .await
-        .map_err(map_transport)?;
-        if created.name != body.name {
-            return Err(EngineApiError::InvalidResponse);
-        }
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
 #[async_trait]
 impl SandboxEngineApi for HttpEngine {
     async fn inspect_image(
@@ -1964,25 +1910,13 @@ struct VolumeResponse {
     labels: Option<BoundedMap<String, String, MAX_LABELS>>,
 }
 
-#[derive(Serialize)]
-struct VolumeCreateRequest {
-    #[serde(rename = "Name")]
-    name: String,
-    #[serde(rename = "Driver")]
-    driver: &'static str,
-    #[serde(rename = "DriverOpts")]
-    driver_options: BTreeMap<String, String>,
-    #[serde(rename = "Labels")]
-    labels: BTreeMap<String, String>,
-}
-
 #[derive(Deserialize)]
 struct ContainerSummary {
     #[serde(rename = "Id")]
     id: String,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 

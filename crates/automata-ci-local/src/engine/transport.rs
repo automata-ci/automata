@@ -1,7 +1,6 @@
 use std::{collections::BTreeMap, fmt, io, marker::PhantomData, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-#[cfg(unix)]
 use http::header::UPGRADE;
 use http::{
     Method, Request, StatusCode,
@@ -11,14 +10,13 @@ use http::{
 };
 use http_body_util::{BodyExt as _, Full};
 use hyper::body::{Body as _, Incoming};
-#[cfg(any(unix, windows))]
 use hyper_util::rt::TokioIo;
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{DeserializeOwned, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor},
 };
 
-use crate::{ApiVersion, DockerConnection, EngineEndpoint};
+use crate::ApiVersion;
 
 const REQUEST_BYTES: usize = 512 * 1024;
 const ERROR_BYTES: usize = 8 * 1024;
@@ -31,43 +29,22 @@ type RequestBody = Full<Bytes>;
 
 #[derive(Clone)]
 pub(super) struct DockerHttpTransport {
-    endpoint: EndpointAddress,
+    socket: std::path::PathBuf,
     api_prefix: String,
     in_flight: Arc<tokio::sync::Semaphore>,
-}
-
-#[derive(Clone)]
-enum EndpointAddress {
-    #[cfg(unix)]
-    Unix(std::path::PathBuf),
-    #[cfg(windows)]
-    NamedPipe(String),
 }
 
 impl fmt::Debug for DockerHttpTransport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("DockerHttpTransport")
-            .field("endpoint", &"[validated-local-endpoint]")
+            .field("socket", &"[fixed-relay-socket]")
             .field("api_prefix", &self.api_prefix)
             .finish_non_exhaustive()
     }
 }
 
 impl DockerHttpTransport {
-    pub(super) fn connect(
-        connection: &DockerConnection,
-        api: ApiVersion,
-    ) -> Result<Self, TransportError> {
-        let endpoint = endpoint_address(connection)?;
-        Ok(Self {
-            endpoint,
-            api_prefix: format!("/v{}.{}", api.major, api.minor),
-            in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
-        })
-    }
-
-    #[cfg(unix)]
     pub(super) fn connect_unix_socket(
         socket: &std::path::Path,
         api: ApiVersion,
@@ -76,7 +53,7 @@ impl DockerHttpTransport {
             return Err(TransportError::InvalidRequest);
         }
         Ok(Self {
-            endpoint: EndpointAddress::Unix(socket.to_owned()),
+            socket: socket.to_owned(),
             api_prefix: format!("/v{}.{}", api.major, api.minor),
             in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
         })
@@ -217,7 +194,6 @@ impl DockerHttpTransport {
         }
     }
 
-    #[cfg(unix)]
     pub(super) async fn hijack_json<B>(
         &self,
         path_and_query: &str,
@@ -239,8 +215,7 @@ impl DockerHttpTransport {
         request
             .headers_mut()
             .insert(UPGRADE, http::HeaderValue::from_static("tcp"));
-        let EndpointAddress::Unix(socket) = &self.endpoint;
-        let stream = tokio::net::UnixStream::connect(socket)
+        let stream = tokio::net::UnixStream::connect(&self.socket)
             .await
             .map_err(|_| TransportError::RequestFailed)?;
         hijack_on(TokioIo::new(stream), request, stdin, response_limit).await
@@ -277,7 +252,6 @@ impl DockerHttpTransport {
             .map_err(|_| TransportError::InvalidRequest)
     }
 
-    #[cfg(unix)]
     fn raw_request(
         &self,
         method: Method,
@@ -313,21 +287,10 @@ impl DockerHttpTransport {
             .await
             .map_err(|_| TransportError::RequestFailed)?;
 
-        #[cfg(unix)]
-        {
-            let EndpointAddress::Unix(socket) = &self.endpoint;
-            let stream = tokio::net::UnixStream::connect(socket)
-                .await
-                .map_err(|_| TransportError::RequestFailed)?;
-            exchange_on(TokioIo::new(stream), request, response_limit).await
-        }
-
-        #[cfg(windows)]
-        {
-            let EndpointAddress::NamedPipe(path) = &self.endpoint;
-            let stream = open_named_pipe_once(path).map_err(|_| TransportError::RequestFailed)?;
-            exchange_on(TokioIo::new(stream), request, response_limit).await
-        }
+        let stream = tokio::net::UnixStream::connect(&self.socket)
+            .await
+            .map_err(|_| TransportError::RequestFailed)?;
+        exchange_on(TokioIo::new(stream), request, response_limit).await
     }
 }
 
@@ -515,49 +478,6 @@ async fn error_response_from_incoming(
         headers: parts.headers,
         body,
     })
-}
-
-#[cfg(unix)]
-fn endpoint_address(connection: &DockerConnection) -> Result<EndpointAddress, TransportError> {
-    if connection.endpoint() != EngineEndpoint::UnixSocket {
-        return Err(TransportError::InvalidRequest);
-    }
-    let path = connection
-        .host()
-        .strip_prefix("unix://")
-        .ok_or(TransportError::InvalidRequest)?;
-    Ok(EndpointAddress::Unix(path.into()))
-}
-
-#[cfg(windows)]
-fn endpoint_address(connection: &DockerConnection) -> Result<EndpointAddress, TransportError> {
-    if connection.endpoint() != EngineEndpoint::WindowsNamedPipe {
-        return Err(TransportError::InvalidRequest);
-    }
-    Ok(EndpointAddress::NamedPipe(named_pipe_path(
-        connection.host(),
-    )?))
-}
-
-#[cfg(windows)]
-fn open_named_pipe_once(
-    path: &str,
-) -> io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
-    tokio::net::windows::named_pipe::ClientOptions::new().open(path)
-}
-
-#[cfg(any(windows, test))]
-fn named_pipe_path(host: &str) -> Result<String, TransportError> {
-    let name = host
-        .strip_prefix("npipe:////./pipe/")
-        .filter(|name| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        })
-        .ok_or(TransportError::InvalidRequest)?;
-    Ok(format!(r"\\.\pipe\{name}"))
 }
 
 fn encode_json<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, TransportError> {
@@ -864,16 +784,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(unix, windows))]
     use std::time::Duration;
 
     use serde::Serialize;
 
     use super::{
         BoundedMap, BoundedVec, REQUEST_BYTES, TransportError, encode_json, encode_path_component,
-        named_pipe_path,
     };
-    #[cfg(unix)]
     use super::{ERROR_BYTES, MAX_IN_FLIGHT_REQUESTS, MAX_RESPONSE_HEADERS, deadline};
 
     #[test]
@@ -883,25 +800,6 @@ mod tests {
             "name%2Fwith%3Ffilters%3D%7B%22x%22%3A1%7D%26nul%3D%00"
         );
         assert_eq!(encode_path_component("AZaz09-._~"), "AZaz09-._~");
-    }
-
-    #[test]
-    fn named_pipe_endpoint_has_one_canonical_unescaped_mapping() {
-        assert_eq!(
-            named_pipe_path("npipe:////./pipe/docker_engine"),
-            Ok(r"\\.\pipe\docker_engine".to_owned())
-        );
-        for invalid in [
-            "npipe:////./pipe/",
-            "npipe:////./pipe/other/pipe",
-            "npipe:////./pipe/%2e%2e",
-            "npipe://./pipe/docker_engine",
-        ] {
-            assert_eq!(
-                named_pipe_path(invalid),
-                Err(TransportError::InvalidRequest)
-            );
-        }
     }
 
     #[test]
@@ -988,13 +886,8 @@ mod tests {
                 .expect("write fake response");
             stream.shutdown().await.expect("close fake response");
         });
-        let connection = crate::DockerConnection {
-            context_name: "transport-test".to_owned(),
-            host: format!("unix://{}", socket.display()),
-            endpoint: crate::EngineEndpoint::UnixSocket,
-        };
-        let transport = super::DockerHttpTransport::connect(
-            &connection,
+        let transport = super::DockerHttpTransport::connect_unix_socket(
+            &socket,
             crate::ApiVersion {
                 major: 1,
                 minor: 53,
@@ -1004,13 +897,11 @@ mod tests {
         (transport, socket, server)
     }
 
-    #[cfg(unix)]
     async fn finish_fake_response(socket: &std::path::Path, server: tokio::task::JoinHandle<()>) {
         server.await.expect("fake Docker server");
         std::fs::remove_file(socket).expect("remove exact fake socket");
     }
 
-    #[cfg(unix)]
     fn transport_with_raw_response(
         response: Vec<u8>,
     ) -> (
@@ -1034,15 +925,9 @@ mod tests {
         (fake_transport(&socket), socket, server)
     }
 
-    #[cfg(unix)]
     fn fake_transport(socket: &std::path::Path) -> super::DockerHttpTransport {
-        let connection = crate::DockerConnection {
-            context_name: "transport-test".to_owned(),
-            host: format!("unix://{}", socket.display()),
-            endpoint: crate::EngineEndpoint::UnixSocket,
-        };
-        super::DockerHttpTransport::connect(
-            &connection,
+        super::DockerHttpTransport::connect_unix_socket(
+            socket,
             crate::ApiVersion {
                 major: 1,
                 minor: 53,
@@ -1051,7 +936,6 @@ mod tests {
         .expect("fake Docker transport")
     }
 
-    #[cfg(unix)]
     async fn read_request_headers(stream: &mut tokio::net::UnixStream) {
         use tokio::io::AsyncReadExt as _;
 
@@ -1457,166 +1341,5 @@ mod tests {
             let _ignored = request.await;
         }
         finish_fake_response(&socket, server).await;
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_transport_rejects_an_endpoint_class_mismatch() {
-        for connection in [
-            crate::DockerConnection {
-                context_name: "wrong-class".to_owned(),
-                host: "unix:///tmp/automata-mismatch.sock".to_owned(),
-                endpoint: crate::EngineEndpoint::WindowsNamedPipe,
-            },
-            crate::DockerConnection {
-                context_name: "wrong-host".to_owned(),
-                host: "npipe:////./pipe/docker_engine".to_owned(),
-                endpoint: crate::EngineEndpoint::UnixSocket,
-            },
-        ] {
-            assert_eq!(
-                super::DockerHttpTransport::connect(
-                    &connection,
-                    crate::ApiVersion {
-                        major: 1,
-                        minor: 53,
-                    },
-                )
-                .expect_err("endpoint mismatch must fail closed"),
-                TransportError::InvalidRequest
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn busy_named_pipe_is_opened_once_without_waiting_or_retrying() {
-        use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
-
-        const ERROR_PIPE_BUSY: i32 = 231;
-        let name = format!(
-            "automata-docker-transport-busy-{}",
-            uuid::Uuid::new_v4().simple()
-        );
-        let pipe = format!(r"\\.\pipe\{name}");
-        let occupied_server = ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe)
-            .expect("create occupied named pipe");
-        let occupied_client = ClientOptions::new()
-            .open(&pipe)
-            .expect("occupy named-pipe instance");
-        occupied_server
-            .connect()
-            .await
-            .expect("connect occupied named pipe");
-        assert_eq!(
-            super::open_named_pipe_once(&pipe)
-                .expect_err("no named-pipe instance is available")
-                .raw_os_error(),
-            Some(ERROR_PIPE_BUSY),
-            "fixture must exercise the native busy-pipe result"
-        );
-
-        let connection = crate::DockerConnection {
-            context_name: "named-pipe-busy".to_owned(),
-            host: format!("npipe:////./pipe/{name}"),
-            endpoint: crate::EngineEndpoint::WindowsNamedPipe,
-        };
-        let transport = super::DockerHttpTransport::connect(
-            &connection,
-            crate::ApiVersion {
-                major: 1,
-                minor: 53,
-            },
-        )
-        .expect("named-pipe transport");
-        let result = tokio::time::timeout(
-            Duration::from_millis(25),
-            transport.json::<serde_json::Value, ()>(
-                http::Method::GET,
-                "/busy",
-                None,
-                http::StatusCode::OK,
-                64,
-            ),
-        )
-        .await
-        .expect("one-shot busy-pipe open returns without a retry sleep");
-        assert_eq!(result, Err(TransportError::RequestFailed));
-
-        drop(occupied_client);
-        drop(occupied_server);
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn every_request_reconnects_to_the_exact_rebound_named_pipe() {
-        use tokio::{
-            io::{AsyncReadExt as _, AsyncWriteExt as _},
-            net::windows::named_pipe::ServerOptions,
-        };
-
-        let name = format!(
-            "automata-docker-transport-{}",
-            uuid::Uuid::new_v4().simple()
-        );
-        let pipe = format!(r"\\.\pipe\{name}");
-        let connection = crate::DockerConnection {
-            context_name: "named-pipe-rebind".to_owned(),
-            host: format!("npipe:////./pipe/{name}"),
-            endpoint: crate::EngineEndpoint::WindowsNamedPipe,
-        };
-        let transport = super::DockerHttpTransport::connect(
-            &connection,
-            crate::ApiVersion {
-                major: 1,
-                minor: 53,
-            },
-        )
-        .expect("named-pipe transport");
-
-        for expected in [1_u8, 2] {
-            let server = ServerOptions::new()
-                .create(&pipe)
-                .expect("create rebound named pipe");
-            let task = tokio::spawn(async move {
-                server.connect().await.expect("connect named-pipe client");
-                let mut server = server;
-                let mut request = Vec::new();
-                let mut chunk = [0_u8; 1024];
-                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                    let read = server
-                        .read(&mut chunk)
-                        .await
-                        .expect("read named-pipe request");
-                    assert_ne!(read, 0, "request ended before its headers");
-                    request.extend_from_slice(&chunk[..read]);
-                    assert!(request.len() <= 16 * 1024, "request headers are bounded");
-                }
-                let body = format!("{{\"server\":{expected}}}");
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                server
-                    .write_all(response.as_bytes())
-                    .await
-                    .expect("write named-pipe response");
-                server.shutdown().await.expect("close named-pipe response");
-            });
-            let observed: serde_json::Value = transport
-                .json(
-                    http::Method::GET,
-                    "/rebind",
-                    None::<&()>,
-                    http::StatusCode::OK,
-                    64,
-                )
-                .await
-                .expect("request reaches current named-pipe instance");
-            assert_eq!(observed["server"], expected);
-            task.await.expect("named-pipe server");
-        }
     }
 }

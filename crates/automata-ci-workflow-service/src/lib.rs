@@ -51,10 +51,7 @@ pub use autonomous_workflow::{
     AutonomousWorkflowPhaseExecutor, AutonomousWorkflowQueue, AutonomousWorkflowRenewalOutcome,
     AutonomousWorkflowService,
 };
-pub use credential_requirements::{
-    BuiltInCredentialRequirement, CredentialDiscoveryError, DiscoveredJobCredentials,
-    discover_job_credentials,
-};
+pub use credential_requirements::{BuiltInCredentialRequirement, CredentialDiscoveryError};
 pub use github::GithubWorkflowPlanVerifier;
 pub use github_activation::{
     GithubActivationContext, GithubActivationEvaluationError, GithubActivationSession,
