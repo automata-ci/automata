@@ -83,6 +83,57 @@ struct GuestServer {
     task: JoinHandle<Result<(), GuestProtocolError>>,
 }
 
+struct GuestProcess {
+    temp: TempDir,
+    socket: PathBuf,
+    child: tokio::process::Child,
+}
+
+impl GuestProcess {
+    async fn start(label: &str) -> Self {
+        let temp = TempDir::new(label);
+        let socket = temp.path().join("guest.sock");
+        let mut child = Command::new(GUEST_BINARY)
+            .arg("serve")
+            .arg(&socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start guest process");
+        timeout(TEST_TIMEOUT, async {
+            loop {
+                assert!(
+                    child.try_wait().expect("inspect guest process").is_none(),
+                    "guest process stopped during startup"
+                );
+                if probe(&socket) {
+                    return;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("guest process becomes ready");
+        Self {
+            temp,
+            socket,
+            child,
+        }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.temp.path().join(name)
+    }
+}
+
+impl Drop for GuestProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
 impl GuestServer {
     async fn start(label: &str) -> Self {
         let temp = TempDir::new(label);
@@ -137,6 +188,7 @@ async fn exchange(socket: &Path, request: &GuestRequest) -> GuestResponse {
             .write_all(&encode_frame(request).expect("encode request"))
             .await
             .expect("write request");
+        stream.shutdown().await.expect("finish request frame");
         let frame = read_wire_frame(&mut stream).await.expect("read response");
         decode_frame(&frame).expect("decode response")
     })
@@ -462,7 +514,7 @@ fn exec_parts(
         truncated,
     } = response
     else {
-        panic!("expected execution response");
+        panic!("expected execution response, got {response:?}");
     };
     assert_eq!(protocol, GUEST_PROTOCOL_VERSION);
     (termination, records, truncated)
@@ -715,7 +767,7 @@ async fn listener_lifecycle_protocol_and_malformed_connections_fail_closed() {
     assert!(probe(&socket));
 
     let expected_rejection = GuestRejection::UnsupportedProtocol;
-    for unsupported_protocol in [1, 2, 3, GUEST_PROTOCOL_VERSION + 1] {
+    for unsupported_protocol in [1, 2, 3, 4, GUEST_PROTOCOL_VERSION + 1] {
         let unsupported = GuestRequest::ReadFile {
             protocol: unsupported_protocol,
             operation_id: FIRST_OPERATION.into(),
@@ -1572,8 +1624,21 @@ async fn replay_is_exact_conflicting_and_single_effect_under_concurrency() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn distinct_operations_execute_concurrently() {
+async fn distinct_exec_operations_execute_concurrently() {
     let server = GuestServer::start("distinct-concurrency").await;
+    assert_eq!(
+        exchange(
+            &server.socket,
+            &GuestRequest::Probe {
+                protocol: GUEST_PROTOCOL_VERSION,
+                operation_id: operation_id(79),
+            },
+        )
+        .await,
+        GuestResponse::Ready {
+            protocol: GUEST_PROTOCOL_VERSION,
+        }
+    );
     let release = server.path("release");
     let waiter = exec_request(
         operation_id(80),
@@ -1589,23 +1654,30 @@ async fn distinct_operations_execute_concurrently() {
         1_000,
         64,
     );
-    let releaser = GuestRequest::WriteFile {
-        protocol: GUEST_PROTOCOL_VERSION,
-        operation_id: operation_id(81),
-        path: release.to_string_lossy().into_owned(),
-        content_base64: BASE64.encode(b"release"),
-    };
+    let releaser = exec_request(
+        operation_id(81),
+        "/bin/sh",
+        vec![
+            "-c".into(),
+            "printf release > \"$1\"".into(),
+            "guest-test".into(),
+            release.to_string_lossy().into_owned(),
+        ],
+        BTreeMap::new(),
+        "/tmp",
+        1_000,
+        64,
+    );
     let waiter_exchange = tokio::spawn({
         let socket = server.socket.clone();
         async move { exchange(&socket, &waiter).await }
     });
     sleep(Duration::from_millis(50)).await;
-    assert_eq!(
-        exchange(&server.socket, &releaser).await,
-        GuestResponse::WriteFile {
-            protocol: GUEST_PROTOCOL_VERSION
-        }
-    );
+    let (release_termination, release_records, release_truncated) =
+        exec_parts(exchange(&server.socket, &releaser).await);
+    assert_eq!(release_termination, GuestTermination::Exited(0));
+    assert_complete_streams(&release_records);
+    assert!(!release_truncated);
     let (termination, records, truncated) = exec_parts(waiter_exchange.await.unwrap());
     assert_eq!(termination, GuestTermination::Exited(0));
     assert_eq!(output_for(&records, GuestOutputStream::Stdout), b"released");
@@ -1613,19 +1685,19 @@ async fn distinct_operations_execute_concurrently() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disconnect_cancels_the_in_flight_process_group() {
-    let server = GuestServer::start("disconnect-cancellation").await;
+async fn accepted_request_completes_and_caches_after_response_transport_is_lost() {
+    let server = GuestServer::start("disconnect-replay").await;
     let started = server.path("started");
-    let leaked = server.path("leaked");
+    let completed = server.path("completed");
     let request = exec_request(
         operation_id(90),
         "/bin/sh",
         vec![
             "-c".into(),
-            "printf started > \"$1\"; /bin/sleep 0.4; printf leaked > \"$2\"".into(),
+            "printf x >> \"$1\"; /bin/sleep 0.2; printf done > \"$2\"".into(),
             "guest-test".into(),
             started.to_string_lossy().into_owned(),
-            leaked.to_string_lossy().into_owned(),
+            completed.to_string_lossy().into_owned(),
         ],
         BTreeMap::new(),
         "/tmp",
@@ -1637,6 +1709,7 @@ async fn disconnect_cancels_the_in_flight_process_group() {
         .write_all(&encode_frame(&request).unwrap())
         .await
         .unwrap();
+    stream.shutdown().await.unwrap();
     timeout(TEST_TIMEOUT, async {
         while !started.exists() {
             sleep(Duration::from_millis(5)).await;
@@ -1645,39 +1718,66 @@ async fn disconnect_cancels_the_in_flight_process_group() {
     .await
     .expect("process starts before client cancellation");
     drop(stream);
-    sleep(Duration::from_millis(650)).await;
-    assert!(
-        !leaked.exists(),
-        "a disconnected client left its process running"
+    timeout(TEST_TIMEOUT, async {
+        while !completed.exists() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("accepted operation completes after response loss");
+    assert_eq!(tokio::fs::read(&started).await.unwrap(), b"x");
+    let replay = exchange(&server.socket, &request).await;
+    let (termination, records, truncated) = exec_parts(replay);
+    assert_eq!(termination, GuestTermination::Exited(0));
+    assert_complete_streams(&records);
+    assert!(!truncated);
+    assert_eq!(
+        tokio::fs::read(&started).await.unwrap(),
+        b"x",
+        "lost response retry re-executed the accepted operation"
     );
 }
 
 #[tokio::test]
-async fn completed_replay_entries_are_bounded_and_oldest_first() {
-    let server = GuestServer::start("replay-eviction").await;
-    let path = server.path("replay-value");
-    let mut first = None;
-    for index in 0..=256 {
-        let request = GuestRequest::WriteFile {
+async fn guest_process_replay_capacity_is_non_evicting_and_precedes_execution() {
+    let guest = GuestProcess::start("replay-capacity").await;
+    let first = GuestRequest::Probe {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(0),
+    };
+    let first_response = exchange(&guest.socket, &first).await;
+    assert_eq!(
+        first_response,
+        GuestResponse::Ready {
             protocol: GUEST_PROTOCOL_VERSION,
-            operation_id: format!("eviction-{index:03}"),
-            path: path.to_string_lossy().into_owned(),
-            content_base64: BASE64.encode(index.to_string()),
-        };
-        if index == 0 {
-            first = Some(request.clone());
         }
-        assert!(matches!(
-            exchange(&server.socket, &request).await,
-            GuestResponse::WriteFile { .. }
-        ));
+    );
+    for index in 1..256 {
+        let request = GuestRequest::Probe {
+            protocol: GUEST_PROTOCOL_VERSION,
+            operation_id: operation_id(index),
+        };
+        assert_eq!(
+            exchange(&guest.socket, &request).await,
+            GuestResponse::Ready {
+                protocol: GUEST_PROTOCOL_VERSION,
+            }
+        );
     }
-    tokio::fs::write(&path, b"outside").await.unwrap();
-    assert!(matches!(
-        exchange(&server.socket, &first.unwrap()).await,
-        GuestResponse::WriteFile { .. }
-    ));
-    assert_eq!(tokio::fs::read(path).await.unwrap(), b"0");
+
+    let path = guest.path("must-not-exist");
+    let rejected = GuestRequest::WriteFile {
+        protocol: GUEST_PROTOCOL_VERSION,
+        operation_id: operation_id(256),
+        path: path.to_string_lossy().into_owned(),
+        content_base64: BASE64.encode(b"must-not-run"),
+    };
+    assert_rejected(
+        exchange(&guest.socket, &rejected).await,
+        GuestRejection::ReplayCapacityExceeded,
+    );
+    assert!(!path.exists(), "capacity rejection must precede execution");
+    assert_eq!(exchange(&guest.socket, &first).await, first_response);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1697,6 +1797,43 @@ async fn command_line_install_serve_probe_and_stdio_client_are_real() {
                 .args(arguments)
                 .status()
                 .expect("run invalid command line")
+                .success()
+        );
+    }
+    for arguments in [
+        vec!["install", "/tmp/automata-unused", "extra"],
+        vec!["serve", "/tmp/automata-unused.sock", "extra"],
+        vec![
+            "serve-vm",
+            "/tmp/automata-unused.sock",
+            "/tmp/unused",
+            "extra",
+        ],
+        vec!["client", "/tmp/automata-unused.sock", "extra"],
+        vec!["stdio-once", "extra"],
+        vec!["keepalive", "extra"],
+        vec!["probe", "/tmp/automata-unused.sock", "extra"],
+    ] {
+        assert!(
+            !std::process::Command::new(GUEST_BINARY)
+                .args(arguments)
+                .status()
+                .expect("run command line with trailing arguments")
+                .success()
+        );
+    }
+    #[cfg(target_os = "linux")]
+    for arguments in [
+        vec!["serve-local", "extra"],
+        vec!["bootstrap-local-client", "extra"],
+        vec!["seal-local-client", "extra"],
+        vec!["local-client", "extra"],
+    ] {
+        assert!(
+            !std::process::Command::new(GUEST_BINARY)
+                .args(arguments)
+                .status()
+                .expect("run local command line with trailing arguments")
                 .success()
         );
     }

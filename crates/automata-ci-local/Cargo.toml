@@ -15,6 +15,9 @@ homepage.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+automata-ci-execution.workspace = true
+automata-ci-sandbox-guest.workspace = true
+base64.workspace = true
 automata-ci-core.workspace = true
 automata-ci-workflow-github.workspace = true
 automata-ci-workflow-service.workspace = true

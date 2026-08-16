@@ -21,6 +21,8 @@ mod check;
 mod engine;
 mod installation;
 #[cfg(unix)]
+mod local_docker;
+#[cfg(unix)]
 mod snapshot;
 #[cfg(not(unix))]
 #[path = "snapshot_unsupported.rs"]
@@ -33,9 +35,21 @@ pub use check::{
 };
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
 pub use installation::{
-    ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
-    InstallationSelectorKey,
+    ComposeProjectName, Installation, InstallationId, InstallationIdError, InstallationName,
+    InstallationNameError, InstallationSelectorKey,
 };
+#[cfg(unix)]
+pub use local_docker::{LOCAL_DOCKER_PROVIDER_ID, LocalDockerProvider};
+
+/// Reserved in-container directory used by the fixed-relay Docker provider's protected client.
+pub const LOCAL_DOCKER_CONTROL_DIRECTORY: &str = automata_ci_sandbox_guest::LOCAL_CONTROL_DIRECTORY;
+
+/// Smallest whole-job memory limit accepted by the fixed-relay Docker provider.
+pub const MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES: u64 = 256 * 1_024 * 1_024;
+/// Smallest CPU quota accepted by the fixed-relay Docker provider, in millicores.
+pub const MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS: u32 = 1_000;
+/// Smallest process limit that can contain PID 1, the protected client, and one workload process.
+pub const MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS: u32 = 3;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const COMMAND_TERMINATION_TIMEOUT: Duration = Duration::from_secs(1);

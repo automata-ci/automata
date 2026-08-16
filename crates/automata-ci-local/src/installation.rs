@@ -186,6 +186,19 @@ impl fmt::Display for InstallationId {
     }
 }
 
+impl FromStr for InstallationId {
+    type Err = InstallationIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_canonical(value).ok_or(InstallationIdError)
+    }
+}
+
+/// Rejected noncanonical or non-random installation UUID.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("installation identity must be a canonical UUIDv4")]
+pub struct InstallationIdError;
+
 /// Verified identity of one engine-owned local installation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Installation {
@@ -197,7 +210,12 @@ pub struct Installation {
 }
 
 impl Installation {
-    pub(crate) fn verified(name: InstallationName, id: InstallationId) -> Self {
+    /// Constructs the exact expected installation binding.
+    ///
+    /// Provider connection still verifies this name and UUID against the
+    /// immutable Engine-owned installation anchor before use.
+    #[must_use]
+    pub fn new(name: InstallationName, id: InstallationId) -> Self {
         let selector_key = InstallationSelectorKey::for_name(&name);
         let compose_project = ComposeProjectName::for_key(selector_key);
         let anchor_volume_name = format!("{compose_project}-identity");

@@ -1219,12 +1219,163 @@ fn kubernetes_provider_configuration_is_exact_and_mutually_exclusive() {
     );
 }
 
+fn local_docker_configuration() -> serde_json::Value {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&valid_configuration()).expect("configuration JSON");
+    value
+        .as_object_mut()
+        .expect("configuration object")
+        .remove("podman");
+    value["state"]
+        .as_object_mut()
+        .expect("state object")
+        .remove("podman");
+    value["executor"]["network"] = serde_json::json!("disabled");
+    value["local_docker"] = serde_json::json!({
+        "installation_name": "evaluation",
+        "installation_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
+        "guest_image": format!(
+            "registry.example/automata/guest@sha256:{}",
+            "ab".repeat(32)
+        )
+    });
+    value
+}
+
+#[test]
+fn local_docker_configuration_is_closed_current_only_and_mutually_exclusive() {
+    let value = local_docker_configuration();
+    let configured = parse_value(&value).expect("local Docker configuration");
+    assert!(configured.podman().is_none());
+    assert!(configured.kubernetes().is_none());
+    assert!(configured.state().provider().is_none());
+    let local = configured.local_docker().expect("local Docker policy");
+    assert_eq!(local.installation().name().as_str(), "evaluation");
+    assert_eq!(
+        local.installation().id().to_string(),
+        "6e561f8b-9098-418d-b573-d82f5c73006e"
+    );
+    assert!(local.guest_image().reference().ends_with(&"ab".repeat(32)));
+    assert!(configured.inventory().containers().features().is_empty());
+
+    for field in ["endpoint", "socket", "docker_host"] {
+        let mut open = value.clone();
+        open["local_docker"][field] = serde_json::json!("unix:///var/run/docker.sock");
+        assert_eq!(
+            parse_value(&open).expect_err("transport selection must stay closed"),
+            RunnerProductConfigError::InvalidDocument
+        );
+    }
+
+    let mut invalid_id = value.clone();
+    invalid_id["local_docker"]["installation_id"] =
+        serde_json::json!("00000000-0000-0000-0000-000000000000");
+    assert_eq!(
+        parse_value(&invalid_id).expect_err("installation identity is canonical UUIDv4"),
+        RunnerProductConfigError::InvalidLocalDocker
+    );
+
+    let mut egress = value.clone();
+    egress["executor"]["network"] = serde_json::json!("private_egress");
+    assert_eq!(
+        parse_value(&egress).expect_err("local Docker is network-disabled only"),
+        RunnerProductConfigError::InvalidExecutor
+    );
+
+    for reserved_path in [
+        "/automata".to_owned(),
+        "/automata/job".to_owned(),
+        automata_ci_local::LOCAL_DOCKER_CONTROL_DIRECTORY.to_owned(),
+        format!("{}/job", automata_ci_local::LOCAL_DOCKER_CONTROL_DIRECTORY),
+    ] {
+        let mut runner_root = value.clone();
+        runner_root["executor"]["runner_root"] = serde_json::json!(&reserved_path);
+        assert_eq!(
+            parse_value(&runner_root).expect_err("runner root must avoid reserved paths"),
+            RunnerProductConfigError::InvalidInventory
+        );
+
+        let mut workspace = value.clone();
+        workspace["inventory"]["environment_profiles"][0]["workspace"] =
+            serde_json::json!(&reserved_path);
+        assert_eq!(
+            parse_value(&workspace).expect_err("workspace must avoid reserved paths"),
+            RunnerProductConfigError::InvalidInventory
+        );
+    }
+
+    let mut ambiguous = value;
+    ambiguous["podman"] = serde_json::from_str::<serde_json::Value>(&valid_configuration())
+        .expect("Podman configuration")
+        .get("podman")
+        .expect("Podman field")
+        .clone();
+    assert_eq!(
+        parse_value(&ambiguous).expect_err("providers are mutually exclusive"),
+        RunnerProductConfigError::InvalidProvider
+    );
+}
+
+#[test]
+fn local_docker_resource_minima_are_current_and_exact() {
+    let value = local_docker_configuration();
+    for (field, minimum) in [
+        (
+            "memory_bytes",
+            automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES,
+        ),
+        (
+            "cpu_millis",
+            u64::from(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS),
+        ),
+        (
+            "pids",
+            u64::from(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS),
+        ),
+    ] {
+        let mut undersized = value.clone();
+        undersized["executor"]["resources"][field] = serde_json::json!(minimum - 1);
+        assert_eq!(
+            parse_value(&undersized).expect_err("local Docker infrastructure minimum"),
+            RunnerProductConfigError::InvalidLocalDocker
+        );
+    }
+
+    let mut minimum = value;
+    minimum["executor"]["resources"]["memory_bytes"] =
+        serde_json::json!(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES);
+    minimum["executor"]["resources"]["cpu_millis"] =
+        serde_json::json!(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS);
+    minimum["executor"]["resources"]["pids"] =
+        serde_json::json!(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS);
+    minimum["inventory"]["resources_per_job"]["memory_bytes"] =
+        serde_json::json!(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES);
+    minimum["inventory"]["resources_per_job"]["cpu_millis"] =
+        serde_json::json!(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS);
+    minimum["inventory"]["resources_per_job"]["pids"] =
+        serde_json::json!(automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS);
+    let configured = parse_value(&minimum).expect("exact local Docker minimum");
+    let resources = configured.executor().resources();
+    assert_eq!(
+        resources.memory_bytes(),
+        automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_MEMORY_BYTES
+    );
+    assert_eq!(
+        resources.cpu_millis(),
+        automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_CPU_MILLIS
+    );
+    assert_eq!(
+        resources.pids(),
+        automata_ci_local::MINIMUM_LOCAL_DOCKER_SANDBOX_PIDS
+    );
+}
+
 #[test]
 fn only_the_current_product_schema_is_accepted() {
     let current: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     assert!(parse_value(&current).is_ok());
-    for unsupported in [0, 1, 2, u16::MAX] {
+    for unsupported in [0, 1, 2, 3, 4, u16::MAX] {
         let mut document = current.clone();
         document["schema_version"] = serde_json::json!(unsupported);
         assert_eq!(
@@ -1238,7 +1389,7 @@ fn only_the_current_product_schema_is_accepted() {
 fn previous_product_schema_is_rejected() {
     let mut document: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
-    let unsupported = 2;
+    let unsupported = RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION - 1;
     document["schema_version"] = serde_json::json!(unsupported);
     assert_eq!(
         parse_value(&document).expect_err("previous schema must fail closed"),

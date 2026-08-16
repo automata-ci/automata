@@ -12,7 +12,7 @@ path, credential path, runtime mount, and metrics port distinct.
 Windows provider, `windows_hyperv`.
 [`runner.macos.example.json`](runner.macos.example.json)
 selects the Virtualization.framework provider on Apple Silicon macOS 15+.
-Exactly one of the `podman`, `kubernetes`, `windows_hyperv`, and
+Exactly one of the `podman`, `local_docker`, `kubernetes`, `windows_hyperv`, and
 `macos_virtualization` provider
 objects may be configured.
 
@@ -21,14 +21,37 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v4 accepts exactly one sandbox provider. Host runners use the
+Product schema v5 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes runners omit
 `state.podman`, `state.windows_hyperv`, and `state.macos_virtualization` and use
 a top-level `kubernetes` object. Windows and macOS runners use their matching
-provider name in both locations. All non-v4 schemas, `windows_native`, and the
+provider name in both locations. All non-v5 schemas, `windows_native`, and the
 removed macOS native key are rejected, not migrated. The runner loads
 credentials through Kubernetes' standard in-cluster or ambient kubeconfig
 discovery; the JSON remains secret-free.
+
+The evaluation-only local Docker selection is deliberately closed:
+
+```json
+{
+  "local_docker": {
+    "installation_name": "default",
+    "installation_id": "00000000-0000-4000-8000-000000000001",
+    "guest_image": "registry.example/automata/sandbox-guest@sha256:<64 hex digits>"
+  }
+}
+```
+
+It is Linux-only, omits every provider state root, and has no endpoint, socket,
+context, or environment-variable override. The runner connects only through
+`/run/automata-engine/docker.sock` and verifies the configured UUID against the
+existing installation anchor. The guest image and every profile image must
+already exist by exact registry-qualified digest; the provider never pulls.
+Local Docker requires disabled networking, a writable root, administrator
+identity, at least 256 MiB, one CPU, and three PIDs per job, zero disk/GPU
+claims, and no job-container engine, service proxy, or BuildKit surface. This
+enables explicit `automata-runner run` evaluation only; there is no
+`automata local run` command yet.
 
 `object_store.tls_trust` is mandatory and has exactly one of two current
 shapes: `{ "mode": "web_pki" }`, or `{ "mode": "private_ca",

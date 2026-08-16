@@ -7,7 +7,7 @@ API compatibility; and Compose plugin version 2.20.0 or newer. It will supervise
 the local Compose project without adding container-engine behavior to the
 control-plane crate.
 
-The user-visible surface remains read-only: `automata local doctor` performs
+The `automata local` user-visible surface remains read-only: `automata local doctor` performs
 host preflight, while `automata local check [WORKFLOW]` validates exact local
 workflow source without inspecting Docker. Context discovery for `doctor` is
 completed first, subsequent daemon probes are pinned to that exact local
@@ -58,20 +58,44 @@ deterministic volume name, exact Automata-managed labels, local driver/scope,
 empty driver options, and container attachments. It exposes no generic Docker
 mutation, delete, prune, image-pull, helper-container, or Compose API.
 
+The crate also provides an evaluation-only `LocalDockerProvider` for the real
+runner composition. It connects only to `/run/automata-engine/docker.sock`,
+revalidates the pinned daemon and exact unattached installation anchor before
+every mutation, and requires already-present digest-pinned Linux images. Each
+sandbox is one sibling container with disabled networking, a writable root,
+fixed resource/process limits, all capabilities dropped, built-in seccomp,
+no-new-privileges, and no host binds, devices, sockets, services, or per-job
+volumes. Admission requires at least 256 MiB, one CPU, and three PIDs for the
+protected guest envelope. An exact memory-bounded tmpfs overlays the job
+workspace so image contents cannot violate clean-workspace admission. A bounded, read-only,
+non-root source container is never started: the provider exports the fixed guest
+binary directly from its verified image rootfs, removes that exact container
+ID, injects and reads back the bytes in the job's writable layer, and reinspects
+the complete realized container configuration.
+
+The guest is the real PID 1; Docker init is disabled. Before workload admission,
+it and a distinct one-shot sealer establish an exact protected client in a
+fixed `rw,exec,nosuid,nodev` control tmpfs. The sealed directory and client
+cannot be traversed or changed by the capability-free UID 0 workload. Every
+live operation, including readiness, uses that client as `65532:65532` against
+the peer-credential-authenticated abstract broker. Exited job containers are
+never restarted, and accepted live operations remain in the non-evicting guest
+replay store for that container lifetime.
+
 An installation is one reusable control-plane and runner-capacity domain, not
 one repository. Repositories sharing an installation are one trusted set and
 retain their own admission, authorization, secret, cache, and history scope in
 the existing control plane. A separate `--installation` name is the explicit
 way to request another deployment/capacity domain.
 
-No product command creates, adopts, or deletes an engine resource yet.
-`local check` stops after source compilation, reusable-call validation, and
+No `automata local` command invokes that provider yet. `local check` stops after
+source compilation, reusable-call validation, and
 credential-name discovery: it does not admit or run work, mint GitHub evidence,
 request a token, or publish a Check Run. Desired specification persistence,
-product-owned Compose rendering, workers, workflow execution, and GitHub
-connection are added only with their own tested contracts. There is still no
-host installation manifest, mirrored resource inventory, lifecycle state
-machine, or secret value in this crate.
+product-owned Compose rendering, local-run orchestration, and GitHub connection
+remain separate work. The provider is consumed only when an operator explicitly
+selects `local_docker` in current runner product schema 5; it does not create a
+host installation manifest, desired-spec state, or Compose topology.
 
 This crate has no command-line parser. The `automata` product maps its public
 CLI into the high-level local-check request; snapshot and archive authority stay

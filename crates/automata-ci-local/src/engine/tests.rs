@@ -6,10 +6,11 @@ use std::{
 use async_trait::async_trait;
 
 use super::{
-    CreateVolume, DockerInstallationAdapter, EngineApi, EngineApiError, EngineFacts,
-    IDENTITY_ANCHOR_KIND, IDENTITY_SCHEMA, InspectedVolume, LABEL_COMPOSE_PROJECT,
+    AnchorEngineApi, CreateVolume, DockerInstallationAdapter, EngineApi, EngineApiError,
+    EngineFacts, IDENTITY_ANCHOR_KIND, IDENTITY_SCHEMA, InspectedVolume, LABEL_COMPOSE_PROJECT,
     LABEL_IDENTITY_SCHEMA, LABEL_INSTALLATION_ID, LABEL_INSTALLATION_KEY, LABEL_MANAGED,
-    LABEL_RESOURCE_KIND, LocalEngineErrorCode, MANAGED_VALUE, adapter_api_version, identity_labels,
+    LABEL_RESOURCE_KIND, LocalEngineErrorCode, MANAGED_VALUE, VolumeEngineApi, adapter_api_version,
+    identity_labels,
 };
 use crate::{
     ComposeFrontend, DockerConnection, Engine, EngineArchitecture, EngineEndpoint, EngineSelection,
@@ -39,6 +40,7 @@ struct FakeState {
     queued_facts: VecDeque<Result<EngineFacts, EngineApiError>>,
     volumes: BTreeMap<String, InspectedVolume>,
     attachments: BTreeMap<String, Vec<String>>,
+    replacement_after_attachments: Option<InspectedVolume>,
     behavior: CreateBehavior,
     calls: Vec<Call>,
 }
@@ -55,6 +57,7 @@ impl FakeEngine {
                 queued_facts: VecDeque::new(),
                 volumes: BTreeMap::new(),
                 attachments: BTreeMap::new(),
+                replacement_after_attachments: None,
                 behavior: CreateBehavior::Apply,
                 calls: Vec::new(),
             }),
@@ -81,12 +84,29 @@ impl EngineApi for FakeEngine {
             Ok(state.facts.clone())
         }
     }
+}
+
+#[async_trait]
+impl AnchorEngineApi for FakeEngine {
     async fn inspect_volume(&self, name: &str) -> Result<Option<InspectedVolume>, EngineApiError> {
         let mut state = self.state.lock().expect("fake engine lock");
         state.calls.push(Call::Inspect(name.to_owned()));
         Ok(state.volumes.get(name).cloned())
     }
 
+    async fn volume_attachments(&self, name: &str) -> Result<Vec<String>, EngineApiError> {
+        let mut state = self.state.lock().expect("fake engine lock");
+        state.calls.push(Call::Attachments(name.to_owned()));
+        let attachments = state.attachments.get(name).cloned().unwrap_or_default();
+        if let Some(replacement) = state.replacement_after_attachments.take() {
+            state.volumes.insert(name.to_owned(), replacement);
+        }
+        Ok(attachments)
+    }
+}
+
+#[async_trait]
+impl VolumeEngineApi for FakeEngine {
     async fn create_volume(&self, request: CreateVolume) -> Result<(), EngineApiError> {
         let mut state = self.state.lock().expect("fake engine lock");
         state.calls.push(Call::Create(request.name.clone()));
@@ -112,12 +132,6 @@ impl EngineApi for FakeEngine {
                 Ok(())
             }
         }
-    }
-
-    async fn volume_attachments(&self, name: &str) -> Result<Vec<String>, EngineApiError> {
-        let mut state = self.state.lock().expect("fake engine lock");
-        state.calls.push(Call::Attachments(name.to_owned()));
-        Ok(state.attachments.get(name).cloned().unwrap_or_default())
     }
 }
 
@@ -192,7 +206,7 @@ async fn engine_verification_uses_the_capped_adapter_api() {
 }
 
 fn anchor(name: &InstallationName, id: InstallationId) -> InspectedVolume {
-    let installation = Installation::verified(name.clone(), id);
+    let installation = Installation::new(name.clone(), id);
     InspectedVolume {
         name: installation.anchor_volume_name().to_owned(),
         driver: "local".to_owned(),
@@ -221,6 +235,7 @@ async fn absent_anchor_is_created_post_inspected_and_then_adopted() {
             Call::Create(expected_name.clone()),
             Call::Inspect(expected_name.clone()),
             Call::Attachments(expected_name.clone()),
+            Call::Inspect(expected_name.clone()),
             Call::EngineFacts,
         ]
     );
@@ -236,7 +251,8 @@ async fn absent_anchor_is_created_post_inspected_and_then_adopted() {
         vec![
             Call::EngineFacts,
             Call::Inspect(expected_name.clone()),
-            Call::Attachments(expected_name),
+            Call::Attachments(expected_name.clone()),
+            Call::Inspect(expected_name),
             Call::EngineFacts,
         ]
     );
@@ -283,6 +299,36 @@ async fn a_concurrent_matching_winner_is_adopted() {
             .expect("adopt concurrent winner")
             .id(),
         winner_id
+    );
+}
+
+#[tokio::test]
+async fn anchor_replacement_during_attachment_inspection_is_never_adopted() {
+    let (adapter, fake) = test_adapter();
+    let name = InstallationName::new("attachment-race").expect("installation name");
+    let owned = anchor(&name, InstallationId::new());
+    let mut replacement = owned.clone();
+    replacement
+        .labels
+        .insert(LABEL_MANAGED.to_owned(), "false".to_owned());
+    fake.mutate(|state| {
+        state.volumes.insert(owned.name.clone(), owned);
+        state.replacement_after_attachments = Some(replacement);
+    });
+
+    assert_eq!(
+        adapter
+            .inspect_identity(&name)
+            .await
+            .expect_err("replacement must invalidate the inspected ownership evidence")
+            .code(),
+        LocalEngineErrorCode::InvalidIdentityAnchor
+    );
+    assert!(
+        !fake
+            .calls()
+            .iter()
+            .any(|call| matches!(call, Call::Create(_)))
     );
 }
 

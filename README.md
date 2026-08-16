@@ -91,9 +91,12 @@ exercise the complete control plane from a source checkout.
                          automata-runner
                                   |
                     configured sandbox provider
-                    /            |             \
-          rootless Podman   Kubernetes Pod   macOS VM / Windows
+                 /          |          |             \
+       rootless Podman  Local Docker*  Kubernetes Pod  macOS VM / Windows
 ```
+
+`Local Docker*` is an explicit schema-5 runner evaluation path through the
+fixed installation relay; `automata local run` is not implemented yet.
 
 `automata` owns event admission, workflow planning, durable orchestration,
 Results and management APIs, GitHub publication, and the web interface.

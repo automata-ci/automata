@@ -423,7 +423,8 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
             kind:
                 GuestRejection::UnsupportedProtocol
                 | GuestRejection::OperationFailed
-                | GuestRejection::OperationConflict,
+                | GuestRejection::OperationConflict
+                | GuestRejection::ReplayCapacityExceeded,
             ..
         }
         | GuestResponse::Ready { .. }

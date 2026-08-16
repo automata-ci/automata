@@ -152,6 +152,7 @@ async fn run_generation(
     }
     match config.provider() {
         RunnerProviderConfig::Podman(_) => Box::pin(run_podman(&config, shutdown)).await,
+        RunnerProviderConfig::LocalDocker(_) => Box::pin(run_local_docker(&config, shutdown)).await,
         RunnerProviderConfig::Kubernetes(_) => Box::pin(run_kubernetes(&config, shutdown)).await,
         RunnerProviderConfig::WindowsHyperV(_) => {
             Box::pin(run_windows_hyperv(&config, shutdown)).await
@@ -191,11 +192,62 @@ enum SupervisionDisposition {
     Recompose,
 }
 
+#[cfg(target_os = "linux")]
+async fn run_local_docker(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<SupervisionDisposition, RunnerProductError> {
+    require_dedicated_runner_user()?;
+    let local = config
+        .local_docker()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    let provider = automata_ci_local::LocalDockerProvider::connect(
+        local.installation().clone(),
+        local.guest_image().clone(),
+    )
+    .await?;
+    if shutdown.is_requested() {
+        return Ok(SupervisionDisposition::Complete);
+    }
+    let metrics = build_metrics(config, None)?;
+    let provider: Arc<dyn automata_ci_execution::SandboxProvider> = Arc::new(provider);
+    let provider = match &metrics {
+        Some(metrics) => metrics.instrument_sandbox_provider(provider),
+        None => provider,
+    };
+    let metrics_listener = match config.metrics() {
+        Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
+        None => None,
+    };
+    let composition = compose_with_provider(
+        config,
+        provider,
+        metrics,
+        &shutdown.probe,
+        false,
+        false,
+        || Ok(()),
+    )?
+    .filter(|_| !shutdown.is_requested());
+    let Some(composition) = composition else {
+        return Ok(SupervisionDisposition::Complete);
+    };
+    supervise_composition(config, composition, metrics_listener, shutdown).await
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn run_local_docker(
+    _config: &RunnerProductConfig,
+    _shutdown: RunnerShutdown,
+) -> Result<SupervisionDisposition, RunnerProductError> {
+    Err(RunnerProductError::UnsupportedPlatform)
+}
+
 async fn run_podman(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
 ) -> Result<SupervisionDisposition, RunnerProductError> {
-    require_dedicated_rootless_user()?;
+    require_dedicated_runner_user()?;
     let podman_options = prepare_admitted_podman(config)?;
     let network_policy = config.executor().network();
     let capability_admission =
@@ -234,7 +286,7 @@ async fn run_kubernetes(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
 ) -> Result<SupervisionDisposition, RunnerProductError> {
-    require_dedicated_rootless_user()?;
+    require_dedicated_runner_user()?;
     let kubernetes = config
         .kubernetes()
         .ok_or(RunnerProductError::ProviderConfiguration)?;
@@ -490,19 +542,19 @@ where
 }
 
 #[cfg(target_os = "linux")]
-fn require_dedicated_rootless_user() -> Result<(), RunnerProductError> {
-    admit_effective_user_id(rustix::process::geteuid().as_raw())
+fn require_dedicated_runner_user() -> Result<(), RunnerProductError> {
+    admit_effective_runner_user_id(rustix::process::geteuid().as_raw())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn require_dedicated_rootless_user() -> Result<(), RunnerProductError> {
+fn require_dedicated_runner_user() -> Result<(), RunnerProductError> {
     Err(RunnerProductError::UnsupportedPlatform)
 }
 
 #[cfg(target_os = "linux")]
-fn admit_effective_user_id(user: u32) -> Result<(), RunnerProductError> {
+fn admit_effective_runner_user_id(user: u32) -> Result<(), RunnerProductError> {
     if user == 0 {
-        Err(RunnerProductError::PodmanProcessTrust)
+        Err(RunnerProductError::RunnerUserTrust)
     } else {
         Ok(())
     }
@@ -828,7 +880,9 @@ fn admit_configured_environment_profiles(
                 toolchain.pwsh().cloned(),
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
-        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => policy
+        RunnerProviderConfig::Podman(_)
+        | RunnerProviderConfig::LocalDocker(_)
+        | RunnerProviderConfig::Kubernetes(_) => policy
             .with_linux_tools(
                 toolchain
                     .bash()
@@ -859,11 +913,20 @@ fn admit_configured_environment_profiles(
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
     };
-    let result = admit_runner_profiles(config, provider, policy, cancellation);
+    report_profile_admission(
+        admit_runner_profiles(config, provider, policy, cancellation),
+        config.environments().len(),
+    )
+}
+
+fn report_profile_admission(
+    result: Result<ProfileAdmissionOutcome, ProfileAdmissionError>,
+    profile_count: usize,
+) -> Result<ProfileAdmissionOutcome, RunnerProductError> {
     match result {
         Ok(ProfileAdmissionOutcome::Admitted) => {
             info!(
-                profiles = config.environments().len(),
+                profiles = profile_count,
                 "runner environment profiles admitted by provider lifecycle"
             );
             Ok(ProfileAdmissionOutcome::Admitted)
@@ -1275,30 +1338,30 @@ fn build_toolchain(
 ) -> Result<StaticGithubToolchain, RunnerProductError> {
     let configured = config.executor().toolchain();
     let mut toolchain = match config.provider() {
-        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => {
-            StaticGithubToolchain::new(
-                configured
-                    .bash()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .sh()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .install()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .tar()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .sha256sum()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-            )?
-        }
+        RunnerProviderConfig::Podman(_)
+        | RunnerProviderConfig::LocalDocker(_)
+        | RunnerProviderConfig::Kubernetes(_) => StaticGithubToolchain::new(
+            configured
+                .bash()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .sh()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .install()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .tar()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .sha256sum()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+        )?,
         RunnerProviderConfig::WindowsHyperV(_) => StaticGithubToolchain::windows(
             configured
                 .pwsh()
@@ -1342,6 +1405,7 @@ fn build_toolchain(
     if matches!(
         config.provider(),
         RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::LocalDocker(_)
             | RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::MacosVirtualization(_)
     ) && let Some(path) = configured.pwsh()
@@ -1495,6 +1559,9 @@ pub enum RunnerProductError {
     /// Provider state-root preparation failed.
     #[error("runner provider state-root initialization failed")]
     StateRoot(#[from] ProductStateRootError),
+    /// The production runner was not launched as a dedicated non-root user.
+    #[error("runner user trust validation failed")]
+    RunnerUserTrust,
     /// Rootless Podman configuration failed.
     #[error("runner Podman configuration failed")]
     PodmanConfiguration(#[from] automata_ci_sandbox_podman::PodmanConfigurationError),
@@ -1507,6 +1574,9 @@ pub enum RunnerProductError {
     /// Rootless Podman initialization failed.
     #[error("runner Podman provider initialization failed")]
     PodmanOpen(#[from] automata_ci_sandbox_podman::PodmanOpenError),
+    /// Fixed-relay local Docker provider initialization failed.
+    #[error("runner local Docker provider initialization failed")]
+    LocalDocker(#[from] automata_ci_local::LocalEngineError),
     /// The provider-specific product configuration was internally inconsistent.
     #[error("runner provider configuration is inconsistent")]
     ProviderConfiguration,
@@ -1650,12 +1720,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn root_is_rejected_before_any_podman_state_preparation() {
+    fn root_is_rejected_by_runner_user_trust_boundary() {
         assert!(matches!(
-            admit_effective_user_id(0),
-            Err(RunnerProductError::PodmanProcessTrust)
+            admit_effective_runner_user_id(0),
+            Err(RunnerProductError::RunnerUserTrust)
         ));
-        assert!(admit_effective_user_id(1).is_ok());
+        assert!(admit_effective_runner_user_id(1).is_ok());
     }
 
     #[test]

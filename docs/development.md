@@ -346,7 +346,7 @@ AUTOMATA_TEST_LOCAL_DOCKER=1 cargo test --locked -p automata-ci-local \
   -- --ignored --exact
 ```
 
-Protocol v4's opt-in helper-image contract test requires an explicit local
+The current protocol-v5 opt-in helper-image contract test requires an explicit local
 Docker endpoint and an already loaded registry digest. It creates a fresh
 ownership-labeled local volume, proves non-root atomic commit and readback
 through the Linux helper envelope, and removes only the revalidated unattached

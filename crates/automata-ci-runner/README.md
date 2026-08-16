@@ -18,7 +18,8 @@ this boundary until native atomic custody adapters and physical-host
 qualification exist; there is no manual or static-identity fallback.
 
 `automata-runner run` selects exactly one host-compatible provider from its
-configuration: rootless Podman or Kubernetes on Linux, fresh
+configuration: rootless Podman, evaluation-only fixed-relay local Docker, or
+Kubernetes on Linux, fresh
 Hyper-V-isolated Windows containers on Windows, or disposable
 Virtualization.framework VMs on Apple Silicon macOS 15+. The checked-in
 Linux host examples
@@ -28,8 +29,9 @@ Linux host examples
 single-slot Podman processes; the
 [Windows](config/runner.windows.example.json) and
 [macOS](config/runner.macos.example.json) examples each remain one process and
-one slot. The [configuration guide](config/README.md) documents Kubernetes,
-Windows Hyper-V container isolation, and the macOS VM trust boundary.
+one slot. The [configuration guide](config/README.md) documents fixed-relay
+local Docker evaluation, Kubernetes, Windows Hyper-V container isolation, and
+the macOS VM trust boundary.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:
@@ -165,7 +167,7 @@ the private journal state root. A warm job
 therefore reads local disk first and falls back to the shared object store; it
 does not contact GitHub again.
 
-Runner product schema 4 requires an explicit object-store trust policy.
+Runner product schema 5 requires an explicit object-store trust policy.
 `web_pki` uses platform roots; `private_ca` loads exactly one bounded CA through
 an existing secure-input descriptor and installs it into an otherwise empty
 root store. The PEM bytes must use canonical RFC 7468 64-column/LF encoding

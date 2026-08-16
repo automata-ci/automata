@@ -7,21 +7,24 @@ dedicated guest image and copies it into each workload Pod; the macOS template
 and Windows runner image bake the reviewed executable into their immutable
 artifacts.
 
-Protocol v4 keeps command arguments, environment values, and file contents out
+Protocol v5 keeps command arguments, environment values, and file contents out
 of Kubernetes Pod specifications, exec request URLs, and container-runtime
 command lines. Unix guests use the persistent authenticated socket lifecycle;
 the `stdio-once` transport handles one framed request over anonymous standard
 input while its caller owns lifecycle, replay, and recovery fencing. Protocol
-v1, v2, and v3 traffic is rejected rather than migrated.
+v1 through v4 traffic is rejected rather than migrated. Persistent Unix guests
+reserve replay capacity before execution, retain every accepted result for the
+guest lifetime, and reject a new operation identifier before execution once the
+fixed 256-entry or byte bound is full.
 
-Protocol upgrades are lockstep artifact changes. A v4 host binary must be
+Protocol upgrades are lockstep artifact changes. A v5 host binary must be
 deployed with rebuilt Kubernetes guest images, Windows runner images, macOS VM
 templates, and the macOS vsock bridge. An older guest is intentionally rejected
-instead of being interpreted as v4.
+instead of being interpreted as v5.
 
 ## Durable file protocol
 
-Protocol v4 adds two narrow operations for engine-managed configuration:
+The current protocol has two narrow operations for engine-managed configuration:
 
 - `atomic_commit_file` replaces one bounded absolute path using a
   compare-and-swap expectation: either `absent` or the exact SHA-256 digest of
@@ -48,8 +51,28 @@ desired bytes and require `already_current` or `committed`; both successful
 outcomes synchronize the exact file and parent directory before acknowledging
 success.
 
-The older `write_file` and `read_file` operations remain available for sandbox
-providers whose existing copy contract does not require durable replacement.
+`write_file` and `read_file` implement the sandbox provider copy contract;
+durable engine configuration uses only the operations above.
+
+## Local Docker protected client
+
+The evaluation-only local Docker provider runs the guest as the container's
+actual PID 1 with Docker init disabled, no capabilities, built-in seccomp, and
+`no-new-privileges`. Before admitting workload traffic, PID 1 copies its exact
+executable into a fixed `tmpfs` mounted `rw,exec,nosuid,nodev` with exact size,
+owner, group, and mode. A distinct one-shot UID seals a root-owned seed into the
+fixed client name and changes the directory to mode `0510`. PID 1 verifies the
+held seed inode, exact client bytes and metadata, seed absence, mount type, and
+sealed directory through one peer-credential-authenticated handshake.
+
+Every provider operation then executes the sealed client as `65532:65532` and
+requires a complete framed response over the abstract broker socket. The
+capability-free UID 0 workload cannot traverse the directory, alter or execute
+the client, assume the client UID, inspect the non-dumpable PID 1 executable, or
+deliver a terminating signal to namespace PID 1. A setup ambiguity is accepted
+only after the protected client returns the exact `Ready` response; otherwise
+the provider destroys the exact container and recreates instead of resealing or
+adopting it.
 
 ## Helper image contract
 
@@ -77,13 +100,13 @@ export AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER_HOST=unix:///var/run/docker.sock
 export AUTOMATA_GUEST_TEST_REPOSITORY=localhost:5000/automata/sandbox-guest
 docker --host "$AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER_HOST" build \
   --file crates/automata-ci-sandbox-guest/Containerfile \
-  --tag "$AUTOMATA_GUEST_TEST_REPOSITORY:protocol-v4" .
+  --tag "$AUTOMATA_GUEST_TEST_REPOSITORY:protocol-v5" .
 docker --host "$AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER_HOST" push \
-  "$AUTOMATA_GUEST_TEST_REPOSITORY:protocol-v4"
+  "$AUTOMATA_GUEST_TEST_REPOSITORY:protocol-v5"
 export AUTOMATA_SANDBOX_GUEST_LIVE_IMAGE="$(docker \
   --host "$AUTOMATA_SANDBOX_GUEST_LIVE_DOCKER_HOST" image inspect \
   --format '{{index .RepoDigests 0}}' \
-  "$AUTOMATA_GUEST_TEST_REPOSITORY:protocol-v4")"
+  "$AUTOMATA_GUEST_TEST_REPOSITORY:protocol-v5")"
 ```
 
 This repository does not yet publish a default sandbox-guest image. The test

@@ -1,10 +1,12 @@
 # Local installation and deployment roadmap
 
 - Roadmap status: Active
-- Available slice: read-only `automata local doctor` and source-only
-  `automata local check` from a reviewed source checkout
-- Current implementation checkpoints: 2B.2a shared sandbox-guest protocol v4
-  file primitives, plus the read-only source-validation portion of 3B
+- Available slice: read-only `automata local doctor`, source-only
+  `automata local check`, and explicit runner-schema-5 evaluation through the
+  fixed-relay `LocalDocker` provider; there is no `automata local run` yet
+- Current implementation checkpoints: shared sandbox-guest protocol v5
+  non-evicting live replay, the evaluation-only 3A provider implementation,
+  and the read-only source-validation portion of 3B
 - Last completed engine-adapter checkpoint: 2B.1, pinned Docker context and
   immutable identity anchor
 - Date: 2026-08-16
@@ -828,7 +830,7 @@ command in this slice.
 Implement the deterministic exact-ID engine lock before exposing desired-spec
 mutation. Under that lock, a commit freshly reads the current optional document,
 requires the caller's expected absent state or exact prior canonical-byte
-SHA-256, invokes protocol 4 `AtomicCommitFile`, and then reads through a new
+SHA-256, invokes current protocol 5 `AtomicCommitFile`, and then reads through a new
 helper. Success requires the expected closed commit outcome plus canonical
 decode, installation binding, and recomputed plan digest. A stale expectation
 is a typed conflict with no mutation; an ambiguous daemon or helper result is
@@ -861,7 +863,7 @@ The renderer consumes the current hidden image boundary
 client, test helper, compatibility alias, or placeholder service-init command.
 The initializer and server share the production S3 connection parser and the
 sole validated-config-to-store AWS SDK construction boundary. Runner product
-schema 4 independently requires the same closed
+schema 5 independently requires the same closed
 trust choice for every runner-side S3 client. Local HTTPS rendering selects
 exact private-CA trust and mounted bounded `SecretSource` file references for
 the CA and credentials on all three surfaces; the private root is never merged
@@ -889,20 +891,33 @@ sandbox/provider interfaces. Reuse executor requests, operation identity,
 runner custody, copy/exec/attach/output bounds, cancellation, and result
 delivery. Add fake-daemon conformance and an ignored live Docker suite.
 
-Foundation status: the shared sandbox contract carries mandatory exact runner
-custody and durable slot identity. The existing runner path now applies one
+Implementation status: the shared sandbox contract carries mandatory exact
+runner custody and durable slot identity. The existing runner path now applies one
 host-owned, bounded, non-evicting operation linearization gate to every provider,
 with protected request commitments, payload-first opaque results, physical
 result-capacity reservation, and sandbox-absence-gated cancellation recovery.
-`LocalDocker` product exposure remains closed until guest replay is likewise
-non-evicting and fail-at-capacity for the container lifetime, and the provider
-proves that exited jobs are never restarted.
+Current guest protocol 5 continues accepted operations after response loss,
+caches live results without eviction, rejects new operation IDs before
+execution at its lifetime bound, and retains an exact failure tombstone if an
+accepted task is aborted. `LocalDocker` is wired into the current closed runner
+parser and composition only for explicit evaluation. It uses the fixed
+`/run/automata-engine/docker.sock` relay, zero per-job volumes, exact
+daemon/anchor/configuration reinspection, and never restarts an exited job or
+advertises restart-safe endpoint replay. No endpoint override, pull, prune,
+generic Engine API, service/job-container surface, or `automata local run`
+command is exposed. The capless, non-dumpable guest PID 1 uses no Docker init
+and admits traffic only after an exact one-shot seal and framed `Probe` to a
+protected client in a fixed `rw,exec,nosuid,nodev` control tmpfs.
 
-Gate: shell and JavaScript-action sandboxes execute; restart attach and exact
-cancellation work; realized configuration is inspected; foreign collisions
-fail without mutation; prohibited privilege, namespace, bind, device, socket,
-and network requests fail closed; output/copy bounds hold; and destroy leaves no
-owned job resources.
+Gate: stateful fake-daemon tests cover shell/copy/exec lifecycle, ambiguous
+retry, lifetime capacity, running attach, exact cancellation, and cleanup; a
+spawned real guest process covers the 256/257 capacity boundary and oldest-ID
+replay. The ignored fixed-relay Arch fixture has qualified shell and
+JavaScript-action sandboxes against the reviewed Docker 29.7.2 amd64
+environment; additional supported daemon and architecture combinations remain
+to be qualified. Realized configuration is inspected; foreign collisions fail without mutation; prohibited privilege,
+namespace, bind, device, socket, and network requests fail closed; output/copy
+bounds hold; and destroy leaves no owned job resources.
 
 ### 3B. `LocalSnapshot` source adapter
 

@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, fmt, io, marker::PhantomData, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+#[cfg(unix)]
+use http::header::UPGRADE;
 use http::{
     Method, Request, StatusCode,
     header::{
@@ -65,6 +67,21 @@ impl DockerHttpTransport {
         })
     }
 
+    #[cfg(unix)]
+    pub(super) fn connect_unix_socket(
+        socket: &std::path::Path,
+        api: ApiVersion,
+    ) -> Result<Self, TransportError> {
+        if !socket.is_absolute() {
+            return Err(TransportError::InvalidRequest);
+        }
+        Ok(Self {
+            endpoint: EndpointAddress::Unix(socket.to_owned()),
+            api_prefix: format!("/v{}.{}", api.major, api.minor),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
+        })
+    }
+
     pub(super) async fn json<T, B>(
         &self,
         method: Method,
@@ -117,7 +134,7 @@ impl DockerHttpTransport {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(unix, test))]
     pub(super) async fn empty_or_not_found(
         &self,
         method: Method,
@@ -138,6 +155,95 @@ impl DockerHttpTransport {
         } else {
             Err(TransportError::InvalidResponse)
         }
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn empty(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        expected: StatusCode,
+    ) -> Result<(), TransportError> {
+        let request = self.request::<()>(method, path_and_query, None)?;
+        let response = self.exchange(request, 1).await?;
+        if response.status() != expected {
+            return Err(error_response(&response));
+        }
+        if response.body().is_empty() {
+            Ok(())
+        } else {
+            Err(TransportError::InvalidResponse)
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn bytes(
+        &self,
+        path_and_query: &str,
+        expected_content_type: &'static str,
+        response_limit: usize,
+    ) -> Result<Vec<u8>, TransportError> {
+        let request = self.request::<()>(Method::GET, path_and_query, None)?;
+        let response = self.exchange(request, response_limit).await?;
+        if response.status() != StatusCode::OK {
+            return Err(error_response(&response));
+        }
+        require_content_type(response.headers(), expected_content_type)?;
+        Ok(response.body)
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn empty_bytes(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        content_type: &'static str,
+        body: &[u8],
+        request_limit: usize,
+        expected: StatusCode,
+    ) -> Result<(), TransportError> {
+        if body.len() > request_limit {
+            return Err(TransportError::InvalidRequest);
+        }
+        let request = self.raw_request(method, path_and_query, content_type, body)?;
+        let response = self.exchange(request, 1).await?;
+        if response.status() != expected {
+            return Err(error_response(&response));
+        }
+        if response.body.is_empty() {
+            Ok(())
+        } else {
+            Err(TransportError::InvalidResponse)
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) async fn hijack_json<B>(
+        &self,
+        path_and_query: &str,
+        body: &B,
+        stdin: &[u8],
+        response_limit: usize,
+    ) -> Result<Vec<u8>, TransportError>
+    where
+        B: Serialize + ?Sized,
+    {
+        let _permit = Arc::clone(&self.in_flight)
+            .acquire_owned()
+            .await
+            .map_err(|_| TransportError::RequestFailed)?;
+        let mut request = self.request(Method::POST, path_and_query, Some(body))?;
+        request
+            .headers_mut()
+            .insert(CONNECTION, http::HeaderValue::from_static("Upgrade"));
+        request
+            .headers_mut()
+            .insert(UPGRADE, http::HeaderValue::from_static("tcp"));
+        let EndpointAddress::Unix(socket) = &self.endpoint;
+        let stream = tokio::net::UnixStream::connect(socket)
+            .await
+            .map_err(|_| TransportError::RequestFailed)?;
+        hijack_on(TokioIo::new(stream), request, stdin, response_limit).await
     }
 
     fn request<B>(
@@ -168,6 +274,32 @@ impl DockerHttpTransport {
         }
         request
             .body(Full::new(Bytes::from(bytes)))
+            .map_err(|_| TransportError::InvalidRequest)
+    }
+
+    #[cfg(unix)]
+    fn raw_request(
+        &self,
+        method: Method,
+        path_and_query: &str,
+        content_type: &'static str,
+        body: &[u8],
+    ) -> Result<Request<RequestBody>, TransportError> {
+        if !path_and_query.starts_with('/') || path_and_query.bytes().any(|byte| byte == b'\0') {
+            return Err(TransportError::InvalidRequest);
+        }
+        let uri = format!("{}{path_and_query}", self.api_prefix)
+            .parse::<http::uri::PathAndQuery>()
+            .map_err(|_| TransportError::InvalidRequest)?;
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(HOST, "localhost")
+            .header(ACCEPT, "application/json")
+            .header(CONNECTION, "close")
+            .header(CONTENT_TYPE, content_type)
+            .header(CONTENT_LENGTH, body.len().to_string())
+            .body(Full::new(Bytes::copy_from_slice(body)))
             .map_err(|_| TransportError::InvalidRequest)
     }
 
@@ -222,9 +354,9 @@ impl WireResponse {
 struct ConnectionDriver(Option<tokio::task::JoinHandle<Result<(), hyper::Error>>>);
 
 impl ConnectionDriver {
-    fn spawn<T>(connection: hyper::client::conn::http1::Connection<T, RequestBody>) -> Self
+    fn spawn<F>(connection: F) -> Self
     where
-        T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+        F: std::future::Future<Output = Result<(), hyper::Error>> + Send + 'static,
     {
         Self(Some(tokio::spawn(connection)))
     }
@@ -277,6 +409,108 @@ where
     let body = collect(body, body_limit).await?;
     driver.finish().await?;
     Ok(WireResponse {
+        status: parts.status,
+        headers: parts.headers,
+        body,
+    })
+}
+
+#[cfg(unix)]
+async fn hijack_on<T>(
+    io: T,
+    request: Request<RequestBody>,
+    stdin: &[u8],
+    response_limit: usize,
+) -> Result<Vec<u8>, TransportError>
+where
+    T: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut builder = hyper::client::conn::http1::Builder::new();
+    builder
+        .max_headers(MAX_RESPONSE_HEADERS)
+        .max_buf_size(MAX_RESPONSE_HEADER_BYTES);
+    let (mut sender, connection) = builder
+        .handshake(io)
+        .await
+        .map_err(|_| TransportError::RequestFailed)?;
+    let driver = ConnectionDriver::spawn(connection.with_upgrades());
+    let mut response = sender
+        .send_request(request)
+        .await
+        .map_err(|_| TransportError::RequestFailed)?;
+    validate_response_headers(response.headers())?;
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS
+        || !header_contains_token(response.headers(), CONNECTION, "upgrade")
+        || !header_contains_token(response.headers(), UPGRADE, "tcp")
+    {
+        return Err(error_response_from_incoming(response, driver).await);
+    }
+    let upgraded = hyper::upgrade::on(&mut response)
+        .await
+        .map_err(|_| TransportError::RequestFailed)?;
+    driver.finish().await?;
+    let mut stream = TokioIo::new(upgraded);
+    stream
+        .write_all(stdin)
+        .await
+        .map_err(|_| TransportError::RequestFailed)?;
+    stream
+        .shutdown()
+        .await
+        .map_err(|_| TransportError::RequestFailed)?;
+    let mut bytes = Vec::with_capacity(response_limit.min(64 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|_| TransportError::RequestFailed)?;
+        if read == 0 {
+            break;
+        }
+        if bytes
+            .len()
+            .checked_add(read)
+            .is_none_or(|length| length > response_limit)
+        {
+            return Err(TransportError::ResponseTooLarge);
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn header_contains_token(
+    headers: &HeaderMap,
+    name: http::header::HeaderName,
+    expected: &str,
+) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case(expected))
+        })
+    })
+}
+
+#[cfg(unix)]
+async fn error_response_from_incoming(
+    response: http::Response<Incoming>,
+    driver: ConnectionDriver,
+) -> TransportError {
+    let (parts, body) = response.into_parts();
+    let body = match collect(body, ERROR_BYTES).await {
+        Ok(body) => body,
+        Err(error) => return error,
+    };
+    if driver.finish().await.is_err() {
+        return TransportError::RequestFailed;
+    }
+    error_response(&WireResponse {
         status: parts.status,
         headers: parts.headers,
         body,
@@ -359,6 +593,13 @@ async fn collect(mut body: Incoming, limit: usize) -> Result<Vec<u8>, TransportE
 }
 
 fn require_json(headers: &http::HeaderMap) -> Result<(), TransportError> {
+    require_content_type(headers, "application/json")
+}
+
+fn require_content_type(
+    headers: &http::HeaderMap,
+    expected: &'static str,
+) -> Result<(), TransportError> {
     let mut values = headers.get_all(CONTENT_TYPE).iter();
     let content_type = values
         .next()
@@ -368,7 +609,7 @@ fn require_json(headers: &http::HeaderMap) -> Result<(), TransportError> {
         && content_type
             .split(';')
             .next()
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
     {
         Ok(())
     } else {
@@ -508,6 +749,16 @@ impl<T, const LIMIT: usize> BoundedVec<T, LIMIT> {
     pub(super) fn into_inner(self) -> Vec<T> {
         self.0
     }
+
+    #[cfg(unix)]
+    pub(super) fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+
+    #[cfg(unix)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 impl<'de, T, const LIMIT: usize> Deserialize<'de> for BoundedVec<T, LIMIT>
@@ -555,9 +806,14 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BoundedMap<K, V, const LIMIT: usize>(BTreeMap<K, V>);
 
-impl<K, V, const LIMIT: usize> BoundedMap<K, V, LIMIT> {
+impl<K: Ord, V, const LIMIT: usize> BoundedMap<K, V, LIMIT> {
     pub(super) fn into_inner(self) -> BTreeMap<K, V> {
         self.0
+    }
+
+    #[cfg(unix)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
