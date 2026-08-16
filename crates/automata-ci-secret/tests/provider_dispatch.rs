@@ -7,20 +7,22 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    task::{Context, Poll, Waker},
 };
 
 use async_trait::async_trait;
 use automata_ci_secret::{
     CreateSecretVersionRequest, CreatedSecretVersion, DestroySecretVersionRequest,
-    ExistingSecretVersion, ProviderCapabilities, ProviderCapability, ProviderError,
-    ProviderErrorKind, ProviderHealth, ProviderLease, ProviderLeaseExpiration, ProviderLeaseId,
-    ProviderOperationContext, ProviderRequestId, ProviderSecretLocator, ProviderVersionId,
-    ReconcileCreateSecretVersionOutcome, ReconcileCreateSecretVersionRequest,
-    RenewProviderLeaseRequest, RevokeProviderLeaseRequest, SecretAtRestProtection,
-    SecretDescriptor, SecretId, SecretName, SecretProvider, SecretProviderDispatchError,
-    SecretProviderId, SecretProviderRegistry, SecretScope, SecretValue, TenantScopeId,
-    WorkloadContext, WorkloadId,
+    ProviderCapabilities, ProviderCapability, ProviderError, ProviderErrorKind, ProviderHealth,
+    ProviderLease, ProviderLeaseExpiration, ProviderLeaseId, ProviderOperationContext,
+    ProviderSecretLocator, ProviderVersionId, ReconcileCreateSecretVersionOutcome,
+    ReconcileCreateSecretVersionRequest, RenewProviderLeaseRequest, RevokeProviderLeaseRequest,
+    SecretAtRestProtection, SecretProvider, SecretProviderDispatchError, SecretProviderId,
+    SecretProviderRegistry, SecretValue, WorkloadContext, WorkloadId,
+};
+
+use crate::support::{
+    existing_version, poll_immediately_ready, provider_context, reconciliation_request,
+    repository_scope, secret_descriptor,
 };
 
 #[derive(Default)]
@@ -168,15 +170,15 @@ fn health_routes_only_to_the_exact_provider_without_default_fallback() {
     let target = ProviderFixture::new("target", &[], None);
     let registry = registry(&default, [&target]);
 
-    let health =
-        ready(registry.dispatch_health(&target.id, &context("health"))).expect("target health");
+    let health = ready(registry.dispatch_health(&target.id, &provider_context("request-health")))
+        .expect("target health");
     assert_eq!(health, ProviderHealth::Healthy);
     assert_eq!(target.calls.health.load(Ordering::Relaxed), 1);
     assert_eq!(default.calls.health.load(Ordering::Relaxed), 0);
 
     let missing = SecretProviderId::new("missing-provider").expect("missing ID");
     assert_eq!(
-        ready(registry.dispatch_health(&missing, &context("health"))),
+        ready(registry.dispatch_health(&missing, &provider_context("request-health"))),
         Err(SecretProviderDispatchError::Rejected)
     );
     assert_eq!(default.calls.health.load(Ordering::Relaxed), 0);
@@ -216,9 +218,11 @@ fn reconciliation_requires_capability_and_never_delegates_to_create() {
     );
     let registry = registry(&create_only, [&capable]);
 
-    let reconciled =
-        ready(registry.dispatch_reconcile_create_version(&capable.id, reconcile_request()))
-            .expect("reconciled version");
+    let reconciled = ready(registry.dispatch_reconcile_create_version(
+        &capable.id,
+        reconciliation_request("request-reconcile", "existing-locator", "existing-version"),
+    ))
+    .expect("reconciled version");
     assert!(matches!(
         reconciled,
         ReconcileCreateSecretVersionOutcome::AlreadyCommitted(_)
@@ -227,7 +231,10 @@ fn reconciliation_requires_capability_and_never_delegates_to_create() {
     assert_eq!(capable.calls.create.load(Ordering::Relaxed), 0);
 
     assert_eq!(
-        ready(registry.dispatch_reconcile_create_version(&create_only.id, reconcile_request(),)),
+        ready(registry.dispatch_reconcile_create_version(
+            &create_only.id,
+            reconciliation_request("request-reconcile", "existing-locator", "existing-version"),
+        )),
         Err(SecretProviderDispatchError::Rejected)
     );
     assert_eq!(create_only.calls.reconcile.load(Ordering::Relaxed), 0);
@@ -318,7 +325,7 @@ fn sanitized_provider_errors_pass_through_without_retry_or_adapter_debug() {
     let provider = ProviderFixture::new("failing", &[], Some(failure));
     let registry = registry(&provider, []);
 
-    let error = ready(registry.dispatch_health(&provider.id, &context("health")))
+    let error = ready(registry.dispatch_health(&provider.id, &provider_context("request-health")))
         .expect_err("provider failure");
     assert_eq!(error, SecretProviderDispatchError::Provider(failure));
     assert_eq!(provider.calls.health.load(Ordering::Relaxed), 1);
@@ -343,76 +350,32 @@ fn registry<const N: usize>(
 }
 
 fn ready<F: Future>(future: F) -> F::Output {
-    let mut context = Context::from_waker(Waker::noop());
-    let mut future = Box::pin(future);
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("in-memory provider unexpectedly yielded"),
-    }
-}
-
-fn tenant() -> TenantScopeId {
-    TenantScopeId::new("tenant-a").expect("tenant ID")
-}
-
-fn scope() -> SecretScope {
-    SecretScope::repository(
-        tenant(),
-        automata_ci_secret::RepositoryScopeId::new("repository-a").expect("repository ID"),
-    )
-}
-
-fn descriptor() -> SecretDescriptor {
-    SecretDescriptor::new(
-        SecretId::new("secret-a").expect("secret ID"),
-        SecretName::new("DEPLOY_TOKEN").expect("secret name"),
-        scope(),
-    )
+    poll_immediately_ready(future, "in-memory provider unexpectedly yielded")
 }
 
 fn workload() -> WorkloadContext {
-    WorkloadContext::new(WorkloadId::new("workload-a").expect("workload ID"), scope())
-        .expect("workload context")
-}
-
-fn context(operation: &str) -> ProviderOperationContext {
-    ProviderOperationContext::new(
-        tenant(),
-        ProviderRequestId::new(format!("request-{operation}")).expect("request ID"),
+    WorkloadContext::new(
+        WorkloadId::new("workload-a").expect("workload ID"),
+        repository_scope(),
     )
-}
-
-fn predecessor() -> ExistingSecretVersion {
-    ExistingSecretVersion::new(
-        ProviderSecretLocator::new("existing-locator").expect("locator"),
-        ProviderVersionId::new("existing-version").expect("version"),
-    )
+    .expect("workload context")
 }
 
 fn create_request() -> CreateSecretVersionRequest {
     CreateSecretVersionRequest::new(
-        context("create"),
-        descriptor(),
-        Some(predecessor()),
+        provider_context("request-create"),
+        secret_descriptor(),
+        Some(existing_version("existing-locator", "existing-version")),
         SecretValue::from_utf8("create-secret".to_owned()).expect("secret value"),
     )
     .expect("create request")
 }
 
-fn reconcile_request() -> ReconcileCreateSecretVersionRequest {
-    ReconcileCreateSecretVersionRequest::new(
-        context("reconcile"),
-        descriptor(),
-        Some(predecessor()),
-    )
-    .expect("reconciliation request")
-}
-
 fn resolve_request() -> automata_ci_secret::ResolveSecretVersionRequest {
     automata_ci_secret::ResolveSecretVersionRequest::new(
-        context("resolve"),
+        provider_context("request-resolve"),
         workload(),
-        descriptor(),
+        secret_descriptor(),
         ProviderSecretLocator::new("requested-locator").expect("locator"),
         ProviderVersionId::new("requested-version").expect("version"),
     )
@@ -421,8 +384,8 @@ fn resolve_request() -> automata_ci_secret::ResolveSecretVersionRequest {
 
 fn destroy_request() -> DestroySecretVersionRequest {
     DestroySecretVersionRequest::new(
-        context("destroy"),
-        descriptor(),
+        provider_context("request-destroy"),
+        secret_descriptor(),
         ProviderSecretLocator::new("destroy-locator").expect("locator"),
         ProviderVersionId::new("destroy-version").expect("version"),
     )
@@ -431,7 +394,7 @@ fn destroy_request() -> DestroySecretVersionRequest {
 
 fn renew_request() -> RenewProviderLeaseRequest {
     RenewProviderLeaseRequest::new(
-        context("renew"),
+        provider_context("request-renew"),
         workload(),
         ProviderLeaseId::new("renew-lease").expect("lease ID"),
     )
@@ -440,7 +403,7 @@ fn renew_request() -> RenewProviderLeaseRequest {
 
 fn revoke_request() -> RevokeProviderLeaseRequest {
     RevokeProviderLeaseRequest::new(
-        context("revoke"),
+        provider_context("request-revoke"),
         ProviderLeaseId::new("revoke-lease").expect("lease ID"),
     )
 }
