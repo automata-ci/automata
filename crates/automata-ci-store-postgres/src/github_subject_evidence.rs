@@ -807,15 +807,17 @@ async fn insert_all_direct_workflow_check_subject(
         INSERT INTO github_check_subjects (
             id, tenant_id, repository_id, provider_delivery_id, subject_key,
             provider_connection_id, provider_installation_id,
-            github_repository_id, github_app_id, head_sha, check_name,
-            external_id, created_at_ms, desired_updated_at_ms
+            github_repository_id, github_repository_name, github_app_id,
+            head_sha, check_name, external_id, created_at_ms,
+            desired_updated_at_ms
         )
         SELECT $1, evidence.tenant_id, evidence.repository_id,
                evidence.provider_delivery_id, entry.workflow_path,
                evidence.provider_connection_id, evidence.provider_installation_id,
-               evidence.github_repository_id, manifest.github_app_id,
-               evidence.github_check_head_sha, manifest.check_name, $2,
-               inbox.accepted_at_ms, inbox.accepted_at_ms
+               evidence.github_repository_id, evidence.github_repository_name,
+               manifest.github_app_id, evidence.github_check_head_sha,
+               manifest.check_name, $2, inbox.accepted_at_ms,
+               inbox.accepted_at_ms
         FROM github_provider_delivery_evidence AS evidence
         JOIN provider_delivery_inbox AS inbox
           ON inbox.id = evidence.provider_delivery_id
