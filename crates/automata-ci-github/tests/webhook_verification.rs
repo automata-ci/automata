@@ -1,4 +1,4 @@
-use crate::support::webhook_signature;
+use crate::support::{json_body, signed_webhook_headers};
 
 use automata_ci_github::{
     GithubPushRefKind, GithubRepositoryVisibility, GithubWebhookError, GithubWebhookEventMetadata,
@@ -7,7 +7,7 @@ use automata_ci_github::{
 };
 use automata_ci_scm::ExactRevision;
 use bytes::Bytes;
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderValue;
 use ring::digest;
 use serde_json::{Value, json};
 
@@ -20,8 +20,8 @@ const REPOSITORY_OWNER_ID: u64 = 9_876_543;
 
 #[test]
 fn valid_push_preserves_exact_authenticated_and_provider_evidence() {
-    let body = encode(&valid_payload());
-    let headers = signed_headers(SECRET, &body, "push", "delivery-123");
+    let body = json_body(&valid_payload());
+    let headers = signed_webhook_headers(SECRET, &body, "push", "delivery-123");
     let boundary = GithubWebhookVerifier::new(SECRET).expect("verifier");
     let split = [
         &body[..13],
@@ -80,8 +80,8 @@ fn valid_push_preserves_exact_authenticated_and_provider_evidence() {
 
 #[test]
 fn every_required_header_must_be_present_exactly_once() {
-    let body = encode(&valid_payload());
-    let base = signed_headers(SECRET, &body, "push", "delivery-123");
+    let body = json_body(&valid_payload());
+    let base = signed_webhook_headers(SECRET, &body, "push", "delivery-123");
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
 
     for name in [X_HUB_SIGNATURE_256, X_GITHUB_EVENT, X_GITHUB_DELIVERY] {
@@ -108,8 +108,8 @@ fn every_required_header_must_be_present_exactly_once() {
 
 #[test]
 fn signature_encoding_is_exactly_canonical_lowercase_sha256() {
-    let body = encode(&valid_payload());
-    let base = signed_headers(SECRET, &body, "push", "delivery-123");
+    let body = json_body(&valid_payload());
+    let base = signed_webhook_headers(SECRET, &body, "push", "delivery-123");
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
     let malformed = [
         format!("SHA256={}", "0".repeat(64)),
@@ -139,14 +139,15 @@ fn signature_encoding_is_exactly_canonical_lowercase_sha256() {
 fn body_limit_is_enforced_before_and_while_buffering() {
     assert_eq!(MAX_GITHUB_WEBHOOK_BODY_BYTES, 25 * 1024 * 1024);
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
-    let mut exact = encode(&valid_payload());
+    let mut exact = json_body(&valid_payload());
     exact.resize(MAX_GITHUB_WEBHOOK_BODY_BYTES, b' ');
     let minus_one = &exact[..MAX_GITHUB_WEBHOOK_BODY_BYTES - 1];
-    let minus_one_headers = signed_headers(SECRET, minus_one, "push", "delivery-limit-minus-one");
+    let minus_one_headers =
+        signed_webhook_headers(SECRET, minus_one, "push", "delivery-limit-minus-one");
     verifier
         .verify(&minus_one_headers, Bytes::copy_from_slice(minus_one))
         .expect("one byte below the limit is accepted");
-    let exact_headers = signed_headers(SECRET, &exact, "push", "delivery-limit");
+    let exact_headers = signed_webhook_headers(SECRET, &exact, "push", "delivery-limit");
     verifier
         .verify(&exact_headers, Bytes::copy_from_slice(&exact))
         .expect("exact limit is accepted");
@@ -177,8 +178,8 @@ fn body_limit_is_enforced_before_and_while_buffering() {
 #[test]
 fn authentication_covers_exact_raw_bytes_and_precedes_json() {
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
-    let body = encode(&valid_payload());
-    let headers = signed_headers(SECRET, &body, "push", "delivery-exact");
+    let body = json_body(&valid_payload());
+    let headers = signed_webhook_headers(SECRET, &body, "push", "delivery-exact");
     let mut changed = body.clone();
     changed.push(b' ');
     assert_eq!(
@@ -189,14 +190,14 @@ fn authentication_covers_exact_raw_bytes_and_precedes_json() {
     );
 
     let malformed = b"raw-body-private-marker:{";
-    let wrong_headers = signed_headers(b"wrong secret", malformed, "push", "delivery-json");
+    let wrong_headers = signed_webhook_headers(b"wrong secret", malformed, "push", "delivery-json");
     assert_eq!(
         verifier
             .verify(&wrong_headers, Bytes::from_static(malformed))
             .expect_err("authentication precedes JSON"),
         GithubWebhookError::AuthenticationFailed
     );
-    let authenticated_headers = signed_headers(SECRET, malformed, "push", "delivery-json");
+    let authenticated_headers = signed_webhook_headers(SECRET, malformed, "push", "delivery-json");
     assert_eq!(
         verifier
             .verify(&authenticated_headers, Bytes::from_static(malformed))
@@ -208,7 +209,7 @@ fn authentication_covers_exact_raw_bytes_and_precedes_json() {
 #[test]
 fn authenticated_non_push_envelopes_are_available_before_event_support() {
     let body = b"generic-body-marker:not-json";
-    let headers = signed_headers(SECRET, body, "repository_dispatch", "delivery-event");
+    let headers = signed_webhook_headers(SECRET, body, "repository_dispatch", "delivery-event");
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
     let authenticated = verifier
         .authenticate_chunks(&headers, [&body[..9], &body[9..]])
@@ -234,17 +235,17 @@ fn authenticated_non_push_envelopes_are_available_before_event_support() {
 
 #[test]
 fn unauthenticated_headers_remain_distinct_durable_evidence() {
-    let body = encode(&valid_payload());
+    let body = json_body(&valid_payload());
     let verifier = GithubWebhookVerifier::new(SECRET).expect("verifier");
     let first = verifier
         .verify(
-            &signed_headers(SECRET, &body, "push", "delivery-one"),
+            &signed_webhook_headers(SECRET, &body, "push", "delivery-one"),
             Bytes::copy_from_slice(&body),
         )
         .expect("first delivery");
     let second = verifier
         .verify(
-            &signed_headers(SECRET, &body, "push", "delivery-two"),
+            &signed_webhook_headers(SECRET, &body, "push", "delivery-two"),
             Bytes::copy_from_slice(&body),
         )
         .expect("second delivery");
@@ -317,11 +318,11 @@ fn repository_owner_id_is_required_positive_and_postgres_bigint_representable() 
 
 #[test]
 fn repository_owner_id_is_covered_by_the_exact_body_signature() {
-    let body = encode(&valid_payload());
-    let headers = signed_headers(SECRET, &body, "push", "delivery-owner-id");
+    let body = json_body(&valid_payload());
+    let headers = signed_webhook_headers(SECRET, &body, "push", "delivery-owner-id");
     let mut tampered_payload = valid_payload();
     tampered_payload["repository"]["owner"]["id"] = json!(9_876_544);
-    let tampered_body = encode(&tampered_payload);
+    let tampered_body = json_body(&tampered_payload);
     assert_eq!(
         tampered_body.len(),
         body.len(),
@@ -531,8 +532,8 @@ fn retained_strings_and_provider_commit_collection_are_bounded() {
     excessive["commits"] = Value::Array(commit_entries(MAX_GITHUB_PUSH_COMMITS + 1));
     assert_malformed_payload(&excessive);
 
-    let body = encode(&valid_payload());
-    let headers = signed_headers(SECRET, &body, "push", &"d".repeat(129));
+    let body = json_body(&valid_payload());
+    let headers = signed_webhook_headers(SECRET, &body, "push", &"d".repeat(129));
     let boundary = GithubWebhookVerifier::new(SECRET).expect("verifier");
     assert_eq!(
         boundary
@@ -573,8 +574,8 @@ fn secrets_raw_payloads_and_signatures_never_appear_in_debug_or_errors() {
     payload["private_marker"] = json!("unique-raw-body-leak-marker");
     payload["repository"]["owner"]["login"] = json!("private-owner-marker");
     payload["repository"]["full_name"] = json!("private-owner-marker/automata");
-    let body = encode(&payload);
-    let headers = signed_headers(secret, &body, "push", "private-delivery-marker");
+    let body = json_body(&payload);
+    let headers = signed_webhook_headers(secret, &body, "push", "private-delivery-marker");
     let boundary = GithubWebhookVerifier::new(secret).expect("verifier");
     let push = boundary
         .verify(&headers, Bytes::copy_from_slice(&body))
@@ -598,7 +599,7 @@ fn secrets_raw_payloads_and_signatures_never_appear_in_debug_or_errors() {
         assert!(!push_debug.contains(marker), "leaked marker: {marker}");
     }
 
-    let wrong_headers = signed_headers(b"another secret", &body, "push", "delivery-error");
+    let wrong_headers = signed_webhook_headers(b"another secret", &body, "push", "delivery-error");
     let error = boundary
         .verify(&wrong_headers, Bytes::from(body))
         .expect_err("wrong HMAC");
@@ -678,11 +679,11 @@ fn commit_entries(count: usize) -> Vec<Value> {
 fn verify_payload(
     payload: &Value,
 ) -> Result<automata_ci_github::VerifiedGithubPush, GithubWebhookError> {
-    let body = encode(payload);
+    let body = json_body(payload);
     GithubWebhookVerifier::new(SECRET)
         .expect("verifier")
         .verify(
-            &signed_headers(SECRET, &body, "push", "delivery-payload"),
+            &signed_webhook_headers(SECRET, &body, "push", "delivery-payload"),
             Bytes::from(body),
         )
 }
@@ -699,25 +700,4 @@ fn assert_malformed_payload(payload: &Value) {
         verify_payload(payload).expect_err("malformed payload"),
         GithubWebhookError::MalformedPayload
     );
-}
-
-fn encode(payload: &Value) -> Vec<u8> {
-    serde_json::to_vec(payload).expect("JSON fixture")
-}
-
-fn signed_headers(secret: &[u8], body: &[u8], event: &str, delivery: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        X_HUB_SIGNATURE_256,
-        HeaderValue::from_str(&webhook_signature(secret, body)).expect("signature header"),
-    );
-    headers.insert(
-        X_GITHUB_EVENT,
-        HeaderValue::from_str(event).expect("event header"),
-    );
-    headers.insert(
-        X_GITHUB_DELIVERY,
-        HeaderValue::from_str(delivery).expect("delivery header"),
-    );
-    headers
 }

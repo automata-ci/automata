@@ -1,22 +1,20 @@
-use std::fmt::Write as _;
+use crate::support::{
+    BASE_SHA, GROUP_SHA, HEAD_SHA, MERGE_SHA, base_repository, head_repository, json_body,
+    signed_webhook_headers, webhook_body_digest,
+};
 
 use automata_ci_github::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubCheckRunAction, GithubMergeGroupAction,
     GithubPullRequestAction, GithubPushRefKind, GithubRepositoryVisibility,
-    GithubStoredWebhookError, GithubWebhookBodyDigest, GithubWebhookError, GithubWebhookVerifier,
-    StoredAuthenticatedGithubWebhook, VerifiedGithubWebhook, X_GITHUB_DELIVERY, X_GITHUB_EVENT,
-    X_HUB_SIGNATURE_256, rehydrate_stored_authenticated_github_webhook,
+    GithubStoredWebhookError, GithubWebhookError, GithubWebhookVerifier,
+    StoredAuthenticatedGithubWebhook, VerifiedGithubWebhook,
+    rehydrate_stored_authenticated_github_webhook,
 };
 use bytes::Bytes;
-use reqwest::header::{HeaderMap, HeaderValue};
-use ring::{digest, hmac};
+use ring::digest;
 use serde_json::{Value, json};
 
 const SECRET: &[u8] = b"independent synthetic webhook secret";
-const BASE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-const HEAD_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
-const MERGE_SHA: &str = "76543210fedcba9876543210fedcba9876543210";
-const GROUP_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
 #[test]
 fn check_run_controls_retain_exact_signed_identity() {
@@ -86,7 +84,7 @@ fn check_suite_rerequest_retains_suite_app_sender_and_revision() {
 
 #[test]
 fn pull_request_normalization_retains_exact_dispatch_evidence() {
-    let body = encode(&pull_request_payload());
+    let body = json_body(&pull_request_payload());
     let event = normalize_bytes(&body, "pull_request", "delivery-pr-7").expect("normalized event");
 
     assert_eq!(event.delivery_id(), "delivery-pr-7");
@@ -165,7 +163,7 @@ fn unmerged_pull_request_without_materialized_merge_revision_uses_head_revision(
 
 #[test]
 fn merge_group_normalization_retains_exact_dispatch_evidence() {
-    let body = encode(&merge_group_payload());
+    let body = json_body(&merge_group_payload());
     let event =
         normalize_bytes(&body, "merge_group", "delivery-group-9").expect("normalized merge group");
 
@@ -190,7 +188,7 @@ fn merge_group_normalization_retains_exact_dispatch_evidence() {
 
 #[test]
 fn repository_dispatch_normalization_retains_bounded_custom_evidence() {
-    let body = encode(&repository_dispatch_payload());
+    let body = json_body(&repository_dispatch_payload());
     let event = normalize_bytes(&body, "repository_dispatch", "delivery-custom-3")
         .expect("normalized repository dispatch");
 
@@ -299,7 +297,7 @@ fn only_documented_event_actions_are_admitted() {
 
 #[test]
 fn duplicate_or_malformed_json_is_rejected_before_typed_decoding() {
-    let canonical = String::from_utf8(encode(&pull_request_payload())).expect("UTF-8 JSON");
+    let canonical = String::from_utf8(json_body(&pull_request_payload())).expect("UTF-8 JSON");
     let duplicate_action = canonical.replacen(
         "\"action\":\"opened\"",
         "\"action\":\"opened\",\"action\":\"closed\"",
@@ -327,7 +325,8 @@ fn duplicate_or_malformed_json_is_rejected_before_typed_decoding() {
         GithubWebhookError::MalformedPayload,
     );
 
-    let dispatch = String::from_utf8(encode(&repository_dispatch_payload())).expect("UTF-8 JSON");
+    let dispatch =
+        String::from_utf8(json_body(&repository_dispatch_payload())).expect("UTF-8 JSON");
     let duplicate_client_value =
         dispatch.replacen("\"sequence\":3", "\"sequence\":3,\"sequence\":4", 1);
     assert_bytes_error(
@@ -428,7 +427,7 @@ fn merge_group_revisions_and_full_branch_refs_are_strict() {
 #[test]
 fn normalized_debug_redacts_authenticated_and_selector_values() {
     let payload = pull_request_payload();
-    let body = encode(&payload);
+    let body = json_body(&payload);
     let event = normalize_bytes(&body, "pull_request", "private-delivery-marker")
         .expect("normalized event");
     let debug = format!("{event:?}");
@@ -448,7 +447,7 @@ fn normalized_debug_redacts_authenticated_and_selector_values() {
 
 #[test]
 fn repository_dispatch_debug_redacts_custom_values() {
-    let body = encode(&repository_dispatch_payload());
+    let body = json_body(&repository_dispatch_payload());
     let event = normalize_bytes(&body, "repository_dispatch", "private-custom-delivery")
         .expect("normalized event");
     let debug = format!("{event:?}");
@@ -481,7 +480,7 @@ fn durable_event_v1_rehydrates_each_supported_kind_without_reserialization() {
             "durable-custom-3",
         ),
     ] {
-        let body = encode(&payload);
+        let body = json_body(&payload);
         let stored = stored_event_v1(&body, event_name, delivery_id);
         let event = rehydrate_stored_authenticated_github_webhook(stored)
             .expect("rehydrated authenticated event");
@@ -498,7 +497,7 @@ fn durable_event_v1_rejects_envelope_drift_and_duplicate_json() {
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
         "application/vnd.automata.github-authenticated-event+json"
     );
-    let body = encode(&pull_request_payload());
+    let body = json_body(&pull_request_payload());
     let wrong_event = stored_event_v1(&body, "merge_group", "durable-pr-7");
     assert_eq!(
         rehydrate_stored_authenticated_github_webhook(wrong_event)
@@ -593,10 +592,6 @@ fn repository_dispatch_payload() -> Value {
     })
 }
 
-fn base_repository() -> Value {
-    repository(41, 11, "example", "base-repository")
-}
-
 fn check_run_payload(action: &str, requested_action: Option<&str>) -> Value {
     let mut payload = json!({
         "action": action,
@@ -635,26 +630,11 @@ fn check_suite_payload() -> Value {
     })
 }
 
-fn head_repository() -> Value {
-    repository(42, 12, "contributor", "head-repository")
-}
-
-fn repository(id: u64, owner_id: u64, owner: &str, name: &str) -> Value {
-    json!({
-        "id": id,
-        "private": false,
-        "visibility": "public",
-        "name": name,
-        "full_name": format!("{owner}/{name}"),
-        "owner": { "id": owner_id, "login": owner }
-    })
-}
-
 fn normalize_payload(
     payload: &Value,
     event_name: &str,
 ) -> Result<VerifiedGithubWebhook, GithubWebhookError> {
-    normalize_bytes(&encode(payload), event_name, "synthetic-delivery")
+    normalize_bytes(&json_body(payload), event_name, "synthetic-delivery")
 }
 
 fn normalize_bytes(
@@ -662,7 +642,7 @@ fn normalize_bytes(
     event_name: &str,
     delivery_id: &str,
 ) -> Result<VerifiedGithubWebhook, GithubWebhookError> {
-    let headers = signed_headers(body, event_name, delivery_id);
+    let headers = signed_webhook_headers(SECRET, body, event_name, delivery_id);
     GithubWebhookVerifier::new(SECRET)
         .expect("verifier")
         .authenticate(&headers, Bytes::copy_from_slice(body))?
@@ -674,7 +654,7 @@ fn assert_invalid_pull_request(payload: &Value) {
 }
 
 fn assert_payload_error(payload: &Value, event_name: &str, expected: GithubWebhookError) {
-    assert_bytes_error(&encode(payload), event_name, expected);
+    assert_bytes_error(&json_body(payload), event_name, expected);
 }
 
 fn assert_bytes_error(body: &[u8], event_name: &str, expected: GithubWebhookError) {
@@ -684,46 +664,14 @@ fn assert_bytes_error(body: &[u8], event_name: &str, expected: GithubWebhookErro
     );
 }
 
-fn encode(payload: &Value) -> Vec<u8> {
-    serde_json::to_vec(payload).expect("JSON fixture")
-}
-
-fn signed_headers(body: &[u8], event_name: &str, delivery_id: &str) -> HeaderMap {
-    let key = hmac::Key::new(hmac::HMAC_SHA256, SECRET);
-    let tag = hmac::sign(&key, body);
-    let mut signature = String::from("sha256=");
-    for byte in tag.as_ref() {
-        write!(&mut signature, "{byte:02x}").expect("write signature");
-    }
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        X_HUB_SIGNATURE_256,
-        HeaderValue::from_str(&signature).expect("signature header"),
-    );
-    headers.insert(
-        X_GITHUB_EVENT,
-        HeaderValue::from_str(event_name).expect("event header"),
-    );
-    headers.insert(
-        X_GITHUB_DELIVERY,
-        HeaderValue::from_str(delivery_id).expect("delivery header"),
-    );
-    headers
-}
-
 fn stored_event_v1(
     body: &[u8],
     event_name: &str,
     delivery_id: &str,
 ) -> StoredAuthenticatedGithubWebhook {
-    let body_digest: [u8; 32] = digest::digest(&digest::SHA256, body)
-        .as_ref()
-        .try_into()
-        .expect("SHA-256 length");
     StoredAuthenticatedGithubWebhook::from_durable_coordinates(
         Bytes::copy_from_slice(body),
-        GithubWebhookBodyDigest::from_bytes(body_digest),
+        webhook_body_digest(body),
         u64::try_from(body.len()).expect("fixture size"),
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
         event_name,

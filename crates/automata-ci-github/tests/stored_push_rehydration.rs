@@ -1,14 +1,11 @@
-use crate::support::webhook_signature;
+use crate::support::{json_body, signed_webhook_headers, webhook_body_digest};
 
 use automata_ci_github::{
     GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubRepositoryVisibility, GithubStoredPushError,
     GithubWebhookBodyDigest, GithubWebhookVerifier, MAX_GITHUB_WEBHOOK_BODY_BYTES,
-    StoredAuthenticatedGithubPush, X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
-    rehydrate_stored_authenticated_github_push,
+    StoredAuthenticatedGithubPush, rehydrate_stored_authenticated_github_push,
 };
 use bytes::Bytes;
-use reqwest::header::{HeaderMap, HeaderValue};
-use ring::digest;
 use serde_json::{Value, json};
 
 const SECRET: &[u8] = b"stored-push-equivalence-secret";
@@ -23,18 +20,18 @@ const REPOSITORY_NAME: &str = "automata";
 
 #[test]
 fn durable_rehydration_is_exactly_equivalent_to_the_hmac_path() {
-    let body = encode(&valid_payload());
+    let body = json_body(&valid_payload());
     let hmac_push = GithubWebhookVerifier::new(SECRET)
         .expect("verifier")
         .verify(
-            &signed_headers(SECRET, &body, DELIVERY),
+            &signed_webhook_headers(SECRET, &body, "push", DELIVERY),
             Bytes::copy_from_slice(&body),
         )
         .expect("authenticated push");
 
     let stored_push = rehydrate_stored_authenticated_github_push(evidence(
         Bytes::copy_from_slice(&body),
-        body_digest(&body),
+        webhook_body_digest(&body),
         u64::try_from(body.len()).expect("fixture size fits u64"),
         GITHUB_PUSH_EVENT_MEDIA_TYPE,
         DELIVERY,
@@ -69,17 +66,17 @@ fn durable_rehydration_is_exactly_equivalent_to_the_hmac_path() {
 fn durable_rehydration_accepts_the_exact_webhook_ceiling() {
     let mut payload = valid_payload();
     payload["padding"] = json!("");
-    let empty_padding = encode(&payload);
+    let empty_padding = json_body(&payload);
     let padding_bytes = MAX_GITHUB_WEBHOOK_BODY_BYTES
         .checked_sub(empty_padding.len())
         .expect("base push is smaller than the webhook ceiling");
     payload["padding"] = json!("x".repeat(padding_bytes));
-    let body = encode(&payload);
+    let body = json_body(&payload);
     assert_eq!(body.len(), MAX_GITHUB_WEBHOOK_BODY_BYTES);
 
     let stored = rehydrate_stored_authenticated_github_push(evidence(
         Bytes::from(body.clone()),
-        body_digest(&body),
+        webhook_body_digest(&body),
         u64::try_from(body.len()).expect("exact webhook ceiling fits u64"),
         GITHUB_PUSH_EVENT_MEDIA_TYPE,
         DELIVERY,
@@ -96,7 +93,7 @@ fn durable_rehydration_accepts_the_exact_webhook_ceiling() {
 fn durable_coordinates_and_stale_body_bytes_fail_before_normalization() {
     let malformed = Bytes::from_static(b"private-malformed-body-marker:{");
     let size = u64::try_from(malformed.len()).expect("fixture size fits u64");
-    let digest = body_digest(&malformed);
+    let digest = webhook_body_digest(&malformed);
 
     assert_eq!(
         rehydrate_stored_authenticated_github_push(evidence(
@@ -159,8 +156,8 @@ fn durable_coordinates_and_stale_body_bytes_fail_before_normalization() {
         GithubStoredPushError::InvalidDurableIdentity
     );
 
-    let original = encode(&valid_payload());
-    let original_digest = body_digest(&original);
+    let original = json_body(&valid_payload());
+    let original_digest = webhook_body_digest(&original);
     let mut changed = original;
     changed.push(b' ');
     assert_eq!(
@@ -184,9 +181,9 @@ fn durable_coordinates_and_stale_body_bytes_fail_before_normalization() {
 fn every_durable_identity_mismatch_precedes_push_normalization() {
     let mut invalid_ref_payload = valid_payload();
     invalid_ref_payload["ref"] = json!("not-a-full-ref");
-    let body = encode(&invalid_ref_payload);
+    let body = json_body(&invalid_ref_payload);
     let size = u64::try_from(body.len()).expect("fixture size fits u64");
-    let digest = body_digest(&body);
+    let digest = webhook_body_digest(&body);
 
     for stored in [
         evidence(
@@ -258,9 +255,9 @@ fn every_durable_identity_mismatch_precedes_push_normalization() {
 fn every_invalid_durable_identity_precedes_push_normalization() {
     let mut invalid_ref_payload = valid_payload();
     invalid_ref_payload["ref"] = json!("not-a-full-ref");
-    let body = encode(&invalid_ref_payload);
+    let body = json_body(&invalid_ref_payload);
     let size = u64::try_from(body.len()).expect("fixture size fits u64");
-    let digest = body_digest(&body);
+    let digest = webhook_body_digest(&body);
 
     for stored in [
         evidence(
@@ -363,10 +360,10 @@ fn stored_repository_owner_identity_rejects_missing_malformed_tampered_and_misma
         assert_stored_error(&mismatched, GithubStoredPushError::IdentityMismatch);
     }
 
-    let original = encode(&valid_payload());
+    let original = json_body(&valid_payload());
     let mut tampered = valid_payload();
     tampered["repository"]["owner"]["id"] = json!(REPOSITORY_OWNER_ID + 1);
-    let tampered = encode(&tampered);
+    let tampered = json_body(&tampered);
     assert_eq!(
         tampered.len(),
         original.len(),
@@ -375,7 +372,7 @@ fn stored_repository_owner_identity_rejects_missing_malformed_tampered_and_misma
     assert_eq!(
         rehydrate_stored_authenticated_github_push(evidence(
             Bytes::from(tampered.clone()),
-            body_digest(&original),
+            webhook_body_digest(&original),
             u64::try_from(tampered.len()).expect("fixture size fits u64"),
             GITHUB_PUSH_EVENT_MEDIA_TYPE,
             DELIVERY,
@@ -431,10 +428,10 @@ fn stored_evidence_debug_and_errors_redact_body_and_identity_values() {
     payload["repository"]["owner"]["login"] = json!("private-owner-marker");
     payload["repository"]["full_name"] = json!("private-owner-marker/private-name-marker");
     payload["repository"]["name"] = json!("private-name-marker");
-    let body = encode(&payload);
+    let body = json_body(&payload);
     let stored = evidence(
         Bytes::copy_from_slice(&body),
-        body_digest(&body),
+        webhook_body_digest(&body),
         u64::try_from(body.len()).expect("fixture size fits u64"),
         "private-media-marker",
         "private-delivery-marker",
@@ -451,14 +448,14 @@ fn stored_evidence_debug_and_errors_redact_body_and_identity_values() {
         "private-name-marker",
         "private-delivery-marker",
         "private-media-marker",
-        &body_digest(&body).to_string(),
+        &webhook_body_digest(&body).to_string(),
     ] {
         assert!(!debug.contains(marker), "stored Debug leaked {marker}");
     }
 
     let error = rehydrate_stored_authenticated_github_push(evidence(
         Bytes::copy_from_slice(&body),
-        body_digest(&body),
+        webhook_body_digest(&body),
         u64::try_from(body.len()).expect("fixture size fits u64"),
         GITHUB_PUSH_EVENT_MEDIA_TYPE,
         "private-delivery-marker",
@@ -535,10 +532,10 @@ fn evidence_with_owner_id(
 }
 
 fn assert_stored_error(payload: &Value, expected: GithubStoredPushError) {
-    let body = encode(payload);
+    let body = json_body(payload);
     let error = rehydrate_stored_authenticated_github_push(evidence(
         Bytes::copy_from_slice(&body),
-        body_digest(&body),
+        webhook_body_digest(&body),
         u64::try_from(body.len()).expect("fixture size fits u64"),
         GITHUB_PUSH_EVENT_MEDIA_TYPE,
         DELIVERY,
@@ -577,29 +574,4 @@ fn valid_payload() -> Value {
             { "id": AFTER, "message": "not interpreted as a diff" }
         ]
     })
-}
-
-fn encode(payload: &Value) -> Vec<u8> {
-    serde_json::to_vec(payload).expect("JSON fixture")
-}
-
-fn body_digest(body: &[u8]) -> GithubWebhookBodyDigest {
-    let digest = digest::digest(&digest::SHA256, body);
-    let mut bytes = [0_u8; 32];
-    bytes.copy_from_slice(digest.as_ref());
-    GithubWebhookBodyDigest::from_bytes(bytes)
-}
-
-fn signed_headers(secret: &[u8], body: &[u8], delivery: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        X_HUB_SIGNATURE_256,
-        HeaderValue::from_str(&webhook_signature(secret, body)).expect("signature header"),
-    );
-    headers.insert(X_GITHUB_EVENT, HeaderValue::from_static("push"));
-    headers.insert(
-        X_GITHUB_DELIVERY,
-        HeaderValue::from_str(delivery).expect("delivery header"),
-    );
-    headers
 }
