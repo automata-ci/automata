@@ -10,6 +10,8 @@
 mod config;
 mod content;
 mod control;
+mod endpoint_replay;
+mod endpoint_result;
 mod error;
 mod events;
 mod observer;

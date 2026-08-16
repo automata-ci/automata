@@ -42,7 +42,8 @@ pub use endpoint::{
     Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, EnvironmentName,
     EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint,
     ExecutionEnvironment, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
-    ExecutionSignal, ExecutionTermination, NeverCancelled, SignalRequest, WaitRequest,
+    ExecutionSignal, ExecutionTermination, MAX_ENDPOINT_OPERATIONS_PER_JOB, NeverCancelled,
+    SignalRequest, WaitRequest,
 };
 pub use error::{
     ExecutionError, ExecutionErrorKind, ExecutionStage, OperationOutcome, ProviderError,

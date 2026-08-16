@@ -33,6 +33,9 @@ pub enum SpoolInvariantError {
     /// A cache key was malformed or inconsistent with its content receipt.
     #[error("content cache key is invalid or does not match its content identity")]
     InvalidCacheKey,
+    /// Content kind and its current-only identity representation disagree.
+    #[error("content identity is invalid for its semantic kind")]
+    InvalidContentIdentity,
     /// Plaintext exceeds either the configured or global per-object bound.
     #[error("content exceeds the hard object-size limit")]
     ObjectTooLarge,
@@ -42,9 +45,12 @@ pub enum SpoolInvariantError {
     /// Protected output expanded beyond the configured per-object allowance.
     #[error("protected content exceeds the configured expansion limit")]
     ProtectionOverheadExceeded,
-    /// Opened plaintext does not match the size and digest in its durable receipt.
-    #[error("content bytes do not match their durable size or SHA-256 identity")]
+    /// Opened plaintext does not match its kind-specific durable identity.
+    #[error("content bytes do not match their durable identity")]
     ContentMismatch,
+    /// Endpoint results must consume capacity reserved before provider invocation.
+    #[error("endpoint-result persistence requires a live capacity reservation")]
+    EndpointResultReservationRequired,
 }
 
 /// Secret-free error returned by a content-protection adapter.

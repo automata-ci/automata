@@ -21,6 +21,7 @@ workspace = true
 
 [dependencies]
 automata-ci-core.workspace = true
+automata-ci-execution.workspace = true
 automata-ci-protocol.workspace = true
 automata-ci-runner-spool.workspace = true
 rustix.workspace = true

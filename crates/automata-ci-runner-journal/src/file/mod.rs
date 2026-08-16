@@ -18,12 +18,13 @@ use self::{
     platform::PlatformDirectory,
 };
 use crate::{
-    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef, JournalError,
-    JournalMutationDomain, JournalMutationObservation, JournalMutationOutcome, JournalObserver,
-    JournalSnapshot, LeaseOfferRecord, LogSegmentAcknowledgement, LogSegmentPublication,
-    NoopJournalObserver, OrphanAbandonmentReason, OrphanAuthorityProof, OrphanAuthorityVerifier,
-    OrphanDelivery, OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation,
-    RunnerJournal, SandboxIdentity, SessionBinding, TerminalResultRecord, model::StoredJournal,
+    CancellationRecord, CommandDisposition, DurableCommand, DurableContentRef, EndpointOperation,
+    EndpointResultContentRef, JournalError, JournalMutationDomain, JournalMutationObservation,
+    JournalMutationOutcome, JournalObserver, JournalSnapshot, LeaseOfferRecord,
+    LogSegmentAcknowledgement, LogSegmentPublication, NoopJournalObserver, OrphanAbandonmentReason,
+    OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanDelivery, OutboundOperationSequence,
+    ProviderFailureOutcome, ProviderOperation, RunnerJournal, SandboxIdentity, SessionBinding,
+    TerminalResultRecord, model::StoredJournal,
 };
 
 pub use state_root::StateRoot;
@@ -491,6 +492,79 @@ impl RunnerJournal for FileJournal {
     ) -> Result<JournalSnapshot, JournalError> {
         self.mutate(JournalMutationDomain::Result, |state| {
             state.acknowledge_terminal_result(session_id, slot, guard, operation_id)
+        })
+    }
+
+    fn accept_endpoint_operation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation: EndpointOperation,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Endpoint, |state| {
+            state.accept_endpoint_operation(session_id, slot, guard, operation)
+        })
+    }
+
+    fn commit_endpoint_invocation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Endpoint, |state| {
+            state.commit_endpoint_invocation(session_id, slot, guard, operation_id)
+        })
+    }
+
+    fn record_endpoint_cancellation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Endpoint, |state| {
+            state.record_endpoint_cancellation(session_id, slot, guard, operation_id)
+        })
+    }
+
+    fn complete_endpoint_cancellation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Endpoint, |state| {
+            state.complete_endpoint_cancellation(session_id, slot, guard, operation_id)
+        })
+    }
+
+    fn abandon_endpoint_operation(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Endpoint, |state| {
+            state.abandon_endpoint_operation(session_id, slot, guard, operation_id)
+        })
+    }
+
+    fn record_endpoint_result(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        operation_id: OperationId,
+        result: EndpointResultContentRef,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::Endpoint, |state| {
+            state.record_endpoint_result(session_id, slot, guard, operation_id, result)
         })
     }
 

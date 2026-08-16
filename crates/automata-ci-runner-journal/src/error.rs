@@ -160,6 +160,66 @@ pub enum JournalInvariantError {
     /// A provider operation identity was replayed with different semantics.
     #[error("provider operation identity conflicts with an existing intent")]
     ProviderOperationReplayConflict,
+    /// An endpoint request commitment has the wrong kind or fixed size.
+    #[error("execution-endpoint request commitment is invalid")]
+    InvalidEndpointRequestContent,
+    /// An endpoint result has the wrong kind or violates its object bound.
+    #[error("execution-endpoint result content is invalid")]
+    InvalidEndpointResultContent,
+    /// An endpoint result reservation is zero or exceeds the object ceiling.
+    #[error("execution-endpoint result reservation is invalid")]
+    InvalidEndpointResultReservation,
+    /// The non-evicting per-slot endpoint operation ceiling was reached.
+    #[error("execution-endpoint operation limit reached for this slot")]
+    EndpointOperationLimit,
+    /// The non-evicting per-slot endpoint content-reference ceiling was reached.
+    #[error("execution-endpoint content-reference limit reached for this slot")]
+    EndpointContentRefLimit,
+    /// The aggregate per-slot request commitment and result budget was exhausted.
+    #[error("execution-endpoint content-byte limit reached for this slot")]
+    EndpointContentBytesLimit,
+    /// A prior endpoint operation remains unresolved and fences its successor.
+    #[error("execution-endpoint operation remains unresolved")]
+    EndpointOperationPending,
+    /// A new endpoint operation did not begin in the accepted phase.
+    #[error("execution-endpoint operation must begin in the accepted phase")]
+    EndpointOperationNotAccepted,
+    /// An endpoint operation identity was reused with different semantics.
+    #[error("execution-endpoint operation replay conflicts with durable state")]
+    EndpointOperationReplayConflict,
+    /// The requested endpoint operation does not exist in the durable slot.
+    #[error("execution-endpoint operation is not journaled")]
+    EndpointOperationMissing,
+    /// Backend invocation was attempted after durable cancellation won.
+    #[error("execution-endpoint operation was durably cancelled")]
+    EndpointOperationCancelled,
+    /// The endpoint operation already has a terminal outcome.
+    #[error("execution-endpoint operation is already resolved")]
+    EndpointOperationResolved,
+    /// Cancellation completion was attempted before cancellation won.
+    #[error("execution-endpoint cancellation was not requested")]
+    EndpointCancellationNotRequested,
+    /// Recovery abandonment was attempted from a non-ambiguous phase.
+    #[error("execution-endpoint operation is not abandonable")]
+    EndpointOperationNotAbandonable,
+    /// Recovery cannot abandon an invocation while its sandbox remains owned.
+    #[error("execution-endpoint sandbox is still present")]
+    EndpointSandboxStillPresent,
+    /// Finalization was attempted while endpoint recovery remains pending.
+    #[error("execution-endpoint recovery must finish before finalization")]
+    EndpointRecoveryPending,
+    /// A durable job cancellation closed the slot to new endpoint operations.
+    #[error("execution-endpoint operations are closed for the cancelled slot")]
+    EndpointOperationsClosed,
+    /// A result was offered before backend invocation permission was durable.
+    #[error("execution-endpoint invocation is not durably committed")]
+    EndpointInvocationNotCommitted,
+    /// A result object exceeded the bytes reserved before backend invocation.
+    #[error("execution-endpoint result exceeds its durable reservation")]
+    EndpointResultExceedsReservation,
+    /// A replayed endpoint result disagreed with the durable result identity.
+    #[error("execution-endpoint result conflicts with durable state")]
+    EndpointResultReplayConflict,
     /// Sandbox identity was recorded without the exact pending create intent.
     #[error("sandbox creation has no matching durable provider-operation intent")]
     SandboxWithoutCreateIntent,

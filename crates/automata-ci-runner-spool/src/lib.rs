@@ -22,7 +22,11 @@ mod store;
 pub use error::{
     ContentProtectionError, RetainedContentError, SpoolError, SpoolInvariantError, SpoolRootError,
 };
-pub use model::{ContentCacheKey, ContentKind, DurableContentRef, ProtectionId, SpoolLimits};
+pub use model::{
+    ContentCacheKey, ContentCommitmentDomain, ContentKind, DurableContentRef,
+    KeyedContentCommitment, OpaqueContentIdentity, ProtectionId, SpoolLimits,
+    endpoint_result_allocation,
+};
 pub use observer::{
     NoopSpoolObserver, SpoolCapacityResource, SpoolEvent, SpoolFailureKind, SpoolObserver,
     SpoolOperation, SpoolOperationOutcome, SpoolProtectionOperation, SpoolProtectionOutcome,
@@ -30,8 +34,8 @@ pub use observer::{
 pub use root::SpoolRoot;
 pub use store::{
     ContentCommitFault, ContentCommitFaultInjector, ContentCommitStage, ContentProtector,
-    DurableContentPublication, DurableContentStore, FileSpool, FileSpoolOptions,
-    NoContentCommitFaults, PublicationCommitFailure, RetainedContentSource,
+    DurableContentPublication, DurableContentStore, EndpointResultCapacityReservation, FileSpool,
+    FileSpoolOptions, NoContentCommitFaults, PublicationCommitFailure, RetainedContentSource,
 };
 
 /// Hard upper bound for one plaintext object accepted by any adapter.

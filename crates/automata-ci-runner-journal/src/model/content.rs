@@ -54,8 +54,8 @@ impl RuntimeAuthorityContentRef {
 
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
         if self.0.kind() != ContentKind::RuntimeAuthority
-            || self.0.size() == 0
-            || self.0.size() > MAX_RUNTIME_AUTHORITY_CONTENT_BYTES
+            || self.0.accounted_bytes() == 0
+            || self.0.accounted_bytes() > MAX_RUNTIME_AUTHORITY_CONTENT_BYTES
         {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityContent);
         }
@@ -93,8 +93,8 @@ impl JobIrContentRef {
 
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
         if self.content.kind() != ContentKind::JobIr
-            || self.content.size() == 0
-            || self.content.size() > MAX_JOB_IR_CONTENT_BYTES
+            || self.content.accounted_bytes() == 0
+            || self.content.accounted_bytes() > MAX_JOB_IR_CONTENT_BYTES
         {
             return Err(JournalInvariantError::InvalidJobIrContent);
         }
@@ -160,8 +160,8 @@ impl TerminalResultRecord {
 
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
         if self.content.kind() != ContentKind::TerminalResult
-            || self.content.size() == 0
-            || terminal_result_content_bytes_rejection(self.content.size()).is_some()
+            || self.content.accounted_bytes() == 0
+            || terminal_result_content_bytes_rejection(self.content.accounted_bytes()).is_some()
         {
             return Err(JournalInvariantError::InvalidTerminalResultContent);
         }

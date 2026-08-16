@@ -1,7 +1,9 @@
 use std::sync::{Mutex, PoisonError};
 
 use automata_ci_runner_journal::{JournalContentRetainSet, RunnerJournal};
-use automata_ci_runner_spool::{DurableContentStore, SpoolError};
+use automata_ci_runner_spool::{
+    DurableContentStore, EndpointResultCapacityReservation, SpoolError,
+};
 
 pub(crate) trait CapacityReclaimError: Sized {
     fn is_capacity_exhausted(&self) -> bool;
@@ -56,5 +58,25 @@ impl ContentOperationCoordinator {
             }
             outcome => outcome,
         })
+    }
+
+    /// Reserves shared protected capacity for an endpoint result before any
+    /// backend invocation, reconciling journal-unreferenced payloads before one
+    /// exact retry on exhaustion.
+    pub(crate) fn reserve_endpoint_result<'store>(
+        &self,
+        journal: &dyn RunnerJournal,
+        spool: &'store dyn DurableContentStore,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'store> + 'store>, SpoolError> {
+        self.run(
+            || match spool.reserve_endpoint_result(maximum_plaintext_bytes) {
+                Err(SpoolError::CapacityExhausted) => {
+                    spool.reconcile(&JournalContentRetainSet::new(journal))?;
+                    spool.reserve_endpoint_result(maximum_plaintext_bytes)
+                }
+                outcome => outcome,
+            },
+        )
     }
 }

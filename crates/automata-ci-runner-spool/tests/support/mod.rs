@@ -7,8 +7,9 @@ use std::{
 
 use automata_ci_core::OperationId;
 use automata_ci_runner_spool::{
-    ContentProtectionError, ContentProtector, DurableContentPublication, DurableContentRef,
-    ProtectionId, RetainedContentError, RetainedContentSource, SpoolRoot,
+    ContentCommitmentDomain, ContentProtectionError, ContentProtector, DurableContentPublication,
+    DurableContentRef, ProtectionId, RetainedContentError, RetainedContentSource, SpoolRoot,
+    endpoint_result_allocation,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -65,6 +66,36 @@ impl TestProtector {
         digest.update(ciphertext);
         digest.finalize().into()
     }
+
+    fn protected_plaintext(
+        reference: &DurableContentRef,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, ContentProtectionError> {
+        let Some(allocation) = reference.endpoint_result_allocation_bytes() else {
+            return Ok(plaintext.to_vec());
+        };
+        let inner_bytes = allocation
+            .checked_sub(32)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or(ContentProtectionError::Failed)?;
+        let required = 44_usize
+            .checked_add(plaintext.len())
+            .ok_or(ContentProtectionError::Failed)?;
+        if required > inner_bytes {
+            return Err(ContentProtectionError::Failed);
+        }
+        let mut inner = Vec::with_capacity(inner_bytes);
+        inner.extend_from_slice(b"EPR1");
+        inner.extend_from_slice(
+            &u64::try_from(plaintext.len())
+                .map_err(|_| ContentProtectionError::Failed)?
+                .to_be_bytes(),
+        );
+        inner.extend_from_slice(&Sha256::digest(plaintext));
+        inner.extend_from_slice(plaintext);
+        inner.resize(inner_bytes, 0);
+        Ok(inner)
+    }
 }
 
 impl fmt::Debug for TestProtector {
@@ -82,20 +113,43 @@ impl ContentProtector for TestProtector {
         &self.id
     }
 
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        if protection_id != &self.id {
+            return Err(ContentProtectionError::KeyUnavailable);
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.key);
+        digest.update(domain.separator());
+        digest.update(material_digest);
+        Ok(digest.finalize().into())
+    }
+
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        endpoint_result_allocation(plaintext_bytes).map_err(|_| ContentProtectionError::Failed)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ContentProtectionError> {
-        let mut protected = Vec::with_capacity(plaintext.len() + 36);
-        protected.extend_from_slice(b"ATP1");
+        let inner = Self::protected_plaintext(reference, plaintext)?;
+        let mut protected = Vec::with_capacity(inner.len() + 32);
         protected.extend(
-            plaintext
+            inner
                 .iter()
                 .enumerate()
                 .map(|(index, byte)| byte ^ self.key[index % self.key.len()]),
         );
-        let tag = self.tag(reference, &protected[4..]);
+        let tag = self.tag(reference, &protected);
         protected.extend_from_slice(&tag);
         Ok(protected)
     }
@@ -105,19 +159,44 @@ impl ContentProtector for TestProtector {
         reference: &DurableContentRef,
         protected: &[u8],
     ) -> Result<Vec<u8>, ContentProtectionError> {
-        if protected.len() < 36 || &protected[..4] != b"ATP1" {
+        if protected.len() < 32 {
             return Err(ContentProtectionError::AuthenticationFailed);
         }
         let tag_offset = protected.len() - 32;
-        let ciphertext = &protected[4..tag_offset];
+        let ciphertext = &protected[..tag_offset];
         if protected[tag_offset..] != self.tag(reference, ciphertext) {
             return Err(ContentProtectionError::AuthenticationFailed);
         }
-        Ok(ciphertext
+        let inner: Vec<u8> = ciphertext
             .iter()
             .enumerate()
             .map(|(index, byte)| byte ^ self.key[index % self.key.len()])
-            .collect())
+            .collect();
+        if reference.kind() != automata_ci_runner_spool::ContentKind::EndpointResult {
+            return Ok(inner);
+        }
+        if inner.len() < 44 || &inner[..4] != b"EPR1" {
+            return Err(ContentProtectionError::AuthenticationFailed);
+        }
+        let plaintext_bytes = u64::from_be_bytes(
+            inner[4..12]
+                .try_into()
+                .map_err(|_| ContentProtectionError::AuthenticationFailed)?,
+        );
+        let plaintext_length = usize::try_from(plaintext_bytes)
+            .map_err(|_| ContentProtectionError::AuthenticationFailed)?;
+        let end = 44_usize
+            .checked_add(plaintext_length)
+            .filter(|end| *end <= inner.len())
+            .ok_or(ContentProtectionError::AuthenticationFailed)?;
+        if inner[end..].iter().any(|byte| *byte != 0) {
+            return Err(ContentProtectionError::AuthenticationFailed);
+        }
+        let plaintext = inner[44..end].to_vec();
+        if Sha256::digest(&plaintext).as_slice() != &inner[12..44] {
+            return Err(ContentProtectionError::AuthenticationFailed);
+        }
+        Ok(plaintext)
     }
 }
 
