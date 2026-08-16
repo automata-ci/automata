@@ -1,4 +1,5 @@
 use crate::github_manifest_fixture;
+use crate::store::fixture::retime_logical_admission;
 
 use std::sync::Arc;
 
@@ -521,7 +522,7 @@ async fn authenticate_fixture(
         claimed.claimed_at(),
     )
     .await?;
-    fixture.command = logical_command_at(&fixture.command, claimed.claimed_at())?;
+    fixture.command = retime_logical_admission(&fixture.command, claimed.claimed_at())?;
     database
         .store()
         .admit_authenticated_github_delivery(
@@ -536,38 +537,6 @@ async fn authenticate_fixture(
         )
         .await?;
     Ok(())
-}
-
-fn logical_command_at(
-    command: &AdmitLogicalWorkflowRun,
-    admitted_at: UnixMillis,
-) -> TestResult<AdmitLogicalWorkflowRun> {
-    let mut builder = AdmitLogicalWorkflowRun::builder(
-        command.tenant().clone(),
-        command.idempotency().clone(),
-        command.request_digest(),
-        command.repository().clone(),
-        command.workflow_id(),
-        command.workflow_path(),
-        command.workflow_name(),
-        command.git_ref(),
-        command.snapshot_id(),
-        command.source().clone(),
-        command.plan().clone(),
-        command.run_id(),
-        command.run_attempt(),
-        command.root_invocation_id(),
-        command.event_name(),
-        command.event().clone(),
-        command.head_sha().to_vec(),
-        command.jobs().to_vec(),
-        admitted_at,
-    );
-    if let Some(base_context) = command.base_context() {
-        builder = builder.base_context(base_context.clone());
-    }
-    builder = builder.trust_snapshot(command.trust_snapshot().clone());
-    Ok(builder.build()?)
 }
 
 fn admission_object(key: String, digest: u8, media_type: &str) -> AdmissionObject {

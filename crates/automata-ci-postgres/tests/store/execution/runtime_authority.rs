@@ -1,4 +1,8 @@
 use crate::github_manifest_fixture;
+use crate::store::fixture::{
+    activation_content_reference, deterministic_job_id, job_content_reference,
+    retime_logical_admission,
+};
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -11,12 +15,12 @@ use automata_ci_control::{
     },
 };
 use automata_ci_core::{
-    Architecture, AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobContentReference,
-    JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
-    JobLifecycle, JobRuntimeContext, JobSource, Lease, LeaseId, OperatingSystem, OperationId,
-    RunId, RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
-    StrategyContext, UnixMillis, ValueTemplate, WorkflowJobKey,
+    Architecture, AttemptId, ContextValue, FencingToken, JobAuthorityProfile, JobExecutionContext,
+    JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobLifecycle, JobRuntimeContext,
+    JobSource, Lease, LeaseId, OperatingSystem, OperationId, RunId, RunValueTemplates,
+    RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements, RunnerSessionId,
+    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, StrategyContext,
+    UnixMillis, ValueTemplate, WorkflowJobKey,
 };
 use automata_ci_key_management::{ENVELOPE_SCHEMA_V1, EncryptedEnvelope, KeyId, WrappedDataKey};
 use automata_ci_store::{
@@ -267,38 +271,6 @@ async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
     .execute(database.pool())
     .await?;
     Ok(())
-}
-
-fn retime_logical_admission(
-    command: &AdmitLogicalWorkflowRun,
-    admitted_at: UnixMillis,
-) -> TestResult<AdmitLogicalWorkflowRun> {
-    let mut builder = AdmitLogicalWorkflowRun::builder(
-        command.tenant().clone(),
-        command.idempotency().clone(),
-        command.request_digest(),
-        command.repository().clone(),
-        command.workflow_id(),
-        command.workflow_path(),
-        command.workflow_name(),
-        command.git_ref(),
-        command.snapshot_id(),
-        command.source().clone(),
-        command.plan().clone(),
-        command.run_id(),
-        command.run_attempt(),
-        command.root_invocation_id(),
-        command.event_name(),
-        command.event().clone(),
-        command.head_sha().to_vec(),
-        command.jobs().to_vec(),
-        admitted_at,
-    );
-    if let Some(base_context) = command.base_context() {
-        builder = builder.base_context(base_context.clone());
-    }
-    builder = builder.trust_snapshot(command.trust_snapshot().clone());
-    Ok(builder.build()?)
 }
 
 fn namespace_id(manifest: &GithubProviderManifest, suffix: u128) -> u128 {
@@ -554,46 +526,6 @@ async fn select_materialization(
         .clone())
 }
 
-fn concrete_job_id(
-    run_id: RunId,
-    invocation_id: LogicalWorkflowInvocationId,
-    logical_job_id: LogicalWorkflowJobId,
-    matrix_digest: Sha256Digest,
-) -> JobId {
-    let mut hasher = Sha256::new();
-    hasher.update(b"automata.workflow-service.logical-job-id.v1\0");
-    hasher.update(run_id.as_uuid().as_bytes());
-    hasher.update(invocation_id.as_uuid().as_bytes());
-    hasher.update(logical_job_id.as_uuid().as_bytes());
-    hasher.update(0_u32.to_be_bytes());
-    hasher.update(1_u32.to_be_bytes());
-    hasher.update(matrix_digest.as_bytes());
-    let output: [u8; 32] = hasher.finalize().into();
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&output[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x80;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    JobId::from_uuid(Uuid::from_bytes(bytes))
-}
-
-fn content_reference(object: &AdmissionObject) -> JobContentReference {
-    JobContentReference::new(
-        object.object_key().as_str(),
-        object.digest(),
-        object.encoded_size(),
-        object.media_type(),
-    )
-}
-
-fn activation_reference(object: &LogicalActivationObject) -> JobContentReference {
-    JobContentReference::new(
-        object.object_key().as_str(),
-        object.digest(),
-        object.encoded_size(),
-        object.media_type(),
-    )
-}
-
 fn prepare_instance(
     fixture: &LogicalFixture,
     claimed: &ClaimedLogicalJobActivation,
@@ -630,7 +562,7 @@ fn prepare_instance(
     )
     .expect("step");
     let job = JobIr::new(
-        concrete_job_id(
+        deterministic_job_id(
             fixture.command.run_id(),
             fixture.command.root_invocation_id(),
             fixture.logical_job_id,
@@ -648,8 +580,8 @@ fn prepare_instance(
         execution.workflow_name(),
         execution.git_ref(),
         workspace,
-        content_reference(claimed.event()),
-        activation_reference(&runtime),
+        job_content_reference(claimed.event()),
+        activation_content_reference(&runtime),
     )
     .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
