@@ -455,11 +455,14 @@ directory root-owned or group-writable. Never enroll as root or as an operator
 account and then copy the private key into place.
 
 Mint a separate one-use token and run `automata-runner enroll` as the exact
-service account for each configuration. Start the services only after every
-enrollment succeeds. If an enrollment is interrupted, repeat the same command
-as the same account with the same server, configuration, and runner name and
-with standard input from `/dev/null`. The private stage retains the original
-token and key; do not mint a replacement token or delete the stage.
+service account for each configuration, selecting exactly one explicit
+`--token-source file:PATH`, `--token-source env:NAME`, or
+`--token-source stdin`. Start the services only after every enrollment succeeds.
+If an enrollment is interrupted, repeat the exact command as the same account
+with the same server, configuration, runner name, and source selector. The
+private stage retains the original token and key and is loaded before the source;
+an explicit stdin retry may therefore use `/dev/null`. Do not mint a replacement
+token or delete the stage.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service

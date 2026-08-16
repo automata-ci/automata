@@ -50,7 +50,6 @@ automata-ci-sandbox-windows.workspace = true
 automata-ci-scm.workspace = true
 automata-ci-workflow-github.workspace = true
 axum.workspace = true
-base64.workspace = true
 bytes.workspace = true
 clap.workspace = true
 http.workspace = true
@@ -87,6 +86,7 @@ automata-ci-build-support.workspace = true
 [dev-dependencies]
 automata-ci-auth.workspace = true
 automata-ci-protocol-protobuf.workspace = true
+base64.workspace = true
 flate2.workspace = true
 rcgen.workspace = true
 static_assertions.workspace = true

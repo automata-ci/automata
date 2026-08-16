@@ -68,6 +68,10 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
 
 ### Changed
 
+- `automata-runner enroll` now requires one explicit `--token-source` selector:
+  `file:ABSOLUTE_PATH`, `env:NAME`, or `stdin`. The ambient environment/stdin
+  fallback and former `--token-file` option were removed; enrollment tokens now
+  share one canonical, redacted generation, validation, and digest contract.
 - Job-log visibility now follows the repository publication policy after the
   runner's mandatory secret masker. Public repositories can therefore expose
   redacted logs without exposing readable runtime authority; artifact audience

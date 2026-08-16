@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+use automata_ci_auth::secret::RunnerEnrollmentToken;
 use rcgen::{
     CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType, KeyPair,
     PKCS_ECDSA_P256_SHA256, PublicKeyData as _,
@@ -21,7 +22,7 @@ use uuid::Uuid;
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
-use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_token};
+use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES};
 use crate::product::{RunnerProductConfig, SecretSource};
 
 const MAX_STAGE_BYTES: usize = 1024 * 1_024;
@@ -120,7 +121,7 @@ impl CredentialDestinations {
         config: &RunnerProductConfig,
         origin: &Url,
         runner_name: &str,
-        token: Zeroizing<String>,
+        token: RunnerEnrollmentToken,
     ) -> Result<EnrollmentStage> {
         self.require_absent()?;
         let stage = EnrollmentStage::new(config, origin, runner_name, token)?;
@@ -180,11 +181,8 @@ pub(super) struct EnrollmentStage {
     pub(super) runner_name: String,
     pub(super) capabilities: automata_ci_core::RunnerCapabilities,
     pub(super) csr_pem: String,
-    #[serde(
-        deserialize_with = "deserialize_zeroizing",
-        serialize_with = "serialize_zeroizing"
-    )]
-    pub(super) token: Zeroizing<String>,
+    #[serde(serialize_with = "serialize_runner_enrollment_token")]
+    pub(super) token: RunnerEnrollmentToken,
     #[serde(
         deserialize_with = "deserialize_zeroizing",
         serialize_with = "serialize_zeroizing"
@@ -204,9 +202,8 @@ impl EnrollmentStage {
         config: &RunnerProductConfig,
         origin: &Url,
         runner_name: &str,
-        token: Zeroizing<String>,
+        token: RunnerEnrollmentToken,
     ) -> Result<Self> {
-        validate_token(token.as_str())?;
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .context("runner enrollment could not generate the local private key")?;
         let mut distinguished_name = DistinguishedName::new();
@@ -244,7 +241,6 @@ impl EnrollmentStage {
         {
             bail!("runner enrollment request stage does not match this invocation");
         }
-        validate_token(self.token.as_str())?;
         let key = KeyPair::from_pem(self.private_key_pem.as_str())
             .context("runner enrollment request stage has an invalid private key")?;
         let csr = CertificateSigningRequestParams::from_pem(&self.csr_pem)
@@ -385,6 +381,16 @@ where
     S: serde::Serializer,
 {
     serializer.serialize_str(value.as_str())
+}
+
+fn serialize_runner_enrollment_token<S>(
+    value: &RunnerEnrollmentToken,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.expose_secret())
 }
 
 fn deserialize_zeroizing<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
@@ -821,6 +827,7 @@ mod tests {
     #[cfg(unix)]
     use std::fs::{self, File};
 
+    use automata_ci_auth::secret::{RandomnessError, RunnerEnrollmentToken, SecureRandom};
     use automata_ci_core::{
         Architecture, OperatingSystem, RunnerCapabilities, RunnerId, RunnerPlatform,
     };
@@ -843,6 +850,15 @@ mod tests {
     use crate::enrollment::RedeemResponse;
     #[cfg(target_os = "linux")]
     use crate::product::RunnerProductConfig;
+
+    struct FixedRandom;
+
+    impl SecureRandom for FixedRandom {
+        fn fill(&self, destination: &mut [u8]) -> Result<(), RandomnessError> {
+            destination.fill(7);
+            Ok(())
+        }
+    }
 
     #[cfg(target_os = "linux")]
     fn product_config(root: &std::path::Path, runner_id: Uuid) -> RunnerProductConfig {
@@ -1042,7 +1058,7 @@ mod tests {
                 RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
             ),
             csr_pem: csr_pem.clone(),
-            token: zeroize::Zeroizing::new("atm_re_staged-secret".to_owned()),
+            token: RunnerEnrollmentToken::generate(&FixedRandom).expect("runner token"),
             private_key_pem: zeroize::Zeroizing::new(private_key_pem.clone()),
         };
         let encoded = serde_json::to_vec(&stage).expect("stage JSON");
@@ -1056,12 +1072,18 @@ mod tests {
         let decoded: EnrollmentStage = serde_json::from_slice(&encoded).expect("staged request");
         assert_eq!(decoded.operation_id, operation_id);
         assert_eq!(decoded.csr_pem, csr_pem);
-        assert_eq!(decoded.token.as_str(), "atm_re_staged-secret");
+        assert_eq!(
+            decoded.token.expose_secret(),
+            RunnerEnrollmentToken::generate(&FixedRandom)
+                .expect("runner token")
+                .expose_secret()
+        );
         assert_eq!(decoded.private_key_pem.as_str(), private_key_pem);
     }
 
     #[test]
     fn request_stage_reader_rejects_noncurrent_schema_versions() {
+        let token = RunnerEnrollmentToken::generate(&FixedRandom).expect("runner token");
         let mut document = serde_json::json!({
             "schema": STAGE_SCHEMA,
             "operation_id": Uuid::new_v4(),
@@ -1072,7 +1094,7 @@ mod tests {
                 RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
             ),
             "csr_pem": "unused by schema validation",
-            "token": "unused by schema validation",
+            "token": token.expose_secret(),
             "private_key_pem": "unused by schema validation",
         });
         document["schema"] = serde_json::json!(STAGE_SCHEMA + 1);

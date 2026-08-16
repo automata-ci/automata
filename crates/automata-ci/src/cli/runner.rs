@@ -3,9 +3,11 @@
 use std::io::Write as _;
 
 use anyhow::{Context as _, Result, bail};
-use automata_ci_auth::session_credential::SessionCredential;
+use automata_ci_auth::{
+    secret::{RunnerEnrollmentToken, SystemSecureRandom},
+    session_credential::SessionCredential,
+};
 use automata_ci_core::RunnerGroup;
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
 use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
@@ -19,10 +21,6 @@ use super::{
 };
 
 const ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
-const TOKEN_PREFIX: &str = "atm_re_";
-const TOKEN_BYTES: usize = 32;
-const TOKEN_ENCODED_BYTES: usize = 43;
-const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
 const CREATE_ATTEMPTS: usize = 3;
 
 pub(crate) async fn execute_runner_command(
@@ -77,7 +75,7 @@ async fn create_token(
     let pending = load_or_create_pending(process_lock, group, expires_in_seconds)?;
     let body = CreateTokenRequest {
         operation_id: pending.operation_id,
-        token: pending.token.as_str(),
+        token: pending.token.expose_secret(),
         runner_group: group,
         expires_in_seconds,
     };
@@ -113,7 +111,6 @@ fn load_or_create_pending(
             || pending.operation_id.is_nil()
             || pending.runner_group != runner_group
             || pending.expires_in_seconds != expires_in_seconds
-            || !valid_generated_token(pending.token.as_str())
         {
             bail!("runner enrollment token receipt does not match this request");
         }
@@ -122,7 +119,8 @@ fn load_or_create_pending(
     let pending = PendingTokenCreate {
         schema: 1,
         operation_id: Uuid::new_v4(),
-        token: generate_token()?,
+        token: RunnerEnrollmentToken::generate(&SystemSecureRandom)
+            .context("runner enrollment token entropy is unavailable")?,
         runner_group: runner_group.to_owned(),
         expires_in_seconds,
     };
@@ -186,37 +184,12 @@ async fn send(
         .context("runner enrollment token request failed")
 }
 
-fn generate_token() -> Result<Zeroizing<String>> {
-    let mut entropy = Zeroizing::new([0_u8; TOKEN_BYTES]);
-    getrandom::fill(&mut *entropy).context("runner enrollment token entropy is unavailable")?;
-    let mut token = Zeroizing::new(String::with_capacity(
-        TOKEN_PREFIX.len() + TOKEN_ENCODED_BYTES,
-    ));
-    token.push_str(TOKEN_PREFIX);
-    URL_SAFE_NO_PAD.encode_string(entropy.as_slice(), &mut token);
-    Ok(token)
-}
-
-fn valid_generated_token(token: &str) -> bool {
-    let Some(encoded) = token
-        .strip_prefix(TOKEN_PREFIX)
-        .filter(|encoded| encoded.len() == TOKEN_ENCODED_BYTES)
-    else {
-        return false;
-    };
-    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
-    matches!(
-        URL_SAFE_NO_PAD.decode_slice(encoded, &mut *decoded),
-        Ok(TOKEN_BYTES)
-    )
-}
-
 fn print_token(output: OutputFormat, issued: &IssuedToken) -> Result<()> {
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     match output {
         OutputFormat::Table => {
-            writeln!(stdout, "token\t{}", issued.token.as_str())?;
+            writeln!(stdout, "token\t{}", issued.token.expose_secret())?;
             writeln!(stdout, "runner_group\t{}", issued.runner_group)?;
             writeln!(stdout, "expires_at_ms\t{}", issued.expires_at_ms)?;
         }
@@ -225,7 +198,7 @@ fn print_token(output: OutputFormat, issued: &IssuedToken) -> Result<()> {
                 &mut stdout,
                 &IssuedTokenOutput {
                     enrollment_id: issued.enrollment_id,
-                    token: issued.token.as_str(),
+                    token: issued.token.expose_secret(),
                     runner_group: &issued.runner_group,
                     expires_at_ms: issued.expires_at_ms,
                 },
@@ -260,32 +233,25 @@ struct CreateTokenResponse {
 struct PendingTokenCreate {
     schema: u8,
     operation_id: Uuid,
-    #[serde(
-        deserialize_with = "deserialize_zeroizing",
-        serialize_with = "serialize_zeroizing"
-    )]
-    token: Zeroizing<String>,
+    #[serde(serialize_with = "serialize_runner_enrollment_token")]
+    token: RunnerEnrollmentToken,
     runner_group: String,
     expires_in_seconds: u64,
 }
 
-fn serialize_zeroizing<S>(value: &Zeroizing<String>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_runner_enrollment_token<S>(
+    value: &RunnerEnrollmentToken,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    serializer.serialize_str(value.as_str())
-}
-
-fn deserialize_zeroizing<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    String::deserialize(deserializer).map(Zeroizing::new)
+    serializer.serialize_str(value.expose_secret())
 }
 
 struct IssuedToken {
     enrollment_id: Uuid,
-    token: Zeroizing<String>,
+    token: RunnerEnrollmentToken,
     runner_group: String,
     expires_at_ms: i64,
 }
@@ -296,19 +262,4 @@ struct IssuedTokenOutput<'a> {
     token: &'a str,
     runner_group: &'a str,
     expires_at_ms: i64,
-}
-
-#[cfg(test)]
-mod tests {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-    use super::{TOKEN_PREFIX, valid_generated_token};
-
-    #[test]
-    fn pending_token_validation_accepts_only_the_canonical_secret_shape() {
-        let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode([7_u8; 32]));
-        assert!(valid_generated_token(&token));
-        assert!(!valid_generated_token("plain-secret"));
-        assert!(!valid_generated_token(&format!("{token}A")));
-    }
 }

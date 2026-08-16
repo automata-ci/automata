@@ -25,6 +25,9 @@ pub use config::{
     WindowsHyperVProductConfig,
 };
 pub use context::StandardGithubContext;
+pub(crate) use files::{
+    ScalarLineEnding, normalize_scalar_bytes, validate_absolute_path, validate_environment_name,
+};
 pub use files::{SecretSource, SecureInputError};
 pub use state::ProductStateRootError;
 pub use tls::ClientTlsMaterialError;
