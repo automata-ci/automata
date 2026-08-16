@@ -312,11 +312,12 @@ async fn concurrency_groups_are_repository_scoped_case_insensitive_and_single_re
         let second_repository = seed_control_plane(database.pool(), 1).await?;
         seed_run_number_counter(&database, &first_repository).await?;
         seed_run_number_counter(&database, &second_repository).await?;
-        let snapshot_id = WorkflowSnapshotId::from_uuid(uuid::Uuid::new_v4());
+        let first_snapshot_id = WorkflowSnapshotId::from_uuid(uuid::Uuid::new_v4());
+        let second_snapshot_id = WorkflowSnapshotId::from_uuid(uuid::Uuid::new_v4());
 
         let first_active = admission_case_with_group(
             &first_repository,
-            snapshot_id,
+            first_snapshot_id,
             111,
             10,
             "Deploy-Main",
@@ -325,7 +326,7 @@ async fn concurrency_groups_are_repository_scoped_case_insensitive_and_single_re
         )?;
         let second_active = admission_case_with_group(
             &second_repository,
-            snapshot_id,
+            second_snapshot_id,
             112,
             10,
             "DEPLOY-MAIN",
@@ -349,7 +350,7 @@ async fn concurrency_groups_are_repository_scoped_case_insensitive_and_single_re
 
         let replaced = admission_case_with_group(
             &first_repository,
-            snapshot_id,
+            first_snapshot_id,
             113,
             20,
             "deploy-main",
@@ -358,7 +359,7 @@ async fn concurrency_groups_are_repository_scoped_case_insensitive_and_single_re
         )?;
         let replacement = admission_case_with_group(
             &first_repository,
-            snapshot_id,
+            first_snapshot_id,
             114,
             30,
             "DePlOy-MaIn",
