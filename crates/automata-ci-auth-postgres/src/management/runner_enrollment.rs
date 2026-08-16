@@ -1,14 +1,15 @@
+use std::fmt;
+
 use automata_ci_auth::management::{
     ManagementActor, ManagementMutationOutcome, ManagementRepositoryError,
 };
 use automata_ci_core::{MAX_REGISTERED_RUNNERS, RunnerCapabilities, RunnerGroup};
-use sqlx::{FromRow, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use super::{
-    AuditDescriptor, AuthorizedActor, MutationAuthorization, PostgresHumanRbacManagementRepository,
-    authorize_mutation, closed_authorization, commit, database_time_milliseconds, finish_applied,
-    map_database_error,
+    AuditDescriptor, AuthorizedActor, MutationAuthorization, authorize_mutation,
+    closed_authorization, commit, database_time_milliseconds, finish_applied, map_database_error,
 };
 
 const ACTION_TOKEN_CREATE: &str = "runner.enrollment_token.create";
@@ -21,6 +22,32 @@ const RUNNER_ENROLLMENT_CREATE_LOCK_SALT: i64 = 0x454e_524f_4c4c_4d54;
 const MAX_NAME_BYTES: usize = 255;
 const MAX_GROUP_CHARACTERS: usize = 256;
 const MAX_REDEEM_RESPONSE_BYTES: usize = 512 * 1_024;
+
+/// `PostgreSQL` adapter for one-time runner enrollment creation and redemption.
+///
+/// Human token creation reauthorizes its session and RBAC grant inside the
+/// transaction. Redemption is authorized solely by possession of the opaque
+/// one-time token.
+#[derive(Clone)]
+pub struct PostgresRunnerEnrollmentRepository {
+    pool: PgPool,
+}
+
+impl PostgresRunnerEnrollmentRepository {
+    /// Binds runner enrollment to one `PostgreSQL` pool.
+    #[must_use]
+    pub const fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+impl fmt::Debug for PostgresRunnerEnrollmentRepository {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PostgresRunnerEnrollmentRepository")
+            .finish_non_exhaustive()
+    }
+}
 
 /// Maximum lifetime used by the control-plane certificate profile. A leaf is
 /// shorter when its issuing CA expires first.
@@ -283,7 +310,7 @@ impl EnrollmentRow {
     }
 }
 
-impl PostgresHumanRbacManagementRepository {
+impl PostgresRunnerEnrollmentRepository {
     /// Creates an audited one-time token record after checking `runners:enroll`.
     ///
     /// # Errors
