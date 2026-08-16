@@ -24,18 +24,21 @@ GitHub events          Browser / CLI
  automata-runner on Linux, Windows, or macOS
                  |
           configured SandboxProvider
-          |              |              |                |
- rootless Podman   Kubernetes Pod   Windows Hyper-V container   macOS VM
+       |             |             |                |                |
+ rootless Podman  Local Docker*  Kubernetes Pod  Windows Hyper-V container  macOS VM
 ```
+
+`Local Docker*` is the evaluation-only fixed-relay runner provider, not a
+user-facing local-run command.
 
 The workspace builds many libraries but distributes two product commands:
 
 - `automata` starts the complete control plane and provides administration
   commands. It has no per-role server selector yet.
-- `automata-runner` supervises rootless Podman or Kubernetes Pod execution on
-  Linux, Hyper-V-isolated Windows container execution, or disposable macOS VM
-  execution, along with host admission, lease renewal, logging, cancellation,
-  and cleanup.
+- `automata-runner` supervises rootless Podman, fixed-relay local Docker
+  evaluation, or Kubernetes Pod execution on Linux; Hyper-V-isolated Windows
+  container execution; or disposable macOS VM execution, along with host
+  admission, lease renewal, logging, cancellation, and cleanup.
 
 The browser preview is a smaller mode of `automata`; it does not start the
 durable services or runner listener. Production dependencies never fall back

@@ -32,17 +32,52 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   Apple Silicon macOS, and x86-64 Windows host tuples, a local Linux Docker
   Engine, and Docker Compose plugin 2.20.0 or newer. Docker daemon probes are
   pinned to the exact endpoint resolved from the context selected first;
-  stable JSON schema 3 and human output report its bounded name. The internal
-  adapter can strictly inspect or create-and-adopt a repository-agnostic
-  installation identity anchor without exposing a product mutation command.
+  stable JSON schema 3 and human output report its bounded name without
+  retaining or exposing a generic direct-Engine mutation adapter.
+- Shared sandbox-guest protocol 5 primitives for bounded optional-file reads
+  and Unix durable compare-and-swap atomic file commits. The scratch helper image
+  seeds a non-root-writable data mountpoint for future engine-managed local
+  configuration; this does not yet add a desired-spec schema, config-volume
+  adapter, Compose topology, or public local lifecycle command. Guest-bearing
+  Kubernetes, Windows, and macOS artifacts must be rebuilt in lockstep because
+  every prior protocol version is deliberately rejected.
+- Read-only `automata local check [WORKFLOW]` over a private, bounded snapshot
+  of tracked and non-ignored live-worktree source. It hashes the exact
+  deterministic archive consumed by shared workflow discovery, pins filesystem
+  ancestors without following links, normalizes tracked symlinks from Git mode,
+  rejects sparse or assume-unchanged index state and portable path-graph
+  aliases, and accepts only direct `.github/workflows/*.{yml,yaml}` members. The
+  optional selector is one exact canonical archive path, and the selected root
+  must declare `workflow_dispatch`. Reachable reusable workflows must be local
+  members of the same snapshot; remote, dynamic, missing, cyclic, or invalid
+  calls fail closed. The shared compiler and reusable-call traversal validate
+  typed inputs, secrets, outputs, propagation, and resource bounds. Human and
+  JSON reports contain only value-free external credential names and closed
+  built-in requirements such as `github_token`, never values, absolute paths,
+  archive bytes, or repository identity. Windows source capture remains closed
+  until exact native mutation evidence is qualified. The command is independent
+  of `local doctor`, Docker, the network, and GitHub tokens, and performs no
+  admission, scheduling, execution, or Check Run operation.
+- Sandbox specifications now require one closed runner-custody variant across
+  every provider; job custody includes a mandatory non-zero durable slot.
+- Exact private-CA HTTPS trust for S3-compatible storage and a hidden,
+  current-only `automata internal object-store ensure-bucket` image command.
+  Server, initializer, and runner use closed bounded credential/trust
+  configuration and the production AWS SDK client path; runner product schema
+  5 requires the same explicit trust choice. Config and SDK clients are one
+  inseparable store, canonical private-CA bytes and signing usage fail closed,
+  connected-store diagnostics expose no bound state, validated transport is
+  one closed security mode, and bucket creation is region-correct, idempotent,
+  conflict-reverified, and bounded by one total deadline.
 
 ### Known limitations
 
 - This bootstrap release is not production-ready and has not passed the full
   end-to-end compatibility gate.
-- Automated runner certificate rotation and lifecycle administration,
-  managed-secret runner delivery, workload OIDC, and several workflow semantics
-  remain unsupported end to end.
+- Runner certificate renewal currently requires Unix file-backed identity;
+  native credential-store rotation, lifecycle administration, managed-secret
+  runner delivery, workload OIDC, and several workflow semantics remain
+  unsupported end to end.
 - No public archive, crate, or product image has been published. Planned static
   archives and images target Linux x86-64; runner execution also requires the
   documented rootless Podman host path.

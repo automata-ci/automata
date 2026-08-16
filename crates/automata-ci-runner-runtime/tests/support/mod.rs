@@ -51,9 +51,10 @@ use automata_ci_runner_runtime::{
     RuntimeControlRetry, RuntimeSleeper, SleepFuture,
 };
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentPublication,
-    DurableContentRef, DurableContentStore, FileSpool, ProtectionId, RetainedContentError,
-    RetainedContentSource, SpoolError, SpoolRoot,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentPublication, DurableContentRef, DurableContentStore,
+    EndpointResultCapacityReservation, FileSpool, KeyedContentCommitment, ProtectionId,
+    RetainedContentError, RetainedContentSource, SpoolError, SpoolRoot, endpoint_result_allocation,
 };
 use automata_ci_runner_transport::PreparedRequest;
 use sha2::{Digest as _, Sha256};
@@ -143,6 +144,31 @@ impl AckCapacitySpool {
 }
 
 impl DurableContentStore for AckCapacitySpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -202,6 +228,31 @@ impl TerminalCapacityProbeSpool {
 }
 
 impl DurableContentStore for TerminalCapacityProbeSpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -288,6 +339,31 @@ impl NestedOfferCapacityProbeSpool {
 }
 
 impl DurableContentStore for NestedOfferCapacityProbeSpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -376,6 +452,31 @@ impl BlockingEosSpool {
 }
 
 impl DurableContentStore for BlockingEosSpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -472,6 +573,31 @@ impl BlockingSegmentLoadSpool {
 }
 
 impl DurableContentStore for BlockingSegmentLoadSpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -545,18 +671,67 @@ impl ContentProtector for TestProtector {
         &self.id
     }
 
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError> {
+        if protection_id != &self.id {
+            return Err(ContentProtectionError::KeyUnavailable);
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.key);
+        digest.update(domain.separator());
+        digest.update(material_digest);
+        Ok(digest.finalize().into())
+    }
+
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError> {
+        endpoint_result_allocation(plaintext_bytes).map_err(|_| ContentProtectionError::Failed)
+    }
+
     fn protect(
         &self,
         reference: &DurableContentRef,
         plaintext: &[u8],
     ) -> Result<Vec<u8>, ContentProtectionError> {
-        let mut protected = Vec::with_capacity(plaintext.len() + 32);
-        protected.extend(
+        let mut protected = if let Some(allocation) = reference.endpoint_result_allocation_bytes() {
+            let allocation =
+                usize::try_from(allocation).map_err(|_| ContentProtectionError::Failed)?;
+            let body_bytes = allocation
+                .checked_sub(32)
+                .ok_or(ContentProtectionError::Failed)?;
+            let required = 8_usize
+                .checked_add(plaintext.len())
+                .ok_or(ContentProtectionError::Failed)?;
+            if required > body_bytes {
+                return Err(ContentProtectionError::Failed);
+            }
+            let mut body = Vec::with_capacity(allocation);
+            body.extend_from_slice(
+                &u64::try_from(plaintext.len())
+                    .map_err(|_| ContentProtectionError::Failed)?
+                    .to_be_bytes(),
+            );
+            body.extend(
+                plaintext
+                    .iter()
+                    .enumerate()
+                    .map(|(index, byte)| byte ^ self.key[index % self.key.len()]),
+            );
+            body.resize(body_bytes, 0);
+            body
+        } else {
             plaintext
                 .iter()
                 .enumerate()
-                .map(|(index, byte)| byte ^ self.key[index % self.key.len()]),
-        );
+                .map(|(index, byte)| byte ^ self.key[index % self.key.len()])
+                .collect()
+        };
         protected.extend_from_slice(&self.tag(reference, &protected));
         Ok(protected)
     }
@@ -574,6 +749,24 @@ impl ContentProtector for TestProtector {
         if protected[tag_offset..] != self.tag(reference, ciphertext) {
             return Err(ContentProtectionError::AuthenticationFailed);
         }
+        let ciphertext = if reference.endpoint_result_allocation_bytes().is_some() {
+            let length = ciphertext
+                .get(..8)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_be_bytes)
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .ok_or(ContentProtectionError::AuthenticationFailed)?;
+            let end = 8_usize
+                .checked_add(length)
+                .filter(|end| *end <= ciphertext.len())
+                .ok_or(ContentProtectionError::AuthenticationFailed)?;
+            if ciphertext[end..].iter().any(|byte| *byte != 0) {
+                return Err(ContentProtectionError::AuthenticationFailed);
+            }
+            &ciphertext[8..end]
+        } else {
+            ciphertext
+        };
         Ok(ciphertext
             .iter()
             .enumerate()
@@ -843,6 +1036,31 @@ impl ContentRaceSpool {
 }
 
 impl DurableContentStore for ContentRaceSpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner.create_keyed_commitment(domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.inner
+            .recreate_keyed_commitment(protection_id, domain, material_digest)
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        self.inner.reserve_endpoint_result(maximum_plaintext_bytes)
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -1492,6 +1710,65 @@ impl JobExecutor for CancellationContentRaceExecutor {
 #[derive(Debug, Default)]
 pub struct FailureIsolationExecutor {
     survivor_started: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+pub struct EndpointRecoveryExecutor {
+    execute_calls: AtomicUsize,
+    cleanup_calls: AtomicUsize,
+}
+
+impl EndpointRecoveryExecutor {
+    pub fn execute_calls(&self) -> usize {
+        self.execute_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn cleanup_calls(&self) -> usize {
+        self.cleanup_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl JobExecutor for EndpointRecoveryExecutor {
+    fn admit(&self, _job: &JobIrEnvelope) -> Result<ExecutionAdmission, AdmissionRejection> {
+        Ok(ExecutionAdmission::new(sandbox_environment()))
+    }
+
+    fn execute(
+        &self,
+        request: ExecutionRequest,
+        events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> ExecutorFuture<'_> {
+        Box::pin(async move {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            events
+                .transition(JobLifecycle::Running)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            Ok(JobResult::new(
+                request.lease().attempt_id(),
+                JobConclusion::Failure,
+                JobSecretExposure::Secretless,
+                UnixMillis::new(10_001),
+            ))
+        })
+    }
+
+    fn cleanup(
+        &self,
+        _request: CleanupRequest,
+        events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> CleanupFuture<'_> {
+        Box::pin(async move {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            let destroy = events
+                .begin_provider_operation(ProviderOperationKind::DestroySandbox)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            events
+                .provider_operation_completed(destroy)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))
+        })
+    }
 }
 
 pub const FAILURE_ISOLATION_LOG_COUNT: usize = 64;
@@ -5729,7 +6006,11 @@ fn record_test_authority_delivery_with_expiries_and_acknowledgement(
                 fixture.lease.guard(),
                 offer.command().operation_id(),
                 offer.command().sequence(),
-                offer.job_ir().content().sha256(),
+                offer
+                    .job_ir()
+                    .content()
+                    .public_plaintext_sha256()
+                    .expect("job IR public digest"),
                 INITIAL_RUNTIME_AUTHORITY_GENERATION,
             ),
             request_operation_id,

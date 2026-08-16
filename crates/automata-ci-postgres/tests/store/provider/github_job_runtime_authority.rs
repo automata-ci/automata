@@ -2418,6 +2418,90 @@ async fn assert_runtime_authority_inspection_waits_for_graph_lock(
     Ok(())
 }
 
+fn runtime_authority_lock_cases(
+    identity: &GithubRuntimeAuthorityIdentity,
+) -> Vec<(&'static str, Uuid)> {
+    vec![
+        (
+            "SELECT id FROM job_attempts WHERE id = $1 FOR UPDATE",
+            identity.key().attempt_id().as_uuid(),
+        ),
+        (
+            "SELECT id FROM runners WHERE id = $1 FOR UPDATE",
+            identity.runner_id().as_uuid(),
+        ),
+        (
+            "SELECT id FROM runner_sessions WHERE id = $1 FOR UPDATE",
+            identity.runner_session_id().as_uuid(),
+        ),
+        (
+            "SELECT workflow.id FROM workflow_definitions AS workflow \
+             JOIN workflow_runs AS run ON run.workflow_id = workflow.id \
+             WHERE run.id = $1 FOR UPDATE OF workflow",
+            identity.run_id().as_uuid(),
+        ),
+        (
+            "SELECT snapshot.id FROM workflow_snapshots AS snapshot \
+             JOIN workflow_runs AS run ON run.snapshot_id = snapshot.id \
+             WHERE run.id = $1 FOR UPDATE OF snapshot",
+            identity.run_id().as_uuid(),
+        ),
+        (
+            "SELECT repository_id FROM github_provider_manifest_revisions \
+             WHERE repository_id = $1 FOR UPDATE",
+            identity.repository_id().as_uuid(),
+        ),
+        (
+            "SELECT selection_id FROM logical_workflow_activation_work_selections \
+             WHERE selection_id = $1 FOR UPDATE",
+            identity
+                .preparation_selection_tail()
+                .selection_id()
+                .as_uuid(),
+        ),
+        (
+            "SELECT selection_id FROM logical_workflow_activation_work_selections \
+             WHERE selection_id = $1 FOR UPDATE",
+            identity
+                .activation_selection_tail()
+                .selection_id()
+                .as_uuid(),
+        ),
+        (
+            "SELECT selection_id FROM logical_workflow_materialization_work_selections \
+             WHERE selection_id = $1 FOR UPDATE",
+            identity
+                .materialization_selection_tail()
+                .selection_id()
+                .as_uuid(),
+        ),
+        (
+            "SELECT selection_id FROM logical_workflow_activation_renewal_receipts \
+             WHERE selection_id = $1 FOR UPDATE",
+            identity
+                .preparation_selection_tail()
+                .selection_id()
+                .as_uuid(),
+        ),
+        (
+            "SELECT selection_id FROM logical_workflow_activation_renewal_receipts \
+             WHERE selection_id = $1 FOR UPDATE",
+            identity
+                .activation_selection_tail()
+                .selection_id()
+                .as_uuid(),
+        ),
+        (
+            "SELECT selection_id FROM logical_workflow_materialization_renewal_receipts \
+             WHERE selection_id = $1 FOR UPDATE",
+            identity
+                .materialization_selection_tail()
+                .selection_id()
+                .as_uuid(),
+        ),
+    ]
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 #[allow(clippy::too_many_lines)] // One scenario verifies the complete authority tuple is immutable.
@@ -2437,85 +2521,7 @@ async fn runtime_authority_locks_attempt_runner_session_and_historical_manifest(
         let identity = exact_standard_identity(resolution, &execution, &manifest)?;
         insert_exact_runtime_authority_candidate(&database, &execution).await?;
 
-        for (lock_sql, locked_id) in [
-            (
-                "SELECT id FROM job_attempts WHERE id = $1 FOR UPDATE",
-                identity.key().attempt_id().as_uuid(),
-            ),
-            (
-                "SELECT id FROM runners WHERE id = $1 FOR UPDATE",
-                identity.runner_id().as_uuid(),
-            ),
-            (
-                "SELECT id FROM runner_sessions WHERE id = $1 FOR UPDATE",
-                identity.runner_session_id().as_uuid(),
-            ),
-            (
-                "SELECT workflow.id FROM workflow_definitions AS workflow \
-                 JOIN workflow_runs AS run ON run.workflow_id = workflow.id \
-                 WHERE run.id = $1 FOR UPDATE OF workflow",
-                identity.run_id().as_uuid(),
-            ),
-            (
-                "SELECT snapshot.id FROM workflow_snapshots AS snapshot \
-                 JOIN workflow_runs AS run ON run.snapshot_id = snapshot.id \
-                 WHERE run.id = $1 FOR UPDATE OF snapshot",
-                identity.run_id().as_uuid(),
-            ),
-            (
-                "SELECT repository_id FROM github_provider_manifest_revisions \
-                 WHERE repository_id = $1 FOR UPDATE",
-                identity.repository_id().as_uuid(),
-            ),
-            (
-                "SELECT selection_id FROM logical_workflow_activation_work_selections \
-                 WHERE selection_id = $1 FOR UPDATE",
-                identity
-                    .preparation_selection_tail()
-                    .selection_id()
-                    .as_uuid(),
-            ),
-            (
-                "SELECT selection_id FROM logical_workflow_activation_work_selections \
-                 WHERE selection_id = $1 FOR UPDATE",
-                identity
-                    .activation_selection_tail()
-                    .selection_id()
-                    .as_uuid(),
-            ),
-            (
-                "SELECT selection_id FROM logical_workflow_materialization_work_selections \
-                 WHERE selection_id = $1 FOR UPDATE",
-                identity
-                    .materialization_selection_tail()
-                    .selection_id()
-                    .as_uuid(),
-            ),
-            (
-                "SELECT selection_id FROM logical_workflow_activation_renewal_receipts \
-                 WHERE selection_id = $1 FOR UPDATE",
-                identity
-                    .preparation_selection_tail()
-                    .selection_id()
-                    .as_uuid(),
-            ),
-            (
-                "SELECT selection_id FROM logical_workflow_activation_renewal_receipts \
-                 WHERE selection_id = $1 FOR UPDATE",
-                identity
-                    .activation_selection_tail()
-                    .selection_id()
-                    .as_uuid(),
-            ),
-            (
-                "SELECT selection_id FROM logical_workflow_materialization_renewal_receipts \
-                 WHERE selection_id = $1 FOR UPDATE",
-                identity
-                    .materialization_selection_tail()
-                    .selection_id()
-                    .as_uuid(),
-            ),
-        ] {
+        for (lock_sql, locked_id) in runtime_authority_lock_cases(&identity) {
             assert_runtime_authority_inspection_waits_for_graph_lock(
                 &database, &identity, lock_sql, locked_id,
             )

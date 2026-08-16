@@ -7,9 +7,11 @@ use std::{
 
 use automata_ci_core::Sha256Digest;
 use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 
 use crate::{
-    ContentKind, ContentProtectionError, DurableContentRef, NoopSpoolObserver, ProtectionId,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, DurableContentRef,
+    KeyedContentCommitment, NoopSpoolObserver, OpaqueContentIdentity, ProtectionId,
     RetainedContentError, SpoolCapacityResource, SpoolError, SpoolEvent, SpoolFailureKind,
     SpoolInvariantError, SpoolLimits, SpoolObserver, SpoolOperation, SpoolOperationOutcome,
     SpoolProtectionOperation, SpoolProtectionOutcome, SpoolRoot,
@@ -74,6 +76,40 @@ pub trait ContentProtector: Send + Sync {
     fn supports_protection_id(&self, protection_id: &ProtectionId) -> bool {
         protection_id == self.protection_id()
     }
+
+    /// Computes a domain-separated PRF commitment with the exact named key.
+    ///
+    /// The implementation must use secret key material unavailable to a reader
+    /// of spool files or journal metadata. Errors must not contain commitment
+    /// input or key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContentProtectionError`] when the exact key is unavailable or
+    /// the protected commitment operation fails.
+    fn keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<[u8; 32], ContentProtectionError>;
+
+    /// Returns the exact encoded bytes this protector will produce for an
+    /// endpoint result of `plaintext_bytes` under its active key.
+    ///
+    /// Implementations must apply the current opaque padded-allocation
+    /// contract. This is a protection-authority preflight: success promises
+    /// that [`Self::protect`] will emit exactly the returned byte count for the
+    /// matching endpoint-result reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContentProtectionError`] when the active protection authority
+    /// is unavailable or the plaintext length cannot be protected.
+    fn endpoint_result_protected_bytes(
+        &self,
+        plaintext_bytes: u64,
+    ) -> Result<u64, ContentProtectionError>;
 
     /// Protects plaintext before any filesystem write.
     ///
@@ -234,6 +270,26 @@ pub struct PublicationCommitFailure<'a, E> {
     publication: DurableContentPublication<'a>,
 }
 
+/// Capacity reserved globally before invoking one endpoint operation.
+///
+/// The reservation owns one object slot and the protected allocation class for
+/// the declared maximum result. Dropping it releases both. Endpoint results can
+/// only be published by consuming this value.
+#[must_use = "endpoint-result capacity must be consumed or released"]
+pub trait EndpointResultCapacityReservation<'store>: Send {
+    /// Protects and durably publishes the result while atomically consuming the
+    /// reserved capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpoolError`] for an oversized result, protection, commit, or
+    /// poisoned-store failure. Every failure releases the reservation.
+    fn persist(
+        self: Box<Self>,
+        plaintext: &[u8],
+    ) -> Result<DurableContentPublication<'store>, SpoolError>;
+}
+
 impl<E> fmt::Debug for PublicationCommitFailure<'_, E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -253,6 +309,44 @@ impl<'a, E> PublicationCommitFailure<'a, E> {
 
 /// Object-safe protected content-store port.
 pub trait DurableContentStore: Send + Sync {
+    /// Computes a new commitment under the active protection key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpoolError`] when the protection authority is unavailable.
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError>;
+
+    /// Recomputes a commitment under the exact key named by durable state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpoolError`] when that exact key is unavailable or protection fails.
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError>;
+
+    /// Reserves global capacity for one endpoint result before provider invocation.
+    ///
+    /// The reservation accounts for one object and the deterministic padded
+    /// protected allocation of `maximum_plaintext_bytes`. It blocks every
+    /// competing publisher or reservation that would consume that capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpoolError`] for an invalid maximum, unavailable protection
+    /// authority, exhausted capacity, or poisoned store.
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError>;
+
     /// Protects, verifies, and durably commits immutable content.
     ///
     /// A successful return occurs only after file and directory synchronization.
@@ -369,6 +463,8 @@ impl fmt::Debug for FileSpoolOptions {
 #[derive(Clone, Copy, Debug, Default)]
 struct MemoryState {
     usage: SpoolUsage,
+    reserved_objects: u32,
+    reserved_protected_bytes: u64,
     poisoned: bool,
 }
 
@@ -385,6 +481,191 @@ pub struct FileSpool {
     memory: Mutex<MemoryState>,
     publications: PublicationGate,
     options: FileSpoolOptions,
+}
+
+struct FileEndpointResultReservation<'store> {
+    spool: &'store FileSpool,
+    maximum_plaintext_bytes: u64,
+    reserved_protected_bytes: u64,
+    active: bool,
+}
+
+impl fmt::Debug for FileEndpointResultReservation<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointResultCapacityReservation")
+            .field("maximum_plaintext_bytes", &self.maximum_plaintext_bytes)
+            .field("reserved_protected_bytes", &self.reserved_protected_bytes)
+            .field("state", &if self.active { "reserved" } else { "consumed" })
+            .finish()
+    }
+}
+
+impl<'store> FileEndpointResultReservation<'store> {
+    fn release(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut memory = self
+            .spool
+            .memory
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match (
+            memory.reserved_objects.checked_sub(1),
+            memory
+                .reserved_protected_bytes
+                .checked_sub(self.reserved_protected_bytes),
+        ) {
+            (Some(objects), Some(bytes)) => {
+                memory.reserved_objects = objects;
+                memory.reserved_protected_bytes = bytes;
+            }
+            _ => memory.poisoned = true,
+        }
+        self.active = false;
+    }
+
+    fn persist_inner(
+        &mut self,
+        plaintext: &[u8],
+        operation: SpoolOperation,
+    ) -> Result<DurableContentPublication<'store>, SpoolError> {
+        let protection_id = self.spool.protector.protection_id();
+        let reference = self
+            .spool
+            .endpoint_result_reference_for(protection_id, plaintext)?;
+        let actual_allocation = reference
+            .endpoint_result_allocation_bytes()
+            .ok_or(SpoolInvariantError::InvalidContentIdentity)?;
+        if actual_allocation > self.reserved_protected_bytes {
+            return Err(SpoolError::CapacityExhausted);
+        }
+        let permit = self.spool.publications.begin()?;
+        let mut memory = self.spool.memory.lock().map_err(|_| SpoolError::Poisoned)?;
+        if memory.poisoned {
+            return Err(SpoolError::Poisoned);
+        }
+        if let Some(existing) = self.spool.load_protected(&reference)? {
+            self.spool.open_and_verify(&reference, &existing)?;
+            let reserved_objects = memory
+                .reserved_objects
+                .checked_sub(1)
+                .ok_or(SpoolError::Poisoned)?;
+            let reserved_protected_bytes = memory
+                .reserved_protected_bytes
+                .checked_sub(self.reserved_protected_bytes)
+                .ok_or(SpoolError::Poisoned)?;
+            memory.reserved_objects = reserved_objects;
+            memory.reserved_protected_bytes = reserved_protected_bytes;
+            self.active = false;
+            return Ok(DurableContentPublication { reference, permit });
+        }
+        let protected = self.spool.protector.protect(&reference, plaintext);
+        self.spool.options.observer.observe(SpoolEvent::Protection {
+            operation: SpoolProtectionOperation::Protect,
+            outcome: if protected.is_ok() {
+                SpoolProtectionOutcome::Success
+            } else {
+                SpoolProtectionOutcome::Error
+            },
+        });
+        let protected = protected?;
+        let protected_bytes = u64::try_from(protected.len())
+            .map_err(|_| SpoolInvariantError::ProtectionOverheadExceeded)?;
+        self.spool
+            .validate_protected_size(&reference, protected_bytes)?;
+        if protected_bytes > self.reserved_protected_bytes {
+            return Err(SpoolError::CapacityExhausted);
+        }
+        let reserved_objects = memory
+            .reserved_objects
+            .checked_sub(1)
+            .ok_or(SpoolError::Poisoned)?;
+        let reserved_bytes = memory
+            .reserved_protected_bytes
+            .checked_sub(self.reserved_protected_bytes)
+            .ok_or(SpoolError::Poisoned)?;
+        let objects = memory
+            .usage
+            .objects
+            .checked_add(1)
+            .ok_or(SpoolError::Poisoned)?;
+        let usage_bytes = memory
+            .usage
+            .protected_bytes
+            .checked_add(protected_bytes)
+            .ok_or(SpoolError::Poisoned)?;
+        match self.spool.directory.commit(
+            &reference,
+            &protected,
+            self.spool.options.fault_injector.as_ref(),
+        ) {
+            Ok(()) => {
+                memory.reserved_objects = reserved_objects;
+                memory.reserved_protected_bytes = reserved_bytes;
+                memory.usage.objects = objects;
+                memory.usage.protected_bytes = usage_bytes;
+                self.active = false;
+                Ok(DurableContentPublication { reference, permit })
+            }
+            Err(failure) if failure.renamed() => {
+                memory.poisoned = true;
+                self.spool
+                    .options
+                    .observer
+                    .observe(SpoolEvent::Poisoned { operation });
+                Err(SpoolError::CommitOutcomeUnknown)
+            }
+            Err(failure) => Err(failure.into_public()),
+        }
+    }
+}
+
+impl Drop for FileEndpointResultReservation<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+impl<'store> EndpointResultCapacityReservation<'store> for FileEndpointResultReservation<'store> {
+    fn persist(
+        mut self: Box<Self>,
+        plaintext: &[u8],
+    ) -> Result<DurableContentPublication<'store>, SpoolError> {
+        let plaintext_bytes =
+            u64::try_from(plaintext.len()).map_err(|_| SpoolInvariantError::ObjectTooLarge)?;
+        if plaintext_bytes > self.maximum_plaintext_bytes {
+            return Err(SpoolInvariantError::ObjectTooLarge.into());
+        }
+        let observed_bytes = crate::endpoint_result_allocation(plaintext_bytes)?;
+
+        let operation = SpoolOperation::Persist;
+        let started = Instant::now();
+        self.spool
+            .options
+            .observer
+            .observe(SpoolEvent::OperationStarted { operation });
+        let result = self.persist_inner(plaintext, operation);
+        if result.is_ok() {
+            self.spool
+                .options
+                .observer
+                .observe(SpoolEvent::ContentBytes {
+                    operation,
+                    content_kind: ContentKind::EndpointResult,
+                    bytes: observed_bytes,
+                });
+        }
+        self.spool.observe_completion(
+            operation,
+            Some(ContentKind::EndpointResult),
+            SpoolOperationOutcome::Success,
+            started,
+            &result,
+        );
+        result
+    }
 }
 
 impl fmt::Debug for FileSpool {
@@ -430,6 +711,8 @@ impl FileSpool {
             protector,
             memory: Mutex::new(MemoryState {
                 usage,
+                reserved_objects: 0,
+                reserved_protected_bytes: 0,
                 poisoned: false,
             }),
             publications: PublicationGate::default(),
@@ -462,7 +745,7 @@ impl FileSpool {
         Ok((memory.usage.objects, memory.usage.protected_bytes))
     }
 
-    fn reference_for(
+    fn public_reference_for(
         &self,
         kind: ContentKind,
         plaintext: &[u8],
@@ -476,13 +759,54 @@ impl FileSpool {
             return Err(SpoolInvariantError::ObjectTooLarge.into());
         }
         let digest = Sha256Digest::from_bytes(Sha256::digest(plaintext).into());
-        DurableContentRef::after_commit(kind, size, digest, self.protector.protection_id().clone())
-            .map_err(Into::into)
+        DurableContentRef::after_public_commit(
+            kind,
+            size,
+            digest,
+            self.protector.protection_id().clone(),
+        )
+        .map_err(Into::into)
+    }
+
+    fn endpoint_result_reference_for(
+        &self,
+        protection_id: &ProtectionId,
+        plaintext: &[u8],
+    ) -> Result<DurableContentRef, SpoolError> {
+        const MATERIAL_DOMAIN: &[u8] = b"automata.runner.endpoint-result.material.v1\0";
+        let plaintext_bytes =
+            u64::try_from(plaintext.len()).map_err(|_| SpoolInvariantError::ObjectTooLarge)?;
+        if plaintext_bytes > self.options.limits.max_object_bytes() {
+            return Err(SpoolInvariantError::ObjectTooLarge.into());
+        }
+        let plaintext_sha256: [u8; 32] = Sha256::digest(plaintext).into();
+        let mut material = Sha256::new();
+        material.update(MATERIAL_DOMAIN);
+        material.update(plaintext_bytes.to_be_bytes());
+        material.update(plaintext_sha256);
+        let material_digest: [u8; 32] = material.finalize().into();
+        let opaque = self.protector.keyed_commitment(
+            protection_id,
+            ContentCommitmentDomain::EndpointResultIdentity,
+            &material_digest,
+        )?;
+        let protected_allocation_bytes = crate::endpoint_result_allocation(plaintext_bytes)?;
+        DurableContentRef::after_endpoint_result_commit(
+            protected_allocation_bytes,
+            OpaqueContentIdentity::from_bytes(opaque),
+            protection_id.clone(),
+        )
+        .map_err(Into::into)
     }
 
     fn load_protected(&self, reference: &DurableContentRef) -> Result<Option<Vec<u8>>, SpoolError> {
-        if reference.size() > self.options.limits.max_object_bytes() {
-            return Err(SpoolInvariantError::ObjectTooLarge.into());
+        match (
+            reference.public_plaintext_bytes(),
+            reference.endpoint_result_allocation_bytes(),
+        ) {
+            (Some(bytes), None) if bytes <= self.options.limits.max_object_bytes() => {}
+            (None, Some(bytes)) if bytes <= self.options.limits.max_encoded_object_bytes() => {}
+            _ => return Err(SpoolInvariantError::ObjectTooLarge.into()),
         }
         if !self
             .protector
@@ -509,18 +833,27 @@ impl FileSpool {
             },
         });
         let plaintext = plaintext?;
-        verify_plaintext(reference, &plaintext)?;
+        self.verify_plaintext(reference, &plaintext)?;
         Ok(plaintext)
     }
 
-    fn capacity_after(&self, usage: SpoolUsage, protected_bytes: u64) -> Result<(), SpoolError> {
-        let objects = usage
+    fn capacity_after(
+        &self,
+        memory: &MemoryState,
+        additional_objects: u32,
+        additional_protected_bytes: u64,
+    ) -> Result<(), SpoolError> {
+        let objects = memory
+            .usage
             .objects
-            .checked_add(1)
+            .checked_add(memory.reserved_objects)
+            .and_then(|objects| objects.checked_add(additional_objects))
             .ok_or(SpoolError::CapacityExhausted)?;
-        let bytes = usage
+        let bytes = memory
+            .usage
             .protected_bytes
-            .checked_add(protected_bytes)
+            .checked_add(memory.reserved_protected_bytes)
+            .and_then(|bytes| bytes.checked_add(additional_protected_bytes))
             .ok_or(SpoolError::CapacityExhausted)?;
         if objects > self.options.limits.max_objects() {
             self.options.observer.observe(SpoolEvent::CapacityRejected {
@@ -535,6 +868,65 @@ impl FileSpool {
             return Err(SpoolError::CapacityExhausted);
         }
         Ok(())
+    }
+
+    fn validate_protected_size(
+        &self,
+        reference: &DurableContentRef,
+        protected_bytes: u64,
+    ) -> Result<(), SpoolError> {
+        let allowed = match (
+            reference.public_plaintext_bytes(),
+            reference.endpoint_result_allocation_bytes(),
+        ) {
+            (Some(plaintext_bytes), None) => plaintext_bytes
+                .checked_add(self.options.limits.max_protection_overhead_bytes())
+                .is_some_and(|maximum| protected_bytes <= maximum),
+            (None, Some(allocation_bytes)) => protected_bytes == allocation_bytes,
+            _ => false,
+        } && protected_bytes <= self.options.limits.max_encoded_object_bytes();
+        if allowed {
+            Ok(())
+        } else {
+            Err(SpoolInvariantError::ProtectionOverheadExceeded.into())
+        }
+    }
+
+    fn verify_plaintext(
+        &self,
+        reference: &DurableContentRef,
+        plaintext: &[u8],
+    ) -> Result<(), SpoolError> {
+        if let (Some(expected_bytes), Some(expected_digest)) = (
+            reference.public_plaintext_bytes(),
+            reference.public_plaintext_sha256(),
+        ) {
+            let size = u64::try_from(plaintext.len()).unwrap_or(u64::MAX);
+            let digest = Sha256Digest::from_bytes(Sha256::digest(plaintext).into());
+            return if size == expected_bytes && digest == expected_digest {
+                Ok(())
+            } else {
+                Err(SpoolInvariantError::ContentMismatch.into())
+            };
+        }
+        let expected = self.endpoint_result_reference_for(reference.protection_id(), plaintext)?;
+        let expected_identity = expected
+            .endpoint_result_identity()
+            .ok_or(SpoolInvariantError::InvalidContentIdentity)?;
+        let actual_identity = reference
+            .endpoint_result_identity()
+            .ok_or(SpoolInvariantError::InvalidContentIdentity)?;
+        if bool::from(
+            expected_identity
+                .as_bytes()
+                .ct_eq(actual_identity.as_bytes()),
+        ) && expected.endpoint_result_allocation_bytes()
+            == reference.endpoint_result_allocation_bytes()
+        {
+            Ok(())
+        } else {
+            Err(SpoolInvariantError::ContentMismatch.into())
+        }
     }
 
     fn observe_completion<T>(
@@ -565,6 +957,88 @@ impl FileSpool {
 }
 
 impl DurableContentStore for FileSpool {
+    fn create_keyed_commitment(
+        &self,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        self.recreate_keyed_commitment(self.protector.protection_id(), domain, material_digest)
+    }
+
+    fn recreate_keyed_commitment(
+        &self,
+        protection_id: &ProtectionId,
+        domain: ContentCommitmentDomain,
+        material_digest: &[u8; 32],
+    ) -> Result<KeyedContentCommitment, SpoolError> {
+        if !self.protector.supports_protection_id(protection_id) {
+            return Err(ContentProtectionError::KeyUnavailable.into());
+        }
+        let commitment = self
+            .protector
+            .keyed_commitment(protection_id, domain, material_digest);
+        self.options.observer.observe(SpoolEvent::Protection {
+            operation: SpoolProtectionOperation::Commitment,
+            outcome: if commitment.is_ok() {
+                SpoolProtectionOutcome::Success
+            } else {
+                SpoolProtectionOutcome::Error
+            },
+        });
+        Ok(KeyedContentCommitment::new(
+            protection_id.clone(),
+            commitment?,
+        ))
+    }
+
+    fn reserve_endpoint_result(
+        &self,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<Box<dyn EndpointResultCapacityReservation<'_> + '_>, SpoolError> {
+        if maximum_plaintext_bytes > self.options.limits.max_object_bytes() {
+            self.options.observer.observe(SpoolEvent::CapacityRejected {
+                resource: SpoolCapacityResource::ObjectBytes,
+            });
+            return Err(SpoolInvariantError::ObjectTooLarge.into());
+        }
+        let protected_bytes = crate::endpoint_result_allocation(maximum_plaintext_bytes)?;
+        let protector_bytes = self
+            .protector
+            .endpoint_result_protected_bytes(maximum_plaintext_bytes)?;
+        if protector_bytes != protected_bytes {
+            return Err(SpoolInvariantError::ProtectionOverheadExceeded.into());
+        }
+        let maximum_encoded = maximum_plaintext_bytes
+            .checked_add(self.options.limits.max_protection_overhead_bytes())
+            .ok_or(SpoolInvariantError::ProtectionOverheadExceeded)?;
+        if protected_bytes > maximum_encoded
+            || protected_bytes > self.options.limits.max_encoded_object_bytes()
+        {
+            return Err(SpoolInvariantError::ProtectionOverheadExceeded.into());
+        }
+        let mut memory = self.memory.lock().map_err(|_| SpoolError::Poisoned)?;
+        if memory.poisoned {
+            return Err(SpoolError::Poisoned);
+        }
+        self.capacity_after(&memory, 1, protected_bytes)?;
+        let reserved_objects = memory
+            .reserved_objects
+            .checked_add(1)
+            .ok_or(SpoolError::CapacityExhausted)?;
+        let reserved_protected_bytes = memory
+            .reserved_protected_bytes
+            .checked_add(protected_bytes)
+            .ok_or(SpoolError::CapacityExhausted)?;
+        memory.reserved_objects = reserved_objects;
+        memory.reserved_protected_bytes = reserved_protected_bytes;
+        Ok(Box::new(FileEndpointResultReservation {
+            spool: self,
+            maximum_plaintext_bytes,
+            reserved_protected_bytes: protected_bytes,
+            active: true,
+        }))
+    }
+
     fn persist(
         &self,
         kind: ContentKind,
@@ -576,7 +1050,10 @@ impl DurableContentStore for FileSpool {
             .observer
             .observe(SpoolEvent::OperationStarted { operation });
         let result = (|| {
-            let reference = self.reference_for(kind, plaintext)?;
+            if kind == ContentKind::EndpointResult {
+                return Err(SpoolInvariantError::EndpointResultReservationRequired.into());
+            }
+            let reference = self.public_reference_for(kind, plaintext)?;
             let permit = self.publications.begin()?;
             let mut memory = self.memory.lock().map_err(|_| SpoolError::Poisoned)?;
             if memory.poisoned {
@@ -598,23 +1075,26 @@ impl DurableContentStore for FileSpool {
             let protected = protected?;
             let protected_bytes = u64::try_from(protected.len())
                 .map_err(|_| SpoolInvariantError::ProtectionOverheadExceeded)?;
-            let allowed = reference
-                .size()
-                .checked_add(self.options.limits.max_protection_overhead_bytes())
-                .is_some_and(|maximum| protected_bytes <= maximum)
-                && protected_bytes <= self.options.limits.max_encoded_object_bytes();
-            if !allowed {
-                return Err(SpoolInvariantError::ProtectionOverheadExceeded.into());
-            }
-            self.capacity_after(memory.usage, protected_bytes)?;
+            self.validate_protected_size(&reference, protected_bytes)?;
+            self.capacity_after(&memory, 1, protected_bytes)?;
+            let next_objects = memory
+                .usage
+                .objects
+                .checked_add(1)
+                .ok_or(SpoolError::CapacityExhausted)?;
+            let next_protected_bytes = memory
+                .usage
+                .protected_bytes
+                .checked_add(protected_bytes)
+                .ok_or(SpoolError::CapacityExhausted)?;
             match self.directory.commit(
                 &reference,
                 &protected,
                 self.options.fault_injector.as_ref(),
             ) {
                 Ok(()) => {
-                    memory.usage.objects += 1;
-                    memory.usage.protected_bytes += protected_bytes;
+                    memory.usage.objects = next_objects;
+                    memory.usage.protected_bytes = next_protected_bytes;
                     Ok(DurableContentPublication { reference, permit })
                 }
                 Err(failure) if failure.renamed() => {
@@ -665,7 +1145,11 @@ impl DurableContentStore for FileSpool {
             self.options.observer.observe(SpoolEvent::ContentBytes {
                 operation,
                 content_kind: reference.kind(),
-                bytes: u64::try_from(plaintext.len()).unwrap_or(u64::MAX),
+                bytes: if reference.kind() == ContentKind::EndpointResult {
+                    reference.accounted_bytes()
+                } else {
+                    u64::try_from(plaintext.len()).unwrap_or(u64::MAX)
+                },
             });
         }
         self.observe_completion(
@@ -699,6 +1183,16 @@ impl DurableContentStore for FileSpool {
             };
             self.open_and_verify(reference, &protected)?;
             let protected_bytes = u64::try_from(protected.len()).unwrap_or(u64::MAX);
+            let next_objects = memory
+                .usage
+                .objects
+                .checked_sub(1)
+                .ok_or(SpoolError::Poisoned)?;
+            let next_protected_bytes = memory
+                .usage
+                .protected_bytes
+                .checked_sub(protected_bytes)
+                .ok_or(SpoolError::Poisoned)?;
             match self.directory.remove(reference) {
                 Ok(false) => return Ok(false),
                 Ok(true) => {}
@@ -713,23 +1207,15 @@ impl DurableContentStore for FileSpool {
                 }
                 Err(failure) => return Err(failure.into_public()),
             }
-            memory.usage.objects = memory
-                .usage
-                .objects
-                .checked_sub(1)
-                .ok_or(SpoolError::Poisoned)?;
-            memory.usage.protected_bytes = memory
-                .usage
-                .protected_bytes
-                .checked_sub(protected_bytes)
-                .ok_or(SpoolError::Poisoned)?;
+            memory.usage.objects = next_objects;
+            memory.usage.protected_bytes = next_protected_bytes;
             Ok(true)
         })();
         if matches!(result, Ok(true)) {
             self.options.observer.observe(SpoolEvent::ContentBytes {
                 operation,
                 content_kind: reference.kind(),
-                bytes: reference.size(),
+                bytes: reference.accounted_bytes(),
             });
         }
         let successful_outcome = if matches!(result, Ok(false)) {
@@ -814,15 +1300,5 @@ impl DurableContentStore for FileSpool {
             &result,
         );
         result
-    }
-}
-
-fn verify_plaintext(reference: &DurableContentRef, plaintext: &[u8]) -> Result<(), SpoolError> {
-    let size = u64::try_from(plaintext.len()).unwrap_or(u64::MAX);
-    let digest = Sha256Digest::from_bytes(Sha256::digest(plaintext).into());
-    if size == reference.size() && digest == reference.sha256() {
-        Ok(())
-    } else {
-        Err(SpoolInvariantError::ContentMismatch.into())
     }
 }

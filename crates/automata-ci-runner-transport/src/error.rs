@@ -32,6 +32,8 @@ pub enum ConfigurationError {
 pub enum ApplicationErrorKind {
     /// The authenticated runner is not authorized for the claimed operation.
     Forbidden,
+    /// The authenticated operation is valid but not yet inside its due window.
+    TooEarly,
     /// The claimed durable session is absent or no longer current.
     StaleSession,
     /// Durable state rejected a conflicting operation or fencing token.

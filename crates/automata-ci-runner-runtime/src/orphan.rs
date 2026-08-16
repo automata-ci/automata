@@ -1,13 +1,14 @@
 use std::{fmt, sync::Arc};
 
-use automata_ci_core::{OperationId, RunnerId, RunnerSessionId, Sha256Digest};
+use automata_ci_core::{LeaseGuard, OperationId, RunnerId, RunnerSessionId, Sha256Digest};
 use automata_ci_protocol::{
-    HandshakeErrorCode, NegotiatedSession, ProtocolLimits, ServerToRunner, SessionDisposition,
+    HandshakeErrorCode, NegotiatedSession, ProtocolLimits, RunnerSlotOrdinal, ServerToRunner,
+    SessionDisposition,
 };
 use automata_ci_runner_journal::{
-    JournalContentRetainSet, OrphanAbandonmentPermissions, OrphanAbandonmentReason,
-    OrphanAuthorityError, OrphanAuthorityGrant, OrphanAuthorityProof, OrphanAuthorityVerifier,
-    OrphanClaim, OrphanDelivery, RunnerJournal, SlotSnapshot,
+    EndpointOperationState, JournalContentRetainSet, OrphanAbandonmentPermissions,
+    OrphanAbandonmentReason, OrphanAuthorityError, OrphanAuthorityGrant, OrphanAuthorityProof,
+    OrphanAuthorityVerifier, OrphanClaim, OrphanDelivery, RunnerJournal, SlotSnapshot,
 };
 use automata_ci_runner_spool::DurableContentStore;
 use sha2::{Digest as _, Sha256};
@@ -243,8 +244,61 @@ impl OrphanRecoveryCoordinator {
             }
         }
 
+        self.resolve_endpoint_recovery_after_sandbox_absence(session_id, slot_ordinal, guard)?;
+
         self.journal.release_slot(session_id, slot_ordinal, guard)?;
         Ok(())
+    }
+
+    fn resolve_endpoint_recovery_after_sandbox_absence(
+        &self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+    ) -> Result<(), RunnerRuntimeError> {
+        loop {
+            let snapshot = self.journal.snapshot()?;
+            let durable = snapshot
+                .slot(slot)
+                .ok_or(RunnerRuntimeError::ExecutorContract)?;
+            if durable.offer().lease().guard() != guard || durable.sandbox().is_some() {
+                return Err(RunnerRuntimeError::ExecutorContract);
+            }
+            let Some(operation) = durable.endpoint_recovery_pending() else {
+                return Ok(());
+            };
+            match operation.state() {
+                EndpointOperationState::Accepted => {
+                    self.journal.record_endpoint_cancellation(
+                        session_id,
+                        slot,
+                        guard,
+                        operation.operation_id(),
+                    )?;
+                }
+                EndpointOperationState::InvocationCommitted => {
+                    self.journal.abandon_endpoint_operation(
+                        session_id,
+                        slot,
+                        guard,
+                        operation.operation_id(),
+                    )?;
+                }
+                EndpointOperationState::CancellationRequested => {
+                    self.journal.complete_endpoint_cancellation(
+                        session_id,
+                        slot,
+                        guard,
+                        operation.operation_id(),
+                    )?;
+                }
+                EndpointOperationState::Cancelled
+                | EndpointOperationState::Abandoned
+                | EndpointOperationState::Completed { .. } => {
+                    return Err(RunnerRuntimeError::ExecutorContract);
+                }
+            }
+        }
     }
 }
 

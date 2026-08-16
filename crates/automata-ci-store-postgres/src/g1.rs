@@ -5200,12 +5200,18 @@ async fn load_lease_offer_publication_by_command(
     Ok(publication)
 }
 
-#[allow(clippy::too_many_lines)] // One snapshot query closes every offer field under the same lock.
-async fn load_runtime_authority_offer_by_command(
+#[derive(Debug)]
+struct DecodedRuntimeAuthorityCommand {
+    request_kind: RunnerOperationKind,
+    operation_id: OperationId,
+    sequence: CommandSequence,
+    created_at: UnixMillis,
+}
+
+async fn query_runtime_authority_offer_by_command(
     transaction: &mut Transaction<'_, Postgres>,
     identity: LeaseOfferCommandIdentity,
-) -> Result<Option<AcceptedRuntimeAuthorityOffer>, StoreError> {
-    let session = identity.session();
+) -> Result<Option<sqlx::postgres::PgRow>, StoreError> {
     let rows = sqlx::query(
         r"
         SELECT publication.request_operation_id, publication.runner_id,
@@ -5236,21 +5242,24 @@ async fn load_runtime_authority_offer_by_command(
         FOR UPDATE OF publication, command
         ",
     )
-    .bind(session.session_id().as_uuid())
+    .bind(identity.session().session_id().as_uuid())
     .bind(sequence_i64(identity.sequence())?)
     .fetch_all(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    let [row] = rows.as_slice() else {
-        return if rows.is_empty() {
-            Ok(None)
-        } else {
-            Err(StoreError::corrupt_data(
-                "multiple runtime-authority offers reference one command",
-            ))
-        };
-    };
+    match rows.len() {
+        0 => Ok(None),
+        1 => Ok(rows.into_iter().next()),
+        _ => Err(StoreError::corrupt_data(
+            "multiple runtime-authority offers reference one command",
+        )),
+    }
+}
 
+fn validate_runtime_authority_offer_session(
+    row: &sqlx::postgres::PgRow,
+    session: RunnerSessionFence,
+) -> Result<(), StoreError> {
     let publication_runner_id =
         RunnerId::from_uuid(row.try_get("runner_id").map_err(operation_error)?);
     let publication_epoch = decode_epoch(
@@ -5272,19 +5281,26 @@ async fn load_runtime_authority_offer_by_command(
         row.try_get("command_runner_generation")
             .map_err(operation_error)?,
     )?;
-    if publication_runner_id != session.runner_id()
-        || publication_epoch != session.session_epoch()
-        || publication_generation != session.runner_generation()
-        || command_session_id != session.session_id().as_uuid()
-        || command_runner_id != session.runner_id()
-        || command_epoch != session.session_epoch()
-        || command_generation != session.runner_generation()
+    if publication_runner_id == session.runner_id()
+        && publication_epoch == session.session_epoch()
+        && publication_generation == session.runner_generation()
+        && command_session_id == session.session_id().as_uuid()
+        && command_runner_id == session.runner_id()
+        && command_epoch == session.session_epoch()
+        && command_generation == session.runner_generation()
     {
-        return Err(StoreError::corrupt_data(
+        Ok(())
+    } else {
+        Err(StoreError::corrupt_data(
             "runtime-authority offer has a mismatched session fence",
-        ));
+        ))
     }
+}
 
+fn decode_runtime_authority_command(
+    row: &sqlx::postgres::PgRow,
+    identity: LeaseOfferCommandIdentity,
+) -> Result<DecodedRuntimeAuthorityCommand, StoreError> {
     let request_kind = RunnerOperationKind::new(
         row.try_get::<String, _>("operation_kind")
             .map_err(operation_error)?,
@@ -5292,29 +5308,27 @@ async fn load_runtime_authority_offer_by_command(
     .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     let command_kind: String = row.try_get("command_kind").map_err(operation_error)?;
     let command_schema = decode_schema(row.try_get("command_schema").map_err(operation_error)?)?;
-    let _command_digest =
-        decode_sha256_digest(row.try_get("command_digest").map_err(operation_error)?)
-            .map_err(|error| StoreError::corrupt_data(error.clone()))?;
+    decode_sha256_digest(row.try_get("command_digest").map_err(operation_error)?)
+        .map_err(|error| StoreError::corrupt_data(error.clone()))?;
     if request_kind.as_str() != LEASE_RPC_OPERATION_KIND
         || !is_lease_offer_command_kind(&command_kind)
+        || command_schema.get() != LEASE_OFFER_COMMAND_SCHEMA
     {
         return Err(StoreError::corrupt_data(
             "runtime-authority offer has invalid command metadata",
         ));
     }
-
-    let command_operation_id = OperationId::from_uuid(
+    let operation_id = OperationId::from_uuid(
         row.try_get("command_operation_id")
             .map_err(operation_error)?,
     );
-    let command_sequence =
-        decode_sequence(row.try_get("command_sequence").map_err(operation_error)?)?;
-    if command_operation_id != identity.operation_id() || command_sequence != identity.sequence() {
+    let sequence = decode_sequence(row.try_get("command_sequence").map_err(operation_error)?)?;
+    if operation_id != identity.operation_id() || sequence != identity.sequence() {
         return Err(StoreError::corrupt_data(
             "runtime-authority offer resolved a different command identity",
         ));
     }
-    let command_created_at = UnixMillis::new(
+    let created_at = UnixMillis::new(
         row.try_get("command_created_at_ms")
             .map_err(operation_error)?,
     );
@@ -5322,12 +5336,29 @@ async fn load_runtime_authority_offer_by_command(
         row.try_get("publication_created_at_ms")
             .map_err(operation_error)?,
     );
-    if command_created_at != publication_created_at {
+    if created_at != publication_created_at {
         return Err(StoreError::corrupt_data(
             "runtime-authority publication and command creation times disagree",
         ));
     }
+    Ok(DecodedRuntimeAuthorityCommand {
+        request_kind,
+        operation_id,
+        sequence,
+        created_at,
+    })
+}
 
+async fn load_runtime_authority_offer_by_command(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: LeaseOfferCommandIdentity,
+) -> Result<Option<AcceptedRuntimeAuthorityOffer>, StoreError> {
+    let Some(row) = query_runtime_authority_offer_by_command(transaction, identity).await? else {
+        return Ok(None);
+    };
+    let session = identity.session();
+    validate_runtime_authority_offer_session(&row, session)?;
+    let command = decode_runtime_authority_command(&row, identity)?;
     let request_operation_id = OperationId::from_uuid(
         row.try_get("request_operation_id")
             .map_err(operation_error)?,
@@ -5335,13 +5366,15 @@ async fn load_runtime_authority_offer_by_command(
     let request_digest =
         decode_sha256_digest(row.try_get("request_digest").map_err(operation_error)?)
             .map_err(|error| StoreError::corrupt_data(error.clone()))?;
-    let request =
-        RunnerOperationRequest::new(session, request_operation_id, request_kind, request_digest);
+    let request = RunnerOperationRequest::new(
+        session,
+        request_operation_id,
+        command.request_kind,
+        request_digest,
+    );
     let protocol_version =
         decode_protocol(row.try_get("protocol_version").map_err(operation_error)?)?;
-    if command_schema.get() != LEASE_OFFER_COMMAND_SCHEMA
-        || protocol_version.get() != LEASE_OFFER_COMMAND_SCHEMA
-    {
+    if protocol_version.get() != LEASE_OFFER_COMMAND_SCHEMA {
         return Err(StoreError::corrupt_data(
             "runtime-authority offer has invalid protocol metadata",
         ));
@@ -5360,8 +5393,8 @@ async fn load_runtime_authority_offer_by_command(
     .ok()
     .and_then(|value| FencingToken::new(value).ok())
     .ok_or_else(|| StoreError::corrupt_data("invalid runtime-authority fencing token"))?;
-    let lease = decode_lease_offer_lease(row, session.runner_id(), fencing)?;
-    let job_ir = decode_lease_offer_job_ir(row)?;
+    let lease = decode_lease_offer_lease(&row, session.runner_id(), fencing)?;
+    let job_ir = decode_lease_offer_job_ir(&row)?;
     let offer_valid_until = UnixMillis::new(
         row.try_get("offer_valid_until_ms")
             .map_err(operation_error)?,
@@ -5374,9 +5407,9 @@ async fn load_runtime_authority_offer_by_command(
         job_ir,
         offer_valid_until,
         RuntimeAuthorityOfferCommand::new(
-            command_operation_id,
-            command_sequence,
-            command_created_at,
+            command.operation_id,
+            command.sequence,
+            command.created_at,
         ),
     )
     .map(Some)

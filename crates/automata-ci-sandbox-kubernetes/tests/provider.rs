@@ -1,5 +1,6 @@
 use std::{
     convert::Infallible,
+    num::NonZeroU16,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,9 +15,9 @@ use automata_ci_core::{
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, ExecutionArgv, ExecutionEnvironment,
     ImmutableImage, NetworkPolicy, NeverCancelled, OperationOutcome, ProviderError,
-    ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy,
-    SandboxCapability, SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxProvider,
-    SandboxSpec, SandboxState, TargetPath,
+    ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy, RunnerId,
+    SandboxCapability, SandboxCustody, SandboxEnvironment, SandboxGeneration, SandboxHandle,
+    SandboxProvider, SandboxSpec, SandboxState, TargetPath,
 };
 use automata_ci_sandbox_kubernetes::{
     KUBERNETES_PROVIDER_ID, KubernetesSandboxConfig, KubernetesSandboxProvider,
@@ -30,6 +31,10 @@ use tower::service_fn;
 const NAMESPACE: &str = "automata-runners";
 const MANAGED_LABEL: &str = "ci.automata.dev/managed";
 const SANDBOX_LABEL: &str = "ci.automata.dev/sandbox";
+const SCHEMA_LABEL: &str = "ci.automata.dev/sandbox-schema";
+const CUSTODY_KIND_LABEL: &str = "ci.automata.dev/custody-kind";
+const CUSTODY_RUNNER_LABEL: &str = "ci.automata.dev/custody-runner";
+const CUSTODY_SLOT_LABEL: &str = "ci.automata.dev/custody-slot";
 const GENERATION_ANNOTATION: &str = "ci.automata.dev/generation";
 const FINGERPRINT_ANNOTATION: &str = "ci.automata.dev/spec-sha256";
 
@@ -47,8 +52,12 @@ impl TestCancellation {
 }
 
 impl Cancellation for TestCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+    fn disposition(&self) -> automata_ci_execution::CancellationDisposition {
+        if self.0.load(Ordering::SeqCst) {
+            automata_ci_execution::CancellationDisposition::Terminate
+        } else {
+            automata_ci_execution::CancellationDisposition::Active
+        }
     }
 }
 
@@ -265,6 +274,34 @@ impl FakeKube {
     fn delay_next(&self, delay: Duration) {
         self.0.lock().expect("fake state lock").delay_next = Some(delay);
     }
+
+    fn replace_custody(&self, kind: &str, runner: RunnerId, slot: u16) {
+        let mut state = self.0.lock().expect("fake state lock");
+        let replace = |resource: &mut Value| {
+            resource["metadata"]["labels"][CUSTODY_KIND_LABEL] = json!(kind);
+            resource["metadata"]["labels"][CUSTODY_RUNNER_LABEL] = json!(runner.to_string());
+            resource["metadata"]["labels"][CUSTODY_SLOT_LABEL] = json!(slot.to_string());
+        };
+        if let Some(resource) = state.pod.as_mut() {
+            replace(resource);
+        }
+        if let Some(resource) = state.policy.as_mut() {
+            replace(resource);
+        }
+    }
+
+    fn replace_schema(&self, schema: &str) {
+        let mut state = self.0.lock().expect("fake state lock");
+        let replace = |resource: &mut Value| {
+            resource["metadata"]["labels"][SCHEMA_LABEL] = json!(schema);
+        };
+        if let Some(resource) = state.pod.as_mut() {
+            replace(resource);
+        }
+        if let Some(resource) = state.policy.as_mut() {
+            replace(resource);
+        }
+    }
 }
 
 fn pod_response(pod: &Value, view: PodView) -> Value {
@@ -376,6 +413,10 @@ fn sandbox_spec() -> SandboxSpec {
     SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(7).expect("generation"),
+        SandboxCustody::Job {
+            runner_id: RunnerId::new(),
+            slot_ordinal: NonZeroU16::new(7).expect("non-zero slot"),
+        },
         environment,
         workspace,
         NetworkPolicy::Disabled,
@@ -454,6 +495,7 @@ async fn complete_lifecycle_uses_exact_owned_objects_and_delete_preconditions() 
     assert_eq!(replayed, record);
     assert_eq!(inspection.handle(), &handle);
     assert_eq!(inspection.generation(), spec.generation());
+    assert_eq!(inspection.custody(), spec.custody());
     assert_eq!(inspection.profile(), spec.profile().attestation());
     assert_eq!(inspection.state(), SandboxState::Running);
     assert_eq!(endpoint.handle(), &handle);
@@ -486,6 +528,7 @@ async fn complete_lifecycle_uses_exact_owned_objects_and_delete_preconditions() 
     let pod_body: Value = serde_json::from_slice(&requests[3].body).expect("Pod body");
     assert_eq!(policy_body["metadata"]["labels"][MANAGED_LABEL], "true");
     assert_eq!(policy_body["metadata"]["labels"][SANDBOX_LABEL], name);
+    assert_eq!(policy_body["metadata"]["labels"][SCHEMA_LABEL], "2");
     assert_eq!(
         policy_body["spec"]["policyTypes"],
         json!(["Ingress", "Egress"])
@@ -591,6 +634,56 @@ async fn create_recovers_both_create_conflicts_by_verifying_stored_fingerprints(
             Method::GET,
         ]
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_reports_and_revalidates_exact_custody_and_current_schema() {
+    let fake = FakeKube::default();
+    let provider = test_provider(&fake);
+    let spec = sandbox_spec();
+    let handle = sandbox_handle(&spec);
+    provider
+        .create(&spec, &NeverCancelled)
+        .expect("create current Kubernetes resources");
+
+    let wrong_runner = RunnerId::new();
+    fake.replace_custody("job", wrong_runner, 7);
+    assert_eq!(
+        provider
+            .inspect(&handle, &NeverCancelled)
+            .expect("custody is explicit recovery evidence")
+            .custody(),
+        SandboxCustody::Job {
+            runner_id: wrong_runner,
+            slot_ordinal: NonZeroU16::new(7).expect("non-zero slot"),
+        }
+    );
+    let error = provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("replay must reject a wrong runner");
+    assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+
+    fake.replace_custody("job", spec.custody().runner_id(), 2);
+    assert_eq!(
+        provider
+            .inspect(&handle, &NeverCancelled)
+            .expect("job slot is explicit recovery evidence")
+            .custody(),
+        SandboxCustody::Job {
+            runner_id: spec.custody().runner_id(),
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        }
+    );
+    let error = provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("replay must reject a wrong slot");
+    assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+
+    fake.replace_schema("1");
+    let error = provider
+        .inspect(&handle, &NeverCancelled)
+        .expect_err("schema-1 Kubernetes resources must not recover");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

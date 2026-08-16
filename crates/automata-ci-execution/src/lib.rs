@@ -34,21 +34,25 @@ mod sandbox;
 mod service;
 mod value;
 
-pub use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, OperationId, Sha256Digest};
+pub use automata_ci_core::{
+    EnvironmentProfile, EnvironmentProfileId, OperationId, RunnerId, Sha256Digest,
+};
 pub use capability::{ProviderCapabilities, SandboxCapability};
 pub use endpoint::{
-    Cancellation, CopyFromRequest, CopyToRequest, EnvironmentName, EnvironmentValue,
-    EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionEnvironment,
-    ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream, ExecutionSignal,
-    ExecutionTermination, NeverCancelled, SignalRequest, WaitRequest,
+    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest,
+    ENDPOINT_JOB_SETUP_OPERATIONS, ENDPOINT_OPERATIONS_PER_RUN_STEP, EnvironmentName,
+    EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint,
+    ExecutionEnvironment, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
+    ExecutionSignal, ExecutionTermination, MAX_ENDPOINT_OPERATIONS_PER_JOB, NeverCancelled,
+    SignalRequest, WaitRequest,
 };
 pub use error::{
     ExecutionError, ExecutionErrorKind, ExecutionStage, OperationOutcome, ProviderError,
     ProviderErrorKind, ProviderStage, ValueError,
 };
 pub use sandbox::{
-    DestroyDisposition, DestroySandbox, SandboxInspection, SandboxProvider, SandboxRecord,
-    SandboxSpec, SandboxState,
+    DestroyDisposition, DestroySandbox, SandboxCustody, SandboxInspection, SandboxProvider,
+    SandboxRecord, SandboxSpec, SandboxState,
 };
 pub use service::{
     ContainerHandle, ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec,

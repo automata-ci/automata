@@ -239,6 +239,7 @@ const fn journal_domain_label(domain: JournalMutationDomain) -> &'static str {
         JournalMutationDomain::Lifecycle => "lifecycle",
         JournalMutationDomain::Result => "result",
         JournalMutationDomain::Provider => "provider",
+        JournalMutationDomain::Endpoint => "endpoint",
         JournalMutationDomain::Outbound => "outbound",
         JournalMutationDomain::Log => "log",
         JournalMutationDomain::Orphan => "orphan",
@@ -1876,6 +1877,8 @@ const fn content_kind_label(value: ContentKind) -> &'static str {
         ContentKind::RuntimeAuthority => "runtime_authority",
         ContentKind::TerminalResult => "terminal_result",
         ContentKind::LogSpool => "log_spool",
+        ContentKind::EndpointRequest => "endpoint_request",
+        ContentKind::EndpointResult => "endpoint_result",
     }
 }
 
@@ -1898,6 +1901,7 @@ const fn spool_failure_label(value: SpoolFailureKind) -> &'static str {
 
 const fn protection_operation_label(value: SpoolProtectionOperation) -> &'static str {
     match value {
+        SpoolProtectionOperation::Commitment => "commitment",
         SpoolProtectionOperation::Protect => "protect",
         SpoolProtectionOperation::Unprotect => "unprotect",
     }

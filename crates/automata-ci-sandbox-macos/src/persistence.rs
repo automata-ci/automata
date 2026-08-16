@@ -5,7 +5,7 @@ use std::{
 };
 
 use automata_ci_execution::{
-    DestroyDisposition, EnvironmentProfile, OperationId, SandboxGeneration,
+    DestroyDisposition, EnvironmentProfile, OperationId, SandboxCustody, SandboxGeneration,
 };
 use rustix::{
     fs::{self, FlockOperation, Mode, OFlags, fchmod, flock, fstat, openat},
@@ -16,13 +16,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::filesystem::SecureRoot;
 
-const LOCK_FILE_NAME: &str = ".automata-macos-virtualization-v1.lock";
-const JOURNAL_FILE_NAME: &str = ".automata-macos-virtualization-v1.events";
-const LEGACY_STATE_NAMES: [&str; 2] = [
-    ".automata-macos-provider-v1.lock",
-    ".automata-macos-provider-v1.events",
-];
-const DURABLE_SCHEMA: u32 = 1;
+const LOCK_FILE_NAME: &str = ".automata-macos-virtualization-v2.lock";
+const JOURNAL_FILE_NAME: &str = ".automata-macos-virtualization-v2.events";
+const DURABLE_SCHEMA: u32 = 2;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
 const FILE_MODE: Mode = Mode::from_raw_mode(0o600);
@@ -42,6 +38,7 @@ pub(crate) struct DurableCreate {
     pub(crate) operation_id: OperationId,
     pub(crate) fingerprint: [u8; 32],
     pub(crate) handle: String,
+    pub(crate) custody: SandboxCustody,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -50,6 +47,7 @@ pub(crate) struct DurableEntry {
     pub(crate) handle: String,
     pub(crate) generation: u64,
     pub(crate) profile: EnvironmentProfile,
+    pub(crate) custody: SandboxCustody,
     pub(crate) workspace: String,
     pub(crate) scratch: String,
     pub(crate) phase: DurableEntryPhase,
@@ -70,6 +68,7 @@ pub(crate) struct DurableDestroyRequest {
     pub(crate) handle: String,
     pub(crate) generation: u64,
     pub(crate) profile: EnvironmentProfile,
+    pub(crate) custody: SandboxCustody,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -102,6 +101,7 @@ pub(crate) struct DurableTombstone {
     pub(crate) handle: String,
     pub(crate) generation: u64,
     pub(crate) profile: EnvironmentProfile,
+    pub(crate) custody: SandboxCustody,
     pub(crate) completed_sequence: u64,
 }
 
@@ -143,7 +143,6 @@ pub(crate) struct LifecycleJournal {
 
 impl LifecycleJournal {
     pub(crate) fn open(root: &SecureRoot) -> io::Result<(Self, DurableSnapshot)> {
-        reject_legacy_state(root)?;
         let lock = open_private_file(root, LOCK_FILE_NAME, false)?;
         flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
             if error == Errno::AGAIN {
@@ -249,22 +248,6 @@ impl LifecycleJournal {
     }
 }
 
-fn reject_legacy_state(root: &SecureRoot) -> io::Result<()> {
-    for name in LEGACY_STATE_NAMES {
-        match openat(
-            root.descriptor(),
-            name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::empty(),
-        ) {
-            Err(Errno::NOENT) => {}
-            Ok(_) | Err(Errno::LOOP | Errno::NOTDIR) => return Err(invalid()),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
-}
-
 fn open_private_file(
     root: &SecureRoot,
     name: &str,
@@ -337,18 +320,7 @@ fn apply_event(
     sequence: u64,
 ) -> io::Result<()> {
     match event {
-        DurableEvent::CreateIntent { create, entry } => {
-            if create.handle != entry.handle
-                || entry.phase != DurableEntryPhase::Intent
-                || snapshot.creates.contains_key(&create.operation_id)
-                || snapshot.entries.contains_key(&entry.handle)
-                || snapshot.tombstones.contains_key(&entry.handle)
-            {
-                return Err(invalid());
-            }
-            snapshot.creates.insert(create.operation_id, create.clone());
-            snapshot.entries.insert(entry.handle.clone(), entry.clone());
-        }
+        DurableEvent::CreateIntent { create, entry } => apply_create(snapshot, create, entry)?,
         DurableEvent::CreateReady { handle } => {
             let entry = snapshot.entries.get_mut(handle).ok_or_else(invalid)?;
             if entry.phase != DurableEntryPhase::Intent {
@@ -363,6 +335,7 @@ fn apply_event(
                 .ok_or_else(invalid)?;
             if entry.generation != request.generation
                 || entry.profile != request.profile
+                || entry.custody != request.custody
                 || entry.phase == DurableEntryPhase::Destroying
                 || snapshot
                     .pending_destroys
@@ -392,6 +365,7 @@ fn apply_event(
             if entry.phase != DurableEntryPhase::Destroying
                 || entry.generation != request.generation
                 || entry.profile != request.profile
+                || entry.custody != request.custody
             {
                 return Err(invalid());
             }
@@ -401,6 +375,7 @@ fn apply_event(
                     handle: request.handle.clone(),
                     generation: request.generation,
                     profile: request.profile.clone(),
+                    custody: request.custody,
                     completed_sequence: sequence,
                 },
             );
@@ -420,6 +395,7 @@ fn apply_event(
                 .ok_or_else(invalid)?;
             if tombstone.generation != request.generation
                 || tombstone.profile != request.profile
+                || tombstone.custody != request.custody
                 || snapshot.destroys.contains_key(&request.operation_id)
             {
                 return Err(invalid());
@@ -437,6 +413,25 @@ fn apply_event(
     Ok(())
 }
 
+fn apply_create(
+    snapshot: &mut DurableSnapshot,
+    create: &DurableCreate,
+    entry: &DurableEntry,
+) -> io::Result<()> {
+    if create.handle != entry.handle
+        || create.custody != entry.custody
+        || entry.phase != DurableEntryPhase::Intent
+        || snapshot.creates.contains_key(&create.operation_id)
+        || snapshot.entries.contains_key(&entry.handle)
+        || snapshot.tombstones.contains_key(&entry.handle)
+    {
+        return Err(invalid());
+    }
+    snapshot.creates.insert(create.operation_id, create.clone());
+    snapshot.entries.insert(entry.handle.clone(), entry.clone());
+    Ok(())
+}
+
 pub(crate) fn recovered_generation(value: u64) -> io::Result<SandboxGeneration> {
     SandboxGeneration::new(value).map_err(|_| invalid())
 }
@@ -450,10 +445,13 @@ mod tests {
     use std::{
         fs::{self, OpenOptions},
         io::Write as _,
+        num::NonZeroU16,
         path::PathBuf,
     };
 
-    use automata_ci_execution::{EnvironmentProfileId, Sha256Digest, TargetPath};
+    use automata_ci_execution::{
+        EnvironmentProfileId, RunnerId, SandboxCustody, Sha256Digest, TargetPath,
+    };
 
     use super::*;
 
@@ -471,17 +469,20 @@ mod tests {
         let operation_id = OperationId::new();
         let handle = OperationId::new().to_string();
         let profile = profile();
+        let custody = custody();
         journal
             .append(DurableEvent::CreateIntent {
                 create: DurableCreate {
                     operation_id,
                     fingerprint: [0x33; 32],
                     handle: handle.clone(),
+                    custody,
                 },
                 entry: DurableEntry {
                     handle: handle.clone(),
                     generation: 1,
                     profile,
+                    custody,
                     workspace: "/Users/automata-job/workspaces/job".to_owned(),
                     scratch: "/Users/automata-job/runner/job".to_owned(),
                     phase: DurableEntryPhase::Intent,
@@ -511,6 +512,14 @@ mod tests {
         );
         assert_eq!(
             snapshot
+                .entries
+                .get(&handle)
+                .expect("recovered entry")
+                .custody,
+            custody
+        );
+        assert_eq!(
+            snapshot
                 .creates
                 .get(&operation_id)
                 .expect("recovered create")
@@ -520,27 +529,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_native_state_is_rejected_without_migration() {
-        let fixture = TestRoot::new("legacy");
-        let root = fixture.secure_root();
-        fs::write(
-            fixture.path.join(LEGACY_STATE_NAMES[1]),
-            b"legacy native state\n",
-        )
-        .expect("write legacy marker");
-        assert!(matches!(
-            LifecycleJournal::open(&root),
-            Err(error) if error.kind() == io::ErrorKind::InvalidData
-        ));
-        assert!(!fixture.path.join(JOURNAL_FILE_NAME).exists());
-    }
-
-    #[test]
     fn lifecycle_reopen_rejects_noncurrent_durable_schemas() {
         let fixture = TestRoot::new("schema");
         let root = fixture.secure_root();
         let (mut journal, mut snapshot) = LifecycleJournal::open(&root).expect("initialize WAL");
         let handle = "schema-test-handle".to_owned();
+        let custody = custody();
         journal
             .append_to_snapshot(
                 &mut snapshot,
@@ -549,11 +543,13 @@ mod tests {
                         operation_id: OperationId::new(),
                         fingerprint: [0x51; 32],
                         handle: handle.clone(),
+                        custody,
                     },
                     entry: DurableEntry {
                         handle,
                         generation: 1,
                         profile: profile(),
+                        custody,
                         workspace: "/Users/automata-job/workspaces/schema-test".to_owned(),
                         scratch: "/Users/automata-job/runner/schema-test".to_owned(),
                         phase: DurableEntryPhase::Intent,
@@ -567,14 +563,79 @@ mod tests {
         let current = fs::read_to_string(&journal_path).expect("current WAL");
         let current_schema = format!("\"schema\":{DURABLE_SCHEMA}");
         assert!(current.contains(&current_schema));
-        for schema in [0, DURABLE_SCHEMA.checked_add(1).expect("test schema")] {
+        for schema in [
+            0,
+            DURABLE_SCHEMA - 1,
+            DURABLE_SCHEMA.checked_add(1).expect("test schema"),
+        ] {
             let noncurrent = current.replacen(&current_schema, &format!("\"schema\":{schema}"), 1);
             fs::write(&journal_path, noncurrent).expect("write noncurrent WAL");
-            let error = match LifecycleJournal::open(&root) {
-                Ok(_) => panic!("accepted WAL schema {schema}"),
-                Err(error) => error,
+            let Err(error) = LifecycleJournal::open(&root) else {
+                panic!("accepted WAL schema {schema}");
             };
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    fn lifecycle_reopen_rejects_wrong_runner_and_slot_custody() {
+        let runner_id = RunnerId::new();
+        let expected = SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        };
+        for (label, observed) in [
+            (
+                "runner",
+                SandboxCustody::Job {
+                    runner_id: RunnerId::new(),
+                    slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+                },
+            ),
+            (
+                "slot",
+                SandboxCustody::Job {
+                    runner_id,
+                    slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+                },
+            ),
+        ] {
+            let fixture = TestRoot::new(label);
+            let root = fixture.secure_root();
+            let operation_id = OperationId::new();
+            let handle = operation_id.to_string();
+            let event = DurableEvent::CreateIntent {
+                create: DurableCreate {
+                    operation_id,
+                    fingerprint: [0x73; 32],
+                    handle: handle.clone(),
+                    custody: expected,
+                },
+                entry: DurableEntry {
+                    handle,
+                    generation: 1,
+                    profile: profile(),
+                    custody: observed,
+                    workspace: "/Users/automata-job/workspaces/custody".to_owned(),
+                    scratch: "/Users/automata-job/runner/custody".to_owned(),
+                    phase: DurableEntryPhase::Intent,
+                },
+            };
+            let sequence = 1;
+            let mut bytes = serde_json::to_vec(&EventRecord {
+                schema: DURABLE_SCHEMA,
+                sequence,
+                checksum: checksum(sequence, &event).expect("event checksum"),
+                event,
+            })
+            .expect("event record");
+            bytes.push(b'\n');
+            fs::write(fixture.path.join(JOURNAL_FILE_NAME), bytes).expect("write journal");
+
+            assert!(matches!(
+                LifecycleJournal::open(&root),
+                Err(error) if error.kind() == io::ErrorKind::InvalidData
+            ));
         }
     }
 
@@ -583,6 +644,12 @@ mod tests {
             EnvironmentProfileId::new("automata.dev/macos-15-arm64-vm-v1").expect("profile ID"),
             Sha256Digest::from_bytes([0x55; 32]),
         )
+    }
+
+    fn custody() -> SandboxCustody {
+        SandboxCustody::ProfileAdmission {
+            runner_id: RunnerId::new(),
+        }
     }
 
     struct TestRoot {

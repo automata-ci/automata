@@ -63,7 +63,7 @@ impl KubernetesExecutionEndpoint {
         cancellation: &dyn Cancellation,
         stage: ExecutionStage,
     ) -> Result<GuestResponse, ExecutionError> {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
         }
         let frame = encode_frame(request)
@@ -158,12 +158,12 @@ impl KubernetesExecutionEndpoint {
             }
         })
         .map_err(|kind| execution_error(map_provider_error(kind), stage))?;
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
         }
-        let response = decode_frame(&response)
+        let response: GuestResponse = decode_frame(&response)
             .map_err(|_| execution_error(ExecutionErrorKind::BackendRejected, stage))?;
-        if response_protocol(&response) != GUEST_PROTOCOL_VERSION {
+        if response.protocol() != GUEST_PROTOCOL_VERSION {
             return Err(execution_error(ExecutionErrorKind::BackendRejected, stage));
         }
         Ok(response)
@@ -171,7 +171,7 @@ impl KubernetesExecutionEndpoint {
 }
 
 async fn cancellation_requested(cancellation: &dyn Cancellation) {
-    while !cancellation.is_cancelled() {
+    while !cancellation.disposition().requires_termination() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -399,18 +399,6 @@ fn copy_from_result(response: GuestResponse, byte_limit: usize) -> Result<Vec<u8
     }
 }
 
-const fn response_protocol(response: &GuestResponse) -> u16 {
-    match response {
-        GuestResponse::Ready { protocol }
-        | GuestResponse::Hello { protocol, .. }
-        | GuestResponse::Configured { protocol }
-        | GuestResponse::Exec { protocol, .. }
-        | GuestResponse::WriteFile { protocol }
-        | GuestResponse::ReadFile { protocol, .. }
-        | GuestResponse::Rejected { protocol, .. } => *protocol,
-    }
-}
-
 fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionError {
     let kind = match response {
         GuestResponse::Rejected {
@@ -421,7 +409,8 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
             kind:
                 GuestRejection::UnsupportedProtocol
                 | GuestRejection::OperationFailed
-                | GuestRejection::OperationConflict,
+                | GuestRejection::OperationConflict
+                | GuestRejection::ReplayCapacityExceeded,
             ..
         }
         | GuestResponse::Ready { .. }
@@ -429,7 +418,9 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
         | GuestResponse::Configured { .. }
         | GuestResponse::Exec { .. }
         | GuestResponse::WriteFile { .. }
-        | GuestResponse::ReadFile { .. } => ExecutionErrorKind::BackendRejected,
+        | GuestResponse::AtomicCommitFile { .. }
+        | GuestResponse::ReadFile { .. }
+        | GuestResponse::ReadOptionalFile { .. } => ExecutionErrorKind::BackendRejected,
     };
     execution_error(kind, stage)
 }

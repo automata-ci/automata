@@ -11,13 +11,13 @@ use automata_ci_control::{
     },
 };
 use automata_ci_core::{JobIrVersion, OperationId, RunnerSessionId, Sha256Digest, UnixMillis};
-use automata_ci_postgres::store::PostgresStore;
 use automata_ci_store::{
     AcknowledgeRunnerCommands, CloseRunnerSession, CommandCursor, CommandReplayLimit,
     DocumentSchema, EnqueueRunnerCommand, OpenRunnerSession, RunnerCommandPayload,
     RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerOperationResponse,
     RunnerPayloadTombstoneReason, RunnerProtocolVersion, RunnerSessionFence, StoreError,
 };
+use automata_ci_store_postgres::PostgresStore;
 
 use crate::support::{
     TestDatabase, TestResult, run_with_database, runner_capability_document, seed_control_plane,

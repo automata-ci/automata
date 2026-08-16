@@ -202,7 +202,7 @@ fn secret_file_loading_rejects_unsafe_paths_and_permissions() {
 }
 
 #[test]
-fn server_configuration_validates_non_secret_endpoint_fields() {
+fn server_configuration_validates_complete_non_secret_s3_shape() {
     let cli = Cli::try_parse_from(["automata", "server", "--s3-endpoint", "not an endpoint"])
         .expect("endpoint validation belongs to server configuration");
     let Command::Server(args) = cli.command else {
@@ -211,6 +211,169 @@ fn server_configuration_validates_non_secret_endpoint_fields() {
     assert!(matches!(
         ServerConfig::from_args(&args),
         Err(ServerConfigError::InvalidS3Endpoint)
+    ));
+
+    let cli = Cli::try_parse_from(["automata", "server", "--s3-prefix", "/absolute"])
+        .expect("namespace validation belongs to server configuration");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidS3Configuration)
+    ));
+}
+
+#[test]
+fn server_s3_trust_policy_is_closed_and_exact() {
+    let private = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--s3-tls-trust",
+        "private-ca",
+        "--s3-private-ca-source",
+        "file:/run/secrets/s3-private-ca.pem",
+    ])
+    .expect("exact private CA syntax");
+    let Command::Server(private) = private.command else {
+        panic!("server command expected");
+    };
+    ServerConfig::from_args(&private).expect("complete private-CA trust policy");
+
+    for arguments in [
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--s3-tls-trust",
+            "private-ca",
+        ],
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--s3-private-ca-source",
+            "file:/run/secrets/unrequested-ca.pem",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments).expect("trust syntax");
+        let Command::Server(args) = cli.command else {
+            panic!("server command expected");
+        };
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidS3TlsTrust)
+        ));
+    }
+}
+
+#[test]
+fn server_database_transport_policy_names_the_exact_trust_union() {
+    let marker = "AUTOMATA_DATABASE_CA_REFERENCE_MARKER";
+    let private = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--database-transport",
+        "web-pki-plus-private-ca-verify-full",
+        "--database-private-ca-source",
+        &format!("env:{marker}"),
+    ])
+    .expect("additive private CA syntax");
+    let Command::Server(private) = private.command else {
+        panic!("server command expected");
+    };
+    let config = ServerConfig::from_args(&private).expect("complete additive CA policy");
+    let debug = format!("{config:?}");
+    assert!(debug.contains("WebPkiPlusPrivateCaVerifyFull"));
+    assert!(!debug.contains(marker));
+
+    for arguments in [
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--database-transport",
+            "web-pki-plus-private-ca-verify-full",
+        ],
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--database-private-ca-source",
+            "file:/run/secrets/unrequested-database-ca.pem",
+        ],
+        vec![
+            "automata",
+            "server",
+            "--results-public-url",
+            "https://results.example.test/",
+            "--database-transport",
+            "loopback-plaintext",
+            "--database-private-ca-source",
+            "file:/run/secrets/unrequested-database-ca.pem",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments).expect("database trust syntax");
+        let Command::Server(args) = cli.command else {
+            panic!("server command expected");
+        };
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidDatabaseTransport)
+        ));
+    }
+
+    assert!(
+        Cli::try_parse_from(["automata", "server", "--database-transport", "verify-full",])
+            .is_err(),
+        "the ambiguous legacy trust label must not remain accepted"
+    );
+}
+
+#[test]
+fn server_private_ca_and_loopback_plaintext_are_incompatible() {
+    let private_plaintext = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--s3-endpoint",
+        "http://127.0.0.1:9000/",
+        "--s3-allow-loopback-http",
+        "--s3-tls-trust",
+        "private-ca",
+        "--s3-private-ca-source",
+        "file:/run/secrets/s3-private-ca.pem",
+    ])
+    .expect("explicit transport syntax");
+    let Command::Server(args) = private_plaintext.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidS3Transport)
+    ));
+
+    let inert_plaintext_flag = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--s3-endpoint",
+        "https://objects.example.test/",
+        "--s3-allow-loopback-http",
+    ])
+    .expect("explicit transport syntax");
+    let Command::Server(args) = inert_plaintext_flag.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::InvalidS3Transport)
     ));
 }
 
@@ -562,6 +725,19 @@ fn installation_bootstrap_requires_proof_identity_and_exact_tenant() {
         ServerConfig::from_args(&args),
         Err(ServerConfigError::InvalidBootstrapConfiguration)
     ));
+
+    for display_name in [
+        " Automata CI",
+        "Automata CI ",
+        "\u{00a0}Automata CI",
+        "Automata CI\u{3000}",
+    ] {
+        args.bootstrap_tenant_display_name = Some(display_name.into());
+        assert!(matches!(
+            ServerConfig::from_args(&args),
+            Err(ServerConfigError::InvalidBootstrapConfiguration)
+        ));
+    }
 }
 
 #[test]

@@ -15,8 +15,8 @@ use std::{
 
 use automata_ci_execution::{
     EnvironmentProfile, EnvironmentProfileId, ExecutionArgv, ExecutionEnvironment, ImmutableImage,
-    NetworkPolicy, OperationId, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
-    SandboxGeneration, SandboxSpec, Sha256Digest, TargetPath,
+    NetworkPolicy, OperationId, ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCustody,
+    SandboxEnvironment, SandboxGeneration, SandboxSpec, Sha256Digest, TargetPath,
 };
 use automata_ci_sandbox_podman::{
     CommandOutput, CommandRequest, CommandTermination, PodmanBinary, PodmanCommandExecutor,
@@ -24,11 +24,15 @@ use automata_ci_sandbox_podman::{
 };
 
 const OWNER: &str = "io.automata.owner";
+const RESOURCE_SCHEMA: &str = "io.automata.sandbox-schema";
 const SANDBOX: &str = "io.automata.sandbox";
 const GENERATION: &str = "io.automata.generation";
 const PROFILE: &str = "io.automata.profile";
 const PROFILE_DIGEST: &str = "io.automata.profile-sha256";
 const SPEC: &str = "io.automata.spec-sha256";
+const CUSTODY_KIND: &str = "io.automata.custody-kind";
+const CUSTODY_RUNNER: &str = "io.automata.custody-runner";
+const CUSTODY_SLOT: &str = "io.automata.custody-slot";
 const FAKE_INFRA_ID: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
 #[derive(Debug)]
@@ -125,7 +129,6 @@ struct FakeState {
     wrong_proxy_identifier_once: bool,
     drift_health_configuration_once: bool,
     replace_network_before_remove: bool,
-    normalize_tagged_digest_image_names: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -152,13 +155,6 @@ impl std::fmt::Debug for FakePodman {
 impl FakePodman {
     pub(crate) fn commands(&self) -> Vec<Vec<String>> {
         self.state.lock().expect("fake lock").commands.clone()
-    }
-
-    pub(crate) fn normalize_tagged_digest_image_names(&self) {
-        self.state
-            .lock()
-            .expect("fake lock")
-            .normalize_tagged_digest_image_names = true;
     }
 
     pub(crate) fn fail_once(&self, command: &[&str]) {
@@ -204,6 +200,49 @@ impl FakePodman {
         }
         for resource in state.containers.values_mut() {
             resource.labels.insert(OWNER.to_owned(), owner.to_owned());
+        }
+    }
+
+    pub(crate) fn replace_custody(&self, kind: &str, runner: RunnerId, slot: u16) {
+        let mut state = self.state.lock().expect("fake lock");
+        let replace = |resource: &mut Resource| {
+            resource
+                .labels
+                .insert(CUSTODY_KIND.to_owned(), kind.to_owned());
+            resource
+                .labels
+                .insert(CUSTODY_RUNNER.to_owned(), runner.to_string());
+            resource
+                .labels
+                .insert(CUSTODY_SLOT.to_owned(), slot.to_string());
+        };
+        if let Some(resource) = state.network.as_mut() {
+            replace(resource);
+        }
+        if let Some(resource) = state.pod.as_mut() {
+            replace(resource);
+        }
+        for resource in state.containers.values_mut() {
+            replace(resource);
+        }
+    }
+
+    pub(crate) fn replace_resource_schema(&self, schema: &str) {
+        let mut state = self.state.lock().expect("fake lock");
+        if let Some(resource) = state.network.as_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
+        }
+        if let Some(resource) = state.pod.as_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
+        }
+        for resource in state.containers.values_mut() {
+            resource
+                .labels
+                .insert(RESOURCE_SCHEMA.to_owned(), schema.to_owned());
         }
     }
 
@@ -457,7 +496,7 @@ impl PodmanCommandExecutor for FakePodman {
         environment: &PodmanProcessEnvironment,
         cancellation: &dyn automata_ci_execution::Cancellation,
     ) -> CommandOutput {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return interrupted_before_input(request, CommandTermination::Cancelled);
         }
         let arguments = request
@@ -1059,9 +1098,6 @@ fn create_fake_container(state: &mut FakeState, arguments: &[String]) -> Command
         .find(|value| value.contains("@sha256:"))
         .cloned()
         .unwrap_or_default();
-    if state.normalize_tagged_digest_image_names {
-        resource.image_name = podman_normalized_digest_reference(&resource.image_name);
-    }
     if arguments.iter().any(|value| value == "--network-alias") {
         state.next_service_address = state.next_service_address.max(10).saturating_add(1);
         resource.network_address = Some(format!("10.89.0.{}", state.next_service_address));
@@ -1155,18 +1191,6 @@ fn create_fake_container(state: &mut FakeState, arguments: &[String]) -> Command
     } else {
         CommandOutput::success(format!("{identifier}\n").into_bytes())
     }
-}
-
-fn podman_normalized_digest_reference(reference: &str) -> String {
-    let Some((name, digest)) = reference.rsplit_once('@') else {
-        return reference.to_owned();
-    };
-    let final_slash = name.rfind('/');
-    let repository = match name.rfind(':') {
-        Some(tag) if final_slash.is_none_or(|slash| tag > slash) => &name[..tag],
-        _ => name,
-    };
-    format!("{repository}@{digest}")
 }
 
 fn execute_fake_copy(
@@ -1367,9 +1391,20 @@ fn option_values<'a>(arguments: &'a [String], option: &'a str) -> impl Iterator<
 }
 
 fn inspect_bytes(resource: &Resource) -> Vec<u8> {
-    let mut values = [OWNER, SANDBOX, GENERATION, PROFILE, PROFILE_DIGEST, SPEC]
-        .map(|key| resource.labels.get(key).cloned().unwrap_or_default())
-        .to_vec();
+    let mut values = [
+        OWNER,
+        RESOURCE_SCHEMA,
+        SANDBOX,
+        GENERATION,
+        PROFILE,
+        PROFILE_DIGEST,
+        SPEC,
+        CUSTODY_KIND,
+        CUSTODY_RUNNER,
+        CUSTODY_SLOT,
+    ]
+    .map(|key| resource.labels.get(key).cloned().unwrap_or_default())
+    .to_vec();
     if let Some(state) = &resource.state {
         values.push(state.clone());
     }
@@ -1511,6 +1546,9 @@ pub(crate) fn sample_spec_with_digest(
     SandboxSpec::new(
         operation_id,
         SandboxGeneration::new(1).expect("generation"),
+        SandboxCustody::ProfileAdmission {
+            runner_id: RunnerId::new(),
+        },
         profile,
         TargetPath::posix("/__w").expect("workspace"),
         network,

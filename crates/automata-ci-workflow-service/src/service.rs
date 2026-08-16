@@ -676,7 +676,10 @@ fn build_command(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let credential_requirements =
-                crate::discover_job_credential_requirements(request.plan().logical(), job)?;
+                crate::credential_requirements::discover_external_job_credentials(
+                    request.plan().logical(),
+                    job,
+                )?;
             AdmittedLogicalWorkflowJob::new(id, key, source_order, kind, prerequisites)
                 .map(|job| job.with_credential_requirements(credential_requirements))
                 .map_err(WorkflowAdmissionError::LogicalValue)
@@ -952,10 +955,11 @@ fn prepare_reusable_workflow_expansion(
                     .iter()
                     .find(|candidate| candidate.key().value() == job.key())
                     .ok_or(WorkflowAdmissionError::Internal)?;
-                let credential_requirements = crate::discover_job_credential_requirements(
-                    invocation_plan.logical(),
-                    logical_job,
-                )?;
+                let credential_requirements =
+                    crate::credential_requirements::discover_external_job_credentials(
+                        invocation_plan.logical(),
+                        logical_job,
+                    )?;
                 Ok(AdmittedReusableJob::new(
                     job.id(),
                     job.key().clone(),

@@ -164,10 +164,6 @@ impl fmt::Display for ComposeProjectName {
 pub struct InstallationId(Uuid);
 
 impl InstallationId {
-    pub(crate) fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
     pub(crate) fn parse_canonical(value: &str) -> Option<Self> {
         let parsed = Uuid::parse_str(value).ok()?;
         (parsed.to_string() == value && parsed.get_version() == Some(Version::Random))
@@ -186,6 +182,19 @@ impl fmt::Display for InstallationId {
     }
 }
 
+impl FromStr for InstallationId {
+    type Err = InstallationIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_canonical(value).ok_or(InstallationIdError)
+    }
+}
+
+/// Rejected noncanonical or non-random installation UUID.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[error("installation identity must be a canonical UUIDv4")]
+pub struct InstallationIdError;
+
 /// Verified identity of one engine-owned local installation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Installation {
@@ -197,7 +206,12 @@ pub struct Installation {
 }
 
 impl Installation {
-    pub(crate) fn verified(name: InstallationName, id: InstallationId) -> Self {
+    /// Constructs the exact expected installation binding.
+    ///
+    /// Provider connection still verifies this name and UUID against the
+    /// immutable Engine-owned installation anchor before use.
+    #[must_use]
+    pub fn new(name: InstallationName, id: InstallationId) -> Self {
         let selector_key = InstallationSelectorKey::for_name(&name);
         let compose_project = ComposeProjectName::for_key(selector_key);
         let anchor_volume_name = format!("{compose_project}-identity");
@@ -210,6 +224,7 @@ impl Installation {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn expected(name: &InstallationName) -> ExpectedInstallation {
         let selector_key = InstallationSelectorKey::for_name(name);
         let compose_project = ComposeProjectName::for_key(selector_key);
@@ -248,6 +263,7 @@ impl Installation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(unix)]
 pub(crate) struct ExpectedInstallation {
     pub(crate) selector_key: InstallationSelectorKey,
     pub(crate) compose_project: ComposeProjectName,
@@ -257,7 +273,7 @@ pub(crate) struct ExpectedInstallation {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposeProjectName, Installation, InstallationName, InstallationNameError,
+        ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
         InstallationSelectorKey,
     };
 
@@ -294,9 +310,13 @@ mod tests {
             ComposeProjectName::for_key(key).as_str(),
             "automata-local-df06ebed0fcba9b2d00b0476426924f3"
         );
-        let expected = Installation::expected(&name);
+        let expected = Installation::new(
+            name,
+            InstallationId::parse_canonical("00000000-0000-4000-8000-000000000001")
+                .expect("canonical test installation ID"),
+        );
         assert_eq!(
-            expected.anchor_volume_name,
+            expected.anchor_volume_name(),
             "automata-local-df06ebed0fcba9b2d00b0476426924f3-identity"
         );
     }

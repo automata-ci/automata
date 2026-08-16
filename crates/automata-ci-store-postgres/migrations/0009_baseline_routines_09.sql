@@ -68,7 +68,7 @@ CREATE FUNCTION automata_reject_installation_singleton_replacement() RETURNS tri
 BEGIN
     RAISE EXCEPTION 'installation singleton cannot be inserted, deleted, or truncated'
         USING ERRCODE = 'check_violation',
-              CONSTRAINT = 'human_auth_installation_state_singleton_immutable';
+              CONSTRAINT = 'installation_state_singleton_immutable';
 END;
 $$;
 

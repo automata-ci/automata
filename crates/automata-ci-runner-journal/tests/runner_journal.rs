@@ -3,6 +3,7 @@ mod support;
 mod command_dispositions;
 mod corrupt_data;
 mod durable_payloads;
+mod endpoint_operations;
 mod fault_recovery;
 mod journal_contract;
 mod lease_poll_checkpoints;

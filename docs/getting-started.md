@@ -67,71 +67,17 @@ downloads and compiles Rust dependencies, then embeds the
 checked-in server-side renderer and browser assets, so it may take a few
 minutes.
 
-### Windows Hyper-V-container source-build boundary
+### Windows Hyper-V-container component boundary
 
-The checked-in
-[`runner.windows.example.json`](../crates/automata-ci-runner/config/runner.windows.example.json)
-selects `windows_hyperv` and schema version 3. It defines an absolute local
-container CLI path and SHA-256, a digest-qualified Windows Server Core image,
-an in-image guest executable, an in-container workspace, disabled networking,
-a writable container root, `ContainerUser`, and CPU, memory, and process
-limits.
-
-The example's image and runtime digests are placeholders. It will not work
-until a laboratory Windows Server 2025 host has the Hyper-V and Containers
-roles, the selected Windows container engine, an exact preloaded compatible
-image containing the guest executable and configured shells, and real reviewed
-digests. The provider never pulls at job startup. It creates with explicit
-Hyper-V isolation and verifies the effective isolation, network, user, image,
-entrypoint, resource, ownership, and no-mount state before executing a step.
-
-The current Windows executor admits only workflow `run:` steps. JavaScript,
-composite, local, repository, and container `uses:` actions, job and service
-containers, egress, devices, administrator profiles, and reboot/interactive
-semantics fail closed or remain unaccepted. PowerShell, Windows PowerShell,
-`cmd.exe`, optional Python, and every configured path must exist inside the
-immutable image; host shell paths are not mounted into the job.
-
-Adapt the file only for an offline component laboratory with an already
-provisioned control plane, object store, engine, and qualified image, then run:
-
-```powershell
-automata-runner run --config C:\path\to\runner.windows.json
-```
-
-Run the runner under a dedicated non-administrative service identity.
-Pre-provision restrictive ACLs on journal, encrypted spool,
-`state.windows_hyperv`, configuration, runtime, update, and evidence roots and
-their trusted ancestors. Keep the journal free of secret bytes; spool content
-is authenticated ciphertext, and workflows must never access runner state or
-the container-engine endpoint.
-
-The JSON configuration and public TLS roots or certificate chains may be read
-from bounded regular non-reparse files. Private keys, spool keys, and object
-store credentials must use the example's environment sources until the
-Windows credential-custody contract is implemented. Supply them through the
-service supervisor's private environment, not an interactive shell history.
-
-The following runner boundaries fail closed on Windows:
-
-- owner-only file-backed credential and secret sources;
-- `automata-runner doctor --active`, which is specifically the Linux rootless
-  Podman isolation probe;
-- job containers, service containers, networked and administrator profiles;
-  and
-- every `uses:` action, including JavaScript, composite, local, repository,
-  and container actions. Only `run:` steps are supported.
-
-The Windows path remains pre-1.0 component code and is not production-ready. A
-successful source build, injected-runtime test, passive doctor report, or local
-container create is not isolation evidence. Hosted Windows CI is disabled
-because Automata does not operate an accepted Windows fleet. Do not deploy this
-path for repository workloads until the
-[Windows isolation plan](platforms/windows.md) completes authenticated
-`EVT-01` -> `AUTH-02` -> `WIN-ISO-01` routing, the restricted management
-and recovery gates, and dedicated-host IT-09/GATE-02 acceptance. On Linux, a
-normal dynamically linked Cargo build is still not a valid `scratch` probe
-payload for a production runner session.
+Windows has no current deployment configuration or supported
+`automata-runner run` path. The Hyper-V provider remains an internal component
+fixture until native atomic TLS renewal custody, a promoted immutable image,
+authenticated placement evidence, and the dedicated physical-host acceptance
+gate land together. Do not reconstruct a configuration from tests or pass
+private material through environment variables; no static-certificate or
+environment-backed fallback is supported. Follow the
+[Windows isolation plan](platforms/windows.md) for the remaining qualification
+work.
 
 ## Verify the installation
 

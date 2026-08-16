@@ -299,7 +299,7 @@ fn execute_system(
 ) -> RuntimeCommandOutput {
     use std::os::windows::process::CommandExt as _;
 
-    if cancellation.is_cancelled() {
+    if cancellation.disposition().requires_termination() {
         return RuntimeCommandOutput::terminated(RuntimeCommandTermination::Cancelled);
     }
     let mut command = Command::new(request.program());
@@ -346,7 +346,7 @@ fn capture_child(
         .checked_add(request.timeout())
         .unwrap_or_else(Instant::now);
     let termination = loop {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             terminate(child);
             break RuntimeCommandTermination::Cancelled;
         }

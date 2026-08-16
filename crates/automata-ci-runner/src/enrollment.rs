@@ -1,35 +1,30 @@
 //! Secure runner-side enrollment and local TLS credential custody.
 
 use std::{
-    io::Read as _,
+    io::Read,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result, bail};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use automata_ci_auth::secret::{RunnerEnrollmentToken, SecretString};
 use bytes::Bytes;
 use reqwest::{Client, StatusCode, Url, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-mod custody;
+pub(crate) mod custody;
 mod transport;
 
 use custody::CredentialDestinations;
 use transport::read_bounded_response;
 
 use crate::{
-    cli::EnrollArgs,
-    product::{RunnerProductConfig, SecretSource},
+    cli::{EnrollArgs, EnrollmentTokenSource},
+    product::{RunnerProductConfig, ScalarLineEnding, SecretSource, normalize_scalar_bytes},
 };
 
 const REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
-const TOKEN_PREFIX: &str = "atm_re_";
-const TOKEN_BYTES: usize = 32;
-const TOKEN_ENCODED_BYTES: usize = 43;
-const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
-const MAX_TOKEN_BYTES: usize = TOKEN_PREFIX.len() + TOKEN_ENCODED_BYTES;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -49,7 +44,7 @@ pub(super) async fn enroll(args: &EnrollArgs) -> Result<()> {
         .context("runner enrollment endpoint is invalid")?;
     let body = RedeemRequest {
         operation_id: stage.operation_id,
-        token: stage.token.as_str(),
+        token: stage.token.expose_secret(),
         runner_name: &stage.runner_name,
         capabilities: &stage.capabilities,
         csr_pem: &stage.csr_pem,
@@ -114,36 +109,56 @@ fn validate_staged_response(staged: &[u8], replayed: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn load_token(args: &EnrollArgs) -> Result<Zeroizing<String>> {
-    let bytes = if let Some(path) = &args.token_file {
-        SecretSource::File { path: path.clone() }
-            .read_scalar(MAX_TOKEN_BYTES)
-            .context("runner enrollment token file is unavailable")?
-    } else if std::env::var_os("AUTOMATA_RUNNER_ENROLLMENT_TOKEN").is_some() {
-        SecretSource::Environment {
-            name: "AUTOMATA_RUNNER_ENROLLMENT_TOKEN".to_owned(),
+fn load_token(args: &EnrollArgs) -> Result<RunnerEnrollmentToken> {
+    let bytes = match &args.token_source {
+        EnrollmentTokenSource::File(path) => SecretSource::File { path: path.clone() }
+            .read_scalar(RunnerEnrollmentToken::BYTE_LENGTH)
+            .context("runner enrollment token file is unavailable")?,
+        EnrollmentTokenSource::Environment(name) => {
+            SecretSource::Environment { name: name.clone() }
+                .read_scalar(RunnerEnrollmentToken::BYTE_LENGTH)
+                .context("runner enrollment token environment value is unavailable")?
         }
-        .read_scalar(MAX_TOKEN_BYTES)
-        .context("runner enrollment token environment value is unavailable")?
-    } else {
-        let mut bytes = Zeroizing::new(Vec::new());
-        std::io::stdin()
-            .take(u64::try_from(MAX_TOKEN_BYTES + 2).expect("token bound fits u64"))
-            .read_to_end(&mut bytes)
-            .context("runner enrollment token could not be read from stdin")?;
-        while bytes
-            .last()
-            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
-        {
-            bytes.pop();
+        EnrollmentTokenSource::Stdin => {
+            let stdin = std::io::stdin();
+            read_stdin_token(&mut stdin.lock())?
         }
-        bytes
+        EnrollmentTokenSource::Invalid => bail!("runner enrollment token source is invalid"),
     };
-    let token = String::from_utf8(Vec::from(bytes.as_slice()))
-        .map(Zeroizing::new)
-        .context("runner enrollment token is invalid")?;
-    validate_token(token.as_str())?;
-    Ok(token)
+    parse_token(bytes)
+}
+
+fn read_stdin_token(reader: &mut dyn Read) -> Result<Zeroizing<Vec<u8>>> {
+    let framed_limit = RunnerEnrollmentToken::BYTE_LENGTH
+        .checked_add(2)
+        .expect("token framing bound fits usize");
+    let proof_limit = framed_limit
+        .checked_add(1)
+        .expect("token overflow probe bound fits usize");
+    let mut bytes = Zeroizing::new(Vec::with_capacity(proof_limit));
+    reader
+        .take(u64::try_from(proof_limit).expect("token overflow probe bound fits u64"))
+        .read_to_end(&mut bytes)
+        .context("runner enrollment token could not be read from stdin")?;
+    normalize_scalar_bytes(
+        &mut bytes,
+        RunnerEnrollmentToken::BYTE_LENGTH,
+        ScalarLineEnding::OptionalSingle,
+    )
+    .context("runner enrollment token stdin value is invalid")?;
+    Ok(bytes)
+}
+
+fn parse_token(mut bytes: Zeroizing<Vec<u8>>) -> Result<RunnerEnrollmentToken> {
+    let token = match String::from_utf8(std::mem::take(&mut *bytes)) {
+        Ok(token) => token,
+        Err(error) => {
+            let _invalid = Zeroizing::new(error.into_bytes());
+            bail!("runner enrollment token is invalid");
+        }
+    };
+    let secret = SecretString::new(token).context("runner enrollment token is invalid")?;
+    RunnerEnrollmentToken::from_secret(secret).context("runner enrollment token is invalid")
 }
 
 fn enrollment_origin(value: &str) -> Result<Url> {
@@ -205,23 +220,6 @@ fn current_unix_time_seconds() -> Result<i64> {
     i64::try_from(seconds).context("runner enrollment system time is out of range")
 }
 
-fn validate_token(value: &str) -> Result<()> {
-    let Some(encoded) = value
-        .strip_prefix(TOKEN_PREFIX)
-        .filter(|encoded| encoded.len() == TOKEN_ENCODED_BYTES)
-    else {
-        bail!("runner enrollment token is invalid");
-    };
-    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
-    if !matches!(
-        URL_SAFE_NO_PAD.decode_slice(encoded, &mut *decoded),
-        Ok(TOKEN_BYTES)
-    ) {
-        bail!("runner enrollment token is invalid");
-    }
-    Ok(())
-}
-
 #[derive(Serialize)]
 struct RedeemRequest<'a> {
     operation_id: Uuid,
@@ -244,9 +242,11 @@ struct RedeemResponse {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::io::Cursor;
 
-    use super::{TOKEN_PREFIX, enrollment_origin, validate_staged_response, validate_token};
+    use super::{enrollment_origin, parse_token, read_stdin_token, validate_staged_response};
+
+    const CANONICAL_TOKEN: &str = "atm_re_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
 
     #[test]
     fn enrollment_origin_requires_tls_except_for_literal_loopback() {
@@ -259,17 +259,29 @@ mod tests {
     }
 
     #[test]
-    fn enrollment_token_requires_the_one_canonical_generated_shape() {
-        let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode([7_u8; 32]));
-        validate_token(&token).expect("canonical token");
-        assert!(validate_token("plain-secret").is_err());
-        assert!(validate_token(&format!("{token}A")).is_err());
-        assert!(validate_token(&format!("{token}\n")).is_err());
-    }
-
-    #[test]
     fn staged_response_requires_a_byte_exact_replay() {
         validate_staged_response(b"exact", b"exact").expect("exact replay");
         assert!(validate_staged_response(b"staged", b"different").is_err());
+    }
+
+    #[test]
+    fn stdin_token_requires_eof_and_one_exact_optional_line_ending() {
+        for input in [
+            CANONICAL_TOKEN.as_bytes().to_vec(),
+            format!("{CANONICAL_TOKEN}\n").into_bytes(),
+            format!("{CANONICAL_TOKEN}\r\n").into_bytes(),
+        ] {
+            let bytes = read_stdin_token(&mut Cursor::new(input)).expect("canonical stdin token");
+            let token = parse_token(bytes).expect("canonical enrollment token");
+            assert_eq!(token.expose_secret(), CANONICAL_TOKEN);
+        }
+
+        for suffix in ["\r", "\n\n", "\r\r", "\r\n\n", "\r\ntrailing"] {
+            let input = format!("{CANONICAL_TOKEN}{suffix}").into_bytes();
+            assert!(
+                read_stdin_token(&mut Cursor::new(input)).is_err(),
+                "invalid stdin suffix {suffix:?} must fail"
+            );
+        }
     }
 }

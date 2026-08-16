@@ -1,0 +1,24 @@
+[package]
+name = "automata-ci-tls"
+description = "Validated TLS trust material shared by Automata infrastructure adapters"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+pem-rfc7468.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+x509-parser.workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true

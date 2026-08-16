@@ -10,15 +10,15 @@ use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
 use automata_ci_core::OperationId;
 
 #[cfg(target_os = "macos")]
-const EXAMPLE_CONFIG: &str = "runner.macos.example.json";
+const HOST_CONFIG: &str = "config/runner.macos.example.json";
 #[cfg(target_os = "windows")]
-const EXAMPLE_CONFIG: &str = "runner.windows.example.json";
+const HOST_CONFIG: &str = "tests/fixtures/runner.windows.product.json";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const EXAMPLE_CONFIG: &str = "runner.local-1.example.json";
+const HOST_CONFIG: &str = "config/runner.local-1.example.json";
 
 #[test]
 fn capabilities_command_emits_only_the_canonical_validated_inventory() {
-    let config_path = format!("{}/config/{EXAMPLE_CONFIG}", env!("CARGO_MANIFEST_DIR"));
+    let config_path = format!("{}/{HOST_CONFIG}", env!("CARGO_MANIFEST_DIR"));
     let secret_sentinel = "capabilities-must-not-read-this-secret";
     let output = Command::new(env!("CARGO_BIN_EXE_automata-runner"))
         .args(["capabilities", "--config", &config_path])

@@ -1,8 +1,9 @@
 use automata_ci::cli::{
-    AuthCommand, Cli, Command, EnvironmentReviewDecision, LocalCommand, LocalContainerEngine,
-    OutputFormat, RepositoryRef, RerunSelection, SecretCommand, SecretProviderCommand, SecretScope,
+    AuthCommand, Cli, Command, DatabaseTransport, EnvironmentReviewDecision, InternalCommand,
+    InternalObjectStoreCommand, LocalCommand, LocalContainerEngine, OutputFormat, RepositoryRef,
+    RerunSelection, S3TlsTrustMode, SecretCommand, SecretProviderCommand, SecretScope,
 };
-use automata_ci::server::{ServerConfig, ServerConfigError};
+use automata_ci::server::{SecretSource, ServerConfig, ServerConfigError};
 use clap::{CommandFactory as _, Parser as _};
 
 #[test]
@@ -13,6 +14,8 @@ fn server_uses_a_loopback_default() {
         panic!("server command expected");
     };
     assert_eq!(args.listen.to_string(), "127.0.0.1:8080");
+    assert_eq!(args.database_transport, DatabaseTransport::WebPkiVerifyFull);
+    assert!(args.database_private_ca_source.is_none());
 }
 
 #[test]
@@ -35,7 +38,9 @@ fn local_doctor_is_an_explicit_read_only_preflight() {
     let Command::Local(local) = cli.command else {
         panic!("local command expected");
     };
-    let LocalCommand::Doctor(args) = local.command;
+    let LocalCommand::Doctor(args) = local.command else {
+        panic!("local doctor command expected");
+    };
     assert_eq!(args.engine, LocalContainerEngine::Docker);
     assert!(args.json);
 
@@ -69,6 +74,132 @@ fn local_doctor_is_an_explicit_read_only_preflight() {
         .is_err(),
         "engine-owned local state must not expose a host state-directory option"
     );
+}
+
+#[test]
+fn internal_object_store_bucket_initialization_is_hidden_exact_and_redacted() {
+    let marker = "AUTOMATA_INTERNAL_PRIVATE_CA_MARKER";
+    let cli = Cli::try_parse_from([
+        "automata",
+        "internal",
+        "object-store",
+        "ensure-bucket",
+        "--s3-endpoint",
+        "https://objects.example.test/",
+        "--s3-bucket",
+        "automata-local",
+        "--s3-tls-trust",
+        "private-ca",
+        "--s3-private-ca-source",
+        &format!("env:{marker}"),
+        "--s3-access-key-source",
+        "file:/run/secrets/s3-access-key",
+        "--s3-secret-key-source",
+        "file:/run/secrets/s3-secret-key",
+    ])
+    .expect("internal ensure-bucket command must parse");
+    let Command::Internal(internal) = cli.command else {
+        panic!("internal command expected");
+    };
+    let InternalCommand::ObjectStore(object_store) = internal.command;
+    let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
+    assert_eq!(args.s3.s3_tls_trust, S3TlsTrustMode::PrivateCa);
+    let debug = format!("{args:?}");
+    assert!(debug.contains("[redacted]"));
+    assert!(!debug.contains(marker));
+
+    let mut command = Cli::command();
+    let internal = command
+        .find_subcommand_mut("internal")
+        .expect("internal namespace");
+    assert!(internal.is_hide_set());
+    assert!(
+        !Cli::command()
+            .render_long_help()
+            .to_string()
+            .contains("internal")
+    );
+
+    for unsupported in [
+        vec!["automata", "__local-service-init"],
+        vec!["automata", "internal", "object-store", "init"],
+        vec!["automata", "internal", "ensure-bucket"],
+    ] {
+        assert!(Cli::try_parse_from(unsupported).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "automata",
+            "internal",
+            "object-store",
+            "ensure-bucket",
+            "--s3-access-key",
+            "raw-secret",
+        ])
+        .is_err(),
+        "the internal command must not accept raw credential arguments"
+    );
+}
+
+#[test]
+fn local_check_is_explicit_source_only_workflow_dispatch_validation() {
+    let cli = Cli::try_parse_from([
+        "automata",
+        "local",
+        "check",
+        ".github/workflows/ci.yml",
+        "--input",
+        "target=staging",
+        "--json",
+    ])
+    .expect("local check must parse");
+    let Command::Local(local) = cli.command else {
+        panic!("local command expected");
+    };
+    let LocalCommand::Check(args) = local.command else {
+        panic!("local check command expected");
+    };
+    assert_eq!(args.workflow.as_deref(), Some(".github/workflows/ci.yml"));
+    assert_eq!(args.inputs.len(), 1);
+    assert_eq!(args.inputs[0].name(), "target");
+    assert!(args.json);
+    assert!(format!("{args:?}").contains("target"));
+    assert!(!format!("{args:?}").contains("staging"));
+
+    assert!(
+        Cli::try_parse_from(["automata", "local", "check", "--event", "push"]).is_err(),
+        "local check must not fabricate provider event evidence"
+    );
+    assert!(
+        Cli::try_parse_from(["automata", "local", "check", "--input", "missing-separator"])
+            .is_err()
+    );
+}
+
+#[test]
+fn internal_private_ca_raw_values_become_redacted_invalid_sources() {
+    let marker = "raw-private-ca-secret-marker";
+    let cli = Cli::try_parse_from([
+        "automata",
+        "internal",
+        "object-store",
+        "ensure-bucket",
+        "--s3-tls-trust",
+        "private-ca",
+        "--s3-private-ca-source",
+        marker,
+    ])
+    .expect("raw input must become a redacted invalid source sentinel");
+    let Command::Internal(internal) = cli.command else {
+        panic!("internal command expected");
+    };
+    let InternalCommand::ObjectStore(object_store) = internal.command;
+    let InternalObjectStoreCommand::EnsureBucket(args) = object_store.command;
+    assert!(matches!(
+        args.s3.s3_private_ca_source,
+        Some(SecretSource::Invalid)
+    ));
+    assert!(!format!("{args:?}").contains(marker));
 }
 
 #[test]
@@ -199,6 +330,7 @@ fn only_operational_top_level_commands_are_advertised() {
     let command = Cli::command();
     let names = command
         .get_subcommands()
+        .filter(|command| !command.is_hide_set())
         .map(clap::Command::get_name)
         .collect::<Vec<_>>();
 

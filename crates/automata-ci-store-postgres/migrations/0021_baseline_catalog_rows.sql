@@ -23,7 +23,18 @@ SELECT queue_name, greatest(0, now_ms - 60000), now_ms
 FROM database_clock
 CROSS JOIN (VALUES ('activation'), ('materialization')) AS queue(queue_name);
 
-INSERT INTO human_auth_installation_state (singleton, state, bootstrap_token_hash, bootstrap_hash_key_id, expected_provider_id, expected_provider_subject, challenge_expires_at_ms, configured_tenant_id, configured_principal_id, configured_at_ms, revision, created_at_ms, updated_at_ms, target_tenant_id, target_tenant_display_name, setup_transaction_id) VALUES (true, 'unconfigured', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 0, 0, NULL, NULL, NULL);
+INSERT INTO installation_state (
+    singleton, state, configuration_mode, bootstrap_token_hash,
+    bootstrap_hash_key_id, expected_provider_id, expected_provider_subject,
+    challenge_expires_at_ms, tenant_id, tenant_display_name,
+    setup_transaction_id, configured_tenant_id, configured_principal_id,
+    configured_at_ms, deployment_authority_sha256,
+    deployment_bootstrap_operation_id, deployment_bootstrap_audit_event_id,
+    revision, created_at_ms, updated_at_ms
+) VALUES (
+    TRUE, 'unconfigured', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 0, 0
+);
 INSERT INTO rbac_permissions (name, description, critical, created_at_ms) VALUES ('tenant:read', 'Read tenant configuration.', false, 0);
 INSERT INTO rbac_permissions (name, description, critical, created_at_ms) VALUES ('tenant:settings:update', 'Update tenant configuration.', true, 0);
 INSERT INTO rbac_permissions (name, description, critical, created_at_ms) VALUES ('tenant:delete', 'Delete a tenant and its retained resources.', true, 0);

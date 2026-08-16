@@ -1,6 +1,3 @@
-use automata_ci_postgres::provisioning::{
-    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner,
-};
 use automata_ci_provisioning::{
     ApplyWorkspaceEntitlementCommand, AuthorizedApplyWorkspaceEntitlement,
     AuthorizedProvisionWorkspace, ComputeSeconds, DelegatedActorIssuer, DisplayName,
@@ -8,6 +5,9 @@ use automata_ci_provisioning::{
     ExternalAccountSubject, OperationId, ProvisionWorkspaceCommand, ProvisioningAuthority,
     ProvisioningAuthorityId, ShardId, WorkspaceEntitlementApplier, WorkspaceExecutionEntitlement,
     WorkspaceId, WorkspaceProvisioner,
+};
+use automata_ci_provisioning_postgres::{
+    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner,
 };
 use uuid::Uuid;
 

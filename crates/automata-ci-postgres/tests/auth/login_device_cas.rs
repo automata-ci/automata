@@ -15,8 +15,8 @@ use automata_ci_auth::{
     secret::{SecretBytes as AuthSecretBytes, SecretString},
     time::UnixTimestamp,
 };
+use automata_ci_auth_postgres::PostgresLoginTransactionRepository;
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::auth::PostgresLoginTransactionRepository;
 use automata_ci_postgres::test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;

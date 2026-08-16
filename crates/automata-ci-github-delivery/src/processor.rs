@@ -27,7 +27,7 @@ use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, GithubChangedFiles, GithubEventMetadata,
     GithubWorkflowCompiler, GithubWorkflowFrontend, GithubWorkflowSourcePlan, ParseWorkflowRequest,
     RepositoryWorkflowDiscoveryLimits, SourceId, SourceOrigin, SourceProvenance,
-    WorkflowFrontend as _, WorkflowNotSelectedReason, discover_repository_workflows,
+    WorkflowFrontend as _, WorkflowNotSelectedReason, discover_github_delivery_workflows,
 };
 use automata_ci_workflow_service::{
     AdmissionRepositoryCoordinates, RepositoryWorkflowSource, WorkflowAdmissionError,
@@ -1306,7 +1306,7 @@ fn repository_workflow_sources(
         limits.workflow_max_bytes(),
     )
     .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)?;
-    discover_repository_workflows(source.bytes(), discovery_limits)
+    discover_github_delivery_workflows(source.bytes(), discovery_limits)
         .map_err(|_| GithubDeliveryWorkflowProcessorError::InvariantViolation)
         .map(|workflows| {
             workflows

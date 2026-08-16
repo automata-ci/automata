@@ -3,9 +3,9 @@ mod support;
 use std::{collections::BTreeMap, sync::Arc};
 
 use automata_ci_core::{
-    JobConclusion, JobSecretExposure, StepAnnotationLevel, StepIr, ValueSource,
+    JobConclusion, JobSecretExposure, RunnerId, StepAnnotationLevel, StepIr, ValueSource,
 };
-use automata_ci_execution::{RootFilesystemPolicy, SandboxPrivilegePolicy};
+use automata_ci_execution::{RootFilesystemPolicy, SandboxCustody, SandboxPrivilegePolicy};
 use automata_ci_github_runtime::{CommandFileKind, WorkflowCommandPolicy};
 use automata_ci_runner_runtime::{
     ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
@@ -38,6 +38,7 @@ async fn credential_free_execution_has_no_authority_or_secret_and_emits_public_o
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
     assert_eq!(result.secret_exposure(), JobSecretExposure::Secretless);
+    assert_eq!(fixture.events.endpoint_bindings(), 1);
     assert!(
         fixture
             .events
@@ -97,6 +98,8 @@ async fn run_steps_preserve_scripts_and_apply_fresh_command_files_after_exit() {
         )]),
     );
     let request = fixture.request(job);
+    let runner_id = request.lease().runner_id();
+    let slot_ordinal = request.slot().get();
     let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
 
     let result = fixture
@@ -106,7 +109,7 @@ async fn run_steps_preserve_scripts_and_apply_fresh_command_files_after_exit() {
         .expect("job executes");
 
     assert_eq!(result.conclusion(), JobConclusion::Success);
-    assert_sandbox_spec(&fixture);
+    assert_sandbox_spec(&fixture, runner_id, slot_ordinal);
 
     let state = fixture.endpoint_state.lock().expect("endpoint lock");
     assert_eq!(
@@ -744,7 +747,7 @@ fn conditioned_run_step(id: &str, command: &str, condition: &str) -> StepIr {
     run_step(id, id, command).with_condition(condition)
 }
 
-fn assert_sandbox_spec(fixture: &Fixture) {
+fn assert_sandbox_spec(fixture: &Fixture, runner_id: RunnerId, slot_ordinal: u16) {
     assert_eq!(fixture.provider.counts(), (1, 1, 0));
     let specs = fixture.provider.specs();
     assert_eq!(specs.len(), 1);
@@ -752,6 +755,13 @@ fn assert_sandbox_spec(fixture: &Fixture) {
     assert_eq!(specs[0].privilege(), SandboxPrivilegePolicy::Administrator);
     assert_eq!(specs[0].workspace().as_str(), "/__w/automata/automata");
     assert_eq!(specs[0].scratch(), None);
+    assert!(matches!(
+        specs[0].custody(),
+        SandboxCustody::Job {
+            runner_id: observed_runner,
+            slot_ordinal: observed_slot,
+        } if observed_runner == runner_id && observed_slot.get() == slot_ordinal
+    ));
 }
 
 #[tokio::test]

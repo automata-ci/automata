@@ -296,7 +296,7 @@ impl MacosVirtualizationEndpoint {
         cancellation: &dyn Cancellation,
     ) -> Result<(), ExecutionError> {
         self.require_running(ExecutionStage::CopyTo)?;
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(error(ExecutionErrorKind::Cancelled, ExecutionStage::CopyTo));
         }
         if !owned_target(&self.entry, request.target()) {
@@ -329,7 +329,7 @@ impl MacosVirtualizationEndpoint {
         cancellation: &dyn Cancellation,
     ) -> Result<Vec<u8>, ExecutionError> {
         self.require_running(ExecutionStage::CopyFrom)?;
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(error(
                 ExecutionErrorKind::Cancelled,
                 ExecutionStage::CopyFrom,
@@ -463,7 +463,9 @@ fn response_error(response: &GuestResponse, stage: ExecutionStage) -> ExecutionE
         | GuestResponse::Configured { .. }
         | GuestResponse::Exec { .. }
         | GuestResponse::WriteFile { .. }
-        | GuestResponse::ReadFile { .. } => ExecutionErrorKind::BackendRejected,
+        | GuestResponse::AtomicCommitFile { .. }
+        | GuestResponse::ReadFile { .. }
+        | GuestResponse::ReadOptionalFile { .. } => ExecutionErrorKind::BackendRejected,
     };
     error(kind, stage)
 }

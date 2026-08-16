@@ -388,14 +388,20 @@ ALTER TABLE ONLY github_workflow_run_subject_evidence
 ALTER TABLE ONLY delegated_actor_identities
     ADD CONSTRAINT delegated_actor_identities_principal_id_fkey FOREIGN KEY (principal_id) REFERENCES human_principals(id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY human_auth_installation_state
-    ADD CONSTRAINT human_auth_installation_state_identity FOREIGN KEY (configured_principal_id, expected_provider_id, expected_provider_subject) REFERENCES human_provider_identities(principal_id, provider_id, provider_subject) ON DELETE RESTRICT;
+ALTER TABLE ONLY installation_state
+    ADD CONSTRAINT installation_state_human_identity FOREIGN KEY (configured_principal_id, expected_provider_id, expected_provider_subject) REFERENCES human_provider_identities(principal_id, provider_id, provider_subject) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY human_auth_installation_state
-    ADD CONSTRAINT human_auth_installation_state_membership FOREIGN KEY (configured_tenant_id, configured_principal_id) REFERENCES tenant_human_memberships(tenant_id, principal_id) ON DELETE RESTRICT;
+ALTER TABLE ONLY installation_state
+    ADD CONSTRAINT installation_state_human_membership FOREIGN KEY (configured_tenant_id, configured_principal_id) REFERENCES tenant_human_memberships(tenant_id, principal_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY human_auth_installation_state
-    ADD CONSTRAINT human_auth_installation_state_setup_transaction FOREIGN KEY (setup_transaction_id) REFERENCES human_login_transactions(id) ON DELETE RESTRICT;
+ALTER TABLE ONLY installation_state
+    ADD CONSTRAINT installation_state_human_setup_transaction FOREIGN KEY (setup_transaction_id) REFERENCES human_login_transactions(id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY installation_state
+    ADD CONSTRAINT installation_state_exact_configured_tenant_fkey FOREIGN KEY (configured_tenant_id, tenant_display_name) REFERENCES tenants(id, display_name) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY installation_state
+    ADD CONSTRAINT installation_state_deployment_audit_fkey FOREIGN KEY (deployment_bootstrap_audit_event_id) REFERENCES security_audit_events(event_id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY human_login_transactions
     ADD CONSTRAINT human_login_transactions_completed_membership FOREIGN KEY (tenant_id, completed_principal_id) REFERENCES tenant_human_memberships(tenant_id, principal_id) ON DELETE RESTRICT;
@@ -651,6 +657,9 @@ ALTER TABLE ONLY runner_enrollment_tokens
 
 ALTER TABLE ONLY runner_enrollment_tokens
     ADD CONSTRAINT runner_enrollment_tokens_issuer_session_fkey FOREIGN KEY (tenant_id, issued_by_principal_id, issued_by_session_id) REFERENCES human_sessions(tenant_id, principal_id, id) ON DELETE RESTRICT;
+
+ALTER TABLE ONLY runner_enrollment_tokens
+    ADD CONSTRAINT runner_enrollment_tokens_installation_authority_fkey FOREIGN KEY (tenant_id, installation_authority_sha256) REFERENCES installation_state(configured_tenant_id, deployment_authority_sha256) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY runner_enrollment_tokens
     ADD CONSTRAINT runner_enrollment_tokens_consumed_runner_fkey FOREIGN KEY (tenant_id, consumed_runner_id) REFERENCES runners(tenant_id, id) ON DELETE RESTRICT;

@@ -11,6 +11,9 @@ pub enum SandboxCapability {
     Attach,
     /// Recovers the current state of an exact opaque sandbox handle.
     Inspect,
+    /// Replays an invocation-committed endpoint request after runner restart
+    /// against the same live sandbox generation without applying it twice.
+    RestartSafeEndpointReplay,
     /// Executes literal argv requests without an implicit shell.
     Exec,
     /// Delivers the portable signals supported by [`crate::ExecutionSignal`].

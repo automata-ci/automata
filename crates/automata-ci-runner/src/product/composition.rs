@@ -5,7 +5,7 @@ use automata_ci_action_github::{
     GithubActionMetadataDecoder, GithubActionMetadataLimits, JavascriptRuntime,
 };
 use automata_ci_blob::ImmutableBlobStore;
-use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfig, StaticS3Credentials};
+use automata_ci_blob_s3::{MAX_S3_PRIVATE_CA_PEM_BYTES, S3TlsTrust, StaticS3Credentials};
 use automata_ci_core::{ContainerCapabilities, ContainerFeature, RunnerCapabilities};
 use automata_ci_execution::{ProviderCapabilities, SandboxCapability};
 use automata_ci_job_executor_github::{
@@ -22,8 +22,8 @@ use automata_ci_runner_runtime::{
 };
 use automata_ci_runner_spool::{ContentProtector, FileSpool, FileSpoolOptions};
 use automata_ci_runner_transport::{
-    HyperRunnerControlClient, HyperRunnerEphemeralClient, RunnerControlClient,
-    RunnerEphemeralClient, TransportLimits,
+    HyperRunnerCertificateRenewalClient, HyperRunnerControlClient, HyperRunnerEphemeralClient,
+    RunnerCertificateRenewalClient, RunnerControlClient, RunnerEphemeralClient, TransportLimits,
 };
 use automata_ci_sandbox_macos::{MacosVirtualizationProvider, MacosVirtualizationProviderOptions};
 #[cfg(not(target_os = "linux"))]
@@ -63,18 +63,21 @@ use super::state::RuntimeMountSnapshot;
 use super::{
     ClientTlsMaterialError, ProductStateRootError, RunnerProductConfig, RunnerProductConfigError,
     RunnerProviderConfig, SecretSource, StandardGithubContext,
-    config::required_podman_state_root,
+    config::{ObjectStoreTlsTrust, required_podman_state_root},
     metrics::RunnerMetrics,
     profile_admission::{
-        ProfileAdmissionOutcome, ProfileAdmissionPolicy, admit_environment_profiles,
+        ProfileAdmissionError, ProfileAdmissionOutcome, ProfileAdmissionPolicy,
+        admit_environment_profiles,
     },
     spool_crypto::{AES_256_GCM_KEY_BYTES, Aes256GcmContentKeyring, Aes256GcmContentProtector},
     state::{capture_dedicated_runtime_mount, ensure_private_directory},
     tls::load_client_tls,
 };
+use crate::certificate_renewal::{CertificateRenewal, CertificateRenewalOutcome};
 
 const MAX_S3_ACCESS_KEY_BYTES: usize = 1_024;
 const MAX_S3_SECRET_BYTES: usize = 65_536;
+const RECOMPOSITION_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
 
 #[cfg(not(target_os = "linux"))]
 #[derive(Clone, Debug)]
@@ -131,25 +134,118 @@ impl RunnerShutdown {
 /// Returns a sanitized startup/runtime category. Secret values, PEM contents,
 /// provider output, and action output are never embedded in this error.
 pub async fn run(config_path: &Path, shutdown: RunnerShutdown) -> Result<(), RunnerProductError> {
+    run_recomposition_loop(shutdown, |generation_shutdown| {
+        Box::pin(run_generation(config_path, generation_shutdown))
+    })
+    .await
+}
+
+async fn run_generation(
+    config_path: &Path,
+    shutdown: RunnerShutdown,
+) -> Result<SupervisionDisposition, RunnerProductError> {
     let config = RunnerProductConfig::load(config_path)?;
     if shutdown.is_requested() {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     }
     match config.provider() {
-        RunnerProviderConfig::Podman(_) => run_podman(&config, shutdown).await,
-        RunnerProviderConfig::Kubernetes(_) => run_kubernetes(&config, shutdown).await,
-        RunnerProviderConfig::WindowsHyperV(_) => run_windows_hyperv(&config, shutdown).await,
+        RunnerProviderConfig::Podman(_) => Box::pin(run_podman(&config, shutdown)).await,
+        RunnerProviderConfig::LocalDocker(_) => Box::pin(run_local_docker(&config, shutdown)).await,
+        RunnerProviderConfig::Kubernetes(_) => Box::pin(run_kubernetes(&config, shutdown)).await,
+        RunnerProviderConfig::WindowsHyperV(_) => {
+            Box::pin(run_windows_hyperv(&config, shutdown)).await
+        }
         RunnerProviderConfig::MacosVirtualization(_) => {
-            run_macos_virtualization(&config, shutdown).await
+            Box::pin(run_macos_virtualization(&config, shutdown)).await
         }
     }
+}
+
+async fn run_recomposition_loop<Generation, GenerationFuture>(
+    shutdown: RunnerShutdown,
+    mut run_generation: Generation,
+) -> Result<(), RunnerProductError>
+where
+    Generation: FnMut(RunnerShutdown) -> GenerationFuture,
+    GenerationFuture: Future<Output = Result<SupervisionDisposition, RunnerProductError>>,
+{
+    loop {
+        if shutdown.is_requested() {
+            return Ok(());
+        }
+        let disposition = run_generation(shutdown.clone()).await?;
+        match disposition {
+            SupervisionDisposition::Complete => return Ok(()),
+            SupervisionDisposition::Recompose if shutdown.is_requested() => return Ok(()),
+            SupervisionDisposition::Recompose => {
+                info!("runner certificate renewed; rebuilding the runner composition");
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupervisionDisposition {
+    Complete,
+    Recompose,
+}
+
+#[cfg(target_os = "linux")]
+async fn run_local_docker(
+    config: &RunnerProductConfig,
+    shutdown: RunnerShutdown,
+) -> Result<SupervisionDisposition, RunnerProductError> {
+    require_dedicated_runner_user()?;
+    let local = config
+        .local_docker()
+        .ok_or(RunnerProductError::ProviderConfiguration)?;
+    let provider = automata_ci_local::LocalDockerProvider::connect(
+        local.installation().clone(),
+        local.guest_image().clone(),
+    )
+    .await?;
+    if shutdown.is_requested() {
+        return Ok(SupervisionDisposition::Complete);
+    }
+    let metrics = build_metrics(config, None)?;
+    let provider: Arc<dyn automata_ci_execution::SandboxProvider> = Arc::new(provider);
+    let provider = match &metrics {
+        Some(metrics) => metrics.instrument_sandbox_provider(provider),
+        None => provider,
+    };
+    let metrics_listener = match config.metrics() {
+        Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
+        None => None,
+    };
+    let composition = compose_with_provider(
+        config,
+        provider,
+        metrics,
+        &shutdown.probe,
+        false,
+        false,
+        || Ok(()),
+    )?
+    .filter(|_| !shutdown.is_requested());
+    let Some(composition) = composition else {
+        return Ok(SupervisionDisposition::Complete);
+    };
+    supervise_composition(config, composition, metrics_listener, shutdown).await
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn run_local_docker(
+    _config: &RunnerProductConfig,
+    _shutdown: RunnerShutdown,
+) -> Result<SupervisionDisposition, RunnerProductError> {
+    Err(RunnerProductError::UnsupportedPlatform)
 }
 
 async fn run_podman(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
-) -> Result<(), RunnerProductError> {
-    require_dedicated_rootless_user()?;
+) -> Result<SupervisionDisposition, RunnerProductError> {
+    require_dedicated_runner_user()?;
     let podman_options = prepare_admitted_podman(config)?;
     let network_policy = config.executor().network();
     let capability_admission =
@@ -160,7 +256,7 @@ async fn run_podman(
         || shutdown.is_requested(),
     )?;
     let Some(admission) = admission else {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     };
     let metrics_listener = match config.metrics() {
         Some(metrics) => Some(bind_metrics_listener(metrics.listen()).await?),
@@ -179,7 +275,7 @@ async fn run_podman(
         Ok(composition)
     })?;
     let Some(composition) = started else {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     };
     supervise_composition(config, composition, metrics_listener, shutdown).await
 }
@@ -187,8 +283,8 @@ async fn run_podman(
 async fn run_kubernetes(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
-) -> Result<(), RunnerProductError> {
-    require_dedicated_rootless_user()?;
+) -> Result<SupervisionDisposition, RunnerProductError> {
+    require_dedicated_runner_user()?;
     let kubernetes = config
         .kubernetes()
         .ok_or(RunnerProductError::ProviderConfiguration)?;
@@ -196,7 +292,7 @@ async fn run_kubernetes(
         .await
         .map_err(RunnerProductError::KubernetesClient)?;
     if shutdown.is_requested() {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     }
     let metrics = build_metrics(config, None)?;
     let provider: Arc<dyn automata_ci_execution::SandboxProvider> = Arc::new(
@@ -224,7 +320,7 @@ async fn run_kubernetes(
     )?
     .filter(|_| !shutdown.is_requested());
     let Some(composition) = composition else {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     };
     supervise_composition(config, composition, metrics_listener, shutdown).await
 }
@@ -232,9 +328,9 @@ async fn run_kubernetes(
 async fn run_windows_hyperv(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
-) -> Result<(), RunnerProductError> {
+) -> Result<SupervisionDisposition, RunnerProductError> {
     if shutdown.is_requested() {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     }
     let metrics = build_metrics(config, None)?;
     let provider = build_windows_provider(config, metrics.as_ref())?;
@@ -253,7 +349,7 @@ async fn run_windows_hyperv(
     )?
     .filter(|_| !shutdown.is_requested());
     let Some(composition) = composition else {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     };
     supervise_composition(config, composition, metrics_listener, shutdown).await
 }
@@ -261,9 +357,9 @@ async fn run_windows_hyperv(
 async fn run_macos_virtualization(
     config: &RunnerProductConfig,
     shutdown: RunnerShutdown,
-) -> Result<(), RunnerProductError> {
+) -> Result<SupervisionDisposition, RunnerProductError> {
     if shutdown.is_requested() {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     }
     let metrics = build_metrics(config, None)?;
     let provider = build_macos_provider(config, metrics.as_ref())?;
@@ -282,7 +378,7 @@ async fn run_macos_virtualization(
     )?
     .filter(|_| !shutdown.is_requested());
     let Some(composition) = composition else {
-        return Ok(());
+        return Ok(SupervisionDisposition::Complete);
     };
     supervise_composition(config, composition, metrics_listener, shutdown).await
 }
@@ -292,47 +388,57 @@ async fn supervise_composition(
     composition: RunnerComposition,
     metrics_listener: Option<TcpListener>,
     shutdown: RunnerShutdown,
-) -> Result<(), RunnerProductError> {
+) -> Result<SupervisionDisposition, RunnerProductError> {
     mark_admitted_composition_ready(config, &composition);
-    let supervisor = composition.supervisor.clone();
-    let runtime_shutdown = shutdown.runtime.clone();
+    let RunnerComposition {
+        supervisor,
+        certificate_renewal,
+        certificate_renewal_client,
+        metrics,
+        journal,
+        spool,
+    } = composition;
+    let inner_shutdown = CancellationToken::new();
+    let runtime_shutdown = inner_shutdown.clone();
     let runtime = async move { supervisor.run(runtime_shutdown).await };
-    let exporter = composition.metrics.as_ref().map(RunnerMetrics::exporter);
-    let metrics_service = serve_metrics(metrics_listener, exporter, shutdown.runtime.clone());
-    let metrics_sampler = sample_metrics(
-        composition.metrics.clone(),
-        Arc::clone(&composition.journal),
-        Arc::clone(&composition.spool),
-        shutdown.runtime.clone(),
-    );
+    let exporter = metrics.as_ref().map(RunnerMetrics::exporter);
+    let metrics_service = serve_metrics(metrics_listener, exporter, inner_shutdown.clone());
+    let metrics_sampler = sample_metrics(metrics.clone(), journal, spool, inner_shutdown.clone());
+    let renewal =
+        certificate_renewal.run(config, certificate_renewal_client, shutdown.runtime.clone());
     tokio::pin!(runtime);
     tokio::pin!(metrics_service);
     tokio::pin!(metrics_sampler);
+    tokio::pin!(renewal);
     let selected = select_composition_exit(
         &shutdown.runtime,
         runtime.as_mut(),
         metrics_service.as_mut(),
         metrics_sampler.as_mut(),
+        renewal.as_mut(),
     )
     .await;
     let result = match selected {
         CompositionExit::Shutdown => {
+            inner_shutdown.cancel();
             let runtime_result = (&mut runtime).await;
             let metrics_result = (&mut metrics_service).await;
             (&mut metrics_sampler).await?;
             info!("runner shutdown requested");
             metrics_result?;
-            runtime_result.map_err(RunnerProductError::Runtime)
+            runtime_result.map_err(RunnerProductError::Runtime)?;
+            Ok(SupervisionDisposition::Complete)
         }
         CompositionExit::Runtime(runtime_result) => {
-            shutdown.runtime.cancel();
+            inner_shutdown.cancel();
             let metrics_result = (&mut metrics_service).await;
             (&mut metrics_sampler).await?;
             metrics_result?;
-            runtime_result.map_err(RunnerProductError::Runtime)
+            runtime_result.map_err(RunnerProductError::Runtime)?;
+            Ok(SupervisionDisposition::Complete)
         }
         CompositionExit::Metrics(metrics_result) => {
-            shutdown.runtime.cancel();
+            inner_shutdown.cancel();
             let _runtime_result = (&mut runtime).await;
             (&mut metrics_sampler).await?;
             match metrics_result {
@@ -341,7 +447,7 @@ async fn supervise_composition(
             }
         }
         CompositionExit::Sampler(sampler_result) => {
-            shutdown.runtime.cancel();
+            inner_shutdown.cancel();
             let _runtime_result = (&mut runtime).await;
             let _metrics_result = (&mut metrics_service).await;
             match sampler_result {
@@ -349,30 +455,79 @@ async fn supervise_composition(
                 Err(error) => Err(error),
             }
         }
+        CompositionExit::Renewal(renewal_result) => {
+            inner_shutdown.cancel();
+            drain_recomposition_generation(
+                runtime.as_mut(),
+                metrics_service.as_mut(),
+                metrics_sampler.as_mut(),
+            )
+            .await?;
+            if shutdown.is_requested() {
+                Ok(SupervisionDisposition::Complete)
+            } else {
+                match renewal_result.map_err(|_| RunnerProductError::CertificateRenewal)? {
+                    CertificateRenewalOutcome::Renewed => Ok(SupervisionDisposition::Recompose),
+                    CertificateRenewalOutcome::Cancelled => Ok(SupervisionDisposition::Complete),
+                }
+            }
+        }
     };
-    if let Some(metrics) = &composition.metrics {
+    if let Some(metrics) = &metrics {
         metrics.set_ready(false);
     }
     result
 }
 
-enum CompositionExit<Runtime, Metrics, Sampler> {
+async fn drain_recomposition_generation<RuntimeFuture, MetricsFuture, SamplerFuture>(
+    runtime: Pin<&mut RuntimeFuture>,
+    metrics: Pin<&mut MetricsFuture>,
+    sampler: Pin<&mut SamplerFuture>,
+) -> Result<(), RunnerProductError>
+where
+    RuntimeFuture: Future<Output = Result<(), automata_ci_runner_runtime::RunnerRuntimeError>>,
+    MetricsFuture: Future<Output = Result<(), RunnerProductError>>,
+    SamplerFuture: Future<Output = Result<(), RunnerProductError>>,
+{
+    let drain = async {
+        let runtime_result = runtime.await;
+        let metrics_result = metrics.await;
+        let sampler_result = sampler.await;
+        runtime_result.map_err(RunnerProductError::Runtime)?;
+        metrics_result?;
+        sampler_result?;
+        Ok(())
+    };
+    tokio::time::timeout(RECOMPOSITION_DRAIN_TIMEOUT, drain)
+        .await
+        .map_err(|_| RunnerProductError::RecompositionDrainTimeout)?
+}
+
+enum CompositionExit<Runtime, Metrics, Sampler, Renewal> {
     Shutdown,
     Runtime(Runtime),
     Metrics(Metrics),
     Sampler(Sampler),
+    Renewal(Renewal),
 }
 
-async fn select_composition_exit<RuntimeFuture, MetricsFuture, SamplerFuture>(
+async fn select_composition_exit<RuntimeFuture, MetricsFuture, SamplerFuture, RenewalFuture>(
     shutdown: &CancellationToken,
     runtime: Pin<&mut RuntimeFuture>,
     metrics: Pin<&mut MetricsFuture>,
     sampler: Pin<&mut SamplerFuture>,
-) -> CompositionExit<RuntimeFuture::Output, MetricsFuture::Output, SamplerFuture::Output>
+    renewal: Pin<&mut RenewalFuture>,
+) -> CompositionExit<
+    RuntimeFuture::Output,
+    MetricsFuture::Output,
+    SamplerFuture::Output,
+    RenewalFuture::Output,
+>
 where
     RuntimeFuture: Future,
     MetricsFuture: Future,
     SamplerFuture: Future,
+    RenewalFuture: Future,
 {
     tokio::select! {
         biased;
@@ -380,23 +535,24 @@ where
         result = runtime => CompositionExit::Runtime(result),
         result = metrics => CompositionExit::Metrics(result),
         result = sampler => CompositionExit::Sampler(result),
+        result = renewal => CompositionExit::Renewal(result),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn require_dedicated_rootless_user() -> Result<(), RunnerProductError> {
-    admit_effective_user_id(rustix::process::geteuid().as_raw())
+fn require_dedicated_runner_user() -> Result<(), RunnerProductError> {
+    admit_effective_runner_user_id(rustix::process::geteuid().as_raw())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn require_dedicated_rootless_user() -> Result<(), RunnerProductError> {
+fn require_dedicated_runner_user() -> Result<(), RunnerProductError> {
     Err(RunnerProductError::UnsupportedPlatform)
 }
 
 #[cfg(target_os = "linux")]
-fn admit_effective_user_id(user: u32) -> Result<(), RunnerProductError> {
+fn admit_effective_runner_user_id(user: u32) -> Result<(), RunnerProductError> {
     if user == 0 {
-        Err(RunnerProductError::PodmanProcessTrust)
+        Err(RunnerProductError::RunnerUserTrust)
     } else {
         Ok(())
     }
@@ -435,6 +591,8 @@ fn prepare_admitted_podman(
 
 struct RunnerComposition {
     supervisor: RunnerSessionSupervisor,
+    certificate_renewal: CertificateRenewal,
+    certificate_renewal_client: Arc<dyn RunnerCertificateRenewalClient>,
     metrics: Option<RunnerMetrics>,
     journal: Arc<FileJournal>,
     spool: Arc<FileSpool>,
@@ -533,6 +691,8 @@ fn compose_with_provider(
     revalidate_provider_trust: impl FnOnce() -> Result<(), RunnerProductError>,
 ) -> Result<Option<RunnerComposition>, RunnerProductError> {
     let protocol_limits = ProtocolLimits::default();
+    let certificate_renewal =
+        CertificateRenewal::open(config).map_err(|_| RunnerProductError::CertificateRenewal)?;
     let tls = load_client_tls(config.tls())?;
     let transport = match &metrics {
         Some(metrics) => HyperRunnerControlClient::new_with_observer(
@@ -559,6 +719,12 @@ fn compose_with_provider(
         &tls,
         TransportLimits::default(),
     )?);
+    let certificate_renewal_client: Arc<dyn RunnerCertificateRenewalClient> =
+        Arc::new(HyperRunnerCertificateRenewalClient::new(
+            config.control_endpoint(),
+            &tls,
+            TransportLimits::default(),
+        )?);
 
     let journal_options = metrics
         .as_ref()
@@ -614,6 +780,8 @@ fn compose_with_provider(
         }
         Ok(RunnerComposition {
             supervisor: RunnerSessionSupervisor::new(runtime_config, ports),
+            certificate_renewal,
+            certificate_renewal_client,
             metrics,
             journal,
             spool,
@@ -710,7 +878,9 @@ fn admit_configured_environment_profiles(
                 toolchain.pwsh().cloned(),
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
-        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => policy
+        RunnerProviderConfig::Podman(_)
+        | RunnerProviderConfig::LocalDocker(_)
+        | RunnerProviderConfig::Kubernetes(_) => policy
             .with_linux_tools(
                 toolchain
                     .bash()
@@ -741,11 +911,20 @@ fn admit_configured_environment_profiles(
             )
             .map_err(|_| RunnerProductError::ProviderConfiguration)?,
     };
-    let result = admit_environment_profiles(provider, config.environments(), policy, cancellation);
+    report_profile_admission(
+        admit_runner_profiles(config, provider, policy, cancellation),
+        config.environments().len(),
+    )
+}
+
+fn report_profile_admission(
+    result: Result<ProfileAdmissionOutcome, ProfileAdmissionError>,
+    profile_count: usize,
+) -> Result<ProfileAdmissionOutcome, RunnerProductError> {
     match result {
         Ok(ProfileAdmissionOutcome::Admitted) => {
             info!(
-                profiles = config.environments().len(),
+                profiles = profile_count,
                 "runner environment profiles admitted by provider lifecycle"
             );
             Ok(ProfileAdmissionOutcome::Admitted)
@@ -766,6 +945,21 @@ fn admit_configured_environment_profiles(
             Err(RunnerProductError::EnvironmentProfileAdmission)
         }
     }
+}
+
+fn admit_runner_profiles(
+    config: &RunnerProductConfig,
+    provider: &dyn automata_ci_execution::SandboxProvider,
+    policy: ProfileAdmissionPolicy,
+    cancellation: &crate::podman_probe::ProbeCancellation,
+) -> Result<ProfileAdmissionOutcome, ProfileAdmissionError> {
+    admit_environment_profiles(
+        provider,
+        config.runner_id(),
+        config.environments(),
+        policy,
+        cancellation,
+    )
 }
 
 async fn bind_metrics_listener(
@@ -1093,31 +1287,31 @@ fn build_object_store(
     config: &RunnerProductConfig,
 ) -> Result<Arc<dyn ImmutableBlobStore>, RunnerProductError> {
     let object_store = config.object_store();
-    let store_config = if object_store.loopback_development() {
-        S3BlobStoreConfig::loopback_development(
-            object_store.endpoint().clone(),
-            object_store.region(),
-            object_store.bucket(),
-            object_store.prefix().map(str::to_owned),
-            object_store.operation_timeout(),
-        )
-    } else {
-        S3BlobStoreConfig::new(
-            object_store.endpoint().clone(),
-            object_store.region(),
-            object_store.bucket(),
-            object_store.prefix().map(str::to_owned),
-            object_store.force_path_style(),
-            object_store.operation_timeout(),
-        )
-    }?;
+    let store_config = match object_store.tls_trust() {
+        ObjectStoreTlsTrust::WebPki => object_store.store_config().clone(),
+        ObjectStoreTlsTrust::PrivateCa { certificate_source } => object_store
+            .store_config()
+            .clone()
+            .with_tls_trust(load_s3_private_ca(certificate_source)?)?,
+    };
     let credentials = load_s3_credentials(
         object_store.access_key_id(),
         object_store.secret_access_key(),
         object_store.session_token(),
     )?;
-    let client = store_config.client(credentials);
-    Ok(Arc::new(S3BlobStore::new(client, &store_config)))
+    Ok(Arc::new(store_config.connect(credentials)?))
+}
+
+/// Loads the exact configured S3 HTTPS trust policy from its bounded source.
+///
+/// # Errors
+///
+/// Returns a sanitized product error when a private CA source is unavailable,
+/// excessive, malformed, or not exactly one X.509 CA certificate.
+fn load_s3_private_ca(certificate_source: &SecretSource) -> Result<S3TlsTrust, RunnerProductError> {
+    let mut certificate_pem = certificate_source.read(MAX_S3_PRIVATE_CA_PEM_BYTES)?;
+    S3TlsTrust::private_ca(std::mem::take(&mut *certificate_pem))
+        .map_err(RunnerProductError::ObjectStore)
 }
 
 fn build_toolchain(
@@ -1125,30 +1319,30 @@ fn build_toolchain(
 ) -> Result<StaticGithubToolchain, RunnerProductError> {
     let configured = config.executor().toolchain();
     let mut toolchain = match config.provider() {
-        RunnerProviderConfig::Podman(_) | RunnerProviderConfig::Kubernetes(_) => {
-            StaticGithubToolchain::new(
-                configured
-                    .bash()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .sh()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .install()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .tar()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-                configured
-                    .sha256sum()
-                    .ok_or(RunnerProductError::ProviderConfiguration)?
-                    .clone(),
-            )?
-        }
+        RunnerProviderConfig::Podman(_)
+        | RunnerProviderConfig::LocalDocker(_)
+        | RunnerProviderConfig::Kubernetes(_) => StaticGithubToolchain::new(
+            configured
+                .bash()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .sh()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .install()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .tar()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+            configured
+                .sha256sum()
+                .ok_or(RunnerProductError::ProviderConfiguration)?
+                .clone(),
+        )?,
         RunnerProviderConfig::WindowsHyperV(_) => StaticGithubToolchain::windows(
             configured
                 .pwsh()
@@ -1192,6 +1386,7 @@ fn build_toolchain(
     if matches!(
         config.provider(),
         RunnerProviderConfig::Podman(_)
+            | RunnerProviderConfig::LocalDocker(_)
             | RunnerProviderConfig::Kubernetes(_)
             | RunnerProviderConfig::MacosVirtualization(_)
     ) && let Some(path) = configured.pwsh()
@@ -1319,6 +1514,12 @@ pub enum RunnerProductError {
     /// Runner control transport configuration failed.
     #[error("runner control transport configuration failed")]
     TransportConfiguration(#[from] automata_ci_runner_transport::ConfigurationError),
+    /// Runner certificate renewal or durable identity rotation failed.
+    #[error("runner certificate renewal failed")]
+    CertificateRenewal,
+    /// Old runner tasks did not stop inside the bounded identity-reload drain.
+    #[error("runner certificate recomposition drain timed out")]
+    RecompositionDrainTimeout,
     /// Crash-durable journal initialization failed.
     #[error("runner durable journal initialization failed")]
     Journal(#[from] automata_ci_runner_journal::JournalError),
@@ -1339,6 +1540,9 @@ pub enum RunnerProductError {
     /// Provider state-root preparation failed.
     #[error("runner provider state-root initialization failed")]
     StateRoot(#[from] ProductStateRootError),
+    /// The production runner was not launched as a dedicated non-root user.
+    #[error("runner user trust validation failed")]
+    RunnerUserTrust,
     /// Rootless Podman configuration failed.
     #[error("runner Podman configuration failed")]
     PodmanConfiguration(#[from] automata_ci_sandbox_podman::PodmanConfigurationError),
@@ -1351,6 +1555,9 @@ pub enum RunnerProductError {
     /// Rootless Podman initialization failed.
     #[error("runner Podman provider initialization failed")]
     PodmanOpen(#[from] automata_ci_sandbox_podman::PodmanOpenError),
+    /// Fixed-relay local Docker provider initialization failed.
+    #[error("runner local Docker provider initialization failed")]
+    LocalDocker(#[from] automata_ci_local::LocalEngineError),
     /// The provider-specific product configuration was internally inconsistent.
     #[error("runner provider configuration is inconsistent")]
     ProviderConfiguration,
@@ -1426,9 +1633,91 @@ mod tests {
         net::{IpAddr, Ipv4Addr, SocketAddr},
     };
 
+    #[cfg(unix)]
+    use std::{fs, os::unix::fs::PermissionsExt as _, path::PathBuf};
+
     use automata_ci_metrics::OPENMETRICS_CONTENT_TYPE;
 
+    #[cfg(unix)]
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+
     use super::*;
+
+    #[cfg(unix)]
+    struct PrivateCaFixture {
+        root: PathBuf,
+        source: SecretSource,
+    }
+
+    #[cfg(unix)]
+    impl PrivateCaFixture {
+        fn new(bytes: &[u8]) -> Self {
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .and_then(std::path::Path::parent)
+                .expect("workspace root")
+                .join("target/runner-s3-private-ca-tests")
+                .join(uuid::Uuid::new_v4().simple().to_string());
+            fs::create_dir_all(&root).expect("create private CA fixture root");
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                .expect("restrict private CA fixture root");
+            let path = root.join("ca.pem");
+            fs::write(&path, bytes).expect("write private CA fixture");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .expect("restrict private CA fixture");
+            Self {
+                root,
+                source: SecretSource::File { path },
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PrivateCaFixture {
+        fn drop(&mut self) {
+            let _ignored = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_ca_binding_loads_one_bounded_exact_redacted_source() {
+        let key = KeyPair::generate().expect("private CA key");
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("private CA params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let pem = params
+            .self_signed(&key)
+            .expect("self-signed private CA")
+            .pem();
+        let certificate = PrivateCaFixture::new(pem.as_bytes());
+        let trust = load_s3_private_ca(&certificate.source).expect("one exact private CA");
+        assert_eq!(
+            format!("{trust:?}"),
+            "S3TlsTrust::PrivateCa([certificate redacted])"
+        );
+        assert!(!format!("{trust:?}").contains(&pem));
+
+        let malformed = PrivateCaFixture::new(b"private CA content must never escape");
+        assert!(matches!(
+            load_s3_private_ca(&malformed.source),
+            Err(RunnerProductError::ObjectStore(
+                automata_ci_blob_s3::S3BlobStoreConfigError::InvalidPrivateCa
+            ))
+        ));
+
+        let oversized = PrivateCaFixture::new(&vec![
+            b'x';
+            automata_ci_blob_s3::MAX_S3_PRIVATE_CA_PEM_BYTES
+                + 1
+        ]);
+        assert!(matches!(
+            load_s3_private_ca(&oversized.source),
+            Err(RunnerProductError::SecureInput(
+                super::super::SecureInputError::InvalidSize
+            ))
+        ));
+    }
 
     #[derive(Debug, Default)]
     struct StartupEffects {
@@ -1494,12 +1783,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn root_is_rejected_before_any_podman_state_preparation() {
+    fn root_is_rejected_by_runner_user_trust_boundary() {
         assert!(matches!(
-            admit_effective_user_id(0),
-            Err(RunnerProductError::PodmanProcessTrust)
+            admit_effective_runner_user_id(0),
+            Err(RunnerProductError::RunnerUserTrust)
         ));
-        assert!(admit_effective_user_id(1).is_ok());
+        assert!(admit_effective_runner_user_id(1).is_ok());
     }
 
     #[test]
@@ -1648,7 +1937,8 @@ mod tests {
         #[cfg(target_os = "macos")]
         let configuration = include_bytes!("../../config/runner.macos.example.json").as_slice();
         #[cfg(target_os = "windows")]
-        let configuration = include_bytes!("../../config/runner.windows.example.json").as_slice();
+        let configuration =
+            include_bytes!("../../tests/fixtures/runner.windows.product.json").as_slice();
         let config = RunnerProductConfig::from_json(configuration)
             .expect("checked-in host runner configuration");
         let mut registered_features = config.inventory().containers().features().clone();
@@ -1733,9 +2023,11 @@ mod tests {
         let runtime = std::future::ready("runtime");
         let metrics = std::future::ready("metrics");
         let sampler = std::future::ready("sampler");
+        let renewal = std::future::ready("renewal");
         tokio::pin!(runtime);
         tokio::pin!(metrics);
         tokio::pin!(sampler);
+        tokio::pin!(renewal);
 
         assert!(matches!(
             select_composition_exit(
@@ -1743,10 +2035,126 @@ mod tests {
                 runtime.as_mut(),
                 metrics.as_mut(),
                 sampler.as_mut(),
+                renewal.as_mut(),
             )
             .await,
             CompositionExit::Shutdown
         ));
+    }
+
+    #[tokio::test]
+    async fn renewal_is_selected_without_waiting_for_an_old_generation_exit() {
+        let shutdown = CancellationToken::new();
+        let runtime = std::future::pending::<()>();
+        let metrics = std::future::pending::<()>();
+        let sampler = std::future::pending::<()>();
+        let renewal = std::future::ready("renewed");
+        tokio::pin!(runtime);
+        tokio::pin!(metrics);
+        tokio::pin!(sampler);
+        tokio::pin!(renewal);
+
+        assert!(matches!(
+            select_composition_exit(
+                &shutdown,
+                runtime.as_mut(),
+                metrics.as_mut(),
+                sampler.as_mut(),
+                renewal.as_mut(),
+            )
+            .await,
+            CompositionExit::Renewal("renewed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn renewed_generation_is_rebuilt_before_normal_completion() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let shutdown = RunnerShutdown::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generation_calls = Arc::clone(&calls);
+        run_recomposition_loop(shutdown, move |_| {
+            let call = generation_calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok(if call == 0 {
+                SupervisionDisposition::Recompose
+            } else {
+                SupervisionDisposition::Complete
+            }))
+        })
+        .await
+        .expect("renewed runner generation is rebuilt");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn shutdown_after_renewal_prevents_a_new_generation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let shutdown = RunnerShutdown::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generation_calls = Arc::clone(&calls);
+        run_recomposition_loop(shutdown, move |generation_shutdown| {
+            generation_calls.fetch_add(1, Ordering::SeqCst);
+            generation_shutdown.request();
+            std::future::ready(Ok(SupervisionDisposition::Recompose))
+        })
+        .await
+        .expect("shutdown remains authoritative after renewal");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recomposition_drain_waits_for_every_old_generation_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let (runtime_sender, runtime_receiver) = tokio::sync::oneshot::channel();
+        let (metrics_sender, metrics_receiver) = tokio::sync::oneshot::channel();
+        let (sampler_sender, sampler_receiver) = tokio::sync::oneshot::channel();
+        let drain_completed = Arc::clone(&completed);
+        let drain = tokio::spawn(async move {
+            let runtime_completed = Arc::clone(&drain_completed);
+            let runtime = async move {
+                runtime_receiver.await.expect("release runtime");
+                runtime_completed.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), automata_ci_runner_runtime::RunnerRuntimeError>(())
+            };
+            let metrics_completed = Arc::clone(&drain_completed);
+            let metrics = async move {
+                metrics_receiver.await.expect("release metrics");
+                metrics_completed.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), RunnerProductError>(())
+            };
+            let sampler = async move {
+                sampler_receiver.await.expect("release sampler");
+                drain_completed.fetch_add(1, Ordering::SeqCst);
+                Ok::<(), RunnerProductError>(())
+            };
+            tokio::pin!(runtime);
+            tokio::pin!(metrics);
+            tokio::pin!(sampler);
+            drain_recomposition_generation(runtime.as_mut(), metrics.as_mut(), sampler.as_mut())
+                .await
+        });
+
+        runtime_sender.send(()).expect("release runtime");
+        metrics_sender.send(()).expect("release metrics");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while completed.load(Ordering::SeqCst) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first two old-generation tasks drained");
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert!(!drain.is_finished());
+        sampler_sender.send(()).expect("release sampler");
+        drain
+            .await
+            .expect("drain task")
+            .expect("bounded generation drain");
+        assert_eq!(completed.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

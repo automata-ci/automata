@@ -11,6 +11,10 @@ repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 async-trait.workspace = true
 automata-ci-auth.workspace = true
@@ -21,6 +25,8 @@ automata-ci-key-management.workspace = true
 automata-ci-oidc-github.workspace = true
 automata-ci-schedule.workspace = true
 automata-ci-store = { workspace = true, features = ["adapter-spi"] }
+automata-ci-tls.workspace = true
+percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -30,6 +36,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+url.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rcgen.workspace = true

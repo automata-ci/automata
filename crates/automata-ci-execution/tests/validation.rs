@@ -1,17 +1,36 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use automata_ci_execution::{
+    CancellationDisposition, ENDPOINT_JOB_SETUP_OPERATIONS, ENDPOINT_OPERATIONS_PER_RUN_STEP,
     EnvironmentName, EnvironmentProfile, EnvironmentProfileId, EnvironmentValue,
     EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment, ExecutionOutput,
     ExecutionOutputRecord, ExecutionOutputStream, ExecutionTermination, ImmutableImage,
-    MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES, MAX_EXECUTION_OUTPUT_RECORDS,
-    NetworkPolicy, OperationId, ProviderCapabilities, ProviderId, ResourceLimits,
-    RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration, SandboxHandle,
-    SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBinding, ServiceContainerBindings,
-    ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy,
-    ServiceNetwork, ServicePort, ServicePortBinding, ServiceTransportProtocol, Sha256Digest,
-    TargetPath, ValueError,
+    MAX_ENDPOINT_OPERATIONS_PER_JOB, MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
+    MAX_EXECUTION_OUTPUT_RECORDS, NetworkPolicy, OperationId, ProviderCapabilities, ProviderId,
+    ResourceLimits, RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody,
+    SandboxEnvironment, SandboxGeneration, SandboxHandle, SandboxPrivilegePolicy, SandboxSpec,
+    ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs,
+    ServiceHealthOverrides, ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding,
+    ServiceTransportProtocol, Sha256Digest, TargetPath, ValueError,
 };
+
+#[test]
+fn only_termination_authorizes_backend_quiescence() {
+    assert!(!CancellationDisposition::Active.requires_termination());
+    assert!(CancellationDisposition::Terminate.requires_termination());
+}
+
+#[test]
+fn endpoint_operation_budget_admits_every_maximum_run_only_phase() {
+    assert_eq!(ENDPOINT_JOB_SETUP_OPERATIONS, 2);
+    assert_eq!(ENDPOINT_OPERATIONS_PER_RUN_STEP, 15);
+    assert_eq!(
+        MAX_ENDPOINT_OPERATIONS_PER_JOB,
+        automata_ci_core::MAX_LOGICAL_STEPS * ENDPOINT_OPERATIONS_PER_RUN_STEP
+            + ENDPOINT_JOB_SETUP_OPERATIONS
+    );
+    assert_eq!(MAX_ENDPOINT_OPERATIONS_PER_JOB, 30_722);
+}
 
 const IMAGE: &str = "docker.io/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -33,6 +52,12 @@ fn profile() -> SandboxEnvironment {
     .expect("profile")
 }
 
+fn custody() -> SandboxCustody {
+    SandboxCustody::ProfileAdmission {
+        runner_id: RunnerId::new(),
+    }
+}
+
 #[test]
 fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
     let image = ImmutableImage::new(IMAGE).expect("immutable image");
@@ -47,10 +72,38 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         ),
         Err(ValueError::InvalidImmutableImage)
     ));
+    for invalid in [
+        "library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "Registry.Example/library/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/Team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example:05000/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team//alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team/alpine_@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert_eq!(
+            ImmutableImage::new(invalid),
+            Err(ValueError::InvalidImmutableImage),
+            "invalid image reference was accepted: {invalid}"
+        );
+    }
+    for valid in [
+        "localhost/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "localhost:5000/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "registry.example/team/a_b.c--d@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "[2001:db8::1]:5000/team/alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert_eq!(
+            ImmutableImage::new(valid)
+                .expect("valid registry-qualified immutable image")
+                .reference(),
+            valid
+        );
+    }
 
     let spec = SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(7).expect("generation"),
+        custody(),
         profile(),
         TargetPath::posix("/__w").expect("workspace"),
         NetworkPolicy::Disabled,
@@ -80,6 +133,45 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
         IMAGE
     );
     assert_eq!(spec.resources().cpu_millis(), 2_000);
+}
+
+#[test]
+fn immutable_image_enforces_docker_name_boundary_and_canonical_ipv6() {
+    const DIGEST: &str = "@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    let maximum_repository_name = "a".repeat(255);
+    let maximum_reference = format!("r.io/{maximum_repository_name}{DIGEST}");
+    assert_eq!(
+        ImmutableImage::new(&maximum_reference)
+            .expect("255-byte Docker repository name")
+            .reference(),
+        maximum_reference
+    );
+
+    let overlong_repository_name = "a".repeat(256);
+    assert_eq!(
+        ImmutableImage::new(format!("r.io/{overlong_repository_name}{DIGEST}")),
+        Err(ValueError::InvalidImmutableImage)
+    );
+
+    let canonical = format!("[2001:db8::1]/team/alpine{DIGEST}");
+    assert_eq!(
+        ImmutableImage::new(&canonical)
+            .expect("canonical bracketed IPv6 registry")
+            .reference(),
+        canonical
+    );
+    for alias in [
+        "[2001:DB8::1]",
+        "[2001:0db8:0000:0000:0000:0000:0000:0001]",
+        "[::ffff:192.0.2.1]",
+    ] {
+        assert_eq!(
+            ImmutableImage::new(format!("{alias}/team/alpine{DIGEST}")),
+            Err(ValueError::InvalidImmutableImage),
+            "noncanonical IPv6 registry alias was accepted: {alias}"
+        );
+    }
 }
 
 #[test]
@@ -393,6 +485,7 @@ fn service_requests_are_exact_redacted_and_discovered_by_requested_port() {
     let sandbox = SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(9).expect("generation"),
+        custody(),
         profile(),
         TargetPath::posix("/__w/project").expect("workspace"),
         NetworkPolicy::PrivateEgress,

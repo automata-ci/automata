@@ -21,6 +21,7 @@ workspace = true
 
 [dependencies]
 automata-ci-core.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

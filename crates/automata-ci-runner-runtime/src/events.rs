@@ -4,6 +4,7 @@ use automata_ci_core::{
     AttemptId, JobLifecycle, LeaseGuard, LogChannel, LogFrame, LogSequence, LogStreamId,
     OperationId,
 };
+use automata_ci_execution::{ExecutionEndpoint, SandboxInspection, SandboxProvider};
 use automata_ci_protocol::{
     LogBatch, MessageHeader, NegotiatedSession, ProtocolLimits, RunnerSlotOrdinal, RunnerToServer,
 };
@@ -442,6 +443,27 @@ impl fmt::Debug for DurableExecutionEvents {
 }
 
 impl ExecutionEvents for DurableExecutionEvents {
+    fn bind_endpoint(
+        &self,
+        provider: Arc<dyn SandboxProvider>,
+        inspection: SandboxInspection,
+        endpoint: Box<dyn ExecutionEndpoint>,
+    ) -> Result<Box<dyn ExecutionEndpoint>, ExecutionEventError> {
+        crate::endpoint_replay::DurableExecutionEndpoint::bind(
+            self.journal.clone(),
+            self.spool.clone(),
+            self.content_operations.clone(),
+            self.serial.clone(),
+            self.session.session_id(),
+            self.slot,
+            self.guard,
+            provider,
+            inspection,
+            endpoint,
+        )
+        .map(|endpoint| Box::new(endpoint) as Box<dyn ExecutionEndpoint>)
+    }
+
     fn transition(&self, next: JobLifecycle) -> Result<(), ExecutionEventError> {
         if next.is_terminal() {
             return Err(ExecutionEventError::InvalidEvent);

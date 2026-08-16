@@ -19,7 +19,9 @@ RUN case "$(uname -m)" in \
         --target "$rust_target" \
     && install -D -m 0755 \
         "target/$rust_target/release/automata-ci-sandbox-guest" \
-        /out/usr/local/bin/automata-ci-sandbox-guest
+        /out/usr/local/bin/automata-ci-sandbox-guest \
+    && install -d -m 0700 -o 65532 -g 65532 \
+        /out/var/lib/automata-local
 
 FROM scratch
 COPY --from=build /out/ /

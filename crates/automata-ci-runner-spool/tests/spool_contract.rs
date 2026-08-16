@@ -2,10 +2,13 @@ use crate::support;
 
 use std::{fs, sync::Arc};
 
+use automata_ci_core::Sha256Digest;
+use automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB;
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, DurableContentStore, FileSpool, FileSpoolOptions,
-    SpoolError, SpoolInvariantError, SpoolLimits,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, DurableContentStore, FileSpool,
+    FileSpoolOptions, SpoolError, SpoolInvariantError, SpoolLimits, endpoint_result_allocation,
 };
+use sha2::{Digest as _, Sha256};
 use static_assertions::assert_obj_safe;
 use support::{Scratch, StaticRetainSet, TestProtector, adopt, content_path};
 
@@ -13,6 +16,55 @@ assert_obj_safe!(DurableContentStore);
 
 fn protector() -> Arc<TestProtector> {
     Arc::new(TestProtector::new("test-aead-v1", 0xa7))
+}
+
+#[test]
+fn default_capacity_holds_every_minimum_class_endpoint_result_admitted_by_one_job() {
+    let admitted_results = u64::try_from(MAX_ENDPOINT_OPERATIONS_PER_JOB).expect("bounded cap");
+    let required = endpoint_result_allocation(1)
+        .expect("one-byte allocation")
+        .checked_mul(admitted_results)
+        .expect("bounded requirement");
+    let limits = SpoolLimits::default();
+    assert!(limits.max_total_bytes() >= required);
+    let required_refs = admitted_results
+        .checked_mul(2)
+        .expect("request and result refs");
+    assert!(u64::from(limits.max_objects()) >= required_refs);
+}
+
+#[test]
+fn plaintext_reference_and_cache_key_cannot_validate_low_entropy_commitment_guesses() {
+    let scratch = Scratch::new("keyed-commitment");
+    let spool = FileSpool::open(scratch.spool_root(), protector()).expect("open spool");
+    let material_digest: [u8; 32] = Sha256::digest(b"0427").into();
+    let commitment = spool
+        .create_keyed_commitment(ContentCommitmentDomain::EndpointRequest, &material_digest)
+        .expect("keyed commitment");
+    assert!(format!("{commitment:?}").contains("[REDACTED]"));
+    assert!(!format!("{commitment:?}").contains("0427"));
+    let reference = adopt(
+        spool
+            .persist(ContentKind::EndpointRequest, commitment.as_bytes())
+            .expect("persist protected commitment"),
+    );
+    for candidate in [b"0000".as_slice(), b"0427", b"9999"] {
+        let candidate_digest: [u8; 32] = Sha256::digest(candidate).into();
+        let vulnerable_reference_digest =
+            Sha256Digest::from_bytes(Sha256::digest(candidate_digest).into());
+        assert_ne!(
+            reference
+                .public_plaintext_sha256()
+                .expect("endpoint commitment is a public content kind"),
+            vulnerable_reference_digest
+        );
+        assert!(
+            !reference
+                .cache_key()
+                .as_str()
+                .contains(&vulnerable_reference_digest.to_string())
+        );
+    }
 }
 
 #[test]

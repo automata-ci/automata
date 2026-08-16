@@ -1503,16 +1503,7 @@ impl DurableRunnerControlHandler {
                 .map_err(|_| app(ApplicationErrorKind::Internal))?;
 
             stage = RunnerRuntimeAuthorityRequestStage::BundleEncoding;
-            let encoded = Zeroizing::new(
-                encode_runtime_authorities(
-                    &authorities,
-                    &job,
-                    offer.lease(),
-                    &self.config.protocol_limits,
-                )
-                .map_err(|_| app(ApplicationErrorKind::Internal))?,
-            );
-            let bundle_digest = sha256(&encoded);
+            let bundle_digest = self.runtime_authority_bundle_digest(&authorities, &job, offer)?;
             if admission
                 .committed_bundle_digest()
                 .is_some_and(|committed| committed != bundle_digest)
@@ -1551,6 +1542,24 @@ impl DurableRunnerControlHandler {
                 .observe_runtime_authority_request_failure(stage, control_failure(error.kind()));
         }
         result
+    }
+
+    fn runtime_authority_bundle_digest(
+        &self,
+        authorities: &JobRuntimeAuthorities,
+        job: &JobIrEnvelope,
+        offer: &AcceptedRuntimeAuthorityOffer,
+    ) -> Result<Sha256Digest, ApplicationError> {
+        let encoded = Zeroizing::new(
+            encode_runtime_authorities(
+                authorities,
+                job,
+                offer.lease(),
+                &self.config.protocol_limits,
+            )
+            .map_err(|_| app(ApplicationErrorKind::Internal))?,
+        );
+        Ok(sha256(&encoded))
     }
 
     async fn issue_runtime_authorities(
@@ -2309,10 +2318,11 @@ const fn control_failure(kind: ApplicationErrorKind) -> RunnerControlFailure {
         ApplicationErrorKind::Forbidden => RunnerControlFailure::Forbidden,
         // The production sync boundary converts stale sessions into a
         // correlated protocol error before observation. A stale handshake is
-        // an application invariant failure, not a reachable label value.
-        ApplicationErrorKind::StaleSession | ApplicationErrorKind::Internal => {
-            RunnerControlFailure::Internal
-        }
+        // an application invariant failure, not a reachable label value. Too
+        // early is exclusive to the separate certificate-renewal route.
+        ApplicationErrorKind::TooEarly
+        | ApplicationErrorKind::StaleSession
+        | ApplicationErrorKind::Internal => RunnerControlFailure::Internal,
         ApplicationErrorKind::Conflict => RunnerControlFailure::Conflict,
         ApplicationErrorKind::Unavailable => RunnerControlFailure::Unavailable,
     }

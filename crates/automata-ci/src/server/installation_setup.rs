@@ -88,7 +88,8 @@ impl InstallationSetupService {
             .await
             .map_err(map_installation_error)?;
         match &current {
-            InstallationState::Configured { .. } => return Ok(current),
+            InstallationState::HumanConfigured { .. }
+            | InstallationState::DeploymentConfigured { .. } => return Ok(current),
             InstallationState::Armed {
                 tenant_id,
                 provider_id,
@@ -248,7 +249,10 @@ impl InstallationSetupService {
             {
                 Ok(revision)
             }
-            InstallationState::Configured { .. } => Err(InstallationSetupError::AlreadyConfigured),
+            InstallationState::HumanConfigured { .. }
+            | InstallationState::DeploymentConfigured { .. } => {
+                Err(InstallationSetupError::AlreadyConfigured)
+            }
             InstallationState::Armed { expires_at, .. }
             | InstallationState::LoginBound { expires_at, .. }
                 if expires_at <= now =>
@@ -299,7 +303,10 @@ impl InstallationSetupService {
             InstallationState::LoginBound { .. }
             | InstallationState::Unconfigured { .. }
             | InstallationState::Armed { .. }
-            | InstallationState::Configured { .. } => Err(InstallationSetupError::IntegrityFailure),
+            | InstallationState::HumanConfigured { .. }
+            | InstallationState::DeploymentConfigured { .. } => {
+                Err(InstallationSetupError::IntegrityFailure)
+            }
         }
     }
 
@@ -320,7 +327,10 @@ impl InstallationSetupService {
                 expires_at,
                 ..
             } if login_transaction_id == transaction_id.clone() && expires_at > now => Ok(revision),
-            InstallationState::Configured { .. } => Err(InstallationSetupError::AlreadyConfigured),
+            InstallationState::HumanConfigured { .. }
+            | InstallationState::DeploymentConfigured { .. } => {
+                Err(InstallationSetupError::AlreadyConfigured)
+            }
             InstallationState::LoginBound { expires_at, .. } if expires_at <= now => {
                 Err(InstallationSetupError::Expired)
             }

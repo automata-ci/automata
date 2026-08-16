@@ -1,9 +1,9 @@
 mod support;
 
-use std::sync::Arc;
+use std::{num::NonZeroU16, sync::Arc};
 
-use automata_ci_core::JobConclusion;
-use automata_ci_execution::{OperationOutcome, ProviderErrorKind};
+use automata_ci_core::{JobConclusion, RunnerId};
+use automata_ci_execution::{OperationOutcome, ProviderErrorKind, SandboxCustody};
 use automata_ci_runner_journal::{
     ProviderFailureKind, ProviderFailureOutcome, ProviderOperationKind,
 };
@@ -11,7 +11,7 @@ use automata_ci_runner_runtime::{
     CleanupRequest, ExecutionCancellation, ExecutionEvents, ExecutorErrorKind, JobExecutor,
 };
 
-use support::{Fixture, PhaseResponse, journal_identity, run_job};
+use support::{Fixture, PhaseResponse, journal_identity, recovered_request, run_job};
 
 const PROVIDER_FAILURE_CASES: &[(ProviderErrorKind, ExecutorErrorKind, ProviderFailureKind)] = &[
     (
@@ -160,6 +160,48 @@ async fn sandbox_identity_commit_failure_replays_the_exact_create_intent() {
     );
     assert_eq!(fixture.events.pending_provider_operation(), None);
     assert_eq!(fixture.events.sandbox(), Some(journal_identity()));
+}
+
+#[tokio::test]
+async fn recovered_sandbox_rejects_wrong_runner_and_slot_custody() {
+    let fixture = Fixture::new(Vec::new(), vec![PhaseResponse::success()]);
+    let request = fixture.request(run_job("true\n"));
+    let events: Arc<dyn ExecutionEvents> = fixture.events.clone();
+
+    fixture
+        .executor
+        .execute(
+            request.clone(),
+            events.clone(),
+            ExecutionCancellation::new(),
+        )
+        .await
+        .expect("initial execution creates exact recoverable sandbox custody");
+
+    for custody in [
+        SandboxCustody::Job {
+            runner_id: RunnerId::new(),
+            slot_ordinal: NonZeroU16::new(request.slot().get()).expect("non-zero slot"),
+        },
+        SandboxCustody::Job {
+            runner_id: request.lease().runner_id(),
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        },
+    ] {
+        fixture.provider.set_inspection_custody(custody);
+        let error = fixture
+            .executor
+            .execute(
+                recovered_request(&request),
+                events.clone(),
+                ExecutionCancellation::new(),
+            )
+            .await
+            .expect_err("recovery must bind exact runner and slot custody");
+        assert_eq!(error.kind(), ExecutorErrorKind::InvalidJob);
+    }
+
+    assert_eq!(fixture.provider.counts(), (1, 1, 0));
 }
 
 #[tokio::test]

@@ -40,6 +40,7 @@ automata-ci-control = { workspace = true, features = ["adapter-spi"] }
 automata-ci-postgres = { workspace = true, features = ["test-support"] }
 automata-ci-protocol-protobuf.workspace = true
 automata-ci-store.workspace = true
+automata-ci-store-postgres = { workspace = true, features = ["test-support"] }
 http-body-util.workspace = true
 tokio.workspace = true
 tower.workspace = true

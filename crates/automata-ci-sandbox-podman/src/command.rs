@@ -824,7 +824,7 @@ impl<'input> CommandRequest<'input> {
                 CommandInput::Environment(document) => Some(document),
                 CommandInput::Bytes(_) => None,
             })
-            .flat_map(super::endpoint::EnvironmentDocument::inherited_variables)
+            .flat_map(EnvironmentDocument::inherited_variables)
             .map(|variable| (variable.name().as_str(), variable.value().expose()))
     }
 
@@ -1367,7 +1367,7 @@ fn execute_system(
     environment: &PodmanProcessEnvironment,
     cancellation: &dyn Cancellation,
 ) -> CommandOutput {
-    if cancellation.is_cancelled() {
+    if cancellation.disposition().requires_termination() {
         return interrupted_before_stdin(request, CommandTermination::Cancelled);
     }
     let now = Instant::now();
@@ -1512,7 +1512,9 @@ fn wait_for_child(
             Ok(ChildExitObservation::Exited(status)) => {
                 return CommandTermination::Exited(status);
             }
-            Ok(ChildExitObservation::Running) if cancellation.is_cancelled() => {
+            Ok(ChildExitObservation::Running)
+                if cancellation.disposition().requires_termination() =>
+            {
                 terminate_process_group(child, TERMINATION_GRACE);
                 return CommandTermination::Cancelled;
             }

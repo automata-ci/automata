@@ -7,7 +7,7 @@ use crate::migration::MIGRATOR;
 const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     (
         "0001_baseline_routines_01.sql",
-        "a88f5c285d9d0286eb5f9d3812c06e254ff22ded8041b014ce666f73c29436d92f2ba0ec3633fdb59d779da6918e7a2a",
+        "23a47099201ff52ec6ea78885b6203b4a721916e3e9746f32f10bcf8589b9c150fe0ad648b61efb5bfb5c5fad984057d",
     ),
     (
         "0002_baseline_routines_02.sql",
@@ -39,7 +39,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0009_baseline_routines_09.sql",
-        "4e1a8df6e6a29b5aa5faf1e501b33336db04e8bcc18cffe473b969f4bb5c7921f257cbf4e3093c370f11d3e49560ced1",
+        "24ed66a871420b128ea7c18c2eb3226520e7499fd5970de85b9af394e46758bd820d83bbff66d0fe33c2a5b7bb44f64b",
     ),
     (
         "0010_baseline_routines_10.sql",
@@ -47,7 +47,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0011_baseline_routines_11.sql",
-        "92de743ed564db5d9abf3600c6c1e5f1c219b4a8cd8650a73683dc9c89cab30f87eead7526718388276a4f6545476c7c",
+        "45a27258237373b21f6706bcc230d5636362e57138168f2bece5002353be4bfc4c47e42f4c00efbd35285f5a68b5787b",
     ),
     (
         "0012_baseline_routines_12.sql",
@@ -75,11 +75,11 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0018_baseline_relations_auth_and_delivery.sql",
-        "5f9baeeea0fa3fa3c3abac2846b0228a8076a63b9dadb7fb8a6a203ec45021258574b1f81f587c396599058eb6c0a99b",
+        "27c9cb0d4b21120ab9a114f318ca4c1f7ec95e6718c1d894e85764d586a96c8bee597f8b6163b413030dff8e3e0b2df7",
     ),
     (
         "0019_baseline_relations_access_runners_and_secrets.sql",
-        "e6b47696f5959411fb0b63704044eab3c5f10b9ee8727a92e669179bd7b9abc20392c3f370c5e5c1e6709ede5e1a25b7",
+        "06606c0be887ea9cbca4df227867002927af17bfe02ac08e8b59dfd1044122a966c9a8c7da01adbe4077100929e2fd37",
     ),
     (
         "0020_baseline_relations_tenants_and_workflows.sql",
@@ -87,11 +87,11 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0021_baseline_catalog_rows.sql",
-        "44f3fe98a0d5df90196fac954b67fc321d5ddde3aec32a1e23804415ea96379e3775a76a718be6264aeef79f78bb6cc3",
+        "5ac10af68a4e59fe7a598ffe7feed01a7861103bc8da912a1736ae4be253e63d628965c6604af9290f440a6fc53a5ebb",
     ),
     (
         "0022_baseline_keys_and_constraints.sql",
-        "811561232385a17a9630e8534d98e0538af044ce0ec09f3abddb33a992301245264ceaf16831a92056c2bd82843340d7",
+        "9de9c35099503ea20251319db6c715030ae6639fb9cd6801bf53457af11bd20ad3fd5f1e3d84480bc974647db07b37ef",
     ),
     (
         "0023_baseline_indexes.sql",
@@ -99,7 +99,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0024_baseline_triggers_control_plane.sql",
-        "b297b80748236be8b1bb1c1793de1d24be4b24bddb1ae628a93cca616457027658fc582c0560500e7331ce02e0a6a7ef",
+        "4e4a69a75bb0745b0f9efff68a2a234e6e6aa0e1cc557a0acace9f66c6804bd54eaf77ae67df2cdeff1aff6b2f4eb5a7",
     ),
     (
         "0025_baseline_triggers_orchestration.sql",
@@ -107,7 +107,7 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     ),
     (
         "0026_baseline_foreign_keys.sql",
-        "57e7e93dcdc0ee7568393785b30774259dcf5300f9a8df99ac7795d9799c60b97dec36479976ae99e5c4bd320080a977",
+        "2fbb82d95b2162d3ddb527443b62ae8bd65792d769b1e9f293d54767fb511051cd57ce9253b83a993237389305abe877",
     ),
     (
         "0027_workspace_usage_feed.sql",
@@ -168,6 +168,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
     (
         "0041_private_pull_request_files_authority.sql",
         "8bdd45b0680b2f08e273c5b3f2386e293c946d63925af1a166df389884467f5eaa76535f3871b1cd0c723aa0fe794b44",
+    ),
+    (
+        "0042_runner_certificate_renewal.sql",
+        "ee79d5ee0481d72ba62d527da49817cf97b8340203ec8fa8be2cc0abcf615fade1f5854bf155487535666cd956e1181a",
     ),
 ];
 
@@ -427,6 +431,218 @@ fn provider_delivery_event_envelope_is_complete_bounded_and_legacy_nullable() {
         32_768,
         "product and durable provider-envelope byte limits diverged"
     );
+}
+
+#[test]
+fn installation_state_baseline_is_greenfield_exact() {
+    let installation_relation =
+        include_str!("../migrations/0018_baseline_relations_auth_and_delivery.sql");
+
+    for required in [
+        "CREATE TABLE installation_state (",
+        "singleton boolean NOT NULL",
+        "configuration_mode text COLLATE pg_catalog.\"C\"",
+        "ascii(left(tenant_display_name, 1))",
+        "ascii(right(tenant_display_name, 1))",
+        "8287, 12288",
+        "configuration_mode IN ('human', 'deployment')",
+        "state = 'configured'\n            AND configuration_mode = 'human'",
+        "state = 'configured'\n            AND configuration_mode = 'deployment'",
+        "deployment_bootstrap_operation_id IS NOT NULL",
+        "deployment_bootstrap_audit_event_id IS NOT NULL",
+        "deployment_authority_sha256 IS NOT NULL",
+        "configured_tenant_id = tenant_id",
+    ] {
+        assert!(
+            installation_relation.contains(required),
+            "greenfield installation relation lost required contract: {required}"
+        );
+    }
+    let installation_definition = installation_relation
+        .split_once("CREATE TABLE installation_state (")
+        .and_then(|(_, remainder)| remainder.split_once("CREATE TABLE human_login_transactions"))
+        .map(|(definition, _)| definition)
+        .expect("installation table has one bounded baseline definition");
+    for forbidden in ["DEFAULT", "human_auth_", "target_tenant_"] {
+        assert!(
+            !installation_definition.contains(forbidden),
+            "greenfield installation relation retained legacy surface: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn runner_enrollment_issuer_baseline_is_greenfield_exact() {
+    let enrollment_relation =
+        include_str!("../migrations/0019_baseline_relations_access_runners_and_secrets.sql");
+
+    for required in [
+        "issuer_kind text COLLATE pg_catalog.\"C\" NOT NULL",
+        "installation_authority_sha256 bytea",
+        "issuer_kind IN ('human', 'installation_bootstrap')",
+        "octet_length(installation_authority_sha256) = 32",
+        "issuer_kind = 'human'",
+        "issued_by_principal_id IS NOT NULL",
+        "issued_by_session_id IS NOT NULL",
+        "issued_authorization_revision IS NOT NULL",
+        "installation_authority_sha256 IS NULL",
+        "issuer_kind = 'installation_bootstrap'",
+        "issued_by_principal_id IS NULL",
+        "issued_by_session_id IS NULL",
+        "issued_authorization_revision IS NULL",
+        "installation_authority_sha256 IS NOT NULL",
+    ] {
+        assert!(
+            enrollment_relation.contains(required),
+            "greenfield runner-enrollment relation lost required contract: {required}"
+        );
+    }
+    let enrollment_definition = enrollment_relation
+        .split_once("CREATE TABLE runner_enrollment_tokens (")
+        .and_then(|(_, remainder)| remainder.split_once("CREATE TABLE runner_operation_receipts"))
+        .map(|(definition, _)| definition)
+        .expect("runner-enrollment table has one bounded baseline definition");
+    assert!(
+        !enrollment_definition.contains("DEFAULT"),
+        "greenfield runner-enrollment relation must not synthesize issuer defaults"
+    );
+}
+
+#[test]
+fn installation_runner_bootstrap_baseline_owners_are_exact() {
+    let installation_routine = include_str!("../migrations/0001_baseline_routines_01.sql");
+    let singleton_routine = include_str!("../migrations/0009_baseline_routines_09.sql");
+    let enrollment_routine = include_str!("../migrations/0011_baseline_routines_11.sql");
+    let catalog = include_str!("../migrations/0021_baseline_catalog_rows.sql");
+    let keys = include_str!("../migrations/0022_baseline_keys_and_constraints.sql");
+    let triggers = include_str!("../migrations/0024_baseline_triggers_control_plane.sql");
+    let foreign_keys = include_str!("../migrations/0026_baseline_foreign_keys.sql");
+
+    for (source, required) in [
+        (
+            installation_routine,
+            "installation_state_deployment_completion_exact",
+        ),
+        (
+            installation_routine,
+            "installation_state_human_completion_exact",
+        ),
+        (singleton_routine, "installation_state_singleton_immutable"),
+        (
+            enrollment_routine,
+            "NEW.issuer_kind IS DISTINCT FROM OLD.issuer_kind",
+        ),
+        (
+            enrollment_routine,
+            "NEW.installation_authority_sha256 IS DISTINCT FROM OLD.installation_authority_sha256",
+        ),
+        (catalog, "INSERT INTO installation_state ("),
+        (keys, "ADD CONSTRAINT installation_state_pkey"),
+        (
+            keys,
+            "UNIQUE (configured_tenant_id, deployment_authority_sha256)",
+        ),
+        (keys, "ADD CONSTRAINT tenants_exact_id_display_name"),
+        (
+            triggers,
+            "CREATE TRIGGER installation_state_lifecycle_guard",
+        ),
+        (
+            foreign_keys,
+            "FOREIGN KEY (configured_tenant_id, tenant_display_name) REFERENCES tenants(id, display_name) ON DELETE RESTRICT",
+        ),
+        (
+            foreign_keys,
+            "FOREIGN KEY (deployment_bootstrap_audit_event_id) REFERENCES security_audit_events(event_id) ON DELETE RESTRICT",
+        ),
+        (
+            foreign_keys,
+            "FOREIGN KEY (tenant_id, installation_authority_sha256) REFERENCES installation_state(configured_tenant_id, deployment_authority_sha256) ON DELETE RESTRICT",
+        ),
+    ] {
+        assert!(
+            source.contains(required),
+            "greenfield installation/enrollment baseline lost required contract: {required}"
+        );
+    }
+}
+
+#[test]
+fn installation_runner_bootstrap_baseline_has_no_transition_surface() {
+    let installation_routine = include_str!("../migrations/0001_baseline_routines_01.sql");
+    let singleton_routine = include_str!("../migrations/0009_baseline_routines_09.sql");
+    let enrollment_routine = include_str!("../migrations/0011_baseline_routines_11.sql");
+    let installation_relation =
+        include_str!("../migrations/0018_baseline_relations_auth_and_delivery.sql");
+    let enrollment_relation =
+        include_str!("../migrations/0019_baseline_relations_access_runners_and_secrets.sql");
+    let catalog = include_str!("../migrations/0021_baseline_catalog_rows.sql");
+    let keys = include_str!("../migrations/0022_baseline_keys_and_constraints.sql");
+    let triggers = include_str!("../migrations/0024_baseline_triggers_control_plane.sql");
+    let foreign_keys = include_str!("../migrations/0026_baseline_foreign_keys.sql");
+
+    let target_sources = [
+        installation_routine,
+        singleton_routine,
+        enrollment_routine,
+        installation_relation,
+        enrollment_relation,
+        catalog,
+        keys,
+        triggers,
+        foreign_keys,
+    ]
+    .concat();
+    for forbidden in [
+        "human_auth_installation_state",
+        "target_tenant_id",
+        "target_tenant_display_name",
+        "CREATE OR REPLACE FUNCTION automata_enforce_installation_state_lifecycle",
+        "CREATE OR REPLACE FUNCTION automata_runner_enrollment_token_consume_once",
+        "UPDATE runner_enrollment_tokens\nSET issuer_kind",
+        "RENAME TO installation_state",
+        "RENAME COLUMN",
+        "ADD COLUMN issuer_kind",
+        "ADD COLUMN installation_authority_sha256",
+        "CREATE TABLE deployment_tenant_authorities",
+        "deployment_authority_id",
+    ] {
+        assert!(
+            !target_sources.contains(forbidden),
+            "greenfield installation/enrollment baseline retained compatibility surface: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn runner_certificate_renewal_is_bounded_exact_and_immutable_while_replayable() {
+    let source = include_str!("../migrations/0042_runner_certificate_renewal.sql");
+
+    for required in [
+        "UNIQUE (runner_id, leaf_sha256)",
+        "CREATE TABLE runner_certificate_renewal_receipts",
+        "operation_id uuid PRIMARY KEY",
+        "UNIQUE (presented_leaf_sha256)",
+        "UNIQUE (renewed_leaf_sha256)",
+        "octet_length(response) BETWEEN 1 AND 524288",
+        "FOREIGN KEY (runner_id, presented_leaf_sha256)",
+        "FOREIGN KEY (runner_id, renewed_leaf_sha256)",
+        "REFERENCES security_audit_events (event_id)",
+        "runner_certificate_renewal_receipts_immutable",
+        "runner_certificate_renewal_receipts_live_delete",
+        "BEFORE TRUNCATE ON runner_certificate_renewal_receipts",
+    ] {
+        assert!(
+            source.contains(required),
+            "runner-certificate renewal migration lost required contract: {required}"
+        );
+    }
+    for forbidden in ["IF NOT EXISTS", "DEFAULT", "ON DELETE CASCADE"] {
+        assert!(
+            !source.contains(forbidden),
+            "runner-certificate renewal migration retained compatibility surface: {forbidden}"
+        );
+    }
 }
 
 fn migration_paths() -> Vec<PathBuf> {

@@ -9,6 +9,7 @@ mod job_outputs_environment;
 mod job_resources;
 mod job_strategy;
 mod limits;
+mod local_authority;
 mod logical_compiler;
 mod permissions;
 mod port_contract;

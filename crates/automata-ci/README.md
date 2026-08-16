@@ -113,10 +113,22 @@ This applies to database, object-store, runner TLS, Results signing,
 authentication, and wrapping-key credentials. References are redacted from
 debug and startup errors, and loaded values have context-specific size limits.
 
-Database connections force full TLS certificate and hostname verification.
-Local development may select `--database-transport loopback-plaintext`, but
-the effective target must be a Unix socket or literal loopback IP address;
-hostnames and remote addresses are rejected.
+Database URLs use one exact `postgresql://` TCP grammar with an explicit host,
+port, user, non-empty password, and database. Query parameters, fragments,
+socket paths, the `postgres://` alias, `.pgpass`, and every ambient `PG*`
+environment setting are rejected. Connections use the fixed `public` search
+path.
+
+The default `--database-transport web-pki-verify-full` requires TLS certificate
+and hostname verification through SQLx's compiled Web PKI roots. The explicit
+`web-pki-plus-private-ca-verify-full` mode adds one bounded canonical CA from
+`--database-private-ca-source`; SQLx retains the Web PKI roots in that mode, so
+it is intentionally a trust union rather than private-CA-only trust. Local
+development may select `loopback-plaintext`, but only with a literal-loopback
+TCP address. Hostnames, remote addresses, and Unix sockets are rejected.
+Generated local topology uses a reserved `.invalid` database DNS identity with
+the explicit Web-PKI-plus-private-CA union, so no public CA can issue for that
+name even though the compiled public roots remain installed.
 
 Required server sources are:
 
@@ -168,6 +180,27 @@ artifact objects; runners verify those exact keys and publish immutable action
 bundles. A differing prefix fails closed as a missing object and is never
 searched or guessed.
 
+HTTPS object storage has one explicit trust mode. The default
+`--s3-tls-trust web-pki` uses the platform Web PKI roots. To trust a private
+service, select `--s3-tls-trust private-ca` and provide exactly one bounded CA
+certificate through `--s3-private-ca-source env:NAME` or
+`--s3-private-ca-source file:/absolute/path`. Private-CA mode starts from an
+empty root store, never adds Web PKI roots, and never retries under a different
+trust policy. The source is subject to the same secure-file and redaction rules
+as other privileged inputs and is capped at 1 MiB. It must be one canonical
+RFC 7468 certificate with 64-column Base64, LF line endings, one terminal LF,
+no preamble/trailing bytes, and `keyCertSign` whenever KeyUsage is present.
+
+For example, an HTTPS S3-compatible service with its own CA uses:
+
+```console
+automata server \
+  --s3-endpoint https://objects.internal.example/ \
+  --s3-tls-trust private-ca \
+  --s3-private-ca-source file:/run/secrets/object-store-ca.pem \
+  --s3-bucket automata
+```
+
 For local RustFS, explicitly allow a literal loopback HTTP endpoint:
 
 ```console
@@ -181,7 +214,10 @@ automata server \
 ```
 
 Plain HTTP object-store endpoints anywhere other than literal loopback are
-rejected even when the development option is present.
+rejected. `--s3-allow-loopback-http` is also rejected for an HTTPS endpoint or
+with private-CA trust, so it cannot remain as an inert or ambiguous setting.
+After argument validation, connection security is exactly one closed state:
+Web PKI HTTPS, exact-private-CA HTTPS, or literal-loopback plaintext.
 
 Object writes use provider-managed AES-256 (`SSE-S3`) by default. Set
 `--s3-kms-key-id` to select `SSE-KMS` with one exact non-secret key identity;

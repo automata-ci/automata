@@ -348,6 +348,7 @@ dependencies = [
  "automata-ci-key-management",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "static_assertions",
  "tokio",
@@ -373,12 +374,16 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-blob",
+ "automata-ci-tls",
  "aws-sdk-s3",
  "aws-smithy-http-client",
  "base64 0.23.1",
  "bytes",
+ "rcgen",
+ "rustls",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "url",
  "zeroize",
 ]
@@ -465,6 +470,7 @@ name = "automata-ci-execution"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "serde",
  "static_assertions",
  "thiserror",
 ]
@@ -606,14 +612,28 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "automata-ci-core",
- "bollard",
+ "automata-ci-execution",
+ "automata-ci-sandbox-guest",
+ "automata-ci-workflow-github",
+ "automata-ci-workflow-service",
+ "base64 0.23.1",
+ "bytes",
+ "cap-fs-ext",
+ "cap-std",
+ "flate2",
+ "http 1.5.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "processkit",
  "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "thiserror",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 
@@ -767,6 +787,7 @@ dependencies = [
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-store",
+ "automata-ci-store-postgres",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -806,6 +827,7 @@ dependencies = [
  "automata-ci-github",
  "automata-ci-github-runtime",
  "automata-ci-job-executor-github",
+ "automata-ci-local",
  "automata-ci-metrics",
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
@@ -838,6 +860,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "static_assertions",
+ "subtle",
  "tar",
  "thiserror",
  "time",
@@ -869,6 +892,7 @@ name = "automata-ci-runner-journal"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "automata-ci-execution",
  "automata-ci-protocol",
  "automata-ci-runner-spool",
  "rustix",
@@ -892,6 +916,7 @@ dependencies = [
  "automata-ci-runner-transport",
  "sha2 0.11.0",
  "static_assertions",
+ "subtle",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -905,10 +930,13 @@ name = "automata-ci-runner-spool"
 version = "0.1.0"
 dependencies = [
  "automata-ci-core",
+ "automata-ci-execution",
  "rustix",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "static_assertions",
+ "subtle",
  "thiserror",
 ]
 
@@ -943,6 +971,7 @@ name = "automata-ci-sandbox-guest"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "getrandom 0.4.3",
  "processkit",
  "rustix",
  "serde",
@@ -1103,6 +1132,9 @@ dependencies = [
  "automata-ci-oidc-github",
  "automata-ci-schedule",
  "automata-ci-store",
+ "automata-ci-tls",
+ "percent-encoding",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1111,7 +1143,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "automata-ci-tls"
+version = "0.1.0"
+dependencies = [
+ "pem-rfc7468",
+ "rcgen",
+ "rustls",
+ "thiserror",
+ "x509-parser",
 ]
 
 [[package]]
@@ -1134,11 +1179,14 @@ dependencies = [
  "automata-ci-github-permissions",
  "automata-ci-schedule",
  "flate2",
+ "focaccia",
  "jiff",
  "saphyr-parser",
  "serde_json",
+ "sha2 0.11.0",
  "tar",
  "thiserror",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -1621,49 +1669,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
-]
-
-[[package]]
-name = "bollard"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9d0a013e3d3ee4edd61e779adf117944c08902d375f18630a0c5b8f95659734"
-dependencies = [
- "base64 0.22.1",
- "bollard-stubs",
- "bytes",
- "futures-core",
- "futures-util",
- "hex",
- "http 1.5.0",
- "http-body-util",
- "hyper",
- "hyper-named-pipe",
- "hyper-util",
- "hyperlocal",
- "log",
- "pin-project-lite",
- "serde",
- "serde_derive",
- "serde_json",
- "serde_urlencoded",
- "thiserror",
- "tokio",
- "tokio-util",
- "tower-service",
- "url",
- "winapi",
-]
-
-[[package]]
-name = "bollard-stubs"
-version = "1.53.1-rc.29.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce412eb6f7096743011dc3cb5c674caeb24ced61d8c498fe07cf7998a4fea889"
-dependencies = [
- "serde",
- "serde_json",
- "serde_repr",
 ]
 
 [[package]]
@@ -2369,6 +2374,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
+name = "focaccia"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ef16690750b6e9a238378f57d3c1325d42e2d82e29b7dfd75f6d387d753b050"
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2761,21 +2772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-named-pipe"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73b7d8abf35697b81a825e386fc151e0d503e8cb5fcb93cc8669c376dfd6f278"
-dependencies = [
- "hex",
- "hyper",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tower-service",
- "winapi",
-]
-
-[[package]]
 name = "hyper-rustls"
 version = "0.27.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2827,21 +2823,6 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "hyperlocal"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "986c5ce3b994526b3cd75578e62554abd09f0899d6206de48b3e96ab34ccc8c7"
-dependencies = [
- "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tower-service",
 ]
 
 [[package]]
@@ -4524,17 +4505,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_repr"
-version = "0.1.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "serde_urlencoded"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5901,22 +5871,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "998767ef88740d1f5b0682a9c53c24431453923962269c2db68ee43788c5a40d"
 
 [[package]]
-name = "winapi"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
-dependencies = [
- "winapi-i686-pc-windows-gnu",
- "winapi-x86_64-pc-windows-gnu",
-]
-
-[[package]]
-name = "winapi-i686-pc-windows-gnu"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
-
-[[package]]
 name = "winapi-util"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5924,12 +5878,6 @@ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
  "windows-sys 0.52.0",
 ]
-
-[[package]]
-name = "winapi-x86_64-pc-windows-gnu"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-link"

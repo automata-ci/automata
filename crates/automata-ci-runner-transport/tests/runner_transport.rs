@@ -1,6 +1,7 @@
 mod support;
 
 mod api_contract;
+mod certificate_renewal;
 mod concurrency_and_client;
 mod ephemeral_secrets;
 mod http_contract;

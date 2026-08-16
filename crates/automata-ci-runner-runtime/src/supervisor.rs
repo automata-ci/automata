@@ -23,11 +23,12 @@ use automata_ci_protocol_protobuf::{
     encode_runtime_authorities,
 };
 use automata_ci_runner_journal::{
-    CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand, JobIrContentRef,
-    JournalContentRetainSet, JournalInvariantError, LeaseOfferRecord, LeaseOfferStatus,
-    LeasePollCheckpoint, LogSegmentAcknowledgement, ProviderOperationKind, RunnerJournal,
-    RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
-    SessionBinding as JournalSessionBinding, SlotSnapshot, TerminalResultRecord,
+    CancellationRecord, CommandDisposition, CommandIgnoredReason, DurableCommand,
+    EndpointOperationState, JobIrContentRef, JournalContentRetainSet, JournalInvariantError,
+    LeaseOfferRecord, LeaseOfferStatus, LeasePollCheckpoint, LogSegmentAcknowledgement,
+    ProviderOperationKind, RunnerJournal, RuntimeAuthorityContentRef,
+    RuntimeAuthorityDeliveryRecord, SessionBinding as JournalSessionBinding, SlotSnapshot,
+    TerminalResultRecord,
 };
 use automata_ci_runner_spool::{ContentKind, DurableContentStore};
 use automata_ci_runner_transport::PreparedRequest;
@@ -518,7 +519,7 @@ impl RunnerSessionSupervisor {
         );
         if let Some(sandbox) = durable.sandbox().cloned()
             && let Err(_error) = self
-                .cleanup_terminal_sandbox(session, &durable, sandbox, cancellation.clone())
+                .cleanup_sandbox(session, &durable, sandbox, cancellation.clone())
                 .await
         {
             warn!(
@@ -1205,13 +1206,19 @@ impl RunnerSessionSupervisor {
             return self.inner.ports.journal.snapshot().map_err(Into::into);
         }
         let job = self.load_job(durable)?;
+        let job_ir_digest = durable
+            .offer()
+            .job_ir()
+            .content()
+            .public_plaintext_sha256()
+            .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
         let binding = RuntimeAuthorityDeliveryBinding::new(
             durable.offer().lease().attempt_id(),
             durable.slot(),
             durable.offer().lease().guard(),
             durable.offer().command().operation_id(),
             durable.offer().command().sequence(),
-            durable.offer().job_ir().content().sha256(),
+            job_ir_digest,
             INITIAL_RUNTIME_AUTHORITY_GENERATION,
         );
         if durable.runtime_authority_delivery().is_none() {
@@ -1268,11 +1275,11 @@ impl RunnerSessionSupervisor {
         let request_operation_id = self.stable_runtime_authority_operation_id(
             durable,
             StableIdDomain::RuntimeAuthorityRequest,
-        );
+        )?;
         let acknowledgement_operation_id = self.stable_runtime_authority_operation_id(
             durable,
             StableIdDomain::RuntimeAuthorityAcknowledgement,
-        );
+        )?;
         let request = RuntimeAuthorityRequest::new(
             Self::request_header(session, request_operation_id),
             binding,
@@ -1454,7 +1461,7 @@ impl RunnerSessionSupervisor {
         &self,
         durable: &SlotSnapshot,
         domain: StableIdDomain,
-    ) -> OperationId {
+    ) -> Result<OperationId, RunnerRuntimeError> {
         let binding = durable.offer();
         let mut identity = binding
             .command()
@@ -1466,9 +1473,16 @@ impl RunnerSessionSupervisor {
         identity.extend_from_slice(binding.lease().attempt_id().as_uuid().as_bytes());
         identity.extend_from_slice(binding.lease().lease_id().as_uuid().as_bytes());
         identity.extend_from_slice(&binding.lease().fencing_token().get().to_be_bytes());
-        identity.extend_from_slice(binding.job_ir().content().sha256().as_bytes());
+        identity.extend_from_slice(
+            binding
+                .job_ir()
+                .content()
+                .public_plaintext_sha256()
+                .ok_or(RunnerRuntimeError::InvalidDurablePayload)?
+                .as_bytes(),
+        );
         identity.extend_from_slice(&INITIAL_RUNTIME_AUTHORITY_GENERATION.get().to_be_bytes());
-        self.inner.ports.ids.stable_operation_id(domain, &identity)
+        Ok(self.inner.ports.ids.stable_operation_id(domain, &identity))
     }
 
     async fn send_until_operation_ack(
@@ -1519,7 +1533,11 @@ impl RunnerSessionSupervisor {
     fn load_job(&self, durable: &SlotSnapshot) -> Result<JobIrEnvelope, RunnerRuntimeError> {
         let content = durable.offer().job_ir().content();
         let encoded = self.inner.ports.spool.load(content)?;
-        if encoded.len() != usize::try_from(content.size()).unwrap_or(usize::MAX) {
+        if content
+            .public_plaintext_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            != Some(encoded.len())
+        {
             return Err(RunnerRuntimeError::InvalidDurablePayload);
         }
         let job = decode_job_ir(&encoded, self.inner.config.protocol_limits())
@@ -1541,7 +1559,11 @@ impl RunnerSessionSupervisor {
             .ok_or(RunnerRuntimeError::InvalidDurablePayload)?;
         let content = delivery.content().content();
         let encoded = Zeroizing::new(self.inner.ports.spool.load(content)?);
-        if encoded.len() != usize::try_from(content.size()).unwrap_or(usize::MAX) {
+        if content
+            .public_plaintext_bytes()
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            != Some(encoded.len())
+        {
             return Err(RunnerRuntimeError::InvalidDurablePayload);
         }
         decode_runtime_authorities(
@@ -1981,6 +2003,13 @@ impl RunnerSessionSupervisor {
         });
         let conclusion = RuntimeJobConclusion::from(result.conclusion());
         let finished = async {
+            self.resolve_endpoint_recovery_before_terminal(
+                session,
+                durable.slot(),
+                lease.guard(),
+                cancellation.clone(),
+            )
+            .await?;
             let finalization_lifecycle = self.finalization_heartbeat_lifecycle(durable.slot())?;
             self.commit_terminal_result(session, durable.slot(), lease.guard(), result)?;
             self.observe(RunnerRuntimeEvent::JobCompleted {
@@ -2038,6 +2067,13 @@ impl RunnerSessionSupervisor {
             JobSecretExposure::Secretless,
             self.inner.ports.clock.wall_now(),
         );
+        self.resolve_endpoint_recovery_before_terminal(
+            session,
+            durable.slot(),
+            durable.offer().lease().guard(),
+            cancellation.clone(),
+        )
+        .await?;
         self.commit_terminal_result(
             session,
             durable.slot(),
@@ -2072,6 +2108,13 @@ impl RunnerSessionSupervisor {
             JobSecretExposure::Secretless,
             self.inner.ports.clock.wall_now(),
         );
+        self.resolve_endpoint_recovery_before_terminal(
+            session,
+            durable.slot(),
+            durable.offer().lease().guard(),
+            cancellation.clone(),
+        )
+        .await?;
         self.commit_terminal_result(
             session,
             durable.slot(),
@@ -2809,6 +2852,84 @@ impl RunnerSessionSupervisor {
         Ok(())
     }
 
+    async fn resolve_endpoint_recovery_before_terminal(
+        &self,
+        session: RuntimeSession,
+        slot: RunnerSlotOrdinal,
+        guard: LeaseGuard,
+        cancellation: CancellationToken,
+    ) -> Result<(), RunnerRuntimeError> {
+        loop {
+            let snapshot = self.inner.ports.journal.snapshot()?;
+            let durable = snapshot
+                .slot(slot)
+                .cloned()
+                .ok_or(RunnerRuntimeError::ExecutorContract)?;
+            if durable.offer().lease().guard() != guard {
+                return Err(RunnerRuntimeError::RecoveryIdentityMismatch {
+                    attempt_id: durable.offer().lease().attempt_id(),
+                    guard,
+                    session_id: session.negotiated.session_id(),
+                    slot,
+                });
+            }
+            let Some(operation) = durable.endpoint_recovery_pending() else {
+                return Ok(());
+            };
+            let operation_id = operation.operation_id();
+            match operation.state() {
+                EndpointOperationState::Accepted => {
+                    self.inner.ports.journal.record_endpoint_cancellation(
+                        session.negotiated.session_id(),
+                        slot,
+                        guard,
+                        operation_id,
+                    )?;
+                }
+                EndpointOperationState::InvocationCommitted
+                | EndpointOperationState::CancellationRequested => {
+                    let cancellation_requested = matches!(
+                        operation.state(),
+                        EndpointOperationState::CancellationRequested
+                    );
+                    if durable.sandbox().is_some() {
+                        self.reconcile_sandbox_absence(session, slot, guard, cancellation.clone())
+                            .await?;
+                    }
+                    let proven = self.inner.ports.journal.snapshot()?;
+                    let proven_slot = proven
+                        .slot(slot)
+                        .ok_or(RunnerRuntimeError::ExecutorContract)?;
+                    if proven_slot.offer().lease().guard() != guard
+                        || proven_slot.sandbox().is_some()
+                    {
+                        return Err(RunnerRuntimeError::ExecutorContract);
+                    }
+                    if cancellation_requested {
+                        self.inner.ports.journal.complete_endpoint_cancellation(
+                            session.negotiated.session_id(),
+                            slot,
+                            guard,
+                            operation_id,
+                        )?;
+                    } else {
+                        self.inner.ports.journal.abandon_endpoint_operation(
+                            session.negotiated.session_id(),
+                            slot,
+                            guard,
+                            operation_id,
+                        )?;
+                    }
+                }
+                EndpointOperationState::Cancelled
+                | EndpointOperationState::Abandoned
+                | EndpointOperationState::Completed { .. } => {
+                    return Err(RunnerRuntimeError::ExecutorContract);
+                }
+            }
+        }
+    }
+
     async fn finish_terminal_slot(
         &self,
         session: RuntimeSession,
@@ -2951,7 +3072,7 @@ impl RunnerSessionSupervisor {
             .cloned()
             .ok_or(RunnerRuntimeError::ExecutorContract)?;
         if current.sandbox().is_some() {
-            self.reconcile_terminal_sandbox(session, slot, guard, cancellation.clone())
+            self.reconcile_sandbox_absence(session, slot, guard, cancellation.clone())
                 .await?;
             current = self
                 .inner
@@ -2979,7 +3100,7 @@ impl RunnerSessionSupervisor {
         Ok(())
     }
 
-    async fn reconcile_terminal_sandbox(
+    async fn reconcile_sandbox_absence(
         &self,
         session: RuntimeSession,
         slot: RunnerSlotOrdinal,
@@ -3006,7 +3127,7 @@ impl RunnerSessionSupervisor {
                 return Ok(());
             };
             match self
-                .cleanup_terminal_sandbox(session, &current, sandbox, cancellation.clone())
+                .cleanup_sandbox(session, &current, sandbox, cancellation.clone())
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -3026,7 +3147,7 @@ impl RunnerSessionSupervisor {
                         .filter(|operation| operation.is_pending())
                         .map(|operation| operation.operation_id());
                     warn!(
-                        stage = "terminal_cleanup",
+                        stage = "sandbox_cleanup",
                         runner_id = %self.inner.config.capabilities().runner_id(),
                         session_id = %session.negotiated.session_id(),
                         attempt_id = %current.offer().lease().attempt_id(),
@@ -3200,7 +3321,7 @@ impl RunnerSessionSupervisor {
         Ok(())
     }
 
-    async fn cleanup_terminal_sandbox(
+    async fn cleanup_sandbox(
         &self,
         session: RuntimeSession,
         durable: &SlotSnapshot,
@@ -3209,7 +3330,7 @@ impl RunnerSessionSupervisor {
     ) -> Result<(), RunnerRuntimeError> {
         let started = self.inner.ports.clock.monotonic_now();
         let result = self
-            .cleanup_terminal_sandbox_inner(session, durable, sandbox, cancellation)
+            .cleanup_sandbox_inner(session, durable, sandbox, cancellation)
             .await;
         let outcome = match &result {
             Ok(()) => RuntimeOperationOutcome::Success,
@@ -3223,7 +3344,7 @@ impl RunnerSessionSupervisor {
         result
     }
 
-    async fn cleanup_terminal_sandbox_inner(
+    async fn cleanup_sandbox_inner(
         &self,
         session: RuntimeSession,
         durable: &SlotSnapshot,

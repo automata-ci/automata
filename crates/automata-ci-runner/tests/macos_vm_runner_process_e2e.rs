@@ -1188,6 +1188,7 @@ fn write_runner_config(
             "bucket": S3_BUCKET,
             "prefix": S3_PREFIX,
             "loopback_development": true,
+            "tls_trust": {"mode": "web_pki"},
             "operation_timeout_seconds": 5,
             "access_key_id": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_ACCESS_KEY"},
             "secret_access_key": {"kind": "environment", "name": "AUTOMATA_PROCESS_E2E_S3_SECRET_KEY"},

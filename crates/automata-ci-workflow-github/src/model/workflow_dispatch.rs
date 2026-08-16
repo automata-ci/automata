@@ -186,6 +186,8 @@ pub enum GithubWorkflowDispatchInputsError {
     InvalidInputKey,
     /// The payload repeats an input identifier.
     DuplicateInputKey,
+    /// An input string contains control characters.
+    InvalidInputValue,
     /// The aggregate identifier and value character budget is exceeded.
     PayloadTooLarge,
 }
@@ -203,6 +205,8 @@ impl fmt::Display for GithubWorkflowDispatchInputsError {
             Self::DuplicateInputKey => {
                 formatter.write_str("workflow_dispatch payload input identifiers must be unique")
             }
+            Self::InvalidInputValue => formatter
+                .write_str("workflow_dispatch payload input values must not contain control text"),
             Self::PayloadTooLarge => write!(
                 formatter,
                 "workflow_dispatch input identifiers and values may contain at most {MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS} aggregate characters"
@@ -213,12 +217,12 @@ impl fmt::Display for GithubWorkflowDispatchInputsError {
 
 impl Error for GithubWorkflowDispatchInputsError {}
 
-/// Bounded input properties from a provider-verified manual-dispatch event.
+/// Bounded input properties from one explicit manual-dispatch selection.
 ///
 /// Construction validates only the provider payload's canonical shape and
 /// resource bounds. The compiler subsequently validates these values against
-/// the exact source contract before exposing an `inputs` context. Callers must
-/// construct this type only from integrity-verified provider evidence.
+/// the exact source contract before exposing an `inputs` context. Provider or
+/// local authority is carried separately from this value-only shape.
 #[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct GithubWorkflowDispatchInputs {
@@ -247,6 +251,9 @@ impl GithubWorkflowDispatchInputs {
             let key = WorkflowInputKey::new(key.into())
                 .map_err(|_| GithubWorkflowDispatchInputsError::InvalidInputKey)?;
             let value = value.into();
+            if value.contains_control_text() {
+                return Err(GithubWorkflowDispatchInputsError::InvalidInputValue);
+            }
             characters = characters
                 .checked_add(key.as_str().chars().count())
                 .and_then(|count| count.checked_add(value.character_count()))
@@ -301,6 +308,13 @@ impl GithubWorkflowDispatchInputValue {
                 }
             }
             Self::String(value) => value.chars().count(),
+        }
+    }
+
+    fn contains_control_text(&self) -> bool {
+        match self {
+            Self::Boolean(_) => false,
+            Self::String(value) => value.chars().any(char::is_control),
         }
     }
 }

@@ -1,27 +1,165 @@
-CREATE TABLE human_auth_installation_state (
-    singleton boolean DEFAULT true NOT NULL,
+CREATE TABLE installation_state (
+    singleton boolean NOT NULL,
     state text NOT NULL,
+    configuration_mode text COLLATE pg_catalog."C",
     bootstrap_token_hash bytea,
     bootstrap_hash_key_id text,
     expected_provider_id text,
     expected_provider_subject text,
     challenge_expires_at_ms bigint,
+    tenant_id text,
+    tenant_display_name text,
+    setup_transaction_id uuid,
     configured_tenant_id text,
     configured_principal_id uuid,
     configured_at_ms bigint,
-    revision bigint DEFAULT 1 NOT NULL,
+    deployment_authority_sha256 bytea,
+    deployment_bootstrap_operation_id uuid,
+    deployment_bootstrap_audit_event_id uuid,
+    revision bigint NOT NULL,
     created_at_ms bigint NOT NULL,
     updated_at_ms bigint NOT NULL,
-    target_tenant_id text,
-    target_tenant_display_name text,
-    setup_transaction_id uuid,
-    CONSTRAINT human_auth_installation_state_revision_positive CHECK ((revision > 0)),
-    CONSTRAINT human_auth_installation_state_shape CHECK (((((state = 'unconfigured'::text) AND (bootstrap_token_hash IS NULL) AND (bootstrap_hash_key_id IS NULL) AND (expected_provider_id IS NULL) AND (expected_provider_subject IS NULL) AND (challenge_expires_at_ms IS NULL) AND (target_tenant_id IS NULL) AND (target_tenant_display_name IS NULL) AND (setup_transaction_id IS NULL) AND (configured_tenant_id IS NULL) AND (configured_principal_id IS NULL) AND (configured_at_ms IS NULL)) OR ((state = 'pending'::text) AND (octet_length(bootstrap_token_hash) = 32) AND ((octet_length(bootstrap_hash_key_id) >= 1) AND (octet_length(bootstrap_hash_key_id) <= 128)) AND (bootstrap_hash_key_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'::text) AND ((octet_length(expected_provider_id) >= 1) AND (octet_length(expected_provider_id) <= 128)) AND (expected_provider_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]*$'::text) AND ((octet_length(expected_provider_subject) >= 1) AND (octet_length(expected_provider_subject) <= 255)) AND (expected_provider_subject !~ '[[:cntrl:]]'::text) AND (target_tenant_id IS NOT NULL) AND (target_tenant_display_name IS NOT NULL) AND (challenge_expires_at_ms > updated_at_ms) AND (configured_tenant_id IS NULL) AND (configured_principal_id IS NULL) AND (configured_at_ms IS NULL)) OR ((state = 'configured'::text) AND (bootstrap_token_hash IS NULL) AND (bootstrap_hash_key_id IS NULL) AND ((octet_length(expected_provider_id) >= 1) AND (octet_length(expected_provider_id) <= 128)) AND ((octet_length(expected_provider_subject) >= 1) AND (octet_length(expected_provider_subject) <= 255)) AND (challenge_expires_at_ms IS NULL) AND (target_tenant_id = configured_tenant_id) AND (target_tenant_display_name IS NOT NULL) AND (setup_transaction_id IS NOT NULL) AND (configured_tenant_id IS NOT NULL) AND (configured_principal_id IS NOT NULL) AND (configured_at_ms >= created_at_ms))) IS TRUE)),
-    CONSTRAINT human_auth_installation_state_singleton CHECK (singleton),
-    CONSTRAINT human_auth_installation_state_state CHECK ((state = ANY (ARRAY['unconfigured'::text, 'pending'::text, 'configured'::text]))),
-    CONSTRAINT human_auth_installation_state_target_display_name_shape CHECK (((target_tenant_display_name IS NULL) OR (((octet_length(target_tenant_display_name) >= 1) AND (octet_length(target_tenant_display_name) <= 255)) AND (target_tenant_display_name !~ '[[:cntrl:]]'::text)))),
-    CONSTRAINT human_auth_installation_state_target_tenant_shape CHECK (((target_tenant_id IS NULL) OR (((octet_length(target_tenant_id) >= 1) AND (octet_length(target_tenant_id) <= 255)) AND (target_tenant_id !~ '[[:cntrl:]]'::text)))),
-    CONSTRAINT human_auth_installation_state_time_monotonic CHECK ((updated_at_ms >= created_at_ms))
+    CONSTRAINT installation_state_configuration_mode CHECK (
+        configuration_mode IS NULL
+        OR configuration_mode IN ('human', 'deployment')
+    ),
+    CONSTRAINT installation_state_state CHECK (
+        state IN ('unconfigured', 'pending', 'configured')
+    ),
+    CONSTRAINT installation_state_tenant_shape CHECK (
+        tenant_id IS NULL
+        OR (
+            octet_length(tenant_id) BETWEEN 1 AND 255
+            AND tenant_id !~ '[[:cntrl:]]'
+        )
+    ),
+    CONSTRAINT installation_state_tenant_display_name_shape CHECK (
+        tenant_display_name IS NULL
+        OR (
+            octet_length(tenant_display_name) BETWEEN 1 AND 255
+            AND NOT (
+                ARRAY[
+                    ascii(left(tenant_display_name, 1)),
+                    ascii(right(tenant_display_name, 1))
+                ] && ARRAY[
+                    9, 10, 11, 12, 13, 32, 133, 160, 5760,
+                    8192, 8193, 8194, 8195, 8196, 8197, 8198,
+                    8199, 8200, 8201, 8202, 8232, 8233, 8239,
+                    8287, 12288
+                ]
+            )
+            AND tenant_display_name !~ '[[:cntrl:]]'
+        )
+    ),
+    CONSTRAINT installation_state_deployment_authority_digest CHECK (
+        deployment_authority_sha256 IS NULL
+        OR (
+            octet_length(deployment_authority_sha256) = 32
+            AND deployment_authority_sha256 <>
+                decode(repeat('00', 32), 'hex')
+        )
+    ),
+    CONSTRAINT installation_state_deployment_ids_non_nil CHECK (
+        (
+            deployment_bootstrap_operation_id IS NULL
+            OR deployment_bootstrap_operation_id <>
+                '00000000-0000-0000-0000-000000000000'::uuid
+        )
+        AND (
+            deployment_bootstrap_audit_event_id IS NULL
+            OR deployment_bootstrap_audit_event_id <>
+                '00000000-0000-0000-0000-000000000000'::uuid
+        )
+    ),
+    CONSTRAINT installation_state_shape CHECK ((
+        (
+            state = 'unconfigured'
+            AND configuration_mode IS NULL
+            AND bootstrap_token_hash IS NULL
+            AND bootstrap_hash_key_id IS NULL
+            AND expected_provider_id IS NULL
+            AND expected_provider_subject IS NULL
+            AND challenge_expires_at_ms IS NULL
+            AND tenant_id IS NULL
+            AND tenant_display_name IS NULL
+            AND setup_transaction_id IS NULL
+            AND configured_tenant_id IS NULL
+            AND configured_principal_id IS NULL
+            AND configured_at_ms IS NULL
+            AND deployment_authority_sha256 IS NULL
+            AND deployment_bootstrap_operation_id IS NULL
+            AND deployment_bootstrap_audit_event_id IS NULL
+        )
+        OR
+        (
+            state = 'pending'
+            AND configuration_mode = 'human'
+            AND octet_length(bootstrap_token_hash) = 32
+            AND octet_length(bootstrap_hash_key_id) BETWEEN 1 AND 128
+            AND bootstrap_hash_key_id ~
+                '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+            AND octet_length(expected_provider_id) BETWEEN 1 AND 128
+            AND expected_provider_id ~
+                '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+            AND octet_length(expected_provider_subject) BETWEEN 1 AND 255
+            AND expected_provider_subject !~ '[[:cntrl:]]'
+            AND challenge_expires_at_ms > updated_at_ms
+            AND tenant_id IS NOT NULL
+            AND tenant_display_name IS NOT NULL
+            AND configured_tenant_id IS NULL
+            AND configured_principal_id IS NULL
+            AND configured_at_ms IS NULL
+            AND deployment_authority_sha256 IS NULL
+            AND deployment_bootstrap_operation_id IS NULL
+            AND deployment_bootstrap_audit_event_id IS NULL
+        )
+        OR
+        (
+            state = 'configured'
+            AND configuration_mode = 'human'
+            AND bootstrap_token_hash IS NULL
+            AND bootstrap_hash_key_id IS NULL
+            AND octet_length(expected_provider_id) BETWEEN 1 AND 128
+            AND expected_provider_id ~
+                '^[A-Za-z0-9][A-Za-z0-9._:-]*$'
+            AND octet_length(expected_provider_subject) BETWEEN 1 AND 255
+            AND expected_provider_subject !~ '[[:cntrl:]]'
+            AND challenge_expires_at_ms IS NULL
+            AND tenant_id IS NOT NULL
+            AND tenant_display_name IS NOT NULL
+            AND setup_transaction_id IS NOT NULL
+            AND configured_tenant_id = tenant_id
+            AND configured_principal_id IS NOT NULL
+            AND configured_at_ms >= created_at_ms
+            AND deployment_authority_sha256 IS NULL
+            AND deployment_bootstrap_operation_id IS NULL
+            AND deployment_bootstrap_audit_event_id IS NULL
+        )
+        OR
+        (
+            state = 'configured'
+            AND configuration_mode = 'deployment'
+            AND bootstrap_token_hash IS NULL
+            AND bootstrap_hash_key_id IS NULL
+            AND expected_provider_id IS NULL
+            AND expected_provider_subject IS NULL
+            AND challenge_expires_at_ms IS NULL
+            AND tenant_id IS NOT NULL
+            AND tenant_display_name IS NOT NULL
+            AND setup_transaction_id IS NULL
+            AND configured_tenant_id = tenant_id
+            AND configured_principal_id IS NULL
+            AND configured_at_ms >= created_at_ms
+            AND deployment_authority_sha256 IS NOT NULL
+            AND deployment_bootstrap_operation_id IS NOT NULL
+            AND deployment_bootstrap_audit_event_id IS NOT NULL
+        )
+    ) IS TRUE),
+    CONSTRAINT installation_state_revision_positive CHECK (revision > 0),
+    CONSTRAINT installation_state_singleton CHECK (singleton),
+    CONSTRAINT installation_state_time_monotonic CHECK (
+        updated_at_ms >= created_at_ms
+    )
 );
 
 CREATE TABLE human_login_transactions (

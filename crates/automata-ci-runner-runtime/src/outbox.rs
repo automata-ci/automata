@@ -233,7 +233,7 @@ mod tests {
         }
 
         fn segment(encoded: &[u8], last: u64, frame_count: u32, end_of_stream: bool) -> LogSegment {
-            let content = DurableContentRef::after_commit(
+            let content = DurableContentRef::after_public_commit(
                 ContentKind::LogSpool,
                 u64::try_from(encoded.len()).expect("encoded size"),
                 Sha256Digest::from_bytes([0xa5; 32]),

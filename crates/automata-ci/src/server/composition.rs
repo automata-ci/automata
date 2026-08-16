@@ -14,11 +14,10 @@ use automata_ci_auth::{
 };
 use automata_ci_auth_postgres::{
     PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
+    PostgresRunnerEnrollmentRepository,
 };
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
-use automata_ci_blob_s3::{
-    S3BlobStore, S3BlobStoreConfig, S3BlobStoreConfigError, StaticS3Credentials,
-};
+use automata_ci_blob_s3::S3BlobStoreConfigError;
 use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, RandomLeaseIdGenerator, RunnableScanLimit, SystemLeaseClock,
     repository::RunnerLeaseRequestRepository,
@@ -83,8 +82,9 @@ use automata_ci_store::{
     WorkflowRerunRepository,
 };
 use automata_ci_store_postgres::{
-    PostgresLiveLogTicketRepository, PostgresLogCommitListener, PostgresSecretCustodyRepository,
-    PostgresSecretManagementRepository, PostgresStore, PostgresStoreError,
+    PostgresConnectionConfig, PostgresConnectionConfigError, PostgresLiveLogTicketRepository,
+    PostgresLogCommitListener, PostgresSecretCustodyRepository, PostgresSecretManagementRepository,
+    PostgresStore, PostgresStoreError,
 };
 use automata_ci_workflow_service::{
     AdmissionClock, AutonomousWorkflowPhaseExecutor, AutonomousWorkflowService,
@@ -102,6 +102,7 @@ use rustls::{
 use thiserror::Error;
 use tokio::net::TcpListener;
 
+use super::config::DatabaseTransportLoadError;
 use super::github_job_runtime_authority::unavailable_github_job_runtime_authority_issuer;
 use super::github_oidc::{
     GithubOidcProductError, build_github_oidc_product, compose_runtime_authority_issuer,
@@ -135,7 +136,10 @@ use crate::app::{
         OperationalRepositorySecretWebData, RepositorySecretWebData,
         repository_secret_browser_router,
     },
-    runner_enrollment_api::{RunnerCertificateIssuer, runner_enrollment_api_router},
+    runner_enrollment_api::{
+        OperationalRunnerCertificateRenewalHandler, RunnerCertificateIssuer,
+        runner_enrollment_create_router, runner_enrollment_redeem_router,
+    },
     secret_api::{RepositorySecretApiBackend, repository_secret_api_router},
     web::{
         LiveWebData, ManagementRbacWebData, RbacWebData, RequestContext, SetupPageAvailability,
@@ -191,6 +195,7 @@ pub(crate) struct ProductionComponents {
     pub(crate) secret_mutation_recovery_loop: Option<SecretMutationRecoveryLoop>,
     pub(crate) state_sampler: ControlPlaneStateSampler,
     pub(crate) human_api: Router,
+    pub(crate) runner_enrollment_redeem_api: Router,
     pub(crate) delegated_actor_api: Option<Router>,
     pub(crate) live_log_stream_api: Router,
     pub(crate) log_commit_listener: Option<PostgresLogCommitListener>,
@@ -223,6 +228,10 @@ impl fmt::Debug for ProductionComponents {
             )
             .field("state_sampler", &self.state_sampler)
             .field("human_api", &self.human_api)
+            .field(
+                "runner_enrollment_redeem_api",
+                &self.runner_enrollment_redeem_api,
+            )
             .field("delegated_actor_api", &self.delegated_actor_api)
             .field("live_log_stream_api", &self.live_log_stream_api)
             .field("log_commit_listener", &self.log_commit_listener)
@@ -343,6 +352,42 @@ impl ProductionComponents {
             RunnerCapabilityReadiness::unavailable()
         };
         verify_runner_capability_readiness(store.as_ref(), capability_readiness).await?;
+        let (
+            runner_enrollment_repository,
+            runner_enrollment_redeem_api,
+            runner_certificate_renewal,
+        ) = match config.runner_public_authority.as_ref() {
+            Some(authority) => {
+                let client_ca = config.load_client_ca_pem()?;
+                let client_ca_key = config.load_client_ca_private_key_pem()?;
+                let server_ca = config.load_runner_server_ca_pem()?;
+                let server_certificate = config.load_server_certificate_pem()?;
+                let issuer = Arc::new(
+                    RunnerCertificateIssuer::from_pem(
+                        &client_ca,
+                        &client_ca_key,
+                        &server_ca,
+                        &server_certificate,
+                        format!("https://{authority}/"),
+                    )
+                    .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
+                );
+                let repository = Arc::new(PostgresRunnerEnrollmentRepository::new(
+                    store.postgres_pool().clone(),
+                ));
+                let router = runner_enrollment_redeem_router(
+                    Arc::clone(&repository),
+                    Arc::clone(&issuer),
+                    capability_readiness,
+                );
+                let renewal = Arc::new(OperationalRunnerCertificateRenewalHandler::new(
+                    Arc::clone(&repository),
+                    issuer,
+                ));
+                (Some(repository), router, Some(renewal))
+            }
+            None => (None, Router::new(), None),
+        };
         let state_repository: Arc<dyn ControlPlaneStateRepository> = store.clone();
         let state_sampler = metrics.state_sampler(state_repository);
 
@@ -442,8 +487,8 @@ impl ProductionComponents {
             secret_management.as_ref(),
             repository_secret_web.clone(),
             fallback_tenant,
-            capability_readiness,
             Arc::clone(&live_log_service),
+            runner_enrollment_repository,
         )
         .await?;
         let github_provider_config = validate_effective_ui_tenant(config, &human.effective_tenant)?;
@@ -620,6 +665,17 @@ impl ProductionComponents {
         } else {
             runner_server
         };
+        let runner_server = if let Some(handler) = runner_certificate_renewal {
+            runner_server.with_certificate_renewal_handler(
+                config
+                    .runner_public_authority
+                    .clone()
+                    .ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
+                handler,
+            )
+        } else {
+            runner_server
+        };
 
         let (secret_cleanup_loop, secret_mutation_recovery_loop) = secret_management
             .map_or((None, None), |runtime| {
@@ -638,6 +694,7 @@ impl ProductionComponents {
             secret_mutation_recovery_loop,
             state_sampler,
             human_api: human.router,
+            runner_enrollment_redeem_api,
             delegated_actor_api,
             live_log_stream_api,
             log_commit_listener: Some(log_commit_listener),
@@ -742,15 +799,20 @@ struct DatabaseBuild {
 
 async fn connect_database(config: &ServerConfig) -> Result<DatabaseBuild, ServerCompositionError> {
     let database_url = config.load_database_url()?;
+    let transport_security = config
+        .load_database_transport()
+        .map_err(|error| match error {
+            DatabaseTransportLoadError::Secret(error) => ServerCompositionError::Secret(error),
+            DatabaseTransportLoadError::InvalidPrivateCa => {
+                ServerCompositionError::PostgresConfiguration(
+                    PostgresConnectionConfigError::InvalidPrivateCa,
+                )
+            }
+        })?;
+    let connection = PostgresConnectionConfig::parse(&database_url, transport_security)?;
     let payload_keyring = config.control_plane_encryption().load_local_keyring()?;
     let control_plane_key_provider: Arc<dyn KeyEncryptionProvider> = Arc::new(payload_keyring);
-    let store = PostgresStore::connect(
-        &database_url,
-        config.database_max_connections,
-        config.database_transport_security,
-    )
-    .await
-    .map_err(ServerCompositionError::from)?;
+    let store = PostgresStore::connect(connection, config.database_max_connections).await?;
     Ok(DatabaseBuild {
         store: store.with_runner_payload_encryption(Arc::clone(&control_plane_key_provider)),
         control_plane_key_provider,
@@ -1198,7 +1260,8 @@ impl SetupPageAvailability for InstallationSetupPageAvailability {
             Ok(
                 InstallationState::Unconfigured { .. }
                 | InstallationState::LoginBound { .. }
-                | InstallationState::Configured { .. },
+                | InstallationState::HumanConfigured { .. }
+                | InstallationState::DeploymentConfigured { .. },
             ) => Ok(SetupPageAvailabilityState::Absent),
             Err(InstallationRepositoryError::Unavailable) => {
                 Err(SetupPageAvailabilityError::Unavailable)
@@ -1370,13 +1433,18 @@ mod setup_page_composition_tests {
                 login_transaction_id,
                 expires_at: UnixTimestamp::from_seconds(1_000),
             },
-            "configured" => InstallationState::Configured {
+            "configured" => InstallationState::HumanConfigured {
                 revision,
                 tenant_id,
                 principal_id: PrincipalId::new("initial-administrator").expect("principal ID"),
                 provider_id,
                 provider_subject: expected_provider_subject,
                 login_transaction_id,
+                configured_at: UnixTimestamp::from_seconds(900),
+            },
+            "deployment_configured" => InstallationState::DeploymentConfigured {
+                revision,
+                tenant_id,
                 configured_at: UnixTimestamp::from_seconds(900),
             },
             _ => panic!("unknown installation test disposition"),
@@ -1431,7 +1499,12 @@ mod setup_page_composition_tests {
         );
         assert!(renderer.requests().is_empty());
 
-        for disposition in ["unconfigured", "login_bound", "configured"] {
+        for disposition in [
+            "unconfigured",
+            "login_bound",
+            "configured",
+            "deployment_configured",
+        ] {
             let repository = Arc::new(MutableInstallationRepository::new(Ok(installation_state(
                 disposition,
             ))));
@@ -1580,6 +1653,45 @@ mod setup_page_composition_tests {
             assert!(renderer.requests().is_empty());
         }
     }
+
+    #[test]
+    fn deployment_installation_cannot_be_reinterpreted_as_human_configuration() {
+        assert!(matches!(
+            classify_human_installation(&installation_state("deployment_configured")),
+            Err(ServerCompositionError::HumanAuthenticationState)
+        ));
+        assert!(matches!(
+            classify_human_installation(&installation_state("configured")),
+            Ok(HumanInstallationDisposition::Configured(tenant_id))
+                if tenant_id.as_str() == "setup-composition-test"
+        ));
+    }
+}
+
+enum HumanInstallationDisposition {
+    Configured(TenantId),
+    SetupRequired,
+}
+
+fn classify_human_installation(
+    installation: &InstallationState,
+) -> Result<HumanInstallationDisposition, ServerCompositionError> {
+    match installation {
+        InstallationState::HumanConfigured {
+            tenant_id,
+            provider_id,
+            ..
+        } if provider_id.as_str() == "github" => {
+            Ok(HumanInstallationDisposition::Configured(tenant_id.clone()))
+        }
+        InstallationState::HumanConfigured { .. }
+        | InstallationState::DeploymentConfigured { .. } => {
+            Err(ServerCompositionError::HumanAuthenticationState)
+        }
+        InstallationState::Unconfigured { .. }
+        | InstallationState::Armed { .. }
+        | InstallationState::LoginBound { .. } => Ok(HumanInstallationDisposition::SetupRequired),
+    }
 }
 
 #[allow(
@@ -1595,8 +1707,8 @@ async fn build_human_api(
     secret_management: Option<&SecretManagementComposition>,
     repository_secret_web: Option<Arc<dyn RepositorySecretWebData>>,
     fallback_tenant: TenantId,
-    capability_readiness: RunnerCapabilityReadiness,
     live_log_service: Arc<LiveLogService>,
+    runner_enrollment_repository: Option<Arc<PostgresRunnerEnrollmentRepository>>,
 ) -> Result<HumanApiComposition, ServerCompositionError> {
     let deployment_token = config.load_conformance_export_token()?;
     let mut router = match deployment_token.as_deref() {
@@ -1617,28 +1729,6 @@ async fn build_human_api(
         None => Router::new(),
     };
 
-    let enrollment_issuer = if config.human_auth().is_some() {
-        let client_ca = config.load_client_ca_pem()?;
-        let client_ca_key = config.load_client_ca_private_key_pem()?;
-        let server_ca = config.load_runner_server_ca_pem()?;
-        let server_certificate = config.load_server_certificate_pem()?;
-        let authority = config
-            .runner_public_authority
-            .as_ref()
-            .ok_or(ServerCompositionError::InvalidRunnerEnrollment)?;
-        Some(Arc::new(
-            RunnerCertificateIssuer::from_pem(
-                &client_ca,
-                &client_ca_key,
-                &server_ca,
-                &server_certificate,
-                format!("https://{authority}/"),
-            )
-            .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
-        ))
-    } else {
-        None
-    };
     let Some(config) = config.human_auth() else {
         return Ok(HumanApiComposition {
             router,
@@ -1658,18 +1748,9 @@ async fn build_human_api(
         .load()
         .await
         .map_err(|_| ServerCompositionError::HumanAuthenticationState)?;
-    let (tenant_id, setup_service) = match installation {
-        InstallationState::Configured {
-            tenant_id,
-            provider_id,
-            ..
-        } if provider_id.as_str() == "github" => (tenant_id, None),
-        InstallationState::Configured { .. } => {
-            return Err(ServerCompositionError::HumanAuthenticationState);
-        }
-        InstallationState::Unconfigured { .. }
-        | InstallationState::Armed { .. }
-        | InstallationState::LoginBound { .. } => {
+    let (tenant_id, setup_service) = match classify_human_installation(&installation)? {
+        HumanInstallationDisposition::Configured(tenant_id) => (tenant_id, None),
+        HumanInstallationDisposition::SetupRequired => {
             let bootstrap = config
                 .bootstrap()
                 .ok_or(ServerCompositionError::HumanAuthenticationNotConfigured)?;
@@ -1694,20 +1775,19 @@ async fn build_human_api(
                 .await
                 .map_err(|_| ServerCompositionError::HumanAuthenticationSetup)?;
             drop(token);
-            match state {
-                InstallationState::Configured {
-                    tenant_id,
-                    provider_id,
-                    ..
-                } if provider_id.as_str() == "github" => (tenant_id, None),
-                InstallationState::Configured { .. } => {
-                    return Err(ServerCompositionError::HumanAuthenticationState);
-                }
-                InstallationState::Armed { tenant_id, .. }
-                | InstallationState::LoginBound { tenant_id, .. } => (tenant_id, Some(service)),
-                InstallationState::Unconfigured { .. } => {
-                    return Err(ServerCompositionError::HumanAuthenticationSetup);
-                }
+            match classify_human_installation(&state)? {
+                HumanInstallationDisposition::Configured(tenant_id) => (tenant_id, None),
+                HumanInstallationDisposition::SetupRequired => match state {
+                    InstallationState::Armed { tenant_id, .. }
+                    | InstallationState::LoginBound { tenant_id, .. } => (tenant_id, Some(service)),
+                    InstallationState::Unconfigured { .. } => {
+                        return Err(ServerCompositionError::HumanAuthenticationSetup);
+                    }
+                    InstallationState::HumanConfigured { .. }
+                    | InstallationState::DeploymentConfigured { .. } => {
+                        return Err(ServerCompositionError::HumanAuthenticationState);
+                    }
+                },
             }
         }
     };
@@ -1754,11 +1834,9 @@ async fn build_human_api(
     let management = Arc::new(PostgresHumanRbacManagementRepository::new(
         store.postgres_pool().clone(),
     ));
-    router = router.merge(runner_enrollment_api_router(
-        Arc::clone(&management),
-        enrollment_issuer.ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
+    router = router.merge(runner_enrollment_create_router(
+        runner_enrollment_repository.ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
         Arc::clone(runtime.clock()),
-        capability_readiness,
     ));
     let management_api_repository: Arc<
         dyn automata_ci_auth::management::HumanRbacManagementRepository,
@@ -1897,40 +1975,15 @@ impl ReadinessProbe for ImmutableBlobReadinessProbe {
 fn build_blob_store(
     config: &ServerConfig,
 ) -> Result<Arc<dyn ImmutableBlobStore>, ServerCompositionError> {
-    let blob_config = if config.s3_endpoint.scheme() == "http" {
-        if !config.s3_allow_loopback_http {
-            return Err(ServerCompositionError::InsecureS3Endpoint);
+    let store = crate::object_store::connect(&config.s3).map_err(|error| match error {
+        crate::object_store::ObjectStoreConnectionError::Secret(error) => {
+            ServerCompositionError::Secret(error)
         }
-        S3BlobStoreConfig::loopback_development(
-            config.s3_endpoint.clone(),
-            config.s3_region.clone(),
-            config.s3_bucket.clone(),
-            config.s3_prefix.clone(),
-            config.s3_operation_timeout,
-        )?
-    } else {
-        S3BlobStoreConfig::new(
-            config.s3_endpoint.clone(),
-            config.s3_region.clone(),
-            config.s3_bucket.clone(),
-            config.s3_prefix.clone(),
-            config.s3_force_path_style,
-            config.s3_operation_timeout,
-        )?
-    };
-    let blob_config = blob_config.with_at_rest_encryption(config.s3_at_rest_encryption.clone());
-    let access_key = config.load_s3_access_key()?;
-    let secret_key = config.load_s3_secret_key()?;
-    let session_token = config.load_s3_session_token()?;
-    let credentials = StaticS3Credentials::new(
-        access_key.as_str(),
-        secret_key.as_str(),
-        session_token
-            .as_ref()
-            .map(|value| value.as_str().to_owned()),
-    )?;
-    let client = blob_config.client(credentials);
-    Ok(Arc::new(S3BlobStore::new(client, &blob_config)))
+        crate::object_store::ObjectStoreConnectionError::Configuration(error) => {
+            ServerCompositionError::S3(error)
+        }
+    })?;
+    Ok(Arc::new(store))
 }
 
 fn load_server_tls(config: &ServerConfig) -> Result<ServerTlsConfig, ServerCompositionError> {
@@ -2031,6 +2084,9 @@ pub enum ServerCompositionError {
     /// `PostgreSQL` could not connect or apply embedded migrations.
     #[error(transparent)]
     Postgres(#[from] PostgresStoreError),
+    /// The exact `PostgreSQL` URL, environment, or transport policy was invalid.
+    #[error(transparent)]
+    PostgresConfiguration(#[from] PostgresConnectionConfigError),
     /// S3 namespace or credential configuration was invalid.
     #[error(transparent)]
     S3(#[from] S3BlobStoreConfigError),
@@ -2070,9 +2126,6 @@ pub enum ServerCompositionError {
     /// A fresh process-local autonomous workflow worker identity was invalid.
     #[error("autonomous workflow worker identity is invalid")]
     InvalidAutonomousWorkflowWorker,
-    /// Plain HTTP was not explicitly permitted for a loopback S3 endpoint.
-    #[error("plain HTTP S3 requires the explicit loopback-development option")]
-    InsecureS3Endpoint,
     /// A PEM source was malformed, empty, excessive, or contained multiple keys.
     #[error("runner TLS PEM material is invalid")]
     InvalidTlsPem,

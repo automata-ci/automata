@@ -1,6 +1,8 @@
-use std::path::PathBuf;
+use std::{convert::Infallible, fmt, path::PathBuf, str::FromStr};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, error::ErrorKind};
+
+use crate::product::{validate_absolute_path, validate_environment_name};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -9,9 +11,57 @@ use clap::{Args, Parser, Subcommand};
     long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("AUTOMATA_BUILD_GIT_SHA"), ")"),
     about = "Automata runner for Linux, Windows, and isolated macOS execution hosts"
 )]
-pub(crate) struct Cli {
+struct ParsedCli {
     #[command(subcommand)]
     pub(crate) command: Command,
+}
+
+#[derive(Debug)]
+pub(crate) struct Cli {
+    pub(crate) command: Command,
+}
+
+impl CommandFactory for Cli {
+    fn command() -> clap::Command {
+        ParsedCli::command()
+    }
+
+    fn command_for_update() -> clap::Command {
+        ParsedCli::command_for_update()
+    }
+}
+
+impl FromArgMatches for Cli {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        let parsed = ParsedCli::from_arg_matches(matches)?;
+        validate_command(&parsed.command)?;
+        Ok(Self {
+            command: parsed.command,
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl Parser for Cli {}
+
+fn validate_command(command: &Command) -> Result<(), clap::Error> {
+    if matches!(
+        command,
+        Command::Enroll(EnrollArgs {
+            token_source: EnrollmentTokenSource::Invalid,
+            ..
+        })
+    ) {
+        return Err(clap::Error::raw(
+            ErrorKind::InvalidValue,
+            "runner enrollment token source must be file:PATH, env:NAME, or stdin",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Subcommand)]
@@ -40,10 +90,60 @@ pub(crate) struct EnrollArgs {
     /// Human-readable runner name, unique within its tenant.
     #[arg(long, value_name = "NAME")]
     pub(crate) name: String,
-    /// Owner-only file containing the one-time token. If omitted, the token is read from
-    /// `AUTOMATA_RUNNER_ENROLLMENT_TOKEN` or redirected stdin, in that order.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) token_file: Option<PathBuf>,
+    /// Explicit one-time token source. File input must be absolute and owner-only; stdin must reach EOF.
+    #[arg(long, value_name = "file:PATH|env:NAME|stdin")]
+    pub(crate) token_source: EnrollmentTokenSource,
+}
+
+#[derive(Clone)]
+pub(crate) enum EnrollmentTokenSource {
+    File(PathBuf),
+    Environment(String),
+    Stdin,
+    Invalid,
+}
+
+impl FromStr for EnrollmentTokenSource {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let source = if value == "stdin" {
+            Self::Stdin
+        } else if let Some(path) = value.strip_prefix("file:") {
+            let path = PathBuf::from(path);
+            if validate_absolute_path(&path).is_ok() {
+                Self::File(path)
+            } else {
+                Self::Invalid
+            }
+        } else if let Some(name) = value.strip_prefix("env:") {
+            let name = name.to_owned();
+            if validate_environment_name(&name).is_ok() {
+                Self::Environment(name)
+            } else {
+                Self::Invalid
+            }
+        } else {
+            Self::Invalid
+        };
+        Ok(source)
+    }
+}
+
+impl fmt::Debug for EnrollmentTokenSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::File(_) => "file",
+            Self::Environment(_) => "environment",
+            Self::Stdin => "stdin",
+            Self::Invalid => "invalid",
+        };
+        formatter
+            .debug_struct("EnrollmentTokenSource")
+            .field("kind", &kind)
+            .field("reference", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Args)]
@@ -90,9 +190,9 @@ pub(crate) struct InternalProbeHttpArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
+    use clap::{CommandFactory as _, Parser as _, error::ErrorKind};
 
-    use super::{Cli, Command};
+    use super::{Cli, Command, EnrollmentTokenSource};
 
     #[test]
     fn run_accepts_only_a_configuration_path() {
@@ -149,7 +249,8 @@ mod tests {
     }
 
     #[test]
-    fn enroll_accepts_safe_token_sources_but_no_inline_token() {
+    fn enroll_requires_one_explicit_redacted_token_source() {
+        let marker = "private-enrollment-source-marker";
         let cli = Cli::try_parse_from([
             "automata-runner",
             "enroll",
@@ -159,22 +260,47 @@ mod tests {
             "https://ci.example.test",
             "--name",
             "linux-amd64-1",
-            "--token-file",
-            "/run/secrets/automata-enrollment-token",
+            "--token-source",
+            &format!("file:/run/secrets/{marker}"),
         ])
         .expect("enroll CLI must parse");
         let Command::Enroll(args) = cli.command else {
             panic!("enroll command expected");
         };
         assert_eq!(args.name, "linux-amd64-1");
-        assert_eq!(
-            args.token_file.as_deref(),
-            Some(std::path::Path::new(
-                "/run/secrets/automata-enrollment-token"
-            ))
-        );
+        assert!(matches!(&args.token_source, EnrollmentTokenSource::File(_)));
+        let rendered = format!("{:?}", args.token_source);
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains(marker));
 
-        let error = Cli::try_parse_from([
+        for (source, reference) in [
+            (
+                "env:PRIVATE_ENROLLMENT_SOURCE_MARKER",
+                Some("PRIVATE_ENROLLMENT_SOURCE_MARKER"),
+            ),
+            ("stdin", None),
+        ] {
+            let cli = Cli::try_parse_from([
+                "automata-runner",
+                "enroll",
+                "--config",
+                "/var/lib/automata/runner.json",
+                "--server",
+                "https://ci.example.test",
+                "--name",
+                "linux-amd64-1",
+                "--token-source",
+                source,
+            ])
+            .expect("each explicit token source must parse");
+            let rendered = format!("{cli:?}");
+            assert!(rendered.contains("[REDACTED]"));
+            if let Some(reference) = reference {
+                assert!(!rendered.contains(reference));
+            }
+        }
+
+        let omitted = Cli::try_parse_from([
             "automata-runner",
             "enroll",
             "--config",
@@ -183,11 +309,63 @@ mod tests {
             "https://ci.example.test",
             "--name",
             "linux-amd64-1",
-            "--token",
-            "must-not-enter-argv",
         ])
-        .expect_err("inline enrollment tokens must not be accepted");
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        .expect_err("the token source must be required");
+        assert_eq!(omitted.kind(), ErrorKind::MissingRequiredArgument);
+
+        for removed in ["--token", "--token-file"] {
+            let error = Cli::try_parse_from([
+                "automata-runner",
+                "enroll",
+                "--config",
+                "/var/lib/automata/runner.json",
+                "--server",
+                "https://ci.example.test",
+                "--name",
+                "linux-amd64-1",
+                removed,
+                marker,
+            ])
+            .expect_err("removed token arguments must not be accepted");
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+            assert!(!error.to_string().contains(marker));
+        }
+
+        for invalid_source in [
+            marker.to_owned(),
+            format!("file:relative-{marker}"),
+            format!("env:lowercase_{marker}"),
+        ] {
+            let invalid = Cli::try_parse_from([
+                "automata-runner",
+                "enroll",
+                "--config",
+                "/var/lib/automata/runner.json",
+                "--server",
+                "https://ci.example.test",
+                "--name",
+                "linux-amd64-1",
+                "--token-source",
+                invalid_source.as_str(),
+            ])
+            .expect_err("invalid token sources must fail without being retained");
+            assert_eq!(invalid.kind(), ErrorKind::InvalidValue);
+            assert!(!invalid.to_string().contains(&invalid_source));
+        }
+    }
+
+    #[test]
+    fn enroll_help_exposes_only_the_current_explicit_source_contract() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("enroll")
+            .expect("enroll command")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--token-source"));
+        assert!(help.contains("file:PATH|env:NAME|stdin"));
+        assert!(!help.contains("--token-file"));
+        assert!(!help.contains("AUTOMATA_RUNNER_ENROLLMENT_TOKEN"));
     }
 
     #[test]

@@ -102,29 +102,6 @@ fn services_use_one_job_network_hardened_argv_and_restart_durable_bindings() {
 }
 
 #[test]
-fn podman_normalized_tagged_digest_remains_exactly_owned() {
-    let fixture = Fixture::new_with_service_proxy("service-tagged-digest-normalization");
-    fixture.fake.normalize_tagged_digest_image_names();
-    let record = fixture
-        .provider
-        .create(&service_spec(OperationId::new()), &NeverCancelled)
-        .expect("create services after Podman normalizes tagged digest names");
-
-    fixture
-        .provider
-        .destroy(
-            &DestroySandbox::new(
-                OperationId::new(),
-                record.handle().clone(),
-                record.generation(),
-            ),
-            &NeverCancelled,
-        )
-        .expect("normalized immutable image remains safely destroyable");
-    assert!(fixture.fake.is_empty());
-}
-
-#[test]
 fn stopped_proxy_is_recreated_with_fresh_logs_and_the_durable_listener_ports() {
     let fixture = Fixture::new_with_service_proxy("service-proxy-restart");
     let spec = service_spec(OperationId::new());
@@ -1029,7 +1006,7 @@ fn service_spec_with_database_variable(
 
 fn service_image(byte: u8) -> ImmutableImage {
     ImmutableImage::new(format!(
-        "registry.example.invalid/synthetic/service:stable@sha256:{}",
+        "registry.example.invalid/synthetic/service@sha256:{}",
         format!("{byte:02x}").repeat(32)
     ))
     .expect("immutable service image")

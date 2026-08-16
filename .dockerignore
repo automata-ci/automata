@@ -1,0 +1,29 @@
+# Local build products must never enter image build contexts.
+/target/
+**/target/
+**/.build/
+**/node_modules/
+**/dist/
+**/.vite/
+**/.pnpm-store/
+**/coverage/
+**/*.profraw
+
+# Version-control metadata is not part of reproducible image inputs.
+/.git
+**/.git/
+
+# Never send local configuration, credentials, logs, or editor state to the
+# daemon. The sandbox-guest image has no runtime configuration inputs.
+**/.env
+**/.env.*
+**/*.log
+**/.DS_Store
+**/*.swp
+**/*.swo
+**/*~
+**/.idea/
+**/.vscode/
+**/__pycache__/
+**/*.pyc
+**/*.pyo

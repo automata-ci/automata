@@ -412,7 +412,7 @@ fn payload_fsync_precedes_offer_cursor_and_exact_session_negotiation_survives_re
     assert_eq!(durable_offer.job_ir().version(), JobIrVersion::current());
     assert_eq!(durable_offer.job_ir().content(), &job_content);
     assert_eq!(
-        durable_offer.job_ir().content().size(),
+        durable_offer.job_ir().content().accounted_bytes(),
         job_bytes.len() as u64
     );
     drop(journal);

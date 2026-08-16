@@ -19,6 +19,7 @@
 pub mod build_info;
 /// Read-only and opt-in active host capability discovery.
 pub mod capability_probe;
+mod certificate_renewal;
 mod cli;
 /// Runner host and control-plane health diagnostics.
 pub mod doctor;

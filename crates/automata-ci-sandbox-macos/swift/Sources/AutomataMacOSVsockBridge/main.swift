@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 private let maximumFrameBytes = 32 * 1024 * 1024
-private let guestProtocol: UInt16 = 2
+private let guestProtocol: UInt16 = 5
 
 private enum BridgeFailure: Error {
   case rejected

@@ -3,6 +3,7 @@
 use crate::support;
 
 use std::{
+    num::NonZeroU16,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -14,9 +15,9 @@ use automata_ci_execution::{
     CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox, EnvironmentName,
     EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEnvironment,
     ExecutionErrorKind, ExecutionSignal, NetworkPolicy, NeverCancelled, OperationId,
-    ProviderErrorKind, RootFilesystemPolicy, SandboxCapability, SandboxGeneration,
-    SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState, SignalRequest, TargetPath,
-    WaitRequest,
+    ProviderErrorKind, RootFilesystemPolicy, RunnerId, SandboxCapability, SandboxCustody,
+    SandboxGeneration, SandboxPrivilegePolicy, SandboxProvider, SandboxSpec, SandboxState,
+    SignalRequest, TargetPath, WaitRequest,
 };
 use automata_ci_sandbox_podman::{
     CommandOutput, PodmanCommandExecutor, PodmanHostGatewayAlias, PodmanLaunchTrust,
@@ -581,6 +582,7 @@ fn writable_ephemeral_rootfs_is_explicit_and_retains_isolation_controls() {
     let spec = SandboxSpec::new(
         OperationId::new(),
         SandboxGeneration::new(1).expect("generation"),
+        baseline.custody(),
         baseline.profile().clone(),
         baseline.workspace().clone(),
         NetworkPolicy::PrivateEgress,
@@ -726,6 +728,95 @@ fn conflicting_spec_and_foreign_ownership_fail_closed() {
 }
 
 #[test]
+fn recovery_reports_custody_and_rejects_wrong_runner_slot_and_old_resource_schema() {
+    let fixture = Fixture::new("custody-runner");
+    let spec = sample_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create current custody resources");
+    assert_eq!(
+        fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("inspect current custody")
+            .custody(),
+        spec.custody()
+    );
+
+    let wrong_runner = RunnerId::new();
+    fixture
+        .fake
+        .replace_custody("profile-admission", wrong_runner, 0);
+    assert_eq!(
+        fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("custody remains directly inspectable")
+            .custody(),
+        SandboxCustody::ProfileAdmission {
+            runner_id: wrong_runner,
+        }
+    );
+    let wrong_runner = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("create replay must reject a wrong runner label");
+    assert_eq!(wrong_runner.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let fixture = Fixture::new("custody-slot");
+    let baseline = sample_spec(OperationId::new());
+    let runner_id = RunnerId::new();
+    let spec = SandboxSpec::new(
+        baseline.operation_id(),
+        baseline.generation(),
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(2).expect("non-zero slot"),
+        },
+        baseline.profile().clone(),
+        baseline.workspace().clone(),
+        baseline.network(),
+        baseline.root_filesystem(),
+        baseline.resources(),
+    );
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create slot test resources");
+    fixture.fake.replace_custody("job", runner_id, 1);
+    assert_eq!(
+        fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect("wrong slot remains explicit recovery evidence")
+            .custody(),
+        SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(1).expect("non-zero slot"),
+        }
+    );
+    let wrong_slot = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("create replay must reject a wrong slot label");
+    assert_eq!(wrong_slot.kind(), ProviderErrorKind::OwnershipMismatch);
+
+    let fixture = Fixture::new("custody-schema");
+    let spec = sample_spec(OperationId::new());
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create schema test resources");
+    fixture.fake.replace_resource_schema("1");
+    let old_schema = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("schema-1 Podman resources must not recover");
+    assert_eq!(old_schema.kind(), ProviderErrorKind::InvalidState);
+}
+
+#[test]
 fn same_profile_id_with_a_different_attestation_digest_cannot_replay() {
     let fixture = Fixture::new("profile-attestation");
     let operation_id = OperationId::new();
@@ -800,20 +891,38 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
         .exec(&command, &NeverCancelled)
         .expect("environment injection");
 
+    assert_exact_environment_custody(
+        &fixture,
+        &[
+            ("TOKEN", secret),
+            ("HOME", home),
+            ("PATH", path),
+            ("TMPDIR", temporary),
+            ("LD_PRELOAD", preload),
+            ("AUTOMATA_EMPTY", ""),
+            ("INPUT_PATH", multiline),
+        ],
+    );
+    assert!(persistent_transfer_state_is_absent(&fixture));
+
+    fixture.fake.set_exec_output(CommandOutput::terminated(
+        automata_ci_sandbox_podman::CommandTermination::Cancelled,
+    ));
+    let output = endpoint
+        .exec(&command, &NeverCancelled)
+        .expect("cancelled exec is a terminal result");
+    assert_eq!(
+        output.termination(),
+        automata_ci_execution::ExecutionTermination::Cancelled
+    );
+    assert!(persistent_transfer_state_is_absent(&fixture));
+}
+
+fn assert_exact_environment_custody(fixture: &Fixture, expected: &[(&str, &str)]) {
     let captured = fixture.fake.last_exec_environment();
-    assert_eq!(captured.get("TOKEN").map(String::as_str), Some(secret));
-    assert_eq!(captured.get("HOME").map(String::as_str), Some(home));
-    assert_eq!(captured.get("PATH").map(String::as_str), Some(path));
-    assert_eq!(captured.get("TMPDIR").map(String::as_str), Some(temporary));
-    assert_eq!(
-        captured.get("LD_PRELOAD").map(String::as_str),
-        Some(preload)
-    );
-    assert_eq!(captured.get("AUTOMATA_EMPTY").map(String::as_str), Some(""));
-    assert_eq!(
-        captured.get("INPUT_PATH").map(String::as_str),
-        Some(multiline)
-    );
+    for (name, value) in expected {
+        assert_eq!(captured.get(*name).map(String::as_str), Some(*value));
+    }
     assert_eq!(
         fixture.fake.last_dynamic_environment_names(),
         ["INPUT_PATH"]
@@ -836,26 +945,10 @@ fn environment_values_are_exact_redacted_and_do_not_control_the_podman_client() 
         Some(fixture.scratch.path().join("process-transient"))
     );
     assert!(commands.iter().flatten().all(|argument| {
-        argument != secret
-            && argument != home
-            && argument != path
-            && argument != temporary
-            && argument != preload
-            && argument != multiline
+        expected
+            .iter()
+            .all(|(_, value)| value.is_empty() || argument != value)
     }));
-    assert!(persistent_transfer_state_is_absent(&fixture));
-
-    fixture.fake.set_exec_output(CommandOutput::terminated(
-        automata_ci_sandbox_podman::CommandTermination::Cancelled,
-    ));
-    let output = endpoint
-        .exec(&command, &NeverCancelled)
-        .expect("cancelled exec is a terminal result");
-    assert_eq!(
-        output.termination(),
-        automata_ci_execution::ExecutionTermination::Cancelled
-    );
-    assert!(persistent_transfer_state_is_absent(&fixture));
 }
 
 #[test]

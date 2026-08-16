@@ -31,10 +31,10 @@ use automata_ci_execution::{
     ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
     ExecutionStage, ExecutionTermination, ImmutableImage, NetworkPolicy, OperationOutcome,
     ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxEnvironment, SandboxGeneration,
-    SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord,
-    SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings, ServiceNetwork,
-    ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxEnvironment,
+    SandboxGeneration, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider,
+    SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings,
+    ServiceNetwork, ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -620,7 +620,7 @@ fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> Exe
         UnixMillis::new(1_000_000),
     )
     .expect("valid lease");
-    let content = DurableContentRef::after_commit(
+    let content = DurableContentRef::after_public_commit(
         ContentKind::JobIr,
         1,
         Sha256Digest::from_bytes([3; 32]),
@@ -658,6 +658,20 @@ fn execution_request(environment: SandboxEnvironment, job: JobIrEnvelope) -> Exe
         environment,
         JobLifecycle::Preparing,
         None,
+    )
+}
+
+pub fn recovered_request(request: &ExecutionRequest) -> ExecutionRequest {
+    ExecutionRequest::new(
+        request.session_id(),
+        request.slot(),
+        request.lease().clone(),
+        request.job().clone(),
+        request.runtime_authorities().clone(),
+        request.job_content().clone(),
+        request.environment().clone(),
+        request.recovery_lifecycle(),
+        Some(journal_identity()),
     )
 }
 
@@ -1422,7 +1436,7 @@ impl ExecutionEndpoint for FakeEndpoint {
         let program = request.argv().program().as_str();
         let mut state = self.state.lock().expect("endpoint lock");
         state.commands.push(request.clone());
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return execution_output(ExecutionTermination::Cancelled, Vec::new(), false)
                 .map_err(|_| execution_error(ExecutionStage::Exec));
         }
@@ -1666,6 +1680,7 @@ struct ProviderState {
     pub attaches: usize,
     pub destroy_requests: Vec<DestroySandbox>,
     pub specs: Vec<SandboxSpec>,
+    pub inspection_custody: Option<SandboxCustody>,
 }
 
 impl FakeProvider {
@@ -1757,6 +1772,10 @@ impl FakeProvider {
             .destroy_requests
             .clone()
     }
+
+    pub fn set_inspection_custody(&self, custody: SandboxCustody) {
+        self.state.lock().expect("provider lock").inspection_custody = Some(custody);
+    }
 }
 
 impl fmt::Debug for FakeProvider {
@@ -1816,9 +1835,15 @@ impl SandboxProvider for FakeProvider {
         handle: &SandboxHandle,
         _cancellation: &dyn Cancellation,
     ) -> Result<SandboxInspection, ProviderError> {
+        let state = self.state.lock().expect("provider lock");
+        let custody = state
+            .inspection_custody
+            .unwrap_or_else(|| state.specs.last().expect("created sandbox spec").custody());
+        drop(state);
         Ok(SandboxInspection::new(
             handle.clone(),
             SandboxGeneration::new(7).expect("valid generation"),
+            custody,
             self.environment.attestation().clone(),
             SandboxState::Running,
         ))
@@ -2344,6 +2369,7 @@ struct EventState {
     provider_operation_begins: Vec<(OperationId, ProviderOperationKind)>,
     provider_operation_failures: Vec<(OperationId, ProviderFailureOutcome)>,
     pending_provider_operation: Option<(OperationId, ProviderOperationKind)>,
+    endpoint_bindings: usize,
     provider_event_failures: BTreeSet<ProviderEventFailurePoint>,
     cancellation_on_log: Option<ExecutionCancellation>,
     fail_log_after_cancellation: bool,
@@ -2391,6 +2417,10 @@ impl FakeEvents {
             .expect("events lock")
             .provider_operation_failures
             .clone()
+    }
+
+    pub fn endpoint_bindings(&self) -> usize {
+        self.state.lock().expect("events lock").endpoint_bindings
     }
 
     pub fn fail_next_begin_provider_operation(&self) {
@@ -2443,6 +2473,16 @@ impl fmt::Debug for FakeEvents {
 }
 
 impl ExecutionEvents for FakeEvents {
+    fn bind_endpoint(
+        &self,
+        _provider: Arc<dyn SandboxProvider>,
+        _inspection: SandboxInspection,
+        endpoint: Box<dyn ExecutionEndpoint>,
+    ) -> Result<Box<dyn ExecutionEndpoint>, ExecutionEventError> {
+        self.state.lock().expect("events lock").endpoint_bindings += 1;
+        Ok(endpoint)
+    }
+
     fn transition(
         &self,
         next: JobLifecycle,

@@ -1,10 +1,10 @@
-use std::{future::Future, str::FromStr as _, sync::Arc, time::Instant};
+use std::{future::Future, num::NonZeroU16, str::FromStr as _, sync::Arc, time::Instant};
 
-use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, Sha256Digest};
+use automata_ci_core::{EnvironmentProfile, EnvironmentProfileId, RunnerId, Sha256Digest};
 use automata_ci_execution::{
     Cancellation, DestroyDisposition, DestroySandbox, OperationOutcome, ProviderCapabilities,
-    ProviderError, ProviderErrorKind, ProviderId, ProviderStage, SandboxCapability, SandboxHandle,
-    SandboxInspection, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
+    ProviderError, ProviderErrorKind, ProviderId, ProviderStage, SandboxCapability, SandboxCustody,
+    SandboxHandle, SandboxInspection, SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
 };
 use k8s_openapi::api::{core::v1::Pod, networking::v1::NetworkPolicy};
 use kube::{
@@ -18,8 +18,9 @@ use crate::{
     endpoint::KubernetesExecutionEndpoint,
     invalid_configuration,
     objects::{
-        FINGERPRINT_ANNOTATION, GENERATION_ANNOTATION, MANAGED_LABEL, PROFILE_DIGEST_ANNOTATION,
-        PROFILE_ID_ANNOTATION, SANDBOX_LABEL, build_objects, network_policy_name,
+        CUSTODY_KIND_LABEL, CUSTODY_RUNNER_LABEL, CUSTODY_SLOT_LABEL, FINGERPRINT_ANNOTATION,
+        GENERATION_ANNOTATION, MANAGED_LABEL, PROFILE_DIGEST_ANNOTATION, PROFILE_ID_ANNOTATION,
+        SANDBOX_LABEL, SANDBOX_SCHEMA, SCHEMA_LABEL, build_objects, network_policy_name,
     },
 };
 
@@ -128,7 +129,7 @@ impl SandboxProvider for KubernetesSandboxProvider {
                 operation_timeout,
             )
             .await?;
-            if cancellation.is_cancelled() {
+            if cancellation.disposition().requires_termination() {
                 return Err(ProviderErrorKind::Cancelled);
             }
             create_or_verify_pod(&pods, objects.pod, &fingerprint, operation_timeout).await?;
@@ -149,7 +150,7 @@ impl SandboxProvider for KubernetesSandboxProvider {
                 Some(handle.clone()),
             )
         })?;
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(ProviderError::new(
                 ProviderErrorKind::Cancelled,
                 ProviderStage::Start,
@@ -223,11 +224,12 @@ impl SandboxProvider for KubernetesSandboxProvider {
         .map_err(|kind| provider_error(kind, ProviderStage::Inspect))?;
         verify_managed(&pod, handle.opaque(), None)
             .map_err(|kind| provider_error(kind, ProviderStage::Inspect))?;
-        let (generation, profile) =
+        let (generation, custody, profile) =
             identity_from_pod(&pod).map_err(|kind| provider_error(kind, ProviderStage::Inspect))?;
         Ok(SandboxInspection::new(
             handle.clone(),
             generation,
+            custody,
             profile,
             pod_state(&pod),
         ))
@@ -253,7 +255,7 @@ impl SandboxProvider for KubernetesSandboxProvider {
         let generation = request.generation().get();
         let timeout_duration = self.inner.config.operation_timeout();
         let result = block_on(async move {
-            let pod_existed =
+            let pod_custody =
                 delete_pod_and_wait(&pods, &name, generation, timeout_duration).await?;
             // Network isolation must outlive the exact Pod UID. Kubernetes Pod
             // deletion is asynchronous even after DELETE succeeds.
@@ -262,10 +264,11 @@ impl SandboxProvider for KubernetesSandboxProvider {
                 &policy_name,
                 &name,
                 generation,
+                pod_custody,
                 timeout_duration,
             )
             .await?;
-            let existed = pod_existed || policy_existed;
+            let existed = pod_custody.is_some() || policy_existed;
             Ok::<_, ProviderErrorKind>(existed)
         })
         .map_err(|kind| {
@@ -289,12 +292,13 @@ async fn delete_pod_and_wait(
     name: &str,
     generation: u64,
     deadline: Duration,
-) -> Result<bool, ProviderErrorKind> {
+) -> Result<Option<SandboxCustody>, ProviderErrorKind> {
     let started = Instant::now();
     let Some(pod) = timed_get_opt(pods, name, remaining(deadline, started)?).await? else {
-        return Ok(false);
+        return Ok(None);
     };
     verify_managed(&pod, name, Some(generation))?;
+    let custody = custody_from_object(&pod)?;
     let uid = pod.uid().ok_or(ProviderErrorKind::BackendRejected)?;
     let resource_version = pod
         .resource_version()
@@ -318,7 +322,7 @@ async fn delete_pod_and_wait(
     }
     loop {
         let Some(observed) = timed_get_opt(pods, name, remaining(deadline, started)?).await? else {
-            return Ok(true);
+            return Ok(Some(custody));
         };
         if observed.uid().as_deref() != Some(uid.as_str()) {
             return Err(ProviderErrorKind::OwnershipMismatch);
@@ -332,6 +336,7 @@ async fn delete_policy_and_wait(
     policy_name: &str,
     sandbox_name: &str,
     generation: u64,
+    expected_custody: Option<SandboxCustody>,
     deadline: Duration,
 ) -> Result<bool, ProviderErrorKind> {
     let started = Instant::now();
@@ -340,6 +345,10 @@ async fn delete_policy_and_wait(
         return Ok(false);
     };
     verify_managed(&policy, sandbox_name, Some(generation))?;
+    let custody = custody_from_object(&policy)?;
+    if expected_custody.is_some_and(|expected| custody != expected) {
+        return Err(ProviderErrorKind::OwnershipMismatch);
+    }
     let uid = policy.uid().ok_or(ProviderErrorKind::BackendRejected)?;
     let resource_version = policy
         .resource_version()
@@ -465,6 +474,7 @@ fn verify_observed_pod(
 ) -> Result<(), ProviderErrorKind> {
     let name = expected.name_any();
     verify_managed(observed, &name, None)?;
+    verify_same_custody(observed, expected)?;
     verify_fingerprint(observed, fingerprint)?;
     let observed = observed.spec.as_ref().ok_or(ProviderErrorKind::Conflict)?;
     let expected = expected
@@ -499,6 +509,7 @@ fn verify_observed_policy(
     fingerprint: &str,
 ) -> Result<(), ProviderErrorKind> {
     verify_managed(observed, sandbox, None)?;
+    verify_same_custody(observed, expected)?;
     verify_fingerprint(observed, fingerprint)?;
     (observed.spec == expected.spec)
         .then_some(())
@@ -526,7 +537,7 @@ async fn wait_until_ready(
 ) -> Result<SandboxState, ProviderErrorKind> {
     let started = Instant::now();
     loop {
-        if cancellation.is_cancelled() {
+        if cancellation.disposition().requires_termination() {
             return Err(ProviderErrorKind::Cancelled);
         }
         let remaining = deadline.saturating_sub(started.elapsed());
@@ -575,7 +586,14 @@ pub(crate) fn pod_state(pod: &Pod) -> SandboxState {
 
 fn identity_from_pod(
     pod: &Pod,
-) -> Result<(automata_ci_execution::SandboxGeneration, EnvironmentProfile), ProviderErrorKind> {
+) -> Result<
+    (
+        automata_ci_execution::SandboxGeneration,
+        SandboxCustody,
+        EnvironmentProfile,
+    ),
+    ProviderErrorKind,
+> {
     let annotations = pod.annotations();
     let generation = annotations
         .get(GENERATION_ANNOTATION)
@@ -590,7 +608,47 @@ fn identity_from_pod(
         .get(PROFILE_DIGEST_ANNOTATION)
         .and_then(|value| Sha256Digest::from_str(value).ok())
         .ok_or(ProviderErrorKind::OwnershipMismatch)?;
-    Ok((generation, EnvironmentProfile::new(profile_id, digest)))
+    Ok((
+        generation,
+        custody_from_object(pod)?,
+        EnvironmentProfile::new(profile_id, digest),
+    ))
+}
+
+fn verify_same_custody<K>(observed: &K, expected: &K) -> Result<(), ProviderErrorKind>
+where
+    K: Resource,
+{
+    (custody_from_object(observed)? == custody_from_object(expected)?)
+        .then_some(())
+        .ok_or(ProviderErrorKind::Conflict)
+}
+
+fn custody_from_object<K>(object: &K) -> Result<SandboxCustody, ProviderErrorKind>
+where
+    K: Resource,
+{
+    let labels = ResourceExt::labels(object);
+    let runner_id = labels
+        .get(CUSTODY_RUNNER_LABEL)
+        .and_then(|value| RunnerId::from_str(value).ok())
+        .ok_or(ProviderErrorKind::OwnershipMismatch)?;
+    let slot = labels
+        .get(CUSTODY_SLOT_LABEL)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or(ProviderErrorKind::OwnershipMismatch)?;
+    match labels.get(CUSTODY_KIND_LABEL).map(String::as_str) {
+        Some("profile-admission") if slot == 0 => {
+            Ok(SandboxCustody::ProfileAdmission { runner_id })
+        }
+        Some("job") => NonZeroU16::new(slot)
+            .map(|slot_ordinal| SandboxCustody::Job {
+                runner_id,
+                slot_ordinal,
+            })
+            .ok_or(ProviderErrorKind::OwnershipMismatch),
+        _ => Err(ProviderErrorKind::OwnershipMismatch),
+    }
 }
 
 pub(crate) fn verify_managed<K>(
@@ -606,6 +664,10 @@ where
         .map(String::as_str)
         != Some("true")
         || ResourceExt::labels(object)
+            .get(SCHEMA_LABEL)
+            .map(String::as_str)
+            != Some(SANDBOX_SCHEMA)
+        || ResourceExt::labels(object)
             .get(SANDBOX_LABEL)
             .map(String::as_str)
             != Some(sandbox)
@@ -618,6 +680,7 @@ where
     {
         return Err(ProviderErrorKind::OwnershipMismatch);
     }
+    custody_from_object(object)?;
     Ok(())
 }
 
@@ -644,7 +707,7 @@ fn ensure_not_cancelled(
     cancellation: &dyn Cancellation,
     stage: ProviderStage,
 ) -> Result<(), ProviderError> {
-    if cancellation.is_cancelled() {
+    if cancellation.disposition().requires_termination() {
         return Err(provider_error(ProviderErrorKind::Cancelled, stage));
     }
     Ok(())

@@ -7,7 +7,7 @@ use automata_ci_execution::{
 
 use crate::{WINDOWS_HYPERV_PROVIDER_ID, error};
 
-const HANDLE_VERSION: &str = "wh1";
+const HANDLE_VERSION: &str = "wh2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceName {
@@ -125,15 +125,19 @@ mod tests {
                 .generation(),
             generation
         );
-        let noncurrent =
-            SandboxHandle::new(provider.clone(), format!("wh0_{}_41", names.identifier()))
-                .expect("noncurrent handle syntax");
-        assert_eq!(
-            ResourceName::from_handle(&noncurrent, &provider)
-                .expect_err("noncurrent handle version must fail closed")
-                .kind(),
-            ProviderErrorKind::InvalidState
-        );
+        for version in ["wh0", "wh1", "wh3"] {
+            let noncurrent = SandboxHandle::new(
+                provider.clone(),
+                format!("{version}_{}_41", names.identifier()),
+            )
+            .expect("noncurrent handle syntax");
+            assert_eq!(
+                ResourceName::from_handle(&noncurrent, &provider)
+                    .expect_err("noncurrent handle version must fail closed")
+                    .kind(),
+                ProviderErrorKind::InvalidState
+            );
+        }
         let foreign = ProviderId::new("foreign-provider").expect("foreign provider");
         assert_eq!(
             ResourceName::from_handle(&names.handle(), &foreign)

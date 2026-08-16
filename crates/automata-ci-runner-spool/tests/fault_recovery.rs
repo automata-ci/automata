@@ -97,3 +97,63 @@ fn post_rename_faults_poison_the_handle_and_reopen_recovers_exact_content() {
         assert_eq!(reopened.usage().expect("recovered usage").0, 1);
     }
 }
+
+#[test]
+fn reserved_endpoint_result_faults_release_or_recover_capacity_at_every_commit_boundary() {
+    let payload = b"opaque endpoint result";
+    for stage in [
+        ContentCommitStage::StagingCreated,
+        ContentCommitStage::DataWritten,
+        ContentCommitStage::FileSynced,
+        ContentCommitStage::Renamed,
+        ContentCommitStage::DirectorySynced,
+    ] {
+        let scratch = Scratch::new(&format!("endpoint-result-{stage:?}"));
+        let root = scratch.spool_root();
+        let spool =
+            FileSpool::open_with_options(root.clone(), protector(), options(stage)).expect("open");
+        let error = match spool
+            .reserve_endpoint_result(64)
+            .expect("reserve before provider")
+            .persist(payload)
+        {
+            Err(error) => error,
+            Ok(publication) => {
+                publication.abort();
+                panic!("faulted publication unexpectedly succeeded")
+            }
+        };
+        if matches!(
+            stage,
+            ContentCommitStage::StagingCreated
+                | ContentCommitStage::DataWritten
+                | ContentCommitStage::FileSynced
+        ) {
+            assert!(matches!(
+                error,
+                SpoolError::InjectedFault(received) if received == stage
+            ));
+            assert_eq!(spool.usage().expect("unchanged usage"), (0, 0));
+            drop(
+                spool
+                    .reserve_endpoint_result(64)
+                    .expect("failed persist released reservation"),
+            );
+        } else {
+            assert!(matches!(error, SpoolError::CommitOutcomeUnknown));
+            assert!(matches!(spool.usage(), Err(SpoolError::Poisoned)));
+        }
+        drop(spool);
+
+        let reopened = FileSpool::open(root, protector()).expect("recover spool");
+        let reference = adopt(
+            reopened
+                .reserve_endpoint_result(64)
+                .expect("reserve exact retry")
+                .persist(payload)
+                .expect("retry after reopen"),
+        );
+        assert_eq!(reopened.load(&reference).expect("recover payload"), payload);
+        assert_eq!(reopened.usage().expect("one recovered object").0, 1);
+    }
+}

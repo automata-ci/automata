@@ -23,9 +23,6 @@ use automata_ci_oidc_github::{
     OidcServiceErrorKind, OidcSupportedClaims, OidcTokenLifetime, RequestBearerConfig,
     RequestBearerKey, RequestBearerKeyring, Rs256Keyring, Rs256SigningKey, RsaPublicJwk,
 };
-use automata_ci_postgres::store::{
-    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository,
-};
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, ActivatedLogicalInstanceDescriptor,
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun, AdmittedLogicalWorkflowJob,
@@ -61,6 +58,9 @@ use automata_ci_store::{
     RetainGithubOidcKey, ReusableSecretPermission, RoutingDocument, RunnerGeneration,
     RunnerProtocolVersion, StableRunnerSlot, StoreError, TenantScope, WorkflowAdmissionIdempotency,
     WorkflowPlanRepository as _, WorkflowSnapshotId, github_oidc_rs256_public_key_fingerprint,
+};
+use automata_ci_store_postgres::{
+    PostgresGithubOidcAuthorityRepository, PostgresGithubOidcIssuanceRepository,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;

@@ -19,12 +19,15 @@ pub use composition::{
 };
 pub use config::{
     ClientTlsSources, ExecutorProductConfig, GithubProductConfig, KubernetesProductConfig,
-    MacosVirtualizationProductConfig, MetricsProductConfig, ObjectStoreProductConfig,
+    LocalDockerProductConfig, MacosVirtualizationProductConfig, MetricsProductConfig,
     PodmanProductConfig, RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION, RunnerProductConfig,
     RunnerProductConfigError, RunnerProviderConfig, SpoolProtectionConfig, StateRoots,
     ToolchainConfig, WindowsHyperVProductConfig,
 };
 pub use context::StandardGithubContext;
+pub(crate) use files::{
+    ScalarLineEnding, normalize_scalar_bytes, validate_absolute_path, validate_environment_name,
+};
 pub use files::{SecretSource, SecureInputError};
 pub use state::ProductStateRootError;
 pub use tls::ClientTlsMaterialError;

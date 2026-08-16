@@ -59,8 +59,12 @@ impl TestCancellation {
 }
 
 impl Cancellation for TestCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+    fn disposition(&self) -> automata_ci_execution::CancellationDisposition {
+        if self.0.load(Ordering::SeqCst) {
+            automata_ci_execution::CancellationDisposition::Terminate
+        } else {
+            automata_ci_execution::CancellationDisposition::Active
+        }
     }
 }
 
@@ -347,7 +351,11 @@ fn owned_running_pod(stale_identity: bool) -> serde_json::Value {
             "uid": "endpoint-pod-uid",
             "labels": {
                 "ci.automata.dev/managed": "true",
-                "ci.automata.dev/sandbox": HANDLE
+                "ci.automata.dev/sandbox": HANDLE,
+                "ci.automata.dev/sandbox-schema": "2",
+                "ci.automata.dev/custody-kind": "profile-admission",
+                "ci.automata.dev/custody-runner": "00000000-0000-4000-8000-000000000001",
+                "ci.automata.dev/custody-slot": "0"
             }
         },
         "status": {

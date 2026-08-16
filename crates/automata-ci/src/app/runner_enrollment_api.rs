@@ -1,4 +1,4 @@
-//! One-time runner enrollment over the human HTTPS listener.
+//! One-time runner enrollment over the control-plane HTTPS listener.
 
 use std::{fmt, sync::Arc, time::Duration};
 
@@ -7,17 +7,24 @@ use automata_ci_auth::{
         ManagementActor, ManagementMutationOutcome, ManagementRepositoryError, ManagementRevision,
     },
     request_auth::AuthenticatedRequestSnapshot,
+    secret::{RunnerEnrollmentToken, SecretString},
     session::SessionKind,
     time::Clock,
 };
 use automata_ci_auth_postgres::management::{
-    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
-    MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS, PostgresHumanRbacManagementRepository,
-    PrepareRunnerEnrollment, PreparedRunnerEnrollment, RunnerEnrollmentConsumeOutcome,
-    RunnerEnrollmentPrepareOutcome,
+    ConsumeRunnerEnrollment, CreateRunnerEnrollmentToken, IssuedRunnerCertificateRenewal,
+    MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
+    PostgresRunnerEnrollmentRepository, PrepareRunnerEnrollment, PreparedRunnerEnrollment,
+    RenewRunnerCertificate, RunnerCertificateRenewalOutcome, RunnerCertificateRenewalSigningError,
+    RunnerEnrollmentConsumeOutcome, RunnerEnrollmentPrepareOutcome,
 };
 use automata_ci_control::runner_control::capability_admission::RunnerCapabilityReadiness;
 use automata_ci_core::{RunnerCapabilities, RunnerFeature, RunnerGroup};
+use automata_ci_runner_transport::{
+    ApplicationError, ApplicationErrorKind, AuthenticatedRunnerCertificateRenewalRequest,
+    CertificateRenewalHandlerFuture, RunnerCertificateRenewalHandler,
+    RunnerCertificateRenewalReply,
+};
 use axum::{
     Router,
     body::Bytes,
@@ -26,7 +33,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::StreamExt as _;
 use rcgen::{
     CertificateSigningRequestParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
@@ -47,12 +53,8 @@ use zeroize::Zeroizing;
 pub(crate) const RUNNER_ENROLLMENTS_PATH: &str = "/api/v1/runner-enrollments";
 pub(crate) const RUNNER_ENROLLMENT_REDEEM_PATH: &str = "/api/v1/runner-enrollments/redeem";
 
-const TOKEN_PREFIX: &str = "atm_re_";
-const TOKEN_BYTES: usize = 32;
-const TOKEN_ENCODED_BYTES: usize = 43;
-const TOKEN_DECODE_BUFFER_BYTES: usize = TOKEN_ENCODED_BYTES.div_ceil(4) * 3;
-const TOKEN_DOMAIN: &[u8] = b"automata.runner-enrollment-token.v1\0";
 const REDEEM_REQUEST_DOMAIN: &[u8] = b"automata.runner-enrollment-request.v1\0";
+const RENEWAL_REQUEST_DOMAIN: &[u8] = b"automata.runner-certificate-renewal-request.v1\0";
 const MAX_REQUEST_BYTES: usize = 384 * 1_024;
 const INITIAL_REQUEST_CAPACITY_BYTES: usize = 8 * 1_024;
 const MAX_CSR_BYTES: usize = 32 * 1_024;
@@ -320,28 +322,174 @@ fn server_root_authority(
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RunnerCertificateIssuerError;
 
-#[derive(Clone)]
-struct RunnerEnrollmentApiState {
-    repository: Arc<PostgresHumanRbacManagementRepository>,
+/// Operational certificate-renewal handler installed only with the exact
+/// runner issuer and its durable `PostgreSQL` authority.
+pub(crate) struct OperationalRunnerCertificateRenewalHandler {
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
     issuer: Arc<RunnerCertificateIssuer>,
+}
+
+impl OperationalRunnerCertificateRenewalHandler {
+    pub(crate) fn new(
+        repository: Arc<PostgresRunnerEnrollmentRepository>,
+        issuer: Arc<RunnerCertificateIssuer>,
+    ) -> Self {
+        Self { repository, issuer }
+    }
+
+    async fn handle_inner(
+        &self,
+        request: AuthenticatedRunnerCertificateRenewalRequest,
+    ) -> Result<RunnerCertificateRenewalReply, ApplicationError> {
+        let (machine, body, cancellation) = request.into_parts();
+        let document: RenewRunnerCertificateDocument = serde_json::from_slice(&body)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Forbidden))?;
+        if document.operation_id.is_nil()
+            || document.csr_pem.is_empty()
+            || document.csr_pem.len() > MAX_CSR_BYTES
+        {
+            return Err(ApplicationError::new(ApplicationErrorKind::Forbidden));
+        }
+        let mut digest = Sha256::new();
+        digest.update(RENEWAL_REQUEST_DOMAIN);
+        digest.update(body.as_slice());
+        let request_sha256 = digest.finalize().into();
+        let renewal = RenewRunnerCertificate::new(machine, document.operation_id, request_sha256)
+            .map_err(|_| ApplicationError::new(ApplicationErrorKind::Forbidden))?;
+        let certificate_issuer = Arc::clone(&self.issuer);
+        let operation_id = document.operation_id;
+        let csr_pem = document.csr_pem;
+        let operation = self.repository.renew_runner_certificate(
+            renewal,
+            move |runner_id, database_time_ms| {
+                let issued_certificate = certificate_issuer
+                    .issue(runner_id, &csr_pem, database_time_ms)
+                    .map_err(|_| RunnerCertificateRenewalSigningError)?;
+                let response = RenewRunnerCertificateResponse {
+                    operation_id,
+                    runner_id,
+                    control_endpoint: issued_certificate.control_endpoint,
+                    certificate_chain_pem: issued_certificate.certificate_chain_pem,
+                    certificate_expires_at_seconds: issued_certificate.expires_at_seconds,
+                };
+                let response = serde_json::to_vec(&response)
+                    .map_err(|_| RunnerCertificateRenewalSigningError)?;
+                Ok(IssuedRunnerCertificateRenewal::new(
+                    issued_certificate.leaf_sha256,
+                    issued_certificate.issued_at_seconds,
+                    issued_certificate.expires_at_seconds,
+                    response,
+                ))
+            },
+        );
+        let outcome = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                return Err(ApplicationError::new(ApplicationErrorKind::Unavailable));
+            }
+            outcome = operation => outcome,
+        }
+        .map_err(renewal_repository_error)?;
+        renewal_outcome_reply(outcome)
+    }
+}
+
+fn renewal_outcome_reply(
+    outcome: RunnerCertificateRenewalOutcome,
+) -> Result<RunnerCertificateRenewalReply, ApplicationError> {
+    match outcome {
+        RunnerCertificateRenewalOutcome::Applied(response)
+        | RunnerCertificateRenewalOutcome::Replayed(response) => {
+            RunnerCertificateRenewalReply::new(response)
+        }
+        RunnerCertificateRenewalOutcome::Rejected => {
+            Err(ApplicationError::new(ApplicationErrorKind::Forbidden))
+        }
+        RunnerCertificateRenewalOutcome::NotDue => {
+            Err(ApplicationError::new(ApplicationErrorKind::TooEarly))
+        }
+        RunnerCertificateRenewalOutcome::Conflict => {
+            Err(ApplicationError::new(ApplicationErrorKind::Conflict))
+        }
+    }
+}
+
+impl fmt::Debug for OperationalRunnerCertificateRenewalHandler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OperationalRunnerCertificateRenewalHandler")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RunnerCertificateRenewalHandler for OperationalRunnerCertificateRenewalHandler {
+    fn handle(
+        &self,
+        request: AuthenticatedRunnerCertificateRenewalRequest,
+    ) -> CertificateRenewalHandlerFuture<'_> {
+        Box::pin(self.handle_inner(request))
+    }
+}
+
+fn renewal_repository_error(error: ManagementRepositoryError) -> ApplicationError {
+    let kind = match error {
+        ManagementRepositoryError::InvalidRequest => ApplicationErrorKind::Forbidden,
+        ManagementRepositoryError::Unavailable => ApplicationErrorKind::Unavailable,
+        ManagementRepositoryError::CorruptData => ApplicationErrorKind::Internal,
+    };
+    ApplicationError::new(kind)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenewRunnerCertificateDocument {
+    operation_id: Uuid,
+    csr_pem: String,
+}
+
+#[derive(Serialize)]
+struct RenewRunnerCertificateResponse {
+    operation_id: Uuid,
+    runner_id: Uuid,
+    control_endpoint: String,
+    certificate_chain_pem: String,
+    certificate_expires_at_seconds: i64,
+}
+
+#[derive(Clone)]
+struct RunnerEnrollmentCreateApiState {
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
     clock: Arc<dyn Clock>,
+}
+
+#[derive(Clone)]
+struct RunnerEnrollmentRedeemApiState {
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
+    issuer: Arc<RunnerCertificateIssuer>,
     capability_readiness: RunnerCapabilityReadiness,
     redemptions: Arc<tokio::sync::Semaphore>,
 }
 
-pub(crate) fn runner_enrollment_api_router(
-    repository: Arc<PostgresHumanRbacManagementRepository>,
-    issuer: Arc<RunnerCertificateIssuer>,
+pub(crate) fn runner_enrollment_create_router(
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
     clock: Arc<dyn Clock>,
-    capability_readiness: RunnerCapabilityReadiness,
 ) -> Router {
     Router::new()
         .route(RUNNER_ENROLLMENTS_PATH, post(create_enrollment))
+        .with_state(RunnerEnrollmentCreateApiState { repository, clock })
+        .layer(axum::middleware::from_fn(super::api_security::no_store))
+}
+
+pub(crate) fn runner_enrollment_redeem_router(
+    repository: Arc<PostgresRunnerEnrollmentRepository>,
+    issuer: Arc<RunnerCertificateIssuer>,
+    capability_readiness: RunnerCapabilityReadiness,
+) -> Router {
+    Router::new()
         .route(RUNNER_ENROLLMENT_REDEEM_PATH, post(redeem_enrollment))
-        .with_state(RunnerEnrollmentApiState {
+        .with_state(RunnerEnrollmentRedeemApiState {
             repository,
             issuer,
-            clock,
             capability_readiness,
             redemptions: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_REDEMPTIONS)),
         })
@@ -349,7 +497,7 @@ pub(crate) fn runner_enrollment_api_router(
 }
 
 async fn create_enrollment(
-    State(state): State<RunnerEnrollmentApiState>,
+    State(state): State<RunnerEnrollmentCreateApiState>,
     request: Request,
 ) -> Response {
     let actor = match actor_from_request(&state, &request) {
@@ -371,14 +519,13 @@ async fn create_enrollment(
     let Ok(runner_group) = RunnerGroup::new(&document.runner_group) else {
         return ApiError::InvalidRequest.into_response();
     };
-    let token_sha256 = match token_digest(document.token.as_bytes()) {
-        Ok(digest) => digest,
-        Err(error) => return error.into_response(),
+    let Ok(token) = RunnerEnrollmentToken::from_secret(document.token) else {
+        return ApiError::EnrollmentRejected.into_response();
     };
     let request = CreateRunnerEnrollmentToken {
         actor,
         enrollment_id: document.operation_id,
-        token_sha256,
+        token_sha256: token.digest(),
         runner_group: runner_group.as_str().to_owned(),
         lifetime_ms: i64::try_from(document.expires_in_seconds)
             .ok()
@@ -407,7 +554,7 @@ async fn create_enrollment(
 }
 
 async fn redeem_enrollment(
-    State(state): State<RunnerEnrollmentApiState>,
+    State(state): State<RunnerEnrollmentRedeemApiState>,
     request: Request,
 ) -> Response {
     let Ok(_permit) = state.redemptions.try_acquire() else {
@@ -420,18 +567,17 @@ async fn redeem_enrollment(
     if !valid_redeem_document(&document) {
         return ApiError::InvalidRequest.into_response();
     }
-    let token_sha256 = match token_digest(document.token.as_bytes()) {
-        Ok(digest) => digest,
-        Err(error) => return error.into_response(),
-    };
     let request_sha256 = match redeem_request_digest(&document) {
         Ok(digest) => digest,
         Err(error) => return error.into_response(),
     };
+    let Ok(token) = RunnerEnrollmentToken::from_secret(document.token) else {
+        return ApiError::EnrollmentRejected.into_response();
+    };
     let outcome = match state
         .repository
         .prepare_runner_enrollment(PrepareRunnerEnrollment {
-            token_sha256,
+            token_sha256: token.digest(),
             operation_id: document.operation_id,
             request_sha256,
         })
@@ -480,7 +626,7 @@ async fn redeem_enrollment(
         return ApiError::Internal.into_response();
     }
     let consume = ConsumeRunnerEnrollment {
-        token_sha256,
+        token_sha256: token.digest(),
         operation_id: document.operation_id,
         request_sha256,
         runner_id,
@@ -548,7 +694,7 @@ fn decide_enrollment_preparation(
 }
 
 fn actor_from_request(
-    state: &RunnerEnrollmentApiState,
+    state: &RunnerEnrollmentCreateApiState,
     request: &Request,
 ) -> Result<ManagementActor, ApiError> {
     let snapshot = request
@@ -617,26 +763,6 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
         })
 }
 
-fn token_digest(token: &[u8]) -> Result<[u8; 32], ApiError> {
-    let encoded = token
-        .strip_prefix(TOKEN_PREFIX.as_bytes())
-        .ok_or(ApiError::EnrollmentRejected)?;
-    if encoded.len() != TOKEN_ENCODED_BYTES {
-        return Err(ApiError::EnrollmentRejected);
-    }
-    let mut decoded = Zeroizing::new([0_u8; TOKEN_DECODE_BUFFER_BYTES]);
-    let decoded_length = URL_SAFE_NO_PAD
-        .decode_slice(encoded, &mut *decoded)
-        .map_err(|_| ApiError::EnrollmentRejected)?;
-    if decoded_length != TOKEN_BYTES {
-        return Err(ApiError::EnrollmentRejected);
-    }
-    let mut digest = Sha256::new();
-    digest.update(TOKEN_DOMAIN);
-    digest.update(token);
-    Ok(digest.finalize().into())
-}
-
 fn redeem_request_digest(document: &RedeemEnrollmentDocument) -> Result<[u8; 32], ApiError> {
     let receipt = RedeemRequestReceipt {
         operation_id: document.operation_id,
@@ -672,8 +798,7 @@ fn exact_json_response(status: StatusCode, body: Vec<u8>) -> Response {
 #[serde(deny_unknown_fields)]
 struct CreateEnrollmentDocument {
     operation_id: Uuid,
-    #[serde(deserialize_with = "deserialize_zeroizing")]
-    token: Zeroizing<String>,
+    token: SecretString,
     runner_group: String,
     expires_in_seconds: u64,
 }
@@ -686,19 +811,11 @@ struct CreateEnrollmentResponse<'a> {
     redeem_url: &'a str,
 }
 
-fn deserialize_zeroizing<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    String::deserialize(deserializer).map(Zeroizing::new)
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RedeemEnrollmentDocument {
     operation_id: Uuid,
-    #[serde(deserialize_with = "deserialize_zeroizing")]
-    token: Zeroizing<String>,
+    token: SecretString,
     runner_name: String,
     capabilities: RunnerCapabilities,
     csr_pem: String,
@@ -809,6 +926,17 @@ mod tests {
         format!("{leaf}{ca_pem}")
     }
 
+    #[test]
+    fn renewal_not_due_is_retryable_but_a_real_conflict_is_terminal() {
+        let not_due = renewal_outcome_reply(RunnerCertificateRenewalOutcome::NotDue)
+            .expect_err("not-due renewal must remain retryable");
+        assert_eq!(not_due.kind(), ApplicationErrorKind::TooEarly);
+
+        let conflict = renewal_outcome_reply(RunnerCertificateRenewalOutcome::Conflict)
+            .expect_err("durable renewal conflict must remain terminal");
+        assert_eq!(conflict.kind(), ApplicationErrorKind::Conflict);
+    }
+
     #[tokio::test]
     async fn json_collector_accepts_fragmented_documents_and_rejects_oversize_bodies() {
         let fragments = futures::stream::iter([
@@ -832,17 +960,6 @@ mod tests {
             json_document::<serde_json::Value>(request).await,
             Err(ApiError::TooLarge)
         ));
-    }
-
-    #[test]
-    fn token_hash_is_domain_separated_and_exact() {
-        let token = format!(
-            "{TOKEN_PREFIX}{}",
-            URL_SAFE_NO_PAD.encode([7_u8; TOKEN_BYTES])
-        );
-        let digest = token_digest(token.as_bytes()).expect("valid enrollment token");
-        assert_ne!(digest, Sha256::digest(token.as_bytes()).as_slice());
-        assert!(token_digest(b"plain-secret").is_err());
     }
 
     #[test]
@@ -871,13 +988,13 @@ mod tests {
         );
         let mut document = RedeemEnrollmentDocument {
             operation_id,
-            token: Zeroizing::new("first-secret".to_owned()),
+            token: SecretString::new("first-secret").expect("bounded secret"),
             runner_name: "runner-one".to_owned(),
             capabilities,
             csr_pem: "csr".to_owned(),
         };
         let first = redeem_request_digest(&document).expect("request digest");
-        document.token = Zeroizing::new("different-secret".to_owned());
+        document.token = SecretString::new("different-secret").expect("bounded secret");
         assert_eq!(
             redeem_request_digest(&document).expect("request digest"),
             first

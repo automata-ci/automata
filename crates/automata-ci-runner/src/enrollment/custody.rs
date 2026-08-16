@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
+use automata_ci_auth::secret::RunnerEnrollmentToken;
 use rcgen::{
     CertificateParams, CertificateSigningRequestParams, DistinguishedName, DnType, KeyPair,
     PKCS_ECDSA_P256_SHA256, PublicKeyData as _,
@@ -17,11 +18,12 @@ use rcgen::{
 use reqwest::Url;
 use rustls::pki_types::pem::PemObject as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
-use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES, validate_token};
+use super::{RedeemResponse, transport::MAX_RESPONSE_BYTES};
 use crate::product::{RunnerProductConfig, SecretSource};
 
 const MAX_STAGE_BYTES: usize = 1024 * 1_024;
@@ -48,7 +50,7 @@ impl CredentialDestinations {
         let private_key = file(config.tls().private_key())?;
         let request_stage = enrollment_sibling(&private_key, ".automata-enrollment-request")?;
         let response_stage = enrollment_sibling(&private_key, ".automata-enrollment-response")?;
-        let lock_path = enrollment_sibling(&private_key, ".automata-enrollment-lock")?;
+        let lock_path = enrollment_sibling(&private_key, ".automata-tls-lock")?;
         let server_roots = file(config.tls().server_roots())?;
         let certificate_chain = file(config.tls().certificate_chain())?;
         let final_paths = [
@@ -120,7 +122,7 @@ impl CredentialDestinations {
         config: &RunnerProductConfig,
         origin: &Url,
         runner_name: &str,
-        token: Zeroizing<String>,
+        token: RunnerEnrollmentToken,
     ) -> Result<EnrollmentStage> {
         self.require_absent()?;
         let stage = EnrollmentStage::new(config, origin, runner_name, token)?;
@@ -180,11 +182,8 @@ pub(super) struct EnrollmentStage {
     pub(super) runner_name: String,
     pub(super) capabilities: automata_ci_core::RunnerCapabilities,
     pub(super) csr_pem: String,
-    #[serde(
-        deserialize_with = "deserialize_zeroizing",
-        serialize_with = "serialize_zeroizing"
-    )]
-    pub(super) token: Zeroizing<String>,
+    #[serde(serialize_with = "serialize_runner_enrollment_token")]
+    pub(super) token: RunnerEnrollmentToken,
     #[serde(
         deserialize_with = "deserialize_zeroizing",
         serialize_with = "serialize_zeroizing"
@@ -204,9 +203,8 @@ impl EnrollmentStage {
         config: &RunnerProductConfig,
         origin: &Url,
         runner_name: &str,
-        token: Zeroizing<String>,
+        token: RunnerEnrollmentToken,
     ) -> Result<Self> {
-        validate_token(token.as_str())?;
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
             .context("runner enrollment could not generate the local private key")?;
         let mut distinguished_name = DistinguishedName::new();
@@ -244,7 +242,6 @@ impl EnrollmentStage {
         {
             bail!("runner enrollment request stage does not match this invocation");
         }
-        validate_token(self.token.as_str())?;
         let key = KeyPair::from_pem(self.private_key_pem.as_str())
             .context("runner enrollment request stage has an invalid private key")?;
         let csr = CertificateSigningRequestParams::from_pem(&self.csr_pem)
@@ -278,49 +275,80 @@ fn validate_certificate_response(
     private_key_pem: &str,
     validation_time_seconds: i64,
 ) -> Result<()> {
+    if response.runner_id != expected_runner_id {
+        bail!("runner enrollment response certificate does not match the staged request");
+    }
+    validate_issued_runner_certificate(
+        expected_runner_id,
+        &response.certificate_chain_pem,
+        response.certificate_expires_at_seconds,
+        private_key_pem,
+        validation_time_seconds,
+        None,
+    )?;
+    validate_server_roots(&response.server_ca_pem, validation_time_seconds)
+}
+
+/// Exact identities derived while validating one issued runner certificate.
+pub(crate) struct ValidatedRunnerCertificate {
+    pub(crate) leaf: [u8; 32],
+    pub(crate) issuer: [u8; 32],
+    pub(crate) public_key: [u8; 32],
+}
+
+/// Validates the shared runner leaf profile, key binding, issuer signature, and
+/// local validity window used by both enrollment and certificate renewal.
+pub(crate) fn validate_issued_runner_certificate(
+    expected_runner_id: Uuid,
+    certificate_chain_pem: &str,
+    certificate_expires_at_seconds: i64,
+    private_key_pem: &str,
+    validation_time_seconds: i64,
+    expected_issuer_sha256: Option<[u8; 32]>,
+) -> Result<ValidatedRunnerCertificate> {
     let key = KeyPair::from_pem(private_key_pem)
-        .context("runner enrollment response has an invalid private key")?;
-    let certificates = rustls::pki_types::CertificateDer::pem_slice_iter(
-        response.certificate_chain_pem.as_bytes(),
-    )
-    .collect::<std::result::Result<Vec<_>, _>>()
-    .context("runner enrollment response has an invalid certificate chain")?;
+        .context("runner certificate response has an invalid private key")?;
+    let certificates =
+        rustls::pki_types::CertificateDer::pem_slice_iter(certificate_chain_pem.as_bytes())
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("runner certificate response has an invalid certificate chain")?;
     let [leaf_der, issuer_der] = certificates.as_slice() else {
-        bail!("runner enrollment response has an invalid certificate chain");
+        bail!("runner certificate response has an invalid certificate chain");
     };
     let (leaf_remainder, leaf) = parse_x509_certificate(leaf_der.as_ref())
-        .context("runner enrollment response has an invalid leaf certificate")?;
+        .context("runner certificate response has an invalid leaf certificate")?;
     let (issuer_remainder, issuer) = parse_x509_certificate(issuer_der.as_ref())
-        .context("runner enrollment response has an invalid issuing certificate")?;
+        .context("runner certificate response has an invalid issuing certificate")?;
     let leaf_constraints = leaf
         .basic_constraints()
-        .context("runner enrollment response has invalid basic constraints")?;
+        .context("runner certificate response has invalid basic constraints")?;
     let leaf_usage = leaf
         .key_usage()
-        .context("runner enrollment response has invalid key usage")?
-        .context("runner enrollment response has no key usage")?;
+        .context("runner certificate response has invalid key usage")?
+        .context("runner certificate response has no key usage")?;
     let leaf_extended_usage = leaf
         .extended_key_usage()
-        .context("runner enrollment response has invalid extended key usage")?
-        .context("runner enrollment response has no extended key usage")?;
+        .context("runner certificate response has invalid extended key usage")?
+        .context("runner certificate response has no extended key usage")?;
     let issuer_constraints = issuer
         .basic_constraints()
-        .context("runner enrollment response has invalid issuer constraints")?
-        .context("runner enrollment response issuer has no basic constraints")?;
+        .context("runner certificate response has invalid issuer constraints")?
+        .context("runner certificate response issuer has no basic constraints")?;
     let issuer_usage = issuer
         .key_usage()
-        .context("runner enrollment response has invalid issuer key usage")?
-        .context("runner enrollment response issuer has no key usage")?;
+        .context("runner certificate response has invalid issuer key usage")?
+        .context("runner certificate response issuer has no key usage")?;
     let expected_common_name = expected_runner_id.hyphenated().to_string();
     let subject_attribute_count = leaf.subject().iter_attributes().count();
     let mut common_names = leaf.subject().iter_common_name();
     let common_name = common_names.next().and_then(|name| name.as_str().ok());
     let has_subject_alternative_name = leaf
         .subject_alternative_name()
-        .context("runner enrollment response has an invalid subject alternative name")?
+        .context("runner certificate response has an invalid subject alternative name")?
         .is_some();
-    if response.runner_id != expected_runner_id
-        || !leaf_remainder.is_empty()
+    let leaf_sha256: [u8; 32] = Sha256::digest(leaf_der.as_ref()).into();
+    let issuer_sha256: [u8; 32] = Sha256::digest(issuer_der.as_ref()).into();
+    if !leaf_remainder.is_empty()
         || !issuer_remainder.is_empty()
         || leaf_constraints.is_some_and(|constraints| constraints.value.ca)
         || leaf_usage.value.flags != 1
@@ -339,22 +367,29 @@ fn validate_certificate_response(
         || leaf.validity().not_after.timestamp() <= validation_time_seconds
         || leaf.validity().not_before < issuer.validity().not_before
         || leaf.validity().not_after > issuer.validity().not_after
-        || leaf.validity().not_after.timestamp() != response.certificate_expires_at_seconds
+        || leaf.validity().not_after.timestamp() != certificate_expires_at_seconds
         || common_name != Some(expected_common_name.as_str())
         || subject_attribute_count != 1
         || common_names.next().is_some()
         || has_subject_alternative_name
         || !issuer_constraints.value.ca
         || !issuer_usage.value.key_cert_sign()
+        || expected_issuer_sha256.is_some_and(|expected| expected != issuer_sha256)
         || leaf.verify_signature(Some(issuer.public_key())).is_err()
     {
-        bail!("runner enrollment response certificate does not match the staged request");
+        bail!("runner certificate response does not match the staged request");
     }
+    Ok(ValidatedRunnerCertificate {
+        leaf: leaf_sha256,
+        issuer: issuer_sha256,
+        public_key: Sha256::digest(key.public_key_raw()).into(),
+    })
+}
+
+fn validate_server_roots(server_ca_pem: &str, validation_time_seconds: i64) -> Result<()> {
     let mut server_roots = rustls::RootCertStore::empty();
     let mut server_root_count = 0_usize;
-    for certificate in
-        rustls::pki_types::CertificateDer::pem_slice_iter(response.server_ca_pem.as_bytes())
-    {
+    for certificate in rustls::pki_types::CertificateDer::pem_slice_iter(server_ca_pem.as_bytes()) {
         let certificate = certificate.context("runner enrollment response has invalid roots")?;
         let (remainder, root) = parse_x509_certificate(certificate.as_ref())
             .context("runner enrollment response has invalid roots")?;
@@ -387,6 +422,16 @@ where
     serializer.serialize_str(value.as_str())
 }
 
+fn serialize_runner_enrollment_token<S>(
+    value: &RunnerEnrollmentToken,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.expose_secret())
+}
+
 fn deserialize_zeroizing<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -394,7 +439,7 @@ where
     String::deserialize(deserializer).map(Zeroizing::new)
 }
 
-fn enrollment_sibling(path: &Path, suffix: &str) -> Result<PathBuf> {
+pub(crate) fn enrollment_sibling(path: &Path, suffix: &str) -> Result<PathBuf> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -413,7 +458,7 @@ fn temporary_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
     temporary
 }
 
-fn temporary_path(path: &Path) -> Result<PathBuf> {
+pub(crate) fn temporary_path(path: &Path) -> Result<PathBuf> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -424,7 +469,7 @@ fn temporary_path(path: &Path) -> Result<PathBuf> {
     Ok(parent.join(temporary_name(name)))
 }
 
-fn validate_destination_set(paths: &[PathBuf]) -> Result<()> {
+pub(crate) fn validate_destination_set(paths: &[PathBuf]) -> Result<()> {
     for (index, path) in paths.iter().enumerate() {
         if !path.is_absolute() || paths[..index].contains(path) {
             bail!("runner enrollment credential and staging paths must be distinct absolute paths");
@@ -454,7 +499,7 @@ fn validate_destination_set(paths: &[PathBuf]) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn acquire_enrollment_lock(path: &Path) -> Result<rustix::fd::OwnedFd> {
+pub(crate) fn acquire_enrollment_lock(path: &Path) -> Result<rustix::fd::OwnedFd> {
     use rustix::fs::{FlockOperation, Mode, OFlags, flock, openat};
 
     let destination = prepare_destination(path)?;
@@ -555,7 +600,7 @@ fn require_trusted_directory(directory: &rustix::fd::OwnedFd) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn read_bounded_file(
+pub(crate) fn read_bounded_file(
     path: &Path,
     limit: usize,
     private: bool,
@@ -589,7 +634,7 @@ fn read_bounded_file(
 }
 
 #[cfg(unix)]
-fn read_bounded_temporary(
+pub(crate) fn read_bounded_temporary(
     path: &Path,
     limit: usize,
     private: bool,
@@ -626,7 +671,7 @@ fn read_bounded_temporary(
 }
 
 #[cfg(not(unix))]
-fn read_bounded_file(
+pub(crate) fn read_bounded_file(
     _path: &Path,
     _limit: usize,
     _private: bool,
@@ -635,7 +680,7 @@ fn read_bounded_file(
 }
 
 #[cfg(not(unix))]
-fn read_bounded_temporary(
+pub(crate) fn read_bounded_temporary(
     _path: &Path,
     _limit: usize,
     _private: bool,
@@ -670,7 +715,7 @@ fn existing_file_matches(path: &Path, expected: &[u8], private: bool) -> Result<
     Ok(())
 }
 
-fn persist_exact_file(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+pub(crate) fn persist_exact_file(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     if let Some(existing) = read_bounded_file(path, bytes.len(), private)? {
         if existing.as_slice() == bytes {
             return sync_parent(path);
@@ -686,8 +731,87 @@ fn persist_exact_file(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     }
 }
 
+/// Replaces one existing credential by atomic rename after proving its exact
+/// staged predecessor digest. A crash before rename leaves the old file; a
+/// crash after rename leaves the exact replacement, so replay is idempotent.
+pub(crate) fn replace_exact_file(
+    path: &Path,
+    predecessor_sha256: &[u8; 32],
+    replacement: &[u8],
+    private: bool,
+) -> Result<()> {
+    if replacement.is_empty() {
+        bail!("runner credential replacement is empty");
+    }
+    let current = read_bounded_file(path, replacement.len().max(MAX_STAGE_BYTES), private)?
+        .context("runner credential replacement target is missing")?;
+    if current.as_slice() == replacement {
+        return sync_parent(path);
+    }
+    let current_sha256: [u8; 32] = Sha256::digest(current.as_slice()).into();
+    if &current_sha256 != predecessor_sha256 {
+        bail!("runner credential replacement predecessor does not match");
+    }
+    replace_file_from_temporary(path, replacement, private)
+}
+
 #[cfg(unix)]
-fn persist_new(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+fn replace_file_from_temporary(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+    use rustix::fs::{Mode, OFlags, fchmod, openat, renameat};
+
+    let destination = prepare_destination(path)?;
+    let temporary = temporary_name(&destination.name);
+    let mode = Mode::from_raw_mode(if private { 0o600 } else { 0o644 });
+    match openat(
+        &destination.parent,
+        &temporary,
+        OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::CLOEXEC
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK,
+        mode,
+    ) {
+        Ok(staging) => {
+            fchmod(&staging, mode).context("runner credential permissions could not be set")?;
+            let mut file = File::from(staging);
+            file.write_all(bytes)
+                .context("runner credential replacement could not be written")?;
+            file.sync_all()
+                .context("runner credential replacement could not be synchronized")?;
+        }
+        Err(rustix::io::Errno::EXIST) => {
+            let staged = read_bounded_temporary(path, bytes.len(), private)?
+                .context("runner credential replacement staging write disappeared")?;
+            if staged.as_slice() != bytes {
+                drop(staged);
+                remove_temporary_durable(path)?;
+                return replace_file_from_temporary(path, bytes, private);
+            }
+        }
+        Err(error) => {
+            return Err(error).context("runner credential replacement could not be staged");
+        }
+    }
+    renameat(
+        &destination.parent,
+        &temporary,
+        &destination.parent,
+        &destination.name,
+    )
+    .context("runner credential replacement could not be published")?;
+    rustix::fs::fsync(&destination.parent)
+        .context("runner credential directory could not be synchronized")
+}
+
+#[cfg(not(unix))]
+fn replace_file_from_temporary(_path: &Path, _bytes: &[u8], _private: bool) -> Result<()> {
+    bail!("durable runner credential replacement is supported only on Unix hosts")
+}
+
+#[cfg(unix)]
+pub(crate) fn persist_new(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     use rustix::fs::{Mode, OFlags, fchmod, openat};
 
     if bytes.is_empty() {
@@ -739,12 +863,12 @@ fn persist_new(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn persist_new(_path: &Path, _bytes: &[u8], _private: bool) -> Result<()> {
+pub(crate) fn persist_new(_path: &Path, _bytes: &[u8], _private: bool) -> Result<()> {
     bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
 #[cfg(unix)]
-fn publish_temporary(path: &Path) -> Result<()> {
+pub(crate) fn publish_temporary(path: &Path) -> Result<()> {
     use rustix::fs::{RenameFlags, renameat_with};
 
     let destination = prepare_destination(path)?;
@@ -762,24 +886,24 @@ fn publish_temporary(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn publish_temporary(_path: &Path) -> Result<()> {
+pub(crate) fn publish_temporary(_path: &Path) -> Result<()> {
     bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> Result<()> {
+pub(crate) fn sync_parent(path: &Path) -> Result<()> {
     let destination = prepare_destination(path)?;
     rustix::fs::fsync(&destination.parent)
         .context("runner enrollment directory could not be synchronized")
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> Result<()> {
+pub(crate) fn sync_parent(_path: &Path) -> Result<()> {
     bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
 #[cfg(unix)]
-fn remove_temporary_durable(path: &Path) -> Result<()> {
+pub(crate) fn remove_temporary_durable(path: &Path) -> Result<()> {
     use rustix::fs::{AtFlags, unlinkat};
 
     let destination = prepare_destination(path)?;
@@ -793,12 +917,12 @@ fn remove_temporary_durable(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn remove_temporary_durable(_path: &Path) -> Result<()> {
+pub(crate) fn remove_temporary_durable(_path: &Path) -> Result<()> {
     bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
 #[cfg(unix)]
-fn remove_durable(path: &Path) -> Result<()> {
+pub(crate) fn remove_durable(path: &Path) -> Result<()> {
     use rustix::fs::{AtFlags, unlinkat};
 
     remove_temporary_durable(path)?;
@@ -812,7 +936,7 @@ fn remove_durable(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn remove_durable(_path: &Path) -> Result<()> {
+pub(crate) fn remove_durable(_path: &Path) -> Result<()> {
     bail!("durable runner enrollment is supported only on Unix hosts")
 }
 
@@ -821,6 +945,7 @@ mod tests {
     #[cfg(unix)]
     use std::fs::{self, File};
 
+    use automata_ci_auth::secret::{RandomnessError, RunnerEnrollmentToken, SecureRandom};
     use automata_ci_core::{
         Architecture, OperatingSystem, RunnerCapabilities, RunnerId, RunnerPlatform,
     };
@@ -843,6 +968,15 @@ mod tests {
     use crate::enrollment::RedeemResponse;
     #[cfg(target_os = "linux")]
     use crate::product::RunnerProductConfig;
+
+    struct FixedRandom;
+
+    impl SecureRandom for FixedRandom {
+        fn fill(&self, destination: &mut [u8]) -> Result<(), RandomnessError> {
+            destination.fill(7);
+            Ok(())
+        }
+    }
 
     #[cfg(target_os = "linux")]
     fn product_config(root: &std::path::Path, runner_id: Uuid) -> RunnerProductConfig {
@@ -1042,7 +1176,7 @@ mod tests {
                 RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
             ),
             csr_pem: csr_pem.clone(),
-            token: zeroize::Zeroizing::new("atm_re_staged-secret".to_owned()),
+            token: RunnerEnrollmentToken::generate(&FixedRandom).expect("runner token"),
             private_key_pem: zeroize::Zeroizing::new(private_key_pem.clone()),
         };
         let encoded = serde_json::to_vec(&stage).expect("stage JSON");
@@ -1056,12 +1190,18 @@ mod tests {
         let decoded: EnrollmentStage = serde_json::from_slice(&encoded).expect("staged request");
         assert_eq!(decoded.operation_id, operation_id);
         assert_eq!(decoded.csr_pem, csr_pem);
-        assert_eq!(decoded.token.as_str(), "atm_re_staged-secret");
+        assert_eq!(
+            decoded.token.expose_secret(),
+            RunnerEnrollmentToken::generate(&FixedRandom)
+                .expect("runner token")
+                .expose_secret()
+        );
         assert_eq!(decoded.private_key_pem.as_str(), private_key_pem);
     }
 
     #[test]
     fn request_stage_reader_rejects_noncurrent_schema_versions() {
+        let token = RunnerEnrollmentToken::generate(&FixedRandom).expect("runner token");
         let mut document = serde_json::json!({
             "schema": STAGE_SCHEMA,
             "operation_id": Uuid::new_v4(),
@@ -1072,7 +1212,7 @@ mod tests {
                 RunnerPlatform::new(OperatingSystem::Linux, Architecture::X86_64),
             ),
             "csr_pem": "unused by schema validation",
-            "token": "unused by schema validation",
+            "token": token.expose_secret(),
             "private_key_pem": "unused by schema validation",
         });
         document["schema"] = serde_json::json!(STAGE_SCHEMA + 1);

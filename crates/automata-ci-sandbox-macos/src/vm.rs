@@ -237,7 +237,7 @@ impl VmProcess {
         })?;
         let response: GuestResponse = decode_frame(&frame)
             .map_err(|_| execution_error(ExecutionErrorKind::BackendRejected, stage))?;
-        if response_protocol(&response) != GUEST_PROTOCOL_VERSION {
+        if response.protocol() != GUEST_PROTOCOL_VERSION {
             return Err(execution_error(ExecutionErrorKind::BackendRejected, stage));
         }
         Ok(response)
@@ -354,7 +354,9 @@ fn read_frame_controlled(
             match receiver.recv_timeout(CONTROL_POLL_INTERVAL) {
                 Ok(result) => return result,
                 Err(RecvTimeoutError::Disconnected) => return Err(io_failure()),
-                Err(RecvTimeoutError::Timeout) if cancellation.is_cancelled() => {
+                Err(RecvTimeoutError::Timeout)
+                    if cancellation.disposition().requires_termination() =>
+                {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(io::Error::from(io::ErrorKind::Interrupted));
@@ -395,18 +397,6 @@ fn framed_payload(frame: &[u8], maximum: usize) -> io::Result<&[u8]> {
         return Err(invalid_data());
     }
     Ok(&frame[4..])
-}
-
-const fn response_protocol(response: &GuestResponse) -> u16 {
-    match response {
-        GuestResponse::Ready { protocol }
-        | GuestResponse::Hello { protocol, .. }
-        | GuestResponse::Configured { protocol }
-        | GuestResponse::Exec { protocol, .. }
-        | GuestResponse::WriteFile { protocol }
-        | GuestResponse::ReadFile { protocol, .. }
-        | GuestResponse::Rejected { protocol, .. } => *protocol,
-    }
 }
 
 fn duration_millis(duration: Duration) -> io::Result<u64> {

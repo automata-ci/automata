@@ -65,6 +65,7 @@ pub use config::{
     SecretSource, ServerConfig, ServerConfigError, VersionedSecretSource,
     VersionedSecretSourceParseError,
 };
+pub(crate) use config::{S3ConnectionConfig, S3Transport};
 pub use github_oidc::{GithubOidcConfig, GithubOidcProductError};
 pub use github_provider::{
     GithubProviderBootstrapError, GithubProviderBootstrapPlan, GithubProviderBootstrapReady,
@@ -220,6 +221,9 @@ pub async fn serve(args: &ServerArgs) -> Result<()> {
                 )),
                 None => router,
             };
+            // One-time enrollment possession is the complete authentication
+            // boundary and must not depend on a configured human identity provider.
+            let router = router.merge(components.runner_enrollment_redeem_api.clone());
             // Live transports authenticate only the one-time, origin-bound
             // ticket and must remain outside browser/CLI session parsing.
             let router = router.merge(components.live_log_stream_api.clone());

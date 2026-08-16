@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{env, ffi::OsString, future::Future, path::PathBuf, process::ExitCode};
 
 #[cfg(target_os = "macos")]
 use std::fmt::Write as _;
@@ -13,88 +13,144 @@ fn main() -> ExitCode {
     let Some(command) = arguments.next() else {
         return ExitCode::FAILURE;
     };
-    match command.to_string_lossy().as_ref() {
-        "install" => {
-            let Some(target) = arguments.next().map(PathBuf::from) else {
-                return ExitCode::FAILURE;
-            };
-            let Ok(source) = env::current_exe() else {
-                return ExitCode::FAILURE;
-            };
-            if std::fs::copy(source, target).is_ok() {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
-        "serve" => {
-            let Some(socket) = arguments.next().map(PathBuf::from) else {
-                return ExitCode::FAILURE;
-            };
-            runtime()
-                .and_then(|runtime| {
-                    runtime
-                        .block_on(automata_ci_sandbox_guest::serve(&socket))
-                        .ok()
-                })
-                .map_or(ExitCode::FAILURE, |()| ExitCode::SUCCESS)
-        }
-        "serve-vm" => {
-            let Some(socket) = arguments.next().map(PathBuf::from) else {
-                return ExitCode::FAILURE;
-            };
-            let Some(identity_path) = arguments.next().map(PathBuf::from) else {
-                return ExitCode::FAILURE;
-            };
-            let identity = std::fs::read(identity_path)
-                .ok()
-                .filter(|bytes| !bytes.is_empty() && bytes.len() <= 16 * 1024)
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .filter(valid_vm_identity);
-            let Some(identity) = identity else {
-                return ExitCode::FAILURE;
-            };
-            runtime()
-                .and_then(|runtime| {
-                    runtime
-                        .block_on(automata_ci_sandbox_guest::serve_vm(&socket, identity))
-                        .ok()
-                })
-                .map_or(ExitCode::FAILURE, |()| ExitCode::SUCCESS)
-        }
-        "client" => {
-            let Some(socket) = arguments.next().map(PathBuf::from) else {
-                return ExitCode::FAILURE;
-            };
-            runtime()
-                .and_then(|runtime| {
-                    runtime
-                        .block_on(automata_ci_sandbox_guest::forward_stdio(&socket))
-                        .ok()
-                })
-                .map_or(ExitCode::FAILURE, |()| ExitCode::SUCCESS)
-        }
-        "stdio-once" => runtime()
-            .and_then(|runtime| {
-                runtime
-                    .block_on(automata_ci_sandbox_guest::serve_stdio_once())
-                    .ok()
-            })
-            .map_or(ExitCode::FAILURE, |()| ExitCode::SUCCESS),
-        "keepalive" => loop {
-            std::thread::park();
-        },
-        "probe" => {
-            let Some(socket) = arguments.next().map(PathBuf::from) else {
-                return ExitCode::FAILURE;
-            };
-            if automata_ci_sandbox_guest::probe(&socket) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            }
-        }
+    dispatch(&command.to_string_lossy(), &mut arguments)
+}
+
+fn dispatch(command: &str, arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    match command {
+        "install" => install(arguments),
+        "serve" => serve(arguments),
+        #[cfg(target_os = "linux")]
+        "serve-local" => serve_local(arguments),
+        #[cfg(target_os = "linux")]
+        "bootstrap-local-client" => bootstrap_local_client(arguments),
+        #[cfg(target_os = "linux")]
+        "seal-local-client" => seal_local_client(arguments),
+        "serve-vm" => serve_vm(arguments),
+        "client" => client(arguments),
+        #[cfg(target_os = "linux")]
+        "local-client" => local_client(arguments),
+        "stdio-once" => stdio_once(arguments),
+        "keepalive" => keepalive(arguments),
+        "probe" => probe(arguments),
         _ => ExitCode::FAILURE,
+    }
+}
+
+fn install(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    let Some(target) = one_path(arguments) else {
+        return ExitCode::FAILURE;
+    };
+    success(env::current_exe().is_ok_and(|source| std::fs::copy(source, target).is_ok()))
+}
+
+fn serve(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    let Some(socket) = one_path(arguments) else {
+        return ExitCode::FAILURE;
+    };
+    run_future(automata_ci_sandbox_guest::serve(&socket))
+}
+
+#[cfg(target_os = "linux")]
+fn serve_local(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    no_argument_future(arguments, automata_ci_sandbox_guest::serve_local_broker())
+}
+
+#[cfg(target_os = "linux")]
+fn bootstrap_local_client(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    no_argument_future(
+        arguments,
+        automata_ci_sandbox_guest::bootstrap_local_client(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn seal_local_client(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    no_argument_future(arguments, automata_ci_sandbox_guest::seal_local_client())
+}
+
+fn serve_vm(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    let Some(socket) = arguments.next().map(PathBuf::from) else {
+        return ExitCode::FAILURE;
+    };
+    let Some(identity_path) = one_path(arguments) else {
+        return ExitCode::FAILURE;
+    };
+    let identity = std::fs::read(identity_path)
+        .ok()
+        .filter(|bytes| !bytes.is_empty() && bytes.len() <= 16 * 1024)
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .filter(valid_vm_identity);
+    let Some(identity) = identity else {
+        return ExitCode::FAILURE;
+    };
+    run_future(automata_ci_sandbox_guest::serve_vm(&socket, identity))
+}
+
+fn client(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    let Some(socket) = one_path(arguments) else {
+        return ExitCode::FAILURE;
+    };
+    run_future(automata_ci_sandbox_guest::forward_stdio(&socket))
+}
+
+#[cfg(target_os = "linux")]
+fn local_client(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    no_argument_future(
+        arguments,
+        automata_ci_sandbox_guest::forward_stdio(std::path::Path::new(
+            automata_ci_sandbox_guest::LOCAL_CONTROL_SOCKET,
+        )),
+    )
+}
+
+fn stdio_once(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    no_argument_future(arguments, automata_ci_sandbox_guest::serve_stdio_once())
+}
+
+fn keepalive(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    if arguments.next().is_some() {
+        return ExitCode::FAILURE;
+    }
+    loop {
+        std::thread::park();
+    }
+}
+
+fn probe(arguments: &mut impl Iterator<Item = OsString>) -> ExitCode {
+    let Some(socket) = one_path(arguments) else {
+        return ExitCode::FAILURE;
+    };
+    success(automata_ci_sandbox_guest::probe(&socket))
+}
+
+fn one_path(arguments: &mut impl Iterator<Item = OsString>) -> Option<PathBuf> {
+    let path = arguments.next().map(PathBuf::from)?;
+    arguments.next().is_none().then_some(path)
+}
+
+fn no_argument_future<F, E>(arguments: &mut impl Iterator<Item = OsString>, future: F) -> ExitCode
+where
+    F: Future<Output = Result<(), E>>,
+{
+    if arguments.next().is_some() {
+        return ExitCode::FAILURE;
+    }
+    run_future(future)
+}
+
+fn run_future<F, E>(future: F) -> ExitCode
+where
+    F: Future<Output = Result<(), E>>,
+{
+    success(runtime().is_some_and(|runtime| runtime.block_on(future).is_ok()))
+}
+
+const fn success(success: bool) -> ExitCode {
+    if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

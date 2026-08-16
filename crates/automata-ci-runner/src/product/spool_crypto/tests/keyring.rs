@@ -1,6 +1,7 @@
 use automata_ci_core::Sha256Digest;
 use automata_ci_runner_spool::{
-    ContentKind, ContentProtectionError, ContentProtector, DurableContentRef, ProtectionId,
+    ContentCommitmentDomain, ContentKind, ContentProtectionError, ContentProtector,
+    DurableContentRef, ProtectionId,
 };
 use sha2::{Digest as _, Sha256};
 use zeroize::Zeroizing;
@@ -16,7 +17,7 @@ fn protector(id: &str, marker: u8) -> Aes256GcmContentProtector {
 }
 
 fn reference(id: &str, plaintext: &[u8]) -> DurableContentRef {
-    DurableContentRef::after_commit(
+    DurableContentRef::after_public_commit(
         ContentKind::RuntimeAuthority,
         u64::try_from(plaintext.len()).expect("fixture size"),
         Sha256Digest::from_bytes(Sha256::digest(plaintext).into()),
@@ -46,6 +47,42 @@ fn rotation_reads_exact_old_id_but_all_new_writes_use_active_id() {
             .expect("old key remains readable"),
         old_plaintext
     );
+    let digest = [0x51; 32];
+    let old_commitment = keyring
+        .keyed_commitment(
+            old_reference.protection_id(),
+            ContentCommitmentDomain::EndpointRequest,
+            &digest,
+        )
+        .expect("old exact key commitment");
+    assert_eq!(
+        old_commitment,
+        protector("spool-v1", 0x11)
+            .keyed_commitment(
+                old_reference.protection_id(),
+                ContentCommitmentDomain::EndpointRequest,
+                &digest,
+            )
+            .expect("standalone old commitment")
+    );
+    let old_result_identity = keyring
+        .keyed_commitment(
+            old_reference.protection_id(),
+            ContentCommitmentDomain::EndpointResultIdentity,
+            &digest,
+        )
+        .expect("old exact-key result identity");
+    assert_eq!(
+        old_result_identity,
+        protector("spool-v1", 0x11)
+            .keyed_commitment(
+                old_reference.protection_id(),
+                ContentCommitmentDomain::EndpointResultIdentity,
+                &digest,
+            )
+            .expect("standalone old result identity")
+    );
+    assert_ne!(old_result_identity, old_commitment);
     assert_eq!(
         keyring
             .protect(&old_reference, old_plaintext)
