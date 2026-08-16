@@ -116,6 +116,7 @@ jobs:
           ./scripts/ci/tests/service-proxy-image.test.sh
           python3 scripts/ci/tests/service-proxy-publication.test.py
           python3 scripts/ci/tests/windows-rust-ci.test.py
+          python3 scripts/ci/tests/windows-image-pipeline.test.py
 
       - name: Verify Prometheus metrics protocol contract
         run: |

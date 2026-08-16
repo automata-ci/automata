@@ -1,2 +1,3 @@
 crates/automata-ci-store-postgres/migrations/*.sql text eol=lf
+images/windows-server-2025-hyperv/*.json text eol=lf
 images/windows-server-2025-hyperv-candidate/*.json text eol=lf

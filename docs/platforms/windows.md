@@ -124,7 +124,7 @@ those release gates:
 
 Candidate evidence that is internally consistent but lacks the external
 promotion signature remains shell-only. JavaScript, composite, repository,
-local-action, and Node-generation capabilities are composed only after both
+and Node-generation capabilities are composed only after both
 promotion verification and fresh profile probes succeed. The source-level
 pre-enrollment admission contract binds the runner, broker/provider identity,
 exact enrollment transaction, exact environment and
@@ -143,7 +143,8 @@ missing, stale, expired, tampered, or mismatched custody fails closed, and
 runtime startup re-runs the full
 profile probes independently; the receipt never substitutes for live evidence,
 and control-plane registered/live intersection retains only capabilities proved
-twice. Missing,
+twice. Workspace-local actions remain omitted on Windows because user checkout
+bytes cannot enter the broker-owned pre-sandbox sealed graph. Missing,
 mismatched, revoked, or substituted evidence and tools stop startup. The
 checked-in candidate files are contract fixtures: they do not claim a built,
 signed, scanned, patched, or physical-host-tested image, and they do not close
@@ -800,6 +801,11 @@ and the broker can mutate only exact generation-bound Automata resources.
       SBOM, patch, revocation, and external Ed25519 promotion metadata.
 - [x] Keep checked-in fixtures explicitly candidate-only and withhold action
       capabilities without a valid external promotion envelope.
+- [x] Add a digest-pinned Server Core 2025 recipe, twice-verified tool
+      acquisition, reproducible local helper build, Hyper-V qualification
+      collector, canonical provenance/SBOM/patch/revocation assembler, and
+      external opaque-key-handle signing command. The pipeline publishes
+      nothing and cannot promote its checked-in candidate fixtures.
 - [ ] Define the exact Server Core host/image compatibility matrix.
 - [ ] Build a digest-pinned image containing guest executable and reviewed
       shells/tools without job-time mutable installation.
@@ -941,9 +947,11 @@ WIN-ISO-06 through WIN-ISO-09 as applicable.
       semantics at the component boundary.
 - [x] Implement exact-generation Node action pre/main/post and composite phase
       execution inside the same sandbox at the component boundary.
-- [x] Implement action materialization without host extraction or host mounts,
-      including bounded Windows archive-name/link/collision checks, in-sandbox
-      digest verification, extraction, and reparse-tree validation.
+- [x] Define action materialization without host extraction or host mounts:
+      JobIR carries the complete ordered, bounded repository-archive graph and
+      the broker materializes it before user code into generation-bound opaque
+      sealed trees. No post-start lazy fetch or workspace-local action enters
+      the Windows execution path.
 - [ ] Prove those runtime and materialization paths in the shipped product on a
       promoted image and dedicated Windows Hyper-V host.
 - [ ] Support only product artifact/cache/source interfaces accepted by their

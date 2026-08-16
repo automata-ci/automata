@@ -9,7 +9,8 @@ image was built, signed, scanned, patched, or exercised on physical Windows
 hardware.
 
 Production promotion requires replacing the candidate values with outputs from
-the Windows image pipeline, deploying the exact files at the configured secure
+the production-shaped pipeline in
+`../windows-server-2025-hyperv/`, deploying the exact files at the configured secure
 paths, and supplying an Ed25519 promotion envelope from an external authority.
 The signed payload must accept all four evidence subjects and bind their exact
 digests, the manifest and lock, both image digests, and the revocation

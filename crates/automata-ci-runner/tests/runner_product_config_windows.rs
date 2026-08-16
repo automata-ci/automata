@@ -162,7 +162,9 @@ impl EvidenceFixture {
             config["windows_hyperv"]["image_contract"][field] =
                 serde_json::json!(root.join(name).to_string_lossy());
         }
-        Self { root, config }
+        let mut fixture = Self { root, config };
+        fixture.refresh_contract_digests();
+        fixture
     }
 
     fn write_config(&self, name: &str) -> PathBuf {
@@ -173,7 +175,6 @@ impl EvidenceFixture {
     }
 
     fn make_production_eligible(&mut self, now_millis: u64) {
-        let mut evidence_digests = BTreeSet::new();
         for (field, name) in [
             ("provenance", "provenance.json"),
             ("sbom", "sbom.spdx.json"),
@@ -193,19 +194,29 @@ impl EvidenceFixture {
                 document["expires_at_unix_millis"] = serde_json::json!(now_millis + 600_000);
             }
             let bytes = serde_json::to_vec(&document).expect("serialize production evidence");
-            fs::write(&path, &bytes).expect("write production evidence");
-            evidence_digests.insert((field, sha256_hex(&bytes)));
+            write_secure_fixture(&path, &bytes);
         }
 
+        self.refresh_contract_digests();
+    }
+
+    fn refresh_contract_digests(&mut self) {
         let manifest_path = self.root.join("manifest.json");
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
                 .expect("parse manifest");
-        for (field, digest) in evidence_digests {
-            manifest["evidence"][field]["sha256"] = serde_json::json!(digest);
+        for (field, name) in [
+            ("provenance", "provenance.json"),
+            ("sbom", "sbom.spdx.json"),
+            ("patch_report", "patch-report.json"),
+            ("revocations", "revocations.json"),
+        ] {
+            manifest["evidence"][field]["sha256"] = serde_json::json!(sha256_hex(
+                &fs::read(self.root.join(name)).expect("read evidence fixture")
+            ));
         }
         let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
-        fs::write(&manifest_path, &manifest_bytes).expect("write manifest");
+        write_secure_fixture(&manifest_path, &manifest_bytes);
         let manifest_sha256 = sha256_hex(&manifest_bytes);
 
         let lock_path = self.root.join("image.lock.json");
@@ -213,7 +224,7 @@ impl EvidenceFixture {
             serde_json::from_slice(&fs::read(&lock_path).expect("read lock")).expect("parse lock");
         lock["manifest_sha256"] = serde_json::json!(manifest_sha256.clone());
         let lock_bytes = serde_json::to_vec(&lock).expect("serialize lock");
-        fs::write(&lock_path, &lock_bytes).expect("write lock");
+        write_secure_fixture(&lock_path, &lock_bytes);
 
         self.config["windows_hyperv"]["image_contract"]["manifest_sha256"] =
             serde_json::json!(manifest_sha256.clone());
