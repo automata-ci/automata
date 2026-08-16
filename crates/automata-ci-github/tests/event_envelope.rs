@@ -1,4 +1,7 @@
-use std::fmt::Write as _;
+use crate::support::{
+    BASE_SHA, GROUP_SHA, HEAD_SHA, MERGE_SHA, base_repository, head_repository, json_body,
+    signed_webhook_headers,
+};
 
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
 use automata_ci_core::{
@@ -10,18 +13,12 @@ use automata_ci_github::{
     GithubEventEnvelopeError, GithubEventFacts, GithubEventRegistryV1, GithubEventTrustFact,
     GithubSealedEventEnvelopeV1, GithubTrustDerivation, GithubWebhookVerifier,
     GithubWorkflowEventKind, MAX_GITHUB_EVENT_ENVELOPE_BYTES, VerifiedGithubWebhook,
-    X_GITHUB_DELIVERY, X_GITHUB_EVENT, X_HUB_SIGNATURE_256, derive_github_trust_snapshot,
+    derive_github_trust_snapshot,
 };
 use bytes::Bytes;
-use reqwest::header::{HeaderMap, HeaderValue};
-use ring::hmac;
 use serde_json::{Value, json};
 
 const SECRET: &[u8] = b"event-envelope-test-secret";
-const BASE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
-const HEAD_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
-const MERGE_SHA: &str = "76543210fedcba9876543210fedcba9876543210";
-const GROUP_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
 #[test]
 fn registry_and_envelopes_cover_every_workflow_event_exactly_once() {
@@ -464,8 +461,8 @@ fn descriptor_for(
 }
 
 fn normalize(payload: &Value, event_name: &str) -> VerifiedGithubWebhook {
-    let body = serde_json::to_vec(payload).expect("JSON fixture");
-    let headers = signed_headers(&body, event_name, "sensitive-delivery");
+    let body = json_body(payload);
+    let headers = signed_webhook_headers(SECRET, &body, event_name, "sensitive-delivery");
     GithubWebhookVerifier::new(SECRET)
         .expect("verifier")
         .authenticate(&headers, Bytes::from(body))
@@ -474,50 +471,8 @@ fn normalize(payload: &Value, event_name: &str) -> VerifiedGithubWebhook {
         .expect("normalized")
 }
 
-fn signed_headers(body: &[u8], event_name: &str, delivery_id: &str) -> HeaderMap {
-    let key = hmac::Key::new(hmac::HMAC_SHA256, SECRET);
-    let tag = hmac::sign(&key, body);
-    let mut signature = String::from("sha256=");
-    for byte in tag.as_ref() {
-        write!(&mut signature, "{byte:02x}").expect("signature encoding");
-    }
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        X_HUB_SIGNATURE_256,
-        HeaderValue::from_str(&signature).expect("signature header"),
-    );
-    headers.insert(
-        X_GITHUB_EVENT,
-        HeaderValue::from_str(event_name).expect("event header"),
-    );
-    headers.insert(
-        X_GITHUB_DELIVERY,
-        HeaderValue::from_str(delivery_id).expect("delivery header"),
-    );
-    headers
-}
-
 fn actor(id: u64, login: &str, kind: &str) -> Value {
     json!({ "id": id, "login": login, "type": kind })
-}
-
-fn repository(id: u64, owner_id: u64, owner: &str, name: &str) -> Value {
-    json!({
-        "id": id,
-        "private": false,
-        "visibility": "public",
-        "name": name,
-        "full_name": format!("{owner}/{name}"),
-        "owner": { "id": owner_id, "login": owner }
-    })
-}
-
-fn base_repository() -> Value {
-    repository(41, 11, "example", "base-repository")
-}
-
-fn head_repository() -> Value {
-    repository(42, 12, "contributor", "head-repository")
 }
 
 fn push_payload() -> Value {

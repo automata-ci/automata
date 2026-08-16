@@ -6,21 +6,70 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use automata_ci_github::{GithubHttpEndpoint, GithubHttpLimits};
+use automata_ci_github::{
+    GithubHttpEndpoint, GithubHttpLimits, GithubWebhookBodyDigest, X_GITHUB_DELIVERY,
+    X_GITHUB_EVENT, X_HUB_SIGNATURE_256,
+};
 use axum::{
     Router,
     body::{Body, to_bytes},
     extract::State,
-    http::{HeaderMap, Request, Response, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, Response, StatusCode},
     routing::any,
 };
-use ring::hmac;
+use ring::{digest, hmac};
+use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use url::Url;
 
 const MAX_FIXTURE_REQUEST_BYTES: usize = 1_048_576;
+pub(crate) const BASE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+pub(crate) const HEAD_SHA: &str = "89abcdef0123456789abcdef0123456789abcdef";
+pub(crate) const MERGE_SHA: &str = "76543210fedcba9876543210fedcba9876543210";
+pub(crate) const GROUP_SHA: &str = "fedcba9876543210fedcba9876543210fedcba98";
 
-pub(crate) fn webhook_signature(secret: &[u8], body: &[u8]) -> String {
+pub(crate) fn json_body(payload: &Value) -> Vec<u8> {
+    serde_json::to_vec(payload).expect("JSON fixture")
+}
+
+pub(crate) fn webhook_body_digest(body: &[u8]) -> GithubWebhookBodyDigest {
+    let digest = digest::digest(&digest::SHA256, body);
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(digest.as_ref());
+    GithubWebhookBodyDigest::from_bytes(bytes)
+}
+
+pub(crate) fn signed_webhook_headers(
+    secret: &[u8],
+    body: &[u8],
+    event: &str,
+    delivery: &str,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        X_HUB_SIGNATURE_256,
+        HeaderValue::from_str(&webhook_signature(secret, body)).expect("signature header"),
+    );
+    headers.insert(
+        X_GITHUB_EVENT,
+        HeaderValue::from_str(event).expect("event header"),
+    );
+    headers.insert(
+        X_GITHUB_DELIVERY,
+        HeaderValue::from_str(delivery).expect("delivery header"),
+    );
+    headers
+}
+
+pub(crate) fn base_repository() -> Value {
+    repository(41, 11, "example", "base-repository")
+}
+
+pub(crate) fn head_repository() -> Value {
+    repository(42, 12, "contributor", "head-repository")
+}
+
+fn webhook_signature(secret: &[u8], body: &[u8]) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
     let tag = hmac::sign(&key, body);
     let mut encoded = String::from("sha256=");
@@ -28,6 +77,17 @@ pub(crate) fn webhook_signature(secret: &[u8], body: &[u8]) -> String {
         write!(encoded, "{byte:02x}").expect("write signature");
     }
     encoded
+}
+
+fn repository(id: u64, owner_id: u64, owner: &str, name: &str) -> Value {
+    json!({
+        "id": id,
+        "private": false,
+        "visibility": "public",
+        "name": name,
+        "full_name": format!("{owner}/{name}"),
+        "owner": { "id": owner_id, "login": owner }
+    })
 }
 
 #[derive(Clone, Debug)]
