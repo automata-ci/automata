@@ -12,10 +12,6 @@ use sha2::{Digest as _, Sha256};
 
 const LOCK_FILE_NAME: &str = ".automata-windows-hyperv-v2.lock";
 const JOURNAL_FILE_NAME: &str = ".automata-windows-hyperv-v2.events";
-const LEGACY_STATE_NAMES: [&str; 2] = [
-    ".automata-windows-hyperv-v1.lock",
-    ".automata-windows-hyperv-v1.events",
-];
 const DURABLE_SCHEMA: u32 = 2;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 256 * 1024 * 1024;
@@ -136,13 +132,6 @@ pub(crate) struct LifecycleJournal {
 
 impl LifecycleJournal {
     pub(crate) fn open(root: &Path) -> io::Result<(Self, DurableSnapshot)> {
-        for name in LEGACY_STATE_NAMES {
-            match std::fs::symlink_metadata(root.join(name)) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidData)),
-                Err(error) => return Err(error),
-            }
-        }
         let lock = open_exclusive_regular(&root.join(LOCK_FILE_NAME), true, false)?;
         let mut journal = open_exclusive_regular(&root.join(JOURNAL_FILE_NAME), true, false)?;
         if journal.metadata()?.len() > MAX_JOURNAL_BYTES {
@@ -511,20 +500,6 @@ mod tests {
                 LifecycleJournal::open(&root.0),
                 Err(error) if error.kind() == io::ErrorKind::InvalidData
             ));
-        }
-    }
-
-    #[test]
-    fn prior_generation_state_files_are_rejected_without_migration() {
-        for (ordinal, legacy_name) in LEGACY_STATE_NAMES.iter().enumerate() {
-            let root = TestRoot::new(&format!("legacy-file-{ordinal}"));
-            fs::write(root.0.join(legacy_name), b"schema-1 state\n")
-                .expect("write prior state file");
-            assert!(matches!(
-                LifecycleJournal::open(&root.0),
-                Err(error) if error.kind() == io::ErrorKind::InvalidData
-            ));
-            assert!(!root.0.join(JOURNAL_FILE_NAME).exists());
         }
     }
 

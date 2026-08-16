@@ -4,7 +4,7 @@ import Foundation
 import Virtualization
 
 private let gibibyte = UInt64(1024 * 1024 * 1024)
-private let guestProtocol: UInt16 = 4
+private let guestProtocol: UInt16 = 5
 private let guestPort: UInt32 = 10250
 
 private enum ToolFailure: Error {

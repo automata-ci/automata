@@ -794,9 +794,7 @@ fn parse_git_coordinates(output: &[u8]) -> Result<GitCoordinates, LocalSnapshotE
     let text = text
         .strip_suffix('\n')
         .ok_or_else(|| LocalSnapshotError::new(LocalSnapshotErrorCode::NotGitWorktree))?;
-    let mut fields = text
-        .split('\n')
-        .map(|field| field.strip_suffix('\r').unwrap_or(field));
+    let mut fields = text.split('\n');
     let (Some(worktree_root), Some(git_directory), Some(common_directory), Some(prefix)) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {
@@ -933,7 +931,6 @@ fn parse_one_git_line(
     let text = std::str::from_utf8(output).map_err(|_| LocalSnapshotError::new(code))?;
     let text = text
         .strip_suffix('\n')
-        .and_then(|line| line.strip_suffix('\r').or(Some(line)))
         .ok_or_else(|| LocalSnapshotError::new(code))?;
     if text.is_empty() || text.contains(['\r', '\n', '\0']) {
         return Err(LocalSnapshotError::new(code));
@@ -2529,6 +2526,26 @@ mod tests {
 
     const WORKFLOW: &str =
         "on: push\njobs:\n  check:\n    runs-on: linux\n    steps:\n      - run: true\n";
+
+    #[test]
+    fn git_text_evidence_requires_canonical_lf_framing() {
+        assert!(super::parse_git_coordinates(b"/worktree\n/git\n/common\n\n").is_ok());
+        assert!(super::parse_git_coordinates(b"/worktree\r\n/git\n/common\n\n").is_err());
+        assert!(
+            super::parse_one_git_line(
+                b"0123456789012345678901234567890123456789\n",
+                LocalSnapshotErrorCode::GitOutput,
+            )
+            .is_ok()
+        );
+        assert!(
+            super::parse_one_git_line(
+                b"0123456789012345678901234567890123456789\r\n",
+                LocalSnapshotErrorCode::GitOutput,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn archive_cancellation_is_terminal_not_retryable_io() {

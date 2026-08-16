@@ -18,12 +18,6 @@ use crate::filesystem::SecureRoot;
 
 const LOCK_FILE_NAME: &str = ".automata-macos-virtualization-v2.lock";
 const JOURNAL_FILE_NAME: &str = ".automata-macos-virtualization-v2.events";
-const LEGACY_STATE_NAMES: [&str; 4] = [
-    ".automata-macos-virtualization-v1.lock",
-    ".automata-macos-virtualization-v1.events",
-    ".automata-macos-provider-v1.lock",
-    ".automata-macos-provider-v1.events",
-];
 const DURABLE_SCHEMA: u32 = 2;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 const MAX_JOURNAL_BYTES: u64 = 16 * 1024 * 1024;
@@ -149,7 +143,6 @@ pub(crate) struct LifecycleJournal {
 
 impl LifecycleJournal {
     pub(crate) fn open(root: &SecureRoot) -> io::Result<(Self, DurableSnapshot)> {
-        reject_legacy_state(root)?;
         let lock = open_private_file(root, LOCK_FILE_NAME, false)?;
         flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
             if error == Errno::AGAIN {
@@ -253,22 +246,6 @@ impl LifecycleJournal {
         apply_event(snapshot, event, sequence)?;
         Ok(sequence)
     }
-}
-
-fn reject_legacy_state(root: &SecureRoot) -> io::Result<()> {
-    for name in LEGACY_STATE_NAMES {
-        match openat(
-            root.descriptor(),
-            name,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-            Mode::empty(),
-        ) {
-            Err(Errno::NOENT) => {}
-            Ok(_) | Err(Errno::LOOP | Errno::NOTDIR) => return Err(invalid()),
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Ok(())
 }
 
 fn open_private_file(
@@ -549,21 +526,6 @@ mod tests {
                 .fingerprint,
             [0x33; 32]
         );
-    }
-
-    #[test]
-    fn legacy_native_state_is_rejected_without_migration() {
-        for (ordinal, legacy_name) in LEGACY_STATE_NAMES.iter().enumerate() {
-            let fixture = TestRoot::new(&format!("legacy-{ordinal}"));
-            let root = fixture.secure_root();
-            fs::write(fixture.path.join(legacy_name), b"legacy native state\n")
-                .expect("write legacy marker");
-            assert!(matches!(
-                LifecycleJournal::open(&root),
-                Err(error) if error.kind() == io::ErrorKind::InvalidData
-            ));
-            assert!(!fixture.path.join(JOURNAL_FILE_NAME).exists());
-        }
     }
 
     #[test]
