@@ -8,7 +8,11 @@ use automata_ci_auth::{
 };
 use automata_ci_core::{
     JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile, OperationId, RunId, Sha256Digest,
-    TrustSnapshot, UnixMillis, WorkflowId, WorkflowJobKey,
+    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustCacheAuthority,
+    TrustEnvironmentAuthority, TrustEventKind, TrustEvidence, TrustOidcAuthority, TrustOriginKind,
+    TrustOutputAuthority, TrustPermissionAuthority, TrustPolicy, TrustRepositoryEvidence,
+    TrustResultsAuthority, TrustSecretAuthority, TrustSnapshot, TrustSourceClass,
+    TrustTokenRecursion, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
@@ -1859,9 +1863,45 @@ async fn seed_dispatch_actor(
     Ok((actor, role_id))
 }
 
+fn workflow_dispatch_trust_snapshot(
+    signed: &AdmitLogicalWorkflowRun,
+    actor: &ManagementActor,
+    repository_owner_id: &str,
+) -> TrustSnapshot {
+    let actor = TrustActorEvidence::new(
+        actor.principal_id().as_str(),
+        TrustActorKind::User,
+        TrustAutomationKind::None,
+    )
+    .expect("workflow dispatch actor trust evidence");
+    let repository = TrustRepositoryEvidence::new(
+        signed.repository().provider_repository_id(),
+        repository_owner_id,
+    )
+    .expect("workflow dispatch repository trust evidence");
+    let revision = lower_hex(signed.head_sha());
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(
+                TrustOriginKind::WorkflowDispatch,
+                TrustEventKind::WorkflowDispatch,
+            )
+            .with_original_actor(actor.clone())
+            .with_triggering_actor(actor)
+            .with_repositories(repository.clone(), repository)
+            .with_refs(signed.git_ref(), signed.git_ref(), signed.git_ref())
+            .with_revisions(revision.as_str(), revision.as_str(), revision.as_str())
+            .with_fork(false)
+            .with_token_recursion(TrustTokenRecursion::External),
+        )
+        .expect("workflow dispatch trust snapshot")
+}
+
+#[allow(clippy::too_many_arguments)] // Fixture keeps independently varied dispatch facts explicit.
 fn workflow_dispatch_fixture(
     signed: &AdmitLogicalWorkflowRun,
     actor: &ManagementActor,
+    repository_owner_id: &str,
     source: AdmissionObject,
     operation_id: OperationId,
     digest: u8,
@@ -1916,6 +1956,11 @@ fn workflow_dispatch_fixture(
         admitted_at,
     )
     .actor(actor.principal_id().as_str())
+    .trust_snapshot(workflow_dispatch_trust_snapshot(
+        signed,
+        actor,
+        repository_owner_id,
+    ))
     .base_context(object_with_media(
         format!("logical/{namespace}/dispatch-context.pb"),
         0x92,
@@ -1980,6 +2025,7 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
         let substituted_dispatch = workflow_dispatch_fixture(
             &signed,
             &actor,
+            source.repository_owner_id(),
             substituted_source.clone(),
             substituted_operation,
             0xed,
@@ -2014,11 +2060,85 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
         let dispatch = workflow_dispatch_fixture(
             &signed,
             &actor,
+            source.repository_owner_id(),
             signed.source().clone(),
             operation_id,
             0x93,
             800,
             admitted_at,
+        );
+        let trust_snapshot = dispatch.trust_snapshot();
+        assert!(!trust_snapshot.is_construction_placeholder());
+        assert!(trust_snapshot.evidence_complete());
+        assert_eq!(trust_snapshot.source_class(), TrustSourceClass::SameRepository);
+        let evidence = trust_snapshot.evidence();
+        assert_eq!(
+            (
+                evidence.origin(),
+                evidence.event(),
+                evidence.fork(),
+                evidence.upstream(),
+                evidence.token_recursion(),
+            ),
+            (
+                TrustOriginKind::WorkflowDispatch,
+                TrustEventKind::WorkflowDispatch,
+                Some(false),
+                None,
+                TrustTokenRecursion::External,
+            )
+        );
+        for actor_evidence in [evidence.original_actor(), evidence.triggering_actor()] {
+            let actor_evidence = actor_evidence.expect("dispatch actor trust evidence");
+            assert_eq!(actor_evidence.id(), actor.principal_id().as_str());
+            assert_eq!(actor_evidence.kind(), TrustActorKind::User);
+            assert_eq!(actor_evidence.automation(), TrustAutomationKind::None);
+        }
+        for repository in [evidence.source_repository(), evidence.target_repository()] {
+            let repository = repository.expect("dispatch repository trust evidence");
+            assert_eq!(repository.id(), source.repository().provider_repository_id());
+            assert_eq!(repository.owner_id(), source.repository_owner_id());
+        }
+        assert_eq!(
+            (
+                evidence.source_ref(),
+                evidence.target_ref(),
+                evidence.execution_ref(),
+            ),
+            (Some(signed.git_ref()), Some(signed.git_ref()), Some(signed.git_ref()))
+        );
+        assert_eq!(
+            (
+                evidence.source_revision(),
+                evidence.target_revision(),
+                evidence.execution_revision(),
+            ),
+            (
+                Some(commit_sha.as_str()),
+                Some(commit_sha.as_str()),
+                Some(commit_sha.as_str()),
+            )
+        );
+        let authority = trust_snapshot.authority();
+        assert_eq!(
+            (
+                authority.permissions(),
+                authority.secrets(),
+                authority.cache(),
+                authority.environment(),
+                authority.oidc(),
+                authority.outputs(),
+                authority.results(),
+            ),
+            (
+                TrustPermissionAuthority::Requested,
+                TrustSecretAuthority::Eligible,
+                TrustCacheAuthority::ReadWrite,
+                TrustEnvironmentAuthority::Eligible,
+                TrustOidcAuthority::Eligible,
+                TrustOutputAuthority::Standard,
+                TrustResultsAuthority::Standard,
+            )
         );
         let claim = AuthenticatedWorkflowDispatchClaim::new(
             actor.clone(),
@@ -2107,6 +2227,7 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
         let changed = workflow_dispatch_fixture(
             &signed,
             &actor,
+            source.repository_owner_id(),
             signed.source().clone(),
             operation_id,
             0x94,
@@ -2167,6 +2288,7 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
         let disabled_dispatch = workflow_dispatch_fixture(
             &signed,
             &actor,
+            source.repository_owner_id(),
             signed.source().clone(),
             disabled_operation,
             0x95,
@@ -2212,6 +2334,7 @@ async fn authenticated_dispatch_resolves_signed_source_audits_and_replays_exactl
         let changed_disabled = workflow_dispatch_fixture(
             &signed,
             &actor,
+            source.repository_owner_id(),
             signed.source().clone(),
             disabled_operation,
             0x96,
