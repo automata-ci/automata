@@ -2309,10 +2309,11 @@ const fn control_failure(kind: ApplicationErrorKind) -> RunnerControlFailure {
         ApplicationErrorKind::Forbidden => RunnerControlFailure::Forbidden,
         // The production sync boundary converts stale sessions into a
         // correlated protocol error before observation. A stale handshake is
-        // an application invariant failure, not a reachable label value.
-        ApplicationErrorKind::StaleSession | ApplicationErrorKind::Internal => {
-            RunnerControlFailure::Internal
-        }
+        // an application invariant failure, not a reachable label value. Too
+        // early is exclusive to the separate certificate-renewal route.
+        ApplicationErrorKind::TooEarly
+        | ApplicationErrorKind::StaleSession
+        | ApplicationErrorKind::Internal => RunnerControlFailure::Internal,
         ApplicationErrorKind::Conflict => RunnerControlFailure::Conflict,
         ApplicationErrorKind::Unavailable => RunnerControlFailure::Unavailable,
     }

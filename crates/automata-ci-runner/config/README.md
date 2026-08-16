@@ -1,15 +1,12 @@
 # Local runner bootstrap
 
-This directory contains three checked-in Linux Podman instance configurations,
-a Hyper-V-isolated Windows-container configuration, and an isolated macOS VM
-configuration for `automata-runner`.
+This directory contains three checked-in Linux Podman instance configurations
+and one isolated macOS VM configuration for `automata-runner`.
 [`runner.local-1.example.json`](runner.local-1.example.json),
 [`runner.local-2.example.json`](runner.local-2.example.json), and
 [`runner.local-3.example.json`](runner.local-3.example.json) select the same
 locked Ubuntu 24.04 profile while keeping every host-local identity, state
 path, credential path, runtime mount, and metrics port distinct.
-[`runner.windows.example.json`](runner.windows.example.json) selects the only
-Windows provider, `windows_hyperv`.
 [`runner.macos.example.json`](runner.macos.example.json)
 selects the Virtualization.framework provider on Apple Silicon macOS 15+.
 Exactly one of the `podman`, `kubernetes`, `windows_hyperv`, and
@@ -103,58 +100,29 @@ replace cluster-side CNI, node-local traffic, admission-policy, RuntimeClass,
 or kubelet verification.
 
 > [!WARNING]
-> Initial enrollment is available through `automata runner token` and
-> `automata-runner enroll` on Unix hosts. Windows remains an unprovisionable
-> source-only experiment; there is no static-registration fallback. Automated
-> certificate rotation and runner disable/drain/delete lifecycle operations
-> remain planned work; account for that operational gap before a production
-> deployment.
+> Initial enrollment and automatic certificate renewal are qualified only for
+> Unix file-backed TLS custody. `automata-runner run` renews that identity
+> before expiry, durably recovers an interrupted rotation, drains the old
+> runner generation, and reloads the new files itself. The macOS example uses
+> that exact file-backed TLS contract. Windows has no deployment example until
+> native atomic rotation is qualified. There is no manual, static-registration,
+> or alternate-protocol fallback.
 
 Configure the control plane with the
 [`automata` reference](https://github.com/automata-ci/automata/blob/main/crates/automata-ci/README.md),
 then provision the runner host according to the requirements below.
 
-## Windows Hyper-V-isolated container example
+## Windows Hyper-V-isolated component boundary
 
-The Windows example is an unprovisionable source-build path for the implemented
-Hyper-V container provider. It requires one absolute SHA-256-pinned container
-runtime executable, one immutable Windows image reference, and the exact guest
-agent path baked into that image. Every job receives a fresh container with
-`--isolation hyperv`, no network, no host mounts, a writable disposable root,
-and `ContainerUser` identity. Configuration rejects every host-network,
-host-filesystem, administrator, native-process, process-isolated-container, or
-mutable-image alternative.
-
-The resulting inventory advertises
-`automata.core/windows-hyperv-container@v1` only for `windows_hyperv`. GitHub
-Windows projection requires that exact launch capability together with
-`IsolationLevel::VirtualMachine`; a generic VM advertisement, including the
-macOS VM provider, cannot match. Registered and live-observed capabilities are
-intersected before scheduler matching, and the match is repeated before a
-placement can become a lease.
-
-It advertises only PowerShell and `cmd.exe` shell steps plus command files, with
-optional support for one absolute standalone Python interpreter. Every
-configured interpreter is exercised through a copied script in a disposable
-container before the runner advertises the profile. Every `uses:` action,
-including JavaScript, composite, local, repository, and container actions,
-fails closed. Job containers, service containers, and active Podman doctor
-checks remain unsupported. The host state root contains provider ownership and
-recovery metadata only; no runner state or credential path is mounted into a
-job container.
-
-The checked-in runtime and image digests are placeholders, not promoted
-artifacts. Unit and injected-runtime tests do not prove a physical Windows host,
-HCS/HCN behavior, image contents, patch compatibility, or nested Job Object
-enforcement. Keep this runner out of production until a reviewed image and the
-physical-host acceptance gate are published. The exact launch requirement also
-does not create the AUTH-02 one-use trust grant; Windows remains unavailable
-until authenticated placement evidence is implemented and accepted.
-
-Copy [`runner.windows.example.json`](runner.windows.example.json) to an ignored
-host-specific path, replace every placeholder digest, and follow the
-[Windows isolation plan](../../../docs/platforms/windows.md) before starting
-`automata-runner run --config C:\path\to\runner.windows.json`.
+The Hyper-V provider remains exercised by an internal product-schema fixture,
+but no checked-in Windows deployment configuration or `automata-runner run`
+path is published. Native atomic TLS renewal custody, a promoted immutable
+image, authenticated placement evidence, and the physical-host acceptance gate
+must land together before that surface can become current. The component still
+rejects process isolation, networking, host mounts, administrator identity,
+mutable images, and every action other than supported `run:` shells; see the
+[Windows isolation plan](../../../docs/platforms/windows.md). There is no
+environment-backed or static-certificate deployment fallback.
 
 ## macOS virtual-machine example
 
@@ -179,15 +147,22 @@ secret bytes. Pre-provision item access for the exact reviewed
 `automata-runner` binary and verify it while logged in as the service account.
 Do not pass secret values on a command line or store them in the JSON.
 
+The renewable TLS roots, certificate chain, and private key use the example's
+three owner-only regular files under `~/Library/Application Support/Automata/tls`.
+Provision that directory and those files for the dedicated service account;
+certificate renewal durably rotates only this file-backed identity. Keychain
+continues to hold the stable spool and object-store secrets.
+
 Copy [`runner.macos.example.json`](runner.macos.example.json) to an ignored
 host-specific path, replace every helper/template pin plus the identity and
-endpoints, provision its owner-only state roots and Keychain items, then start
+endpoints, provision its owner-only state roots, TLS files, and Keychain items, then start
 `automata-runner run --config /absolute/path/to/runner.macos.json`. Template
 construction, signing, isolation details, and the physical-host acceptance gate
 are documented in the [macOS guide](../../../docs/platforms/macos.md).
 
 The remainder of this guide describes the three-process rootless-Podman Linux
-host. Windows and macOS each use one runner process with one slot.
+host. macOS uses one runner process with one slot; Windows has no supported
+deployment or `automata-runner run` path.
 
 ## What the Linux example assumes
 
@@ -463,6 +438,17 @@ with the same server, configuration, runner name, and source selector. The
 private stage retains the original token and key and is loaded before the source;
 an explicit stdin retry may therefore use `/dev/null`. Do not mint a replacement
 token or delete the stage.
+
+The long-lived runner owns certificate renewal after enrollment. It requests a
+replacement only inside the fixed server due window, keeps the existing leaf
+usable for exact replay until that leaf expires, and stores request, key, and
+response recovery state beside `runner-key.pem` under the same owner-only
+custody lock. Do not delete `.automata-renewal-*` state or replace either TLS
+file independently. After an accepted response, the process publishes each
+file with an atomic replacement and crash-reconciles the pair, drains every
+task and control connection using the old identity, and rebuilds the full
+runner composition from disk. Normal service shutdown remains authoritative
+during this sequence.
 
 Use owner-only file sources or the process supervisor's private credential
 facility. Do not place secret values in the JSON file, shell history, service

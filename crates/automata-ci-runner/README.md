@@ -9,6 +9,15 @@ validates the host and opens an mTLS session to
 the control plane, accepts fenced leases, runs jobs through the configured
 sandbox provider, streams logs, and removes interrupted work.
 
+For Unix file-backed TLS custody, the long-lived command also renews its runner
+certificate before expiry through the dedicated mTLS authority. It recovers
+partial file rotation durably, drains every old-identity task and connection,
+then rebuilds the composition with the replacement identity. The checked-in
+macOS configuration therefore keeps its renewable TLS identity in owner-only
+files while retaining Keychain custody for stable secrets. Windows has no
+deployment configuration until native atomic TLS custody and physical-host
+qualification exist; there is no manual or static-identity fallback.
+
 `automata-runner run` selects exactly one host-compatible provider from its
 configuration: rootless Podman or Kubernetes on Linux, fresh
 Hyper-V-isolated Windows containers on Windows, or disposable
@@ -17,11 +26,11 @@ Linux host examples
 ([one](config/runner.local-1.example.json),
 [two](config/runner.local-2.example.json), and
 [three](config/runner.local-3.example.json)) select three independent
-single-slot Podman processes; the
-[Windows](config/runner.windows.example.json) and
-[macOS](config/runner.macos.example.json) examples each remain one process and
+single-slot Podman processes. The
+[macOS](config/runner.macos.example.json) example remains one process and
 one slot. The [configuration guide](config/README.md) documents Kubernetes,
-Windows Hyper-V container isolation, and the macOS VM trust boundary.
+the unprovisioned Windows Hyper-V component boundary, and the macOS VM trust
+boundary.
 
 No crates.io package or public runner archive has been published. Install a
 reviewed source build for configuration work and diagnostics:
@@ -69,7 +78,7 @@ GitHub Actions compatibility.
 using the caller's `PATH` and scratch settings. Its success does not replace
 startup admission, and its raw Podman output should stay inside the operator
 trust domain. The active Podman diagnostic is unavailable on Windows; Windows
-provider admission happens on `automata-runner run`.
+has no supported `automata-runner run` or provider-admission path.
 
 ## Environment profiles
 

@@ -11,8 +11,8 @@ use automata_ci_execution::{
 use automata_ci_runner::product::{RunnerProductConfig, RunnerProductConfigError};
 
 fn baseline() -> serde_json::Value {
-    serde_json::from_slice(include_bytes!("../config/runner.windows.example.json"))
-        .expect("checked-in Windows configuration JSON")
+    serde_json::from_slice(include_bytes!("fixtures/runner.windows.product.json"))
+        .expect("internal Windows product fixture JSON")
 }
 
 fn parse(value: &serde_json::Value) -> Result<RunnerProductConfig, RunnerProductConfigError> {
@@ -22,8 +22,8 @@ fn parse(value: &serde_json::Value) -> Result<RunnerProductConfig, RunnerProduct
 }
 
 #[test]
-fn checked_in_windows_configuration_selects_only_hyperv_containers() {
-    let config = parse(&baseline()).expect("checked-in Windows runner configuration");
+fn internal_windows_fixture_selects_only_hyperv_containers() {
+    let config = parse(&baseline()).expect("internal Windows product fixture");
     let windows = config.windows_hyperv().expect("Windows Hyper-V provider");
 
     assert!(config.podman().is_none());

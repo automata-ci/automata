@@ -9,19 +9,16 @@
   },
   "tls": {
     "server_roots": {
-      "kind": "macos_keychain",
-      "service": "dev.automata.runner",
-      "account": "server-roots-pem"
+      "kind": "file",
+      "path": "/Users/automata-runner/Library/Application Support/Automata/tls/server-roots.pem"
     },
     "certificate_chain": {
-      "kind": "macos_keychain",
-      "service": "dev.automata.runner",
-      "account": "certificate-chain-pem"
+      "kind": "file",
+      "path": "/Users/automata-runner/Library/Application Support/Automata/tls/runner.pem"
     },
     "private_key": {
-      "kind": "macos_keychain",
-      "service": "dev.automata.runner",
-      "account": "private-key-pem"
+      "kind": "file",
+      "path": "/Users/automata-runner/Library/Application Support/Automata/tls/runner-key.pem"
     }
   },
   "spool": {

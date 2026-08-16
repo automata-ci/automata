@@ -141,7 +141,8 @@ use crate::app::{
         repository_secret_browser_router,
     },
     runner_enrollment_api::{
-        RunnerCertificateIssuer, runner_enrollment_create_router, runner_enrollment_redeem_router,
+        OperationalRunnerCertificateRenewalHandler, RunnerCertificateIssuer,
+        runner_enrollment_create_router, runner_enrollment_redeem_router,
     },
     secret_api::{RepositorySecretApiBackend, repository_secret_api_router},
     web::{
@@ -376,35 +377,42 @@ impl ProductionComponents {
             RunnerCapabilityReadiness::unavailable()
         };
         verify_runner_capability_readiness(store.as_ref(), capability_readiness).await?;
-        let (runner_enrollment_repository, runner_enrollment_redeem_api) =
-            match config.runner_public_authority.as_ref() {
-                Some(authority) => {
-                    let client_ca = config.load_client_ca_pem()?;
-                    let client_ca_key = config.load_client_ca_private_key_pem()?;
-                    let server_ca = config.load_runner_server_ca_pem()?;
-                    let server_certificate = config.load_server_certificate_pem()?;
-                    let issuer = Arc::new(
-                        RunnerCertificateIssuer::from_pem(
-                            &client_ca,
-                            &client_ca_key,
-                            &server_ca,
-                            &server_certificate,
-                            format!("https://{authority}/"),
-                        )
-                        .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
-                    );
-                    let repository = Arc::new(PostgresRunnerEnrollmentRepository::new(
-                        store.postgres_pool().clone(),
-                    ));
-                    let router = runner_enrollment_redeem_router(
-                        Arc::clone(&repository),
-                        issuer,
-                        capability_readiness,
-                    );
-                    (Some(repository), router)
-                }
-                None => (None, Router::new()),
-            };
+        let (
+            runner_enrollment_repository,
+            runner_enrollment_redeem_api,
+            runner_certificate_renewal,
+        ) = match config.runner_public_authority.as_ref() {
+            Some(authority) => {
+                let client_ca = config.load_client_ca_pem()?;
+                let client_ca_key = config.load_client_ca_private_key_pem()?;
+                let server_ca = config.load_runner_server_ca_pem()?;
+                let server_certificate = config.load_server_certificate_pem()?;
+                let issuer = Arc::new(
+                    RunnerCertificateIssuer::from_pem(
+                        &client_ca,
+                        &client_ca_key,
+                        &server_ca,
+                        &server_certificate,
+                        format!("https://{authority}/"),
+                    )
+                    .map_err(|_| ServerCompositionError::InvalidRunnerEnrollment)?,
+                );
+                let repository = Arc::new(PostgresRunnerEnrollmentRepository::new(
+                    store.postgres_pool().clone(),
+                ));
+                let router = runner_enrollment_redeem_router(
+                    Arc::clone(&repository),
+                    Arc::clone(&issuer),
+                    capability_readiness,
+                );
+                let renewal = Arc::new(OperationalRunnerCertificateRenewalHandler::new(
+                    Arc::clone(&repository),
+                    issuer,
+                ));
+                (Some(repository), router, Some(renewal))
+            }
+            None => (None, Router::new(), None),
+        };
         let state_repository: Arc<dyn ControlPlaneStateRepository> = store.clone();
         let state_sampler = metrics.state_sampler(state_repository);
 
@@ -689,6 +697,17 @@ impl ProductionComponents {
                     .clone()
                     .ok_or(ServerCompositionError::InvalidSecretManagement)?,
                 Arc::new(handler),
+            )
+        } else {
+            runner_server
+        };
+        let runner_server = if let Some(handler) = runner_certificate_renewal {
+            runner_server.with_certificate_renewal_handler(
+                config
+                    .runner_public_authority
+                    .clone()
+                    .ok_or(ServerCompositionError::InvalidRunnerEnrollment)?,
+                handler,
             )
         } else {
             runner_server

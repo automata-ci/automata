@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-mod custody;
+pub(crate) mod custody;
 mod transport;
 
 use custody::CredentialDestinations;

@@ -24,7 +24,9 @@ mod prepared;
 mod server;
 mod tls;
 
-pub use client::{HyperRunnerControlClient, HyperRunnerEphemeralClient};
+pub use client::{
+    HyperRunnerCertificateRenewalClient, HyperRunnerControlClient, HyperRunnerEphemeralClient,
+};
 pub use error::{
     ApplicationError, ApplicationErrorKind, ClientError, ClientErrorKind, ConfigurationError,
     RetryClass, ServeError,
@@ -44,13 +46,17 @@ pub use observer::{
     RunnerTransportResponseRejection, RunnerTransportRoute, RunnerTransportTlsOutcome,
 };
 pub use port::{
-    AuthenticatedRunnerEphemeralRequest, AuthenticatedRunnerRequest, ClientFuture, ControlReply,
-    ControlRoute, EphemeralClientFuture, EphemeralHandlerFuture, HandlerFuture,
-    RunnerControlClient, RunnerControlHandler, RunnerEphemeralClient, RunnerEphemeralHandler,
-    RunnerEphemeralReply, RunnerEphemeralResponse, SessionBinding,
+    AuthenticatedRunnerCertificateRenewalRequest, AuthenticatedRunnerEphemeralRequest,
+    AuthenticatedRunnerRequest, CertificateRenewalClientFuture, CertificateRenewalHandlerFuture,
+    ClientFuture, ControlReply, ControlRoute, EphemeralClientFuture, EphemeralHandlerFuture,
+    HandlerFuture, RunnerCertificateRenewalClient, RunnerCertificateRenewalHandler,
+    RunnerCertificateRenewalReply, RunnerCertificateRenewalResponse, RunnerControlClient,
+    RunnerControlHandler, RunnerEphemeralClient, RunnerEphemeralHandler, RunnerEphemeralReply,
+    RunnerEphemeralResponse, SessionBinding,
 };
 pub use prepared::{
-    PrepareEphemeralError, PrepareError, PreparedEphemeralRequest, PreparedRequest,
+    PrepareCertificateRenewalError, PrepareEphemeralError, PrepareError,
+    PreparedCertificateRenewalRequest, PreparedEphemeralRequest, PreparedRequest,
 };
 pub use server::RunnerControlServer;
 pub use tls::{ClientTlsConfig, ServerTlsConfig};
@@ -76,6 +82,19 @@ pub const MAX_EPHEMERAL_REQUEST_BYTES: usize = 128 * 1024;
 
 /// Maximum response bytes admitted on the ephemeral-secret route.
 pub const MAX_EPHEMERAL_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Certificate-renewal route on the dedicated runner mTLS listener.
+pub const CERTIFICATE_RENEWAL_PATH: &str = "/automata.runner.v1.RunnerCertificateRenewal/Renew";
+
+/// Exact media type for the current bounded renewal document.
+pub const CERTIFICATE_RENEWAL_CONTENT_TYPE: &str =
+    "application/vnd.automata.runner-certificate-renewal.v1+json";
+
+/// Maximum CSR-bearing renewal request bytes.
+pub const MAX_CERTIFICATE_RENEWAL_REQUEST_BYTES: usize = 64 * 1024;
+
+/// Maximum PEM-bearing exact renewal response bytes.
+pub const MAX_CERTIFICATE_RENEWAL_RESPONSE_BYTES: usize = 512 * 1024;
 
 /// Stable verifier-key identity for managed-secret delivery bearer digests.
 pub const MANAGED_SECRET_DELIVERY_CREDENTIAL_KEY_ID: &str = "managed-secret-delivery-v1";

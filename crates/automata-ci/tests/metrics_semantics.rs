@@ -8,8 +8,9 @@ use automata_ci_control::runner_control::{
     RunnerHandshakeOutcome,
 };
 use automata_ci_runner_transport::{
-    RunnerTransportByteDirection, RunnerTransportConnectionEvent, RunnerTransportObserver,
-    RunnerTransportRequestObservation, RunnerTransportRoute, RunnerTransportTlsOutcome,
+    RunnerTransportApplicationRejection, RunnerTransportByteDirection,
+    RunnerTransportConnectionEvent, RunnerTransportObserver, RunnerTransportRequestObservation,
+    RunnerTransportRoute, RunnerTransportTlsOutcome,
 };
 use automata_ci_workflow_service::{
     WorkflowAdmissionObservation, WorkflowAdmissionObserver, WorkflowAdmissionStage,
@@ -81,13 +82,13 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         .filter_map(|line| line.split_once(' ').map(|(sample, _value)| sample))
         .filter(|sample| is_semantic_metric(sample.split('{').next().expect("sample name")))
         .count();
-    assert_eq!(semantic_series, 1_122);
+    assert_eq!(semantic_series, 1_284);
     let all_series = exposition
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .count();
     assert_eq!(
-        all_series, 5_348,
+        all_series, 5_830,
         "the preinitialized series set must match the reviewed cardinality manifest"
     );
     assert_eq!(
@@ -114,6 +115,9 @@ fn semantic_metrics_have_an_exact_bounded_privacy_safe_exposition() {
         "automata_ci_control_plane_runner_transport_requests_in_flight{route=\"ephemeral_secrets\"} 0",
         "automata_ci_control_plane_runner_transport_bytes_total{route=\"ephemeral_secrets\",direction=\"request\"} 23",
         "automata_ci_control_plane_runner_transport_requests_total{route=\"ephemeral_secrets\",stage=\"head\",outcome=\"method\"} 1",
+        "automata_ci_control_plane_runner_transport_requests_total{route=\"certificate_renewal\",stage=\"application\",outcome=\"too_early\"} 1",
+        "automata_ci_control_plane_runner_transport_requests_in_flight{route=\"certificate_renewal\"} 0",
+        "automata_ci_control_plane_runner_transport_bytes_total{route=\"certificate_renewal\",direction=\"request\"} 29",
     ] {
         assert!(exposition.contains(expected), "missing sample: {expected}");
     }
@@ -215,6 +219,22 @@ fn record_semantic_observations(metrics: &ControlPlaneMetrics) {
         },
         Duration::from_millis(1),
     );
+    RunnerTransportObserver::request_started(metrics, RunnerTransportRoute::CertificateRenewal);
+    RunnerTransportObserver::observe_bytes(
+        metrics,
+        RunnerTransportRoute::CertificateRenewal,
+        RunnerTransportByteDirection::Request,
+        29,
+    );
+    RunnerTransportObserver::observe_request(
+        metrics,
+        RunnerTransportRequestObservation::ApplicationRejected {
+            route: RunnerTransportRoute::CertificateRenewal,
+            reason: RunnerTransportApplicationRejection::TooEarly,
+        },
+        Duration::from_millis(2),
+    );
+    RunnerTransportObserver::request_finished(metrics, RunnerTransportRoute::CertificateRenewal);
 }
 
 fn series_keys(exposition: &str) -> BTreeSet<String> {
