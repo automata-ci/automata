@@ -89,7 +89,9 @@ jobs:
           target/ci-tools/actionlint .ci/workflows/*.yml
 
       - name: Verify Windows CI contract
-        run: python3 scripts/ci/tests/windows-rust-ci.test.py
+        run: |
+          python3 scripts/ci/tests/windows-rust-ci.test.py
+          python3 scripts/ci/tests/windows-image-pipeline.test.py
 
   frontend:
     name: Critical frontend checks

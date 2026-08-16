@@ -116,6 +116,7 @@ def main() -> None:
     pull_request_workflow = PULL_REQUEST_WORKFLOW.read_text(encoding="utf-8")
     pull_request_checks = job_body(pull_request_workflow, "critical_rust")
     assert "python3 scripts/ci/tests/windows-rust-ci.test.py" in pull_request_checks
+    assert "python3 scripts/ci/tests/windows-image-pipeline.test.py" in pull_request_checks
     pull_request_windows = job_body(pull_request_workflow, "windows")
     assert pull_request_windows.strip() == windows.strip(), (
         "pull-request Windows sandbox/runner lane must match the protected main lane"

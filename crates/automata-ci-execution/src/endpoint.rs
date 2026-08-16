@@ -1673,7 +1673,7 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
 #[cfg(test)]
 mod sealed_action_tests {
     use automata_ci_core::{
-        JobContentReference, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE, WindowsRepositoryActionArchive,
+        WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE, WindowsRepositoryActionArchive,
         WindowsRepositoryActionGraph,
     };
     use sha2::{Digest as _, Sha256};
@@ -1782,24 +1782,8 @@ mod sealed_action_tests {
     }
 
     fn graph_request(operation_id: OperationId) -> ActionGraphMaterializationRequest {
-        let content = b"archive-0";
-        let planned = WindowsRepositoryActionArchive::new(
-            0,
-            crate::Sha256Digest::from_bytes([1; 32]),
-            "",
-            JobContentReference::new(
-                "windows-actions/00.tar.gz",
-                digest(content),
-                u64::try_from(content.len()).expect("archive size"),
-                WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
-            ),
-            WindowsActionArchiveFacts::new(1, 1, 1, 1, 1).expect("facts"),
-        )
-        .expect("planned archive");
-        let plan_sha256 = WindowsRepositoryActionGraph::new(vec![planned])
-            .expect("planned graph")
-            .graph_sha256();
         let archives = vec![archive(0, r"C:\actions\0000", "").expect("archive")];
+        let plan_sha256 = plan_sha256(&archives);
         ActionGraphMaterializationRequest::new(
             operation_id,
             sandbox("sandbox-a"),

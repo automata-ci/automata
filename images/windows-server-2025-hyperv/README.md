@@ -95,6 +95,14 @@ Node capabilities. No action capability is registered unless control verifies
 the broker-signed admission receipt and that receipt attests the sealed-action
 graph materialization profile.
 
+The hermetic pipeline contract runs in both protected-main and pull-request CI:
+
+```text
+python3 scripts/ci/tests/windows-image-pipeline.test.py
+```
+
+That contract does not build, publish, qualify, or sign an image.
+
 Actual image publication, external signing, registry verification, dedicated
 Hyper-V-host compatibility, broker admission, hostile testing, patch review,
 and operational promotion remain external acceptance evidence. The checked-in

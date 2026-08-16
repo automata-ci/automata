@@ -1012,17 +1012,13 @@ mod tests {
             facts,
         )
         .expect("planned archive");
-        let plan_sha256 = WindowsRepositoryActionGraph::new(vec![planned])
+        let plan_sha256 = WindowsRepositoryActionGraph::new(vec![planned.clone()])
             .expect("planned graph")
             .graph_sha256();
         let archive = ActionArchiveMaterialization::new(
-            0,
-            action_key_sha256,
-            subpath,
+            planned,
             TargetPath::windows(destination).expect("destination"),
             content.to_vec(),
-            content_sha256,
-            facts,
         )
         .expect("archive");
         ActionGraphMaterializationRequest::new(

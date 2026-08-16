@@ -122,6 +122,7 @@ fn path_argument(arguments: &mut impl Iterator<Item = OsString>) -> Option<PathB
     arguments.next().map(PathBuf::from)
 }
 
+#[cfg(target_os = "linux")]
 fn no_argument_future<F, E>(arguments: &mut impl Iterator<Item = OsString>, future: F) -> ExitCode
 where
     F: Future<Output = Result<(), E>>,
