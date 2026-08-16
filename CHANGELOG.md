@@ -35,6 +35,23 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   stable JSON schema 3 and human output report its bounded name. The internal
   adapter can strictly inspect or create-and-adopt a repository-agnostic
   installation identity anchor without exposing a product mutation command.
+- Read-only `automata local check [WORKFLOW]` over a private, bounded snapshot
+  of tracked and non-ignored live-worktree source. It hashes the exact
+  deterministic archive consumed by shared workflow discovery, pins filesystem
+  ancestors without following links, normalizes tracked symlinks from Git mode,
+  rejects sparse or assume-unchanged index state and portable path-graph
+  aliases, and accepts only direct `.github/workflows/*.{yml,yaml}` members. The
+  optional selector is one exact canonical archive path, and the selected root
+  must declare `workflow_dispatch`. Reachable reusable workflows must be local
+  members of the same snapshot; remote, dynamic, missing, cyclic, or invalid
+  calls fail closed. The shared compiler and reusable-call traversal validate
+  typed inputs, secrets, outputs, propagation, and resource bounds. Human and
+  JSON reports contain only value-free external credential names and closed
+  built-in requirements such as `github_token`, never values, absolute paths,
+  archive bytes, or repository identity. Windows source capture remains closed
+  until exact native mutation evidence is qualified. The command is independent
+  of `local doctor`, Docker, the network, and GitHub tokens, and performs no
+  admission, scheduling, execution, or Check Run operation.
 
 ### Known limitations
 

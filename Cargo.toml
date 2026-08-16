@@ -125,9 +125,12 @@ automata-ci-workflow-service = { path = "crates/automata-ci-workflow-service", v
 axum = { version = "0.8.4", features = ["http1", "json", "tokio"] }
 base64 = "0.23.1"
 bytes = "=1.12.1"
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 clap = { version = "4.5.45", features = ["derive", "env"] }
 futures = "0.3.31"
 flate2 = { version = "1.1.9", default-features = false, features = ["rust_backend"] }
+focaccia = "2.0.0"
 getrandom = "0.4.3"
 http = "1.3.1"
 http-body-util = "=0.1.4"
@@ -159,6 +162,7 @@ thiserror = "2.0.16"
 time = { version = "0.3.55", default-features = false, features = ["parsing", "std"] }
 tar = { version = "0.4.46", default-features = false }
 tokio = { version = "1.47.1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+unicode-normalization = "0.1.25"
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
 tokio-stream = { version = "0.1.17", default-features = false }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }

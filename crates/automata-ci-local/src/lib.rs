@@ -1,8 +1,9 @@
 //! Cross-platform boundary for disposable local Automata installations.
 //!
-//! The crate owns Docker Engine discovery without depending on the product CLI.
-//! Lifecycle mutation is added in separately reviewed slices; [`inspect`] is
-//! read-only and creates no engine resources or host state.
+//! The crate owns Docker Engine discovery and exact local workflow inspection
+//! without depending on the product CLI. Lifecycle mutation is added in
+//! separately reviewed slices; [`inspect`] and [`check_workflow`] are read-only
+//! and create no engine resources, admission records, or host state.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -16,9 +17,20 @@ use tokio::{
     time::timeout,
 };
 
+mod check;
 mod engine;
 mod installation;
+#[cfg(unix)]
+mod snapshot;
+#[cfg(not(unix))]
+#[path = "snapshot_unsupported.rs"]
+mod snapshot;
+mod snapshot_limits;
 
+pub use check::{
+    LocalCheckDiagnostic, LocalCheckIssue, LocalCheckIssueCode, LocalCheckReport,
+    LocalCheckRequest, LocalCheckSource, LocalCheckedJob, LocalCheckedWorkflow, check_workflow,
+};
 pub use engine::{DockerInstallationAdapter, LocalEngineError, LocalEngineErrorCode};
 pub use installation::{
     ComposeProjectName, Installation, InstallationId, InstallationName, InstallationNameError,
@@ -529,9 +541,11 @@ async fn capture_docker(probe: DoctorProbe, arguments: &[&str]) -> ProbeOutput {
         return ProbeOutput::Failure(CommandFailure::Failed);
     };
     let captured = timeout(COMMAND_TIMEOUT, async {
-        tokio::try_join!(read_bounded(stdout), read_bounded(stderr), async {
-            child.wait().await.map_err(|_error| CaptureFailure::Io)
-        })
+        tokio::try_join!(
+            read_bounded(stdout, MAX_COMMAND_STREAM_BYTES),
+            read_bounded(stderr, MAX_COMMAND_STREAM_BYTES),
+            async { child.wait().await.map_err(|_error| CaptureFailure::Io) }
+        )
     })
     .await;
     let (stdout, stderr, status) = match captured {
@@ -572,8 +586,11 @@ enum CaptureFailure {
     OutputTooLarge,
 }
 
-async fn read_bounded<R: AsyncRead + Unpin>(mut reader: R) -> Result<Vec<u8>, CaptureFailure> {
-    let mut bytes = Vec::with_capacity(MAX_COMMAND_STREAM_BYTES.min(4096));
+async fn read_bounded<R: AsyncRead + Unpin>(
+    mut reader: R,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, CaptureFailure> {
+    let mut bytes = Vec::with_capacity(maximum_bytes.min(4096));
     let mut chunk = [0_u8; 4096];
     loop {
         let count = reader
@@ -583,7 +600,7 @@ async fn read_bounded<R: AsyncRead + Unpin>(mut reader: R) -> Result<Vec<u8>, Ca
         if count == 0 {
             break;
         }
-        let remaining = MAX_COMMAND_STREAM_BYTES.saturating_sub(bytes.len());
+        let remaining = maximum_bytes.saturating_sub(bytes.len());
         if count > remaining {
             return Err(CaptureFailure::OutputTooLarge);
         }
@@ -1613,7 +1630,7 @@ mod tests {
     async fn command_capture_rejects_output_above_the_bound() {
         let input = tokio::io::repeat(7).take((MAX_COMMAND_STREAM_BYTES + 1) as u64);
         assert_eq!(
-            read_bounded(input).await,
+            read_bounded(input, MAX_COMMAND_STREAM_BYTES).await,
             Err(CaptureFailure::OutputTooLarge)
         );
     }

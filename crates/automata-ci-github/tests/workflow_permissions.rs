@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use std::time::{Duration, Instant};
 
@@ -109,11 +109,14 @@ async fn schema_drift_redirects_and_expired_deadlines_fail_closed() {
     }
     assert_eq!(fixture.remaining_responses(), 0);
 
+    let expired_deadline = Instant::now()
+        .checked_sub(Duration::from_millis(1))
+        .expect("the monotonic clock represents one millisecond in the past");
     let error = endpoint
         .workflow_permission_defaults(GithubWorkflowPermissionDefaultsRequest::new(
             &repository,
             &token,
-            Instant::now() - Duration::from_millis(1),
+            expired_deadline,
         ))
         .await
         .expect_err("expired deadline");

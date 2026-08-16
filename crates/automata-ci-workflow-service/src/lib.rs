@@ -51,7 +51,7 @@ pub use autonomous_workflow::{
     AutonomousWorkflowPhaseExecutor, AutonomousWorkflowQueue, AutonomousWorkflowRenewalOutcome,
     AutonomousWorkflowService,
 };
-pub use credential_requirements::{CredentialDiscoveryError, discover_job_credential_requirements};
+pub use credential_requirements::{BuiltInCredentialRequirement, CredentialDiscoveryError};
 pub use github::GithubWorkflowPlanVerifier;
 pub use github_activation::{
     GithubActivationContext, GithubActivationEvaluationError, GithubActivationSession,
@@ -93,11 +93,14 @@ pub use reusable_runtime::{
 pub use reusable_workflow::{
     CatalogedReusableWorkflow, ExpandReusableWorkflowRequest, ExpandedReusableInput,
     ExpandedReusableJob, ExpandedReusableOutput, ExpandedReusableOutputMapping,
-    ExpandedReusableSecret, GithubReusableWorkflowCatalog, MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES,
+    ExpandedReusableSecret, GithubReusableWorkflowCatalog, LocalGithubAnalyzedJob,
+    LocalGithubAnalyzedWorkflow, LocalGithubArchiveAnalysis, LocalGithubArchiveAnalysisFailure,
+    LocalGithubArchiveAnalysisFailureKind, MAX_REUSABLE_WORKFLOW_CATALOG_ENTRIES,
     MAX_REUSABLE_WORKFLOW_DEPTH, MAX_REUSABLE_WORKFLOW_EXPANDED_JOBS,
     MAX_REUSABLE_WORKFLOW_INVOCATIONS, RepositoryWorkflowSource, ReusableInputBindingSource,
     ReusableWorkflowExpander, ReusableWorkflowExpansion, ReusableWorkflowExpansionError,
     ReusableWorkflowInvocationExpansion, ReusableWorkflowLimits, ReusableWorkflowPermissions,
+    analyze_local_github_archive,
 };
 pub use run_finalization::{
     LOGICAL_RUN_FINALIZATION_CLAIM_MILLIS, LogicalRunFinalizationError,

@@ -134,6 +134,7 @@ POSTGRES_TEST_SUPPORT_MODULES = frozenset({
     ("crates/automata-ci-postgres/tests/auth/mod.rs", "request_auth"),
     ("crates/automata-ci-postgres/tests/auth/mod.rs", "sign_in"),
     ("crates/automata-ci-postgres/tests/store/mod.rs", "execution"),
+    ("crates/automata-ci-postgres/tests/store/mod.rs", "fixture"),
     ("crates/automata-ci-postgres/tests/store/mod.rs", "orchestration"),
     ("crates/automata-ci-postgres/tests/store/mod.rs", "provider"),
     ("crates/automata-ci-postgres/tests/store/mod.rs", "security"),

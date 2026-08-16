@@ -7,15 +7,45 @@ mod safety;
 mod trigger;
 
 use automata_ci_core::{
-    ContextValue, Located, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan,
+    ContextValue, Located, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, Sha256Digest,
     WorkflowEventProvenance, WorkflowPlan, WorkflowSourceProvenance,
 };
 
 use crate::{
-    Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, GithubEventMetadata,
+    Diagnostic, DiagnosticKind, DiagnosticSeverity, EventName, EventTrigger, GithubEventMetadata,
     GithubWorkflowDispatchContract, GithubWorkflowSourcePlan, PreservedField, SourceOrigin,
     SourceSpan, TriggerConfiguration,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LocalWorkflowSourceEvidence {
+    snapshot_digest: Sha256Digest,
+}
+
+impl LocalWorkflowSourceEvidence {
+    pub(crate) const fn new(snapshot_digest: Sha256Digest) -> Self {
+        Self { snapshot_digest }
+    }
+
+    const fn snapshot_digest(self) -> Sha256Digest {
+        self.snapshot_digest
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LocalWorkflowDispatchEvidence {
+    source: LocalWorkflowSourceEvidence,
+    inputs: crate::GithubWorkflowDispatchInputs,
+}
+
+impl LocalWorkflowDispatchEvidence {
+    pub(crate) const fn new(
+        source: LocalWorkflowSourceEvidence,
+        inputs: crate::GithubWorkflowDispatchInputs,
+    ) -> Self {
+        Self { source, inputs }
+    }
+}
 
 /// Borrowed request to select and compile one GitHub event invocation.
 #[derive(Clone, Debug)]
@@ -31,6 +61,17 @@ enum EventSelection {
     Unverified,
     Metadata(GithubEventMetadata),
     Preselected(Option<GithubEventMetadata>),
+    LocalWorkflowDispatch(LocalWorkflowDispatchEvidence),
+    LocalWorkflowCall(LocalWorkflowSourceEvidence),
+}
+
+impl EventSelection {
+    const fn source_provider(&self) -> &'static str {
+        match self {
+            Self::Unverified | Self::Metadata(_) | Self::Preselected(_) => "github",
+            Self::LocalWorkflowDispatch(_) | Self::LocalWorkflowCall(_) => "local",
+        }
+    }
 }
 
 impl<'plan> CompileWorkflowRequest<'plan> {
@@ -95,6 +136,39 @@ impl<'plan> CompileWorkflowRequest<'plan> {
             source_plan,
             event,
             selection: EventSelection::Preselected(Some(metadata)),
+        }
+    }
+
+    /// Selects an explicit local `workflow_dispatch` invocation.
+    ///
+    /// This is the only initial local-event constructor. It emits `local`
+    /// source/event provenance and verifies the source repository revision is
+    /// the exact evidence digest. It never accepts GitHub delivery metadata.
+    #[must_use]
+    pub(crate) fn for_local_workflow_dispatch(
+        source_plan: &'plan GithubWorkflowSourcePlan,
+        evidence: LocalWorkflowDispatchEvidence,
+    ) -> Self {
+        Self {
+            source_plan,
+            event: WorkflowEventProvenance::new("local", "workflow_dispatch"),
+            selection: EventSelection::LocalWorkflowDispatch(evidence),
+        }
+    }
+
+    /// Compiles one same-snapshot reusable workflow for `workflow_call`.
+    ///
+    /// The request remains local source authority even though the parsed
+    /// syntax and expression dialect are GitHub Actions compatible.
+    #[must_use]
+    pub(crate) fn for_local_workflow_call(
+        source_plan: &'plan GithubWorkflowSourcePlan,
+        evidence: LocalWorkflowSourceEvidence,
+    ) -> Self {
+        Self {
+            source_plan,
+            event: WorkflowEventProvenance::new("local", "workflow_call"),
+            selection: EventSelection::LocalWorkflowCall(evidence),
         }
     }
 
@@ -350,7 +424,10 @@ fn has_errors(diagnostics: &[Diagnostic]) -> bool {
         .any(|diagnostic| diagnostic.severity() == DiagnosticSeverity::Error)
 }
 
-fn compile_source(context: &CompileContext<'_>) -> WorkflowSourceProvenance {
+fn compile_source(
+    context: &CompileContext<'_>,
+    source_provider: &'static str,
+) -> WorkflowSourceProvenance {
     let provenance = context.source.source().provenance();
     let origin = match provenance.origin() {
         SourceOrigin::Repository {
@@ -369,7 +446,7 @@ fn compile_source(context: &CompileContext<'_>) -> WorkflowSourceProvenance {
             name: name.to_string(),
         },
     };
-    WorkflowSourceProvenance::new("github", provenance.id().as_str(), origin)
+    WorkflowSourceProvenance::new(source_provider, provenance.id().as_str(), origin)
 }
 
 fn compile_event(
@@ -377,15 +454,7 @@ fn compile_event(
     selection: &EventSelection,
     context: &mut CompileContext<'_>,
 ) -> CompiledEvent {
-    if event.provider() != "github" {
-        context.semantic(
-            "github.compile.event_provider",
-            format!(
-                "GitHub workflow compiler cannot accept `{}` event provenance",
-                event.provider()
-            ),
-            context.source.workflow().span().clone(),
-        );
+    if !validate_event_authority(&event, selection, context) {
         return CompiledEvent::Rejected;
     }
     let Some(triggers) = context.source.workflow().triggers() else {
@@ -433,6 +502,24 @@ fn compile_event(
     let Some(span) = context.span(selected.span()) else {
         return CompiledEvent::Rejected;
     };
+    compile_selected_event(
+        event,
+        selection,
+        selected,
+        selected_dispatch_contract,
+        span,
+        context,
+    )
+}
+
+fn compile_selected_event(
+    event: WorkflowEventProvenance,
+    selection: &EventSelection,
+    selected: &EventTrigger,
+    selected_dispatch_contract: Option<GithubWorkflowDispatchContract>,
+    span: PlanSourceSpan,
+    context: &mut CompileContext<'_>,
+) -> CompiledEvent {
     match selection {
         EventSelection::Preselected(metadata) => compile_preselected_event(
             event,
@@ -467,7 +554,89 @@ fn compile_event(
             context,
         )
         .with_event(event, span),
+        EventSelection::LocalWorkflowDispatch(evidence) => {
+            if !matches!(selected.name().value(), EventName::WorkflowDispatch) {
+                context.semantic(
+                    "github.compile.local_event_selection",
+                    "local source checking selects only an explicit workflow_dispatch trigger",
+                    selected.span().clone(),
+                );
+                return CompiledEvent::Rejected;
+            }
+            trigger::local_workflow_dispatch_matches(
+                selected_dispatch_contract.as_ref(),
+                &evidence.inputs,
+                selected.span(),
+                context,
+            )
+            .with_event(event, span)
+        }
+        EventSelection::LocalWorkflowCall(_) => {
+            if !matches!(selected.name().value(), EventName::WorkflowCall) {
+                context.semantic(
+                    "github.compile.local_event_selection",
+                    "local reusable-workflow compilation selects only workflow_call",
+                    selected.span().clone(),
+                );
+                return CompiledEvent::Rejected;
+            }
+            trigger::event_matches(
+                &event,
+                selected.configuration(),
+                selected_dispatch_contract.as_ref(),
+                None,
+                selected.span(),
+                context,
+            )
+            .with_event(event, span)
+        }
     }
+}
+
+fn validate_event_authority(
+    event: &WorkflowEventProvenance,
+    selection: &EventSelection,
+    context: &mut CompileContext<'_>,
+) -> bool {
+    let expected_provider = selection.source_provider();
+    if event.provider() != expected_provider {
+        context.semantic(
+            "github.compile.event_provider",
+            format!(
+                "workflow source authority `{expected_provider}` cannot accept `{}` event provenance",
+                event.provider(),
+            ),
+            context.source.workflow().span().clone(),
+        );
+        return false;
+    }
+    if let Some(evidence) = match selection {
+        EventSelection::LocalWorkflowDispatch(evidence) => Some(evidence.source),
+        EventSelection::LocalWorkflowCall(evidence) => Some(*evidence),
+        EventSelection::Unverified
+        | EventSelection::Metadata(_)
+        | EventSelection::Preselected(_) => None,
+    } {
+        let SourceOrigin::Repository { revision, .. } =
+            context.source.source().provenance().origin()
+        else {
+            context.semantic(
+                "github.compile.local_source_origin",
+                "local workflow compilation requires repository snapshot provenance",
+                context.source.workflow().span().clone(),
+            );
+            return false;
+        };
+        if revision.as_ref() != evidence.snapshot_digest().to_string() {
+            context.semantic(
+                "github.compile.local_snapshot_mismatch",
+                "local workflow source revision does not match its snapshot evidence",
+                context.source.workflow().span().clone(),
+            );
+            return false;
+        }
+    }
+    true
 }
 
 fn compile_preselected_event(
