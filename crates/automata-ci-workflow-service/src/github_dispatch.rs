@@ -118,10 +118,7 @@ pub struct GithubWorkflowDispatchRequest {
     workflow_name: String,
     inputs: GithubWorkflowDispatchInputs,
     operation_id: OperationId,
-    vars: ContextValue,
-    secrets: BTreeMap<String, SecretBinding>,
     display_title: Option<String>,
-    commit_subject: Option<String>,
 }
 
 impl fmt::Debug for GithubWorkflowDispatchRequest {
@@ -133,7 +130,6 @@ impl fmt::Debug for GithubWorkflowDispatchRequest {
             .field("operation_id", &self.operation_id)
             .field("source_size_bytes", &self.source.len())
             .field("input_count", &self.inputs.values().len())
-            .field("secret_binding_count", &self.secrets.len())
             .finish_non_exhaustive()
     }
 }
@@ -221,10 +217,7 @@ impl GithubWorkflowDispatchRequest {
             git_ref: git_ref.into(),
             inputs,
             operation_id,
-            vars: ContextValue::empty_object(),
-            secrets: BTreeMap::new(),
             display_title: None,
-            commit_subject: None,
         }
     }
 
@@ -235,31 +228,10 @@ impl GithubWorkflowDispatchRequest {
         self
     }
 
-    /// Attaches a trusted repository-variable snapshot.
-    #[must_use]
-    pub fn with_vars(mut self, vars: ContextValue) -> Self {
-        self.vars = vars;
-        self
-    }
-
-    /// Attaches opaque, separately authorized repository secret bindings.
-    #[must_use]
-    pub fn with_secrets(mut self, secrets: BTreeMap<String, SecretBinding>) -> Self {
-        self.secrets = secrets;
-        self
-    }
-
     /// Sets an optional bounded display title.
     #[must_use]
     pub fn with_display_title(mut self, display_title: impl Into<String>) -> Self {
         self.display_title = Some(display_title.into());
-        self
-    }
-
-    /// Sets an optional bounded source commit subject.
-    #[must_use]
-    pub fn with_commit_subject(mut self, commit_subject: impl Into<String>) -> Self {
-        self.commit_subject = Some(commit_subject.into());
         self
     }
 
@@ -275,10 +247,6 @@ impl GithubWorkflowDispatchRequest {
             || !valid_commit_sha(&self.commit_sha)
             || self
                 .display_title
-                .as_deref()
-                .is_some_and(|value| !valid_text(value))
-            || self
-                .commit_subject
                 .as_deref()
                 .is_some_and(|value| !valid_text(value))
         {
@@ -428,8 +396,8 @@ impl GithubWorkflowDispatchService {
             .ok_or(GithubWorkflowDispatchError::InvalidSourcePlan)?;
         let base_context = JobRuntimeContext::new_base(
             canonical_inputs,
-            request.vars.clone(),
-            request.secrets.clone(),
+            ContextValue::empty_object(),
+            BTreeMap::<String, SecretBinding>::new(),
         )
         .map_err(|_| GithubWorkflowDispatchError::InvalidBaseContext)?;
         let evidence = GithubWorkflowDispatchEvidence::new(&request)?;
@@ -454,9 +422,6 @@ impl GithubWorkflowDispatchService {
         .run_attempt(1);
         if let Some(display_title) = &request.display_title {
             admission = admission.display_title(display_title);
-        }
-        if let Some(commit_subject) = &request.commit_subject {
-            admission = admission.commit_subject(commit_subject);
         }
         let admission = admission.build()?;
         Box::pin(
