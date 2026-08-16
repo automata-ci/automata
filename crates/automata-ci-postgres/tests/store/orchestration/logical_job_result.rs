@@ -1,22 +1,25 @@
 use crate::github_manifest_fixture;
+use crate::store::fixture::{
+    activation_content_reference, job_content_reference, retime_logical_admission,
+};
 
 use std::collections::BTreeMap;
 
 use automata_ci_control::runner_control::repository::RunnerSessionRepository as _;
 use automata_ci_core::{
     Architecture, CompiledValueTemplate, ContextValue, JobAuthorityProfile, JobConclusion,
-    JobContentReference, JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope,
-    JobIrVersion, JobOutputDefinition, JobResult, JobResultOutput, JobRuntimeContext,
-    JobSecretExposure, JobSource, Located, LogicalJobKind, LogicalJobOutputDefinition,
-    LogicalJobOutputSource, LogicalJobTemplate, LogicalOutputMergePolicy, LogicalRunStepTemplate,
-    LogicalRunnerTemplate, LogicalStepKind, LogicalStepTemplate, MatrixAxis, MatrixAxisValues,
-    MatrixPatchSet, MatrixTemplate, MatrixValue, MatrixValueTemplate, OperatingSystem,
-    OutputSensitivity, PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, RunId,
-    RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
-    StepJobTemplate, StrategyContext, UnixMillis, ValueTemplate, WorkflowEventProvenance,
-    WorkflowId, WorkflowJobKey, WorkflowOutputKey, WorkflowPlan, WorkflowSourceProvenance,
-    WorkflowStepKey, WorkflowStrategyTemplate,
+    JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
+    JobOutputDefinition, JobResult, JobResultOutput, JobRuntimeContext, JobSecretExposure,
+    JobSource, Located, LogicalJobKind, LogicalJobOutputDefinition, LogicalJobOutputSource,
+    LogicalJobTemplate, LogicalOutputMergePolicy, LogicalRunStepTemplate, LogicalRunnerTemplate,
+    LogicalStepKind, LogicalStepTemplate, MatrixAxis, MatrixAxisValues, MatrixPatchSet,
+    MatrixTemplate, MatrixValue, MatrixValueTemplate, OperatingSystem, OutputSensitivity,
+    PlanSourceLocation, PlanSourceOrigin, PlanSourceSpan, RunId, RunValueTemplates,
+    RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements, RunnerSessionId,
+    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, StepJobTemplate,
+    StrategyContext, UnixMillis, ValueTemplate, WorkflowEventProvenance, WorkflowId,
+    WorkflowJobKey, WorkflowOutputKey, WorkflowPlan, WorkflowSourceProvenance, WorkflowStepKey,
+    WorkflowStrategyTemplate,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, ActivatedLogicalInstanceDescriptor,
@@ -1616,7 +1619,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
         claimed.claimed_at(),
     )
     .await?;
-    let command = logical_command_at(&fixture.command, claimed.claimed_at())?;
+    let command = retime_logical_admission(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -1628,38 +1631,6 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
         .admit_authenticated_github_delivery(command.clone(), authenticated, command.admitted_at())
         .await?;
     Ok(())
-}
-
-fn logical_command_at(
-    command: &AdmitLogicalWorkflowRun,
-    admitted_at: UnixMillis,
-) -> TestResult<AdmitLogicalWorkflowRun> {
-    let mut builder = AdmitLogicalWorkflowRun::builder(
-        command.tenant().clone(),
-        command.idempotency().clone(),
-        command.request_digest(),
-        command.repository().clone(),
-        command.workflow_id(),
-        command.workflow_path(),
-        command.workflow_name(),
-        command.git_ref(),
-        command.snapshot_id(),
-        command.source().clone(),
-        command.plan().clone(),
-        command.run_id(),
-        command.run_attempt(),
-        command.root_invocation_id(),
-        command.event_name(),
-        command.event().clone(),
-        command.head_sha().to_vec(),
-        command.jobs().to_vec(),
-        admitted_at,
-    );
-    if let Some(base_context) = command.base_context() {
-        builder = builder.base_context(base_context.clone());
-    }
-    builder = builder.trust_snapshot(command.trust_snapshot().clone());
-    Ok(builder.build()?)
 }
 
 async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
@@ -1912,8 +1883,8 @@ fn prepared_instance(
         execution.workflow_name(),
         execution.git_ref(),
         workspace,
-        admission_reference(claimed.event()),
-        activation_reference(&runtime),
+        job_content_reference(claimed.event()),
+        activation_content_reference(&runtime),
     )
     .with_run_id_alias(execution.run_id_alias())
     .with_run_number(execution.run_number())
@@ -2236,24 +2207,6 @@ fn admission_object(key: String, bytes: &[u8], media: &str) -> AdmissionObject {
         media,
     )
     .expect("admission object")
-}
-
-fn admission_reference(object: &AdmissionObject) -> JobContentReference {
-    JobContentReference::new(
-        object.object_key().as_str(),
-        object.digest(),
-        object.encoded_size(),
-        object.media_type(),
-    )
-}
-
-fn activation_reference(object: &LogicalActivationObject) -> JobContentReference {
-    JobContentReference::new(
-        object.object_key().as_str(),
-        object.digest(),
-        object.encoded_size(),
-        object.media_type(),
-    )
 }
 
 fn deterministic_job_id(

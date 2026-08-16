@@ -1,4 +1,5 @@
 use crate::github_manifest_fixture;
+use crate::store::fixture::retime_logical_admission;
 
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile,
@@ -279,7 +280,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
         claimed.claimed_at(),
     )
     .await?;
-    fixture.command = logical_command_at(&fixture.command, claimed.claimed_at())?;
+    fixture.command = retime_logical_admission(&fixture.command, claimed.claimed_at())?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -295,38 +296,6 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixt
         )
         .await?;
     Ok(())
-}
-
-fn logical_command_at(
-    command: &AdmitLogicalWorkflowRun,
-    admitted_at: UnixMillis,
-) -> TestResult<AdmitLogicalWorkflowRun> {
-    let mut builder = AdmitLogicalWorkflowRun::builder(
-        command.tenant().clone(),
-        command.idempotency().clone(),
-        command.request_digest(),
-        command.repository().clone(),
-        command.workflow_id(),
-        command.workflow_path(),
-        command.workflow_name(),
-        command.git_ref(),
-        command.snapshot_id(),
-        command.source().clone(),
-        command.plan().clone(),
-        command.run_id(),
-        command.run_attempt(),
-        command.root_invocation_id(),
-        command.event_name(),
-        command.event().clone(),
-        command.head_sha().to_vec(),
-        command.jobs().to_vec(),
-        admitted_at,
-    );
-    if let Some(base_context) = command.base_context() {
-        builder = builder.base_context(base_context.clone());
-    }
-    builder = builder.trust_snapshot(command.trust_snapshot().clone());
-    Ok(builder.build()?)
 }
 
 async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
