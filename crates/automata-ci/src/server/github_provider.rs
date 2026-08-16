@@ -224,13 +224,18 @@ impl GithubProviderBootstrapPlan {
             match (
                 repository.visibility(),
                 repository.private_source_authority(),
+                repository.private_pull_request_files_authority(),
             ) {
-                (ProviderRepositoryVisibility::Public, None) => {}
-                (ProviderRepositoryVisibility::Private, Some(authority)) => {
+                (ProviderRepositoryVisibility::Public, None, None) => {}
+                (
+                    ProviderRepositoryVisibility::Private,
+                    Some(source_authority),
+                    Some(pull_request_files_authority),
+                ) => {
                     let private_source = authority_identity(
                         config,
                         repository,
-                        authority,
+                        source_authority,
                         connection_id,
                         GithubServerServiceScope::PrivateRepositorySourceRead,
                         app_key_spki_sha256,
@@ -240,6 +245,20 @@ impl GithubProviderBootstrapPlan {
                         return Err(GithubProviderBootstrapError::DuplicateSelector);
                     }
                     authorities.push(private_source);
+
+                    let private_pull_request_files = authority_identity(
+                        config,
+                        repository,
+                        pull_request_files_authority,
+                        connection_id,
+                        GithubServerServiceScope::PrivatePullRequestFilesRead,
+                        app_key_spki_sha256,
+                        broker_policy_fingerprint,
+                    )?;
+                    if !authority_ids.insert(private_pull_request_files.authority_id()) {
+                        return Err(GithubProviderBootstrapError::DuplicateSelector);
+                    }
+                    authorities.push(private_pull_request_files);
                 }
                 _ => return Err(GithubProviderBootstrapError::InvalidConfiguration),
             }

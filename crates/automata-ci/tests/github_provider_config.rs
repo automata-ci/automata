@@ -105,7 +105,9 @@ fn repository(
             "checks_write": authority(checks_authority_id, 7),
             "workflow_permissions_read": authority(checks_authority_id + 0x1000_0000, 7),
             "private_repository_source_read": private_authority_id
-                .map_or(Value::Null, |id| authority(id, 7))
+                .map_or(Value::Null, |id| authority(id, 7)),
+            "private_pull_request_files_read": private_authority_id
+                .map_or(Value::Null, |id| authority(id + 0x10_0000, 7))
         }
     })
 }
@@ -143,7 +145,7 @@ fn private_repository() -> Value {
 fn manifest(repositories: Vec<Value>) -> Value {
     let repositories = Value::Array(repositories);
     json!({
-        "schema": 3,
+        "schema": 4,
         "transport": {"mode": "github_dot_com"},
         "dashboard_url": "https://ci.automata.example/",
         "app": {
@@ -362,28 +364,23 @@ fn dashboard_url_is_a_canonical_public_automata_origin() {
 }
 
 #[test]
-fn schema_three_requires_dashboard_and_workflow_permission_authority() {
+fn schema_four_requires_dashboard_and_both_specialized_authorities() {
     let explicit = manifest(vec![public_repository()]);
-    let configured = load_value("dashboard-schema-three.json", &explicit)
-        .expect("schema 3 accepts its explicit dashboard and workflow authority");
+    let configured = load_value("provider-schema-four.json", &explicit)
+        .expect("schema 4 accepts the explicit dashboard and authority shapes");
     assert_eq!(
         configured.dashboard_url().as_str(),
         "https://ci.automata.example/"
     );
 
-    let mut legacy_two = explicit.clone();
-    legacy_two["schema"] = json!(2);
-    assert_eq!(
-        load_value("dashboard-schema-two.json", &legacy_two),
-        Err(GithubProviderConfigError)
-    );
-
-    let mut legacy_one = explicit.clone();
-    legacy_one["schema"] = json!(1);
-    assert_eq!(
-        load_value("dashboard-schema-one.json", &legacy_one),
-        Err(GithubProviderConfigError)
-    );
+    for legacy_schema in [1, 2, 3] {
+        let mut legacy = explicit.clone();
+        legacy["schema"] = json!(legacy_schema);
+        assert_eq!(
+            load_value(&format!("provider-schema-{legacy_schema}.json"), &legacy),
+            Err(GithubProviderConfigError)
+        );
+    }
 
     let mut missing = explicit;
     missing
@@ -391,7 +388,7 @@ fn schema_three_requires_dashboard_and_workflow_permission_authority() {
         .expect("provider manifest object")
         .remove("dashboard_url");
     assert_eq!(
-        load_value("dashboard-schema-two-missing.json", &missing),
+        load_value("dashboard-schema-four-missing.json", &missing),
         Err(GithubProviderConfigError)
     );
 }
@@ -597,9 +594,11 @@ fn server_loads_one_sorted_mixed_visibility_registry_without_loading_nested_secr
     );
     assert_eq!(private.visibility(), ProviderRepositoryVisibility::Private);
     assert!(private.private_source_authority().is_some());
+    assert!(private.private_pull_request_files_authority().is_some());
     assert_eq!(public.installation_id().get(), 202);
     assert_eq!(public.visibility(), ProviderRepositoryVisibility::Public);
     assert!(public.private_source_authority().is_none());
+    assert!(public.private_pull_request_files_authority().is_none());
     assert_eq!(public.repository_owner_id().get(), 402);
     assert_eq!(public.repository_name().as_str(), "octo/public-repository");
 
@@ -628,12 +627,34 @@ fn visibility_requires_an_explicit_exact_private_authority_shape() {
         Err(GithubProviderConfigError)
     );
 
+    let mut public_with_pull_request_files = public_repository();
+    public_with_pull_request_files["authorities"]["private_pull_request_files_read"] =
+        authority(0x702, 7);
+    assert_eq!(
+        load_value(
+            "public-with-pull-request-files.json",
+            &manifest(vec![public_with_pull_request_files])
+        ),
+        Err(GithubProviderConfigError)
+    );
+
     let mut private_without_private = private_repository();
     private_without_private["authorities"]["private_repository_source_read"] = Value::Null;
     assert_eq!(
         load_value(
             "private-without-private.json",
             &manifest(vec![private_without_private])
+        ),
+        Err(GithubProviderConfigError)
+    );
+
+    let mut private_without_pull_request_files = private_repository();
+    private_without_pull_request_files["authorities"]["private_pull_request_files_read"] =
+        Value::Null;
+    assert_eq!(
+        load_value(
+            "private-without-pull-request-files.json",
+            &manifest(vec![private_without_pull_request_files])
         ),
         Err(GithubProviderConfigError)
     );
@@ -647,6 +668,19 @@ fn visibility_requires_an_explicit_exact_private_authority_shape() {
         load_value(
             "public-missing-private-field.json",
             &manifest(vec![public_missing_null])
+        ),
+        Err(GithubProviderConfigError)
+    );
+
+    let mut public_missing_pull_request_files_null = public_repository();
+    public_missing_pull_request_files_null["authorities"]
+        .as_object_mut()
+        .expect("authorities object")
+        .remove("private_pull_request_files_read");
+    assert_eq!(
+        load_value(
+            "public-missing-pull-request-files-field.json",
+            &manifest(vec![public_missing_pull_request_files_null])
         ),
         Err(GithubProviderConfigError)
     );
@@ -683,6 +717,11 @@ fn every_repository_and_authority_identity_is_unique() {
     let mut same_repository_authorities = private_repository();
     same_repository_authorities["authorities"]["private_repository_source_read"]["authority_id"] =
         same_repository_authorities["authorities"]["checks_write"]["authority_id"].clone();
+    let mut same_pull_request_authorities = private_repository();
+    same_pull_request_authorities["authorities"]["private_pull_request_files_read"]
+        ["authority_id"] = same_pull_request_authorities["authorities"]
+        ["private_repository_source_read"]["authority_id"]
+        .clone();
     for (case, repositories) in [
         ("selector", vec![base.clone(), selector]),
         ("authority", vec![base.clone(), authority_id]),
@@ -690,6 +729,10 @@ fn every_repository_and_authority_identity_is_unique() {
         (
             "same-repository-authorities",
             vec![same_repository_authorities],
+        ),
+        (
+            "same-pull-request-authorities",
+            vec![same_pull_request_authorities],
         ),
     ] {
         assert_eq!(
@@ -923,7 +966,7 @@ fn typed_values_and_nested_sources_fail_closed() {
 #[test]
 fn noncurrent_provider_config_schema_fails_closed() {
     let expected = Err(GithubProviderConfigError);
-    for unsupported in [0, 1, 2, u16::MAX] {
+    for unsupported in [0, 1, 2, 3, u16::MAX] {
         let mut value = manifest(vec![private_repository()]);
         value["schema"] = json!(unsupported);
         assert_eq!(load_value("schema.json", &value), expected);

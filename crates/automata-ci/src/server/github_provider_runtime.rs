@@ -2086,7 +2086,7 @@ async fn retire_superseded_server_service_authorities(
                 .ok_or(GithubProviderRuntimeBuildError::WorkflowPermissionObservation)?;
             if !shares_server_service_revocation_route(descriptor.identity(), desired_route) {
                 // Installation replacement and App-identity replacement require
-                // a retained historical broker route. Schema 3 does not yet
+                // a retained historical broker route. Schema 4 does not yet
                 // authenticate or retain that route, so fail before mutating any
                 // superseded authority in this complete validation pass.
                 return Err(GithubProviderRuntimeBuildError::WorkflowPermissionObservation);

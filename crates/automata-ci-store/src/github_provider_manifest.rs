@@ -69,7 +69,10 @@ pub const GITHUB_PROVIDER_WEBHOOK_ACCEPT_TIMEOUT_MILLIS: u64 = 7_000;
 pub const GITHUB_PROVIDER_PUSH_WEBHOOK_MAX_COMMITS: u64 = 2_048;
 /// Maximum push commits for which webhook metadata is complete for path filters.
 pub const GITHUB_PROVIDER_PATH_FILTER_MAX_COMMITS: u64 = 1_000;
-/// Maximum provider-verified changed paths accepted by trigger evaluation.
+/// Maximum provider changed-file records selected for pull-request path filters.
+///
+/// This matches the documented 3,000-record GitHub Actions and Pull-request
+/// Files REST window and is retained exactly in durable manifest replay.
 pub const GITHUB_PROVIDER_PATH_FILTER_MAX_CHANGED_FILES: u64 = 3_000;
 /// Exact compressed repository-archive ceiling supported by discovery.
 pub const GITHUB_PROVIDER_ARCHIVE_MAX_COMPRESSED_BYTES: u64 = 256 * 1_024 * 1_024;
@@ -513,7 +516,7 @@ impl GithubProviderManifestLimits {
     pub const fn path_filter_max_commits(self) -> u64 {
         self.path_filter_max_commits
     }
-    /// Returns the provider-verified changed-file ceiling.
+    /// Returns the upstream REST changed-file transport ceiling.
     #[must_use]
     pub const fn path_filter_max_changed_files(self) -> u64 {
         self.path_filter_max_changed_files

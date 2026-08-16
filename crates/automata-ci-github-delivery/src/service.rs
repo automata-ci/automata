@@ -47,14 +47,17 @@ const PRIVATE_SOURCE_HANDOFF_MILLIS: i64 =
 
 /// Closed private-repository action bound into one server-service handoff.
 ///
-/// The two actions deliberately share no replay identity. A revision-archive
-/// handoff cannot authorize a changed-files request or vice versa.
+/// The actions deliberately share no replay identity. Revision archives,
+/// push comparisons, and pull-request file pages each require their exact
+/// provider permission and cannot substitute for one another.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum GithubDeliveryPrivateRepositoryAction {
     /// Fetch the exact private repository revision archive.
     FetchPrivateRepositoryRevision,
     /// Fetch the exact private repository changed-file set.
     FetchPrivateRepositoryChangedFiles,
+    /// Fetch the exact private pull request's changed-file set.
+    FetchPrivatePullRequestFiles,
 }
 
 const fn server_service_action(
@@ -66,6 +69,9 @@ const fn server_service_action(
         }
         GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
             GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+        }
+        GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
+            GithubServerServiceAction::FetchPrivatePullRequestFiles
         }
     }
 }
@@ -359,6 +365,7 @@ impl GithubDeliverySourceCredentialBinding {
                 consumer.action(),
                 GithubServerServiceAction::FetchPrivateRepositoryRevision
                     | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+                    | GithubServerServiceAction::FetchPrivatePullRequestFiles
             )
             || consumer.revision().get() > u64::from(MAX_PROVIDER_DELIVERY_ATTEMPTS)
             || required_through.get() < 0

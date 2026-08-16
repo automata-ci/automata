@@ -295,7 +295,8 @@ pub(super) fn compile(request: CompileWorkflowRequest<'_>) -> CompilationReport 
         (CompiledEvent::Selected { event, .. }, Some(span))
             if !has_errors(&context.diagnostics) =>
         {
-            match automata_ci_core::WorkflowPlan::logical_builder(source, event.clone(), jobs, span)
+            let event = event.as_ref().clone();
+            match automata_ci_core::WorkflowPlan::logical_builder(source, event, jobs, span)
                 .name(name)
                 .invocation(invocation)
                 .run_name(run_name)

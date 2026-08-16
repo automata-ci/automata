@@ -21,18 +21,17 @@ use automata_ci_github::{
     rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
-    GithubDeliveryPrivateRepositoryAction, GithubDeliveryService, GithubDeliveryServiceConfig,
-    GithubDeliveryServiceConfigurationError, GithubDeliveryServiceError,
-    GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
+    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
+    GithubDeliveryService, GithubDeliveryServiceConfig, GithubDeliveryServiceConfigurationError,
+    GithubDeliveryServiceError, GithubDeliveryServiceOutcome, GithubDeliverySourceCredential,
     GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
     GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
     GithubDeliveryWorkerConfig, GithubDeliveryWorkerOutcome,
     GithubDeliveryWorkflowAdmissionProcessor, GithubDeliveryWorkflowProcessor,
     GithubDeliveryWorkflowProcessorCompletion, GithubDeliveryWorkflowProcessorError,
-    GithubDeliveryWorkflowRequest, GithubPushChangedFilesAuthority, GithubPushChangedFilesError,
-    GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
-    GithubServerServiceCredentialRelease,
+    GithubDeliveryWorkflowRequest, GithubPushChangedFilesAuthority, GithubPushChangedFilesProvider,
+    GithubPushChangedFilesRequest, GithubServerServiceCredentialRelease,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
@@ -63,7 +62,6 @@ use automata_ci_store::{
     RejectProviderDelivery, RenewProviderDeliveryClaim, RenewedProviderDeliveryClaim,
     RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
 };
-use automata_ci_workflow_github::GithubChangedFiles;
 use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -527,7 +525,7 @@ struct RacingChangedFilesObservation {
 
 #[derive(Debug)]
 struct RenewalRacingChangedFiles {
-    first_error: Option<GithubPushChangedFilesError>,
+    first_disposition: Option<GithubChangedFilesDisposition>,
     calls: AtomicUsize,
     observations: Mutex<Vec<RacingChangedFilesObservation>>,
     renewal_apply_gate: Arc<RenewalApplyGate>,
@@ -535,11 +533,11 @@ struct RenewalRacingChangedFiles {
 
 impl RenewalRacingChangedFiles {
     fn new(
-        first_error: GithubPushChangedFilesError,
+        first_disposition: GithubChangedFilesDisposition,
         renewal_apply_gate: Arc<RenewalApplyGate>,
     ) -> Self {
         Self {
-            first_error: Some(first_error),
+            first_disposition: Some(first_disposition),
             calls: AtomicUsize::new(0),
             observations: Mutex::new(Vec::new()),
             renewal_apply_gate,
@@ -548,7 +546,7 @@ impl RenewalRacingChangedFiles {
 
     fn path_miss(renewal_apply_gate: Arc<RenewalApplyGate>) -> Self {
         Self {
-            first_error: None,
+            first_disposition: None,
             calls: AtomicUsize::new(0),
             observations: Mutex::new(Vec::new()),
             renewal_apply_gate,
@@ -561,7 +559,7 @@ impl GithubPushChangedFilesProvider for RenewalRacingChangedFiles {
     async fn changed_files(
         &self,
         request: GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+    ) -> GithubChangedFilesDisposition {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         self.observations
             .lock()
@@ -574,13 +572,16 @@ impl GithubPushChangedFilesProvider for RenewalRacingChangedFiles {
                 ),
             });
         if call == 0
-            && let Some(first_error) = self.first_error
+            && let Some(first_disposition) = &self.first_disposition
         {
             self.renewal_apply_gate.wait_committed().await;
             self.renewal_apply_gate.mark_downstream_result_ready();
-            return Err(first_error);
+            return first_disposition.clone();
         }
-        Ok(GithubChangedFiles::complete(["README.md"]))
+        GithubChangedFilesDisposition::Complete {
+            files: vec![GithubChangedFileSelection::changed("README.md")],
+            evidence_digest: Sha256Digest::from_bytes([0x6a; 32]),
+        }
     }
 }
 
@@ -735,7 +736,8 @@ impl RecordingCredentialProvider {
                 GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryRevision => {
                     GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
                 }
-                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles => {
+                GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles
+                | GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles => {
                     GithubServerServiceAction::FetchPrivateRepositoryRevision
                 }
             }
@@ -1607,7 +1609,7 @@ fn snapshot_processor_harness_with_config(
 fn changed_files_renewal_harness(
     visibility: ProviderRepositoryVisibility,
     credential_behavior: CredentialBehavior,
-    first_error: Option<GithubPushChangedFilesError>,
+    first_disposition: Option<GithubChangedFilesDisposition>,
 ) -> (
     Harness,
     Arc<CountingWorkflowProcessor>,
@@ -1657,8 +1659,10 @@ fn changed_files_renewal_harness(
         bytes: body,
         reads: AtomicUsize::new(0),
     });
-    let changed_files = Arc::new(match first_error {
-        Some(error) => RenewalRacingChangedFiles::new(error, renewal_apply_gate.clone()),
+    let changed_files = Arc::new(match first_disposition {
+        Some(disposition) => {
+            RenewalRacingChangedFiles::new(disposition, renewal_apply_gate.clone())
+        }
         None => RenewalRacingChangedFiles::path_miss(renewal_apply_gate.clone()),
     });
     let admission = WorkflowAdmissionService::with_system_ports(
@@ -2822,14 +2826,14 @@ async fn stale_changed_files_failures_wait_for_renewal_and_replay_on_the_success
         ProviderRepositoryVisibility::Public,
         ProviderRepositoryVisibility::Private,
     ] {
-        for first_error in [
-            GithubPushChangedFilesError::InvalidEvidence,
-            GithubPushChangedFilesError::Unavailable,
+        for first_disposition in [
+            GithubChangedFilesDisposition::Invalid,
+            GithubChangedFilesDisposition::RetryableUnavailable,
         ] {
             let (harness, processor, changed_files) = changed_files_renewal_harness(
                 visibility,
                 CredentialBehavior::Exact,
-                Some(first_error),
+                Some(first_disposition),
             );
             let task = tokio::spawn(run_once(harness.service.clone(), CancellationToken::new()));
             tokio::time::timeout(Duration::from_secs(2), async {

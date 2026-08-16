@@ -138,6 +138,8 @@ pub enum GithubDeliveryWorkerConfigurationError {
 pub enum GithubDeliveryWorkerPrerequisite {
     /// Exact provider changed-file evidence is required for path filtering.
     ProviderChangedFiles,
+    /// Private pull-request files require a separately pinned `pull requests: read` authority.
+    PrivatePullRequestFilesAuthority,
     /// The product has not supplied durable workflow admission.
     WorkflowAdmission,
 }

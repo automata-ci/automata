@@ -1,13 +1,17 @@
 use crate::support;
 
-use std::time::{Duration, Instant};
+use std::{
+    num::NonZeroU64,
+    time::{Duration, Instant},
+};
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_github::{
-    GithubHttpEndpoint, GithubHttpLimits, GithubPullRequestDiffOutcome,
-    GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffError,
-    GithubPushDiffIncompleteReason, GithubPushDiffOutcome, GithubPushDiffRange,
-    GithubPushDiffRequest, MAX_COMPLETE_GITHUB_COMPARE_FILES,
+    GithubChangedFilesEvidenceDigest, GithubHttpEndpoint, GithubHttpLimits,
+    GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome, GithubPullRequestDiffRequest,
+    GithubPushDiffAuthority, GithubPushDiffIncompleteReason, GithubPushDiffOutcome,
+    GithubPushDiffRange, GithubPushDiffRequest, MAX_GITHUB_COMPARE_PATH_FILTER_FILES,
+    MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES,
 };
 use automata_ci_scm::{ExactRevision, RepositoryId};
 use axum::http::StatusCode;
@@ -56,18 +60,37 @@ fn compare_page(
     serde_json::to_string(&body).expect("comparison JSON")
 }
 
-fn pull_request_compare_page(base: &str, merge_base: &str, head: &str, files: &[Value]) -> String {
+fn pull_request_snapshot(number: u64, base: &str, head: &str, changed_files: usize) -> String {
+    pull_request_snapshot_with_repositories(
+        number,
+        base,
+        head,
+        changed_files,
+        "octo-org/private-repo",
+        "octo-org/private-repo",
+    )
+}
+
+fn pull_request_snapshot_with_repositories(
+    number: u64,
+    base: &str,
+    head: &str,
+    changed_files: usize,
+    base_repository: &str,
+    head_repository: &str,
+) -> String {
     serde_json::to_string(&json!({
-        "status": "diverged",
-        "ahead_by": 1,
-        "behind_by": 2,
-        "total_commits": 1,
-        "base_commit": {"sha": base},
-        "merge_base_commit": {"sha": merge_base},
-        "commits": [{"sha": head}],
-        "files": files,
+        "number": number,
+        "state": "open",
+        "changed_files": changed_files,
+        "base": {"sha": base, "repo": {"full_name": base_repository}},
+        "head": {"sha": head, "repo": {"full_name": head_repository}},
     }))
-    .expect("pull-request comparison JSON")
+    .expect("pull-request snapshot JSON")
+}
+
+fn pull_request_file(path: &str, status: &str) -> Value {
+    json!({"sha": OTHER, "filename": path, "status": status})
 }
 
 async fn existing_diff<'a>(
@@ -77,7 +100,7 @@ async fn existing_diff<'a>(
     after: &'a ExactRevision,
     pushed_commits: &'a [ExactRevision],
     authority: GithubPushDiffAuthority<'a>,
-) -> Result<GithubPushDiffOutcome, GithubPushDiffError> {
+) -> GithubPushDiffOutcome {
     endpoint
         .push_changed_files(GithubPushDiffRequest::new(
             repository,
@@ -98,16 +121,63 @@ async fn pull_request_diff<'a>(
     base: &'a ExactRevision,
     head: &'a ExactRevision,
 ) -> GithubPullRequestDiffOutcome {
+    pull_request_diff_with(
+        endpoint,
+        repository,
+        repository,
+        base,
+        head,
+        GithubPullRequestDiffAuthority::PublicAnonymous,
+    )
+    .await
+}
+
+async fn pull_request_diff_with<'a>(
+    endpoint: &'a GithubHttpEndpoint,
+    repository: &'a RepositoryId,
+    head_repository: &'a RepositoryId,
+    base: &'a ExactRevision,
+    head: &'a ExactRevision,
+    authority: GithubPullRequestDiffAuthority<'a>,
+) -> GithubPullRequestDiffOutcome {
     endpoint
         .pull_request_changed_files(GithubPullRequestDiffRequest::new(
             repository,
+            head_repository,
+            NonZeroU64::new(17).expect("PR number"),
             base,
             head,
-            GithubPushDiffAuthority::PublicAnonymous,
-            Instant::now() + Duration::from_secs(2),
+            authority,
+            Instant::now() + Duration::from_secs(10),
         ))
         .await
-        .expect("pull-request comparison")
+}
+
+async fn pull_request_digest(files: Vec<Value>) -> GithubChangedFilesEvidenceDigest {
+    let fixture = FixtureServer::spawn().await;
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, files.len()),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&files).expect("pull-request files JSON"),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, files.len()),
+    ));
+    let outcome = pull_request_diff(
+        &fixture.endpoint(),
+        &repository(),
+        &revision(BEFORE),
+        &revision(AFTER),
+    )
+    .await;
+    let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
+        panic!("expected complete pull-request evidence");
+    };
+    evidence.evidence_digest()
 }
 
 #[tokio::test]
@@ -115,15 +185,19 @@ async fn pull_request_three_dot_comparison_accepts_divergence_and_binds_exact_re
     let fixture = FixtureServer::spawn().await;
     fixture.enqueue(ResponseSpec::json(
         StatusCode::OK,
-        pull_request_compare_page(
-            BEFORE,
-            OTHER,
-            AFTER,
-            &[
-                changed_file("web/index.html", "modified"),
-                changed_file("src/lib.rs", "added"),
-            ],
-        ),
+        pull_request_snapshot(17, BEFORE, AFTER, 2),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&[
+            pull_request_file("web/index.html", "modified"),
+            pull_request_file("src/lib.rs", "added"),
+        ])
+        .unwrap(),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 2),
     ));
     let repository = repository();
     let base = revision(BEFORE);
@@ -135,11 +209,12 @@ async fn pull_request_three_dot_comparison_accepts_divergence_and_binds_exact_re
     };
     assert_eq!(evidence.base(), &base);
     assert_eq!(evidence.head(), &head);
+    assert_eq!(evidence.number().get(), 17);
     assert_eq!(evidence.changed_paths(), ["src/lib.rs", "web/index.html"]);
-    assert_eq!(fixture.requests().len(), 1);
+    assert_eq!(fixture.requests().len(), 3);
     assert_eq!(
-        fixture.requests()[0].uri,
-        format!("/api/repos/octo-org/private-repo/compare/{BEFORE}...{AFTER}?per_page=100&page=1")
+        fixture.requests()[1].uri,
+        "/api/repos/octo-org/private-repo/pulls/17/files?per_page=100&page=1"
     );
 }
 
@@ -148,7 +223,7 @@ async fn pull_request_comparison_rejects_a_response_not_ending_at_signed_head() 
     let fixture = FixtureServer::spawn().await;
     fixture.enqueue(ResponseSpec::json(
         StatusCode::OK,
-        pull_request_compare_page(BEFORE, OTHER, OTHER, &[]),
+        pull_request_snapshot(17, BEFORE, OTHER, 0),
     ));
     let outcome = pull_request_diff(
         &fixture.endpoint(),
@@ -159,8 +234,406 @@ async fn pull_request_comparison_rejects_a_response_not_ending_at_signed_head() 
     .await;
     assert_eq!(
         outcome,
-        GithubPullRequestDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::InvalidEvidence)
+        GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
     );
+}
+
+#[tokio::test]
+async fn pull_request_transport_and_authority_failures_have_disjoint_dispositions() {
+    let unavailable = FixtureServer::spawn().await;
+    unavailable.enqueue(ResponseSpec::status(StatusCode::TOO_MANY_REQUESTS));
+    assert_eq!(
+        pull_request_diff(
+            &unavailable.endpoint(),
+            &repository(),
+            &revision(BEFORE),
+            &revision(AFTER),
+        )
+        .await,
+        GithubPullRequestDiffOutcome::RetryableUnavailable
+    );
+
+    let rejected = FixtureServer::spawn().await;
+    rejected.enqueue(ResponseSpec::status(StatusCode::UNAUTHORIZED));
+    let repository = repository();
+    let token = SecretString::new("ghs_rejected_pull_requests_read").unwrap();
+    assert_eq!(
+        pull_request_diff_with(
+            &rejected.endpoint(),
+            &repository,
+            &repository,
+            &revision(BEFORE),
+            &revision(AFTER),
+            GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(&token),
+        )
+        .await,
+        GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::ProviderRejected)
+    );
+}
+
+#[tokio::test]
+async fn pull_request_selection_is_pinned_to_the_first_three_thousand_files() {
+    for reported_changed_files in [2_999_usize, 3_000, 3_001] {
+        let selected_file_count =
+            reported_changed_files.min(MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES);
+        let fixture = FixtureServer::spawn().await;
+        fixture.enqueue(ResponseSpec::json(
+            StatusCode::OK,
+            pull_request_snapshot(17, BEFORE, AFTER, reported_changed_files),
+        ));
+        for page in 0..selected_file_count.div_ceil(100) {
+            let page_start = page * 100;
+            let page_end = (page_start + 100).min(selected_file_count);
+            let files = (page_start..page_end)
+                .map(|index| pull_request_file(&format!("src/file-{index:04}.rs"), "modified"))
+                .collect::<Vec<_>>();
+            fixture.enqueue(ResponseSpec::json(
+                StatusCode::OK,
+                serde_json::to_string(&files).expect("pull-request page JSON"),
+            ));
+        }
+        fixture.enqueue(ResponseSpec::json(
+            StatusCode::OK,
+            pull_request_snapshot(17, BEFORE, AFTER, reported_changed_files),
+        ));
+
+        let outcome = pull_request_diff(
+            &fixture.endpoint(),
+            &repository(),
+            &revision(BEFORE),
+            &revision(AFTER),
+        )
+        .await;
+        let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
+            panic!("expected complete provider selection window");
+        };
+        assert_eq!(
+            evidence.total_changed_files(),
+            u64::try_from(reported_changed_files).expect("bounded fixture count")
+        );
+        assert_eq!(evidence.selected_file_count(), selected_file_count);
+        assert_eq!(evidence.changed_paths().len(), selected_file_count);
+        assert_eq!(evidence.page_digests().len(), 30);
+        assert!(
+            !evidence
+                .changed_paths()
+                .iter()
+                .any(|path| path == "src/file-3000.rs")
+        );
+        let requests = fixture.requests();
+        assert_eq!(requests.len(), 32);
+        assert!(requests[30].uri.ends_with("per_page=100&page=30"));
+        assert_eq!(
+            requests[31].uri,
+            "/api/repos/octo-org/private-repo/pulls/17"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pull_request_page_chain_detects_duplicate_omitted_and_mutated_evidence() {
+    let duplicate = FixtureServer::spawn().await;
+    duplicate.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    let first_page = (0..100)
+        .map(|index| pull_request_file(&format!("src/{index:03}.rs"), "modified"))
+        .collect::<Vec<_>>();
+    duplicate.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&first_page).unwrap(),
+    ));
+    duplicate.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&[pull_request_file("src/099.rs", "modified")]).unwrap(),
+    ));
+    duplicate.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    assert_eq!(
+        pull_request_diff(
+            &duplicate.endpoint(),
+            &repository(),
+            &revision(BEFORE),
+            &revision(AFTER),
+        )
+        .await,
+        GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
+    );
+
+    let omitted = FixtureServer::spawn().await;
+    omitted.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    omitted.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&first_page).unwrap(),
+    ));
+    omitted.enqueue(ResponseSpec::json(StatusCode::OK, "[]"));
+    assert_eq!(
+        pull_request_diff(
+            &omitted.endpoint(),
+            &repository(),
+            &revision(BEFORE),
+            &revision(AFTER),
+        )
+        .await,
+        GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
+    );
+    assert_eq!(omitted.requests().len(), 3);
+
+    let mutated = FixtureServer::spawn().await;
+    mutated.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 1),
+    ));
+    mutated.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&[pull_request_file("src/lib.rs", "modified")]).unwrap(),
+    ));
+    mutated.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, OTHER, 1),
+    ));
+    assert_eq!(
+        pull_request_diff(
+            &mutated.endpoint(),
+            &repository(),
+            &revision(BEFORE),
+            &revision(AFTER),
+        )
+        .await,
+        GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
+    );
+}
+
+#[tokio::test]
+async fn pull_request_page_order_is_digest_bound_and_restart_is_deterministic() {
+    let first = pull_request_file("src/first.rs", "modified");
+    let second = pull_request_file("src/second.rs", "added");
+    let original = pull_request_digest(vec![first.clone(), second.clone()]).await;
+    let replay = pull_request_digest(vec![first.clone(), second.clone()]).await;
+    let reordered = pull_request_digest(vec![second, first]).await;
+
+    assert_eq!(replay, original);
+    assert_ne!(reordered, original);
+}
+
+#[tokio::test]
+async fn pull_request_retry_restarts_at_page_one_and_reproduces_clean_evidence() {
+    let fixture = FixtureServer::spawn().await;
+    let first_page = (0..100)
+        .map(|index| pull_request_file(&format!("src/{index:03}.rs"), "modified"))
+        .collect::<Vec<_>>();
+    let final_page = vec![pull_request_file("src/final.rs", "added")];
+
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&first_page).unwrap(),
+    ));
+    fixture.enqueue(ResponseSpec::status(StatusCode::SERVICE_UNAVAILABLE));
+    assert_eq!(
+        pull_request_diff(
+            &fixture.endpoint(),
+            &repository(),
+            &revision(BEFORE),
+            &revision(AFTER),
+        )
+        .await,
+        GithubPullRequestDiffOutcome::RetryableUnavailable
+    );
+
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&first_page).unwrap(),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&final_page).unwrap(),
+    ));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    let replay = pull_request_diff(
+        &fixture.endpoint(),
+        &repository(),
+        &revision(BEFORE),
+        &revision(AFTER),
+    )
+    .await;
+    let GithubPullRequestDiffOutcome::Complete(replay) = replay else {
+        panic!("expected complete replay evidence");
+    };
+
+    let clean = FixtureServer::spawn().await;
+    clean.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    clean.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&first_page).unwrap(),
+    ));
+    clean.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&final_page).unwrap(),
+    ));
+    clean.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 101),
+    ));
+    let clean_outcome = pull_request_diff(
+        &clean.endpoint(),
+        &repository(),
+        &revision(BEFORE),
+        &revision(AFTER),
+    )
+    .await;
+    let GithubPullRequestDiffOutcome::Complete(clean_evidence) = clean_outcome else {
+        panic!("expected clean evidence");
+    };
+    assert_eq!(replay.evidence_digest(), clean_evidence.evidence_digest());
+
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 7);
+    assert_eq!(requests[0].uri, "/api/repos/octo-org/private-repo/pulls/17");
+    assert_eq!(requests[3].uri, requests[0].uri);
+}
+
+#[tokio::test]
+async fn pull_request_authority_and_fork_repository_are_exactly_bound() {
+    let fixture = FixtureServer::spawn().await;
+    let head_repository = RepositoryId::new("fork-owner/fork-repo").unwrap();
+    let snapshot = pull_request_snapshot_with_repositories(
+        17,
+        BEFORE,
+        AFTER,
+        1,
+        "octo-org/private-repo",
+        head_repository.as_str(),
+    );
+    fixture.enqueue(ResponseSpec::json(StatusCode::OK, snapshot.clone()));
+    fixture.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&[pull_request_file("src/fork.rs", "added")]).unwrap(),
+    ));
+    fixture.enqueue(ResponseSpec::json(StatusCode::OK, snapshot));
+    let token = SecretString::new("ghs_exact_pull_requests_read").unwrap();
+    let outcome = pull_request_diff_with(
+        &fixture.endpoint(),
+        &repository(),
+        &head_repository,
+        &revision(BEFORE),
+        &revision(AFTER),
+        GithubPullRequestDiffAuthority::PrivateInstallationPullRequestsRead(&token),
+    )
+    .await;
+    assert!(matches!(outcome, GithubPullRequestDiffOutcome::Complete(_)));
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 3);
+    for request in requests {
+        assert_eq!(
+            request.headers["authorization"],
+            "Bearer ghs_exact_pull_requests_read"
+        );
+    }
+    assert!(!format!("{outcome:?}").contains("ghs_exact_pull_requests_read"));
+
+    let mismatch = FixtureServer::spawn().await;
+    mismatch.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 1),
+    ));
+    assert_eq!(
+        pull_request_diff_with(
+            &mismatch.endpoint(),
+            &repository(),
+            &head_repository,
+            &revision(BEFORE),
+            &revision(AFTER),
+            GithubPullRequestDiffAuthority::PublicAnonymous,
+        )
+        .await,
+        GithubPullRequestDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
+    );
+    assert_eq!(mismatch.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn pull_request_deletions_and_both_rename_paths_are_complete() {
+    let deletion = FixtureServer::spawn().await;
+    deletion.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 1),
+    ));
+    deletion.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&[pull_request_file("src/removed.rs", "removed")]).unwrap(),
+    ));
+    deletion.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 1),
+    ));
+    let outcome = pull_request_diff(
+        &deletion.endpoint(),
+        &repository(),
+        &revision(BEFORE),
+        &revision(AFTER),
+    )
+    .await;
+    let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
+        panic!("expected deletion evidence");
+    };
+    assert_eq!(evidence.changed_paths(), ["src/removed.rs"]);
+
+    let rename = FixtureServer::spawn().await;
+    rename.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 1),
+    ));
+    rename.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        serde_json::to_string(&[json!({
+            "sha": OTHER,
+            "filename": "src/new.rs",
+            "previous_filename": "src/old.rs",
+            "status": "renamed"
+        })])
+        .unwrap(),
+    ));
+    rename.enqueue(ResponseSpec::json(
+        StatusCode::OK,
+        pull_request_snapshot(17, BEFORE, AFTER, 1),
+    ));
+    let outcome = pull_request_diff(
+        &rename.endpoint(),
+        &repository(),
+        &revision(BEFORE),
+        &revision(AFTER),
+    )
+    .await;
+    let GithubPullRequestDiffOutcome::Complete(evidence) = outcome else {
+        panic!("expected rename evidence");
+    };
+    assert_eq!(evidence.selected_file_count(), 1);
+    assert_eq!(evidence.changed_files()[0].current_path(), "src/new.rs");
+    assert_eq!(
+        evidence.changed_files()[0].previous_path(),
+        Some("src/old.rs")
+    );
+    assert_eq!(evidence.changed_paths(), ["src/new.rs", "src/old.rs"]);
 }
 
 #[tokio::test]
@@ -193,8 +666,7 @@ async fn public_comparison_is_anonymous_exact_and_canonical() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .expect("public comparison");
+    .await;
     let GithubPushDiffOutcome::Complete(evidence) = outcome else {
         panic!("expected complete comparison");
     };
@@ -242,8 +714,7 @@ async fn private_comparison_sends_only_the_exact_bearer_to_the_api_origin() {
         &commits,
         GithubPushDiffAuthority::PrivateInstallationContentsRead(&token),
     )
-    .await
-    .expect("private comparison");
+    .await;
     assert!(matches!(outcome, GithubPushDiffOutcome::Complete(_)));
     let requests = fixture.requests();
     assert_eq!(requests.len(), 1);
@@ -282,43 +753,51 @@ async fn unsupported_push_shapes_are_typed_incomplete_without_provider_io() {
                 GithubPushDiffAuthority::PublicAnonymous,
                 deadline(),
             ))
-            .await
-            .expect("typed incomplete outcome");
-        assert_eq!(outcome, GithubPushDiffOutcome::Incomplete(expected));
+            .await;
+        assert_eq!(outcome, GithubPushDiffOutcome::Invalid(expected));
     }
     assert!(fixture.requests().is_empty());
 }
 
 #[tokio::test]
-async fn exactly_three_hundred_files_are_never_labeled_complete() {
-    assert_eq!(MAX_COMPLETE_GITHUB_COMPARE_FILES, 299);
-    let fixture = FixtureServer::spawn().await;
-    let files = (0..300)
-        .map(|index| changed_file(&format!("files/{index:03}.txt"), "modified"))
-        .collect();
-    fixture.enqueue(ResponseSpec::json(
-        StatusCode::OK,
-        compare_page(BEFORE, BEFORE, 1, &[AFTER.to_owned()], Some(files)),
-    ));
-    let repository = repository();
-    let before = revision(BEFORE);
-    let after = revision(AFTER);
-    let commits = [after.clone()];
+async fn compare_selection_has_exact_299_300_301_boundaries() {
+    assert_eq!(MAX_GITHUB_COMPARE_PATH_FILTER_FILES, 300);
+    for file_count in [299_usize, 300, 301] {
+        let fixture = FixtureServer::spawn().await;
+        let files = (0..file_count)
+            .map(|index| changed_file(&format!("files/{index:03}.txt"), "modified"))
+            .collect();
+        fixture.enqueue(ResponseSpec::json(
+            StatusCode::OK,
+            compare_page(BEFORE, BEFORE, 1, &[AFTER.to_owned()], Some(files)),
+        ));
+        let repository = repository();
+        let before = revision(BEFORE);
+        let after = revision(AFTER);
+        let commits = [after.clone()];
 
-    let outcome = existing_diff(
-        &fixture.endpoint(),
-        &repository,
-        &before,
-        &after,
-        &commits,
-        GithubPushDiffAuthority::PublicAnonymous,
-    )
-    .await
-    .expect("capped comparison disposition");
-    assert_eq!(
-        outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::FileListCapped)
-    );
+        let outcome = existing_diff(
+            &fixture.endpoint(),
+            &repository,
+            &before,
+            &after,
+            &commits,
+            GithubPushDiffAuthority::PublicAnonymous,
+        )
+        .await;
+        if file_count <= MAX_GITHUB_COMPARE_PATH_FILTER_FILES {
+            let GithubPushDiffOutcome::Complete(evidence) = outcome else {
+                panic!("expected complete {file_count}-file selection");
+            };
+            assert_eq!(evidence.selected_file_count(), file_count);
+            assert_eq!(evidence.changed_paths().len(), file_count);
+        } else {
+            assert_eq!(
+                outcome,
+                GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::FileListCapped)
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -360,8 +839,7 @@ async fn pagination_must_equal_the_complete_signed_commit_set_and_end_at_after()
         &signed_commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .expect("fully paginated comparison");
+    .await;
     assert!(matches!(outcome, GithubPushDiffOutcome::Complete(_)));
     let requests = fixture.requests();
     assert_eq!(requests.len(), 2);
@@ -386,16 +864,15 @@ async fn pagination_must_equal_the_complete_signed_commit_set_and_end_at_after()
         &signed_commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .expect("mismatched evidence disposition");
+    .await;
     assert_eq!(
         outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::InvalidEvidence)
+        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
     );
 }
 
 #[tokio::test]
-async fn divergence_and_renames_are_explicitly_incomplete() {
+async fn divergence_is_invalid_and_push_renames_include_both_paths() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
@@ -414,11 +891,10 @@ async fn divergence_and_renames_are_explicitly_incomplete() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::DivergedPush)
+        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::DivergedPush)
     );
 
     let renamed = FixtureServer::spawn().await;
@@ -444,12 +920,17 @@ async fn divergence_and_renames_are_explicitly_incomplete() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap();
+    .await;
+    let GithubPushDiffOutcome::Complete(evidence) = outcome else {
+        panic!("expected complete rename selection");
+    };
+    assert_eq!(evidence.selected_file_count(), 1);
+    assert_eq!(evidence.changed_files()[0].current_path(), "new/name.rs");
     assert_eq!(
-        outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::RenamedPath)
+        evidence.changed_files()[0].previous_path(),
+        Some("old/name.rs")
     );
+    assert_eq!(evidence.changed_paths(), ["new/name.rs", "old/name.rs"]);
 }
 
 #[tokio::test]
@@ -463,6 +944,17 @@ async fn duplicate_or_malformed_paths_fail_closed() {
         vec![changed_file("double//separator", "modified")],
         vec![changed_file("control\npath", "modified")],
         vec![changed_file("valid", "copied")],
+        vec![json!({"filename": "new/path", "status": "renamed"})],
+        vec![json!({
+            "filename": "new/path",
+            "previous_filename": "../old/path",
+            "status": "renamed"
+        })],
+        vec![json!({
+            "filename": "same/path",
+            "previous_filename": "same/path",
+            "status": "renamed"
+        })],
     ] {
         let fixture = FixtureServer::spawn().await;
         fixture.enqueue(ResponseSpec::json(
@@ -481,11 +973,10 @@ async fn duplicate_or_malformed_paths_fail_closed() {
             &commits,
             GithubPushDiffAuthority::PublicAnonymous,
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(
             outcome,
-            GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::InvalidEvidence)
+            GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
         );
     }
 }
@@ -512,11 +1003,10 @@ async fn redirects_and_oversized_responses_fail_closed_without_following() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::InvalidEvidence)
+        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
     );
     assert_eq!(redirect.requests().len(), 1);
     assert_eq!(redirect.remaining_responses(), 1);
@@ -551,11 +1041,10 @@ async fn redirects_and_oversized_responses_fail_closed_without_following() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::InvalidEvidence)
+        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
     );
 }
 
@@ -578,11 +1067,10 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::InvalidEvidence)
+        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::InvalidEvidence)
     );
 
     let rejected = FixtureServer::spawn().await;
@@ -596,16 +1084,15 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
         &commits,
         GithubPushDiffAuthority::PrivateInstallationContentsRead(&token),
     )
-    .await
-    .unwrap();
+    .await;
     assert_eq!(
         outcome,
-        GithubPushDiffOutcome::Incomplete(GithubPushDiffIncompleteReason::ProviderRejected)
+        GithubPushDiffOutcome::Invalid(GithubPushDiffIncompleteReason::ProviderRejected)
     );
 
     let secondary_limit = FixtureServer::spawn().await;
     secondary_limit.enqueue(ResponseSpec::status(StatusCode::FORBIDDEN));
-    let error = existing_diff(
+    let outcome = existing_diff(
         &secondary_limit.endpoint(),
         &repository,
         &before,
@@ -613,9 +1100,8 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap_err();
-    assert_eq!(error, GithubPushDiffError::Unavailable);
+    .await;
+    assert_eq!(outcome, GithubPushDiffOutcome::RetryableUnavailable);
 }
 
 #[tokio::test]
@@ -626,7 +1112,7 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
     let commits = [after.clone()];
     let limited = FixtureServer::spawn().await;
     limited.enqueue(ResponseSpec::status(StatusCode::TOO_MANY_REQUESTS).header("retry-after", "3"));
-    let error = existing_diff(
+    let outcome = existing_diff(
         &limited.endpoint(),
         &repository,
         &before,
@@ -634,12 +1120,11 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap_err();
-    assert_eq!(error, GithubPushDiffError::Unavailable);
+    .await;
+    assert_eq!(outcome, GithubPushDiffOutcome::RetryableUnavailable);
 
     let no_io = FixtureServer::spawn().await;
-    let error = no_io
+    let outcome = no_io
         .endpoint()
         .push_changed_files(GithubPushDiffRequest::new(
             &repository,
@@ -653,13 +1138,12 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
                 .checked_sub(Duration::from_millis(1))
                 .unwrap(),
         ))
-        .await
-        .unwrap_err();
-    assert_eq!(error, GithubPushDiffError::Unavailable);
+        .await;
+    assert_eq!(outcome, GithubPushDiffOutcome::RetryableUnavailable);
     assert!(no_io.requests().is_empty());
 
     let (timeout_endpoint, server) = unresponsive_endpoint().await;
-    let error = existing_diff(
+    let outcome = existing_diff(
         &timeout_endpoint,
         &repository,
         &before,
@@ -667,9 +1151,8 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
         &commits,
         GithubPushDiffAuthority::PublicAnonymous,
     )
-    .await
-    .unwrap_err();
-    assert_eq!(error, GithubPushDiffError::Unavailable);
+    .await;
+    assert_eq!(outcome, GithubPushDiffOutcome::RetryableUnavailable);
     server.abort();
 }
 

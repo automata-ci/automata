@@ -29,26 +29,66 @@ definition of done.
 
 Tasks:
 
-- [ ] Add authenticated, paginated pull-request file retrieval.
-- [ ] Select least authority for public, private, same-repository, and fork
+- [x] Add authenticated, paginated pull-request file retrieval.
+- [x] Select least authority for public, private, same-repository, and fork
   pull requests.
 - [ ] Match two-dot, three-dot, new-branch, forced/diverged, rename, deletion,
-  300-file, and 1,000-commit behavior.
-- [ ] Separate complete file evidence, provider-proven run-all behavior,
+  3,000-file, and 1,000-commit behavior.
+- [x] Separate complete file evidence, provider-proven run-all behavior,
   retryable unavailability, and invalid evidence.
-- [ ] Never turn transport failure into match or skip.
-- [ ] Match positive/negative path order and branch/tag/path interaction.
-- [ ] Complete pull-request activity defaults.
+- [x] Never turn transport failure into match or skip.
+- [x] Match positive/negative path order and branch/tag/path interaction.
+- [x] Complete pull-request activity defaults.
 - [ ] Implement supported commit-message skip directives and intentional
   skipped-check projection.
-- [ ] Bind evidence digest to the exact event and workflow selection.
+- [x] Bind evidence digest to the exact event and workflow selection.
 
 Acceptance:
 
 - [ ] Differential fixtures cover all documented diff shapes and boundaries.
-- [ ] Pagination cannot reorder, duplicate, or omit files undetected.
-- [ ] Missing evidence never silently skips a workflow.
-- [ ] Restart after any page is deterministic.
+- [x] Pagination cannot reorder, duplicate, or omit files undetected.
+- [x] Missing evidence never silently skips a workflow.
+- [x] Restart after any page is deterministic.
+
+Current implementation boundary:
+
+- Public same-repository and fork pull requests use anonymous, paginated
+  `pulls/{number}/files` reads. Exact pre/post pull-request snapshots bind the
+  base repository, head repository, pull-request number, base SHA, head SHA,
+  state, and provider-reported file count. The github.com Actions product
+  target consumes exactly the first 3,000 provider file records in at most 30
+  exact 100-file pages; a reported 3,001st file is neither fetched nor matched.
+- Each page is order-digested; the aggregate evidence digest also binds the
+  canonical path set. A well-formed rename contributes both its previous and
+  current path while retaining one provider-record count. Duplicate primary
+  filenames, malformed rename pairs, omitted pages, or snapshot-drifting
+  evidence is invalid. Transport, rate-limit, and server failures are retryable
+  and never become run-all.
+- A retry deliberately starts again at page one; partial pages are not cached.
+  Exact snapshot binding and canonical page digests make the replay
+  deterministic. Once a workflow is admitted, the selection digest is part of
+  immutable workflow-plan provenance and therefore its plan/admission digest;
+  a terminal path miss is retained by durable per-workflow delivery progress.
+- Private pull-request delivery evidence pins a distinct
+  `private_pull_request_files_read` selector whose exact policy is only
+  `pull requests: read`. The selector, App/config/policy revisions, delivery
+  claim fence, action, and provider-use horizon are revalidated before a
+  credential handoff. Acquisition happens only after the compiler demands
+  path evidence, and the existing `contents: read` source selector cannot be
+  substituted at the typed, adapter, or database boundary.
+- Existing-push Compare evidence retains the REST response's 300-record
+  boundary; rename records likewise contribute both old and new paths. Exact
+  299/300/301 Compare fixtures remain distinct from exact 2,999/3,000/3,001
+  pull-request fixtures, including a match whose first selected path is record
+  3,000.
+- GitHub's [canonical trigger guidance](https://docs.github.com/en/enterprise-cloud@latest/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#using-filters-to-target-specific-paths-for-pull-request-or-push-events)
+  and Pull-request Files REST contract define a 3,000-file pull-request
+  window. Automata fetches and evidence-binds that complete window. Protected
+  live differential evidence remains required before a broader compatibility
+  claim.
+- New-branch and forced/diverged push comparisons remain fail-closed.
+  Commit-message skip directives and live GitHub differential evidence also
+  remain open; this component coverage is not a production compatibility claim.
 
 ### EVT-03 — Manual dispatch core parity
 

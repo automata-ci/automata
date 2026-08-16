@@ -1,6 +1,6 @@
 use crate::support;
 
-use automata_ci_core::WorkflowEventProvenance;
+use automata_ci_core::{Sha256Digest, WorkflowEventProvenance};
 use automata_ci_workflow_github::{
     CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubChangedFiles,
     GithubEventMetadata, GithubWorkflowCompiler, WorkflowNotSelectedReason,
@@ -370,6 +370,51 @@ fn changed_file_filters_require_verified_metadata_and_honor_ordered_patterns() {
 }
 
 #[test]
+fn changed_file_evidence_digest_is_part_of_immutable_event_provenance() {
+    let source = "on:\n  pull_request:\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let expected = Sha256Digest::from_bytes([0x6c; 32]);
+    let report = compile(
+        source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
+            GithubChangedFiles::complete_with_evidence(["src/lib.rs"], expected),
+        )),
+    );
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let plan = report.plan().expect("evidence-bound plan");
+    assert_eq!(plan.event().selection_digest(), Some(expected));
+
+    let changed = Sha256Digest::from_bytes([0x6d; 32]);
+    let changed_report = compile(
+        source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
+            GithubChangedFiles::complete_with_evidence(["src/lib.rs"], changed),
+        )),
+    );
+    let changed_plan = changed_report.plan().expect("changed evidence plan");
+    assert_eq!(changed_plan.event().selection_digest(), Some(changed));
+    assert_ne!(changed_plan, plan);
+    assert_ne!(
+        serde_json::to_vec(changed_plan).expect("serialize changed evidence plan"),
+        serde_json::to_vec(plan).expect("serialize original evidence plan")
+    );
+
+    let parsed = support::parse(source);
+    let replay =
+        GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::for_preselected_event(
+            parsed.plan().expect("replay source plan"),
+            plan.event().clone(),
+        ));
+    assert!(replay.is_accepted(), "{:#?}", replay.diagnostics());
+    assert_eq!(replay.plan(), Some(plan));
+}
+
+#[test]
 fn workflow_paths_match_native_ci_path_filters() {
     let source = "on:\n  push:\n    paths: ['.ci/workflows/ci.yml']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
     let metadata = GithubEventMetadata::push_with_changed_files(
@@ -452,11 +497,11 @@ fn invalid_changed_file_metadata_is_bounded_and_sanitized() {
 }
 
 #[test]
-fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
-    let source = "on:\n  push:\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    let files = (0..3_000).map(|index| format!("src/file-{index}.rs"));
+fn changed_file_metadata_enforces_event_specific_provider_windows() {
+    let push_source = "on:\n  push:\n    paths: ['src/**']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let files = (0..300).map(|index| format!("src/file-{index}.rs"));
     let report = compile(
-        source,
+        push_source,
         event("push", "refs/heads/main"),
         Some(GithubEventMetadata::push_with_changed_files(
             false,
@@ -465,9 +510,9 @@ fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
     );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
 
-    let files = (0..3_001).map(|index| format!("src/file-{index}.rs"));
+    let files = (0..301).map(|index| format!("src/file-{index}.rs"));
     let report = compile(
-        source,
+        push_source,
         event("push", "refs/heads/main"),
         Some(GithubEventMetadata::push_with_changed_files(
             false,
@@ -475,6 +520,54 @@ fn changed_file_metadata_accepts_exactly_the_provider_filter_window() {
         )),
     );
     assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
+
+    let pull_request_source = "on:\n  pull_request:\n    paths: ['src/file-2999.rs']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
+    let files = (0..3_000).map(|index| format!("src/file-{index}.rs"));
+    let report = compile(
+        pull_request_source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
+            GithubChangedFiles::complete(files),
+        )),
+    );
+    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+
+    let files = (0..3_001).map(|index| format!("src/file-{index}.rs"));
+    let report = compile(
+        pull_request_source,
+        event("pull_request", "refs/pull/42/merge"),
+        Some(GithubEventMetadata::pull_request_with_changed_files(
+            "opened",
+            "main",
+            GithubChangedFiles::complete(files),
+        )),
+    );
+    assert_rejected_with(&report, "github.compile.invalid_changed_files_metadata");
+}
+
+#[test]
+fn renamed_file_matches_both_previous_and_current_paths() {
+    for matched_path in ["legacy/module.rs", "src/module.rs"] {
+        let source = format!(
+            "on:\n  pull_request:\n    paths: ['{matched_path}']\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n"
+        );
+        let report = compile(
+            &source,
+            event("pull_request", "refs/pull/42/merge"),
+            Some(GithubEventMetadata::pull_request_with_changed_files(
+                "opened",
+                "main",
+                GithubChangedFiles::complete_selection_with_evidence(
+                    ["legacy/module.rs", "src/module.rs"],
+                    1,
+                    Sha256Digest::from_bytes([0x44; 32]),
+                ),
+            )),
+        );
+        assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    }
 }
 
 #[test]

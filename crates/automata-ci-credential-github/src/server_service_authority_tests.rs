@@ -214,6 +214,7 @@ struct FakeRepository {
     checks_identity: GithubServerServiceAuthorityIdentity,
     private_identity: GithubServerServiceAuthorityIdentity,
     workflow_permissions_identity: GithubServerServiceAuthorityIdentity,
+    private_pull_request_files_identity: GithubServerServiceAuthorityIdentity,
     codec: Arc<EnvelopeCodec>,
     corrupt_handoff: AtomicBool,
     begin_calls: AtomicUsize,
@@ -239,6 +240,10 @@ impl FakeRepository {
                 GithubServerServiceScope::WorkflowPermissionsRead,
                 0x103,
             ),
+            private_pull_request_files_identity: identity(
+                GithubServerServiceScope::PrivatePullRequestFilesRead,
+                0x104,
+            ),
             codec,
             corrupt_handoff: AtomicBool::new(false),
             begin_calls: AtomicUsize::new(0),
@@ -261,6 +266,9 @@ impl FakeRepository {
             GithubServerServiceScope::PrivateRepositorySourceRead => &self.private_identity,
             GithubServerServiceScope::WorkflowPermissionsRead => {
                 &self.workflow_permissions_identity
+            }
+            GithubServerServiceScope::PrivatePullRequestFilesRead => {
+                &self.private_pull_request_files_identity
             }
         }
     }
@@ -818,7 +826,7 @@ async fn prepared_handoff_release_replays_one_frozen_timestamp_after_clock_advan
 }
 
 #[tokio::test]
-async fn revision_and_changed_files_have_distinct_exact_handoffs() {
+async fn private_actions_have_distinct_exact_handoffs() {
     let codec = codec();
     let repository = Arc::new(FakeRepository::new(codec.clone()));
     let issuer = GithubServerServiceCredentialIssuer::new(
@@ -848,6 +856,17 @@ async fn revision_and_changed_files_have_distinct_exact_handoffs() {
         ))
         .await
         .expect("changed-files handoff");
+    let pull_request_files = issuer
+        .acquire(acquire_request(
+            &repository.private_pull_request_files_identity,
+            handoff_id(0x612),
+            consumer(
+                GithubServerServiceAction::FetchPrivatePullRequestFiles,
+                0x512,
+            ),
+        ))
+        .await
+        .expect("pull-request-files handoff");
     assert_ne!(
         revision.binding().handoff_id(),
         changed.binding().handoff_id()
@@ -859,6 +878,14 @@ async fn revision_and_changed_files_have_distinct_exact_handoffs() {
     assert_eq!(
         changed.binding().consumer().action(),
         GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
+    );
+    assert_eq!(
+        pull_request_files.binding().consumer().action(),
+        GithubServerServiceAction::FetchPrivatePullRequestFiles
+    );
+    assert_ne!(
+        changed.binding().selector().authority_id(),
+        pull_request_files.binding().selector().authority_id()
     );
 }
 
@@ -1055,6 +1082,11 @@ fn service_core_has_only_closed_authenticated_repository_scopes() {
         0x203,
     ))
     .expect("workflow-permissions request");
+    let pull_request_files = github_server_service_credential_request(&identity(
+        GithubServerServiceScope::PrivatePullRequestFilesRead,
+        0x204,
+    ))
+    .expect("private pull-request-files request");
     assert_eq!(
         checks
             .permissions()
@@ -1079,11 +1111,20 @@ fn service_core_has_only_closed_authenticated_repository_scopes() {
             .collect::<Vec<_>>(),
         vec![("administration", PermissionLevel::Read)]
     );
+    assert_eq!(
+        pull_request_files
+            .permissions()
+            .iter()
+            .map(|(name, level)| (name.as_str(), level))
+            .collect::<Vec<_>>(),
+        vec![("pull_requests", PermissionLevel::Read)]
+    );
     assert!(
         [
             GithubServerServiceScope::ChecksWrite,
             GithubServerServiceScope::PrivateRepositorySourceRead,
             GithubServerServiceScope::WorkflowPermissionsRead,
+            GithubServerServiceScope::PrivatePullRequestFilesRead,
         ]
         .into_iter()
         .all(|scope| !scope.as_str().contains("public"))
@@ -1375,6 +1416,7 @@ fn action_handoff_id(action: GithubServerServiceAction) -> GithubServerServiceHa
         GithubServerServiceAction::FetchPrivateRepositoryChangedFiles => 0x706,
         GithubServerServiceAction::DiscoverPrivateRepositorySchedules => 0x707,
         GithubServerServiceAction::ObserveWorkflowPermissionDefaults => 0x708,
+        GithubServerServiceAction::FetchPrivatePullRequestFiles => 0x709,
     };
     handoff_id(value)
 }

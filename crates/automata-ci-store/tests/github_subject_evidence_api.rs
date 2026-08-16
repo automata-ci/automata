@@ -66,6 +66,14 @@ fn push_event() -> GithubAuthenticatedEvent {
         .expect("push event")
 }
 
+fn pull_request_event() -> GithubAuthenticatedEvent {
+    GithubAuthenticatedEvent::new(
+        GithubAuthenticatedEventKind::PullRequest,
+        "refs/pull/7/merge",
+    )
+    .expect("pull-request event")
+}
+
 #[test]
 fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identity() {
     let owner = ProviderRepositoryOwnerId::new(404).expect("owner");
@@ -348,6 +356,71 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             subject_id,
             GithubCheckHeadSha::new([9; 20]).expect("head"),
             push_event(),
+            UnixMillis::new(100),
+        ),
+        Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
+    ));
+}
+
+#[test]
+fn private_pull_request_evidence_requires_a_distinct_exact_pr_files_selector() {
+    let manifest = manifest(ProviderRepositoryVisibility::Private);
+    let checks = selector(&manifest, 0x401, [0x41; 32]);
+    let source = selector(&manifest, 0x402, [0x42; 32]);
+    let pull_request_files = selector(&manifest, 0x403, [0x43; 32]);
+    let delivery_id = ProviderDeliveryId::from_uuid(Uuid::from_u128(0x404)).expect("delivery");
+    let subject_id = GithubCheckSubjectId::from_uuid(Uuid::from_u128(0x405)).expect("subject");
+
+    let evidence =
+        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
+            delivery_id,
+            ProviderRepositoryOwnerId::new(404).expect("owner"),
+            manifest.clone(),
+            manifest.webhook_verifier_fingerprint(),
+            manifest.webhook_verifier_revision(),
+            checks.clone(),
+            Some(source.clone()),
+            Some(pull_request_files.clone()),
+            subject_id,
+            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            pull_request_event(),
+            UnixMillis::new(100),
+        )
+        .expect("private PR evidence");
+    assert_eq!(
+        evidence.private_pull_request_files_authority(),
+        Some(&pull_request_files)
+    );
+
+    assert!(matches!(
+        ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+            delivery_id,
+            ProviderRepositoryOwnerId::new(404).expect("owner"),
+            manifest.clone(),
+            manifest.webhook_verifier_fingerprint(),
+            manifest.webhook_verifier_revision(),
+            checks.clone(),
+            Some(source.clone()),
+            subject_id,
+            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            pull_request_event(),
+            UnixMillis::new(100),
+        ),
+        Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)
+    ));
+    assert!(matches!(
+        ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
+            delivery_id,
+            ProviderRepositoryOwnerId::new(404).expect("owner"),
+            manifest,
+            evidence.authenticated_webhook_verifier_fingerprint(),
+            evidence.authenticated_webhook_verifier_revision(),
+            checks,
+            Some(source.clone()),
+            Some(source),
+            subject_id,
+            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            pull_request_event(),
             UnixMillis::new(100),
         ),
         Err(GithubSubjectEvidenceValueError::AuthorityPinMismatch)

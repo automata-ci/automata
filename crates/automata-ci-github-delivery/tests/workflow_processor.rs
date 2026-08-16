@@ -11,7 +11,7 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
-use automata_ci_core::{Sha256Digest, UnixMillis};
+use automata_ci_core::{Sha256Digest, UnixMillis, WorkflowPlan};
 use automata_ci_github::{
     GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE, GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX,
     GithubRepositoryVisibility as GithubRepositoryVisibilityFact, GithubSealedEventEnvelopeV1,
@@ -19,15 +19,17 @@ use automata_ci_github::{
     rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_github_delivery::{
-    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubDeliveryClock,
-    GithubDeliveryPrivateRepositoryAction, GithubDeliverySourceAuthority,
-    GithubDeliverySourceCredential, GithubDeliverySourceCredentialBinding,
-    GithubDeliverySourceCredentialProvider, GithubDeliverySourceCredentialProviderError,
-    GithubDeliverySourceCredentialRequest, GithubDeliveryWorker, GithubDeliveryWorkerConfig,
-    GithubDeliveryWorkerError, GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
-    GithubDeliveryWorkflowAdmissionProcessor, GithubPullRequestChangedFilesRequest,
-    GithubPushChangedFilesAuthority, GithubPushChangedFilesError, GithubPushChangedFilesProvider,
-    GithubPushChangedFilesRequest, GithubServerServiceCredentialRelease,
+    GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
+    GithubChangedFilesDisposition, GithubDeliveryClock, GithubDeliveryPrivateRepositoryAction,
+    GithubDeliverySourceAuthority, GithubDeliverySourceCredential,
+    GithubDeliverySourceCredentialBinding, GithubDeliverySourceCredentialProvider,
+    GithubDeliverySourceCredentialProviderError, GithubDeliverySourceCredentialRequest,
+    GithubDeliveryWorker, GithubDeliveryWorkerConfig, GithubDeliveryWorkerError,
+    GithubDeliveryWorkerOutcome, GithubDeliveryWorkerPrerequisite,
+    GithubDeliveryWorkflowAdmissionProcessor, GithubPullRequestChangedFilesAuthority,
+    GithubPullRequestChangedFilesRequest, GithubPushChangedFilesAuthority,
+    GithubPushChangedFilesProvider, GithubPushChangedFilesRequest,
+    GithubServerServiceCredentialRelease,
 };
 use automata_ci_scm::{
     ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
@@ -55,7 +57,6 @@ use automata_ci_store::{
     RejectProviderDelivery, RepositoryId as StoreRepositoryId, RetryProviderDelivery, TenantScope,
     WorkflowAdmissionIdempotency,
 };
-use automata_ci_workflow_github::GithubChangedFiles;
 use automata_ci_workflow_service::{GithubWorkflowPlanVerifier, WorkflowAdmissionService};
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -74,10 +75,12 @@ const REPOSITORY_OWNER_ID: u64 = 8_001;
 const INSTALLATION_ID: u64 = 4_242;
 const DELIVERY: &str = "delivery-workflow-processor-1";
 const WORKFLOW_PATH: &str = ".ci/workflows/ci.yml";
+const ALTERNATE_WORKFLOW_PATH: &str = ".ci/workflows/alternate.yml";
 const CREDENTIAL: &str = "installation-token-private-marker";
 const DIFF_CREDENTIAL: &str = "installation-token-private-diff-marker";
 const ACCEPTED_WORKFLOW: &[u8] = b"name: Exact CI\non: push\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo exact\n";
 const PATH_WORKFLOW: &[u8] = b"name: Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo paths\n";
+const ALTERNATE_PATH_WORKFLOW: &[u8] = b"name: Alternate Paths CI\non:\n  push:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo alternate paths\n";
 const PULL_REQUEST_WORKFLOW: &[u8] = b"name: Pull Request CI\non: pull_request\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request\n";
 const PULL_REQUEST_PATH_WORKFLOW: &[u8] = b"name: Pull Request Paths CI\non:\n  pull_request:\n    paths: ['src/**']\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo pull-request-paths\n";
 
@@ -318,8 +321,21 @@ impl FixtureSubjectEvidence {
     ) -> Self {
         let base = Self::from_claimed(claimed).0;
         let event = GithubAuthenticatedEvent::new(kind, git_ref).expect("event coordinates");
+        let private_pull_request_files_authority = (base.repository_visibility()
+            == ProviderRepositoryVisibility::Private
+            && kind == GithubAuthenticatedEventKind::PullRequest)
+            .then(|| {
+                GithubServerServiceAuthoritySelector::from_durable_parts(
+                    base.tenant().clone(),
+                    GithubServerServiceAuthorityId::from_uuid(Uuid::from_u128(0x71ff))
+                        .expect("private pull-request-files authority ID"),
+                    Sha256Digest::from_bytes([0x53; 32]),
+                    base.checks_authority().app_configuration_revision(),
+                    base.checks_authority().policy_revision(),
+                )
+            });
         Self(
-            ManifestPinnedGithubDeliveryEvidence::from_durable_parts(
+            ManifestPinnedGithubDeliveryEvidence::from_durable_parts_with_pull_request_files_authority(
                 base.delivery_id(),
                 base.repository_owner_id(),
                 base.manifest().clone(),
@@ -327,6 +343,7 @@ impl FixtureSubjectEvidence {
                 base.authenticated_webhook_verifier_revision(),
                 base.checks_authority().clone(),
                 base.private_source_authority().cloned(),
+                private_pull_request_files_authority,
                 base.check_subject_id(),
                 base.check_head_sha(),
                 event,
@@ -505,13 +522,13 @@ struct ChangedFilesObservation {
 
 #[derive(Debug)]
 struct ChangedFiles {
-    result: Result<GithubChangedFiles, GithubPushChangedFilesError>,
+    result: GithubChangedFilesDisposition,
     calls: AtomicUsize,
     observations: Mutex<Vec<ChangedFilesObservation>>,
 }
 
 impl ChangedFiles {
-    fn new(result: Result<GithubChangedFiles, GithubPushChangedFilesError>) -> Self {
+    fn new(result: GithubChangedFilesDisposition) -> Self {
         Self {
             result,
             calls: AtomicUsize::new(0),
@@ -525,7 +542,7 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
     async fn changed_files(
         &self,
         request: GithubPushChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+    ) -> GithubChangedFilesDisposition {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let (credential_present, credential_matches) = match request.authority() {
             GithubPushChangedFilesAuthority::PublicAnonymous => (false, false),
@@ -555,15 +572,46 @@ impl GithubPushChangedFilesProvider for ChangedFiles {
     async fn pull_request_changed_files(
         &self,
         request: GithubPullRequestChangedFilesRequest<'_>,
-    ) -> Result<GithubChangedFiles, GithubPushChangedFilesError> {
+    ) -> GithubChangedFilesDisposition {
         self.calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.pull_request().base_revision().as_str(), BEFORE);
         assert_eq!(request.pull_request().head_revision().as_str(), AFTER);
-        assert_eq!(
-            request.private_action(),
-            Some(GithubDeliveryPrivateRepositoryAction::FetchPrivateRepositoryChangedFiles)
-        );
+        let (credential_present, credential_matches) = match request.authority() {
+            GithubPullRequestChangedFilesAuthority::PublicAnonymous => (false, false),
+            GithubPullRequestChangedFilesAuthority::PrivateInstallationPullRequestsRead(
+                credential,
+            ) => (true, credential.expose_secret() == DIFF_CREDENTIAL),
+        };
+        self.observations
+            .lock()
+            .expect("observations lock")
+            .push(ChangedFilesObservation {
+                repository: request.identity().repository_identity().to_owned(),
+                request_digest: request.request_digest(),
+                before: request.pull_request().base_revision().as_str().to_owned(),
+                after: request.pull_request().head_revision().as_str().to_owned(),
+                claim: request.snapshot().claim(),
+                attempt: request.snapshot().attempt(),
+                observed_at: request.observed_at(),
+                required_through: request.required_through(),
+                private_action: request.private_action(),
+                credential_present,
+                credential_matches,
+            });
         self.result.clone()
+    }
+}
+
+fn complete_changed_files(
+    files: impl IntoIterator<Item = impl Into<String>>,
+) -> GithubChangedFilesDisposition {
+    let files = files.into_iter().map(Into::into).collect::<Vec<_>>();
+    GithubChangedFilesDisposition::Complete {
+        files: files
+            .into_iter()
+            .map(GithubChangedFileSelection::changed)
+            .collect(),
+        evidence_digest: Sha256Digest::from_bytes([0x7a; 32]),
     }
 }
 
@@ -663,8 +711,21 @@ async fn pull_request_harness(
     files: BTreeMap<&str, &[u8]>,
     changed_files: Option<Arc<ChangedFiles>>,
 ) -> Harness {
+    pull_request_harness_with_visibility(
+        files,
+        changed_files,
+        ProviderRepositoryVisibility::Private,
+    )
+    .await
+}
+
+async fn pull_request_harness_with_visibility(
+    files: BTreeMap<&str, &[u8]>,
+    changed_files: Option<Arc<ChangedFiles>>,
+    visibility: ProviderRepositoryVisibility,
+) -> Harness {
     let blobs = Arc::new(MemoryBlobStore::default());
-    let body = pull_request_body();
+    let body = pull_request_body_with_visibility(visibility);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&body).into());
     let raw_key = format!("{GITHUB_RAW_EVENT_OBJECT_KEY_PREFIX}/{digest}.json");
     let raw_payload = BlobPayload::from_bytes(
@@ -684,17 +745,9 @@ async fn pull_request_harness(
         GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE,
     )
     .expect("raw event");
-    let event_envelope = provider_event_envelope(
-        &body,
-        &raw_descriptor,
-        "pull_request",
-        ProviderRepositoryVisibility::Private,
-    );
-    let claimed = claimed(
-        raw_event,
-        event_envelope,
-        ProviderRepositoryVisibility::Private,
-    );
+    let event_envelope =
+        provider_event_envelope(&body, &raw_descriptor, "pull_request", visibility);
+    let claimed = claimed(raw_event, event_envelope, visibility);
     let logical = Arc::new(LogicalAdmissions::default());
     let admission = WorkflowAdmissionService::with_system_ports(
         blobs.clone(),
@@ -721,10 +774,7 @@ async fn pull_request_harness(
     }
     let worker = GithubDeliveryWorker::new(
         blobs.clone(),
-        Arc::new(FixedSource {
-            source,
-            visibility: ProviderRepositoryVisibility::Private,
-        }),
+        Arc::new(FixedSource { source, visibility }),
         Arc::new(processor),
         deliveries.clone(),
         subject_evidence,
@@ -842,8 +892,16 @@ fn push_body(commit_count: usize, visibility: ProviderRepositoryVisibility) -> B
 }
 
 fn pull_request_body() -> Bytes {
+    pull_request_body_with_visibility(ProviderRepositoryVisibility::Private)
+}
+
+fn pull_request_body_with_visibility(visibility: ProviderRepositoryVisibility) -> Bytes {
+    let (private, visibility) = match visibility {
+        ProviderRepositoryVisibility::Public => (false, "public"),
+        ProviderRepositoryVisibility::Private => (true, "private"),
+    };
     Bytes::from(format!(
-        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{AFTER}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":true,"visibility":"private","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
+        r#"{{"action":"opened","number":7,"pull_request":{{"number":7,"merged":false,"merge_commit_sha":"{AFTER}","head":{{"ref":"feature/topic","sha":"{AFTER}","repo":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}},"base":{{"ref":"main","sha":"{BEFORE}","repo":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}}}}}},"repository":{{"id":{REPOSITORY_ID},"private":{private},"visibility":"{visibility}","name":"{REPOSITORY}","full_name":"{OWNER}/{REPOSITORY}","owner":{{"id":{REPOSITORY_OWNER_ID},"login":"{OWNER}"}}}},"installation":{{"id":{INSTALLATION_ID}}},"sender":{{"id":301}}}}"#
     ))
 }
 
@@ -1041,13 +1099,15 @@ async fn pull_request_metadata_and_raw_event_reach_logical_admission_exactly() {
 }
 
 #[tokio::test]
-async fn pull_request_path_filters_resolve_changed_files_and_admit_without_a_prerequisite() {
-    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
-        "src/lib.rs",
-    ]))));
-    let harness = pull_request_harness(
+async fn public_pull_request_path_filters_admit_with_durable_selection_evidence() {
+    let files = (0..2_999)
+        .map(|index| format!("docs/file-{index}.md"))
+        .chain(std::iter::once("src/lib.rs".to_owned()));
+    let changed = Arc::new(ChangedFiles::new(complete_changed_files(files)));
+    let harness = pull_request_harness_with_visibility(
         BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_PATH_WORKFLOW)]),
         Some(changed.clone()),
+        ProviderRepositoryVisibility::Public,
     )
     .await;
 
@@ -1057,14 +1117,111 @@ async fn pull_request_path_filters_resolve_changed_files_and_admit_without_a_pre
             .expect("pull-request path processing"),
         GithubDeliveryWorkerOutcome::Completed(_)
     ));
+    assert!(matches!(
+        process(&harness)
+            .await
+            .expect("durable pull-request path replay"),
+        GithubDeliveryWorkerOutcome::Completed(_)
+    ));
     assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.logical.commands().len(), 1);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 0);
+    let commands = harness.logical.commands();
+    assert_eq!(commands.len(), 1);
+    let encoded_plan = read_admission_object(&harness.blobs, commands[0].plan()).await;
+    let plan: WorkflowPlan = serde_json::from_slice(&encoded_plan).expect("durable workflow plan");
+    assert!(plan.event().selection_digest().is_some());
     assert_eq!(
         outcome_kind(harness.deliveries.completions()[0].outcomes()[0].conclusion()),
         ("admitted", None)
     );
+}
+
+#[tokio::test]
+async fn pull_request_rename_matches_both_previous_and_current_paths() {
+    for (previous_path, current_path) in
+        [("src/old.rs", "docs/new.rs"), ("docs/old.rs", "src/new.rs")]
+    {
+        let changed = Arc::new(ChangedFiles::new(GithubChangedFilesDisposition::Complete {
+            files: vec![GithubChangedFileSelection::renamed(
+                previous_path,
+                current_path,
+            )],
+            evidence_digest: Sha256Digest::from_bytes([0x79; 32]),
+        }));
+        let harness = pull_request_harness_with_visibility(
+            BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_PATH_WORKFLOW)]),
+            Some(changed),
+            ProviderRepositoryVisibility::Public,
+        )
+        .await;
+
+        process(&harness)
+            .await
+            .expect("renamed pull-request path processing");
+        assert_eq!(harness.logical.commands().len(), 1);
+        assert_eq!(
+            outcome_kind(harness.deliveries.completions()[0].outcomes()[0].conclusion()),
+            ("admitted", None)
+        );
+    }
+}
+
+#[tokio::test]
+async fn private_pull_request_path_filters_use_only_the_pinned_pr_read_authority() {
+    let changed = Arc::new(ChangedFiles::new(complete_changed_files(["src/lib.rs"])));
+    let harness = pull_request_harness(
+        BTreeMap::from([(WORKFLOW_PATH, PULL_REQUEST_PATH_WORKFLOW)]),
+        Some(changed.clone()),
+    )
+    .await;
+
+    assert!(matches!(
+        process(&harness)
+            .await
+            .expect("private pull-request path processing"),
+        GithubDeliveryWorkerOutcome::Completed(_)
+    ));
+    assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.credentials.releases.load(Ordering::SeqCst), 1);
+    let changed_observations = changed.observations.lock().expect("observations lock");
+    assert_eq!(changed_observations.len(), 1);
+    assert_eq!(
+        changed_observations[0].private_action,
+        Some(GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles)
+    );
+    assert!(changed_observations[0].credential_present);
+    assert!(changed_observations[0].credential_matches);
+    drop(changed_observations);
+    let credentials = harness
+        .credentials
+        .observations
+        .lock()
+        .expect("credential observations lock");
+    assert_eq!(credentials.len(), 1);
+    assert_eq!(
+        credentials[0].action,
+        GithubDeliveryPrivateRepositoryAction::FetchPrivatePullRequestFiles
+    );
+    assert_eq!(
+        credentials[0].consumer.action(),
+        GithubServerServiceAction::FetchPrivatePullRequestFiles
+    );
+    let pinned = FixtureSubjectEvidence::authenticated_event(
+        &harness.claimed,
+        GithubAuthenticatedEventKind::PullRequest,
+        "refs/pull/7/merge",
+    );
+    assert_eq!(
+        &credentials[0].authority_selector,
+        pinned
+            .0
+            .private_pull_request_files_authority()
+            .expect("private PR evidence pins PR-files authority")
+    );
+    drop(credentials);
+    assert_eq!(harness.logical.commands().len(), 1);
 }
 
 async fn read_admission_object(blobs: &MemoryBlobStore, object: &AdmissionObject) -> Bytes {
@@ -1083,9 +1240,7 @@ async fn read_admission_object(blobs: &MemoryBlobStore, object: &AdmissionObject
 
 #[tokio::test]
 async fn changed_files_are_requested_only_after_typed_compiler_demand() {
-    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
-        "src/lib.rs",
-    ]))));
+    let changed = Arc::new(ChangedFiles::new(complete_changed_files(["src/lib.rs"])));
     let harness = harness(
         BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
         Some(changed.clone()),
@@ -1165,9 +1320,7 @@ async fn changed_files_are_requested_only_after_typed_compiler_demand() {
 
 #[tokio::test]
 async fn public_changed_files_are_anonymous_and_never_request_private_authority() {
-    let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
-        "src/lib.rs",
-    ]))));
+    let changed = Arc::new(ChangedFiles::new(complete_changed_files(["src/lib.rs"])));
     let harness = harness_with_visibility(
         BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
         Some(changed.clone()),
@@ -1197,14 +1350,64 @@ async fn public_changed_files_are_anonymous_and_never_request_private_authority(
 }
 
 #[tokio::test]
+async fn selection_digest_binds_event_provider_evidence_workflow_path_and_source() {
+    async fn admitted_selection_digest(harness: &Harness) -> Sha256Digest {
+        process(harness).await.expect("selection-bound processing");
+        let commands = harness.logical.commands();
+        assert_eq!(commands.len(), 1);
+        let encoded_plan = read_admission_object(&harness.blobs, commands[0].plan()).await;
+        let plan: WorkflowPlan = serde_json::from_slice(&encoded_plan).expect("durable plan");
+        plan.event()
+            .selection_digest()
+            .expect("selection evidence digest")
+    }
+
+    let base = harness_with_visibility(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(Arc::new(ChangedFiles::new(complete_changed_files([
+            "src/lib.rs",
+        ])))),
+        0,
+        ProviderRepositoryVisibility::Public,
+    )
+    .await;
+    let different_source = harness_with_visibility(
+        BTreeMap::from([(WORKFLOW_PATH, ALTERNATE_PATH_WORKFLOW)]),
+        Some(Arc::new(ChangedFiles::new(complete_changed_files([
+            "src/lib.rs",
+        ])))),
+        0,
+        ProviderRepositoryVisibility::Public,
+    )
+    .await;
+    let different_path = harness_with_visibility(
+        BTreeMap::from([(ALTERNATE_WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(Arc::new(ChangedFiles::new(complete_changed_files([
+            "src/lib.rs",
+        ])))),
+        0,
+        ProviderRepositoryVisibility::Public,
+    )
+    .await;
+
+    let base_digest = admitted_selection_digest(&base).await;
+    assert_ne!(
+        admitted_selection_digest(&different_source).await,
+        base_digest
+    );
+    assert_ne!(
+        admitted_selection_digest(&different_path).await,
+        base_digest
+    );
+}
+
+#[tokio::test]
 async fn private_changed_files_reject_wrong_selector_or_action_before_provider_io() {
     for behavior in [
         DiffCredentialBehavior::WrongSelector,
         DiffCredentialBehavior::WrongAction,
     ] {
-        let changed = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete([
-            "src/lib.rs",
-        ]))));
+        let changed = Arc::new(ChangedFiles::new(complete_changed_files(["src/lib.rs"])));
         let harness = harness(
             BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
             Some(changed.clone()),
@@ -1258,6 +1461,30 @@ async fn authenticated_commit_ceiling_bypasses_diff_without_a_provider_call() {
 }
 
 #[tokio::test]
+async fn only_the_typed_provider_run_all_disposition_bypasses_path_filters() {
+    let changed = Arc::new(ChangedFiles::new(
+        GithubChangedFilesDisposition::ProviderRunAll {
+            evidence_digest: Sha256Digest::from_bytes([0x7b; 32]),
+        },
+    ));
+    let harness = harness_with_visibility(
+        BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
+        Some(changed.clone()),
+        0,
+        ProviderRepositoryVisibility::Public,
+    )
+    .await;
+
+    process(&harness).await.expect("typed provider run-all");
+    assert_eq!(changed.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.logical.commands().len(), 1);
+    assert_eq!(
+        outcome_kind(harness.deliveries.completions()[0].outcomes()[0].conclusion()),
+        ("admitted", None)
+    );
+}
+
+#[tokio::test]
 async fn invalid_source_and_valid_non_selection_are_deterministic_path_outcomes() {
     let dispatch = b"name: Manual\non: workflow_dispatch\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: echo manual\n";
     let invalid = harness(
@@ -1295,9 +1522,9 @@ async fn invalid_source_and_valid_non_selection_are_deterministic_path_outcomes(
 
 #[tokio::test]
 async fn changed_file_provider_failures_remain_closed_and_sanitized() {
-    let oversized = Arc::new(ChangedFiles::new(Ok(GithubChangedFiles::complete(
-        (0..=3_000).map(|index| format!("src/{index}.rs")),
-    ))));
+    let oversized = Arc::new(ChangedFiles::new(complete_changed_files(
+        (0..=300).map(|index| format!("src/{index}.rs")),
+    )));
     let oversized_harness = harness(
         BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
         Some(oversized),
@@ -1320,9 +1547,7 @@ async fn changed_file_provider_failures_remain_closed_and_sanitized() {
     );
     assert!(oversized_harness.logical.commands().is_empty());
 
-    let invalid = Arc::new(ChangedFiles::new(Err(
-        GithubPushChangedFilesError::InvalidEvidence,
-    )));
+    let invalid = Arc::new(ChangedFiles::new(GithubChangedFilesDisposition::Invalid));
     let invalid_harness = harness(
         BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
         Some(invalid),
@@ -1341,9 +1566,9 @@ async fn changed_file_provider_failures_remain_closed_and_sanitized() {
         ("failed", Some("github.workflow.changed_files_invalid"))
     );
 
-    let unavailable = Arc::new(ChangedFiles::new(Err(
-        GithubPushChangedFilesError::Unavailable,
-    )));
+    let unavailable = Arc::new(ChangedFiles::new(
+        GithubChangedFilesDisposition::RetryableUnavailable,
+    ));
     let harness = harness(
         BTreeMap::from([(WORKFLOW_PATH, PATH_WORKFLOW)]),
         Some(unavailable),

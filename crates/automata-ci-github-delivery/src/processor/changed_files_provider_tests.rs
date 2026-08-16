@@ -20,7 +20,6 @@ use automata_ci_store::{
     ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
     ProviderRepositoryVisibility, TenantScope,
 };
-use automata_ci_workflow_github::GithubChangedFiles;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use tokio::{
@@ -32,7 +31,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    GithubPushChangedFilesAuthority, GithubPushChangedFilesError, GithubPushChangedFilesProvider,
+    GithubChangedFilesDisposition, GithubPushChangedFilesAuthority, GithubPushChangedFilesProvider,
     GithubPushChangedFilesRequest,
 };
 use crate::{
@@ -350,8 +349,8 @@ async fn assert_invalid(
     request: GithubPushChangedFilesRequest<'_>,
 ) {
     assert_eq!(
-        provider.changed_files(request).await.unwrap_err(),
-        GithubPushChangedFilesError::InvalidEvidence
+        provider.changed_files(request).await,
+        GithubChangedFilesDisposition::Invalid
     );
 }
 
@@ -367,9 +366,14 @@ async fn public_request_is_anonymous_at_the_real_http_boundary() {
             delivery.claimed.identity(),
             GithubPushChangedFilesAuthority::PublicAnonymous,
         ))
-        .await
-        .expect("public changed files");
-    assert_eq!(outcome, GithubChangedFiles::complete([CHANGED_PATH]));
+        .await;
+    assert!(matches!(
+        outcome,
+        GithubChangedFilesDisposition::Complete { ref files, .. }
+            if files.len() == 1
+                && files[0].current_path() == CHANGED_PATH
+                && files[0].previous_path().is_none()
+    ));
 
     let captured = http.finish().await;
     assert_common_request(&captured);
@@ -389,9 +393,14 @@ async fn private_request_sends_only_the_exact_token_at_the_real_http_boundary() 
             delivery.claimed.identity(),
             GithubPushChangedFilesAuthority::PrivateInstallationContentsRead(&token),
         ))
-        .await
-        .expect("private changed files");
-    assert_eq!(outcome, GithubChangedFiles::complete([CHANGED_PATH]));
+        .await;
+    assert!(matches!(
+        outcome,
+        GithubChangedFilesDisposition::Complete { ref files, .. }
+            if files.len() == 1
+                && files[0].current_path() == CHANGED_PATH
+                && files[0].previous_path().is_none()
+    ));
 
     let captured = http.finish().await;
     assert_common_request(&captured);

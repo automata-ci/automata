@@ -53,6 +53,7 @@ fn server_service_policies_are_fixed_disjoint_and_digest_bound() {
     let checks = GithubServerServiceScope::ChecksWrite;
     let source = GithubServerServiceScope::PrivateRepositorySourceRead;
     let workflow_permissions = GithubServerServiceScope::WorkflowPermissionsRead;
+    let pull_request_files = GithubServerServiceScope::PrivatePullRequestFilesRead;
     assert_eq!(checks.permissions_json(), r#"{"checks":"write"}"#);
     assert!(!checks.permissions_json().contains("contents"));
     assert_eq!(source.permissions_json(), r#"{"contents":"read"}"#);
@@ -66,6 +67,24 @@ fn server_service_policies_are_fixed_disjoint_and_digest_bound() {
     assert_ne!(checks.policy_digest(), source.policy_digest());
     assert_ne!(checks.policy_digest(), workflow_permissions.policy_digest());
     assert_ne!(source.policy_digest(), workflow_permissions.policy_digest());
+    assert_eq!(
+        pull_request_files.permissions_json(),
+        r#"{"pull_requests":"read"}"#
+    );
+    assert!(!pull_request_files.permissions_json().contains("contents"));
+    assert_eq!(
+        pull_request_files.policy_digest(),
+        Sha256Digest::from_bytes([
+            0x52, 0x3d, 0x03, 0x19, 0xf4, 0x0c, 0xf9, 0x1e, 0x5e, 0xb3, 0xe1, 0x48, 0x2a, 0x80,
+            0x46, 0x20, 0x88, 0x74, 0x8a, 0xa2, 0x53, 0x7a, 0xe3, 0xc9, 0x54, 0x0e, 0x76, 0xb7,
+            0x96, 0x5d, 0x00, 0x99,
+        ])
+    );
+    assert_ne!(source.policy_digest(), pull_request_files.policy_digest());
+    assert_ne!(
+        workflow_permissions.policy_digest(),
+        pull_request_files.policy_digest()
+    );
 
     for action in [
         GithubServerServiceAction::EnsureCheckSuite,
@@ -85,6 +104,10 @@ fn server_service_policies_are_fixed_disjoint_and_digest_bound() {
     assert_eq!(
         GithubServerServiceAction::ObserveWorkflowPermissionDefaults.required_scope(),
         workflow_permissions
+    );
+    assert_eq!(
+        GithubServerServiceAction::FetchPrivatePullRequestFiles.required_scope(),
+        pull_request_files
     );
 }
 

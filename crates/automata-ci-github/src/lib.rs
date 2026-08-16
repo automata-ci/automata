@@ -18,11 +18,11 @@ mod webhook_event;
 mod workflow_permissions;
 
 pub use changed_files::{
-    GithubCompletePullRequestDiff, GithubCompletePushDiff, GithubPullRequestDiffAuthority,
-    GithubPullRequestDiffError, GithubPullRequestDiffOutcome, GithubPullRequestDiffRequest,
-    GithubPushDiffAuthority, GithubPushDiffError, GithubPushDiffIncompleteReason,
+    GithubChangedFile, GithubChangedFilesEvidenceDigest, GithubCompletePullRequestDiff,
+    GithubCompletePushDiff, GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome,
+    GithubPullRequestDiffRequest, GithubPushDiffAuthority, GithubPushDiffIncompleteReason,
     GithubPushDiffOutcome, GithubPushDiffRange, GithubPushDiffRequest,
-    MAX_COMPLETE_GITHUB_COMPARE_FILES,
+    MAX_GITHUB_COMPARE_PATH_FILTER_FILES, MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES,
 };
 pub use checks::{
     GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
