@@ -19,7 +19,10 @@ use crate::{
     CacheEntryId, CacheService, CacheServiceError, CacheServiceErrorKind, ResultsHttpRoute,
     ResultsObserver, RuntimeTokenClaims, RuntimeTokenVerifier, SignedCacheCapability, TokenError,
     azure::{AzureProtocolError, parse_block_list, validate_block_id},
-    http::{admit_results_upload, harden_results_response, results_upload_admission},
+    http::{
+        admit_results_upload, content_length_matches, harden_results_response, parse_canonical_u64,
+        results_upload_admission,
+    },
     observer::{NoopResultsObserver, ResultsHttpObservation},
 };
 
@@ -628,33 +631,6 @@ fn parse_entry_id(value: &str) -> Result<CacheEntryId, ()> {
         return Err(());
     }
     CacheEntryId::new(uuid).map_err(|_| ())
-}
-
-fn content_length_matches(headers: &HeaderMap, actual: usize) -> bool {
-    let mut values = headers.get_all(header::CONTENT_LENGTH).iter();
-    let Some(value) = values.next() else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
-    }
-    value
-        .to_str()
-        .ok()
-        .and_then(|value| parse_canonical_u64(value).ok())
-        .and_then(|value| usize::try_from(value).ok())
-        == Some(actual)
-}
-
-fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
-    if value.is_empty()
-        || value.len() > 20
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-        || (value.len() > 1 && value.starts_with('0'))
-    {
-        return Err(());
-    }
-    value.parse().map_err(|_| ())
 }
 
 #[derive(Clone, Copy, Debug)]

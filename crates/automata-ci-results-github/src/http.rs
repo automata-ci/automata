@@ -774,7 +774,7 @@ fn parse_timestamp(value: &str) -> Result<u64, ()> {
     u64::try_from(timestamp.unix_timestamp()).map_err(|_| ())
 }
 
-fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
+pub(crate) fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
     if value.is_empty()
         || value.len() > 20
         || !value.bytes().all(|byte| byte.is_ascii_digit())
@@ -791,7 +791,7 @@ fn parse_artifact_id(value: &str) -> Result<ArtifactId, ()> {
         .and_then(|value| ArtifactId::new(value).map_err(|_| ()))
 }
 
-fn content_length_matches(headers: &HeaderMap, actual: usize) -> bool {
+pub(crate) fn content_length_matches(headers: &HeaderMap, actual: usize) -> bool {
     let mut values = headers.get_all(header::CONTENT_LENGTH).iter();
     let Some(value) = values.next() else {
         return false;
