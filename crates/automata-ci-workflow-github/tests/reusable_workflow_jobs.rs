@@ -2,8 +2,7 @@ use crate::support;
 
 use automata_ci_core::{LogicalJobKind, ReusableSecretForwarding, WorkflowEventProvenance};
 use automata_ci_workflow_github::{
-    CompileWorkflowRequest, DiagnosticKind, GithubEventMetadata, GithubWorkflowCompiler,
-    ReusableWorkflowSecrets, ScalarResolution,
+    DiagnosticKind, GithubEventMetadata, ReusableWorkflowSecrets, ScalarResolution,
 };
 
 #[test]
@@ -35,12 +34,7 @@ jobs:
     secrets: inherit
 ";
 
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "source diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("source plan");
 
     let local_job = plan.workflow().jobs()[1].job();
@@ -322,18 +316,11 @@ jobs:
     secrets: inherit
 ";
 
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
-    let report = GithubWorkflowCompiler::new().compile(
-        CompileWorkflowRequest::new(
-            parsed.plan().expect("source plan"),
-            WorkflowEventProvenance::new("github", "push").with_git_ref("refs/heads/main"),
-        )
-        .with_event_metadata(GithubEventMetadata::push(false)),
+    let parsed = support::parse_accepted(source);
+    let report = support::compile(
+        parsed.plan().expect("source plan"),
+        WorkflowEventProvenance::new("github", "push").with_git_ref("refs/heads/main"),
+        Some(GithubEventMetadata::push(false)),
     );
 
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());

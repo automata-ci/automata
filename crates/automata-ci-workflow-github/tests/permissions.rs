@@ -4,9 +4,7 @@ use automata_ci_core::{
     PermissionLevel as PlanPermissionLevel, WorkflowEventProvenance, WorkflowPermissions,
 };
 use automata_ci_github_permissions::GITHUB_WORKFLOW_PERMISSIONS;
-use automata_ci_workflow_github::{
-    CompileWorkflowRequest, GithubWorkflowCompiler, PermissionLevel, Permissions,
-};
+use automata_ci_workflow_github::{PermissionLevel, Permissions};
 
 const JOB: &str = r"
 jobs:
@@ -48,15 +46,15 @@ fn id_token_write_and_none_survive_current_logical_compilation() {
         "    runs-on: linux",
         "    permissions:\n      id-token: none\n    runs-on: linux",
     );
-    let parsed = support::parse(&source);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(&source);
+    let report = support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("synthetic-permissions")
             .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
             .with_git_ref("refs/heads/main"),
-    ));
+        None,
+    );
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
     let logical = report.plan().expect("logical plan").logical();
 
@@ -97,10 +95,11 @@ fn every_catalog_permission_accepts_exactly_its_declared_levels() {
                 parsed.diagnostics()
             );
             if allowed {
-                let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+                let compiled = support::compile(
                     parsed.plan().expect("source plan"),
                     WorkflowEventProvenance::new("github", "workflow_dispatch"),
-                ));
+                    None,
+                );
                 assert!(
                     compiled.is_accepted(),
                     "{}:{level}: {:#?}",
@@ -144,12 +143,12 @@ fn an_unknown_permission_is_rejected_at_its_exact_key_span() {
 #[test]
 fn an_explicit_empty_mapping_is_a_valid_deny_all_request() {
     let source = format!("on: workflow_dispatch\npermissions: {{}}\n{JOB}");
-    let parsed = support::parse(&source);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let compiled = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(&source);
+    let compiled = support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch"),
-    ));
+        None,
+    );
     assert!(compiled.is_accepted(), "{:#?}", compiled.diagnostics());
     let WorkflowPermissions::Mapping(grants) = compiled
         .plan()

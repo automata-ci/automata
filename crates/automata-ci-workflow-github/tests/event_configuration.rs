@@ -2,8 +2,8 @@ use crate::support;
 
 use automata_ci_core::WorkflowEventProvenance;
 use automata_ci_workflow_github::{
-    CompilationDisposition, CompilationReport, CompileWorkflowRequest, GithubEventMetadata,
-    GithubWorkflowCompiler, WorkflowNotSelectedReason,
+    CompilationReport, CompileWorkflowRequest, GithubEventMetadata, GithubWorkflowCompiler,
+    WorkflowNotSelectedReason,
 };
 
 fn compile(
@@ -11,58 +11,15 @@ fn compile(
     event_name: &str,
     metadata: Option<GithubEventMetadata>,
 ) -> CompilationReport {
-    let parsed = support::parse(source);
-    assert!(
-        parsed.is_accepted(),
-        "source diagnostics: {:#?}",
-        parsed.diagnostics()
-    );
-    let request = CompileWorkflowRequest::new(
+    let parsed = support::parse_accepted(source);
+    support::compile(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", event_name)
             .with_delivery_id("synthetic-event-configuration")
             .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
             .with_git_ref("refs/heads/main"),
-    );
-    let request = match metadata {
-        Some(metadata) => request.with_event_metadata(metadata),
-        None => request,
-    };
-    GithubWorkflowCompiler::new().compile(request)
-}
-
-fn assert_rejected_with(report: &CompilationReport, code: &str) {
-    assert!(
-        report.plan().is_none(),
-        "unexpected plan: {:#?}",
-        report.plan()
-    );
-    assert!(
-        report.disposition() == CompilationDisposition::Rejected,
-        "unexpected disposition: {:?}",
-        report.disposition()
-    );
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == code),
-        "missing diagnostic `{code}`: {:#?}",
-        report.diagnostics()
-    );
-}
-
-fn assert_not_selected(report: &CompilationReport, reason: WorkflowNotSelectedReason) {
-    assert_eq!(report.plan(), None);
-    assert_eq!(
-        report.disposition(),
-        CompilationDisposition::NotSelected(reason)
-    );
-    assert!(
-        report.diagnostics().is_empty(),
-        "{:#?}",
-        report.diagnostics()
-    );
+        metadata,
+    )
 }
 
 #[test]
@@ -103,7 +60,7 @@ fn empty_dispatch_and_reusable_workflow_contracts_are_admitted() {
 #[test]
 fn configured_dispatch_inputs_require_verified_payload_evidence() {
     let source = "on:\n  workflow_dispatch:\n    inputs:\n      target:\n        type: string\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(source, "workflow_dispatch", None),
         "github.compile.event_metadata_required",
     );
@@ -127,7 +84,7 @@ fn schedule_admission_requires_the_exact_firing_cron() {
         ));
     assert!(replay.is_accepted(), "{:#?}", replay.diagnostics());
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             "schedule",
@@ -135,11 +92,11 @@ fn schedule_admission_requires_the_exact_firing_cron() {
         ),
         WorkflowNotSelectedReason::ScheduleNotConfigured,
     );
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(source, "schedule", None),
         "github.compile.event_metadata_required",
     );
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(source, "schedule", Some(GithubEventMetadata::push(false))),
         "github.compile.event_metadata_mismatch",
     );
@@ -174,7 +131,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         configured_selected.diagnostics()
     );
 
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             source,
             "merge_group",
@@ -185,7 +142,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         ),
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
-    assert_not_selected(
+    support::assert_not_selected(
         &compile(
             configured,
             "merge_group",
@@ -197,7 +154,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         WorkflowNotSelectedReason::EventFiltersNotMatched,
     );
     let unsupported_type = "on:\n  merge_group:\n    types: [destroyed]\njobs:\n  test:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(
             unsupported_type,
             "merge_group",
@@ -208,11 +165,11 @@ fn merge_group_requires_exact_authenticated_metadata() {
         ),
         "github.compile.unsupported_merge_group_type",
     );
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(source, "merge_group", None),
         "github.compile.event_metadata_required",
     );
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(
             source,
             "merge_group",
@@ -220,7 +177,7 @@ fn merge_group_requires_exact_authenticated_metadata() {
         ),
         "github.compile.event_metadata_mismatch",
     );
-    assert_rejected_with(
+    support::assert_rejected_with(
         &compile(
             source,
             "merge_group",
@@ -270,6 +227,6 @@ fn malformed_or_not_yet_evaluable_event_configuration_is_diagnostic() {
             "github.compile.invalid_workflow_call_configuration",
         ),
     ] {
-        assert_rejected_with(&compile(source, event_name, metadata), code);
+        support::assert_rejected_with(&compile(source, event_name, metadata), code);
     }
 }

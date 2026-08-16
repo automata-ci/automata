@@ -2,8 +2,7 @@ use crate::support;
 
 use automata_ci_core::{WorkflowEventProvenance, WorkflowPlan, WorkflowPlanVersion};
 use automata_ci_workflow_github::{
-    CompilationDisposition, CompileWorkflowRequest, DiagnosticKind, GithubEventMetadata,
-    GithubWorkflowCompiler, WorkflowNotSelectedReason,
+    CompilationDisposition, DiagnosticKind, GithubEventMetadata, WorkflowNotSelectedReason,
 };
 
 fn event(name: &str) -> WorkflowEventProvenance {
@@ -15,18 +14,16 @@ fn event(name: &str) -> WorkflowEventProvenance {
 
 fn compile(source: &str, event_name: &str) -> automata_ci_workflow_github::CompilationReport {
     let parsed = support::parse(source);
-    let request = CompileWorkflowRequest::new(
+    let metadata = match event_name {
+        "push" => Some(GithubEventMetadata::push(false)),
+        "pull_request" => Some(GithubEventMetadata::pull_request("opened", "main")),
+        _ => None,
+    };
+    support::compile(
         parsed.plan().expect("loss-aware source plan"),
         event(event_name),
-    );
-    let request = match event_name {
-        "push" => request.with_event_metadata(GithubEventMetadata::push(false)),
-        "pull_request" => {
-            request.with_event_metadata(GithubEventMetadata::pull_request("opened", "main"))
-        }
-        _ => request,
-    };
-    GithubWorkflowCompiler::new().compile(request)
+        metadata,
+    )
 }
 
 #[test]
@@ -38,13 +35,12 @@ jobs:
     steps:
       - run: echo verify
 ";
-    let parsed = support::parse(source);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
-    let source_plan = parsed.plan().expect("source plan");
-    let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
-        source_plan,
+    let parsed = support::parse_accepted(source);
+    let report = support::compile(
+        parsed.plan().expect("source plan"),
         event("workflow_dispatch"),
-    ));
+        None,
+    );
 
     assert!(report.is_accepted(), "{:#?}", report.diagnostics());
     let plan = report.plan().expect("current plan");

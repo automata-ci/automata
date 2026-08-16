@@ -9,12 +9,9 @@ const WORKFLOW_LF: &str =
 fn bom_and_newline_style_are_retained_but_do_not_change_semantics() {
     let bom = format!("\u{feff}{WORKFLOW_LF}");
     let crlf = WORKFLOW_LF.replace('\n', "\r\n");
-    let plain = support::parse(WORKFLOW_LF);
-    let with_bom = support::parse(&bom);
-    let with_crlf = support::parse(&crlf);
-    for report in [&plain, &with_bom, &with_crlf] {
-        assert!(report.is_accepted(), "{:#?}", report.diagnostics());
-    }
+    let plain = support::parse_accepted(WORKFLOW_LF);
+    let with_bom = support::parse_accepted(&bom);
+    let with_crlf = support::parse_accepted(&crlf);
     assert_eq!(with_bom.plan().expect("BOM plan").source().text(), bom);
     assert_eq!(with_crlf.plan().expect("CRLF plan").source().text(), crlf);
     assert_eq!(workflow_shape(&plain), workflow_shape(&with_bom));
@@ -69,22 +66,15 @@ fn empty_and_trailing_documents_are_rejected_as_document_count_errors() {
 
 #[test]
 fn quoted_and_unquoted_on_keys_decode_identically() {
-    let unquoted = support::parse(WORKFLOW_LF);
-    let quoted = support::parse(&WORKFLOW_LF.replacen("on:", "'on':", 1));
-    assert!(unquoted.is_accepted(), "{:#?}", unquoted.diagnostics());
-    assert!(quoted.is_accepted(), "{:#?}", quoted.diagnostics());
+    let unquoted = support::parse_accepted(WORKFLOW_LF);
+    let quoted = support::parse_accepted(&WORKFLOW_LF.replacen("on:", "'on':", 1));
     assert_eq!(workflow_shape(&unquoted), workflow_shape(&quoted));
 }
 
 #[test]
 fn yaml_1_2_does_not_resolve_on_off_yes_or_no_as_booleans() {
     let source = "on: push\nenv:\n  ON_VALUE: on\n  OFF_VALUE: off\n  YES_VALUE: yes\n  NO_VALUE: no\n  TRUE_VALUE: true\n  QUOTED_TRUE: 'true'\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo test\n";
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("plan");
     let root = plan.document().root().as_mapping().expect("mapping");
     let on_key = root[0].key().as_scalar().expect("on key");
@@ -118,12 +108,7 @@ fn yaml_1_2_does_not_resolve_on_off_yes_or_no_as_booleans() {
 #[test]
 fn yaml_1_2_numeric_resolution_rejects_underscores_and_signed_nondecimal_integers() {
     let source = "on: push\nenv:\n  UNDERSCORED_INTEGER: 1_000\n  UNDERSCORED_FLOAT: 1.0_0\n  SIGNED_HEX: -0x10\n  INTEGER: 1000\n  HEX: 0x10\n  FLOAT: .5\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo test\n";
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
 
     let env = mapping_value(report.plan().expect("plan").document().root(), "env");
     let resolutions = env
@@ -157,12 +142,7 @@ fn original_text_is_an_exact_round_trip_artifact() {
 #[test]
 fn spans_use_utf8_byte_offsets_and_one_based_display_locations() {
     let source = "name: 'café'\non: push\njobs:\n  build:\n    runs-on: linux\n    steps:\n      - run: echo test\n";
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("plan");
     let name = plan.document().root().as_mapping().expect("mapping")[0].value();
     assert_eq!(plan.source().slice(name.span()), Some("'café'"));

@@ -2,9 +2,8 @@ use crate::support;
 
 use automata_ci_core::WorkflowEventProvenance;
 use automata_ci_workflow_github::{
-    BooleanValue, CompileWorkflowRequest, DiagnosticKind, GithubEventMetadata,
-    GithubWorkflowCompiler, MatrixConfigurations, MatrixDimensionValues, MatrixValue,
-    ScalarResolution, StrategyMatrix,
+    BooleanValue, DiagnosticKind, GithubEventMetadata, MatrixConfigurations, MatrixDimensionValues,
+    MatrixValue, ScalarResolution, StrategyMatrix,
 };
 
 #[test]
@@ -34,12 +33,7 @@ jobs:
       - run: echo test
 ";
 
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "source diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("source plan");
     let strategy = plan.workflow().jobs()[0]
         .job()
@@ -135,12 +129,7 @@ jobs:
       - run: echo mixed
 ";
 
-    let report = support::parse(source);
-    assert!(
-        report.is_accepted(),
-        "source diagnostics: {:#?}",
-        report.diagnostics()
-    );
+    let report = support::parse_accepted(source);
     let plan = report.plan().expect("source plan");
     assert!(matches!(
         plan.workflow().jobs()[0]
@@ -369,10 +358,11 @@ fn compiler_fails_closed_when_malformed_strategy_was_retained() {
         let plan = parsed.plan().expect("loss-aware source plan");
         assert!(plan.workflow().jobs()[0].job().strategy().is_none());
 
-        let report = GithubWorkflowCompiler::new().compile(CompileWorkflowRequest::new(
+        let report = support::compile(
             plan,
             WorkflowEventProvenance::new("github", "workflow_dispatch"),
-        ));
+            None,
+        );
         assert!(report.plan().is_none(), "strategy value {value}");
         let diagnostics = report
             .diagnostics()
@@ -419,18 +409,11 @@ jobs:
     ];
 
     for source in cases {
-        let parsed = support::parse(source);
-        assert!(
-            parsed.is_accepted(),
-            "source diagnostics: {:#?}",
-            parsed.diagnostics()
-        );
-        let report = GithubWorkflowCompiler::new().compile(
-            CompileWorkflowRequest::new(
-                parsed.plan().expect("source plan"),
-                WorkflowEventProvenance::new("github", "push").with_git_ref("refs/heads/main"),
-            )
-            .with_event_metadata(GithubEventMetadata::push(false)),
+        let parsed = support::parse_accepted(source);
+        let report = support::compile(
+            parsed.plan().expect("source plan"),
+            WorkflowEventProvenance::new("github", "push").with_git_ref("refs/heads/main"),
+            Some(GithubEventMetadata::push(false)),
         );
         assert!(report.is_accepted(), "{:#?}", report.diagnostics());
         assert!(

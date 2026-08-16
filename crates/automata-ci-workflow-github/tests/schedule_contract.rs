@@ -90,8 +90,7 @@ fn timezone_evaluation_skips_gaps_and_retains_both_fold_instants() {
 #[test]
 fn extraction_preserves_order_and_defaults_timezone_to_utc() {
     let source = "on:\n  schedule:\n    - cron: '15 4 * * MON-FRI'\n    - cron: '45 16 * * 2,4'\n      timezone: Europe/Sofia\njobs:\n  verify:\n    runs-on: linux\n    steps:\n      - run: true\n";
-    let parsed = support::parse(source);
-    assert!(parsed.is_accepted(), "{:#?}", parsed.diagnostics());
+    let parsed = support::parse_accepted(source);
     let entries = extract_github_schedule_entries(parsed.plan().expect("source plan"))
         .expect("valid schedules");
     assert_eq!(entries.len(), 2);

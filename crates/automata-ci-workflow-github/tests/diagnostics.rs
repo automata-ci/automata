@@ -56,8 +56,7 @@ fn unknown_fields_are_preserved_and_rejected_as_unsupported() {
 #[test]
 fn anchors_and_aliases_retain_original_evidence_and_decode_from_an_expanded_tree() {
     let source = include_str!("fixtures/aliases.yml");
-    let report = support::parse(source);
-    assert!(report.is_accepted(), "{:#?}", report.diagnostics());
+    let report = support::parse_accepted(source);
 
     let plan = report.plan().expect("plan");
     let jobs = plan.document().root().as_mapping().expect("root")[3]
