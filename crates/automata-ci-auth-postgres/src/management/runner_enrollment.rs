@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use super::{
     AuditDescriptor, AuthorizedActor, MutationAuthorization, authorize_mutation,
-    closed_authorization, commit, database_time_milliseconds, finish_applied, map_database_error,
+    closed_authorization, commit, finish_applied, map_database_error,
 };
 
 const ACTION_TOKEN_CREATE: &str = "runner.enrollment_token.create";
@@ -532,6 +532,14 @@ fn valid_origin_text(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+async fn enrollment_database_time_milliseconds(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT")
+        .fetch_one(&mut **transaction)
+        .await
+}
+
 /// Result of atomically consuming a token and registering its runner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunnerEnrollmentConsumeOutcome {
@@ -748,7 +756,7 @@ impl PostgresRunnerEnrollmentRepository {
         }
         let mut transaction = self.pool.begin().await.map_err(map_database_error)?;
         let row = load_enrollment(&mut transaction, &request.token_sha256, true).await?;
-        let now_ms = database_time_milliseconds(&mut transaction)
+        let now_ms = enrollment_database_time_milliseconds(&mut transaction)
             .await
             .map_err(map_database_error)?;
         commit(transaction).await?;
@@ -808,7 +816,7 @@ impl PostgresRunnerEnrollmentRepository {
             commit(transaction).await?;
             return Ok(RunnerEnrollmentConsumeOutcome::Rejected);
         };
-        let replay_time_ms = database_time_milliseconds(&mut transaction)
+        let replay_time_ms = enrollment_database_time_milliseconds(&mut transaction)
             .await
             .map_err(map_database_error)?;
         if let Some(response) = row.replay(
@@ -828,7 +836,7 @@ impl PostgresRunnerEnrollmentRepository {
             .execute(&mut *transaction)
             .await
             .map_err(map_database_error)?;
-        let now_ms = database_time_milliseconds(&mut transaction)
+        let now_ms = enrollment_database_time_milliseconds(&mut transaction)
             .await
             .map_err(map_database_error)?;
         if row.expires_at_ms <= now_ms {
@@ -902,7 +910,7 @@ impl PostgresRunnerEnrollmentRepository {
                 transaction.rollback().await.map_err(map_database_error)?;
                 return Ok(RunnerEnrollmentConsumeOutcome::Rejected);
             }
-            admitted_at_ms = database_time_milliseconds(&mut transaction)
+            admitted_at_ms = enrollment_database_time_milliseconds(&mut transaction)
                 .await
                 .map_err(map_database_error)?;
             if !windows_admission_is_current(admission, admitted_at_ms) {
@@ -1590,7 +1598,7 @@ async fn try_insert_enrollment(
         .execute(&mut **transaction)
         .await
         .map_err(map_database_error)?;
-    let issued_at_ms = database_time_milliseconds(transaction)
+    let issued_at_ms = enrollment_database_time_milliseconds(transaction)
         .await
         .map_err(map_database_error)?;
     let group_id = ensure_runner_group(
