@@ -615,6 +615,24 @@ pub enum GuestResponse {
     },
 }
 
+impl GuestResponse {
+    /// Returns the protocol version carried by this response.
+    #[must_use]
+    pub const fn protocol(&self) -> u16 {
+        match self {
+            Self::Ready { protocol }
+            | Self::Hello { protocol, .. }
+            | Self::Configured { protocol }
+            | Self::Exec { protocol, .. }
+            | Self::WriteFile { protocol }
+            | Self::AtomicCommitFile { protocol, .. }
+            | Self::ReadFile { protocol, .. }
+            | Self::ReadOptionalFile { protocol, .. }
+            | Self::Rejected { protocol, .. } => *protocol,
+        }
+    }
+}
+
 impl fmt::Debug for GuestResponse {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

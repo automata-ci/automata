@@ -161,9 +161,9 @@ impl KubernetesExecutionEndpoint {
         if cancellation.disposition().requires_termination() {
             return Err(execution_error(ExecutionErrorKind::Cancelled, stage));
         }
-        let response = decode_frame(&response)
+        let response: GuestResponse = decode_frame(&response)
             .map_err(|_| execution_error(ExecutionErrorKind::BackendRejected, stage))?;
-        if response_protocol(&response) != GUEST_PROTOCOL_VERSION {
+        if response.protocol() != GUEST_PROTOCOL_VERSION {
             return Err(execution_error(ExecutionErrorKind::BackendRejected, stage));
         }
         Ok(response)
@@ -396,20 +396,6 @@ fn copy_from_result(response: GuestResponse, byte_limit: usize) -> Result<Vec<u8
             Ok(content)
         }
         response => Err(response_error(&response, ExecutionStage::CopyFrom)),
-    }
-}
-
-const fn response_protocol(response: &GuestResponse) -> u16 {
-    match response {
-        GuestResponse::Ready { protocol }
-        | GuestResponse::Hello { protocol, .. }
-        | GuestResponse::Configured { protocol }
-        | GuestResponse::Exec { protocol, .. }
-        | GuestResponse::WriteFile { protocol }
-        | GuestResponse::AtomicCommitFile { protocol, .. }
-        | GuestResponse::ReadFile { protocol, .. }
-        | GuestResponse::ReadOptionalFile { protocol, .. }
-        | GuestResponse::Rejected { protocol, .. } => *protocol,
     }
 }
 
