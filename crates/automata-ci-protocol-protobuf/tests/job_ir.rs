@@ -6,11 +6,11 @@ use automata_ci_core::{
     JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant,
     JobPermissionRequest, JobSource, Lease, LeaseId, OperationId, OutputSensitivity,
     PermissionLevel, RunId, RunIdAlias, RunValueTemplates, RunnerId, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SemanticStep,
-    Sha256Digest, ShellTemplate, StepId, StepIr, TrustActorEvidence, TrustActorKind,
-    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
-    TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis, ValueSource,
-    ValueTemplate, ValueTemplateSegment, WorkflowId,
+    RunnerSessionId, RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate,
+    SandboxAuthorizations, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
+    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
+    UnixMillis, ValueSource, ValueTemplate, ValueTemplateSegment, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandSequence, JobRuntimeAuthorities, LeaseOffer, MessageValidationError, ProtocolLimits,
@@ -487,7 +487,8 @@ fn credential_free_offer_round_trips_without_pre_accept_authority_material() {
         UnixMillis::new(10_000),
     )
     .expect("lease");
-    JobRuntimeAuthorities::new(Vec::new(), &job, &lease).expect("empty authority bundle");
+    JobRuntimeAuthorities::new(Vec::new(), SandboxAuthorizations::default(), &job, &lease)
+        .expect("empty authority bundle");
     let message = ServerToRunner::LeaseOffer(Box::new(LeaseOffer::new(
         ServerCommandHeader::new(
             SUPPORTED_PROTOCOL_RANGE.max(),

@@ -92,8 +92,8 @@ cores, 54 GiB, and 13,824 tasks. Inventory schema 3 admits a host only with
 slots 1, 2, and 3.
 
 Authenticated Handshake/Sync already negotiates the exact current runner
-protocol v2 and JobIR v1 contract before lease traffic; the supported protocol
-range is currently min=max v2. Rotation and lifecycle update channels remain
+protocol v3 and JobIR v1 contract before lease traffic; the supported protocol
+range is currently min=max v3. Rotation and lifecycle update channels remain
 separate work; version skew is unsupported.
 
 Tasks:
@@ -108,7 +108,7 @@ Tasks:
 - [x] Remove the privileged static fleet path without a compatibility mode and
   document enrollment for the exact three-process reference deployment.
 - [ ] Add disable, drain, replace, delete, and audit operations.
-- [x] Negotiate the exact protocol v2 and JobIR v1 range during authenticated
+- [x] Negotiate the exact protocol v3 and JobIR v1 range during authenticated
   Handshake/Sync before accepting lease traffic.
 - [ ] Keep enrollment and updates pinned to the exact current protocol and
   block mixed-version automatic replacement.

@@ -976,6 +976,7 @@ fn validate_spec(
         && spec.resources().memory_bytes() >= template.minimum_memory_bytes
         && spec.resources().pids() == template.process_limit
         && spec.services().is_empty()
+        && spec.sandbox_authorizations().as_slice().is_empty()
         && spec.has_coherent_resource_contract()
         && !spec
             .profile()
@@ -1797,11 +1798,22 @@ fn uncertain(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ApfsContainer, ApfsInventory, ApfsPhysicalStore, ApfsVolume, WholeDiskInfo,
-        normalized_volume_uuid, select_dedicated_apfs_storage, supported_product_version,
-        valid_helper_code_requirement, whole_disk_is_physical,
+    use std::{path::PathBuf, time::Duration};
+
+    use automata_ci_execution::{
+        EnvironmentProfile, EnvironmentProfileId, ExecutionEnvironment, NetworkPolicy, OperationId,
+        ProviderErrorKind, ProviderStage, ResourceLimits, RootFilesystemPolicy, RunnerId,
+        SandboxAuthorization, SandboxAuthorizationName, SandboxAuthorizations, SandboxCustody,
+        SandboxEnvironment, SandboxGeneration, SandboxSpec, Sha256Digest, TargetPath,
     };
+
+    use super::{
+        ApfsContainer, ApfsInventory, ApfsPhysicalStore, ApfsVolume,
+        MacosVirtualizationProviderOptions, WholeDiskInfo, normalized_volume_uuid,
+        select_dedicated_apfs_storage, supported_product_version, valid_helper_code_requirement,
+        validate_spec, whole_disk_is_physical,
+    };
+    use crate::template::VerifiedTemplate;
 
     #[test]
     fn virtualization_provider_requires_macos_15_or_newer() {
@@ -1909,5 +1921,79 @@ mod tests {
         let mut system_image = info("Physical", "USB", false);
         system_image.system_image = true;
         assert!(!whole_disk_is_physical(&system_image));
+    }
+
+    #[test]
+    fn macos_provider_rejects_sandbox_authorizations_observably() {
+        let profile_id =
+            EnvironmentProfileId::new("automata.dev/macos-15-arm64-vm-v1").expect("profile ID");
+        let manifest_digest = Sha256Digest::from_bytes([0x22; 32]);
+        let profile =
+            EnvironmentProfile::new(profile_id.clone(), Sha256Digest::from_bytes([0x33; 32]));
+        let profile_workspace = TargetPath::posix("/Users/runner/work").expect("profile workspace");
+        let environment = SandboxEnvironment::virtual_machine(
+            profile,
+            manifest_digest,
+            profile_workspace,
+            ExecutionEnvironment::empty(),
+        )
+        .expect("VM environment");
+        let spec = SandboxSpec::new(
+            OperationId::new(),
+            SandboxGeneration::new(1).expect("generation"),
+            SandboxCustody::ProfileAdmission {
+                runner_id: RunnerId::new(),
+            },
+            environment,
+            TargetPath::posix("/Users/runner/work/repository").expect("workspace"),
+            NetworkPolicy::Disabled,
+            RootFilesystemPolicy::Writable,
+            ResourceLimits::new(8 * 1024 * 1024 * 1024, 4_000, 512).expect("resources"),
+        )
+        .with_scratch(TargetPath::posix("/Users/runner/scratch").expect("scratch"));
+        let template = VerifiedTemplate {
+            profile_id,
+            manifest_digest,
+            macos_version: "15.7".to_owned(),
+            macos_build: "24G222".to_owned(),
+            disk_image: PathBuf::from("/Library/Automata/template.img"),
+            auxiliary_storage: PathBuf::from("/Library/Automata/template.aux"),
+            hardware_model_base64: "AA==".to_owned(),
+            guest_agent_digest: Sha256Digest::from_bytes([0x44; 32]),
+            guest_port: 1_024,
+            job_uid: 502,
+            job_gid: 502,
+            process_limit: 512,
+            minimum_cpu_count: 2,
+            minimum_memory_bytes: 4 * 1024 * 1024 * 1024,
+        };
+        let options = MacosVirtualizationProviderOptions::new(
+            "/Volumes/AutomataVM/state",
+            "/Library/Automata/bin/automata-macos-vm-helper",
+            Sha256Digest::from_bytes([0x11; 32]),
+            "identifier \"dev.automata.macos-vm-helper\" and anchor apple generic and certificate leaf[subject.OU] = \"ABCDEFGHIJ\"".to_owned(),
+            "/Library/Automata/templates/macos-15-arm64-v1/manifest.json",
+            manifest_digest,
+            "01234567-89AB-CDEF-0123-456789ABCDEF",
+            256 * 1024 * 1024 * 1024,
+            Duration::from_mins(5),
+            Duration::from_secs(10),
+        )
+        .expect("provider options");
+
+        validate_spec(&options, &template, &spec).expect("empty authorization set is valid");
+        let authorization = SandboxAuthorization::new(
+            SandboxAuthorizationName::new("test-authority").expect("authorization name"),
+            1,
+            vec![0x5a],
+        )
+        .expect("authorization");
+        let authorized = spec.with_sandbox_authorizations(
+            SandboxAuthorizations::new(vec![authorization]).expect("authorization set"),
+        );
+        let error = validate_spec(&options, &template, &authorized)
+            .expect_err("macOS must reject unsupported sandbox authorization");
+        assert_eq!(error.kind(), ProviderErrorKind::InvalidConfiguration);
+        assert_eq!(error.stage(), ProviderStage::Validate);
     }
 }

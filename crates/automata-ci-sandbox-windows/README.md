@@ -22,6 +22,14 @@ The provider accepts only `SandboxLaunch::WindowsHyperVContainer` and requires:
 - one provider-owned container with immutable ownership, generation, resource,
   image, entrypoint, and policy labels.
 
+Job-custody creation also requires exactly one `windows-hyperv` sandbox
+authorization at the current broker-grant payload schema and an injected
+restricted-broker consumer. That consumer canonical-decodes, validates, and
+atomically spends the signed grant against stable lease-fenced sandbox policy
+before the provider performs any create mutation. Direct provider construction
+remains valid for profile admission only; job creation without the consumer
+fails closed.
+
 An absolute container CLI executable is pinned by SHA-256, opened without
 delete/write sharing, and invoked with a cleared environment and an empty,
 reparse-safe provider-owned CLI configuration directory that is revalidated

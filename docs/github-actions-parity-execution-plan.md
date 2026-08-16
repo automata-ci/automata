@@ -12,7 +12,7 @@ current support. The [implementation plan](implementation-plan.md) owns release
 gates. This page is an execution aid: unchecked tasks are planned work, not
 availability claims.
 
-The refreshed greenfield baseline uses runner protocol v2, message schema v1,
+The refreshed greenfield baseline uses runner protocol v3, message schema v1,
 JobIR schema v1, runner-requirements schema v1, and a frozen additive
 PostgreSQL migration lineage. The lineage is gap-free, checksum-verified, and
 extended only through a new migration. The baseline also contains a real

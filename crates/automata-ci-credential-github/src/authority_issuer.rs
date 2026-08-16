@@ -431,8 +431,13 @@ impl GithubRepositoryRuntimeAuthorityIssuer {
             expires_at,
         )
         .map_err(|_| ControlPortError::Corrupt)?;
-        JobRuntimeAuthorities::new(vec![authority], request.job(), request.lease())
-            .map_err(|_| ControlPortError::Corrupt)
+        JobRuntimeAuthorities::new(
+            vec![authority],
+            automata_ci_core::SandboxAuthorizations::empty(),
+            request.job(),
+            request.lease(),
+        )
+        .map_err(|_| ControlPortError::Corrupt)
     }
 
     async fn quarantine(

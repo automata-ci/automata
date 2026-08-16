@@ -15,7 +15,9 @@ use crate::scheduling::{
 use automata_ci_core::{
     JobIrVersion, Lease, RunnerCapabilities, RunnerGroup, RunnerLabel, UnixMillis,
 };
-use automata_ci_protocol::{LeaseRequest, ProtocolVersion, RunnerSlotOrdinal};
+use automata_ci_protocol::{
+    LeaseAuthorityPollContributions, LeaseRequest, ProtocolVersion, RunnerSlotOrdinal,
+};
 use automata_ci_store::{JobIrMetadata, RoutingDocument, RunnerSessionFence, StableRunnerSlot};
 
 use super::{
@@ -79,23 +81,26 @@ impl AuthenticatedRunnerSession {
 pub struct ClaimedLeasePoll {
     lease: Lease,
     slot: RunnerSlotOrdinal,
-    job_ir: JobIrMetadata,
+    job_ir: Box<JobIrMetadata>,
+    authority_contributions: LeaseAuthorityPollContributions,
     replayed: bool,
 }
 
 impl ClaimedLeasePoll {
     /// Reconstitutes one exact claimed poll from a trusted scheduling adapter.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         lease: Lease,
         slot: RunnerSlotOrdinal,
         job_ir: JobIrMetadata,
+        authority_contributions: LeaseAuthorityPollContributions,
         replayed: bool,
     ) -> Self {
         Self {
             lease,
             slot,
-            job_ir,
+            job_ir: Box::new(job_ir),
+            authority_contributions,
             replayed,
         }
     }
@@ -116,6 +121,12 @@ impl ClaimedLeasePoll {
     #[must_use]
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.job_ir
+    }
+
+    /// Returns the exact bounded authority contributions admitted with this claim.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        &self.authority_contributions
     }
 
     /// Reports whether a durable terminal receipt was replayed.
@@ -258,10 +269,10 @@ impl<'a> LeasePollService<'a> {
 
         if let Some(receipt) = self
             .repository
-            .lookup_lease_request(poll.request_key)
+            .lookup_lease_request(poll.request_key, &poll.authority_contributions)
             .await?
         {
-            return Self::receipt_outcome(poll, &receipt, None, true);
+            return Self::receipt_outcome(&poll, &receipt, None, true);
         }
 
         let observed_at = self.clock.now();
@@ -269,7 +280,7 @@ impl<'a> LeasePollService<'a> {
             .repository
             .routing_for_session(poll.request_key.session())
             .await?;
-        ensure_routing_context(&routing, poll)?;
+        ensure_routing_context(&routing, &poll)?;
         let registered = decode_capabilities(
             routing.registered_capabilities(),
             CapabilityDocument::Registered,
@@ -321,7 +332,7 @@ impl<'a> LeasePollService<'a> {
         match self.scheduler.decide(input) {
             PlacementDecision::Place(placement) => {
                 self.claim(
-                    poll,
+                    &poll,
                     availability == RunnerSlotAvailability::Available
                         && slot_is_effectively_available,
                     observed_at,
@@ -339,11 +350,12 @@ impl<'a> LeasePollService<'a> {
                             poll.request_key,
                             observed_at,
                             page.no_work_advance(),
+                            poll.authority_contributions.clone(),
                         )
                         .map_err(LeasePollError::InvalidClaim)?,
                     )
                     .await?;
-                Self::receipt_outcome(poll, &receipt, None, false)
+                Self::receipt_outcome(&poll, &receipt, None, false)
             }
         }
     }
@@ -355,9 +367,6 @@ impl<'a> LeasePollService<'a> {
     ) -> Result<Vec<RunnableCandidate>, LeasePollError> {
         let mut eligible = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            if !candidate.windows_placement_authorized {
-                continue;
-            }
             let disposition = if let Some(gate) = self.attempt_gate {
                 gate.evaluate(candidate.candidate.attempt_id(), observed_at)
                     .await?
@@ -373,7 +382,7 @@ impl<'a> LeasePollService<'a> {
 
     async fn claim(
         &self,
-        poll: ValidatedLeasePoll,
+        poll: &ValidatedLeasePoll,
         slot_is_available: bool,
         observed_at: UnixMillis,
         placement: Placement,
@@ -421,6 +430,7 @@ impl<'a> LeasePollService<'a> {
             expires_at,
             page.claim_advance(placement.attempt_id())
                 .map_err(LeasePollError::InvalidRunnableScan)?,
+            poll.authority_contributions.clone(),
         )
         .map_err(LeasePollError::InvalidClaim)?;
         let receipt = self.repository.try_claim(claim).await?;
@@ -443,13 +453,17 @@ impl<'a> LeasePollService<'a> {
     }
 
     fn receipt_outcome(
-        poll: ValidatedLeasePoll,
+        poll: &ValidatedLeasePoll,
         receipt: &TryClaimReceipt,
         selected: Option<(automata_ci_core::AttemptId, automata_ci_core::JobId)>,
         found_before_scheduling: bool,
     ) -> Result<LeasePollOutcome, LeasePollError> {
         if receipt.request_key() != poll.request_key
-            || receipt.request_digest() != poll.request_key.request_digest()
+            || receipt.request_digest()
+                != super::operation::lease_poll_decision_request_digest(
+                    poll.request_key,
+                    &poll.authority_contributions,
+                )
         {
             return Err(LeasePollInvariant::ReceiptRequestMismatch.into());
         }
@@ -473,12 +487,16 @@ impl<'a> LeasePollService<'a> {
                 if claimed.job_ir().version() != poll.job_ir_version {
                     return Err(LeasePollInvariant::ReceiptJobIrVersionMismatch.into());
                 }
+                if claimed.authority_contributions() != &poll.authority_contributions {
+                    return Err(LeasePollInvariant::ReceiptRequestMismatch.into());
+                }
                 let slot = RunnerSlotOrdinal::new(request_key.slot().ordinal())
                     .map_err(|_| LeasePollInvariant::ReceiptAssignmentMismatch)?;
                 Ok(LeasePollOutcome::Claimed(ClaimedLeasePoll::new(
                     claimed.lease().clone(),
                     slot,
                     claimed.job_ir().clone(),
+                    claimed.authority_contributions().clone(),
                     replayed,
                 )))
             }
@@ -546,10 +564,11 @@ const fn observe_failure(error: &LeasePollError) -> LeasePollFailure {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ValidatedLeasePoll {
     request_key: LeaseRequestKey,
     job_ir_version: JobIrVersion,
+    authority_contributions: LeaseAuthorityPollContributions,
 }
 
 impl ValidatedLeasePoll {
@@ -590,18 +609,18 @@ impl ValidatedLeasePoll {
         Ok(Self {
             request_key,
             job_ir_version: authenticated.job_ir_version,
+            authority_contributions: request.authority_contributions().clone(),
         })
     }
 }
 
 struct ApplicationCandidate {
     candidate: RunnableCandidate,
-    windows_placement_authorized: bool,
 }
 
 fn ensure_routing_context(
     routing: &RunnerRoutingSnapshot,
-    expected: ValidatedLeasePoll,
+    expected: &ValidatedLeasePoll,
 ) -> Result<(), LeasePollError> {
     if routing.fence() != expected.request_key.session() {
         return Err(LeasePollInvariant::RoutingFenceMismatch.into());
@@ -706,6 +725,5 @@ fn candidate_from_durable(
             durable.queued_at(),
             routing,
         ),
-        windows_placement_authorized: durable.windows_placement_is_authorizable(),
     })
 }

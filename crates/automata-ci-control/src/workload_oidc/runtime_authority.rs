@@ -417,9 +417,14 @@ impl OptionalRuntimeAuthorityIssuer for WorkloadOidcRuntimeAuthorityIssuer {
             expires_at,
         )
         .map_err(|_| ControlPortError::Corrupt)?;
-        JobRuntimeAuthorities::new(vec![authority], job, lease)
-            .map(Some)
-            .map_err(|_| ControlPortError::Corrupt)
+        JobRuntimeAuthorities::new(
+            vec![authority],
+            automata_ci_core::SandboxAuthorizations::empty(),
+            job,
+            lease,
+        )
+        .map(Some)
+        .map_err(|_| ControlPortError::Corrupt)
     }
 }
 

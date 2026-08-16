@@ -109,7 +109,7 @@ URLs use separate protocol domains and derived keys. Every metadata mutation
 rechecks the attempt lifecycle and fence.
 
 `RunnerResultsRuntimeAuthorityIssuer` creates the JWT only after the runner
-durably accepts the exact lease offer. Runner protocol v2 delivers the
+durably accepts the exact lease offer. Runner protocol v3 delivers the
 per-attempt authority bundle through the separate post-accept exchange; the
 lease offer and its persisted outbox payload contain no credential values. The
 runner protects the bundle before acknowledging custody and injects it into

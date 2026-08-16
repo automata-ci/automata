@@ -6,7 +6,8 @@ use automata_ci_core::{
 };
 use automata_ci_execution::MAX_ENDPOINT_OPERATIONS_PER_JOB;
 use automata_ci_protocol::{
-    CommandCursor, CommandSequence, LeaseRejectionReason, ProtocolVersion, RunnerSlotOrdinal,
+    CommandCursor, CommandSequence, LeaseAuthorityPollReceipt, LeaseRejectionReason,
+    MAX_LEASE_AUTHORITY_POLL_CONTRIBUTIONS, ProtocolVersion, RunnerSlotOrdinal,
     SUPPORTED_PROTOCOL_RANGE,
 };
 use automata_ci_runner_spool::DurableContentRef;
@@ -15,11 +16,12 @@ use serde::{Deserialize, Serialize};
 use super::{
     CancellationRecord, CommandDisposition, CommandTombstone, DiskSchemaVersion, DurableCommand,
     EndpointOperation, EndpointOperationState, EndpointResultContentRef, LeaseOfferRecord,
-    LeaseRejectionRecord, LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement,
-    LogSegmentPublication, OrphanAbandonmentReason, OrphanAuthorityGrant, OrphanDelivery,
-    OrphanRecord, OutboundOperationCursor, OutboundOperationSequence, ProviderFailureOutcome,
-    ProviderOperation, ProviderOperationKind, ProviderOperationOutcome,
-    RuntimeAuthorityDeliveryRecord, SandboxIdentity, TerminalResultRecord,
+    LeasePollCommandRecord, LeaseRejectionRecord, LogDeliveryCursor, LogSegment,
+    LogSegmentAcknowledgement, LogSegmentPublication, OrphanAbandonmentReason,
+    OrphanAuthorityGrant, OrphanDelivery, OrphanRecord, OutboundOperationCursor,
+    OutboundOperationSequence, ProviderFailureOutcome, ProviderOperation, ProviderOperationKind,
+    ProviderOperationOutcome, RuntimeAuthorityDeliveryRecord, SandboxIdentity,
+    TerminalResultRecord,
 };
 use crate::{
     JournalInvariantError, MAX_COMMAND_TOMBSTONES, MAX_ENDPOINT_CONTENT_BYTES_PER_SLOT,
@@ -165,12 +167,13 @@ impl SessionSnapshot {
 
 /// Crash-durable identity of the exact lease request currently owned by one
 /// stable runner slot.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeasePollCheckpoint {
     slot: RunnerSlotOrdinal,
     current_operation_id: OperationId,
     acknowledges_operation_id: Option<OperationId>,
+    pending_authority_receipts: Vec<LeaseAuthorityPollReceipt>,
 }
 
 impl LeasePollCheckpoint {
@@ -179,6 +182,7 @@ impl LeasePollCheckpoint {
             slot,
             current_operation_id,
             acknowledges_operation_id: None,
+            pending_authority_receipts: Vec::new(),
         }
     }
 
@@ -190,14 +194,51 @@ impl LeasePollCheckpoint {
 
     /// Returns the exact request operation that recovery must replay.
     #[must_use]
-    pub const fn current_operation_id(self) -> OperationId {
+    pub const fn current_operation_id(&self) -> OperationId {
         self.current_operation_id
     }
 
     /// Returns the predecessor acknowledged by the current request, if any.
     #[must_use]
-    pub const fn acknowledges_operation_id(self) -> Option<OperationId> {
+    pub const fn acknowledges_operation_id(&self) -> Option<OperationId> {
         self.acknowledges_operation_id
+    }
+
+    /// Returns accepted contribution identities awaiting durable source acknowledgement.
+    #[must_use]
+    pub fn pending_authority_receipts(&self) -> &[LeaseAuthorityPollReceipt] {
+        &self.pending_authority_receipts
+    }
+}
+
+/// One complete lease-poll result prepared for a single atomic journal commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LeasePollCompletion {
+    poll_slot: RunnerSlotOrdinal,
+    expected_current: OperationId,
+    successor_operation_id: OperationId,
+    pending_authority_receipts: Vec<LeaseAuthorityPollReceipt>,
+    command: LeasePollCommandRecord,
+}
+
+impl LeasePollCompletion {
+    /// Binds a nested command effect and accepted authority receipts to the
+    /// exact carrier poll and its proposed successor.
+    #[must_use]
+    pub fn new(
+        poll_slot: RunnerSlotOrdinal,
+        expected_current: OperationId,
+        successor_operation_id: OperationId,
+        pending_authority_receipts: Vec<LeaseAuthorityPollReceipt>,
+        command: LeasePollCommandRecord,
+    ) -> Self {
+        Self {
+            poll_slot,
+            expected_current,
+            successor_operation_id,
+            pending_authority_receipts,
+            command,
+        }
     }
 }
 
@@ -704,6 +745,7 @@ fn validate_session(session: &SessionSnapshot) -> Result<(), JournalInvariantErr
         {
             return Err(JournalInvariantError::DecodedStateInvalid);
         }
+        validate_authority_receipts(checkpoint.pending_authority_receipts())?;
         previous_slot = Some(checkpoint.slot());
     }
     Ok(())
@@ -1034,13 +1076,63 @@ impl StoredJournal {
         }
     }
 
-    pub(crate) fn advance_lease_poll(
+    pub(crate) fn complete_lease_poll(
+        &mut self,
+        session_id: RunnerSessionId,
+        completion: LeasePollCompletion,
+    ) -> Result<bool, JournalInvariantError> {
+        let LeasePollCompletion {
+            poll_slot,
+            expected_current,
+            successor_operation_id,
+            pending_authority_receipts,
+            command,
+        } = completion;
+        validate_authority_receipts(&pending_authority_receipts)?;
+        let checkpoint_changed = self.advance_lease_poll(
+            session_id,
+            poll_slot,
+            expected_current,
+            successor_operation_id,
+            pending_authority_receipts,
+        )?;
+        let command_changed = match command {
+            LeasePollCommandRecord::NoCommand => false,
+            LeasePollCommandRecord::Recorded {
+                command,
+                disposition,
+            } => {
+                self.verify_recorded_command(session_id, command, disposition)?;
+                false
+            }
+            LeasePollCommandRecord::Ignored { command, reason } => self
+                .record_command_disposition(
+                    session_id,
+                    command,
+                    CommandDisposition::Ignored(reason),
+                )?,
+            LeasePollCommandRecord::LeaseOffer(offer) => self.record_offer(session_id, *offer)?,
+            LeasePollCommandRecord::Cancellation {
+                slot,
+                guard,
+                cancellation,
+            } => self.record_cancellation(session_id, slot, guard, cancellation)?,
+        };
+        if !checkpoint_changed && command_changed {
+            return Err(JournalInvariantError::CommandReplayConflict);
+        }
+        Ok(command_changed || checkpoint_changed)
+    }
+
+    fn advance_lease_poll(
         &mut self,
         session_id: RunnerSessionId,
         slot: RunnerSlotOrdinal,
         expected_current: OperationId,
         successor_operation_id: OperationId,
+        pending_authority_receipts: Vec<LeaseAuthorityPollReceipt>,
     ) -> Result<bool, JournalInvariantError> {
+        validate_authority_receipts(&pending_authority_receipts)?;
         self.require_session(session_id)?;
         let session = self
             .session
@@ -1050,10 +1142,16 @@ impl StoredJournal {
             .lease_poll_checkpoints
             .binary_search_by_key(&slot, LeasePollCheckpoint::slot)
             .map_err(|_| JournalInvariantError::LeasePollCheckpointMissing(slot))?;
-        let checkpoint = session.lease_poll_checkpoints[index];
+        let checkpoint = &session.lease_poll_checkpoints[index];
         if checkpoint.current_operation_id() != expected_current {
             return if checkpoint.acknowledges_operation_id() == Some(expected_current) {
-                Ok(false)
+                if checkpoint.pending_authority_receipts.is_empty()
+                    || checkpoint.pending_authority_receipts == pending_authority_receipts
+                {
+                    Ok(false)
+                } else {
+                    Err(JournalInvariantError::LeaseAuthorityReceiptMismatch)
+                }
             } else {
                 Err(JournalInvariantError::LeasePollCheckpointMismatch {
                     expected: expected_current,
@@ -1068,7 +1166,35 @@ impl StoredJournal {
             slot,
             current_operation_id: successor_operation_id,
             acknowledges_operation_id: Some(expected_current),
+            pending_authority_receipts,
         };
+        Ok(true)
+    }
+
+    pub(crate) fn acknowledge_lease_authority_receipts(
+        &mut self,
+        session_id: RunnerSessionId,
+        slot: RunnerSlotOrdinal,
+        expected: &[LeaseAuthorityPollReceipt],
+    ) -> Result<bool, JournalInvariantError> {
+        self.require_session(session_id)?;
+        validate_authority_receipts(expected)?;
+        let session = self
+            .session
+            .as_mut()
+            .ok_or(JournalInvariantError::NoSession)?;
+        let checkpoint = session
+            .lease_poll_checkpoints
+            .binary_search_by_key(&slot, LeasePollCheckpoint::slot)
+            .map(|index| &mut session.lease_poll_checkpoints[index])
+            .map_err(|_| JournalInvariantError::LeasePollCheckpointMissing(slot))?;
+        if checkpoint.pending_authority_receipts.is_empty() {
+            return Ok(false);
+        }
+        if checkpoint.pending_authority_receipts != expected {
+            return Err(JournalInvariantError::LeaseAuthorityReceiptMismatch);
+        }
+        checkpoint.pending_authority_receipts.clear();
         Ok(true)
     }
 
@@ -1171,6 +1297,34 @@ impl StoredJournal {
         disposition: CommandDisposition,
     ) -> Result<bool, JournalInvariantError> {
         self.commit_command(session_id, command, disposition)
+    }
+
+    fn verify_recorded_command(
+        &self,
+        session_id: RunnerSessionId,
+        command: DurableCommand,
+        disposition: CommandDisposition,
+    ) -> Result<(), JournalInvariantError> {
+        self.require_session(session_id)?;
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(JournalInvariantError::NoSession)?;
+        let Some(cursor) = session.command_cursor().acknowledged_through() else {
+            return Err(JournalInvariantError::CommandReplayConflict);
+        };
+        if command.sequence() > cursor {
+            return Err(JournalInvariantError::CommandReplayConflict);
+        }
+        let tombstone = session
+            .command_tombstones
+            .iter()
+            .find(|tombstone| tombstone.command().sequence() == command.sequence())
+            .ok_or(JournalInvariantError::CommandReplayOutsideWindow)?;
+        if tombstone.command() != command || tombstone.disposition() != disposition {
+            return Err(JournalInvariantError::CommandReplayConflict);
+        }
+        Ok(())
     }
 
     fn slot_index(&self, slot: RunnerSlotOrdinal) -> Result<usize, JournalInvariantError> {
@@ -2108,4 +2262,20 @@ fn lease_poll_operation_is_used(session: &SessionSnapshot, operation_id: Operati
         checkpoint.current_operation_id() == operation_id
             || checkpoint.acknowledges_operation_id() == Some(operation_id)
     })
+}
+
+fn validate_authority_receipts(
+    receipts: &[LeaseAuthorityPollReceipt],
+) -> Result<(), JournalInvariantError> {
+    if receipts.len() > MAX_LEASE_AUTHORITY_POLL_CONTRIBUTIONS
+        || receipts
+            .windows(2)
+            .any(|pair| pair[0].name() >= pair[1].name())
+        || receipts
+            .iter()
+            .any(|receipt| receipt.payload_schema_version() == 0)
+    {
+        return Err(JournalInvariantError::DecodedStateInvalid);
+    }
+    Ok(())
 }

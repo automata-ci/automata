@@ -9,6 +9,7 @@ mod execution;
 mod handshake;
 mod header;
 mod lease;
+mod lease_authority;
 mod limits;
 mod log;
 mod managed_secret;
@@ -19,7 +20,7 @@ pub use authority::*;
 pub use codec::{ValidatedRunnerToServer, ValidatedServerToRunner};
 pub use control::{CommandAck, OperationAck};
 pub use envelope::{RunnerToServer, ServerToRunner};
-pub use error::{ErrorMessage, NoWork, RemoteErrorCode};
+pub use error::{ErrorMessage, RemoteErrorCode};
 pub use execution::{CancelJob, JobResultMessage, JobStateUpdate};
 pub use handshake::{
     HandshakeErrorCode, HandshakeRejected, NegotiatedSession, OrphanDeliveryPermissions,
@@ -27,8 +28,14 @@ pub use handshake::{
 };
 pub use header::MessageHeader;
 pub use lease::{
-    LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason, LeaseRenewal, LeaseRequest,
-    LeaseResponse,
+    LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeasePollOutcome, LeasePollResponse,
+    LeaseRejectionReason, LeaseRenewal, LeaseRequest, LeaseResponse,
+};
+pub use lease_authority::{
+    LEASE_AUTHORITY_POLL_CONTRIBUTIONS_SCHEMA_VERSION, LeaseAuthorityName,
+    LeaseAuthorityPollContribution, LeaseAuthorityPollContributionError,
+    LeaseAuthorityPollContributions, LeaseAuthorityPollReceipt, MAX_LEASE_AUTHORITY_NAME_BYTES,
+    MAX_LEASE_AUTHORITY_POLL_CONTRIBUTIONS, MAX_LEASE_AUTHORITY_POLL_PAYLOAD_BYTES,
 };
 pub use limits::{MAX_CONFIGURABLE_FRAME_BYTES, ProtocolLimits, ProtocolLimitsError};
 pub use log::{LogAckMessage, LogBatch};

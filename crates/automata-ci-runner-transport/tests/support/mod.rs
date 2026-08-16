@@ -24,9 +24,10 @@ use automata_ci_core::{
     RunnerPlatform, RunnerSessionId, UnixMillis,
 };
 use automata_ci_protocol::{
-    CommandCursor, ErrorMessage, LeaseHeartbeat, LeaseRequest, MessageHeader, NegotiatedSession,
-    NoWork, ProtocolLimits, RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer,
-    SUPPORTED_PROTOCOL_RANGE, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
+    CommandCursor, ErrorMessage, LeaseAuthorityPollContributions, LeaseHeartbeat,
+    LeasePollResponse, LeaseRequest, MessageHeader, NegotiatedSession, ProtocolLimits,
+    RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, SUPPORTED_PROTOCOL_RANGE,
+    ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
 };
 use automata_ci_runner_transport::{
     ApplicationError, ApplicationErrorKind, AuthenticatedRunnerRequest, ClientTlsConfig,
@@ -642,14 +643,17 @@ fn reply_to(message: &RunnerToServer) -> Result<ServerToRunner, ApplicationError
         ))),
         RunnerToServer::LeaseRequest(request) => {
             let header = request.header();
-            Ok(ServerToRunner::NoWork(NoWork::new(
-                MessageHeader::reply(
-                    header.protocol_version(),
-                    header.session_id(),
-                    OperationId::new(),
-                    header.operation_id(),
+            Ok(ServerToRunner::LeasePollResponse(Box::new(
+                LeasePollResponse::no_work(
+                    MessageHeader::reply(
+                        header.protocol_version(),
+                        header.session_id(),
+                        OperationId::new(),
+                        header.operation_id(),
+                    ),
+                    request.authority_contributions().sha256_digest(),
+                    25,
                 ),
-                25,
             )))
         }
         _ => Err(ApplicationError::new(ApplicationErrorKind::Internal)),
@@ -684,6 +688,7 @@ pub fn poll_request() -> PreparedRequest {
         RunnerToServer::LeaseRequest(LeaseRequest::first(
             header,
             RunnerSlotOrdinal::new(1).expect("slot"),
+            LeaseAuthorityPollContributions::empty(),
         )),
         NegotiatedSession::new(
             SUPPORTED_PROTOCOL_RANGE.max(),

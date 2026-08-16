@@ -5,8 +5,9 @@ use automata_ci_core::{
     RunnerSessionId,
 };
 use automata_ci_protocol::{
-    CommandAck, CommandCursor, LeaseOffer, LeaseRequest, MessageHeader, MessageValidationError,
-    ProtocolLimits, RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerToRunner,
+    CommandAck, CommandCursor, LeaseAuthorityPollContributions, LeaseOffer, LeaseRequest,
+    MessageHeader, MessageValidationError, ProtocolLimits, RunnerToServer,
+    SUPPORTED_PROTOCOL_RANGE, ServerToRunner,
 };
 use automata_ci_protocol_protobuf::{
     DecodeError, EncodeError, decode_job_ir, decode_runner_frame, decode_server_frame,
@@ -36,6 +37,15 @@ fn wire_guard() -> fixture_wire::LeaseGuard {
     fixture_wire::LeaseGuard {
         lease_id: Uuid::from_u128(4).as_bytes().to_vec(),
         fencing_token: 1,
+    }
+}
+
+fn wire_empty_authority_contributions() -> fixture_wire::LeaseAuthorityPollContributions {
+    let empty = LeaseAuthorityPollContributions::default();
+    fixture_wire::LeaseAuthorityPollContributions {
+        schema_version: u32::from(empty.schema_version()),
+        contributions: Vec::new(),
+        sha256_digest: empty.sha256_digest().as_bytes().to_vec(),
     }
 }
 
@@ -532,6 +542,7 @@ fn missing_or_unknown_required_oneofs_are_rejected() {
                 header: None,
                 slot: 1,
                 acknowledges_operation_id: None,
+                authority_contributions: Some(wire_empty_authority_contributions()),
             },
         )),
     };
@@ -555,6 +566,47 @@ fn missing_or_unknown_required_oneofs_are_rejected() {
             field: "runtime_authority_grant.authorities"
         })
     ));
+
+    let message = common::runner_messages()
+        .into_iter()
+        .find_map(|(name, message)| (name == "lease_request").then_some(message))
+        .expect("lease request fixture");
+    let encoded =
+        encode_runner_frame(&message, &ProtocolLimits::default()).expect("encode fixture");
+    let mut frame = fixture_wire::RunnerFrame::decode(encoded.as_slice()).expect("wire fixture");
+    let Some(fixture_wire::runner_frame::Payload::LeaseRequest(request)) = frame.payload.as_mut()
+    else {
+        panic!("lease request fixture shape");
+    };
+    request.authority_contributions = None;
+    assert!(matches!(
+        decode_runner_frame(&encode(&frame), &ProtocolLimits::default()),
+        Err(DecodeError::MissingField {
+            field: "lease_request.authority_contributions"
+        })
+    ));
+}
+
+#[test]
+fn protected_authority_bundle_requires_provider_neutral_sandbox_authorizations() {
+    let mut frame = fixture_runtime_authority_grant();
+    let Some(fixture_wire::server_frame::Payload::RuntimeAuthorityGrant(grant)) =
+        frame.payload.as_mut()
+    else {
+        panic!("runtime-authority grant fixture shape");
+    };
+    grant
+        .authorities
+        .as_mut()
+        .expect("authorities")
+        .sandbox_authorizations = None;
+
+    assert!(matches!(
+        decode_server_frame(&encode(&frame), &ProtocolLimits::default()),
+        Err(DecodeError::MissingField {
+            field: "runtime_authorities.sandbox_authorizations"
+        })
+    ));
 }
 
 #[test]
@@ -567,6 +619,7 @@ fn uuid_fields_require_exactly_sixteen_bytes_without_echoing_contents() {
                 header: Some(header),
                 slot: 1,
                 acknowledges_operation_id: None,
+                authority_contributions: Some(wire_empty_authority_contributions()),
             },
         )),
     };
@@ -589,6 +642,7 @@ fn uuid_fields_require_exactly_sixteen_bytes_without_echoing_contents() {
                 header: Some(wire_header(false)),
                 slot: 1,
                 acknowledges_operation_id: Some(acknowledgement),
+                authority_contributions: Some(wire_empty_authority_contributions()),
             },
         )),
     };
@@ -614,6 +668,7 @@ fn lease_request_self_acknowledgement_is_rejected_after_wire_conversion() {
                 header: Some(header),
                 slot: 1,
                 acknowledges_operation_id: Some(operation_id),
+                authority_contributions: Some(wire_empty_authority_contributions()),
             },
         )),
     };
@@ -1131,6 +1186,7 @@ fn only_the_current_protocol_is_accepted() {
                 header: Some(wire_header(false)),
                 slot: 1,
                 acknowledges_operation_id: None,
+                authority_contributions: Some(wire_empty_authority_contributions()),
             },
         )),
     };
@@ -1164,6 +1220,7 @@ fn message_job_ir_and_requirements_schema_skew_are_rejected_without_reconstructi
                 header: Some(wire_header(false)),
                 slot: 1,
                 acknowledges_operation_id: None,
+                authority_contributions: Some(wire_empty_authority_contributions()),
             },
         )),
     };
@@ -1244,6 +1301,7 @@ fn encoding_applies_domain_validation_and_size_budget() {
     let valid = RunnerToServer::LeaseRequest(LeaseRequest::first(
         common::request_header(90),
         common::slot(),
+        LeaseAuthorityPollContributions::default(),
     ));
     let tiny = ProtocolLimits::new(1, 1, 1, 1, 1).expect("coherent tiny limits");
     assert!(matches!(

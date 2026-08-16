@@ -4,9 +4,10 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandCursorError, CommandSequence, CommandSequenceError,
-    LeaseRequest, MessageHeader, MessageValidationError, NegotiatedSession, ProtocolLimits,
-    RunnerHello, RunnerSlotOrdinal, RunnerToServer, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
-    ServerHello, ServerTiming, SessionDisposition, SessionResume, ValidatedRunnerToServer,
+    LeaseAuthorityPollContributions, LeaseRequest, MessageHeader, MessageValidationError,
+    NegotiatedSession, ProtocolLimits, RunnerHello, RunnerSlotOrdinal, RunnerToServer,
+    SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, SessionDisposition,
+    SessionResume, ValidatedRunnerToServer,
 };
 
 fn capabilities() -> RunnerCapabilities {
@@ -212,6 +213,7 @@ fn lease_request_constructors_make_chain_position_explicit_and_reject_self_ackno
     let first = LeaseRequest::first(
         MessageHeader::request(protocol, session_id, first_operation_id),
         slot,
+        LeaseAuthorityPollContributions::default(),
     );
     assert_eq!(first.acknowledges_operation_id(), None);
     assert_eq!(first.validate(), Ok(()));
@@ -220,6 +222,7 @@ fn lease_request_constructors_make_chain_position_explicit_and_reject_self_ackno
         MessageHeader::request(protocol, session_id, OperationId::new()),
         slot,
         first_operation_id,
+        LeaseAuthorityPollContributions::default(),
     );
     assert_eq!(
         successor.acknowledges_operation_id(),
@@ -232,6 +235,7 @@ fn lease_request_constructors_make_chain_position_explicit_and_reject_self_ackno
         MessageHeader::request(protocol, session_id, self_operation_id),
         slot,
         self_operation_id,
+        LeaseAuthorityPollContributions::default(),
     ));
     assert_eq!(
         ValidatedRunnerToServer::try_from(self_acknowledgement),
@@ -251,6 +255,7 @@ fn first_lease_poll_validates_chain_origin_for_one_authenticated_slot() {
     let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
         header,
         RunnerSlotOrdinal::new(2).expect("slot two"),
+        LeaseAuthorityPollContributions::default(),
     ));
     let validated = ValidatedRunnerToServer::new(message, &ProtocolLimits::default())
         .expect("validate first lease poll");

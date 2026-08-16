@@ -14,10 +14,10 @@ use automata_ci_control::{
     },
     lease::{
         AuthenticatedPlacementTrust, BeginLeaseRequest, BegunLeaseRequest, ClaimRejection,
-        ClaimedAttempt, CompleteLeaseRequest, LeaseRequestCompletion, LeaseRequestKey,
-        NoWorkLeaseRequest, RevokedLeaseOfferFallback, RunnableAttempt, RunnableQueueKey,
-        RunnableScanLimit, RunnableScanPage, RunnableScanRequest, TryClaimAttempt, TryClaimOutcome,
-        TryClaimReceipt,
+        ClaimedAttempt, CompleteLeaseRequest, LeaseAuthorityPollContributions,
+        LeaseRequestCompletion, LeaseRequestKey, NoWorkLeaseRequest, RevokedLeaseOfferFallback,
+        RunnableAttempt, RunnableQueueKey, RunnableScanLimit, RunnableScanPage,
+        RunnableScanRequest, TryClaimAttempt, TryClaimOutcome, TryClaimReceipt,
         repository::{
             RunnableAttemptRepository, RunnerClaimRepository, RunnerLeaseRequestRepository,
         },
@@ -77,8 +77,9 @@ use automata_ci_store::{
 
 const LEASE_OPERATION_KIND: &str = "automata.lease-request.v1";
 const LEASE_RPC_OPERATION_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
-const LEASE_OFFER_COMMAND_SCHEMA: u16 = 2;
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v3";
+const LEASE_OFFER_COMMAND_SCHEMA: u16 = 3;
+const CURRENT_RUNNER_PROTOCOL_VERSION: u16 = 3;
 const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
 const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
 const COMMAND_ENVELOPE_METADATA_DOMAIN: &[u8] =
@@ -1586,10 +1587,12 @@ impl RunnerLeaseOfferRepository for PostgresStore {
             .await?;
         let routing = lock_live_routing(&mut transaction, request.request().session()).await?;
         routing.require_online(request.request().session())?;
+        let receipt = lock_exact_lease_offer_claim(&mut transaction, &request, &routing).await?;
         if let Some(publication) =
             load_lease_offer_publication(&mut transaction, encryption, &request, None, None, true)
                 .await?
         {
+            validate_published_lease_offer_claim_receipt(&receipt, &request)?;
             if !matches!(
                 classify_locked_published_lease_offer(&mut transaction, &publication).await?,
                 LockedLeaseOfferDeliveryStatus::Live
@@ -1600,7 +1603,7 @@ impl RunnerLeaseOfferRepository for PostgresStore {
             transaction.commit().await.map_err(operation_error)?;
             return Ok(LeaseOfferClaimStatus::Published(Box::new(publication)));
         }
-        lock_exact_lease_offer_claim(&mut transaction, &request, &routing).await?;
+        require_current_lease_offer_claim(&receipt, &request)?;
         let current = lock_publishable_lease_offer_attempt(&mut transaction, &request).await?;
         if current && !routing.accepts_new_work {
             return Err(StoreError::RunnerNotAcceptingWork(
@@ -1675,6 +1678,8 @@ impl RunnerLeaseOfferRepository for PostgresStore {
             .await?;
         let routing = lock_live_routing(&mut transaction, request.request().session()).await?;
         routing.require_online(request.request().session())?;
+        let receipt =
+            lock_exact_lease_offer_claim(&mut transaction, request.claim(), &routing).await?;
         if let Some(publication) = load_lease_offer_publication(
             &mut transaction,
             encryption,
@@ -1685,6 +1690,7 @@ impl RunnerLeaseOfferRepository for PostgresStore {
         )
         .await?
         {
+            validate_published_lease_offer_claim_receipt(&receipt, request.claim())?;
             if !matches!(
                 classify_locked_published_lease_offer(&mut transaction, &publication).await?,
                 LockedLeaseOfferDeliveryStatus::Live
@@ -1696,7 +1702,7 @@ impl RunnerLeaseOfferRepository for PostgresStore {
             transaction.commit().await.map_err(operation_error)?;
             return Ok(publication);
         }
-        lock_exact_lease_offer_claim(&mut transaction, request.claim(), &routing).await?;
+        require_current_lease_offer_claim(&receipt, request.claim())?;
         if !lock_publishable_lease_offer_attempt(&mut transaction, request.claim()).await? {
             return Err(StoreError::AttemptFenceRejected(
                 request.lease().attempt_id(),
@@ -5372,7 +5378,7 @@ async fn load_runtime_authority_offer_by_command(
     );
     let protocol_version =
         decode_protocol(row.try_get("protocol_version").map_err(operation_error)?)?;
-    if protocol_version.get() != LEASE_OFFER_COMMAND_SCHEMA {
+    if protocol_version.get() != CURRENT_RUNNER_PROTOCOL_VERSION {
         return Err(StoreError::corrupt_data(
             "runtime-authority offer has invalid protocol metadata",
         ));
@@ -5668,7 +5674,7 @@ async fn lock_exact_lease_offer_claim(
     transaction: &mut Transaction<'_, Postgres>,
     request: &LeaseOfferClaim,
     routing: &LockedRouting,
-) -> Result<(), StoreError> {
+) -> Result<TryClaimReceipt, StoreError> {
     let conflict = || StoreError::OperationConflict {
         session_id: request.request().session().session_id(),
         operation_id: request.request().operation_id(),
@@ -5722,7 +5728,18 @@ async fn lock_exact_lease_offer_claim(
     let receipt = claim_receipt_row(transaction, key)
         .await?
         .ok_or_else(conflict)
-        .and_then(|row| decode_claim_receipt(&row, key, true))?;
+        .and_then(|row| decode_claim_receipt(&row, key, request.authority_contributions(), true))?;
+    Ok(receipt)
+}
+
+fn require_current_lease_offer_claim(
+    receipt: &TryClaimReceipt,
+    request: &LeaseOfferClaim,
+) -> Result<(), StoreError> {
+    let conflict = || StoreError::OperationConflict {
+        session_id: request.request().session().session_id(),
+        operation_id: request.request().operation_id(),
+    };
     let TryClaimOutcome::Claimed(claimed) = receipt.outcome() else {
         return Err(conflict());
     };
@@ -5733,6 +5750,21 @@ async fn lock_exact_lease_offer_claim(
         return Err(conflict());
     }
     Ok(())
+}
+
+fn validate_published_lease_offer_claim_receipt(
+    receipt: &TryClaimReceipt,
+    request: &LeaseOfferClaim,
+) -> Result<(), StoreError> {
+    match receipt.outcome() {
+        TryClaimOutcome::Claimed(_) => require_current_lease_offer_claim(receipt, request),
+        TryClaimOutcome::Rejected(
+            ClaimRejection::ClaimExpired | ClaimRejection::ClaimSuperseded,
+        ) => Ok(()),
+        TryClaimOutcome::Rejected(_) | TryClaimOutcome::NoWork => Err(StoreError::corrupt_data(
+            "published lease offer has an incompatible claim receipt",
+        )),
+    }
 }
 
 /// Locks the attempt row even when the repository-level concurrency advisory is absent.
@@ -6535,6 +6567,7 @@ impl RunnerClaimRepository for PostgresStore {
     async fn lookup_lease_request(
         &self,
         request: LeaseRequestKey,
+        authority_contributions: &LeaseAuthorityPollContributions,
     ) -> Result<Option<TryClaimReceipt>, StoreError> {
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
@@ -6544,7 +6577,7 @@ impl RunnerClaimRepository for PostgresStore {
         lock_current_lease_request_head(&mut transaction, request, None).await?;
         let row = claim_receipt_row(&mut transaction, request).await?;
         let receipt = if let Some(row) = row.as_ref() {
-            let receipt = decode_claim_receipt(row, request, true)?;
+            let receipt = decode_claim_receipt(row, request, authority_contributions, true)?;
             Some(resolve_claim_receipt(&mut transaction, receipt).await?)
         } else {
             None
@@ -6602,7 +6635,12 @@ impl RunnerClaimRepository for PostgresStore {
         .rows_affected();
 
         if inserted == 0 {
-            let receipt = replay_claim(&mut transaction, request.request_key()).await?;
+            let receipt = replay_claim(
+                &mut transaction,
+                request.request_key(),
+                request.authority_contributions(),
+            )
+            .await?;
             transaction.commit().await.map_err(operation_error)?;
             return Ok(receipt);
         }
@@ -6633,7 +6671,12 @@ impl RunnerClaimRepository for PostgresStore {
         };
         complete_claim_receipt(&mut transaction, &request, &outcome, committed_cursor).await?;
         transaction.commit().await.map_err(operation_error)?;
-        Ok(TryClaimReceipt::new(request.request_key(), outcome, false))
+        Ok(TryClaimReceipt::new(
+            request.request_key(),
+            request.request_digest(),
+            outcome,
+            false,
+        ))
     }
 
     async fn record_no_work(
@@ -6642,7 +6685,7 @@ impl RunnerClaimRepository for PostgresStore {
     ) -> Result<TryClaimReceipt, StoreError> {
         let request_key = request.request_key();
         let cursor = automata_ci_control::adapter_spi::no_work_lease_request_cursor(&request);
-        let digest = request_key.request_digest();
+        let digest = request.request_digest();
         let mut transaction = self.pool.begin().await.map_err(operation_error)?;
         super::pin_runner_attempt_read_committed(&mut transaction).await?;
         let routing = lock_live_routing(&mut transaction, request_key.session()).await?;
@@ -6690,9 +6733,14 @@ impl RunnerClaimRepository for PostgresStore {
             };
             complete_no_work_receipt(&mut transaction, &request, &outcome, committed_cursor)
                 .await?;
-            TryClaimReceipt::new(request_key, outcome, false)
+            TryClaimReceipt::new(request_key, digest, outcome, false)
         } else {
-            replay_claim(&mut transaction, request_key).await?
+            replay_claim(
+                &mut transaction,
+                request_key,
+                request.authority_contributions(),
+            )
+            .await?
         };
         transaction.commit().await.map_err(operation_error)?;
         Ok(receipt)
@@ -8461,12 +8509,6 @@ async fn evaluate_claim(
     let job_version =
         decode_job_ir_version(row.try_get("job_ir_schema").map_err(operation_error)?)?;
     let durable_candidate = decode_runnable_attempt(&row)?;
-    if !automata_ci_control::adapter_spi::try_claim_attempt_matches_runnable(
-        request,
-        &durable_candidate,
-    ) {
-        return Ok(TryClaimOutcome::Rejected(ClaimRejection::NotRoutable));
-    }
     let requirements = durable_candidate.requirements().clone();
     let machine_requirements = requirements
         .clone()
@@ -8557,8 +8599,13 @@ async fn evaluate_claim(
     .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     let assignment = AttemptAssignment::new(request.session(), request.slot());
     let metadata = durable_candidate.job_ir().clone();
-    let claimed = ClaimedAttempt::try_new(lease, assignment, metadata)
-        .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
+    let claimed = ClaimedAttempt::try_new(
+        lease,
+        assignment,
+        metadata,
+        request.authority_contributions().clone(),
+    )
+    .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
     Ok(TryClaimOutcome::Claimed(Box::new(claimed)))
 }
 
@@ -8727,11 +8774,12 @@ async fn complete_no_work_receipt(
 async fn replay_claim(
     transaction: &mut Transaction<'_, Postgres>,
     request: LeaseRequestKey,
+    authority_contributions: &LeaseAuthorityPollContributions,
 ) -> Result<TryClaimReceipt, StoreError> {
     let row = claim_receipt_row(transaction, request)
         .await?
         .ok_or_else(|| invalid_operation_receipt("conflicting receipt disappeared"))?;
-    let receipt = decode_claim_receipt(&row, request, true)?;
+    let receipt = decode_claim_receipt(&row, request, authority_contributions, true)?;
     resolve_claim_receipt(transaction, receipt).await
 }
 
@@ -8836,6 +8884,7 @@ async fn resolve_claim_receipt(
     }
     Ok(TryClaimReceipt::new(
         receipt.request_key(),
+        receipt.request_digest(),
         TryClaimOutcome::Rejected(rejection),
         true,
     ))
@@ -8869,6 +8918,7 @@ async fn claim_receipt_row(
 fn decode_claim_receipt(
     row: &sqlx::postgres::PgRow,
     request: LeaseRequestKey,
+    authority_contributions: &LeaseAuthorityPollContributions,
     replayed: bool,
 ) -> Result<TryClaimReceipt, StoreError> {
     let kind: &str = row.try_get("operation_kind").map_err(operation_error)?;
@@ -8881,7 +8931,7 @@ fn decode_claim_receipt(
         .and_then(|value| StableRunnerSlot::new(value).ok())
         .ok_or_else(|| invalid_operation_receipt("invalid runner slot"))?;
     if kind != LEASE_OPERATION_KIND
-        || stored_digest != request.request_digest()
+        || stored_digest != request.decision_request_digest(authority_contributions)
         || stored_slot != request.slot()
     {
         return Err(StoreError::OperationConflict {
@@ -8916,6 +8966,7 @@ fn decode_claim_receipt(
                 lease,
                 AttemptAssignment::new(request.session(), stored_slot),
                 decode_receipt_job_ir(row)?,
+                authority_contributions.clone(),
             )
             .map_err(|error| invalid_operation_receipt(error.to_string()))?;
             TryClaimOutcome::Claimed(Box::new(claimed))
@@ -8957,7 +9008,12 @@ fn decode_claim_receipt(
             )));
         }
     };
-    Ok(TryClaimReceipt::new(request, outcome, replayed))
+    Ok(TryClaimReceipt::new(
+        request,
+        stored_digest,
+        outcome,
+        replayed,
+    ))
 }
 
 fn decode_receipt_job_ir(row: &sqlx::postgres::PgRow) -> Result<JobIrMetadata, StoreError> {

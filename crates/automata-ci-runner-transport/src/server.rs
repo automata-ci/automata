@@ -1307,6 +1307,9 @@ fn sync_response_matches_request(request: &RunnerToServer, response: &ServerToRu
         ServerToRunner::RuntimeAuthorityGrant(grant) => {
             grant.header().validate_reply_for(header).is_ok()
         }
+        ServerToRunner::LeasePollResponse(response) => {
+            response.header().validate_reply_for(header).is_ok()
+        }
         ServerToRunner::CancelJob(cancel) => cancel
             .header()
             .validate_for(header.protocol_version(), header.session_id())
@@ -1316,7 +1319,6 @@ fn sync_response_matches_request(request: &RunnerToServer, response: &ServerToRu
         }
         ServerToRunner::LogAck(ack) => ack.header().validate_reply_for(header).is_ok(),
         ServerToRunner::OperationAck(ack) => ack.header().validate_reply_for(header).is_ok(),
-        ServerToRunner::NoWork(no_work) => no_work.header().validate_reply_for(header).is_ok(),
         ServerToRunner::Error(error) => error.header().validate_reply_for(header).is_ok(),
     }
 }

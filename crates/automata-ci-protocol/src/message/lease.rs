@@ -2,29 +2,36 @@
 
 use automata_ci_core::{
     AttemptId, FencingToken, JobIrEnvelope, JobLifecycle, Lease, LeaseGuard, LeaseId, OperationId,
-    UnixMillis,
+    Sha256Digest, UnixMillis,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::MessageValidationError;
+use super::{CancelJob, LeaseAuthorityPollContributions, MessageValidationError};
 use super::{MessageHeader, RunnerSlotOrdinal, ServerCommandHeader};
 
 /// Runner request for at most one assignment to one stable slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeaseRequest {
     header: MessageHeader,
     slot: RunnerSlotOrdinal,
     acknowledges_operation_id: Option<OperationId>,
+    authority_contributions: LeaseAuthorityPollContributions,
 }
 
 impl LeaseRequest {
     /// Creates the first lease request in a slot's request chain.
     #[must_use]
-    pub const fn first(header: MessageHeader, slot: RunnerSlotOrdinal) -> Self {
+    pub const fn first(
+        header: MessageHeader,
+        slot: RunnerSlotOrdinal,
+        authority_contributions: LeaseAuthorityPollContributions,
+    ) -> Self {
         Self {
             header,
             slot,
             acknowledges_operation_id: None,
+            authority_contributions,
         }
     }
 
@@ -35,11 +42,13 @@ impl LeaseRequest {
         header: MessageHeader,
         slot: RunnerSlotOrdinal,
         acknowledges_operation_id: OperationId,
+        authority_contributions: LeaseAuthorityPollContributions,
     ) -> Self {
         Self {
             header,
             slot,
             acknowledges_operation_id: Some(acknowledges_operation_id),
+            authority_contributions,
         }
     }
 
@@ -62,6 +71,12 @@ impl LeaseRequest {
         self.acknowledges_operation_id
     }
 
+    /// Returns the exact provider-neutral authority contributions carried by this poll.
+    #[must_use]
+    pub const fn authority_contributions(&self) -> &LeaseAuthorityPollContributions {
+        &self.authority_contributions
+    }
+
     /// Validates locally provable lease-request invariants.
     ///
     /// # Errors
@@ -79,9 +94,133 @@ impl LeaseRequest {
     }
 }
 
+/// Successful result of one lease poll after its authority contributions are durable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeasePollResponse {
+    header: MessageHeader,
+    accepted_contributions_sha256: Sha256Digest,
+    outcome: LeasePollOutcome,
+}
+
+impl LeasePollResponse {
+    /// Creates a correlated no-work response with a positive backoff.
+    #[must_use]
+    pub const fn no_work(
+        header: MessageHeader,
+        accepted_contributions_sha256: Sha256Digest,
+        retry_after_millis: u32,
+    ) -> Self {
+        Self {
+            header,
+            accepted_contributions_sha256,
+            outcome: LeasePollOutcome::NoWork { retry_after_millis },
+        }
+    }
+
+    /// Creates a correlated response carrying one durable lease offer command.
+    #[must_use]
+    pub fn lease_offer(
+        header: MessageHeader,
+        accepted_contributions_sha256: Sha256Digest,
+        offer: LeaseOffer,
+    ) -> Self {
+        Self {
+            header,
+            accepted_contributions_sha256,
+            outcome: LeasePollOutcome::LeaseOffer(Box::new(offer)),
+        }
+    }
+
+    /// Creates a correlated response carrying one durable cancellation command.
+    #[must_use]
+    pub const fn cancel_job(
+        header: MessageHeader,
+        accepted_contributions_sha256: Sha256Digest,
+        cancel: CancelJob,
+    ) -> Self {
+        Self {
+            header,
+            accepted_contributions_sha256,
+            outcome: LeasePollOutcome::CancelJob(cancel),
+        }
+    }
+
+    /// Returns the response header correlated to the lease request.
+    #[must_use]
+    pub const fn header(&self) -> MessageHeader {
+        self.header
+    }
+
+    /// Returns the exact contribution-bundle digest durably accepted by the server.
+    #[must_use]
+    pub const fn accepted_contributions_sha256(&self) -> Sha256Digest {
+        self.accepted_contributions_sha256
+    }
+
+    /// Returns the poll result.
+    #[must_use]
+    pub const fn outcome(&self) -> &LeasePollOutcome {
+        &self.outcome
+    }
+
+    /// Validates locally provable response invariants.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid reply header, zero backoff, or mismatched nested command session.
+    pub fn validate(&self) -> Result<(), MessageValidationError> {
+        self.header.validate_reply()?;
+        match &self.outcome {
+            LeasePollOutcome::NoWork { retry_after_millis } if *retry_after_millis == 0 => {
+                Err(MessageValidationError::ZeroValue("retry_after_millis"))
+            }
+            LeasePollOutcome::NoWork { .. } => Ok(()),
+            LeasePollOutcome::LeaseOffer(offer) => offer
+                .header()
+                .validate_for(self.header.protocol_version(), self.header.session_id()),
+            LeasePollOutcome::CancelJob(cancel) => cancel
+                .header()
+                .validate_for(self.header.protocol_version(), self.header.session_id()),
+        }
+    }
+
+    /// Validates correlation and exact contribution acceptance for one request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a response to another request, an unequal accepted digest, or
+    /// any invalid nested outcome. A durable command may be replayed on a
+    /// concurrent slot exchange, so the nested offer's stable slot is not
+    /// required to match the poll carrier's slot.
+    pub fn validate_for(&self, request: &LeaseRequest) -> Result<(), MessageValidationError> {
+        self.validate()?;
+        self.header.validate_reply_for(request.header())?;
+        if self.accepted_contributions_sha256 != request.authority_contributions().sha256_digest() {
+            return Err(MessageValidationError::LeaseAuthorityAcceptanceMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Outcome nested inside one explicitly correlated lease-poll response.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum LeasePollOutcome {
+    /// No compatible work is available; wait at least this many milliseconds.
+    NoWork {
+        /// Server-selected positive retry delay.
+        retry_after_millis: u32,
+    },
+    /// One durable job assignment command.
+    LeaseOffer(Box<LeaseOffer>),
+    /// One durable cancellation command.
+    CancelJob(CancelJob),
+}
+
 /// Server offer containing an immutable job and its exclusive lease.
 ///
-/// Runtime credentials are deliberately absent. Protocol v2 delivers them
+/// Runtime credentials are deliberately absent. Protocol v3 delivers them
 /// only after the runner has durably accepted this exact offer.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

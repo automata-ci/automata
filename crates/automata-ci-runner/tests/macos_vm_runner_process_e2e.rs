@@ -32,8 +32,8 @@ use automata_ci_core::{
 use automata_ci_core::{ExpressionProgram, ValueSource};
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, JobResultMessage, JobRuntimeAuthorities,
-    LeaseDisposition, LeaseOffer, LeaseRenewal, LeaseRequest, LogAckMessage, LogBatch,
-    MessageHeader, NegotiatedSession, NoWork, OperationAck, ProtocolLimits, RunnerSlotOrdinal,
+    LeaseDisposition, LeaseOffer, LeasePollResponse, LeaseRenewal, LeaseRequest, LogAckMessage,
+    LogBatch, MessageHeader, NegotiatedSession, OperationAck, ProtocolLimits, RunnerSlotOrdinal,
     RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityGrant, RuntimeAuthorityRequest,
     SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
     SessionDisposition,
@@ -118,8 +118,13 @@ async fn shipped_runner_process_executes_a_claimed_isolated_job_with_action_runt
         UnixMillis::new(unix_millis().saturating_add(i64::from(process_control_timeout_millis()))),
     )
     .expect("process test lease");
-    let authorities =
-        JobRuntimeAuthorities::new(Vec::new(), &job, &lease).expect("credential-free authorities");
+    let authorities = JobRuntimeAuthorities::new(
+        Vec::new(),
+        automata_ci_core::SandboxAuthorizations::empty(),
+        &job,
+        &lease,
+    )
+    .expect("credential-free authorities");
     let handler = Arc::new(ProcessFlowHandler::new(
         runner_id,
         session_id,
@@ -883,13 +888,22 @@ impl ProcessFlowHandler {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         if !state.offered {
             state.offered = true;
-            Ok(ServerToRunner::LeaseOffer(Box::new(self.offer.clone())))
+            Ok(ServerToRunner::LeasePollResponse(Box::new(
+                LeasePollResponse::lease_offer(
+                    reply_header(poll.header()),
+                    poll.authority_contributions().sha256_digest(),
+                    self.offer.clone(),
+                ),
+            )))
         } else if state.result_received {
             state.observation.completed_poll = true;
             self.completed_poll.notify_one();
-            Ok(ServerToRunner::NoWork(NoWork::new(
-                reply_header(poll.header()),
-                25,
+            Ok(ServerToRunner::LeasePollResponse(Box::new(
+                LeasePollResponse::no_work(
+                    reply_header(poll.header()),
+                    poll.authority_contributions().sha256_digest(),
+                    25,
+                ),
             )))
         } else {
             Err(internal_application_error())

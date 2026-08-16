@@ -27,15 +27,15 @@ pub use model::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, CommandTombstone, DurableCommand,
     EndpointOperation, EndpointOperationKind, EndpointOperationState, EndpointRequestContentRef,
     EndpointResultContentRef, JobIrContentRef, JournalSnapshot, LeaseOfferRecord, LeaseOfferStatus,
-    LeasePollCheckpoint, LeaseRejectionRecord, LogDeliveryCursor, LogSegment,
-    LogSegmentAcknowledgement, LogSegmentPublication, OrphanAbandonmentPermissions,
-    OrphanAbandonmentReason, OrphanAuthorityError, OrphanAuthorityGrant, OrphanAuthorityProof,
-    OrphanAuthorityVerifier, OrphanClaim, OrphanDelivery, OrphanRecord, OutboundOperationCursor,
-    OutboundOperationSequence, PendingDeliveryTimestamps, ProviderFailureKind,
-    ProviderFailureOutcome, ProviderName, ProviderOperation, ProviderOperationKind,
-    ProviderOperationOutcome, RuntimeAuthorityContentRef, RuntimeAuthorityDeliveryRecord,
-    SandboxHandle, SandboxIdentity, SessionBinding, SessionSnapshot, SlotSnapshot,
-    TerminalResultRecord,
+    LeasePollCheckpoint, LeasePollCommandRecord, LeasePollCompletion, LeaseRejectionRecord,
+    LogDeliveryCursor, LogSegment, LogSegmentAcknowledgement, LogSegmentPublication,
+    OrphanAbandonmentPermissions, OrphanAbandonmentReason, OrphanAuthorityError,
+    OrphanAuthorityGrant, OrphanAuthorityProof, OrphanAuthorityVerifier, OrphanClaim,
+    OrphanDelivery, OrphanRecord, OutboundOperationCursor, OutboundOperationSequence,
+    PendingDeliveryTimestamps, ProviderFailureKind, ProviderFailureOutcome, ProviderName,
+    ProviderOperation, ProviderOperationKind, ProviderOperationOutcome, RuntimeAuthorityContentRef,
+    RuntimeAuthorityDeliveryRecord, SandboxHandle, SandboxIdentity, SessionBinding,
+    SessionSnapshot, SlotSnapshot, TerminalResultRecord,
 };
 pub use observer::{
     JournalMutationDomain, JournalMutationObservation, JournalMutationOutcome, JournalObserver,
@@ -46,7 +46,7 @@ pub use observer::{
 ///
 /// Obsolete or future schemas fail closed rather than being interpreted by
 /// compatibility readers.
-pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 5;
+pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 6;
 
 /// Largest delivery enqueue timestamp accepted by the durable journal.
 ///

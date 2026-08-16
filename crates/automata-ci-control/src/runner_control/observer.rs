@@ -89,6 +89,9 @@ pub enum RunnerLeaseRequestStage {
     SessionHeartbeat,
     /// Resolution of an already-completed request.
     CompletedRequestReplay,
+    /// Verification and durable acceptance of canonical lease-authority poll
+    /// contributions before scheduling.
+    LeaseAuthorityAcceptance,
     /// Durable command replay before polling for work.
     PrePollCommandReplay,
     /// Scheduler polling and attempt claim.

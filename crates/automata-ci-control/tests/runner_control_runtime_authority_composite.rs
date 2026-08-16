@@ -192,9 +192,13 @@ async fn optional_oversized_merge_fails_closed() {
             .expect("authority")
         })
         .collect::<Vec<_>>();
-    let optional_bundle =
-        JobRuntimeAuthorities::new(optional_authorities, request.job(), request.lease())
-            .expect("maximum-sized optional bundle");
+    let optional_bundle = JobRuntimeAuthorities::new(
+        optional_authorities,
+        automata_ci_core::SandboxAuthorizations::empty(),
+        request.job(),
+        request.lease(),
+    )
+    .expect("maximum-sized optional bundle");
     let required: Arc<dyn RuntimeAuthorityIssuer> =
         Arc::new(DerivedIssuer::new("required", "required-token"));
     let optional: Arc<dyn OptionalRuntimeAuthorityIssuer> =
@@ -405,8 +409,13 @@ impl RuntimeAuthorityIssuer for DerivedIssuer {
             request.lease().expires_at(),
         )
         .map_err(|_| ControlPortError::Corrupt)?;
-        JobRuntimeAuthorities::new(vec![authority], request.job(), request.lease())
-            .map_err(|_| ControlPortError::Corrupt)
+        JobRuntimeAuthorities::new(
+            vec![authority],
+            automata_ci_core::SandboxAuthorizations::empty(),
+            request.job(),
+            request.lease(),
+        )
+        .map_err(|_| ControlPortError::Corrupt)
     }
 }
 

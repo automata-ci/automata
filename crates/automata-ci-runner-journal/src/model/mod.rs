@@ -9,7 +9,7 @@ mod value;
 
 pub use command::{
     CancellationRecord, CommandDisposition, CommandIgnoredReason, CommandTombstone, DurableCommand,
-    LeaseOfferRecord, LeaseRejectionRecord, RuntimeAuthorityDeliveryRecord,
+    LeaseOfferRecord, LeasePollCommandRecord, LeaseRejectionRecord, RuntimeAuthorityDeliveryRecord,
 };
 pub use content::{JobIrContentRef, RuntimeAuthorityContentRef, TerminalResultRecord};
 pub use cursor::{
@@ -31,7 +31,7 @@ pub use provider::{
 };
 pub(crate) use state::StoredJournal;
 pub use state::{
-    JournalSnapshot, LeaseOfferStatus, LeasePollCheckpoint, PendingDeliveryTimestamps,
-    SessionBinding, SessionSnapshot, SlotSnapshot,
+    JournalSnapshot, LeaseOfferStatus, LeasePollCheckpoint, LeasePollCompletion,
+    PendingDeliveryTimestamps, SessionBinding, SessionSnapshot, SlotSnapshot,
 };
 pub(crate) use value::DiskSchemaVersion;

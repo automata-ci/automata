@@ -80,8 +80,13 @@ impl RuntimeAuthorityIssuer for RunnerResultsRuntimeAuthorityIssuer {
         let trust = request.job().job().trust_snapshot().authority();
         match (trust.results(), trust.cache()) {
             (TrustResultsAuthority::Denied, TrustCacheAuthority::Denied) => {
-                return JobRuntimeAuthorities::new(Vec::new(), request.job(), request.lease())
-                    .map_err(|_| ControlPortError::Corrupt);
+                return JobRuntimeAuthorities::new(
+                    Vec::new(),
+                    automata_ci_core::SandboxAuthorizations::empty(),
+                    request.job(),
+                    request.lease(),
+                )
+                .map_err(|_| ControlPortError::Corrupt);
             }
             (TrustResultsAuthority::Standard, TrustCacheAuthority::ReadWrite)
             | (TrustResultsAuthority::Untrusted, TrustCacheAuthority::ReadOnly) => {}
@@ -145,8 +150,13 @@ impl RuntimeAuthorityIssuer for RunnerResultsRuntimeAuthorityIssuer {
             expires_at,
         )
         .map_err(|_| ControlPortError::Corrupt)?;
-        JobRuntimeAuthorities::new(vec![authority], job, lease)
-            .map_err(|_| ControlPortError::Corrupt)
+        JobRuntimeAuthorities::new(
+            vec![authority],
+            automata_ci_core::SandboxAuthorizations::empty(),
+            job,
+            lease,
+        )
+        .map_err(|_| ControlPortError::Corrupt)
     }
 }
 

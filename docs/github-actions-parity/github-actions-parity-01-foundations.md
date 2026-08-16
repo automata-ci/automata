@@ -171,7 +171,7 @@ Acceptance:
 
 **Owner:** rotating integration owner. **Size:** S. **Dependencies:** none.
 
-Current baseline: runner protocol v2, message schema v1, JobIR schema v1,
+Current baseline: runner protocol v3, message schema v1, JobIR schema v1,
 runner-requirements schema v1, and a frozen additive PostgreSQL migration
 lineage. The lineage is gap-free, checksum-verified, and extended only through
 a new migration. Version, reader, rejection, and limit tests remain with their

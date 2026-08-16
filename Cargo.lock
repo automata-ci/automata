@@ -440,6 +440,7 @@ dependencies = [
  "automata-ci-store",
  "automata-ci-workload-oidc",
  "flate2",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",

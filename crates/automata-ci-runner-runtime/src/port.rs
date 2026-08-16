@@ -11,9 +11,15 @@ use automata_ci_core::{
     LogChannel, LogGroup, LogGroupId, OperationId, RunnerId, RunnerSessionId, UnixMillis,
 };
 use automata_ci_execution::{
-    ExecutionEndpoint, SandboxCustody, SandboxEnvironment, SandboxInspection, SandboxProvider,
+    ExecutionEndpoint, SandboxCustody, SandboxEnvironment, SandboxExecutionBinding,
+    SandboxInspection, SandboxProvider,
 };
-use automata_ci_protocol::{JobRuntimeAuthorities, ManagedSecretBindingOverlay};
+use automata_ci_protocol::{
+    JobRuntimeAuthorities, LeaseAuthorityName, LeaseAuthorityPollContribution,
+    LeaseAuthorityPollContributions, LeaseAuthorityPollReceipt,
+    MAX_LEASE_AUTHORITY_POLL_CONTRIBUTIONS, ManagedSecretBindingOverlay,
+    RuntimeAuthorityDeliveryBinding,
+};
 use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal};
 use automata_ci_runner_journal::{
     DurableContentRef, ProviderFailureOutcome, ProviderOperationKind, SandboxIdentity,
@@ -79,6 +85,8 @@ pub struct ExecutionRequest {
     lease: Lease,
     job: JobIrEnvelope,
     runtime_authorities: JobRuntimeAuthorities,
+    authority_binding: RuntimeAuthorityDeliveryBinding,
+    sandbox_execution_binding: SandboxExecutionBinding,
     managed_secret_bindings: Option<ManagedSecretBindingOverlay>,
     job_content: DurableContentRef,
     environment: SandboxEnvironment,
@@ -94,30 +102,64 @@ impl ExecutionRequest {
     /// Alternate supervisors must preserve those trust-boundary invariants;
     /// the executor independently validates correlations it can observe.
     #[allow(clippy::too_many_arguments)]
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Rejects an authority delivery binding that does not match the exact
+    /// slot, lease, `JobIR`, or protected runtime-authority bundle.
     pub fn new(
         session_id: RunnerSessionId,
         slot: RunnerSlotOrdinal,
         lease: Lease,
         job: JobIrEnvelope,
         runtime_authorities: JobRuntimeAuthorities,
+        authority_binding: RuntimeAuthorityDeliveryBinding,
         job_content: DurableContentRef,
         environment: SandboxEnvironment,
         recovery_lifecycle: JobLifecycle,
         recovered_sandbox: Option<SandboxIdentity>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ExecutorError> {
+        runtime_authorities
+            .validate_for(&job, &lease)
+            .map_err(|_| ExecutorError::new(ExecutorErrorKind::InvalidJob))?;
+        let job_ir_digest = job_content
+            .public_plaintext_sha256()
+            .ok_or_else(|| ExecutorError::new(ExecutorErrorKind::InvalidJob))?;
+        if authority_binding.attempt_id() != lease.attempt_id()
+            || authority_binding.slot() != slot
+            || authority_binding.guard() != lease.guard()
+            || authority_binding.job_ir_digest() != job_ir_digest
+        {
+            return Err(ExecutorError::new(ExecutorErrorKind::InvalidJob));
+        }
+        let accepted_offer_sequence =
+            std::num::NonZeroU64::new(authority_binding.offer_sequence().get())
+                .ok_or_else(|| ExecutorError::new(ExecutorErrorKind::InvalidJob))?;
+        let sandbox_execution_binding = SandboxExecutionBinding::new(
+            session_id,
+            job.job().run_id(),
+            job.job().job_id(),
+            lease.attempt_id(),
+            lease.guard(),
+            authority_binding.offer_operation_id(),
+            accepted_offer_sequence,
+            job.version(),
+            job_ir_digest,
+        );
+        Ok(Self {
             session_id,
             slot,
             lease,
             job,
             runtime_authorities,
+            authority_binding,
+            sandbox_execution_binding,
             managed_secret_bindings: None,
             job_content,
             environment,
             recovery_lifecycle,
             recovered_sandbox,
-        }
+        })
     }
 
     /// Returns the durable runner session.
@@ -150,7 +192,7 @@ impl ExecutionRequest {
         &self.job
     }
 
-    /// Returns exact server-issued authority protected before lease acceptance.
+    /// Returns exact server-issued authority protected after lease acceptance and before execution.
     #[must_use]
     pub const fn runtime_authorities(&self) -> &JobRuntimeAuthorities {
         &self.runtime_authorities
@@ -176,6 +218,24 @@ impl ExecutionRequest {
     #[must_use]
     pub const fn managed_secret_bindings(&self) -> Option<&ManagedSecretBindingOverlay> {
         self.managed_secret_bindings.as_ref()
+    }
+
+    /// Returns the exact sandbox authorizations from the protected authority bundle.
+    #[must_use]
+    pub const fn sandbox_authorizations(&self) -> &automata_ci_core::SandboxAuthorizations {
+        self.runtime_authorities.sandbox_authorizations()
+    }
+
+    /// Returns the exact job, lease, session, offer, and `JobIR` binding.
+    #[must_use]
+    pub const fn sandbox_execution_binding(&self) -> SandboxExecutionBinding {
+        self.sandbox_execution_binding
+    }
+
+    /// Returns the exact post-accept delivery coordinates used for recovery.
+    #[must_use]
+    pub const fn runtime_authority_delivery_binding(&self) -> RuntimeAuthorityDeliveryBinding {
+        self.authority_binding
     }
 
     /// Returns the durable protected `JobIR` content identity.
@@ -219,6 +279,11 @@ impl fmt::Debug for ExecutionRequest {
                     .as_ref()
                     .map_or(0, |overlay| overlay.bindings().len()),
             )
+            .field(
+                "sandbox_authorizations",
+                self.runtime_authorities.sandbox_authorizations(),
+            )
+            .field("sandbox_execution_binding", &self.sandbox_execution_binding)
             .field("environment", &self.environment)
             .field("recovery_lifecycle", &self.recovery_lifecycle)
             .field("recovered_sandbox", &self.recovered_sandbox)
@@ -638,6 +703,177 @@ pub trait RuntimeClock: fmt::Debug + Send + Sync {
     fn wall_now(&self) -> UnixMillis;
     /// Returns process-local monotonic time used for leases and deadlines.
     fn monotonic_now(&self) -> MonotonicMillis;
+}
+
+/// Future returned by one durable lease-authority extension.
+pub type LeaseAuthorityPollFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<LeaseAuthorityPollContribution, LeaseAuthorityExtensionError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Future returned after control durably accepts one exact contribution.
+pub type LeaseAuthorityAcknowledgementFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), LeaseAuthorityExtensionError>> + Send + 'a>>;
+
+/// Runner-side durable source for one namespaced lease-authority extension.
+///
+/// Implementations retain the exact current contribution across restart and
+/// replay it until [`Self::acknowledge`] succeeds. Multiple slots may observe
+/// the same retained contribution concurrently, so an exact repeated or stale
+/// acknowledgement must be idempotent while a substituted digest fails closed.
+pub trait LeaseAuthorityExtension: fmt::Debug + Send + Sync {
+    /// Returns the extension's stable protocol namespace.
+    fn name(&self) -> &LeaseAuthorityName;
+
+    /// Returns the current retained contribution or durably refreshes it.
+    fn current_or_refresh(
+        &self,
+        observed_at: UnixMillis,
+        cancellation: CancellationToken,
+    ) -> LeaseAuthorityPollFuture<'_>;
+
+    /// Durably acknowledges control acceptance of one exact contribution identity.
+    ///
+    /// The extension must continue replaying that contribution until this
+    /// succeeds. Exact repeated acknowledgements are idempotent.
+    fn acknowledge(
+        &self,
+        receipt: LeaseAuthorityPollReceipt,
+        cancellation: CancellationToken,
+    ) -> LeaseAuthorityAcknowledgementFuture<'_>;
+}
+
+/// Canonical registry of runner-side lease-authority extensions.
+#[derive(Clone, Default)]
+pub struct LeaseAuthorityExtensionRegistry {
+    extensions: Arc<[Arc<dyn LeaseAuthorityExtension>]>,
+}
+
+impl LeaseAuthorityExtensionRegistry {
+    /// Builds a canonical registry ordered by extension namespace.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate namespaces or more extensions than the protocol can
+    /// carry in one poll.
+    pub fn new(
+        mut extensions: Vec<Arc<dyn LeaseAuthorityExtension>>,
+    ) -> Result<Self, LeaseAuthorityExtensionError> {
+        if extensions.len() > MAX_LEASE_AUTHORITY_POLL_CONTRIBUTIONS {
+            return Err(LeaseAuthorityExtensionError::TooManyExtensions);
+        }
+        extensions.sort_by(|left, right| left.name().cmp(right.name()));
+        if extensions
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(LeaseAuthorityExtensionError::DuplicateName);
+        }
+        Ok(Self {
+            extensions: extensions.into(),
+        })
+    }
+
+    /// Returns an empty registry for runners with no lease-authority adapter.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Returns the number of registered extension namespaces.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.extensions.len()
+    }
+
+    /// Returns whether no lease-authority extensions are installed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.extensions.is_empty()
+    }
+
+    pub(crate) async fn current_or_refresh(
+        &self,
+        observed_at: UnixMillis,
+        cancellation: CancellationToken,
+    ) -> Result<LeaseAuthorityPollContributions, LeaseAuthorityExtensionError> {
+        let mut contributions = Vec::with_capacity(self.extensions.len());
+        for extension in self.extensions.iter() {
+            let contribution = extension
+                .current_or_refresh(observed_at, cancellation.clone())
+                .await?;
+            if contribution.name() != extension.name() {
+                return Err(LeaseAuthorityExtensionError::ContributionNameMismatch);
+            }
+            contributions.push(contribution);
+        }
+        LeaseAuthorityPollContributions::new(contributions)
+            .map_err(|_| LeaseAuthorityExtensionError::InvalidContributionSet)
+    }
+
+    pub(crate) async fn acknowledge(
+        &self,
+        receipts: &[LeaseAuthorityPollReceipt],
+        cancellation: CancellationToken,
+    ) -> Result<(), LeaseAuthorityExtensionError> {
+        if receipts.len() != self.extensions.len() {
+            return Err(LeaseAuthorityExtensionError::InvalidContributionSet);
+        }
+        for (extension, receipt) in self.extensions.iter().zip(receipts.iter()) {
+            if receipt.name() != extension.name() {
+                return Err(LeaseAuthorityExtensionError::ContributionNameMismatch);
+            }
+            extension
+                .acknowledge(receipt.clone(), cancellation.clone())
+                .await?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for LeaseAuthorityExtensionRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LeaseAuthorityExtensionRegistry")
+            .field(
+                "names",
+                &self
+                    .extensions
+                    .iter()
+                    .map(|extension| extension.name().as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// Value-free failure from runner-side lease-authority extension plumbing.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum LeaseAuthorityExtensionError {
+    /// An adapter or its durable custody is temporarily unavailable.
+    #[error("lease authority extension is unavailable")]
+    Unavailable,
+    /// Retained adapter state violated its extension contract.
+    #[error("lease authority extension state is invalid")]
+    InvalidState,
+    /// Local shutdown cancelled extension work.
+    #[error("lease authority extension work was cancelled")]
+    Cancelled,
+    /// Two adapters claimed the same canonical namespace.
+    #[error("lease authority extension namespace is duplicated")]
+    DuplicateName,
+    /// The registry exceeds the protocol's fixed contribution budget.
+    #[error("too many lease authority extensions are registered")]
+    TooManyExtensions,
+    /// An adapter returned a contribution under another namespace.
+    #[error("lease authority contribution namespace does not match its extension")]
+    ContributionNameMismatch,
+    /// Adapter contributions could not form one canonical protocol bundle.
+    #[error("lease authority contribution set is invalid")]
+    InvalidContributionSet,
 }
 
 /// Production runtime clock.

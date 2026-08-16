@@ -14,8 +14,8 @@ use automata_ci_core::{
     LogAck, OperationId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
 };
 use automata_ci_protocol::{
-    CommandSequence, ErrorMessage, LeaseRenewal, LogAckMessage, MessageHeader, NegotiatedSession,
-    NoWork, OperationAck, ProtocolLimits, RemoteErrorCode, RunnerToServer,
+    CommandSequence, ErrorMessage, LeasePollResponse, LeaseRenewal, LogAckMessage, MessageHeader,
+    NegotiatedSession, OperationAck, ProtocolLimits, RemoteErrorCode, RunnerToServer,
     SUPPORTED_PROTOCOL_RANGE, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
 };
 use automata_ci_runner_journal::{CancellationRecord, DurableCommand, RunnerJournal};
@@ -274,7 +274,11 @@ impl RunnerRuntimeControlClient for CompletionClient {
                 }
                 RunnerToServer::LeaseRequest(poll) => {
                     self.shutdown.cancel();
-                    ServerToRunner::NoWork(NoWork::new(reply_header(poll.header()), 1))
+                    ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
+                        reply_header(poll.header()),
+                        poll.authority_contributions().sha256_digest(),
+                        1,
+                    )))
                 }
                 RunnerToServer::RuntimeAuthorityRequest(_)
                 | RunnerToServer::RuntimeAuthorityAck(_) => {

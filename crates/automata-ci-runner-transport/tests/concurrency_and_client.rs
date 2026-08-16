@@ -7,7 +7,7 @@ use std::{
 };
 
 use automata_ci_core::{OperationId, RunnerSessionId};
-use automata_ci_protocol::{MessageHeader, NoWork, ServerToRunner};
+use automata_ci_protocol::{LeasePollResponse, MessageHeader, ServerToRunner};
 use automata_ci_runner_transport::{
     AuthenticatedRunnerRequest, ClientErrorKind, HandlerFuture, PROTOBUF_CONTENT_TYPE, RetryClass,
     RunnerControlClient, RunnerControlClientByteDirection, RunnerControlClientObserver,
@@ -491,14 +491,17 @@ impl RunnerControlHandler for WrongSessionHandler {
                 ));
             };
             let request_header = poll.header();
-            Ok(ServerToRunner::NoWork(NoWork::new(
-                MessageHeader::reply(
-                    request_header.protocol_version(),
-                    RunnerSessionId::new(),
-                    OperationId::new(),
-                    request_header.operation_id(),
+            Ok(ServerToRunner::LeasePollResponse(Box::new(
+                LeasePollResponse::no_work(
+                    MessageHeader::reply(
+                        request_header.protocol_version(),
+                        RunnerSessionId::new(),
+                        OperationId::new(),
+                        request_header.operation_id(),
+                    ),
+                    poll.authority_contributions().sha256_digest(),
+                    10,
                 ),
-                10,
             )))
         })
     }

@@ -7,11 +7,12 @@ use automata_ci_execution::{
     ImmutableImage, MAX_EXECUTION_OUTPUT_BYTES, MAX_EXECUTION_OUTPUT_RECORD_BYTES,
     MAX_EXECUTION_OUTPUT_RECORDS, NetworkPolicy, OperationId, ProviderCapabilities, ProviderId,
     ResourceLimits, RootFilesystemPolicy, RunnerId, RuntimeServiceProtocol, RuntimeServiceRoute,
-    RuntimeServiceRoutes, SandboxCapability, SandboxCustody, SandboxEnvironment, SandboxGeneration,
-    SandboxHandle, SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBinding,
-    ServiceContainerBindings, ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides,
-    ServiceHealthPolicy, ServiceNetwork, ServicePort, ServicePortBinding, ServiceTransportProtocol,
-    Sha256Digest, TargetPath, ValueError,
+    RuntimeServiceRoutes, SandboxAuthorization, SandboxAuthorizationName, SandboxAuthorizations,
+    SandboxCapability, SandboxCustody, SandboxEnvironment, SandboxGeneration, SandboxHandle,
+    SandboxPrivilegePolicy, SandboxSpec, ServiceContainerBinding, ServiceContainerBindings,
+    ServiceContainerSpec, ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy,
+    ServiceNetwork, ServicePort, ServicePortBinding, ServiceTransportProtocol, Sha256Digest,
+    TargetPath, ValueError,
 };
 use url::Url;
 
@@ -140,6 +141,19 @@ fn image_profile_and_spec_are_exact_and_never_resolve_hosted_labels() {
     );
     assert_eq!(spec.privilege(), SandboxPrivilegePolicy::Unprivileged);
     assert!(spec.runtime_service_routes().is_empty());
+    assert!(spec.sandbox_authorizations().as_slice().is_empty());
+    let authorization = SandboxAuthorization::new(
+        SandboxAuthorizationName::new("example.provider").expect("authorization name"),
+        3,
+        b"opaque-authorization".to_vec(),
+    )
+    .expect("authorization");
+    let authorizations =
+        SandboxAuthorizations::new(vec![authorization]).expect("authorization set");
+    let authorized = spec
+        .clone()
+        .with_sandbox_authorizations(authorizations.clone());
+    assert_eq!(authorized.sandbox_authorizations(), &authorizations);
     let administrative = spec
         .clone()
         .with_privilege(SandboxPrivilegePolicy::Administrator);

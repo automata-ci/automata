@@ -100,6 +100,66 @@ pub fn decode_runtime_authorities(
     runtime_authorities(value, job, lease, limits)
 }
 
+/// Canonically decodes one provider-owned Windows runner placement renewal payload.
+///
+/// This standalone payload is bounded by the generic lease-authority payload
+/// ceiling and rejects unknown, reordered, or otherwise noncanonical protobuf
+/// encodings before returning the domain envelope.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for empty, oversized, malformed, noncanonical, or
+/// invalid renewal bytes.
+pub fn decode_windows_runner_placement_renewal_payload(
+    encoded: &[u8],
+) -> Result<protocol::WindowsRunnerPlacementRenewalEnvelope, DecodeError> {
+    check_intrinsic_payload_size(encoded, protocol::MAX_LEASE_AUTHORITY_POLL_PAYLOAD_BYTES)?;
+    let value = wire::WindowsRunnerPlacementRenewalEnvelope::decode(encoded)
+        .map_err(DecodeError::MalformedProtobuf)?;
+    if value.encode_to_vec() != encoded {
+        return Err(DecodeError::NonCanonicalValue {
+            field: "windows_runner_placement_renewal_payload",
+        });
+    }
+    windows_placement_renewal(value)
+}
+
+/// Canonically decodes one provider-owned Windows Hyper-V sandbox grant payload.
+///
+/// This standalone payload is bounded by the generic sandbox-authorization
+/// payload ceiling and rejects protobuf aliases before returning the grant.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] for empty, oversized, malformed, noncanonical, or
+/// invalid grant bytes.
+pub fn decode_windows_hyperv_broker_grant_payload(
+    encoded: &[u8],
+) -> Result<core::WindowsHyperVBrokerGrant, DecodeError> {
+    check_intrinsic_payload_size(encoded, core::MAX_SANDBOX_AUTHORIZATION_PAYLOAD_BYTES)?;
+    let value =
+        wire::WindowsHyperVBrokerGrant::decode(encoded).map_err(DecodeError::MalformedProtobuf)?;
+    if value.encode_to_vec() != encoded {
+        return Err(DecodeError::NonCanonicalValue {
+            field: "windows_hyperv_broker_grant_payload",
+        });
+    }
+    windows_hyperv_broker_grant(value)
+}
+
+fn check_intrinsic_payload_size(encoded: &[u8], maximum: usize) -> Result<(), DecodeError> {
+    if encoded.is_empty() {
+        return Err(DecodeError::EmptyFrame);
+    }
+    if encoded.len() > maximum {
+        return Err(DecodeError::FrameTooLarge {
+            size: encoded.len(),
+            maximum,
+        });
+    }
+    Ok(())
+}
+
 fn check_frame_size(frame: &[u8], limits: &protocol::ProtocolLimits) -> Result<(), DecodeError> {
     if frame.is_empty() {
         return Err(DecodeError::EmptyFrame);
@@ -122,7 +182,7 @@ fn runner_frame(
 
     match required_variant(frame.payload, "runner_frame.payload")? {
         Payload::Hello(value) => runner_hello(value, limits).map(Domain::Hello),
-        Payload::LeaseRequest(value) => lease_request(value).map(Domain::LeaseRequest),
+        Payload::LeaseRequest(value) => lease_request(value, limits).map(Domain::LeaseRequest),
         Payload::LeaseResponse(value) => lease_response(value).map(Domain::LeaseResponse),
         Payload::RuntimeAuthorityRequest(value) => {
             runtime_authority_request(value).map(Domain::RuntimeAuthorityRequest)
@@ -150,6 +210,9 @@ fn server_frame(
         Payload::HandshakeRejected(value) => {
             handshake_rejected(value).map(Domain::HandshakeRejected)
         }
+        Payload::LeasePollResponse(value) => {
+            lease_poll_response(value, limits).map(|item| Domain::LeasePollResponse(Box::new(item)))
+        }
         Payload::LeaseOffer(value) => {
             lease_offer(value, limits).map(|item| Domain::LeaseOffer(Box::new(item)))
         }
@@ -159,7 +222,6 @@ fn server_frame(
         Payload::CancelJob(value) => cancel_job(value).map(Domain::CancelJob),
         Payload::LogAck(value) => log_ack_message(value).map(Domain::LogAck),
         Payload::OperationAck(value) => operation_ack(value).map(Domain::OperationAck),
-        Payload::NoWork(value) => no_work(value).map(Domain::NoWork),
         Payload::Error(value) => error_message(value, limits).map(Domain::Error),
     }
 }
@@ -885,22 +947,149 @@ fn decode_groups(
         .collect()
 }
 
-fn lease_request(value: wire::LeaseRequest) -> Result<protocol::LeaseRequest, DecodeError> {
+fn lease_request(
+    value: wire::LeaseRequest,
+    limits: &protocol::ProtocolLimits,
+) -> Result<protocol::LeaseRequest, DecodeError> {
     let header = message_header(required(value.header, "lease_request.header")?)?;
     let slot = runner_slot(value.slot, "lease_request.slot")?;
-    value.acknowledges_operation_id.map_or_else(
-        || Ok(protocol::LeaseRequest::first(header, slot)),
-        |operation_id| {
-            Ok(protocol::LeaseRequest::successor(
-                header,
-                slot,
-                core::OperationId::from_uuid(uuid(
-                    operation_id,
-                    "lease_request.acknowledges_operation_id",
-                )?),
-            ))
-        },
+    let authority_contributions = lease_authority_poll_contributions(
+        required(
+            value.authority_contributions,
+            "lease_request.authority_contributions",
+        )?,
+        limits,
+    )?;
+    match value.acknowledges_operation_id {
+        None => Ok(protocol::LeaseRequest::first(
+            header,
+            slot,
+            authority_contributions,
+        )),
+        Some(operation_id) => Ok(protocol::LeaseRequest::successor(
+            header,
+            slot,
+            core::OperationId::from_uuid(uuid(
+                operation_id,
+                "lease_request.acknowledges_operation_id",
+            )?),
+            authority_contributions,
+        )),
+    }
+}
+
+fn lease_authority_poll_contributions(
+    value: wire::LeaseAuthorityPollContributions,
+    limits: &protocol::ProtocolLimits,
+) -> Result<protocol::LeaseAuthorityPollContributions, DecodeError> {
+    check_schema(
+        value.schema_version,
+        protocol::LEASE_AUTHORITY_POLL_CONTRIBUTIONS_SCHEMA_VERSION,
+        "lease_authority_poll_contributions.schema_version",
+    )?;
+    check_collection(
+        value.contributions.len(),
+        protocol::MAX_LEASE_AUTHORITY_POLL_CONTRIBUTIONS.min(limits.max_collection_items()),
+        "lease_authority_poll_contributions.contributions",
+    )?;
+    ensure_order(
+        value
+            .contributions
+            .windows(2)
+            .map(|pair| pair[0].name.cmp(&pair[1].name)),
+        "lease_authority_poll_contributions.contributions",
+    )?;
+    let contributions = value
+        .contributions
+        .into_iter()
+        .map(lease_authority_poll_contribution)
+        .collect::<Result<Vec<_>, _>>()?;
+    protocol::LeaseAuthorityPollContributions::from_parts(
+        narrow_u16(
+            value.schema_version,
+            "lease_authority_poll_contributions.schema_version",
+        )?,
+        contributions,
+        sha256_digest(
+            value.sha256_digest,
+            "lease_authority_poll_contributions.sha256_digest",
+        )?,
     )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "lease_authority_poll_contributions",
+    })
+}
+
+fn lease_authority_poll_contribution(
+    value: wire::LeaseAuthorityPollContribution,
+) -> Result<protocol::LeaseAuthorityPollContribution, DecodeError> {
+    protocol::LeaseAuthorityPollContribution::from_parts(
+        protocol::LeaseAuthorityName::new(value.name).map_err(|_| DecodeError::InvalidValue {
+            field: "lease_authority_poll_contribution.name",
+        })?,
+        narrow_u16(
+            value.payload_schema_version,
+            "lease_authority_poll_contribution.payload_schema_version",
+        )?,
+        sha256_digest(
+            value.payload_sha256,
+            "lease_authority_poll_contribution.payload_sha256",
+        )?,
+        value.payload,
+    )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "lease_authority_poll_contribution",
+    })
+}
+
+fn lease_poll_response(
+    value: wire::LeasePollResponse,
+    limits: &protocol::ProtocolLimits,
+) -> Result<protocol::LeasePollResponse, DecodeError> {
+    use wire::lease_poll_response::Outcome;
+
+    let header = message_header(required(value.header, "lease_poll_response.header")?)?;
+    let accepted = sha256_digest(
+        value.accepted_contributions_sha256,
+        "lease_poll_response.accepted_contributions_sha256",
+    )?;
+    match required_variant(value.outcome, "lease_poll_response.outcome")? {
+        Outcome::NoWorkRetryAfterMillis(retry_after_millis) => Ok(
+            protocol::LeasePollResponse::no_work(header, accepted, retry_after_millis),
+        ),
+        Outcome::LeaseOffer(offer) => Ok(protocol::LeasePollResponse::lease_offer(
+            header,
+            accepted,
+            lease_offer(offer, limits)?,
+        )),
+        Outcome::CancelJob(cancel) => Ok(protocol::LeasePollResponse::cancel_job(
+            header,
+            accepted,
+            cancel_job(cancel)?,
+        )),
+    }
+}
+
+fn windows_placement_renewal(
+    value: wire::WindowsRunnerPlacementRenewalEnvelope,
+) -> Result<protocol::WindowsRunnerPlacementRenewalEnvelope, DecodeError> {
+    let schema_version =
+        u16::try_from(value.schema_version).map_err(|_| DecodeError::IntegerOutOfRange {
+            field: "windows_runner_placement_renewal_payload.schema_version",
+        })?;
+    if schema_version != protocol::WINDOWS_RUNNER_PLACEMENT_RENEWAL_SCHEMA_VERSION {
+        return Err(DecodeError::InvalidValue {
+            field: "windows_runner_placement_renewal_payload.schema_version",
+        });
+    }
+    protocol::WindowsRunnerPlacementRenewalEnvelope::new(
+        value.issuer_key_id,
+        value.signed_payload,
+        value.authenticator,
+    )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "windows_runner_placement_renewal_payload",
+    })
 }
 
 fn lease_offer(
@@ -915,17 +1104,161 @@ fn lease_offer(
         .managed_secret_bindings
         .map(|overlay| managed_secret_binding_overlay(overlay, &lease, limits))
         .transpose()?;
-    let offer = protocol::LeaseOffer::new(header, slot, lease, job);
-    match managed_secret_bindings {
-        Some(overlay) => {
+    let mut offer = protocol::LeaseOffer::new(header, slot, lease, job);
+    if let Some(overlay) = managed_secret_bindings {
+        offer =
             offer
                 .with_managed_secret_bindings(overlay)
                 .map_err(|_| DecodeError::InvalidValue {
                     field: "lease_offer.managed_secret_bindings",
-                })
-        }
-        None => Ok(offer),
+                })?;
     }
+    Ok(offer)
+}
+
+fn windows_hyperv_broker_grant(
+    value: wire::WindowsHyperVBrokerGrant,
+) -> Result<core::WindowsHyperVBrokerGrant, DecodeError> {
+    let schema = u16::try_from(value.schema).map_err(|_| DecodeError::IntegerOutOfRange {
+        field: "windows_hyperv_broker_grant.schema",
+    })?;
+    let key_id = sha256_digest(
+        value.key_id_sha256,
+        "windows_hyperv_broker_grant.key_id_sha256",
+    )?;
+    let claims = windows_hyperv_broker_grant_claims(required(
+        value.claims,
+        "windows_hyperv_broker_grant.claims",
+    )?)?;
+    core::WindowsHyperVBrokerGrant::from_parts(schema, key_id, claims, value.ed25519_signature)
+        .map_err(|_| DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant",
+        })
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn windows_hyperv_broker_grant_claims(
+    value: wire::WindowsHyperVBrokerGrantClaims,
+) -> Result<core::WindowsHyperVBrokerGrantClaims, DecodeError> {
+    let slot = u16::try_from(value.slot).map_err(|_| DecodeError::IntegerOutOfRange {
+        field: "windows_hyperv_broker_grant.claims.slot",
+    })?;
+    let job_ir_version =
+        u16::try_from(value.job_ir_version).map_err(|_| DecodeError::IntegerOutOfRange {
+            field: "windows_hyperv_broker_grant.claims.job_ir_version",
+        })?;
+    let profile_id =
+        core::EnvironmentProfileId::new(value.environment_profile_id).map_err(|_| {
+            DecodeError::InvalidValue {
+                field: "windows_hyperv_broker_grant.claims.environment_profile_id",
+            }
+        })?;
+    let profile = core::EnvironmentProfile::new(
+        profile_id,
+        sha256_digest(
+            value.environment_profile_sha256,
+            "windows_hyperv_broker_grant.claims.environment_profile_sha256",
+        )?,
+    );
+    let job_resource_allocation = decode_resource_allocation(required(
+        value.job_resource_allocation,
+        "windows_hyperv_broker_grant.claims.job_resource_allocation",
+    )?)?;
+    let expected_sandbox_spec_sha256 = sha256_digest(
+        value.sandbox_spec_sha256,
+        "windows_hyperv_broker_grant.claims.sandbox_spec_sha256",
+    )?;
+    let claims = core::WindowsHyperVBrokerGrantClaims::new(
+        sha256_digest(
+            value.host_id_sha256,
+            "windows_hyperv_broker_grant.claims.host_id_sha256",
+        )?,
+        sha256_digest(
+            value.placement_binding_sha256,
+            "windows_hyperv_broker_grant.claims.placement_binding_sha256",
+        )?,
+        core::AttemptId::from_uuid(uuid(
+            value.attempt_id,
+            "windows_hyperv_broker_grant.claims.attempt_id",
+        )?),
+        core::JobId::from_uuid(uuid(
+            value.job_id,
+            "windows_hyperv_broker_grant.claims.job_id",
+        )?),
+        core::RunId::from_uuid(uuid(
+            value.run_id,
+            "windows_hyperv_broker_grant.claims.run_id",
+        )?),
+        core::OperationId::from_uuid(uuid(
+            value.poll_operation_id,
+            "windows_hyperv_broker_grant.claims.poll_operation_id",
+        )?),
+        core::OperationId::from_uuid(uuid(
+            value.accepted_offer_operation_id,
+            "windows_hyperv_broker_grant.claims.accepted_offer_operation_id",
+        )?),
+        value.accepted_offer_sequence,
+        core::OperationId::from_uuid(uuid(
+            value.post_accept_operation_id,
+            "windows_hyperv_broker_grant.claims.post_accept_operation_id",
+        )?),
+        sha256_digest(
+            value.post_accept_request_sha256,
+            "windows_hyperv_broker_grant.claims.post_accept_request_sha256",
+        )?,
+        core::RunnerId::from_uuid(uuid(
+            value.runner_id,
+            "windows_hyperv_broker_grant.claims.runner_id",
+        )?),
+        core::RunnerSessionId::from_uuid(uuid(
+            value.runner_session_id,
+            "windows_hyperv_broker_grant.claims.runner_session_id",
+        )?),
+        value.runner_generation,
+        value.session_epoch,
+        slot,
+        core::LeaseId::from_uuid(uuid(
+            value.lease_id,
+            "windows_hyperv_broker_grant.claims.lease_id",
+        )?),
+        core::FencingToken::new(value.fencing_token).map_err(|_| DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant.claims.fencing_token",
+        })?,
+        core::JobIrVersion::new(job_ir_version).map_err(|_| DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant.claims.job_ir_version",
+        })?,
+        value.job_ir_encoded_size,
+        sha256_digest(
+            value.job_ir_sha256,
+            "windows_hyperv_broker_grant.claims.job_ir_sha256",
+        )?,
+        sha256_digest(
+            value.job_ir_object_key_sha256,
+            "windows_hyperv_broker_grant.claims.job_ir_object_key_sha256",
+        )?,
+        job_resource_allocation,
+        value.sandbox_pids_limit,
+        sha256_digest(
+            value.trust_binding_sha256,
+            "windows_hyperv_broker_grant.claims.trust_binding_sha256",
+        )?,
+        profile,
+        sha256_digest(
+            value.profile_contract_sha256,
+            "windows_hyperv_broker_grant.claims.profile_contract_sha256",
+        )?,
+        core::UnixMillis::new(value.issued_at_unix_millis),
+        core::UnixMillis::new(value.expires_at_unix_millis),
+    )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "windows_hyperv_broker_grant.claims",
+    })?;
+    if claims.sandbox_spec_sha256() != expected_sandbox_spec_sha256 {
+        return Err(DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant.claims.sandbox_spec_sha256",
+        });
+    }
+    Ok(claims)
 }
 
 fn runtime_authority_delivery_binding(
@@ -1109,11 +1442,18 @@ fn runtime_authorities(
         .into_iter()
         .map(runtime_authority)
         .collect::<Result<Vec<_>, _>>()?;
-    protocol::JobRuntimeAuthorities::new(authorities, job, lease).map_err(|_| {
-        DecodeError::InvalidValue {
+    let sandbox_authorizations = sandbox_authorizations(
+        required(
+            value.sandbox_authorizations,
+            "runtime_authorities.sandbox_authorizations",
+        )?,
+        limits,
+    )?;
+    protocol::JobRuntimeAuthorities::new(authorities, sandbox_authorizations, job, lease).map_err(
+        |_| DecodeError::InvalidValue {
             field: "runtime_authorities",
-        }
-    })
+        },
+    )
 }
 
 fn runtime_authorities_unbound(
@@ -1135,10 +1475,67 @@ fn runtime_authorities_unbound(
         .into_iter()
         .map(runtime_authority)
         .collect::<Result<Vec<_>, _>>()?;
-    protocol::JobRuntimeAuthorities::from_unbound(authorities).map_err(|_| {
-        DecodeError::InvalidValue {
+    let sandbox_authorizations = sandbox_authorizations(
+        required(
+            value.sandbox_authorizations,
+            "runtime_authorities.sandbox_authorizations",
+        )?,
+        limits,
+    )?;
+    protocol::JobRuntimeAuthorities::from_unbound(authorities, sandbox_authorizations).map_err(
+        |_| DecodeError::InvalidValue {
             field: "runtime_authorities",
-        }
+        },
+    )
+}
+
+fn sandbox_authorizations(
+    value: wire::SandboxAuthorizations,
+    limits: &protocol::ProtocolLimits,
+) -> Result<core::SandboxAuthorizations, DecodeError> {
+    check_schema(
+        value.schema_version,
+        core::SANDBOX_AUTHORIZATIONS_SCHEMA_VERSION,
+        "sandbox_authorizations.schema_version",
+    )?;
+    check_collection(
+        value.authorizations.len(),
+        core::MAX_SANDBOX_AUTHORIZATIONS.min(limits.max_collection_items()),
+        "sandbox_authorizations.authorizations",
+    )?;
+    ensure_order(
+        value
+            .authorizations
+            .windows(2)
+            .map(|pair| pair[0].name.cmp(&pair[1].name)),
+        "sandbox_authorizations.authorizations",
+    )?;
+    let authorizations = value
+        .authorizations
+        .into_iter()
+        .map(sandbox_authorization)
+        .collect::<Result<Vec<_>, _>>()?;
+    core::SandboxAuthorizations::new(authorizations).map_err(|_| DecodeError::InvalidValue {
+        field: "sandbox_authorizations",
+    })
+}
+
+fn sandbox_authorization(
+    value: wire::SandboxAuthorization,
+) -> Result<core::SandboxAuthorization, DecodeError> {
+    core::SandboxAuthorization::from_parts(
+        core::SandboxAuthorizationName::new(value.name).map_err(|_| DecodeError::InvalidValue {
+            field: "sandbox_authorization.name",
+        })?,
+        narrow_u16(
+            value.payload_schema_version,
+            "sandbox_authorization.payload_schema_version",
+        )?,
+        sha256_digest(value.payload_sha256, "sandbox_authorization.payload_sha256")?,
+        value.payload,
+    )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "sandbox_authorization",
     })
 }
 
@@ -2676,13 +3073,6 @@ fn operation_ack(value: wire::OperationAck) -> Result<protocol::OperationAck, De
     )?)?))
 }
 
-fn no_work(value: wire::NoWork) -> Result<protocol::NoWork, DecodeError> {
-    Ok(protocol::NoWork::new(
-        message_header(required(value.header, "no_work.header")?)?,
-        value.retry_after_millis,
-    ))
-}
-
 fn error_message(
     value: wire::ErrorMessage,
     limits: &protocol::ProtocolLimits,
@@ -2745,6 +3135,13 @@ fn runner_slot(
 
 fn fencing_token(value: u64, field: &'static str) -> Result<core::FencingToken, DecodeError> {
     core::FencingToken::new(value).map_err(|_| DecodeError::InvalidValue { field })
+}
+
+fn sha256_digest(value: Vec<u8>, field: &'static str) -> Result<core::Sha256Digest, DecodeError> {
+    let bytes = value
+        .try_into()
+        .map_err(|_| DecodeError::InvalidValue { field })?;
+    Ok(core::Sha256Digest::from_bytes(bytes))
 }
 
 fn uuid(value: impl AsRef<[u8]>, field: &'static str) -> Result<Uuid, DecodeError> {

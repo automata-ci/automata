@@ -16,7 +16,7 @@ evidence from real Windows hosts.
 | Initial network profile | Disabled |
 | Security priority | Isolation integrity, trust routing, management-plane least privilege, destructive cleanup, then action parity |
 | Work packages | WIN-ISO-00 through WIN-ISO-12; WIN-01 through WIN-03 remain capability work behind the isolation gate |
-| Last reviewed | 2026-08-16 |
+| Last reviewed | 2026-08-18 |
 
 The words **must**, **must not**, **should**, and **may** express required,
 recommended, and optional constraints. An unchecked task is planned work. It
@@ -158,22 +158,35 @@ must place that authority behind a narrow broker, or prove an equivalently
 restricted engine service identity and API surface, before hostile jobs are
 admitted.
 
-The current source tree now also has a local pre-lease admission increment. It
-rehydrates the canonical AUTH-02 trust snapshot and immutable materialization
-authority, filters Windows candidates without complete authenticated evidence,
-and derives a server-only one-use `WindowsHyperVPlacementGrant`. The value binds
-the attempt, poll operation, runner generation/session/slot, lease, JobIR,
-trust-policy and snapshot digests, authority profile, exact current
-requirements, environment profile, and expiry. PostgreSQL re-derives that value
-from locked current state immediately before changing `queued` to `leased`, so
-a missing grant, a legacy direct-claim bypass, or stale trust/requirements state
-cannot fall through to another Windows boundary.
+The current source tree now also has a provider-neutral lease-authority
+extension boundary. Before scheduling, protocol 3 carries a bounded canonical
+contribution bundle which registered control-side extensions validate and
+commit durably. The exact bundle digest is bound to the claim receipt and its
+replay. After locked `JobIR` verification, the Windows extension derives
+value-free placement evidence from its contribution and records that evidence
+in the lease-offer v3 command. Only after exact offer acceptance may the
+extension prepare and commit a signed one-use sandbox authorization.
 
-That value is intentionally not a broker credential: it is not serialized,
-signed, or accepted from a runner. WIN-ISO-02 must define and independently
-verify the broker-consumable signed form. This increment therefore closes the
-local pre-placement seam without live-provider credentials, not the hostile-host
-acceptance gate.
+That provider-owned value is not a general broker credential and is never
+interpreted by generic orchestration. The source tree defines these component
+seams without claiming their production composition:
+
+- protocol 3 can carry a Windows renewal envelope as one provider-owned,
+  canonical lease-poll contribution instead of adding Windows fields to the
+  generic lease request;
+- post-accept `JobRuntimeAuthorities` schema 2 can carry the signed
+  `WindowsHyperVBrokerGrant` as one `windows-hyperv` sandbox authorization; and
+- the Windows provider requires exactly one such authorization plus an
+  injected restricted-broker consumer, which must validate and atomically
+  spend the grant before any job-custody create mutation.
+
+The generic runner and executor do not interpret either Windows payload. A
+provider without a matching consumer rejects a nonempty authorization set, and
+the Windows provider rejects job creation when its consumer is absent. Direct
+provider construction remains useful only for profile admission. The runner
+product still does not install a Windows lease-authority adapter or a
+production restricted-broker consumer, so these component boundaries do not
+make `automata-runner run` available on Windows or close the hostile-host gate.
 
 ## Non-negotiable invariants
 
@@ -756,8 +769,12 @@ implicit default.
       and reject generic VM or alternate-provider capabilities before lease.
 - [x] Reject unknown, missing, incomplete, or stale local placement evidence by
       re-deriving the server-only grant from locked durable state before lease.
+- [x] Define the canonical signed broker-grant payload and carry it only through
+      the provider-neutral post-accept sandbox-authorization contract.
+- [x] Require the Windows provider's injected consumer to validate and spend
+      that exact authorization before a job-custody create mutation.
 - [ ] Sign a broker-consumable one-use grant and verify it independently at the
-      restricted management boundary.
+      composed restricted management boundary.
 - [x] Ensure no scheduler, rerun, recovery, administrative API, or capacity
       fallback can select an alternate Windows boundary.
 - [x] Bind the server-only one-use admission value to attempt, operation,

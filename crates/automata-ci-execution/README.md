@@ -11,6 +11,15 @@ a separate side channel from general sandbox networking: a provider must
 enforce the supplied scheme, host, and port set and must not infer broader
 egress authority from it.
 
+`SandboxAuthorizations` carries a canonical bounded set of opaque,
+provider-owned authorization payloads from a leased execution request into
+the exact `SandboxSpec`. A provider must consume only its own namespace and
+payload schema before mutation; providers without such a boundary reject a
+nonempty set instead of ignoring it. `SandboxExecutionBinding` accompanies a
+job authorization with the exact session, run, job, attempt, lease, accepted
+offer, and immutable `JobIR` identity so a restricted adapter can reject an
+authorization substituted from another execution.
+
 The Podman, Kubernetes, macOS Virtualization.framework, and Windows Hyper-V
 sandbox adapters implement `SandboxProvider` directly. Providers that
 advertise service-container support return the complete healthy discovery view

@@ -311,15 +311,24 @@ impl RunnerJournal for FileJournal {
         })
     }
 
-    fn advance_lease_poll(
+    fn complete_lease_poll(
+        &self,
+        session_id: RunnerSessionId,
+        completion: crate::LeasePollCompletion,
+    ) -> Result<JournalSnapshot, JournalError> {
+        self.mutate(JournalMutationDomain::LeasePoll, |state| {
+            state.complete_lease_poll(session_id, completion)
+        })
+    }
+
+    fn acknowledge_lease_authority_receipts(
         &self,
         session_id: RunnerSessionId,
         slot: RunnerSlotOrdinal,
-        expected_current: OperationId,
-        successor_operation_id: OperationId,
+        expected: &[automata_ci_protocol::LeaseAuthorityPollReceipt],
     ) -> Result<JournalSnapshot, JournalError> {
         self.mutate(JournalMutationDomain::LeasePoll, |state| {
-            state.advance_lease_poll(session_id, slot, expected_current, successor_operation_id)
+            state.acknowledge_lease_authority_receipts(session_id, slot, expected)
         })
     }
 

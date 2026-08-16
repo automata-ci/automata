@@ -249,6 +249,10 @@ const CANONICAL_MIGRATIONS: &[(&str, &str)] = &[
         "0061_job_check_topology.sql",
         "befdac4d4754eb1b39e6954c95b012b67797fccb7baa248a53c0559162d295b38069f41e78f0e724ded395df965c5e58",
     ),
+    (
+        "0062_runner_protocol_v3.sql",
+        "3cab21e969aa502ded9cfdf2d0442cb610426072a82506f844961aea72ad13ce7fb9020043e07dce0b4752355bfe3561",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

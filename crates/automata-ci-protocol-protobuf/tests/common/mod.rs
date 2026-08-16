@@ -12,20 +12,22 @@ use automata_ci_core::{
     LogFrame, LogSequence, LogStreamId, MountSource, OperatingSystem, OperationId,
     ResourceCapacity, RunId, RunValueTemplates, RunnerCapabilities, RunnerFeature, RunnerGroup,
     RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
-    RuntimePositiveInteger, RuntimeTimeoutTemplate, SandboxCapabilities, SandboxFeature,
-    SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepAnnotation, StepAnnotationLevel,
-    StepAnnotationProperty, StepId, StepIr, StepResult, TransportProtocol, TrustActorEvidence,
-    TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
-    TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, ValueSource,
-    ValueTemplate, VolumeMount, WorkflowId,
+    RuntimePositiveInteger, RuntimeTimeoutTemplate, SandboxAuthorization, SandboxAuthorizationName,
+    SandboxAuthorizations, SandboxCapabilities, SandboxFeature, SecretBinding, SemanticStep,
+    Sha256Digest, ShellTemplate, StepAnnotation, StepAnnotationLevel, StepAnnotationProperty,
+    StepId, StepIr, StepResult, TransportProtocol, TrustActorEvidence, TrustActorKind,
+    TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
+    TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis, ValueSource, ValueTemplate,
+    VolumeMount, WorkflowId,
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
     HandshakeRejected, INITIAL_RUNTIME_AUTHORITY_GENERATION, JobResultMessage,
-    JobRuntimeAuthorities, JobRuntimeAuthority, JobStateUpdate, LeaseDisposition, LeaseHeartbeat,
-    LeaseOffer, LeaseRejectionReason, LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage,
-    LogBatch, ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession, NoWork, OperationAck,
-    RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck,
+    JobRuntimeAuthorities, JobRuntimeAuthority, JobStateUpdate, LeaseAuthorityPollContributions,
+    LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeasePollResponse, LeaseRejectionReason,
+    LeaseRenewal, LeaseRequest, LeaseResponse, LogAckMessage, LogBatch,
+    ManagedSecretBindingOverlay, MessageHeader, NegotiatedSession, OperationAck, RemoteErrorCode,
+    RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck,
     RuntimeAuthorityCredential, RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint,
     RuntimeAuthorityGrant, RuntimeAuthorityName, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
     ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
@@ -60,6 +62,7 @@ pub fn runner_messages() -> Vec<(&'static str, RunnerToServer)> {
                 request_header(12),
                 slot(),
                 operation_id(11),
+                LeaseAuthorityPollContributions::default(),
             )),
         ),
         (
@@ -203,8 +206,12 @@ pub fn server_messages() -> Vec<(&'static str, ServerToRunner)> {
             ServerToRunner::OperationAck(OperationAck::new(reply_header(61, 62))),
         ),
         (
-            "no_work",
-            ServerToRunner::NoWork(NoWork::new(reply_header(63, 64), 1_250)),
+            "lease_poll_response_no_work",
+            ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::no_work(
+                reply_header(63, 64),
+                LeaseAuthorityPollContributions::default().sha256_digest(),
+                1_250,
+            ))),
         ),
         (
             "error",
@@ -666,7 +673,17 @@ pub fn runtime_authorities(job: &JobIrEnvelope, lease: &Lease) -> JobRuntimeAuth
         UnixMillis::new(1_700_003_600_000),
     )
     .expect("valid runtime authority");
-    JobRuntimeAuthorities::new(vec![authority], job, lease).expect("valid authority bundle")
+    let sandbox_authorizations = SandboxAuthorizations::new(vec![
+        SandboxAuthorization::new(
+            SandboxAuthorizationName::new("windows-hyperv").expect("authorization name"),
+            automata_ci_core::WINDOWS_HYPERV_BROKER_GRANT_SCHEMA_V4,
+            vec![0xa5; 64],
+        )
+        .expect("sandbox authorization"),
+    ])
+    .expect("sandbox authorizations");
+    JobRuntimeAuthorities::new(vec![authority], sandbox_authorizations, job, lease)
+        .expect("valid authority bundle")
 }
 
 fn job_result(attempt: AttemptId) -> JobResult {

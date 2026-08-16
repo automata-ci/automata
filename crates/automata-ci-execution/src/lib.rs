@@ -42,7 +42,10 @@ mod service;
 mod value;
 
 pub use automata_ci_core::{
-    EnvironmentProfile, EnvironmentProfileId, OperationId, RunnerId, Sha256Digest,
+    AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken, JobId, JobIrVersion,
+    JobResourceAllocation, LeaseGuard, LeaseId, OperationId, ResourceCapacity, RunId, RunnerId,
+    RunnerSessionId, SANDBOX_AUTHORIZATIONS_SCHEMA_VERSION, SandboxAuthorization,
+    SandboxAuthorizationError, SandboxAuthorizationName, SandboxAuthorizations, Sha256Digest,
 };
 pub use capability::{ProviderCapabilities, SandboxCapability};
 pub use endpoint::{
@@ -61,8 +64,8 @@ pub use runtime_service::{
     MAX_RUNTIME_SERVICE_ROUTES, RuntimeServiceProtocol, RuntimeServiceRoute, RuntimeServiceRoutes,
 };
 pub use sandbox::{
-    DestroyDisposition, DestroySandbox, SandboxCustody, SandboxInspection, SandboxProvider,
-    SandboxRecord, SandboxSpec, SandboxState,
+    DestroyDisposition, DestroySandbox, SandboxCustody, SandboxExecutionBinding, SandboxInspection,
+    SandboxProvider, SandboxRecord, SandboxSpec, SandboxState,
 };
 pub use service::{
     ContainerHandle, ServiceContainerBinding, ServiceContainerBindings, ServiceContainerSpec,

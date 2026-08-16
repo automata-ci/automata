@@ -60,6 +60,9 @@ pub enum JournalInvariantError {
     /// A proposed lease-poll identity is already bound to another checkpoint.
     #[error("lease-poll operation identity conflicts with another durable checkpoint")]
     LeasePollOperationConflict,
+    /// Source acknowledgement did not match the exact durably accepted contribution identities.
+    #[error("lease-authority acknowledgement receipts do not match the durable checkpoint")]
+    LeaseAuthorityReceiptMismatch,
     /// No durable lease occupies the requested stable slot.
     #[error("runner slot ordinal {0:?} is not journaled")]
     SlotNotFound(RunnerSlotOrdinal),

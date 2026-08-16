@@ -4,6 +4,7 @@ use crate::lease::{
     TryClaimReceipt,
 };
 use async_trait::async_trait;
+use automata_ci_protocol::LeaseAuthorityPollContributions;
 use automata_ci_store::StoreError;
 
 /// Bounded exact-response ledger for lease-request chains.
@@ -30,6 +31,7 @@ pub trait RunnerClaimRepository: Send + Sync {
     async fn lookup_lease_request(
         &self,
         request: LeaseRequestKey,
+        authority_contributions: &LeaseAuthorityPollContributions,
     ) -> Result<Option<TryClaimReceipt>, StoreError>;
 
     /// Claims one scheduler-selected candidate and records the answer in the

@@ -907,6 +907,16 @@ fn sync_response_matches(prepared: &PreparedRequest, response: &ServerToRunner) 
         ServerToRunner::RuntimeAuthorityGrant(grant) => {
             grant.header().validate_reply_for(request_header).is_ok()
         }
+        ServerToRunner::LeasePollResponse(response) => {
+            response.header().validate_reply_for(request_header).is_ok()
+                && match response.outcome() {
+                    automata_ci_protocol::LeasePollOutcome::LeaseOffer(offer) => {
+                        offer.job().version() == binding.job_ir_version()
+                    }
+                    automata_ci_protocol::LeasePollOutcome::NoWork { .. }
+                    | automata_ci_protocol::LeasePollOutcome::CancelJob(_) => true,
+                }
+        }
         ServerToRunner::CancelJob(cancel) => cancel
             .header()
             .validate_for(binding.protocol_version(), binding.session_id())
@@ -917,9 +927,6 @@ fn sync_response_matches(prepared: &PreparedRequest, response: &ServerToRunner) 
         ServerToRunner::LogAck(ack) => ack.header().validate_reply_for(request_header).is_ok(),
         ServerToRunner::OperationAck(ack) => {
             ack.header().validate_reply_for(request_header).is_ok()
-        }
-        ServerToRunner::NoWork(no_work) => {
-            no_work.header().validate_reply_for(request_header).is_ok()
         }
         ServerToRunner::Error(error) => error.header().validate_reply_for(request_header).is_ok(),
     }

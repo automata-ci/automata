@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use automata_ci_core as core;
 use automata_ci_protocol as protocol;
+use prost::Message as _;
 use uuid::Uuid;
 use zeroize::Zeroize as _;
 
@@ -111,6 +112,29 @@ pub fn encode_runtime_authorities(
     encoded
 }
 
+/// Canonically encodes one provider-owned Windows runner placement renewal payload.
+///
+/// The domain envelope enforces its own hard byte bounds. The returned bytes
+/// are suitable for [`protocol::LeaseAuthorityPollContribution::new`] and do
+/// not depend on runner-frame transport limits.
+#[must_use]
+pub fn encode_windows_runner_placement_renewal_payload(
+    renewal: &protocol::WindowsRunnerPlacementRenewalEnvelope,
+) -> Vec<u8> {
+    windows_placement_renewal(renewal).encode_to_vec()
+}
+
+/// Canonically encodes one provider-owned Windows Hyper-V sandbox grant payload.
+///
+/// The grant shape is intrinsically bounded. The returned exact protobuf bytes
+/// are suitable for [`core::SandboxAuthorization::new`].
+#[must_use]
+pub fn encode_windows_hyperv_broker_grant_payload(
+    grant: &core::WindowsHyperVBrokerGrant,
+) -> Vec<u8> {
+    windows_hyperv_broker_grant(grant).encode_to_vec()
+}
+
 fn encode_message<M: prost::Message>(
     message: &M,
     limits: &protocol::ProtocolLimits,
@@ -157,6 +181,7 @@ fn server_frame(message: &protocol::ServerToRunner) -> wire::ServerFrame {
     let payload = match message {
         Domain::Hello(value) => Payload::Hello(server_hello(value)),
         Domain::HandshakeRejected(value) => Payload::HandshakeRejected(handshake_rejected(value)),
+        Domain::LeasePollResponse(value) => Payload::LeasePollResponse(lease_poll_response(value)),
         Domain::LeaseOffer(value) => Payload::LeaseOffer(lease_offer(value)),
         Domain::RuntimeAuthorityGrant(value) => {
             Payload::RuntimeAuthorityGrant(runtime_authority_grant(value))
@@ -165,7 +190,6 @@ fn server_frame(message: &protocol::ServerToRunner) -> wire::ServerFrame {
         Domain::CancelJob(value) => Payload::CancelJob(cancel_job(value)),
         Domain::LogAck(value) => Payload::LogAck(log_ack_message(value)),
         Domain::OperationAck(value) => Payload::OperationAck(operation_ack(*value)),
-        Domain::NoWork(value) => Payload::NoWork(no_work(value)),
         Domain::Error(value) => Payload::Error(error_message(value)),
     };
     wire::ServerFrame {
@@ -474,6 +498,63 @@ fn lease_request(value: &protocol::LeaseRequest) -> wire::LeaseRequest {
         acknowledges_operation_id: value
             .acknowledges_operation_id()
             .map(|operation_id| uuid_bytes(operation_id.as_uuid())),
+        authority_contributions: Some(lease_authority_poll_contributions(
+            value.authority_contributions(),
+        )),
+    }
+}
+
+fn lease_authority_poll_contributions(
+    value: &protocol::LeaseAuthorityPollContributions,
+) -> wire::LeaseAuthorityPollContributions {
+    wire::LeaseAuthorityPollContributions {
+        schema_version: u32::from(value.schema_version()),
+        contributions: value
+            .as_slice()
+            .iter()
+            .map(lease_authority_poll_contribution)
+            .collect(),
+        sha256_digest: value.sha256_digest().as_bytes().to_vec(),
+    }
+}
+
+fn lease_authority_poll_contribution(
+    value: &protocol::LeaseAuthorityPollContribution,
+) -> wire::LeaseAuthorityPollContribution {
+    wire::LeaseAuthorityPollContribution {
+        name: value.name().as_str().to_owned(),
+        payload_schema_version: u32::from(value.payload_schema_version()),
+        payload_sha256: value.payload_sha256().as_bytes().to_vec(),
+        payload: value.payload().to_vec(),
+    }
+}
+
+fn lease_poll_response(value: &protocol::LeasePollResponse) -> wire::LeasePollResponse {
+    use protocol::LeasePollOutcome as Domain;
+    use wire::lease_poll_response::Outcome;
+
+    let outcome = match value.outcome() {
+        Domain::NoWork { retry_after_millis } => {
+            Outcome::NoWorkRetryAfterMillis(*retry_after_millis)
+        }
+        Domain::LeaseOffer(offer) => Outcome::LeaseOffer(lease_offer(offer)),
+        Domain::CancelJob(cancel) => Outcome::CancelJob(cancel_job(cancel)),
+    };
+    wire::LeasePollResponse {
+        header: Some(message_header(value.header())),
+        accepted_contributions_sha256: value.accepted_contributions_sha256().as_bytes().to_vec(),
+        outcome: Some(outcome),
+    }
+}
+
+fn windows_placement_renewal(
+    value: &protocol::WindowsRunnerPlacementRenewalEnvelope,
+) -> wire::WindowsRunnerPlacementRenewalEnvelope {
+    wire::WindowsRunnerPlacementRenewalEnvelope {
+        schema_version: u32::from(value.schema_version()),
+        issuer_key_id: value.issuer_key_id().to_owned(),
+        signed_payload: value.signed_payload().to_vec(),
+        authenticator: value.authenticator().to_vec(),
     }
 }
 
@@ -486,6 +567,54 @@ fn lease_offer(value: &protocol::LeaseOffer) -> wire::LeaseOffer {
         managed_secret_bindings: value
             .managed_secret_bindings()
             .map(managed_secret_binding_overlay),
+    }
+}
+
+fn windows_hyperv_broker_grant(
+    value: &core::WindowsHyperVBrokerGrant,
+) -> wire::WindowsHyperVBrokerGrant {
+    wire::WindowsHyperVBrokerGrant {
+        schema: u32::from(value.schema()),
+        key_id_sha256: value.key_id().as_bytes().to_vec(),
+        claims: Some(windows_hyperv_broker_grant_claims(value.claims())),
+        ed25519_signature: value.signature().to_vec(),
+    }
+}
+
+fn windows_hyperv_broker_grant_claims(
+    value: &core::WindowsHyperVBrokerGrantClaims,
+) -> wire::WindowsHyperVBrokerGrantClaims {
+    wire::WindowsHyperVBrokerGrantClaims {
+        host_id_sha256: value.host_id().as_bytes().to_vec(),
+        placement_binding_sha256: value.placement_binding_digest().as_bytes().to_vec(),
+        attempt_id: uuid_bytes(value.attempt_id().as_uuid()),
+        job_id: uuid_bytes(value.job_id().as_uuid()),
+        run_id: uuid_bytes(value.run_id().as_uuid()),
+        poll_operation_id: uuid_bytes(value.poll_operation_id().as_uuid()),
+        runner_id: uuid_bytes(value.runner_id().as_uuid()),
+        runner_session_id: uuid_bytes(value.runner_session_id().as_uuid()),
+        runner_generation: value.runner_generation(),
+        session_epoch: value.session_epoch(),
+        slot: u32::from(value.slot()),
+        lease_id: uuid_bytes(value.lease_id().as_uuid()),
+        fencing_token: value.fencing_token().get(),
+        job_ir_version: u32::from(value.job_ir_version().get()),
+        job_ir_encoded_size: value.job_ir_encoded_size(),
+        job_ir_sha256: value.job_ir_digest().as_bytes().to_vec(),
+        job_ir_object_key_sha256: value.job_ir_object_key_digest().as_bytes().to_vec(),
+        trust_binding_sha256: value.trust_binding_digest().as_bytes().to_vec(),
+        environment_profile_id: value.environment_profile().id().as_str().to_owned(),
+        environment_profile_sha256: value.environment_profile().digest().as_bytes().to_vec(),
+        issued_at_unix_millis: value.issued_at().get(),
+        expires_at_unix_millis: value.expires_at().get(),
+        accepted_offer_operation_id: uuid_bytes(value.accepted_offer_operation_id().as_uuid()),
+        accepted_offer_sequence: value.accepted_offer_sequence(),
+        post_accept_operation_id: uuid_bytes(value.post_accept_operation_id().as_uuid()),
+        post_accept_request_sha256: value.post_accept_request_digest().as_bytes().to_vec(),
+        job_resource_allocation: Some(job_resource_allocation(value.job_resource_allocation())),
+        profile_contract_sha256: value.profile_contract_sha256().as_bytes().to_vec(),
+        sandbox_pids_limit: value.sandbox_pids_limit(),
+        sandbox_spec_sha256: value.sandbox_spec_sha256().as_bytes().to_vec(),
     }
 }
 
@@ -558,6 +687,23 @@ fn runtime_authorities(value: &protocol::JobRuntimeAuthorities) -> wire::JobRunt
     wire::JobRuntimeAuthorities {
         schema_version: u32::from(value.schema_version()),
         authorities: value.as_slice().iter().map(runtime_authority).collect(),
+        sandbox_authorizations: Some(sandbox_authorizations(value.sandbox_authorizations())),
+    }
+}
+
+fn sandbox_authorizations(value: &core::SandboxAuthorizations) -> wire::SandboxAuthorizations {
+    wire::SandboxAuthorizations {
+        schema_version: u32::from(value.schema_version()),
+        authorizations: value.as_slice().iter().map(sandbox_authorization).collect(),
+    }
+}
+
+fn sandbox_authorization(value: &core::SandboxAuthorization) -> wire::SandboxAuthorization {
+    wire::SandboxAuthorization {
+        name: value.name().as_str().to_owned(),
+        payload_schema_version: u32::from(value.payload_schema_version()),
+        payload_sha256: value.payload_sha256().as_bytes().to_vec(),
+        payload: value.payload().to_vec(),
     }
 }
 
@@ -597,6 +743,11 @@ fn zeroize_server_authorities(frame: &mut wire::ServerFrame) {
 fn zeroize_runtime_authorities(authorities: &mut wire::JobRuntimeAuthorities) {
     for authority in &mut authorities.authorities {
         authority.credential.zeroize();
+    }
+    if let Some(authorizations) = authorities.sandbox_authorizations.as_mut() {
+        for authorization in &mut authorizations.authorizations {
+            authorization.payload.zeroize();
+        }
     }
 }
 
@@ -1418,13 +1569,6 @@ fn operation_ack(value: protocol::OperationAck) -> wire::OperationAck {
     }
 }
 
-fn no_work(value: &protocol::NoWork) -> wire::NoWork {
-    wire::NoWork {
-        header: Some(message_header(value.header())),
-        retry_after_millis: value.retry_after_millis(),
-    }
-}
-
 fn error_message(value: &protocol::ErrorMessage) -> wire::ErrorMessage {
     wire::ErrorMessage {
         header: Some(message_header(value.header())),
@@ -1467,4 +1611,102 @@ const fn remote_error_code(value: protocol::RemoteErrorCode) -> i32 {
 
 fn uuid_bytes(value: Uuid) -> Vec<u8> {
     value.as_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DecodeError,
+        decode::{
+            decode_windows_hyperv_broker_grant_payload,
+            windows_hyperv_broker_grant_claims as decode_claims,
+        },
+    };
+
+    fn claims() -> core::WindowsHyperVBrokerGrantClaims {
+        let capacity = core::ResourceCapacity::new(2_000, 2 * 1024 * 1024 * 1024, 0, 0);
+        core::WindowsHyperVBrokerGrantClaims::new(
+            core::Sha256Digest::from_bytes([1; 32]),
+            core::Sha256Digest::from_bytes([2; 32]),
+            core::AttemptId::new(),
+            core::JobId::new(),
+            core::RunId::new(),
+            core::OperationId::new(),
+            core::OperationId::new(),
+            1,
+            core::OperationId::new(),
+            core::Sha256Digest::from_bytes([3; 32]),
+            core::RunnerId::new(),
+            core::RunnerSessionId::new(),
+            1,
+            1,
+            1,
+            core::LeaseId::new(),
+            core::FencingToken::new(1).expect("fencing token"),
+            core::JobIrVersion::current(),
+            128,
+            core::Sha256Digest::from_bytes([4; 32]),
+            core::Sha256Digest::from_bytes([5; 32]),
+            core::JobResourceAllocation::new(capacity, capacity).expect("allocation"),
+            64,
+            core::Sha256Digest::from_bytes([6; 32]),
+            core::EnvironmentProfile::new(
+                core::EnvironmentProfileId::new("example.test/windows").expect("profile id"),
+                core::Sha256Digest::from_bytes([7; 32]),
+            ),
+            core::Sha256Digest::from_bytes([8; 32]),
+            core::UnixMillis::new(100),
+            core::UnixMillis::new(200),
+        )
+        .expect("claims")
+    }
+
+    #[test]
+    fn sandbox_spec_binding_roundtrips_and_mutation_fails_closed() {
+        let expected = claims();
+        let wire = windows_hyperv_broker_grant_claims(&expected);
+        assert_eq!(decode_claims(wire).expect("roundtrip"), expected);
+
+        let mut mutated = windows_hyperv_broker_grant_claims(&expected);
+        mutated.sandbox_pids_limit += 1;
+        assert!(matches!(
+            decode_claims(mutated),
+            Err(DecodeError::InvalidValue {
+                field: "windows_hyperv_broker_grant.claims.sandbox_spec_sha256"
+            })
+        ));
+    }
+
+    #[test]
+    fn broker_grant_payload_codec_is_canonical_and_intrinsically_bounded() {
+        let grant = core::WindowsHyperVBrokerGrant::new(
+            core::Sha256Digest::from_bytes([9; 32]),
+            claims(),
+            vec![0xa5; 64],
+        )
+        .expect("grant");
+        let encoded = encode_windows_hyperv_broker_grant_payload(&grant);
+        assert_eq!(
+            decode_windows_hyperv_broker_grant_payload(&encoded).expect("canonical payload"),
+            grant
+        );
+
+        let mut aliased = encoded;
+        aliased.extend_from_slice(&[0xf8, 0x01, 0x00]);
+        assert!(matches!(
+            decode_windows_hyperv_broker_grant_payload(&aliased),
+            Err(DecodeError::NonCanonicalValue {
+                field: "windows_hyperv_broker_grant_payload"
+            })
+        ));
+
+        let oversized = vec![0; core::MAX_SANDBOX_AUTHORIZATION_PAYLOAD_BYTES + 1];
+        assert!(matches!(
+            decode_windows_hyperv_broker_grant_payload(&oversized),
+            Err(DecodeError::FrameTooLarge { size, maximum })
+                if size == core::MAX_SANDBOX_AUTHORIZATION_PAYLOAD_BYTES + 1
+                    && maximum == core::MAX_SANDBOX_AUTHORIZATION_PAYLOAD_BYTES
+        ));
+    }
 }

@@ -4,6 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use async_trait::async_trait;
 use automata_ci_auth::{
     authorization::SecretExposureClass,
     machine::{AuthenticatedMachine, ExternalRunnerIdentity},
@@ -17,17 +18,21 @@ use automata_ci_control::lease::{
     RevokedLeaseOfferFallback,
 };
 use automata_ci_control::runner_control::durable::{
-    LeaseResponseAction, PublishedLeaseOffer, RunnerControlValueError,
+    CommitRuntimeAuthorityDelivery, LeaseResponseAction, PublishedLeaseOffer,
+    RunnerControlValueError, RuntimeAuthorityDeliveryDisposition,
 };
 use automata_ci_control::runner_control::{
     AuthorizeRuntimeAuthorityDelivery, AuthorizedRunnerRegistration, ControlPortError,
-    DesiredRunnerState, DurableRunnerControlHandler, LeaseOfferClaimStatus, LeaseOfferObservation,
-    LeaseOfferPublishOutcome, LeaseOfferReplayResolution, PublishedCommand, RunnerControlConfig,
-    RunnerControlFailure, RunnerControlMessageKind, RunnerControlMessageOutcome,
-    RunnerControlObserver, RunnerControlPorts, RunnerDurabilityPorts, RunnerDurableDisposition,
-    RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
-    RunnerIdentityPorts, RunnerLeasePorts, RunnerLeaseRequestStage,
-    RuntimeAuthorityDeliveryAdmission, repository::RunnerCommandOutbox as _,
+    DesiredRunnerState, DurableRunnerControlHandler, LeaseAuthorityEvidence,
+    LeaseAuthorityEvidenceSet, LeaseAuthorityExtension, LeaseAuthorityExtensionRegistry,
+    LeaseAuthorityOfferRequest, LeaseAuthorityPollAcceptance, LeaseOfferClaimStatus,
+    LeaseOfferObservation, LeaseOfferPublishOutcome, LeaseOfferReplayResolution,
+    PreparedSandboxAuthorization, PublishedCommand, RunnerControlConfig, RunnerControlFailure,
+    RunnerControlMessageKind, RunnerControlMessageOutcome, RunnerControlObserver,
+    RunnerControlPorts, RunnerDurabilityPorts, RunnerDurableDisposition, RunnerDurableMessageKind,
+    RunnerHandshakeOutcome, RunnerHandshakeRejection, RunnerIdentityPorts, RunnerLeasePorts,
+    RunnerLeaseRequestStage, RuntimeAuthorityDeliveryAdmission,
+    repository::RunnerCommandOutbox as _,
 };
 use automata_ci_core::{
     Architecture, AttemptId, FencingToken, JobAuthorityProfile, JobConclusion, JobId,
@@ -35,21 +40,26 @@ use automata_ci_core::{
     JobPermissionRequest, JobResult, JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId,
     LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, RunId, RunValueTemplates,
     RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements,
-    RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest, ShellTemplate,
-    StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    RunnerSessionId, RuntimeBoolean, SandboxAuthorization, SandboxAuthorizationName,
+    SandboxAuthorizations, SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepId,
+    StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, HandshakeErrorCode,
     INITIAL_RUNTIME_AUTHORITY_GENERATION, JobRuntimeAuthorities, JobRuntimeAuthority,
-    JobStateUpdate, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRejectionReason,
-    LeaseRequest, LeaseResponse, LogBatch, ManagedSecretBindingOverlay, MessageHeader, NoWork,
+    JobStateUpdate, LeaseAuthorityName, LeaseAuthorityPollContribution,
+    LeaseAuthorityPollContributions, LeaseDisposition, LeaseHeartbeat, LeaseOffer,
+    LeasePollOutcome as ProtocolLeasePollOutcome, LeasePollResponse, LeaseRejectionReason,
+    LeaseRequest, LeaseResponse, LogBatch, ManagedSecretBindingOverlay, MessageHeader,
     ProtocolLimits, ProtocolRange, ProtocolVersion, RemoteErrorCode, RunnerHello,
     RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityCredential,
     RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint, RuntimeAuthorityGeneration,
     RuntimeAuthorityName, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader,
     ServerToRunner, SessionDisposition, SessionResume, ValidatedRunnerToServer,
 };
-use automata_ci_protocol_protobuf::{encode_job_ir, encode_runner_frame, encode_server_frame};
+use automata_ci_protocol_protobuf::{
+    encode_job_ir, encode_runner_frame, encode_runtime_authorities, encode_server_frame,
+};
 use automata_ci_runner_transport::ApplicationErrorKind;
 use automata_ci_store::{
     CommandCursor as StoreCommandCursor, CommandReplayDisposition,
@@ -67,6 +77,96 @@ use super::runner_control_support::{
     Receipts, Resolver, Sessions, Transactions,
 };
 
+fn empty_lease_request(header: MessageHeader, slot: RunnerSlotOrdinal) -> LeaseRequest {
+    LeaseRequest::first(header, slot, LeaseAuthorityPollContributions::empty())
+}
+
+fn successor_lease_request(
+    header: MessageHeader,
+    slot: RunnerSlotOrdinal,
+    predecessor: OperationId,
+) -> LeaseRequest {
+    LeaseRequest::successor(
+        header,
+        slot,
+        predecessor,
+        LeaseAuthorityPollContributions::empty(),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct TestNoWork {
+    header: MessageHeader,
+    retry_after_millis: u32,
+}
+
+impl TestNoWork {
+    const fn header(self) -> MessageHeader {
+        self.header
+    }
+
+    const fn retry_after_millis(self) -> u32 {
+        self.retry_after_millis
+    }
+}
+
+fn no_work_view(response: &ServerToRunner) -> TestNoWork {
+    let ServerToRunner::LeasePollResponse(response) = response else {
+        panic!("expected a lease-poll response")
+    };
+    let ProtocolLeasePollOutcome::NoWork { retry_after_millis } = response.outcome() else {
+        panic!("expected a no-work lease-poll outcome")
+    };
+    TestNoWork {
+        header: response.header(),
+        retry_after_millis: *retry_after_millis,
+    }
+}
+
+fn is_no_work(response: &ServerToRunner) -> bool {
+    matches!(
+        response,
+        ServerToRunner::LeasePollResponse(response)
+            if matches!(response.outcome(), ProtocolLeasePollOutcome::NoWork { .. })
+    )
+}
+
+fn lease_offer_view(response: &ServerToRunner) -> &LeaseOffer {
+    let ServerToRunner::LeasePollResponse(response) = response else {
+        panic!("expected a lease-poll response")
+    };
+    let ProtocolLeasePollOutcome::LeaseOffer(offer) = response.outcome() else {
+        panic!("expected a lease-offer outcome")
+    };
+    offer
+}
+
+fn is_lease_offer(response: &ServerToRunner) -> bool {
+    matches!(
+        response,
+        ServerToRunner::LeasePollResponse(response)
+            if matches!(response.outcome(), ProtocolLeasePollOutcome::LeaseOffer(_))
+    )
+}
+
+fn cancel_view(response: &ServerToRunner) -> &automata_ci_protocol::CancelJob {
+    let ServerToRunner::LeasePollResponse(response) = response else {
+        panic!("expected a lease-poll response")
+    };
+    let ProtocolLeasePollOutcome::CancelJob(cancel) = response.outcome() else {
+        panic!("expected a cancel outcome")
+    };
+    cancel
+}
+
+fn is_cancel(response: &ServerToRunner) -> bool {
+    matches!(
+        response,
+        ServerToRunner::LeasePollResponse(response)
+            if matches!(response.outcome(), ProtocolLeasePollOutcome::CancelJob(_))
+    )
+}
+
 struct Harness {
     handler: DurableRunnerControlHandler,
     observer: Arc<RecordingRunnerControlObserver>,
@@ -81,6 +181,110 @@ struct Harness {
     transactions: Arc<Transactions>,
     receipts: Arc<Receipts>,
     commands: Arc<Commands>,
+}
+
+#[derive(Debug)]
+struct TestLeaseAuthorityExtension {
+    name: LeaseAuthorityName,
+    evidence: LeaseAuthorityEvidence,
+    authorization: SandboxAuthorization,
+    accepted: AtomicUsize,
+    offers: AtomicUsize,
+    prepared: AtomicUsize,
+    committed: Arc<AtomicUsize>,
+    committed_digest: Arc<Mutex<Option<Sha256Digest>>>,
+}
+
+impl TestLeaseAuthorityExtension {
+    fn new() -> Self {
+        let name = LeaseAuthorityName::new("test-sandbox").expect("authority name");
+        let evidence =
+            LeaseAuthorityEvidence::new(name.clone(), 1, vec![0x31; 32]).expect("evidence");
+        let authorization = SandboxAuthorization::new(
+            SandboxAuthorizationName::new("test-sandbox").expect("authorization name"),
+            1,
+            vec![0x42; 32],
+        )
+        .expect("authorization");
+        Self {
+            name,
+            evidence,
+            authorization,
+            accepted: AtomicUsize::new(0),
+            offers: AtomicUsize::new(0),
+            prepared: AtomicUsize::new(0),
+            committed: Arc::new(AtomicUsize::new(0)),
+            committed_digest: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[async_trait]
+impl LeaseAuthorityExtension for TestLeaseAuthorityExtension {
+    fn name(&self) -> &LeaseAuthorityName {
+        &self.name
+    }
+
+    async fn accept_poll_contribution(
+        &self,
+        _context: LeaseAuthorityPollAcceptance,
+        contribution: &LeaseAuthorityPollContribution,
+    ) -> Result<(), ControlPortError> {
+        if contribution.name() != &self.name {
+            return Err(ControlPortError::Conflict);
+        }
+        self.accepted.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn prepare_offer_evidence(
+        &self,
+        _request: LeaseAuthorityOfferRequest<'_>,
+    ) -> Result<Option<LeaseAuthorityEvidence>, ControlPortError> {
+        self.offers.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(self.evidence.clone()))
+    }
+
+    async fn prepare_sandbox_authorization(
+        &self,
+        evidence: &LeaseAuthorityEvidence,
+        _job: &JobIrEnvelope,
+        _admission: &RuntimeAuthorityDeliveryAdmission,
+    ) -> Result<Box<dyn PreparedSandboxAuthorization>, ControlPortError> {
+        if evidence != &self.evidence {
+            return Err(ControlPortError::Corrupt);
+        }
+        self.prepared.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(TestPreparedSandboxAuthorization {
+            authorization: self.authorization.clone(),
+            committed: Arc::clone(&self.committed),
+            committed_digest: Arc::clone(&self.committed_digest),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct TestPreparedSandboxAuthorization {
+    authorization: SandboxAuthorization,
+    committed: Arc<AtomicUsize>,
+    committed_digest: Arc<Mutex<Option<Sha256Digest>>>,
+}
+
+#[async_trait]
+impl PreparedSandboxAuthorization for TestPreparedSandboxAuthorization {
+    fn authorization(&self) -> &SandboxAuthorization {
+        &self.authorization
+    }
+
+    async fn commit(
+        self: Box<Self>,
+        delivery: CommitRuntimeAuthorityDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, ControlPortError> {
+        self.committed.fetch_add(1, Ordering::SeqCst);
+        *self.committed_digest.lock().expect("committed digest lock") =
+            Some(delivery.bundle_digest());
+        Ok(RuntimeAuthorityDeliveryDisposition::Committed)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -489,7 +693,7 @@ fn claimed_credential_free_job() -> JobIrEnvelope {
 
 fn claimed_runtime_authorities(job: &JobIrEnvelope, lease: &Lease) -> JobRuntimeAuthorities {
     if job.job().authority_profile() == JobAuthorityProfile::CredentialFree {
-        return JobRuntimeAuthorities::new(Vec::new(), job, lease)
+        return JobRuntimeAuthorities::new(Vec::new(), SandboxAuthorizations::empty(), job, lease)
             .expect("credential-free runtime authorities");
     }
     let authority = JobRuntimeAuthority::new(
@@ -504,7 +708,8 @@ fn claimed_runtime_authorities(job: &JobIrEnvelope, lease: &Lease) -> JobRuntime
         UnixMillis::new(9_000),
     )
     .expect("runtime authority");
-    JobRuntimeAuthorities::new(vec![authority], job, lease).expect("runtime authorities")
+    JobRuntimeAuthorities::new(vec![authority], SandboxAuthorizations::empty(), job, lease)
+        .expect("runtime authorities")
 }
 
 fn test_offer_command(
@@ -535,12 +740,71 @@ fn test_offer_command_with_bindings(
     lease: &Lease,
     managed_secret_bindings: &ManagedSecretBindingOverlay,
 ) -> DurableRunnerCommand {
+    test_offer_command_with_projection(
+        fence,
+        operation_id,
+        sequence,
+        slot,
+        job,
+        lease,
+        managed_secret_bindings,
+        &LeaseAuthorityEvidenceSet::empty(),
+    )
+}
+
+fn handler_with_extensions(
+    harness: &Harness,
+    extensions: LeaseAuthorityExtensionRegistry,
+) -> DurableRunnerControlHandler {
+    let ports = RunnerControlPorts::new(
+        RunnerIdentityPorts::new(
+            harness.authorizer.clone(),
+            harness.resolver.clone(),
+            harness.sessions.clone(),
+        ),
+        RunnerLeasePorts::new(
+            harness.poller.clone(),
+            harness.objects.clone(),
+            harness.publisher.clone(),
+        ),
+        RunnerDurabilityPorts::new(
+            harness.ingress_objects.clone(),
+            harness.transactions.clone(),
+            harness.receipts.clone(),
+            harness.receipts.clone(),
+            harness.commands.clone(),
+            harness.transactions.clone(),
+        ),
+        Arc::new(Clock(UnixMillis::new(2_000))),
+        Arc::new(Ids),
+    )
+    .with_runtime_authority_issuer(harness.authority_issuer.clone())
+    .with_lease_authority_extensions(extensions);
+    DurableRunnerControlHandler::new(
+        ports,
+        RunnerControlConfig::new(15_000, 60_000, 1_750, ProtocolLimits::default())
+            .expect("test policy"),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn test_offer_command_with_projection(
+    fence: RunnerSessionFence,
+    operation_id: OperationId,
+    sequence: CommandSequence,
+    slot: RunnerSlotOrdinal,
+    job: &JobIrEnvelope,
+    lease: &Lease,
+    managed_secret_bindings: &ManagedSecretBindingOverlay,
+    lease_authority_evidence: &LeaseAuthorityEvidenceSet,
+) -> DurableRunnerCommand {
     let payload = serde_json::to_vec(&serde_json::json!({
         "job": job,
         "lease": lease,
         "managed_secret_bindings": managed_secret_bindings,
+        "lease_authority_evidence": lease_authority_evidence,
         "protocol_version": SUPPORTED_PROTOCOL_RANGE.max().get(),
-        "schema": 2,
+        "schema": 3,
         "slot": slot.get(),
     }))
     .expect("offer payload");
@@ -548,8 +812,8 @@ fn test_offer_command_with_bindings(
         EnqueueRunnerCommand::new(
             fence,
             operation_id,
-            RunnerOperationKind::new("automata.runner.lease-offer.v2").expect("offer kind"),
-            RunnerCommandPayload::new(DocumentSchema::new(2).expect("schema"), payload)
+            RunnerOperationKind::new("automata.runner.lease-offer.v3").expect("offer kind"),
+            RunnerCommandPayload::new(DocumentSchema::new(3).expect("schema"), payload)
                 .expect("offer payload"),
             UnixMillis::new(2_000),
         ),
@@ -560,6 +824,7 @@ fn test_offer_command_with_bindings(
 
 fn test_offer_response(
     fence: RunnerSessionFence,
+    request_operation_id: OperationId,
     operation_id: OperationId,
     sequence: CommandSequence,
     slot: RunnerSlotOrdinal,
@@ -580,7 +845,16 @@ fn test_offer_response(
     )
     .with_managed_secret_bindings(empty_overlay)
     .expect("canonical managed-secret overlay");
-    ServerToRunner::LeaseOffer(Box::new(offer))
+    ServerToRunner::LeasePollResponse(Box::new(LeasePollResponse::lease_offer(
+        MessageHeader::reply(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            operation_id,
+            request_operation_id,
+        ),
+        LeaseAuthorityPollContributions::empty().sha256_digest(),
+        offer,
+    )))
 }
 
 struct RuntimeAuthorityExchangeFixture {
@@ -595,6 +869,22 @@ fn install_runtime_authority_exchange(
     fence: RunnerSessionFence,
     runner_id: RunnerId,
     job: JobIrEnvelope,
+) -> RuntimeAuthorityExchangeFixture {
+    install_runtime_authority_exchange_with_evidence(
+        harness,
+        fence,
+        runner_id,
+        job,
+        &LeaseAuthorityEvidenceSet::empty(),
+    )
+}
+
+fn install_runtime_authority_exchange_with_evidence(
+    harness: &Harness,
+    fence: RunnerSessionFence,
+    runner_id: RunnerId,
+    job: JobIrEnvelope,
+    lease_authority_evidence: &LeaseAuthorityEvidenceSet,
 ) -> RuntimeAuthorityExchangeFixture {
     let encoded = encode_job_ir(&job, &ProtocolLimits::default()).expect("JobIR");
     let metadata = JobIrMetadata::new(
@@ -618,13 +908,15 @@ fn install_runtime_authority_exchange(
     let slot = RunnerSlotOrdinal::new(1).expect("slot");
     let offer_operation_id = OperationId::new();
     let offer_sequence = CommandSequence::new(1).expect("sequence");
-    let command = test_offer_command(
+    let command = test_offer_command_with_projection(
         fence,
         offer_operation_id,
         offer_sequence,
         slot,
         &job,
         &lease,
+        &ManagedSecretBindingOverlay::empty(&lease),
+        lease_authority_evidence,
     );
     let offer_request = RunnerOperationRequest::new(
         fence,
@@ -1018,14 +1310,17 @@ fn revoked_test_completion(
     let response_operation_id: OperationId = encoded_operation_id[..32]
         .parse()
         .expect("digest prefix operation ID");
-    let durable = durable_test_response(&ServerToRunner::NoWork(NoWork::new(
-        MessageHeader::reply(
-            request.protocol_version(),
-            request.session_id(),
-            response_operation_id,
-            request.operation_id(),
+    let durable = durable_test_response(&ServerToRunner::LeasePollResponse(Box::new(
+        LeasePollResponse::no_work(
+            MessageHeader::reply(
+                request.protocol_version(),
+                request.session_id(),
+                response_operation_id,
+                request.operation_id(),
+            ),
+            LeaseAuthorityPollContributions::empty().sha256_digest(),
+            retry_after_millis,
         ),
-        retry_after_millis,
     )));
     let fallback = RevokedLeaseOfferFallback::new(
         response_operation_id,
@@ -1104,7 +1399,7 @@ async fn observer_records_only_reachable_handshake_and_transport_message_outcome
     );
 
     let (transport, identity, _runner_id, _generation) = harness(DesiredRunnerState::Active);
-    let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let message = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             RunnerSessionId::new(),
@@ -1191,6 +1486,7 @@ async fn retryable_claim_offer_failures_leave_the_current_poll_head_incomplete()
                 lease.clone(),
                 slot,
                 metadata.clone(),
+                LeaseAuthorityPollContributions::empty(),
                 false,
             )));
         *harness.objects.bytes.lock().expect("object bytes lock") = Some(encoded);
@@ -1215,7 +1511,7 @@ async fn retryable_claim_offer_failures_leave_the_current_poll_head_incomplete()
                 .expect("publication result lock") = Some(Err(ControlPortError::Unavailable));
         }
 
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -1342,7 +1638,7 @@ async fn durable_offer_replays_decode_their_exact_secret_overlay_shape() {
             .push(command.clone());
         *harness.publisher.replay.lock().expect("offer replay lock") =
             Some(Ok(LeaseOfferReplayResolution::Published(command)));
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -1351,10 +1647,8 @@ async fn durable_offer_replays_decode_their_exact_secret_overlay_shape() {
             slot,
         ));
 
-        let ServerToRunner::LeaseOffer(replayed) = exchange(&harness, &identity, &request).await
-        else {
-            panic!("canonical durable lease offer");
-        };
+        let response = exchange(&harness, &identity, &request).await;
+        let replayed = lease_offer_view(&response);
         if include_binding {
             assert_eq!(replayed.managed_secret_bindings(), Some(&overlay));
         } else {
@@ -1419,7 +1713,7 @@ async fn pending_offer_replay_requires_two_way_publication_provenance() {
                 .expect("commands lock")
                 .push(pending);
         }
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -1481,7 +1775,7 @@ async fn exact_pending_offer_provenance_completes_without_rebuilding_work() {
         .push(command.clone());
     *harness.publisher.replay.lock().expect("offer replay lock") =
         Some(Ok(LeaseOfferReplayResolution::Published(command)));
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -1490,9 +1784,8 @@ async fn exact_pending_offer_provenance_completes_without_rebuilding_work() {
         slot,
     ));
 
-    assert!(matches!(
-        exchange(&harness, &identity, &request).await,
-        ServerToRunner::LeaseOffer(_)
+    assert!(is_lease_offer(
+        &exchange(&harness, &identity, &request).await
     ));
     assert_eq!(harness.publisher.replays.load(Ordering::SeqCst), 2);
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 0);
@@ -1537,9 +1830,14 @@ async fn post_publication_offer_revocation_commits_no_work_before_admitting_succ
         UnixMillis::new(10_000),
     )
     .expect("lease");
-    *harness.poller.outcome.lock().expect("poll outcome lock") = Some(LeasePollOutcome::Claimed(
-        ClaimedLeasePoll::new(lease.clone(), slot, metadata, false),
-    ));
+    *harness.poller.outcome.lock().expect("poll outcome lock") =
+        Some(LeasePollOutcome::Claimed(ClaimedLeasePoll::new(
+            lease.clone(),
+            slot,
+            metadata,
+            LeaseAuthorityPollContributions::empty(),
+            false,
+        )));
     *harness.objects.bytes.lock().expect("object bytes lock") = Some(encoded);
     *harness
         .authority_issuer
@@ -1577,7 +1875,7 @@ async fn post_publication_offer_revocation_commits_no_work_before_admitting_succ
         .revoke_lease_completion
         .store(true, Ordering::SeqCst);
     let request_operation_id = OperationId::new();
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -1587,9 +1885,7 @@ async fn post_publication_offer_revocation_commits_no_work_before_admitting_succ
     ));
 
     let first = exchange(&harness, &identity, &request).await;
-    let ServerToRunner::NoWork(no_work) = &first else {
-        panic!("receipt-completion revocation must return no work")
-    };
+    let no_work = no_work_view(&first);
     assert_eq!(no_work.header().in_reply_to(), Some(request_operation_id));
     assert_eq!(exchange(&harness, &identity, &request).await, first);
     assert_eq!(harness.publisher.replays.load(Ordering::SeqCst), 1);
@@ -1626,7 +1922,7 @@ async fn post_publication_offer_revocation_commits_no_work_before_admitting_succ
     *harness.poller.outcome.lock().expect("poll outcome lock") =
         Some(LeasePollOutcome::NoWork { replayed: false });
     let successor_operation_id = OperationId::new();
-    let successor = RunnerToServer::LeaseRequest(LeaseRequest::successor(
+    let successor = RunnerToServer::LeaseRequest(successor_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -1637,7 +1933,7 @@ async fn post_publication_offer_revocation_commits_no_work_before_admitting_succ
     ));
     assert!(matches!(
         exchange(&harness, &identity, &successor).await,
-        ServerToRunner::NoWork(_)
+        response if is_no_work(&response)
     ));
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 2);
     assert_eq!(harness.receipts.lease_completions.load(Ordering::SeqCst), 2);
@@ -1698,7 +1994,7 @@ async fn revoked_pending_offer_requires_a_retry_before_later_work_or_polling() {
                 resolutions.push_back(Ok(LeaseOfferReplayResolution::NotPublished));
             }
         }
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -1732,14 +2028,8 @@ async fn revoked_pending_offer_requires_a_retry_before_later_work_or_polling() {
             .expect("commands lock")
             .retain(|command| command.sequence().get() != 1);
         let response = exchange(&harness, &identity, &request).await;
-        assert_eq!(
-            matches!(&response, ServerToRunner::CancelJob(_)),
-            has_later_command
-        );
-        assert_eq!(
-            matches!(&response, ServerToRunner::NoWork(_)),
-            !has_later_command
-        );
+        assert_eq!(is_cancel(&response), has_later_command);
+        assert_eq!(is_no_work(&response), !has_later_command);
         assert_eq!(
             harness.poller.calls.load(Ordering::SeqCst),
             usize::from(!has_later_command)
@@ -1762,7 +2052,7 @@ async fn saturated_replay_page_is_retryable_without_polling_or_completing() {
         .lock()
         .expect("command replay disposition lock")
         .push_back(CommandReplayDisposition::Saturated);
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -1790,9 +2080,7 @@ async fn saturated_replay_page_is_retryable_without_polling_or_completing() {
 
     let (_, _, later_sequence) = install_cancel_command(&harness, fence).await;
     let response = exchange(&harness, &identity, &request).await;
-    let ServerToRunner::CancelJob(cancel) = response else {
-        panic!("the retry must reach the later durable command")
-    };
+    let cancel = cancel_view(&response);
     assert_eq!(cancel.header().sequence(), later_sequence);
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.receipts.lease_completions.load(Ordering::SeqCst), 1);
@@ -1811,7 +2099,7 @@ async fn post_poll_saturation_does_not_complete_the_lease_request() {
             CommandReplayDisposition::Exhausted,
             CommandReplayDisposition::Saturated,
         ]);
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -1876,7 +2164,7 @@ async fn resolver_revocation_never_scans_a_second_command_in_the_same_exchange()
     }
     let (_, _, later_sequence) = install_cancel_command(&harness, fence).await;
     assert_eq!(later_sequence.get(), 2);
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -1900,9 +2188,7 @@ async fn resolver_revocation_never_scans_a_second_command_in_the_same_exchange()
         .expect("commands lock")
         .retain(|command| command.sequence().get() == later_sequence.get());
     let response = exchange(&harness, &identity, &request).await;
-    let ServerToRunner::CancelJob(cancel) = response else {
-        panic!("the retry must reach the later durable command")
-    };
+    let cancel = cancel_view(&response);
     assert_eq!(cancel.header().sequence(), later_sequence);
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.receipts.lease_completions.load(Ordering::SeqCst), 1);
@@ -1935,9 +2221,14 @@ async fn credential_free_offer_bypasses_every_runtime_authority_issuer() {
     )
     .expect("lease");
     let slot = RunnerSlotOrdinal::new(1).expect("slot");
-    *harness.poller.outcome.lock().expect("poll outcome lock") = Some(LeasePollOutcome::Claimed(
-        ClaimedLeasePoll::new(lease.clone(), slot, metadata, false),
-    ));
+    *harness.poller.outcome.lock().expect("poll outcome lock") =
+        Some(LeasePollOutcome::Claimed(ClaimedLeasePoll::new(
+            lease.clone(),
+            slot,
+            metadata,
+            LeaseAuthorityPollContributions::empty(),
+            false,
+        )));
     *harness.objects.bytes.lock().expect("object bytes lock") = Some(encoded);
     *harness
         .publisher
@@ -1965,7 +2256,7 @@ async fn credential_free_offer_bypasses_every_runtime_authority_issuer() {
             &empty_overlay,
         )),
     ));
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -1986,9 +2277,7 @@ async fn credential_free_offer_bypasses_every_runtime_authority_issuer() {
                 harness.publisher.publications.load(Ordering::SeqCst),
             )
         });
-    let ServerToRunner::LeaseOffer(offer) = response else {
-        panic!("credential-free poll must return an offer")
-    };
+    let offer = lease_offer_view(&response);
     assert_eq!(
         offer.job().job().authority_profile(),
         JobAuthorityProfile::CredentialFree
@@ -2052,9 +2341,14 @@ async fn observer_distinguishes_published_replayed_and_superseded_lease_offers()
         )
         .expect("lease");
         let slot = RunnerSlotOrdinal::new(1).expect("slot");
-        *harness.poller.outcome.lock().expect("poll outcome lock") = Some(
-            LeasePollOutcome::Claimed(ClaimedLeasePoll::new(lease.clone(), slot, metadata, false)),
-        );
+        *harness.poller.outcome.lock().expect("poll outcome lock") =
+            Some(LeasePollOutcome::Claimed(ClaimedLeasePoll::new(
+                lease.clone(),
+                slot,
+                metadata,
+                LeaseAuthorityPollContributions::empty(),
+                false,
+            )));
         *harness.objects.bytes.lock().expect("object bytes lock") = Some(encoded);
         *harness
             .authority_issuer
@@ -2112,7 +2406,7 @@ async fn observer_distinguishes_published_replayed_and_superseded_lease_offers()
             }
         }
 
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -2122,7 +2416,7 @@ async fn observer_distinguishes_published_replayed_and_superseded_lease_offers()
         ));
         let response = exchange(&harness, &identity, &request).await;
         assert_eq!(
-            matches!(response, ServerToRunner::LeaseOffer(_)),
+            is_lease_offer(&response),
             !matches!(scenario, ObservedOfferScenario::Superseded)
         );
         assert_eq!(
@@ -2147,7 +2441,7 @@ async fn persisted_offer_fallback_survives_retry_policy_restart_on_both_replay_p
         let fence = install_session(&harness, runner_id, generation);
         let slot = RunnerSlotOrdinal::new(1).expect("slot");
         let request_operation_id = OperationId::new();
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -2184,12 +2478,10 @@ async fn persisted_offer_fallback_survives_retry_policy_restart_on_both_replay_p
         let first_handler = handler_with_retry(&harness, 1_750);
         let first = exchange_with_handler(&first_handler, &identity, &request).await;
         if revoke_at_completion {
-            let ServerToRunner::NoWork(no_work) = &first else {
-                panic!("revoked completion must return its persisted no-work fallback")
-            };
+            let no_work = no_work_view(&first);
             assert_eq!(no_work.retry_after_millis(), 1_750);
         } else {
-            assert!(matches!(first, ServerToRunner::LeaseOffer(_)));
+            assert!(is_lease_offer(&first));
             *harness.publisher.replay.lock().expect("offer replay lock") =
                 Some(Ok(LeaseOfferReplayResolution::Revoked));
         }
@@ -2207,9 +2499,7 @@ async fn persisted_offer_fallback_survives_retry_policy_restart_on_both_replay_p
 
         let restarted_handler = handler_with_retry(&harness, 9_250);
         let replay = exchange_with_handler(&restarted_handler, &identity, &request).await;
-        let ServerToRunner::NoWork(no_work) = &replay else {
-            panic!("revoked offer replay must return persisted no work")
-        };
+        let no_work = no_work_view(&replay);
         assert_eq!(no_work.retry_after_millis(), 1_750);
         assert_eq!(
             no_work.header().operation_id(),
@@ -2233,7 +2523,7 @@ async fn revoked_completed_and_race_winner_offers_replay_as_no_work() {
         let fence = install_session(&harness, runner_id, generation);
         let slot = RunnerSlotOrdinal::new(1).expect("slot");
         let request_operation_id = OperationId::new();
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -2287,9 +2577,7 @@ async fn revoked_completed_and_race_winner_offers_replay_as_no_work() {
             });
         let second = exchange(&harness, &identity, &request).await;
         assert_eq!(first, second);
-        let ServerToRunner::NoWork(no_work) = first else {
-            panic!("a revoked durable offer must replay as no work")
-        };
+        let no_work = no_work_view(&first);
         assert_ne!(no_work.header().operation_id(), offer_operation_id);
         assert_eq!(no_work.header().in_reply_to(), Some(request_operation_id));
         assert_eq!(harness.publisher.replays.load(Ordering::SeqCst), 0);
@@ -2318,7 +2606,7 @@ async fn exact_completed_and_race_winner_offer_provenance_replays() {
         let fence = install_session(&harness, runner_id, generation);
         let slot = RunnerSlotOrdinal::new(1).expect("slot");
         let request_operation_id = OperationId::new();
-        let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        let request = RunnerToServer::LeaseRequest(empty_lease_request(
             MessageHeader::request(
                 SUPPORTED_PROTOCOL_RANGE.max(),
                 fence.session_id(),
@@ -2351,6 +2639,7 @@ async fn exact_completed_and_race_winner_offer_provenance_replays() {
         let command = test_offer_command(fence, server_operation_id, sequence, slot, &job, &lease);
         let response = durable_test_response(&test_offer_response(
             fence,
+            request_operation_id,
             server_operation_id,
             sequence,
             slot,
@@ -2375,9 +2664,8 @@ async fn exact_completed_and_race_winner_offer_provenance_replays() {
                 .expect("completion winner lock") = Some(completion);
         }
 
-        assert!(matches!(
-            exchange(&harness, &identity, &request).await,
-            ServerToRunner::LeaseOffer(_)
+        assert!(is_lease_offer(
+            &exchange(&harness, &identity, &request).await
         ));
         assert_eq!(harness.publisher.replays.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -2599,7 +2887,7 @@ async fn resumed_sync_replays_cancel_exactly_before_poll_until_cumulative_ack() 
     ));
 
     let poll_operation = OperationId::new();
-    let poll = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let poll = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -2610,13 +2898,10 @@ async fn resumed_sync_replays_cancel_exactly_before_poll_until_cumulative_ack() 
     let first = exchange(&harness, &identity, &poll).await;
     let replay = exchange(&harness, &identity, &poll).await;
     assert_eq!(first, replay);
-    assert!(matches!(
-        first,
-        ServerToRunner::CancelJob(ref cancel)
-            if cancel.attempt_id() == attempt_id
-                && cancel.guard() == guard
-                && cancel.header().sequence() == sequence
-    ));
+    let cancel = cancel_view(&first);
+    assert_eq!(cancel.attempt_id(), attempt_id);
+    assert_eq!(cancel.guard(), guard);
+    assert_eq!(cancel.header().sequence(), sequence);
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 0);
 
     let acknowledgement = RunnerToServer::CommandAck(CommandAck::new(
@@ -2637,7 +2922,7 @@ async fn resumed_sync_replays_cancel_exactly_before_poll_until_cumulative_ack() 
     );
     record_test_command_cursor(&harness, sequence);
 
-    let successor = RunnerToServer::LeaseRequest(LeaseRequest::successor(
+    let successor = RunnerToServer::LeaseRequest(successor_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -2648,7 +2933,7 @@ async fn resumed_sync_replays_cancel_exactly_before_poll_until_cumulative_ack() 
     ));
     assert!(matches!(
         exchange(&harness, &identity, &successor).await,
-        ServerToRunner::NoWork(_)
+        response if is_no_work(&response)
     ));
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 1);
 }
@@ -3227,7 +3512,7 @@ async fn cancellation_short_circuits_before_authorization_or_mutation() {
 async fn every_sync_rejects_a_different_authenticated_machine() {
     let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&harness, runner_id, generation);
-    let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let message = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3256,7 +3541,7 @@ async fn every_sync_rejects_a_different_authenticated_machine() {
 async fn sync_fences_cross_session_and_cross_protocol_claims() {
     let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&harness, runner_id, generation);
-    let cross_session = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let cross_session = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             RunnerSessionId::new(),
@@ -3282,7 +3567,7 @@ async fn sync_fences_cross_session_and_cross_protocol_claims() {
     );
 
     *harness.sessions.snapshot.lock().expect("session lock") = Some(snapshot(fence, 1));
-    let cross_protocol = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let cross_protocol = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3327,7 +3612,7 @@ async fn closed_or_disabled_session_cannot_refresh_liveness_through_a_lease_poll
         )
         .expect("closed snapshot"),
     );
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3353,7 +3638,7 @@ async fn closed_or_disabled_session_cannot_refresh_liveness_through_a_lease_poll
 
     let (disabled, identity, runner_id, generation) = harness(DesiredRunnerState::Disabled);
     let fence = install_session(&disabled, runner_id, generation);
-    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let request = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3387,7 +3672,7 @@ async fn transport_sync_correlates_only_an_authenticated_stale_session() {
         RunnerSessionId::new(),
         OperationId::new(),
     );
-    let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let message = RunnerToServer::LeaseRequest(empty_lease_request(
         request_header,
         RunnerSlotOrdinal::new(1).expect("slot"),
     ));
@@ -3445,7 +3730,7 @@ async fn transport_sync_correlates_only_an_authenticated_stale_session() {
 
     let (conflict, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&conflict, runner_id, generation);
-    let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let message = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3494,7 +3779,7 @@ async fn transport_sync_correlates_only_an_authenticated_stale_session() {
 async fn lease_poll_no_work_is_correlated_receipted_and_replayed() {
     let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&harness, runner_id, generation);
-    let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let message = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3526,7 +3811,14 @@ async fn lease_poll_no_work_is_correlated_receipted_and_replayed() {
         .await
         .expect("replayed no work");
     assert_eq!(first, second);
-    assert!(matches!(first, ServerToRunner::NoWork(_)));
+    assert!(is_no_work(&first));
+    let ServerToRunner::LeasePollResponse(poll) = &first else {
+        panic!("no-work must use the explicit lease-poll wrapper")
+    };
+    assert_eq!(
+        poll.accepted_contributions_sha256(),
+        LeaseAuthorityPollContributions::empty().sha256_digest()
+    );
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.receipts.lease_completions.load(Ordering::SeqCst), 1);
     assert_eq!(harness.sessions.heartbeats.load(Ordering::SeqCst), 2);
@@ -3561,12 +3853,154 @@ async fn lease_poll_no_work_is_correlated_receipted_and_replayed() {
 }
 
 #[tokio::test]
+async fn unknown_lease_authority_contribution_fails_before_scheduling() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let contribution = LeaseAuthorityPollContribution::new(
+        LeaseAuthorityName::new("unknown-provider").expect("authority name"),
+        1,
+        vec![7; 32],
+    )
+    .expect("contribution");
+    let contributions =
+        LeaseAuthorityPollContributions::new(vec![contribution]).expect("contributions");
+    let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        RunnerSlotOrdinal::new(1).expect("slot"),
+        contributions,
+    ));
+    let error = exchange_result(&harness, &identity, &message)
+        .await
+        .expect_err("an unregistered extension must fail closed");
+    assert_eq!(error.kind(), ApplicationErrorKind::Conflict);
+    assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.objects.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.publisher.publications.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn accepted_lease_authority_contributions_are_echoed_exactly_and_replayed() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let extension = Arc::new(TestLeaseAuthorityExtension::new());
+    let contribution =
+        LeaseAuthorityPollContribution::new(extension.name.clone(), 1, vec![0x19; 32])
+            .expect("contribution");
+    let contributions =
+        LeaseAuthorityPollContributions::new(vec![contribution]).expect("contributions");
+    let accepted_digest = contributions.sha256_digest();
+    let request = RunnerToServer::LeaseRequest(LeaseRequest::first(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        RunnerSlotOrdinal::new(1).expect("slot"),
+        contributions,
+    ));
+    let extension_port: Arc<dyn LeaseAuthorityExtension> = extension.clone();
+    let registry =
+        LeaseAuthorityExtensionRegistry::new(vec![extension_port]).expect("extension registry");
+    let handler = handler_with_extensions(&harness, registry);
+
+    let first = exchange_with_handler(&handler, &identity, &request).await;
+    let replay = exchange_with_handler(&handler, &identity, &request).await;
+
+    assert_eq!(first, replay, "replay must preserve the exact wrapper");
+    let ServerToRunner::LeasePollResponse(response) = first else {
+        panic!("lease polling must use the explicit response wrapper")
+    };
+    assert_eq!(response.accepted_contributions_sha256(), accepted_digest);
+    assert!(matches!(
+        response.outcome(),
+        ProtocolLeasePollOutcome::NoWork { .. }
+    ));
+    assert_eq!(extension.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.receipts.lease_completions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn durable_authority_evidence_propagates_to_one_atomic_sandbox_authorization_commit() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let extension = Arc::new(TestLeaseAuthorityExtension::new());
+    let evidence =
+        LeaseAuthorityEvidenceSet::new(vec![extension.evidence.clone()]).expect("evidence set");
+    let fixture = install_runtime_authority_exchange_with_evidence(
+        &harness,
+        fence,
+        runner_id,
+        claimed_credential_free_job(),
+        &evidence,
+    );
+    let retained = harness
+        .transactions
+        .runtime_authority_admission
+        .lock()
+        .expect("runtime-authority admission lock")
+        .as_ref()
+        .expect("runtime-authority admission")
+        .offer()
+        .lease_authority_evidence()
+        .clone();
+    assert_eq!(retained, evidence);
+
+    let extension_port: Arc<dyn LeaseAuthorityExtension> = extension.clone();
+    let registry =
+        LeaseAuthorityExtensionRegistry::new(vec![extension_port]).expect("extension registry");
+    let handler = handler_with_extensions(&harness, registry);
+    let response = exchange_with_handler(&handler, &identity, &fixture.request).await;
+    let ServerToRunner::RuntimeAuthorityGrant(grant) = response else {
+        panic!("post-accept request must return a runtime-authority grant")
+    };
+    assert_eq!(
+        grant.authorities().sandbox_authorizations().as_slice(),
+        std::slice::from_ref(&extension.authorization)
+    );
+    let canonical_bundle = encode_runtime_authorities(
+        grant.authorities(),
+        &fixture.job,
+        &fixture.lease,
+        &ProtocolLimits::default(),
+    )
+    .expect("canonical complete runtime-authority bundle");
+    assert_eq!(
+        grant.bundle_digest(),
+        Sha256Digest::from_bytes(Sha256::digest(canonical_bundle).into()),
+        "the protected digest covers the whole bundle including sandbox authorization",
+    );
+    assert_eq!(extension.prepared.load(Ordering::SeqCst), 1);
+    assert_eq!(extension.committed.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *extension
+            .committed_digest
+            .lock()
+            .expect("committed digest lock"),
+        Some(grant.bundle_digest())
+    );
+    assert!(
+        harness
+            .transactions
+            .runtime_authority_commits
+            .lock()
+            .expect("generic delivery commits lock")
+            .is_empty(),
+        "the prepared provider commit owns the atomic delivery path"
+    );
+}
+
+#[tokio::test]
 async fn lease_poll_successors_require_the_exact_completed_head_before_liveness_or_polling() {
     let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
     let fence = install_session(&harness, runner_id, generation);
     let slot = RunnerSlotOrdinal::new(1).expect("slot");
     let first_operation = OperationId::new();
-    let first = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let first = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3576,10 +4010,10 @@ async fn lease_poll_successors_require_the_exact_completed_head_before_liveness_
     ));
     assert!(matches!(
         exchange(&harness, &identity, &first).await,
-        ServerToRunner::NoWork(_)
+        response if is_no_work(&response)
     ));
 
-    let missing_predecessor = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let missing_predecessor = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3587,7 +4021,7 @@ async fn lease_poll_successors_require_the_exact_completed_head_before_liveness_
         ),
         slot,
     ));
-    let wrong_predecessor = RunnerToServer::LeaseRequest(LeaseRequest::successor(
+    let wrong_predecessor = RunnerToServer::LeaseRequest(successor_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3606,7 +4040,7 @@ async fn lease_poll_successors_require_the_exact_completed_head_before_liveness_
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 1);
 
     let successor_operation = OperationId::new();
-    let successor = RunnerToServer::LeaseRequest(LeaseRequest::successor(
+    let successor = RunnerToServer::LeaseRequest(successor_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),
@@ -3616,7 +4050,7 @@ async fn lease_poll_successors_require_the_exact_completed_head_before_liveness_
         first_operation,
     ));
     let response = exchange(&harness, &identity, &successor).await;
-    assert!(matches!(response, ServerToRunner::NoWork(_)));
+    assert!(is_no_work(&response));
     assert_eq!(exchange(&harness, &identity, &successor).await, response);
     assert_eq!(harness.sessions.heartbeats.load(Ordering::SeqCst), 3);
     assert_eq!(harness.poller.calls.load(Ordering::SeqCst), 2);
@@ -3638,7 +4072,7 @@ async fn lease_poll_fails_closed_when_fenced_liveness_refresh_is_rejected() {
         .sessions
         .reject_heartbeats
         .store(true, Ordering::SeqCst);
-    let message = RunnerToServer::LeaseRequest(LeaseRequest::first(
+    let message = RunnerToServer::LeaseRequest(empty_lease_request(
         MessageHeader::request(
             SUPPORTED_PROTOCOL_RANGE.max(),
             fence.session_id(),

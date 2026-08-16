@@ -6,7 +6,8 @@ use std::sync::{
 use async_trait::async_trait;
 use automata_ci_control::cancellation::CANCEL_JOB_COMMAND_KIND;
 use automata_ci_control::runner_control::{
-    ControlIdGenerator, ControlPortError, LeaseOfferClaim as ControlLeaseOfferClaim,
+    ControlIdGenerator, ControlPortError, LeaseAuthorityEvidence, LeaseAuthorityEvidenceSet,
+    LeaseOfferClaim as ControlLeaseOfferClaim,
     LeaseOfferClaimStatus as ControlLeaseOfferClaimStatus, LeaseOfferCommand,
     LeaseOfferCommandError, LeaseOfferCommandPublisher as _, LeaseOfferPublishOutcome,
     LeaseOfferReplayResolution, RunnerSessionFenceResolver as _, StoreLeaseOfferCommandPublisher,
@@ -24,6 +25,7 @@ use automata_ci_core::{
     UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
+    LeaseAuthorityName, LeaseAuthorityPollContribution, LeaseAuthorityPollContributions,
     ManagedSecretBindingOverlay, ProtocolLimits, ProtocolVersion, RunnerSlotOrdinal,
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
@@ -273,6 +275,7 @@ impl RunnerLeaseOfferRepository for MismatchedPublishedLeaseOffer {
             "job": self.job,
             "lease": self.lease,
             "managed_secret_bindings": ManagedSecretBindingOverlay::empty(&self.lease),
+            "lease_authority_evidence": LeaseAuthorityEvidenceSet::empty(),
             "protocol_version": request.protocol_version().get(),
             "schema": self.inner_schema,
             "slot": self.slot,
@@ -287,7 +290,7 @@ impl RunnerLeaseOfferRepository for MismatchedPublishedLeaseOffer {
         let command = EnqueueRunnerCommand::new(
             request.request().session(),
             OperationId::new(),
-            RunnerOperationKind::new("automata.runner.lease-offer.v2").expect("command kind"),
+            RunnerOperationKind::new("automata.runner.lease-offer.v3").expect("command kind"),
             RunnerCommandPayload::new(
                 DocumentSchema::new(self.outer_schema).expect("schema"),
                 payload,
@@ -417,6 +420,7 @@ impl LeaseOfferCommandFixture {
                 self.slot,
                 self.lease.clone(),
                 metadata,
+                LeaseAuthorityPollContributions::empty(),
             ),
             self.job.clone(),
             created_at,
@@ -519,6 +523,24 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         )],
     )
     .expect("managed-secret overlay");
+    let lease_authority_evidence = LeaseAuthorityEvidenceSet::new(vec![
+        LeaseAuthorityEvidence::new(
+            LeaseAuthorityName::new("test-sandbox").expect("authority name"),
+            7,
+            vec![0x6d; 32],
+        )
+        .expect("lease-authority evidence"),
+    ])
+    .expect("lease-authority evidence set");
+    let authority_contributions = LeaseAuthorityPollContributions::new(vec![
+        LeaseAuthorityPollContribution::new(
+            LeaseAuthorityName::new("test-sandbox").expect("authority name"),
+            3,
+            vec![0x5a; 32],
+        )
+        .expect("lease-authority contribution"),
+    ])
+    .expect("lease-authority contributions");
     let repository = Arc::new(LeaseOffers::default());
     let publisher = StoreLeaseOfferCommandPublisher::new(
         repository.clone(),
@@ -535,6 +557,7 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         RunnerSlotOrdinal::new(2).expect("slot"),
         lease.clone(),
         metadata.clone(),
+        authority_contributions.clone(),
     );
     assert_eq!(
         publisher.inspect(claim.clone()).await.expect("inspection"),
@@ -545,6 +568,9 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
             LeaseOfferCommand::try_new(claim.clone(), job.clone(), UnixMillis::new(20))
                 .and_then(|command| {
                     command.with_managed_secret_bindings(managed_secret_bindings.clone())
+                })
+                .and_then(|command| {
+                    command.with_lease_authority_evidence(lease_authority_evidence.clone())
                 })
                 .expect("valid lease-offer command"),
         )
@@ -655,6 +681,7 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         assert_eq!(request.slot().get(), 2);
         assert_eq!(request.lease(), &lease);
         assert_eq!(request.job_ir(), &metadata);
+        assert_eq!(request.authority_contributions(), &authority_contributions);
         assert_eq!(request.offer_valid_until(), lease.expires_at());
         for invalid_horizon in [lease.issued_at(), UnixMillis::new(101)] {
             assert_eq!(
@@ -664,6 +691,7 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
                     request.slot(),
                     request.lease().clone(),
                     request.job_ir().clone(),
+                    request.authority_contributions().clone(),
                     invalid_horizon,
                     request.command().clone(),
                 )
@@ -685,6 +713,7 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
                 request.slot(),
                 request.lease().clone(),
                 request.job_ir().clone(),
+                request.authority_contributions().clone(),
                 request.offer_valid_until(),
                 early_command,
             )
@@ -695,11 +724,11 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         assert_eq!(request.command().operation_id(), server_operation_id);
         assert_eq!(
             request.command().kind().as_str(),
-            "automata.runner.lease-offer.v2"
+            "automata.runner.lease-offer.v3"
         );
         let body: serde_json::Value =
             serde_json::from_slice(request.command().payload().bytes()).expect("offer JSON");
-        assert_eq!(body["schema"], 2);
+        assert_eq!(body["schema"], 3);
         assert_eq!(body["protocol_version"], 2);
         assert_eq!(body["slot"], 2);
         assert_eq!(
@@ -712,6 +741,10 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
             serde_json::to_value(&managed_secret_bindings).expect("managed-secret overlay JSON")
         );
         assert_eq!(
+            body["lease_authority_evidence"],
+            serde_json::to_value(&lease_authority_evidence).expect("lease-authority evidence JSON")
+        );
+        assert_eq!(
             body.as_object()
                 .expect("offer object")
                 .keys()
@@ -720,6 +753,7 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
             [
                 "job",
                 "lease",
+                "lease_authority_evidence",
                 "managed_secret_bindings",
                 "protocol_version",
                 "schema",
@@ -779,6 +813,7 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         RunnerSlotOrdinal::new(2).expect("slot"),
         lease.clone(),
         metadata.clone(),
+        LeaseAuthorityPollContributions::empty(),
     );
     assert_eq!(
         superseded
@@ -849,6 +884,7 @@ async fn lease_offer_adapter_maps_only_draining_races_to_unavailable() {
         RunnerSlotOrdinal::new(2).expect("slot"),
         lease.clone(),
         metadata.clone(),
+        LeaseAuthorityPollContributions::empty(),
     );
     let command = LeaseOfferCommand::try_new(claim.clone(), job.clone(), UnixMillis::new(20))
         .expect("valid lease-offer command");
@@ -922,6 +958,7 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
         RunnerSlotOrdinal::new(2).expect("slot"),
         lease.clone(),
         metadata,
+        LeaseAuthorityPollContributions::empty(),
     );
     let mismatched_job = job();
     let same_identity_mismatched_job = JobIrEnvelope::new(
@@ -962,8 +999,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 3,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
-            inner_schema: 2,
+            outer_schema: 3,
+            inner_schema: 3,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -972,8 +1009,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
-            inner_schema: 2,
+            outer_schema: 3,
+            inner_schema: 3,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -982,8 +1019,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
-            inner_schema: 2,
+            outer_schema: 3,
+            inner_schema: 3,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -992,8 +1029,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: mismatched_lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
-            inner_schema: 2,
+            outer_schema: 3,
+            inner_schema: 3,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -1002,8 +1039,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
-            inner_schema: 2,
+            outer_schema: 3,
+            inner_schema: 3,
             extra_field: true,
             nested_extra_field: false,
         },
@@ -1012,8 +1049,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
-            inner_schema: 2,
+            outer_schema: 3,
+            inner_schema: 3,
             extra_field: false,
             nested_extra_field: true,
         },
@@ -1022,8 +1059,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 1,
-            inner_schema: 2,
+            outer_schema: 2,
+            inner_schema: 3,
             extra_field: false,
             nested_extra_field: false,
         },
@@ -1032,7 +1069,7 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
+            outer_schema: 3,
             inner_schema: 0,
             extra_field: false,
             nested_extra_field: false,
@@ -1042,8 +1079,8 @@ async fn recovered_offer_payload_rejects_noncurrent_schema_and_mismatched_column
             lease: lease.clone(),
             slot: 2,
             created_at: UnixMillis::new(20),
-            outer_schema: 2,
-            inner_schema: 1,
+            outer_schema: 3,
+            inner_schema: 2,
             extra_field: false,
             nested_extra_field: false,
         },
