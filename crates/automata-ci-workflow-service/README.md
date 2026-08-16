@@ -32,8 +32,9 @@ an exact replay returns the same run with `200`.
 
 A first-party CLI command, browser form, mutable branch/tag resolution, and
 complete repository variable and secret-reference hydration remain product
-work. Scheduled workflow synthesis is a separate unsupported control-plane
-surface.
+work. Scheduled workflows are discovered and admitted by the separate
+product-supervised GitHub schedule service. The [compatibility matrix](https://github.com/automata-ci/automata/blob/main/docs/compatibility.md#v01-implementation-status)
+records their experimental status and remaining acceptance gates.
 
 - [Architecture documentation](https://github.com/automata-ci/automata/blob/main/docs/architecture.md)
 - API documentation: run `cargo doc -p automata-ci-workflow-service --open` from a source checkout.
