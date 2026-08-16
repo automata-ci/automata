@@ -286,9 +286,7 @@ impl GithubWorkflowPermissionObservationCandidate {
         digest.update(self.authority_selector.authority_id().as_uuid().as_bytes());
         digest.update(self.authority_identity_digest.as_bytes());
         update_text(&mut digest, self.expected_default.as_str());
-        digest.update([u8::from(
-            self.expected_can_approve_pull_request_reviews,
-        )]);
+        digest.update([u8::from(self.expected_can_approve_pull_request_reviews)]);
         digest.update(self.consumer.consumer_id().as_uuid().as_bytes());
         digest.update(self.consumer.owner().as_uuid().as_bytes());
         digest.update(self.consumer.fence().get().to_be_bytes());

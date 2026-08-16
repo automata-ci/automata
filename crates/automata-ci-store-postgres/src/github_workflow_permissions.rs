@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use automata_ci_core::UnixMillis;
 use automata_ci_store::{
     FinalizeGithubWorkflowPermissionObservation, GITHUB_PROVIDER_REST_API_VERSION,
+    GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
     GithubWorkflowPermissionDefaultsObservationError,
     GithubWorkflowPermissionDefaultsObservationRepository,
     GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
     ReconcileGithubWorkflowPermissionHandoff,
-    GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
 };
 use sqlx::{Postgres, Row as _, Transaction};
 
@@ -242,9 +242,7 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
                 return Err(GithubWorkflowPermissionDefaultsObservationError::CorruptData);
             }
             let handoff_id = automata_ci_store::GithubServerServiceHandoffId::from_uuid(
-                finalized
-                    .try_get("handoff_id")
-                    .map_err(operation_error)?,
+                finalized.try_get("handoff_id").map_err(operation_error)?,
             )
             .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
             let generation = automata_ci_store::GithubServerServiceGeneration::new(
@@ -262,11 +260,13 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
                     .map_err(operation_error)?,
             );
             transaction.commit().await.map_err(operation_error)?;
-            return Ok(GithubWorkflowPermissionHandoffReconciliation::AlreadyReleased {
-                handoff_id,
-                generation,
-                released_at,
-            });
+            return Ok(
+                GithubWorkflowPermissionHandoffReconciliation::AlreadyReleased {
+                    handoff_id,
+                    generation,
+                    released_at,
+                },
+            );
         }
 
         if let Some(existing) = load_handoff_closure(&mut transaction, &request).await? {
@@ -321,11 +321,8 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
                     .try_get("required_through_ms")
                     .map_err(operation_error)?,
             );
-            let granted_at = UnixMillis::new(
-                handoff
-                    .try_get("granted_at_ms")
-                    .map_err(operation_error)?,
-            );
+            let granted_at =
+                UnixMillis::new(handoff.try_get("granted_at_ms").map_err(operation_error)?);
             if required_through != request.required_through() || database_now < granted_at {
                 return Err(GithubWorkflowPermissionDefaultsObservationError::CorruptData);
             }
@@ -574,14 +571,10 @@ impl GithubWorkflowPermissionDefaultsObservationRepository for PostgresStore {
             )
             .await
             .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::Conflict)?;
-            let manifest_receipt = bootstrap_locked_manifest(
-                &mut transaction,
-                desired,
-                manifest_current,
-                recorded_at,
-            )
-            .await
-            .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::Conflict)?;
+            let manifest_receipt =
+                bootstrap_locked_manifest(&mut transaction, desired, manifest_current, recorded_at)
+                    .await
+                    .map_err(|_| GithubWorkflowPermissionDefaultsObservationError::Conflict)?;
             if policy_receipt.pin().revision() != candidate.runtime_policy_revision()
                 || policy_receipt.pin().digest() != candidate.runtime_policy_digest()
                 || manifest_receipt.current().manifest() != desired
@@ -1030,8 +1023,8 @@ async fn load_ready_permission_default_head(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(operation_error)?;
-    let (ready, fresh_through_ms) = readiness
-        .ok_or(GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
+    let (ready, fresh_through_ms) =
+        readiness.ok_or(GithubWorkflowPermissionDefaultsObservationError::CorruptData)?;
     if !ready {
         return Ok(false);
     }
