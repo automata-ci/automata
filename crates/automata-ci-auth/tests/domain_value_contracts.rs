@@ -3,9 +3,7 @@ mod support;
 use std::collections::BTreeSet;
 
 use automata_ci_auth::{
-    human::{
-        AuthenticatedHuman, PrincipalId, ProviderCredential, ProviderId, ProviderSubject, TenantId,
-    },
+    human::{AuthenticatedHuman, PrincipalId, ProviderCredential, TenantId},
     machine::{AuthenticatedMachine, ExternalRunnerIdentity, MachineIdentityError},
     time::UnixTimestamp,
     vault::{
@@ -16,15 +14,7 @@ use automata_ci_auth::{
 };
 use serde_json::json;
 
-use support::secret;
-
-fn provider_id() -> ProviderId {
-    ProviderId::new("github").expect("provider ID")
-}
-
-fn provider_subject() -> ProviderSubject {
-    ProviderSubject::new("42").expect("provider subject")
-}
+use support::{provider_id, provider_subject, secret};
 
 fn valid_metadata() -> ProviderTokenMetadata {
     ProviderTokenMetadata::builder(
