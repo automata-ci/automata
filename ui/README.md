@@ -34,7 +34,7 @@ The browser bundle hydrates the same document. JavaScript enhances the theme
 toggle, in-page log filtering, and repository-settings draft and submission
 states. Links, GET filters, settings forms, and RBAC management forms retain
 their native behavior when JavaScript is absent or fails. There is no SPA router
-and no client-only page-data fetch.
+and every initial page route remains a complete server-rendered document.
 
 ## Source architecture
 
@@ -52,13 +52,17 @@ src/
 └── validation/   exact validation of the untrusted host boundary
 ```
 
-Production pages receive validated models and render ordinary links and forms;
-they do not fetch data or know how the static demo is routed. The demo owns its
-sample data and its small query-preserving GET adapter, and production source
-never imports test fixtures. The adapter is reinstalled on hot module replacement
-so routing changes do not leave a stale submit handler. `styles.css` only
-declares the cascade order and imports the focused modules documented in
-`src/styles/README.md`.
+Production pages receive validated initial models and render ordinary links and
+forms; they do not own generic page-data loading or know how the static demo is
+routed. The active job-log page revalidates bounded JSON snapshots. The shared
+live-log package selects advertised transports, strictly decodes SSE, advances
+checkpoints, reconnects, and falls back to snapshot polling, as
+specified by [ADR 0004](../docs/architecture-decisions/0004-resumable-live-log-delivery.md).
+The demo owns its sample data and its small query-preserving GET adapter, and
+production source never imports test fixtures. The adapter is reinstalled on hot
+module replacement so routing changes do not leave a stale submit handler.
+`styles.css` only declares the cascade order and imports the focused modules
+documented in `src/styles/README.md`.
 
 ## Commands
 
