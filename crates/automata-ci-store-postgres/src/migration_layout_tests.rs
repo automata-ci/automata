@@ -161,6 +161,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0039_qualify_workflow_permission_guard.sql",
         "2dc845db52210db4a44a41232845bb7e5ddff10663b8977ce087f6699b80376e5643f7b09b880446abc6a4beced44d80",
     ),
+    (
+        "0040_provider_delivery_event_envelope.sql",
+        "939ba465bb389fbe4c3ed2066e4e86cd46102664e35451ea182af3f49d10e142fcdc046c1f957c28d9eb1747309793e0",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -361,6 +365,64 @@ fn runtime_authority_delivery_is_post_accept_exact_and_value_free() {
             "runtime-authority migration must not persist grant material: {forbidden}"
         );
     }
+}
+
+#[test]
+fn provider_delivery_event_envelope_is_complete_bounded_and_legacy_nullable() {
+    let source = include_str!("../migrations/0040_provider_delivery_event_envelope.sql");
+
+    for required in [
+        "ADD COLUMN event_envelope_schema SMALLINT",
+        "ADD COLUMN event_registry_schema SMALLINT",
+        "ADD COLUMN event_envelope_digest BYTEA",
+        "ADD COLUMN event_envelope_bytes BYTEA",
+        "ADD COLUMN event_envelope_media_type TEXT COLLATE \"C\"",
+        "CONSTRAINT provider_delivery_inbox_event_envelope_complete CHECK",
+        "event_envelope_schema IS NULL",
+        "event_registry_schema IS NULL",
+        "event_envelope_digest IS NULL",
+        "event_envelope_bytes IS NULL",
+        "event_envelope_media_type IS NULL",
+        "event_envelope_schema IS NOT NULL",
+        "event_registry_schema IS NOT NULL",
+        "event_envelope_digest IS NOT NULL",
+        "event_envelope_bytes IS NOT NULL",
+        "event_envelope_media_type IS NOT NULL",
+        "event_envelope_schema > 0",
+        "event_registry_schema > 0",
+        "octet_length(event_envelope_digest) = 32",
+        "octet_length(event_envelope_bytes) BETWEEN 1 AND 32768",
+        "octet_length(event_envelope_media_type) BETWEEN 1 AND 128",
+        "event_envelope_media_type LIKE '%/%'",
+        "event_envelope_media_type ~ '^[!-~]+$'",
+        "event_envelope_media_type !~ '[[:space:][:cntrl:];]'",
+        ") NOT VALID",
+        "VALIDATE CONSTRAINT provider_delivery_inbox_event_envelope_complete",
+        "CREATE OR REPLACE FUNCTION automata_enforce_provider_delivery_lifecycle()",
+        "NEW.event_envelope_schema IS DISTINCT FROM OLD.event_envelope_schema",
+        "NEW.event_registry_schema IS DISTINCT FROM OLD.event_registry_schema",
+        "NEW.event_envelope_digest IS DISTINCT FROM OLD.event_envelope_digest",
+        "NEW.event_envelope_bytes IS DISTINCT FROM OLD.event_envelope_bytes",
+        "NEW.event_envelope_media_type IS DISTINCT FROM OLD.event_envelope_media_type",
+        "OLD.event_envelope_schema IS NULL",
+        "OLD.state IN ('pending', 'retry', 'claimed')",
+        "NEW.state = 'rejected'",
+        "NEW.claim_fence <> OLD.claim_fence + 1",
+        "NEW.attempt_count <> GREATEST(OLD.attempt_count, 1)",
+        "IS DISTINCT FROM 'provider_delivery.legacy_unsealed'",
+        "CONSTRAINT = 'provider_delivery_inbox_legacy_unsealed_transition'",
+    ] {
+        assert!(
+            source.contains(required),
+            "provider-delivery envelope migration lost required contract: {required}"
+        );
+    }
+
+    assert_eq!(
+        automata_ci_store::MAX_PROVIDER_DELIVERY_EVENT_ENVELOPE_BYTES,
+        32_768,
+        "product and durable provider-envelope byte limits diverged"
+    );
 }
 
 fn migration_paths() -> Vec<PathBuf> {
