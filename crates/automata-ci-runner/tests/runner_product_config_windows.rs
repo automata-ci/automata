@@ -34,7 +34,7 @@ fn write_secure_fixture(path: &Path, bytes: &[u8]) {
         .expect("restrict Windows evidence fixture DACL");
 }
 
-fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) {
+fn assert_action_features_remain_unadvertised(request: &WindowsEnrollmentAdmissionRequest) {
     for feature in [
         RunnerFeature::JAVASCRIPT_ACTIONS,
         RunnerFeature::COMPOSITE_ACTIONS,
@@ -43,12 +43,12 @@ fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) 
         RunnerFeature::NODE24_ACTIONS,
     ] {
         assert!(
-            request
+            !request
                 .binding()
                 .capabilities()
                 .features()
                 .contains(&feature),
-            "active admission must prove exact registration feature {feature}"
+            "unsupported Windows action feature escaped admission: {feature}"
         );
     }
 }
@@ -406,7 +406,7 @@ fn candidate_evidence_is_verified_but_does_not_publish_action_capabilities() {
 }
 
 #[test]
-fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admission() {
+fn exact_external_promotion_keeps_actions_unadvertised_without_a_broker_materializer() {
     let mut fixture = EvidenceFixture::new();
     add_promotion(&mut fixture);
     let config_path = fixture.write_config("promoted-runner.json");
@@ -494,7 +494,7 @@ fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admissio
             .expect("Hyper-V container image")
             .reference()
     );
-    assert_admitted_action_features(&request);
+    assert_action_features_remain_unadvertised(&request);
     assert_host_input_contract(&request, &config_path);
 }
 

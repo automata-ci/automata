@@ -218,32 +218,32 @@ macOS VM provider, cannot match. Registered and live-observed capabilities are
 intersected before scheduler matching, and the match is repeated before a
 placement can become a lease.
 
-Without an external promotion envelope the verified candidate's durable
-inventory contains only
-PowerShell and `cmd.exe` shell steps plus command files, with optional support
-for one absolute standalone Python interpreter. A production image may enable
-JavaScript, composite, repository, and local-action capabilities only after a
-canonical Ed25519-signed promotion payload accepts all evidence digests and
-revocation generation. Startup exercises every configured shell, archive,
-hash, Node, and optional Python executable through a copied probe in one fresh
-container. The required Windows enrollment adapter must run the same exact
-profile/tool contract and retain a short-lived authenticated receipt under an
-opaque broker-custody handle. The request binds the shared probe-contract schema
-and digest, and the supplied helper executes the same lifecycle, argv, and
-output checks as startup. This component supplies that request/receipt port;
-the restricted-broker caller and credential-publication integration remain a
-separate deployment gate. Once composed, the enrollment request must use the
-broker-attested ordered host-input set (configuration, executable, manifest,
-lock, evidence records, and promotion envelope), including protected DACL,
-owner, non-reparse, stable file/volume identity, and exact digest proof, and the
-receipt's exact capability set and a staged retry must resolve the identical
-receipt digest and binding. Missing, stale, expired, or tampered custody fails
-closed. The
+The durable Windows inventory contains only PowerShell and `cmd.exe` shell
+steps plus command files, with optional support for one absolute standalone
+Python interpreter. An externally promoted image remains shell-only: promotion
+qualifies its signed evidence for enrollment but does not authorize JavaScript,
+composite, repository, local-action, or Node runtime capabilities. Those
+features remain unavailable until a broker-owned action materializer ships
+with its first production provider. Startup still exercises every configured
+shell, archive, hash, Node, and optional Python executable through a copied
+probe in one fresh container; evidence and probe success do not make those
+action tools runtime authority. The required Windows enrollment adapter must
+run the same exact profile/tool contract and retain a short-lived authenticated
+receipt under an opaque broker-custody handle. The request binds the shared
+probe-contract schema and digest, and the supplied helper executes the same
+lifecycle, argv, and output checks as startup. This component supplies that
+request/receipt port; the restricted-broker caller and credential-publication
+integration remain a separate deployment gate. Once composed, the enrollment
+request must use the broker-attested ordered host-input set (configuration,
+executable, manifest, lock, evidence records, and promotion envelope),
+including protected DACL, owner, non-reparse, stable file/volume identity,
+and exact digest proof. The receipt's exact capability set and a staged retry
+must resolve the identical receipt digest and binding. Missing, stale, expired,
+or tampered custody fails closed. The
 `capabilities` command remains a passive shell-only diagnostic and cannot mint
 action authority. Startup independently repeats the probes before opening a
-runtime session, and action/Node features remain schedulable only when the
-registered and live-observed sets agree. There is no `PATH` or Node-generation
-fallback. Docker actions, job
+runtime session, and action/Node features are not registered, observed, or
+schedulable. There is no `PATH` or Node-generation fallback. Docker actions, job
 containers, service containers, and active Podman doctor checks remain
 unsupported. The host state root contains provider ownership and recovery
 metadata only; no runner state or credential path is mounted into a job

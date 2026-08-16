@@ -68,7 +68,7 @@ use super::state::RuntimeMountSnapshot;
 use super::{
     ClientTlsMaterialError, ProductStateRootError, RunnerProductConfig, RunnerProductConfigError,
     RunnerProviderConfig, SecretSource, StandardGithubContext,
-    config::{ObjectStoreTlsTrust, promoted_windows_runtime_features, required_podman_state_root},
+    config::{ObjectStoreTlsTrust, required_podman_state_root},
     metrics::RunnerMetrics,
     profile_admission::{
         ProfileAdmissionError, ProfileAdmissionOutcome, ProfileAdmissionPolicy,
@@ -834,20 +834,12 @@ fn admitted_runtime_inventory(
     buildkit_configured: bool,
     provider: &ProviderCapabilities,
 ) -> Result<RunnerCapabilities, RunnerProductError> {
-    let mut inventory = inventory_for_verified_provider(
+    let inventory = inventory_for_verified_provider(
         config.inventory(),
         service_proxy_configured,
         buildkit_configured,
         provider,
     );
-    if config
-        .windows_hyperv()
-        .is_some_and(|windows| windows.image_admission().permits_actions())
-    {
-        inventory = inventory.with_features(promoted_windows_runtime_features(
-            config.executor().toolchain(),
-        ));
-    }
     inventory
         .validate()
         .map_err(|_| RunnerProductError::SandboxProviderInvariant)?;
@@ -1446,21 +1438,6 @@ fn build_toolchain(
     if let Some(path) = configured.python() {
         toolchain = toolchain.with_python(path.clone())?;
     }
-    let windows_actions = config
-        .windows_hyperv()
-        .is_some_and(|windows| windows.image_admission().permits_actions());
-    if windows_actions {
-        toolchain = toolchain.with_windows_action_materializer(
-            configured
-                .tar()
-                .ok_or(RunnerProductError::ProviderConfiguration)?
-                .clone(),
-            configured
-                .sha256sum()
-                .ok_or(RunnerProductError::ProviderConfiguration)?
-                .clone(),
-        )?;
-    }
     if matches!(
         config.provider(),
         RunnerProviderConfig::Podman(_)
@@ -1478,8 +1455,7 @@ fn build_toolchain(
         (JavascriptRuntime::Node24, configured.node24()),
     ] {
         if let Some(path) = path
-            && (!matches!(config.provider(), RunnerProviderConfig::WindowsHyperV(_))
-                || windows_actions)
+            && !matches!(config.provider(), RunnerProviderConfig::WindowsHyperV(_))
         {
             toolchain = toolchain.with_node(runtime, path.clone())?;
         }
@@ -1819,7 +1795,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn promoted_windows_features_exist_only_in_post_admission_inventory() {
+    fn promoted_windows_image_remains_shell_only_without_a_broker_materializer() {
         struct InjectedPromotedEvidence;
 
         impl super::super::windows_image::WindowsImageEvidenceVerifier for InjectedPromotedEvidence {
@@ -1865,8 +1841,15 @@ mod tests {
             automata_ci_core::RunnerFeature::LOCAL_ACTIONS,
             automata_ci_core::RunnerFeature::NODE24_ACTIONS,
         ] {
-            assert!(admitted.features().contains(&feature), "missing {feature}");
+            assert!(
+                !admitted.features().contains(&feature),
+                "unsupported Windows action feature escaped admission: {feature}"
+            );
         }
+        let toolchain = build_toolchain(&config).expect("shell-only Windows toolchain");
+        assert!(toolchain.tar().is_none());
+        assert!(toolchain.sha256().is_none());
+        assert!(toolchain.node(JavascriptRuntime::Node24).is_none());
     }
     #[derive(Debug, Default)]
     struct StartupEffects {

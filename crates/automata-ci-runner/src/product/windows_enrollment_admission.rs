@@ -7,7 +7,8 @@ use std::{
 };
 
 use automata_ci_core::{
-    EnvironmentProfile, JobResourceAllocation, RunnerCapabilities, RunnerId, Sha256Digest,
+    EnvironmentProfile, JobResourceAllocation, RunnerCapabilities, RunnerFeature, RunnerId,
+    Sha256Digest,
 };
 use automata_ci_execution::{
     NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
@@ -21,7 +22,7 @@ use uuid::Uuid;
 
 use super::{
     RunnerProductConfig,
-    config::promoted_windows_runtime_features,
+    config::windows_enrollment_runtime_features,
     profile_admission::{
         ProfileAdmissionOutcome, ProfileAdmissionPolicy, WINDOWS_PROFILE_PROBE_SCHEMA_VERSION,
         admit_environment_profiles, windows_profile_probe_contract_sha256,
@@ -32,6 +33,16 @@ const MAX_ID_BYTES: usize = 128;
 const MAX_SERVER_ORIGIN_BYTES: usize = 2_048;
 const MAX_RUNNER_NAME_BYTES: usize = 255;
 const MAX_RECEIPT_LIFETIME_SECONDS: u64 = 15 * 60;
+const WINDOWS_ACTION_RUNTIME_FEATURES: [RunnerFeature; 8] = [
+    RunnerFeature::JAVASCRIPT_ACTIONS,
+    RunnerFeature::NODE12_ACTIONS,
+    RunnerFeature::NODE16_ACTIONS,
+    RunnerFeature::NODE20_ACTIONS,
+    RunnerFeature::NODE24_ACTIONS,
+    RunnerFeature::COMPOSITE_ACTIONS,
+    RunnerFeature::REPOSITORY_ACTIONS,
+    RunnerFeature::LOCAL_ACTIONS,
+];
 const WINDOWS_HOST_INPUT_KINDS: [WindowsHostInputKind; 9] = [
     WindowsHostInputKind::Configuration,
     WindowsHostInputKind::BackendExecutable,
@@ -573,7 +584,7 @@ pub fn windows_enrollment_admission_request(
     let Some(windows) = config.windows_hyperv() else {
         return Ok(None);
     };
-    if !windows.image_admission().permits_actions() {
+    if !windows.image_admission().is_promoted() {
         return Ok(None);
     }
     if !valid_backend_id(backend_id) || config.executor().network() != NetworkPolicy::Disabled {
@@ -600,15 +611,19 @@ pub fn windows_enrollment_admission_request(
     let promotion_envelope_sha256 = windows
         .promotion_envelope_sha256()
         .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
-    let capabilities = config
-        .inventory()
-        .clone()
-        .with_features(promoted_windows_runtime_features(
-            config.executor().toolchain(),
-        ));
+    let capabilities =
+        config
+            .inventory()
+            .clone()
+            .with_features(windows_enrollment_runtime_features(
+                config.executor().toolchain(),
+            ));
     capabilities
         .validate()
         .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+    if has_windows_action_runtime_features(&capabilities) {
+        return Err(WindowsEnrollmentAdmissionError::InvalidRequest);
+    }
     let capabilities_sha256 = canonical_digest(&capabilities)?;
     let capacity = config.executor().resource_capacity();
     let allocation = JobResourceAllocation::new(capacity, capacity)
@@ -951,6 +966,7 @@ impl WindowsEnrollmentAdmissionReceipt {
         if self.binding != request.binding
             || canonical_digest(&self.binding.capabilities)? != self.binding.capabilities_sha256
             || self.binding.capabilities.validate().is_err()
+            || has_windows_action_runtime_features(&self.binding.capabilities)
             || !valid_host_inputs(&self.binding.host_inputs)
         {
             return Err(WindowsEnrollmentAdmissionError::Mismatch);
@@ -969,6 +985,12 @@ impl WindowsEnrollmentAdmissionReceipt {
         }
         Ok(ValidatedWindowsEnrollmentAdmission { receipt: self })
     }
+}
+
+fn has_windows_action_runtime_features(capabilities: &RunnerCapabilities) -> bool {
+    WINDOWS_ACTION_RUNTIME_FEATURES
+        .iter()
+        .any(|feature| capabilities.features().contains(feature))
 }
 
 /// Receipt whose exact binding and freshness have been validated for enrollment.
@@ -1360,11 +1382,7 @@ mod tests {
 
     #[test]
     fn restart_reauthenticates_the_same_broker_custody_receipt() {
-        let request = request([
-            RunnerFeature::SHELL_STEPS,
-            RunnerFeature::JAVASCRIPT_ACTIONS,
-            RunnerFeature::NODE24_ACTIONS,
-        ]);
+        let request = request([RunnerFeature::SHELL_STEPS]);
         let port = RestartingPort {
             state: Mutex::new(RestartingPortState::default()),
         };
@@ -1400,6 +1418,20 @@ mod tests {
         assert_eq!(
             port.resume(resumed.handle(), &request),
             Err(WindowsEnrollmentAdmissionError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn exact_action_capability_receipt_fails_closed() {
+        let request = request([
+            RunnerFeature::SHELL_STEPS,
+            RunnerFeature::JAVASCRIPT_ACTIONS,
+            RunnerFeature::NODE24_ACTIONS,
+        ]);
+
+        assert_eq!(
+            receipt(&request).validate(&request, NOW),
+            Err(WindowsEnrollmentAdmissionError::Mismatch)
         );
     }
 

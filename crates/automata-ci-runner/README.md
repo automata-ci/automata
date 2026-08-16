@@ -96,34 +96,23 @@ image inspection adds it to the live inventory. A missing value
 disables the feature, and an invalid or unavailable configured image stops
 startup. Mutable tags are rejected.
 
-The Windows profile always supports exact configured PowerShell and `cmd.exe`
-`run:` steps, plus an optional standalone Python interpreter. Its action-ready
-  component path additionally binds a Windows Server 2025 Server Core image
-  manifest and lock to typed reference records for provenance, SPDX SBOM,
-  patch, and revocation evidence and to exact `tar.exe`, hash-helper, and Node
-  12/16/20/24 paths. Each record binds the native artifact media type and digest;
-  it is not parsed as though it were the referenced native format. Candidate evidence
-without an external Ed25519 promotion envelope remains shell-only. The Windows
-enrollment component defines a receipt contract requiring the same exact
-fresh-container probes before registration and authenticated, short-lived
-receipt retention only through opaque broker custody. The request binds a
-versioned digest of those shared lifecycle, argv, output, and cleanup semantics;
-the broker caller invokes the same helper as runtime admission instead of
-duplicating probe scripts. The restricted-broker
-caller and Windows credential publication are a separate integration gate; until
-they are composed, enrollment remains unavailable rather than registering a
-shell-only or action-ready runner. Only an externally promoted image whose
-ordered config, broker executable, manifest, evidence, and promotion-envelope
-paths and digests receive fresh broker owner/protected-DACL/file-ID/local-volume
-attestation, and whose
-pre-enrollment probes all succeed can register JavaScript, composite,
-repository, local-action, and exact Node-generation capabilities. Startup
-independently repeats admission before reporting the live inventory, so
-registered/live capability intersection retains only abilities proved at both
-boundaries. Missing, stale, tampered, revoked, or mismatched receipt, image,
-tool, or runtime evidence fails closed. Docker
-actions, job containers, service containers, administrator profiles, and
-host-network or host-filesystem policy remain unsupported.
+The Windows profile supports exact configured PowerShell and `cmd.exe` `run:`
+steps, plus an optional standalone Python interpreter. Its image contract also
+binds a Windows Server 2025 Server Core manifest and lock to provenance, SPDX
+SBOM, patch, revocation, archive-tool, hash-helper, and Node-path evidence.
+Those action artifacts are inputs to a future broker-owned materializer, not
+runtime authority: JavaScript, composite, repository, local, and Node action
+features remain absent from both enrollment and live inventories, even for an
+externally promoted image. The executor rejects every Windows action step
+before provider mutation and repeats the guard at direct execution.
+
+Restricted-broker custody, Windows credential publication, and a
+retained-file-identity materializer remain separate integration gates. Until
+they are implemented together, Windows enrollment stays unavailable rather
+than registering an action-ready runner. Missing, stale, tampered, revoked, or
+mismatched image, tool, or runtime evidence fails closed. Docker actions, job
+containers, service containers, administrator profiles, and host-network or
+host-filesystem policy remain unsupported.
 
 Hosted Windows CI is currently disabled because Automata does not yet operate
 Windows runners. Unit and injected-runtime provider tests do not constitute a

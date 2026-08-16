@@ -580,6 +580,9 @@ impl ActionsJobExecutor {
         }
         let workspace =
             job_workspace(job, &environment).map_err(|_| AdmissionRejection::InvalidJob)?;
+        if unsupported_windows_action_job(job, workspace.platform()) {
+            return Err(AdmissionRejection::InvalidJob);
+        }
         if self.ports.toolchain.platform() != workspace.platform() {
             return Err(AdmissionRejection::CapabilityChanged);
         }
@@ -703,6 +706,9 @@ impl ActionsJobExecutor {
         events: Arc<dyn ExecutionEvents>,
         cancellation: ExecutionCancellation,
     ) -> Result<JobResult, ExecutorAdapterError> {
+        if unsupported_windows_action_job(request.job(), self.ports.toolchain.platform()) {
+            return Err(invalid_job());
+        }
         // We can safely resume a Preparing saga because no workflow phase has
         // started. Later lifecycle recovery requires durable per-phase state;
         // fail closed instead of replaying arbitrary user code.
@@ -7570,6 +7576,15 @@ fn validate_action_step_admission(
         }
     }
     Ok(())
+}
+
+fn unsupported_windows_action_job(job: &JobIrEnvelope, platform: TargetPlatform) -> bool {
+    platform == TargetPlatform::Windows
+        && job
+            .job()
+            .steps()
+            .iter()
+            .any(|step| matches!(step.kind(), SemanticStep::Action { .. }))
 }
 
 fn validate_resource_admission(
