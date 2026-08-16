@@ -1,79 +1,9 @@
-use std::{fmt, sync::Arc};
-
-use async_trait::async_trait;
 use automata_ci_secret::{
-    CreateSecretVersionRequest, CreatedSecretVersion, DestroySecretVersionRequest,
-    MAX_REGISTERED_SECRET_PROVIDERS, ProviderError, ProviderHealth, ProviderOperationContext,
-    ResolveSecretVersionRequest, ResolvedSecretVersion, SecretAtRestProtection, SecretProvider,
-    SecretProviderId, SecretProviderRegistry, SecretProviderRegistryError,
+    MAX_REGISTERED_SECRET_PROVIDERS, SecretAtRestProtection, SecretProviderId,
+    SecretProviderRegistry, SecretProviderRegistryError,
 };
 
-struct FakeProvider {
-    id: SecretProviderId,
-}
-
-impl FakeProvider {
-    fn new(id: &str) -> Self {
-        Self {
-            id: SecretProviderId::new(id).expect("test provider ID"),
-        }
-    }
-}
-
-impl fmt::Debug for FakeProvider {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("FakeProvider(configuration=must-not-appear)")
-    }
-}
-
-#[async_trait]
-impl SecretProvider for FakeProvider {
-    fn provider_id(&self) -> &SecretProviderId {
-        &self.id
-    }
-
-    fn capabilities(&self) -> &automata_ci_secret::ProviderCapabilities {
-        static CAPABILITIES: std::sync::LazyLock<automata_ci_secret::ProviderCapabilities> =
-            std::sync::LazyLock::new(automata_ci_secret::ProviderCapabilities::default);
-        &CAPABILITIES
-    }
-
-    fn at_rest_protection(&self) -> SecretAtRestProtection {
-        SecretAtRestProtection::ProviderManagedEncryption
-    }
-
-    async fn health(
-        &self,
-        _context: &ProviderOperationContext,
-    ) -> Result<ProviderHealth, ProviderError> {
-        Ok(ProviderHealth::Healthy)
-    }
-
-    async fn create_version(
-        &self,
-        _request: CreateSecretVersionRequest,
-    ) -> Result<CreatedSecretVersion, ProviderError> {
-        Err(ProviderError::unsupported())
-    }
-
-    async fn resolve_version(
-        &self,
-        _request: ResolveSecretVersionRequest,
-    ) -> Result<ResolvedSecretVersion, ProviderError> {
-        Err(ProviderError::unsupported())
-    }
-
-    async fn destroy_version(
-        &self,
-        _request: DestroySecretVersionRequest,
-    ) -> Result<(), ProviderError> {
-        Err(ProviderError::unsupported())
-    }
-}
-
-fn provider(id: &str) -> Arc<dyn SecretProvider> {
-    Arc::new(FakeProvider::new(id))
-}
+use crate::support::provider_adapter as provider;
 
 #[test]
 fn registry_selects_only_exact_registered_providers() {
