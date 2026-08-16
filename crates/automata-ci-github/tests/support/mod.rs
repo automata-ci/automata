@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, VecDeque},
+    fmt::Write as _,
     sync::{Arc, Mutex},
 };
 
@@ -13,10 +14,21 @@ use axum::{
     http::{HeaderMap, Request, Response, StatusCode},
     routing::any,
 };
+use ring::hmac;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 use url::Url;
 
 const MAX_FIXTURE_REQUEST_BYTES: usize = 1_048_576;
+
+pub(crate) fn webhook_signature(secret: &[u8], body: &[u8]) -> String {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+    let tag = hmac::sign(&key, body);
+    let mut encoded = String::from("sha256=");
+    for byte in tag.as_ref() {
+        write!(encoded, "{byte:02x}").expect("write signature");
+    }
+    encoded
+}
 
 #[derive(Clone, Debug)]
 pub struct ResponseSpec {
