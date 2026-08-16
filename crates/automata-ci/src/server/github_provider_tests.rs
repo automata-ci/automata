@@ -556,7 +556,10 @@ async fn duplicate_config_and_durable_manifest_selector_drift_fail_closed() {
     );
 }
 
-fn database_desired_state() -> automata_ci_provisioning::GithubProviderDesiredState {
+fn database_desired_state(
+    configuration_revision: u64,
+    workspace_revision: u64,
+) -> automata_ci_provisioning::GithubProviderDesiredState {
     use automata_ci_core::JobAuthorityProfile;
     use automata_ci_provisioning::{
         GithubProviderConfiguration, GithubProviderConfigurationRevision,
@@ -599,14 +602,16 @@ fn database_desired_state() -> automata_ci_provisioning::GithubProviderDesiredSt
     .expect("repository selection");
     automata_ci_provisioning::GithubProviderDesiredState::new(
         ShardId::new("prod-us-east-1-001").expect("shard ID"),
-        GithubProviderConfigurationRevision::new(5).expect("configuration revision"),
+        GithubProviderConfigurationRevision::new(configuration_revision)
+            .expect("configuration revision"),
         3,
         4,
         configuration,
         vec![
             WorkspaceGithubRepositoriesDesiredState::new(
                 workspace_id,
-                WorkspaceGithubRepositoriesRevision::new(2).expect("workspace revision"),
+                WorkspaceGithubRepositoriesRevision::new(workspace_revision)
+                    .expect("workspace revision"),
                 vec![repository],
             )
             .expect("workspace desired state"),
@@ -617,9 +622,9 @@ fn database_desired_state() -> automata_ci_provisioning::GithubProviderDesiredSt
 
 #[test]
 fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
-    let first = GithubProviderConfig::from_desired_state(database_desired_state())
+    let first = GithubProviderConfig::from_desired_state(database_desired_state(5, 5))
         .expect("database projection");
-    let second = GithubProviderConfig::from_desired_state(database_desired_state())
+    let second = GithubProviderConfig::from_desired_state(database_desired_state(5, 5))
         .expect("stable database projection");
     let first_repository = &first.config().repositories()[0];
     let second_repository = &second.config().repositories()[0];
@@ -628,9 +633,9 @@ fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
         first_repository.tenant().as_str(),
         "11111111-1111-4111-8111-111111111111"
     );
-    assert_eq!(first_repository.manifest_revision().get(), 7);
-    assert_eq!(first_repository.policy_revision().get(), 7);
-    assert_eq!(first_repository.runtime_policy_revision().get(), 7);
+    assert_eq!(first_repository.manifest_revision().get(), 5);
+    assert_eq!(first_repository.policy_revision().get(), 5);
+    assert_eq!(first_repository.runtime_policy_revision().get(), 5);
     assert_eq!(
         first_repository.connection_id(),
         second_repository.connection_id()
@@ -649,4 +654,9 @@ fn database_desired_state_derives_stable_runtime_identities_and_revisions() {
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("database-app-key"));
     assert!(!debug.contains("database-webhook-secret"));
+}
+
+#[test]
+fn database_desired_state_rejects_mixed_runtime_generations() {
+    assert!(GithubProviderConfig::from_desired_state(database_desired_state(5, 4)).is_err());
 }
