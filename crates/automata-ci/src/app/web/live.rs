@@ -3595,7 +3595,7 @@ mod tests {
                 requested_log_visibility: OutputVisibility::Public,
                 requested_artifact_visibility: OutputVisibility::Public,
                 safety_reason: "secretless".to_owned(),
-                safety_schema: 1,
+                safety_schema: 2,
             },
         }
     }
@@ -4431,7 +4431,7 @@ mod tests {
             ),
         );
         assert!(log_stream_safety_is_valid(&stream));
-        for schema in [0, 2] {
+        for schema in [0, 1, 3] {
             stream.publication.safety_schema = schema;
             assert!(!log_stream_safety_is_valid(&stream));
         }
@@ -4871,7 +4871,7 @@ mod tests {
                 requested_log_visibility: OutputVisibility::Public,
                 requested_artifact_visibility: OutputVisibility::Public,
                 safety_reason: "secretless".to_owned(),
-                safety_schema: 1,
+                safety_schema: 2,
             },
         };
         let mapped = map_run(&run).expect("unsafe optional copy is omitted");
@@ -5123,7 +5123,7 @@ mod tests {
                     requested_visibility: artifact_visibility,
                     effective_visibility: artifact_visibility,
                     safety_reason: "fixture".to_owned(),
-                    safety_schema: 1,
+                    safety_schema: 2,
                 },
             };
             let manifest = ArtifactManifest {
