@@ -7,11 +7,11 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding};
 use automata_ci_store::{
-    AcknowledgeRunnerCommands, CommandCursor, DocumentSchema, DurableRunnerCommand,
-    EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity, MAX_LOG_SEGMENT_BYTES,
-    MAX_TERMINAL_RESULT_BYTES, ObjectKey, RunnerGeneration, RunnerOperationReceipt,
-    RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion, RunnerSessionFence,
-    StableRunnerSlot, StoreError,
+    AcknowledgeRunnerCommands, CommandCursor, CommandSequence, DocumentSchema,
+    DurableRunnerCommand, EnqueueRunnerCommand, JobIrMetadata, LeaseOfferCommandIdentity,
+    MAX_LOG_SEGMENT_BYTES, MAX_TERMINAL_RESULT_BYTES, ObjectKey, RunnerGeneration,
+    RunnerOperationReceipt, RunnerOperationRequest, RunnerOperationResponse, RunnerProtocolVersion,
+    RunnerSessionFence, StableRunnerSlot, StoreError,
 };
 use thiserror::Error;
 
@@ -24,6 +24,130 @@ pub struct CurrentRunnerSession {
     runner_id: RunnerId,
     generation: RunnerGeneration,
     session_id: RunnerSessionId,
+}
+
+/// Retained command coordinates needed after the lease-offer payload is acknowledged and erased.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeAuthorityOfferCommand {
+    operation_id: automata_ci_core::OperationId,
+    sequence: CommandSequence,
+    created_at: UnixMillis,
+}
+
+impl RuntimeAuthorityOfferCommand {
+    /// Creates immutable coordinates for the exact published lease-offer command.
+    #[must_use]
+    pub const fn new(
+        operation_id: automata_ci_core::OperationId,
+        sequence: CommandSequence,
+        created_at: UnixMillis,
+    ) -> Self {
+        Self {
+            operation_id,
+            sequence,
+            created_at,
+        }
+    }
+
+    /// Returns the exact outbox operation identity.
+    #[must_use]
+    pub const fn operation_id(self) -> automata_ci_core::OperationId {
+        self.operation_id
+    }
+
+    /// Returns the exact durable outbox sequence.
+    #[must_use]
+    pub const fn sequence(self) -> CommandSequence {
+        self.sequence
+    }
+
+    /// Returns the trusted command creation time.
+    #[must_use]
+    pub const fn created_at(self) -> UnixMillis {
+        self.created_at
+    }
+}
+
+/// Metadata-only accepted offer retained for post-acknowledgement authority delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedRuntimeAuthorityOffer {
+    request: RunnerOperationRequest,
+    protocol_version: RunnerProtocolVersion,
+    slot: StableRunnerSlot,
+    lease: Lease,
+    job_ir: JobIrMetadata,
+    offer_valid_until: UnixMillis,
+    command: RuntimeAuthorityOfferCommand,
+}
+
+impl AcceptedRuntimeAuthorityOffer {
+    /// Builds an accepted offer from immutable publication and command metadata.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an invalid command or authority horizon.
+    pub fn new(
+        request: RunnerOperationRequest,
+        protocol_version: RunnerProtocolVersion,
+        slot: StableRunnerSlot,
+        lease: Lease,
+        job_ir: JobIrMetadata,
+        offer_valid_until: UnixMillis,
+        command: RuntimeAuthorityOfferCommand,
+    ) -> Result<Self, RunnerControlValueError> {
+        validate_offer_validity_horizon(&lease, command.created_at(), offer_valid_until)?;
+        Ok(Self {
+            request,
+            protocol_version,
+            slot,
+            lease,
+            job_ir,
+            offer_valid_until,
+            command,
+        })
+    }
+
+    /// Returns the exact runner poll request identity.
+    #[must_use]
+    pub const fn request(&self) -> &RunnerOperationRequest {
+        &self.request
+    }
+
+    /// Returns the negotiated protocol.
+    #[must_use]
+    pub const fn protocol_version(&self) -> RunnerProtocolVersion {
+        self.protocol_version
+    }
+
+    /// Returns the stable runner slot.
+    #[must_use]
+    pub const fn slot(&self) -> StableRunnerSlot {
+        self.slot
+    }
+
+    /// Returns the exact accepted lease.
+    #[must_use]
+    pub const fn lease(&self) -> &Lease {
+        &self.lease
+    }
+
+    /// Returns immutable `JobIR` object metadata.
+    #[must_use]
+    pub const fn job_ir(&self) -> &JobIrMetadata {
+        &self.job_ir
+    }
+
+    /// Returns the exclusive authority horizon.
+    #[must_use]
+    pub const fn offer_valid_until(&self) -> UnixMillis {
+        self.offer_valid_until
+    }
+
+    /// Returns retained command coordinates without erased payload bytes.
+    #[must_use]
+    pub const fn command(&self) -> RuntimeAuthorityOfferCommand {
+        self.command
+    }
 }
 
 impl CurrentRunnerSession {
@@ -323,6 +447,25 @@ impl PublishedLeaseOffer {
     }
 }
 
+impl From<PublishedLeaseOffer> for AcceptedRuntimeAuthorityOffer {
+    fn from(offer: PublishedLeaseOffer) -> Self {
+        let command = RuntimeAuthorityOfferCommand::new(
+            offer.command.request().operation_id(),
+            offer.command.sequence(),
+            offer.command.request().created_at(),
+        );
+        Self {
+            request: offer.request,
+            protocol_version: offer.protocol_version,
+            slot: offer.slot,
+            lease: offer.lease,
+            job_ir: offer.job_ir,
+            offer_valid_until: offer.offer_valid_until,
+            command,
+        }
+    }
+}
+
 fn validate_offer_validity_horizon(
     lease: &Lease,
     command_created_at: UnixMillis,
@@ -428,7 +571,7 @@ impl AuthorizeRuntimeAuthorityDelivery {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeAuthorityDeliveryAdmission {
     request: AuthorizeRuntimeAuthorityDelivery,
-    offer: PublishedLeaseOffer,
+    offer: AcceptedRuntimeAuthorityOffer,
     committed_bundle_digest: Option<Sha256Digest>,
 }
 
@@ -441,16 +584,17 @@ impl RuntimeAuthorityDeliveryAdmission {
     /// `JobIR`, or generation mismatch.
     pub fn new(
         request: AuthorizeRuntimeAuthorityDelivery,
-        offer: PublishedLeaseOffer,
+        offer: impl Into<AcceptedRuntimeAuthorityOffer>,
         committed_bundle_digest: Option<Sha256Digest>,
     ) -> Result<Self, RunnerControlValueError> {
+        let offer = offer.into();
         let binding = request.binding();
         if request.request().session() != offer.request().session()
             || request.protocol_version() != offer.protocol_version()
             || binding.attempt_id() != offer.lease().attempt_id()
             || binding.slot().get() != offer.slot().ordinal()
             || binding.guard() != offer.lease().guard()
-            || binding.offer_operation_id() != offer.command().request().operation_id()
+            || binding.offer_operation_id() != offer.command().operation_id()
             || binding.offer_sequence().get() != offer.command().sequence().get()
             || binding.job_ir_digest() != offer.job_ir().digest()
             || binding.generation() != INITIAL_RUNTIME_AUTHORITY_GENERATION
@@ -472,7 +616,7 @@ impl RuntimeAuthorityDeliveryAdmission {
 
     /// Returns the accepted, value-free offer publication.
     #[must_use]
-    pub const fn offer(&self) -> &PublishedLeaseOffer {
+    pub const fn offer(&self) -> &AcceptedRuntimeAuthorityOffer {
         &self.offer
     }
 
@@ -502,7 +646,7 @@ impl CommitRuntimeAuthorityDelivery {
         bundle_digest: Sha256Digest,
         committed_at: UnixMillis,
     ) -> Result<Self, RunnerControlValueError> {
-        if committed_at < admission.offer().command().request().created_at()
+        if committed_at < admission.offer().command().created_at()
             || committed_at >= admission.offer().offer_valid_until()
         {
             return Err(RunnerControlValueError::RuntimeAuthorityCommitOutsideHorizon);

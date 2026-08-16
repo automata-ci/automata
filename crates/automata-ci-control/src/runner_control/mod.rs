@@ -29,9 +29,10 @@ pub use automata_ci_protocol::{
     INITIAL_RUNTIME_AUTHORITY_GENERATION, RuntimeAuthorityDeliveryBinding,
 };
 pub use durable::{
-    AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
-    CommitRuntimeAuthorityDelivery, RuntimeAuthorityDeliveryAdmission,
-    RuntimeAuthorityDeliveryDisposition, RuntimeAuthorityDeliveryRepository,
+    AcceptedRuntimeAuthorityOffer, AcknowledgeRuntimeAuthorityDelivery,
+    AuthorizeRuntimeAuthorityDelivery, CommitRuntimeAuthorityDelivery,
+    RuntimeAuthorityDeliveryAdmission, RuntimeAuthorityDeliveryDisposition,
+    RuntimeAuthorityDeliveryRepository, RuntimeAuthorityOfferCommand,
 };
 pub use handler::{
     DurableRunnerControlHandler, LOG_SEGMENT_MEDIA_TYPE, MAX_HEARTBEAT_INTERVAL_MILLIS,

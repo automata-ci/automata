@@ -46,10 +46,10 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use super::durable::{
-    AcknowledgeRuntimeAuthorityDelivery, AuthorizeRuntimeAuthorityDelivery,
-    CommitCommandAcknowledgement, CommitLeaseHeartbeat, CommitLeaseResponse,
-    CommitRunnerLogSegment, CommitRunnerTerminalResult, CommitRuntimeAuthorityDelivery,
-    LeaseResponseAction, PublishedLeaseOffer, RunnerControlTransactionRepository,
+    AcceptedRuntimeAuthorityOffer, AcknowledgeRuntimeAuthorityDelivery,
+    AuthorizeRuntimeAuthorityDelivery, CommitCommandAcknowledgement, CommitLeaseHeartbeat,
+    CommitLeaseResponse, CommitRunnerLogSegment, CommitRunnerTerminalResult,
+    CommitRuntimeAuthorityDelivery, LeaseResponseAction, RunnerControlTransactionRepository,
     RunnerLogAdmissionRequest, RuntimeAuthorityDeliveryRepository,
 };
 use super::observer::NoopRunnerControlObserver;
@@ -1523,7 +1523,7 @@ impl DurableRunnerControlHandler {
     async fn issue_runtime_authorities(
         &self,
         job: &JobIrEnvelope,
-        offer: &PublishedLeaseOffer,
+        offer: &AcceptedRuntimeAuthorityOffer,
     ) -> Result<JobRuntimeAuthorities, ApplicationError> {
         let issuance = RuntimeAuthorityIssueRequest::new(
             job,
