@@ -925,7 +925,7 @@ fn manifest(
         GithubServerServiceAppClientId::new("Iv1.8a61f9b3a7aba766")?,
         GithubServerServiceJwtIssuer::AppClientId,
         Sha256Digest::from_bytes([0x11; 32]),
-        GithubServerServiceRevision::new(revision)?,
+        GithubServerServiceRevision::new(1)?,
         GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes(
             [0x22; 32],
         ))?,
