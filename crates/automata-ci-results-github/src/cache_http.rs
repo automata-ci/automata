@@ -4,10 +4,10 @@ use automata_ci_core::Sha256Digest;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{DefaultBodyLimit, MatchedPath, Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, Request, StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::Response,
     routing::{get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -18,13 +18,14 @@ use uuid::Uuid;
 
 use crate::{
     CacheEntryId, CacheService, CacheServiceError, CacheServiceErrorKind, ResultsHttpRoute,
-    ResultsObserver, RuntimeTokenClaims, RuntimeTokenVerifier, SignedCacheCapability, TokenError,
+    ResultsObserver, RuntimeTokenVerifier, SignedCacheCapability,
     azure::{AzureProtocolError, parse_block_list, validate_block_id},
-    http::{
-        admit_results_upload, content_length_matches, harden_results_response, parse_canonical_u64,
-        results_upload_admission,
+    http_support::{
+        AzureErrorClass, SignedUrlQuery, TwirpErrorBody, TwirpErrorClass, admit_results_upload,
+        authenticate_runtime_token, content_length_matches, no_store, observe_results_http,
+        parse_canonical_u64, results_upload_admission, signature_has_valid_shape,
     },
-    observer::{NoopResultsObserver, ResultsHttpObservation},
+    observer::NoopResultsObserver,
 };
 
 const CREATE_CACHE_PATH: &str =
@@ -35,7 +36,6 @@ const GET_CACHE_PATH: &str =
     "/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL";
 const CACHE_UPLOAD_PATH: &str = "/_apis/results/caches/{entry_id}/blob";
 const CACHE_DOWNLOAD_PATH: &str = "/_apis/results/caches/{entry_id}/{digest}/download";
-const MAXIMUM_SIGNATURE_BYTES: usize = 256;
 const MAXIMUM_TWIRP_BODY_BYTES: usize = 64 * 1024;
 const MAXIMUM_AZURE_BODY_BYTES: usize = 128 * 1024 * 1024;
 
@@ -166,20 +166,7 @@ async fn observe_http(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let observation = ResultsHttpObservation::new(
-        observer,
-        request.method(),
-        cache_http_route(
-            request
-                .extensions()
-                .get::<MatchedPath>()
-                .map(MatchedPath::as_str),
-        ),
-    );
-    let mut response = next.run(request).await;
-    harden_results_response(&mut response);
-    observation.finish(response.status());
-    response
+    observe_results_http(observer, cache_http_route, request, next).await
 }
 
 fn cache_http_route(matched_path: Option<&str>) -> ResultsHttpRoute {
@@ -239,9 +226,8 @@ async fn create_cache(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let claims = match authenticate(&state, &headers) {
-        Ok(claims) => claims,
-        Err(error) => return twirp_token_error(error),
+    let Ok(claims) = authenticate_runtime_token(state.runtime_tokens.as_ref(), &headers) else {
+        return twirp_error(TwirpErrorClass::Unauthenticated);
     };
     let Ok((encoding, request)) = decode_create_request(&headers, &body) else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
@@ -344,9 +330,8 @@ async fn finalize_cache(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let claims = match authenticate(&state, &headers) {
-        Ok(claims) => claims,
-        Err(error) => return twirp_token_error(error),
+    let Ok(claims) = authenticate_runtime_token(state.runtime_tokens.as_ref(), &headers) else {
+        return twirp_error(TwirpErrorClass::Unauthenticated);
     };
     let Ok((encoding, request)) = decode_finalize_request(&headers, &body) else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
@@ -464,9 +449,8 @@ async fn get_cache(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let claims = match authenticate(&state, &headers) {
-        Ok(claims) => claims,
-        Err(error) => return twirp_token_error(error),
+    let Ok(claims) = authenticate_runtime_token(state.runtime_tokens.as_ref(), &headers) else {
+        return twirp_error(TwirpErrorClass::Unauthenticated);
     };
     let Ok((encoding, request)) = decode_get_request(&headers, &body) else {
         return twirp_error(TwirpErrorClass::InvalidArgument);
@@ -585,8 +569,7 @@ async fn cache_blob(
     let Ok(entry_id) = parse_entry_id(&entry_id) else {
         return azure_error(AzureErrorClass::InvalidRequest);
     };
-    if query.sig.is_empty()
-        || query.sig.len() > MAXIMUM_SIGNATURE_BYTES
+    if !signature_has_valid_shape(&query.sig)
         || state
             .capabilities
             .verify_cache_upload(entry_id, query.se, &query.sig)
@@ -641,21 +624,14 @@ async fn cache_blob(
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DownloadQuery {
-    se: u64,
-    sig: String,
-}
-
 async fn head_cache(
     State(state): State<CacheApiState>,
     Path((entry_id, digest)): Path<(String, String)>,
-    Query(query): Query<DownloadQuery>,
+    Query(query): Query<SignedUrlQuery>,
 ) -> Response {
     let (entry_id, digest) = match verify_download_path(&state, &entry_id, &digest, &query) {
         Ok(value) => value,
-        Err(status) => return download_error(status),
+        Err(status) => return no_store(status),
     };
     match state.service.prepare_download(entry_id, digest, None).await {
         Ok(prepared) => download_headers(StatusCode::OK, &prepared, Body::empty()),
@@ -666,12 +642,12 @@ async fn head_cache(
 async fn download_cache(
     State(state): State<CacheApiState>,
     Path((entry_id, digest)): Path<(String, String)>,
-    Query(query): Query<DownloadQuery>,
+    Query(query): Query<SignedUrlQuery>,
     headers: HeaderMap,
 ) -> Response {
     let (entry_id, digest) = match verify_download_path(&state, &entry_id, &digest, &query) {
         Ok(value) => value,
-        Err(status) => return download_error(status),
+        Err(status) => return no_store(status),
     };
     let metadata = match state.service.prepare_download(entry_id, digest, None).await {
         Ok(prepared) => prepared,
@@ -707,15 +683,14 @@ fn verify_download_path(
     state: &CacheApiState,
     entry_id: &str,
     digest: &str,
-    query: &DownloadQuery,
+    query: &SignedUrlQuery,
 ) -> Result<(CacheEntryId, Sha256Digest), StatusCode> {
     let entry_id = parse_entry_id(entry_id).map_err(|()| StatusCode::BAD_REQUEST)?;
     let parsed_digest = Sha256Digest::from_str(digest)
         .ok()
         .filter(|parsed| parsed.to_string() == digest)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    if query.sig.is_empty()
-        || query.sig.len() > MAXIMUM_SIGNATURE_BYTES
+    if !signature_has_valid_shape(&query.sig)
         || state
             .capabilities
             .verify_cache_download(entry_id, parsed_digest, query.se, &query.sig)
@@ -755,7 +730,7 @@ fn download_headers(
     no_store(
         builder
             .body(body)
-            .unwrap_or_else(|_| download_error(StatusCode::INTERNAL_SERVER_ERROR)),
+            .unwrap_or_else(|_| no_store(StatusCode::INTERNAL_SERVER_ERROR)),
     )
 }
 
@@ -796,51 +771,12 @@ fn parse_range(headers: &HeaderMap, size: u64) -> Result<Option<std::ops::Range<
     Ok(Some(start..end))
 }
 
-fn authenticate(
-    state: &CacheApiState,
-    headers: &HeaderMap,
-) -> Result<RuntimeTokenClaims, TokenError> {
-    let mut values = headers.get_all(header::AUTHORIZATION).iter();
-    let value = values.next().ok_or(TokenError::Malformed)?;
-    if values.next().is_some() {
-        return Err(TokenError::Malformed);
-    }
-    let value = value.to_str().map_err(|_| TokenError::Malformed)?;
-    let (scheme, credential) = value.split_once(' ').ok_or(TokenError::Malformed)?;
-    if !scheme.eq_ignore_ascii_case("Bearer")
-        || credential.is_empty()
-        || credential.bytes().any(|byte| byte.is_ascii_whitespace())
-    {
-        return Err(TokenError::Malformed);
-    }
-    state.runtime_tokens.verify(credential)
-}
-
 fn parse_entry_id(value: &str) -> Result<CacheEntryId, ()> {
     let uuid = Uuid::parse_str(value).map_err(|_| ())?;
     if uuid.to_string() != value {
         return Err(());
     }
     CacheEntryId::new(uuid).map_err(|_| ())
-}
-
-#[derive(Clone, Copy, Debug)]
-enum TwirpErrorClass {
-    InvalidArgument,
-    Unauthenticated,
-    PermissionDenied,
-    NotFound,
-    AlreadyExists,
-    FailedPrecondition,
-    ResourceExhausted,
-    Unavailable,
-    Internal,
-}
-
-#[derive(Debug, Serialize)]
-struct TwirpErrorBody {
-    code: &'static str,
-    msg: &'static str,
 }
 
 fn twirp_error(class: TwirpErrorClass) -> Response {
@@ -890,10 +826,6 @@ fn twirp_error(class: TwirpErrorClass) -> Response {
     no_store((status, Json(TwirpErrorBody { code, msg: message })))
 }
 
-fn twirp_token_error(_error: TokenError) -> Response {
-    twirp_error(TwirpErrorClass::Unauthenticated)
-}
-
 fn twirp_service_error(error: CacheServiceError) -> Response {
     twirp_error(match error.kind() {
         CacheServiceErrorKind::InvalidArgument => TwirpErrorClass::InvalidArgument,
@@ -905,18 +837,6 @@ fn twirp_service_error(error: CacheServiceError) -> Response {
         CacheServiceErrorKind::Unavailable => TwirpErrorClass::Unavailable,
         CacheServiceErrorKind::Internal => TwirpErrorClass::Internal,
     })
-}
-
-#[derive(Clone, Copy, Debug)]
-enum AzureErrorClass {
-    InvalidRequest,
-    AuthenticationFailed,
-    NotFound,
-    Conflict,
-    InvalidState,
-    TooLarge,
-    Unavailable,
-    Internal,
 }
 
 fn azure_success() -> Response {
@@ -1002,7 +922,7 @@ fn azure_service_error(error: CacheServiceError) -> Response {
 }
 
 fn download_service_error(error: CacheServiceError) -> Response {
-    download_error(match error.kind() {
+    no_store(match error.kind() {
         CacheServiceErrorKind::InvalidArgument => StatusCode::BAD_REQUEST,
         CacheServiceErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
         CacheServiceErrorKind::NotFound => StatusCode::NOT_FOUND,
@@ -1020,14 +940,4 @@ fn range_not_satisfiable(size: u64) -> Response {
         StatusCode::RANGE_NOT_SATISFIABLE,
         [(header::CONTENT_RANGE, format!("bytes */{size}"))],
     ))
-}
-
-fn download_error(status: StatusCode) -> Response {
-    no_store(status)
-}
-
-fn no_store(response: impl IntoResponse) -> Response {
-    let mut response = response.into_response();
-    harden_results_response(&mut response);
-    response
 }
