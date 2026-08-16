@@ -1743,6 +1743,13 @@ async fn require_workflow_enabled(
         WHERE workflow.repository_id = $2
           AND workflow.id = $3
           AND workflow.path = $4
+          AND NOT EXISTS (
+              SELECT 1
+              FROM workflow_enable_state_current AS current
+              WHERE current.tenant_id = $1
+                AND current.repository_id = $2
+                AND current.workflow_id = $3
+          )
         ON CONFLICT DO NOTHING
         ",
     )
@@ -1758,7 +1765,15 @@ async fn require_workflow_enabled(
         r"
         INSERT INTO workflow_enable_state_current (
             tenant_id, repository_id, workflow_id, state_revision
-        ) VALUES ($1,$2,$3,1)
+        )
+        SELECT $1,$2,$3,1
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM workflow_enable_state_current AS current
+            WHERE current.tenant_id = $1
+              AND current.repository_id = $2
+              AND current.workflow_id = $3
+        )
         ON CONFLICT DO NOTHING
         ",
     )
