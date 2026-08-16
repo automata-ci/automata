@@ -1,4 +1,4 @@
-use std::fmt::Write as _;
+use crate::support::webhook_signature;
 
 use automata_ci_github::{
     GITHUB_PUSH_EVENT_MEDIA_TYPE, GithubRepositoryVisibility, GithubStoredPushError,
@@ -8,7 +8,7 @@ use automata_ci_github::{
 };
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderValue};
-use ring::{digest, hmac};
+use ring::digest;
 use serde_json::{Value, json};
 
 const SECRET: &[u8] = b"stored-push-equivalence-secret";
@@ -594,7 +594,7 @@ fn signed_headers(secret: &[u8], body: &[u8], delivery: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         X_HUB_SIGNATURE_256,
-        HeaderValue::from_str(&signature(secret, body)).expect("signature header"),
+        HeaderValue::from_str(&webhook_signature(secret, body)).expect("signature header"),
     );
     headers.insert(X_GITHUB_EVENT, HeaderValue::from_static("push"));
     headers.insert(
@@ -602,14 +602,4 @@ fn signed_headers(secret: &[u8], body: &[u8], delivery: &str) -> HeaderMap {
         HeaderValue::from_str(delivery).expect("delivery header"),
     );
     headers
-}
-
-fn signature(secret: &[u8], body: &[u8]) -> String {
-    let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
-    let tag = hmac::sign(&key, body);
-    let mut encoded = String::from("sha256=");
-    for byte in tag.as_ref() {
-        write!(encoded, "{byte:02x}").expect("write signature");
-    }
-    encoded
 }
