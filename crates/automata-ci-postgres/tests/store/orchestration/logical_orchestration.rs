@@ -43,17 +43,7 @@ use automata_ci_store::{
 };
 use uuid::Uuid;
 
-use crate::support::{TestDatabase, TestResult, run_with_database};
-
-fn lower_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
-}
+use crate::support::{TestDatabase, TestResult, lower_hex, run_with_database};
 
 async fn seed_tenant(database: &TestDatabase, tenant: &str) -> TestResult {
     sqlx::query(

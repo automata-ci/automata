@@ -344,7 +344,7 @@ async fn ensure_workflow_permission_credential(
     }
 }
 
-fn lower_hex(bytes: &[u8]) -> String {
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
 
     let mut encoded = String::with_capacity(bytes.len() * 2);
