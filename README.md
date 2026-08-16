@@ -7,6 +7,9 @@ workflows. It accepts authenticated GitHub events, plans work from
 `.ci/workflows/`, schedules fenced job attempts, and executes them through an
 isolated runner provider on infrastructure you control.
 
+Public CI runs and runner-redacted logs for this repository are available on
+the [Automata CI dashboard](https://ci.automata-ci.com/automata-ci/automata/actions).
+
 > [!WARNING]
 > Automata is pre-1.0 software for development and evaluation. No public
 > release has been published, and the complete production composition has not
