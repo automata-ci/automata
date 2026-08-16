@@ -690,6 +690,18 @@ pub struct ServerArgs {
     )]
     pub github_oidc_config_source: Option<SecretSource>,
 
+    /// Optional strict trust registry for broker-signed Windows runner admission.
+    ///
+    /// Each issuer is independently pinned to one broker host, one exact
+    /// environment profile, and one image-promotion trust bundle. Omitting this
+    /// option keeps Windows runner enrollment fail-closed.
+    #[arg(
+        long,
+        env = "AUTOMATA_WINDOWS_RUNNER_ADMISSION_CONFIG_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub windows_runner_admission_config_source: Option<SecretSource>,
+
     /// `PostgreSQL` URL reference; secret values are never accepted in argv.
     #[arg(
         long,

@@ -8,11 +8,11 @@
 //! control-plane policy and are intentionally outside this pure verifier.
 
 use automata_ci_core::{
-    EnvironmentProfile, OperatingSystem, OperationId, RunnerCapabilities, RunnerFeature, RunnerId,
-    Sha256Digest,
+    EnvironmentProfile, IsolationLevel, OperatingSystem, OperationId, RunnerCapabilities,
+    RunnerFeature, RunnerId, SandboxFeature, Sha256Digest,
 };
 use ring::signature;
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -22,7 +22,11 @@ pub const WINDOWS_RUNNER_ADMISSION_SCHEMA_VERSION: u16 = 1;
 /// Fixed sandbox provider authorized by this receipt contract.
 pub const WINDOWS_RUNNER_ADMISSION_PROVIDER_ID: &str = "windows-hyperv";
 
-const MAX_CANONICAL_PAYLOAD_BYTES: usize = 512 * 1024;
+// The envelope is embedded in the bounded enrollment JSON document. `Vec<u8>`
+// uses JSON's integer-array representation, so this ceiling deliberately
+// leaves room for that expansion, the CSR, and the capability document under
+// the enrollment endpoint's absolute request limit.
+const MAX_CANONICAL_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_ID_BYTES: usize = 128;
 const MAX_ORIGIN_BYTES: usize = 2_048;
 const MAX_IMAGE_REFERENCE_BYTES: usize = 2_048;
@@ -599,6 +603,11 @@ impl WindowsRunnerAdmissionBinding {
             .map_err(|_| WindowsRunnerAdmissionError::InvalidCapabilities)?;
         if capabilities.runner_id() != transaction.runner_id
             || capabilities.platform().operating_system() != &OperatingSystem::Windows
+            || capabilities.sandbox().maximum_isolation() != IsolationLevel::VirtualMachine
+            || !capabilities
+                .sandbox()
+                .features()
+                .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
             || capabilities.environment_profiles().len() != 1
             || !capabilities
                 .environment_profiles()
@@ -1557,7 +1566,9 @@ fn envelope_digest(envelope: &WindowsRunnerAdmissionEnvelope) -> Sha256Digest {
 mod tests {
     use std::collections::BTreeMap;
 
-    use automata_ci_core::{Architecture, EnvironmentProfileId, OperationId, RunnerPlatform};
+    use automata_ci_core::{
+        Architecture, EnvironmentProfileId, OperationId, RunnerPlatform, SandboxCapabilities,
+    };
     use ring::{
         rand::SystemRandom,
         signature::{Ed25519KeyPair, KeyPair as _},
@@ -1625,6 +1636,10 @@ mod tests {
             runner_id,
             RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
         )
+        .with_sandbox(SandboxCapabilities::new(
+            IsolationLevel::VirtualMachine,
+            [SandboxFeature::WINDOWS_HYPERV_CONTAINER],
+        ))
         .with_features([
             RunnerFeature::SHELL_STEPS,
             RunnerFeature::REPOSITORY_ACTIONS,
@@ -1844,6 +1859,16 @@ mod tests {
         let mut value = serde_json::to_value(claims("broker-admission-v1", NOW + 60_000).binding)
             .expect("binding value");
         value["broker_profile"]["sealed_action_trees"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<WindowsRunnerAdmissionBinding>(value).is_err());
+
+        let mut value = serde_json::to_value(claims("broker-admission-v1", NOW + 60_000).binding)
+            .expect("binding value");
+        value["capabilities"]["sandbox"]["maximum_isolation"] = serde_json::json!("process");
+        assert!(serde_json::from_value::<WindowsRunnerAdmissionBinding>(value).is_err());
+
+        let mut value = serde_json::to_value(claims("broker-admission-v1", NOW + 60_000).binding)
+            .expect("binding value");
+        value["capabilities"]["sandbox"]["features"] = serde_json::json!([]);
         assert!(serde_json::from_value::<WindowsRunnerAdmissionBinding>(value).is_err());
     }
 }
