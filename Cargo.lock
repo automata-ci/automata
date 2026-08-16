@@ -476,6 +476,7 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-core",
  "serde",
+ "sha2 0.11.0",
  "static_assertions",
  "thiserror",
 ]
@@ -1233,6 +1234,7 @@ name = "automata-ci-workflow-service"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "automata-ci-action",
  "automata-ci-action-github",
  "automata-ci-auth",
  "automata-ci-blob",
@@ -1247,9 +1249,11 @@ dependencies = [
  "automata-ci-store",
  "automata-ci-workflow-github",
  "bytes",
+ "flate2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tar",
  "thiserror",
  "tokio",
  "tokio-util",

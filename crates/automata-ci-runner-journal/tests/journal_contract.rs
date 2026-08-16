@@ -5,15 +5,95 @@ use automata_ci_core::{
 };
 use automata_ci_protocol::{CommandSequence, LeaseRejectionReason, RunnerSlotOrdinal};
 use automata_ci_runner_journal::{
-    CancellationRecord, JournalError, JournalInvariantError, JournalSnapshot, LeaseOfferStatus,
-    LogSegment, LogSegmentAcknowledgement, LogSegmentPublication, OutboundOperationSequence,
-    ProviderName, ProviderOperation, ProviderOperationKind, ProviderOperationOutcome,
-    RunnerJournal, SandboxHandle, SandboxIdentity,
+    CancellationRecord, ContentKind, EndpointOperation, EndpointOperationKind,
+    EndpointRequestContentRef, JournalError, JournalInvariantError, JournalSnapshot,
+    LeaseOfferStatus, LogSegment, LogSegmentAcknowledgement, LogSegmentPublication,
+    OutboundOperationSequence, ProviderName, ProviderOperation, ProviderOperationKind,
+    ProviderOperationOutcome, RunnerJournal, SandboxHandle, SandboxIdentity,
 };
 use static_assertions::assert_obj_safe;
 use support::{Fixture, Scratch, record_and_ack_runtime_authority, record_and_ack_terminal};
 
 assert_obj_safe!(RunnerJournal);
+
+#[test]
+fn endpoint_operation_kinds_survive_durable_reopen_exactly() {
+    let scratch = Scratch::new("endpoint-operation-kinds");
+    let fixture = Fixture::new();
+    let kinds = [
+        EndpointOperationKind::Exec,
+        EndpointOperationKind::Signal,
+        EndpointOperationKind::Wait,
+        EndpointOperationKind::CopyTo,
+        EndpointOperationKind::CopyFrom,
+        EndpointOperationKind::MaterializeActionGraph,
+        EndpointOperationKind::ReadSealedAction,
+        EndpointOperationKind::ExecSealedAction,
+    ];
+    assert_eq!(
+        serde_json::to_value(kinds).expect("serialize operation kinds"),
+        serde_json::json!([
+            "exec",
+            "signal",
+            "wait",
+            "copy_to",
+            "copy_from",
+            "materialize_action_graph",
+            "read_sealed_action",
+            "exec_sealed_action"
+        ])
+    );
+    let journal = fixture.open(&scratch);
+    journal
+        .begin_session(fixture.binding())
+        .expect("begin session");
+    journal
+        .record_lease_offer(fixture.session_id, fixture.offer(1))
+        .expect("record offer");
+    journal
+        .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
+        .expect("accept lease");
+    for (index, kind) in kinds.iter().copied().enumerate() {
+        let marker = u8::try_from(index + 1).expect("bounded marker");
+        let request = EndpointRequestContentRef::new(Fixture::content(
+            ContentKind::EndpointRequest,
+            32,
+            marker,
+        ))
+        .expect("request commitment");
+        let operation = EndpointOperation::accepted(OperationId::new(), kind, request, 1)
+            .expect("accepted endpoint operation");
+        let operation_id = operation.operation_id();
+        journal
+            .accept_endpoint_operation(
+                fixture.session_id,
+                fixture.slot,
+                fixture.lease.guard(),
+                operation,
+            )
+            .expect("journal endpoint operation");
+        journal
+            .record_endpoint_cancellation(
+                fixture.session_id,
+                fixture.slot,
+                fixture.lease.guard(),
+                operation_id,
+            )
+            .expect("resolve endpoint operation");
+    }
+    drop(journal);
+
+    let reopened = fixture.open(&scratch);
+    let recovered = reopened.snapshot().expect("reopen journal");
+    let recovered_kinds: Vec<_> = recovered
+        .slot(fixture.slot)
+        .expect("slot")
+        .endpoint_operations()
+        .iter()
+        .map(EndpointOperation::kind)
+        .collect();
+    assert_eq!(recovered_kinds, kinds);
+}
 
 fn acknowledge_log_head(
     journal: &dyn RunnerJournal,

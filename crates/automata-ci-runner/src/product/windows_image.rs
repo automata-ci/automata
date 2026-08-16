@@ -2,12 +2,12 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     str::FromStr as _,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use automata_ci_core::{EnvironmentProfileId, Sha256Digest};
 use automata_ci_execution::{ImmutableImage, TargetPath};
 use base64::Engine as _;
-use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -24,6 +24,9 @@ const MAX_PROMOTION_BYTES: usize = 256 * 1024;
 const EVIDENCE_REFERENCE_MEDIA_TYPE: &str =
     "application/vnd.automata.windows-image-evidence-reference+json";
 const MAX_REVOKED_IMAGES: usize = 4_096;
+const PROMOTION_PAYLOAD_SCHEMA_VERSION: u16 = 2;
+const MAX_PROMOTION_LIFETIME_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const MAX_PROMOTION_FUTURE_SKEW_MILLIS: u64 = 5 * 60 * 1_000;
 
 /// Result of the Windows image-evidence gate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,15 +36,14 @@ pub enum WindowsImageAdmission {
     /// All candidate artifacts are internally consistent, but no external
     /// promotion authority has accepted them.
     Candidate,
-    /// Candidate artifacts and an external Ed25519 promotion envelope verify.
-    Promoted,
+    /// Candidate artifacts and a structurally valid external envelope are
+    /// ready for independent broker verification. This state is not authority.
+    PromotionPending,
 }
 
 impl WindowsImageAdmission {
-    /// Reports whether action runtimes may be composed and advertised.
-    #[must_use]
-    pub const fn permits_actions(self) -> bool {
-        matches!(self, Self::Promoted)
+    pub(super) const fn is_promotion_pending(self) -> bool {
+        matches!(self, Self::PromotionPending)
     }
 }
 
@@ -54,8 +56,11 @@ pub struct WindowsImageVerification {
     patch_report_sha256: Option<Sha256Digest>,
     revocations_sha256: Option<Sha256Digest>,
     promotion_payload_sha256: Option<Sha256Digest>,
-    promotion_public_key_sha256: Option<Sha256Digest>,
     promotion_envelope_sha256: Option<Sha256Digest>,
+    promotion_serial: Option<u64>,
+    revocation_generation: Option<u64>,
+    promotion_issued_at_unix_millis: Option<u64>,
+    promotion_expires_at_unix_millis: Option<u64>,
 }
 
 impl WindowsImageVerification {
@@ -69,8 +74,11 @@ impl WindowsImageVerification {
             patch_report_sha256: None,
             revocations_sha256: None,
             promotion_payload_sha256: None,
-            promotion_public_key_sha256: None,
             promotion_envelope_sha256: None,
+            promotion_serial: None,
+            revocation_generation: None,
+            promotion_issued_at_unix_millis: None,
+            promotion_expires_at_unix_millis: None,
         }
     }
 
@@ -84,28 +92,60 @@ impl WindowsImageVerification {
             patch_report_sha256: None,
             revocations_sha256: None,
             promotion_payload_sha256: None,
-            promotion_public_key_sha256: None,
             promotion_envelope_sha256: None,
+            promotion_serial: None,
+            revocation_generation: None,
+            promotion_issued_at_unix_millis: None,
+            promotion_expires_at_unix_millis: None,
         }
     }
 
-    /// Creates a promoted result bound to the canonical signed payload digest.
-    #[must_use]
-    pub const fn promoted(
+    const fn promotion_pending(
         promotion_payload_sha256: Sha256Digest,
-        promotion_public_key_sha256: Sha256Digest,
         promotion_envelope_sha256: Sha256Digest,
+        promotion_serial: u64,
+        revocation_generation: u64,
+        promotion_issued_at_unix_millis: u64,
+        promotion_expires_at_unix_millis: u64,
     ) -> Self {
         Self {
-            admission: WindowsImageAdmission::Promoted,
+            admission: WindowsImageAdmission::PromotionPending,
             provenance_sha256: None,
             sbom_sha256: None,
             patch_report_sha256: None,
             revocations_sha256: None,
             promotion_payload_sha256: Some(promotion_payload_sha256),
-            promotion_public_key_sha256: Some(promotion_public_key_sha256),
             promotion_envelope_sha256: Some(promotion_envelope_sha256),
+            promotion_serial: Some(promotion_serial),
+            revocation_generation: Some(revocation_generation),
+            promotion_issued_at_unix_millis: Some(promotion_issued_at_unix_millis),
+            promotion_expires_at_unix_millis: Some(promotion_expires_at_unix_millis),
         }
+    }
+
+    #[cfg(all(test, target_os = "windows"))]
+    pub(super) const fn promotion_pending_fixture(
+        promotion_payload_sha256: Sha256Digest,
+        promotion_envelope_sha256: Sha256Digest,
+        provenance_sha256: Sha256Digest,
+        sbom_sha256: Sha256Digest,
+        patch_report_sha256: Sha256Digest,
+        revocations_sha256: Sha256Digest,
+    ) -> Self {
+        Self::promotion_pending(
+            promotion_payload_sha256,
+            promotion_envelope_sha256,
+            1,
+            1,
+            1_800_000_000_000,
+            1_800_000_300_000,
+        )
+        .with_evidence_digests(
+            provenance_sha256,
+            sbom_sha256,
+            patch_report_sha256,
+            revocations_sha256,
+        )
     }
 
     /// Returns the coarse image admission state.
@@ -148,16 +188,26 @@ impl WindowsImageVerification {
         self.promotion_payload_sha256
     }
 
-    /// Returns the digest of the exact verified external promotion public key.
-    #[must_use]
-    pub const fn promotion_public_key_sha256(self) -> Option<Sha256Digest> {
-        self.promotion_public_key_sha256
-    }
-
     /// Returns the digest of the complete verified promotion envelope.
     #[must_use]
     pub const fn promotion_envelope_sha256(self) -> Option<Sha256Digest> {
         self.promotion_envelope_sha256
+    }
+
+    pub(super) const fn promotion_serial(self) -> Option<u64> {
+        self.promotion_serial
+    }
+
+    pub(super) const fn revocation_generation(self) -> Option<u64> {
+        self.revocation_generation
+    }
+
+    pub(super) const fn promotion_issued_at_unix_millis(self) -> Option<u64> {
+        self.promotion_issued_at_unix_millis
+    }
+
+    pub(super) const fn promotion_expires_at_unix_millis(self) -> Option<u64> {
+        self.promotion_expires_at_unix_millis
     }
 }
 
@@ -235,8 +285,8 @@ impl WindowsImageContractConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsImagePromotionConfig {
     envelope_path: PathBuf,
+    trust_bundle_id: WindowsPromotionTrustBundleId,
     key_id: String,
-    public_key_base64: String,
 }
 
 impl WindowsImagePromotionConfig {
@@ -250,6 +300,43 @@ impl WindowsImagePromotionConfig {
     #[must_use]
     pub fn key_id(&self) -> &str {
         &self.key_id
+    }
+
+    /// Returns the broker/control-owned versioned trust-policy bundle.
+    #[must_use]
+    pub const fn trust_bundle_id(&self) -> &WindowsPromotionTrustBundleId {
+        &self.trust_bundle_id
+    }
+}
+
+/// Versioned broker/control-owned promotion trust-policy identifier.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct WindowsPromotionTrustBundleId(String);
+
+impl WindowsPromotionTrustBundleId {
+    /// Validates a non-path, non-URL lowercase policy identifier.
+    ///
+    /// # Errors
+    ///
+    /// Rejects values outside 3..=128 bytes or outside
+    /// `[a-z0-9][a-z0-9._-]*`.
+    pub fn new(value: impl Into<String>) -> Result<Self, WindowsImageVerificationError> {
+        let value = value.into();
+        let valid = (3..=128).contains(&value.len())
+            && value.bytes().enumerate().all(|(index, byte)| match byte {
+                b'a'..=b'z' | b'0'..=b'9' => true,
+                b'.' | b'_' | b'-' => index > 0,
+                _ => false,
+            });
+        valid
+            .then_some(Self(value))
+            .ok_or(WindowsImageVerificationError::InvalidEvidence)
+    }
+
+    /// Returns the canonical identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -343,8 +430,8 @@ pub enum WindowsImageVerificationError {
     /// The image is present in the accepted revocation metadata.
     #[error("Windows image is revoked")]
     Revoked,
-    /// The configured external promotion signature is invalid.
-    #[error("Windows image promotion signature is invalid")]
+    /// The configured promotion envelope cannot be submitted to the broker.
+    #[error("Windows image promotion envelope is invalid")]
     InvalidPromotion,
 }
 
@@ -353,98 +440,131 @@ impl WindowsImageEvidenceVerifier for FilesystemWindowsImageEvidenceVerifier {
         &self,
         request: &WindowsImageVerificationRequest<'_>,
     ) -> Result<WindowsImageVerification, WindowsImageVerificationError> {
-        let manifest_bytes = read_evidence(request.contract.manifest_path(), MAX_MANIFEST_BYTES)?;
-        if digest(&manifest_bytes) != request.contract.manifest_sha256() {
-            return Err(WindowsImageVerificationError::Mismatch);
-        }
-        let manifest: ImageManifest = parse(&manifest_bytes)?;
-        validate_manifest(&manifest, request)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| WindowsImageVerificationError::InvalidPromotion)?;
+        let now = u64::try_from(now.as_millis())
+            .map_err(|_| WindowsImageVerificationError::InvalidPromotion)?;
+        verify_image_evidence(request, now)
+    }
+}
 
-        let lock_bytes = read_evidence(request.contract.lock_path(), MAX_LOCK_BYTES)?;
-        if digest(&lock_bytes) != request.contract.lock_sha256() {
-            return Err(WindowsImageVerificationError::Mismatch);
-        }
-        let lock: ImageLock = parse(&lock_bytes)?;
-        if lock.schema_version != 1
-            || lock.profile_id != request.profile_id.as_str()
-            || lock.image != request.image.reference()
-            || lock.base_image != manifest.base_image
-            || parse_digest(&lock.manifest_sha256)? != request.contract.manifest_sha256()
+fn verify_image_evidence(
+    request: &WindowsImageVerificationRequest<'_>,
+    now_unix_millis: u64,
+) -> Result<WindowsImageVerification, WindowsImageVerificationError> {
+    let manifest_bytes = read_evidence(request.contract.manifest_path(), MAX_MANIFEST_BYTES)?;
+    if digest(&manifest_bytes) != request.contract.manifest_sha256() {
+        return Err(WindowsImageVerificationError::Mismatch);
+    }
+    let manifest: ImageManifest = parse(&manifest_bytes)?;
+    validate_manifest(&manifest, request)?;
+
+    let lock_bytes = read_evidence(request.contract.lock_path(), MAX_LOCK_BYTES)?;
+    if digest(&lock_bytes) != request.contract.lock_sha256() {
+        return Err(WindowsImageVerificationError::Mismatch);
+    }
+    let lock: ImageLock = parse(&lock_bytes)?;
+    if lock.schema_version != 1
+        || lock.profile_id != request.profile_id.as_str()
+        || lock.image != request.image.reference()
+        || lock.base_image != manifest.base_image
+        || parse_digest(&lock.manifest_sha256)? != request.contract.manifest_sha256()
+    {
+        return Err(WindowsImageVerificationError::Mismatch);
+    }
+
+    let evidence = [
+        (
+            EvidenceKind::Provenance,
+            request.contract.provenance_path(),
+            &manifest.evidence.provenance,
+        ),
+        (
+            EvidenceKind::Sbom,
+            request.contract.sbom_path(),
+            &manifest.evidence.sbom,
+        ),
+        (
+            EvidenceKind::PatchReport,
+            request.contract.patch_report_path(),
+            &manifest.evidence.patch_report,
+        ),
+        (
+            EvidenceKind::Revocations,
+            request.contract.revocations_path(),
+            &manifest.evidence.revocations,
+        ),
+    ];
+    let mut evidence_digests = BTreeMap::new();
+    let mut evidence_dispositions = BTreeMap::new();
+    let mut revocation = None;
+    for (expected_kind, path, reference) in evidence {
+        let bytes = read_evidence(path, MAX_EVIDENCE_BYTES)?;
+        let actual_digest = digest(&bytes);
+        if parse_digest(&reference.sha256)? != actual_digest
+            || reference.media_type != EVIDENCE_REFERENCE_MEDIA_TYPE
         {
             return Err(WindowsImageVerificationError::Mismatch);
         }
-
-        let evidence = [
-            (
-                EvidenceKind::Provenance,
-                request.contract.provenance_path(),
-                &manifest.evidence.provenance,
-            ),
-            (
-                EvidenceKind::Sbom,
-                request.contract.sbom_path(),
-                &manifest.evidence.sbom,
-            ),
-            (
-                EvidenceKind::PatchReport,
-                request.contract.patch_report_path(),
-                &manifest.evidence.patch_report,
-            ),
-            (
-                EvidenceKind::Revocations,
-                request.contract.revocations_path(),
-                &manifest.evidence.revocations,
-            ),
-        ];
-        let mut evidence_digests = BTreeMap::new();
-        let mut revocation_generation = None;
-        for (expected_kind, path, reference) in evidence {
-            let bytes = read_evidence(path, MAX_EVIDENCE_BYTES)?;
-            let actual_digest = digest(&bytes);
-            if parse_digest(&reference.sha256)? != actual_digest
-                || reference.media_type != EVIDENCE_REFERENCE_MEDIA_TYPE
-            {
-                return Err(WindowsImageVerificationError::Mismatch);
-            }
-            let document: EvidenceReferenceDocument = parse(&bytes)?;
-            if let Some(generation) = validate_evidence_reference_document(
-                &document,
-                expected_kind,
-                request.profile_id.as_str(),
-                request.image.reference(),
-            )? {
-                revocation_generation = Some(generation);
-            }
-            evidence_digests.insert(expected_kind, actual_digest);
-        }
-
-        let Some(promotion) = request.contract.promotion() else {
-            return Ok(WindowsImageVerification::candidate().with_evidence_digests(
-                evidence_digests[&EvidenceKind::Provenance],
-                evidence_digests[&EvidenceKind::Sbom],
-                evidence_digests[&EvidenceKind::PatchReport],
-                evidence_digests[&EvidenceKind::Revocations],
-            ));
-        };
-        let promotion_verification = verify_promotion(
-            promotion,
-            request,
-            &manifest,
-            &evidence_digests,
-            revocation_generation.ok_or(WindowsImageVerificationError::InvalidEvidence)?,
+        let document: EvidenceReferenceDocument = parse(&bytes)?;
+        let disposition = validate_evidence_reference_document(
+            &document,
+            expected_kind,
+            request.profile_id.as_str(),
+            request.image.reference(),
         )?;
-        Ok(WindowsImageVerification::promoted(
-            promotion_verification.payload,
-            promotion_verification.public_key,
-            promotion_verification.envelope,
-        )
-        .with_evidence_digests(
+        if let Some(metadata) = disposition.revocation {
+            revocation = Some(metadata);
+        }
+        evidence_dispositions.insert(expected_kind, disposition);
+        evidence_digests.insert(expected_kind, actual_digest);
+    }
+
+    let Some(promotion) = request.contract.promotion() else {
+        return Ok(WindowsImageVerification::candidate().with_evidence_digests(
             evidence_digests[&EvidenceKind::Provenance],
             evidence_digests[&EvidenceKind::Sbom],
             evidence_digests[&EvidenceKind::PatchReport],
             evidence_digests[&EvidenceKind::Revocations],
-        ))
-    }
+        ));
+    };
+    let promotion_verification = verify_promotion(
+        promotion,
+        request,
+        &manifest,
+        &evidence_digests,
+        &evidence_dispositions,
+        revocation.ok_or(WindowsImageVerificationError::InvalidEvidence)?,
+        now_unix_millis,
+    )?;
+    Ok(WindowsImageVerification::promotion_pending(
+        promotion_verification.payload,
+        promotion_verification.envelope,
+        promotion_verification.promotion_serial,
+        promotion_verification.revocation_generation,
+        promotion_verification.issued_at_unix_millis,
+        promotion_verification.expires_at_unix_millis,
+    )
+    .with_evidence_digests(
+        evidence_digests[&EvidenceKind::Provenance],
+        evidence_digests[&EvidenceKind::Sbom],
+        evidence_digests[&EvidenceKind::PatchReport],
+        evidence_digests[&EvidenceKind::Revocations],
+    ))
+}
+
+#[derive(Clone, Copy)]
+struct EvidenceDisposition {
+    candidate_fixture: bool,
+    revocation: Option<RevocationMetadata>,
+}
+
+#[derive(Clone, Copy)]
+struct RevocationMetadata {
+    generation: u64,
+    issued_at_unix_millis: Option<u64>,
+    expires_at_unix_millis: Option<u64>,
 }
 
 fn validate_evidence_reference_document(
@@ -452,10 +572,9 @@ fn validate_evidence_reference_document(
     expected_kind: EvidenceKind,
     profile_id: &str,
     image: &str,
-) -> Result<Option<u64>, WindowsImageVerificationError> {
+) -> Result<EvidenceDisposition, WindowsImageVerificationError> {
     if document.schema_version != 1
         || document.kind != expected_kind
-        || document.candidate_fixture == Some(false)
         || document.profile_id != profile_id
         || document.image != image
         || parse_digest(&document.subject.sha256).is_err()
@@ -467,10 +586,17 @@ fn validate_evidence_reference_document(
         return Err(WindowsImageVerificationError::Mismatch);
     }
     if expected_kind != EvidenceKind::Revocations {
-        if document.generation.is_some() || !document.revoked_images.is_empty() {
+        if document.generation.is_some()
+            || document.issued_at_unix_millis.is_some()
+            || document.expires_at_unix_millis.is_some()
+            || !document.revoked_images.is_empty()
+        {
             return Err(WindowsImageVerificationError::InvalidEvidence);
         }
-        return Ok(None);
+        return Ok(EvidenceDisposition {
+            candidate_fixture: document.candidate_fixture == Some(true),
+            revocation: None,
+        });
     }
     let generation = document
         .generation
@@ -491,7 +617,14 @@ fn validate_evidence_reference_document(
     {
         return Err(WindowsImageVerificationError::Revoked);
     }
-    Ok(Some(generation))
+    Ok(EvidenceDisposition {
+        candidate_fixture: document.candidate_fixture == Some(true),
+        revocation: Some(RevocationMetadata {
+            generation,
+            issued_at_unix_millis: document.issued_at_unix_millis,
+            expires_at_unix_millis: document.expires_at_unix_millis,
+        }),
+    })
 }
 
 const fn expected_subject_media_type(kind: EvidenceKind) -> &'static str {
@@ -585,8 +718,13 @@ fn verify_promotion(
     request: &WindowsImageVerificationRequest<'_>,
     manifest: &ImageManifest,
     evidence: &BTreeMap<EvidenceKind, Sha256Digest>,
-    revocation_generation: u64,
+    dispositions: &BTreeMap<EvidenceKind, EvidenceDisposition>,
+    revocation: RevocationMetadata,
+    now_unix_millis: u64,
 ) -> Result<PromotionVerification, WindowsImageVerificationError> {
+    // Fixture disposition is examined before the envelope is even loaded, so
+    // a valid signature can never erase or override it.
+    require_production_evidence(dispositions)?;
     let bytes = read_evidence(promotion.envelope_path(), MAX_PROMOTION_BYTES)?;
     let envelope: PromotionEnvelope = parse(&bytes)?;
     if envelope.schema_version != 1 || envelope.key_id != promotion.key_id() {
@@ -599,16 +737,29 @@ fn verify_promotion(
     let signature = decoder
         .decode(envelope.signature_base64)
         .map_err(|_| WindowsImageVerificationError::InvalidPromotion)?;
-    let public_key = decoder
-        .decode(&promotion.public_key_base64)
-        .map_err(|_| WindowsImageVerificationError::InvalidPromotion)?;
-    UnparsedPublicKey::new(&ED25519, &public_key)
-        .verify(&payload_bytes, &signature)
-        .map_err(|_| WindowsImageVerificationError::InvalidPromotion)?;
+    if signature.len() != 64 {
+        return Err(WindowsImageVerificationError::InvalidPromotion);
+    }
     let payload: PromotionPayload = parse(&payload_bytes)?;
+    let valid_window = valid_signed_window(
+        payload.issued_at_unix_millis,
+        payload.expires_at_unix_millis,
+        now_unix_millis,
+    );
+    let valid_revocations = match (
+        revocation.issued_at_unix_millis,
+        revocation.expires_at_unix_millis,
+    ) {
+        (Some(issued), Some(expires)) => {
+            valid_signed_window(issued, expires, now_unix_millis)
+                && issued <= payload.issued_at_unix_millis
+                && expires >= payload.expires_at_unix_millis
+        }
+        _ => false,
+    };
     if serde_json::to_vec(&payload).map_err(|_| WindowsImageVerificationError::InvalidPromotion)?
         != payload_bytes
-        || payload.schema_version != 1
+        || payload.schema_version != PROMOTION_PAYLOAD_SCHEMA_VERSION
         || payload.decision != "promote"
         || !payload.provenance_accepted
         || !payload.sbom_accepted
@@ -623,21 +774,48 @@ fn verify_promotion(
         || parse_digest(&payload.sbom_sha256)? != evidence[&EvidenceKind::Sbom]
         || parse_digest(&payload.patch_report_sha256)? != evidence[&EvidenceKind::PatchReport]
         || parse_digest(&payload.revocations_sha256)? != evidence[&EvidenceKind::Revocations]
-        || payload.revocation_generation != revocation_generation
+        || payload.promotion_serial == 0
+        || payload.revocation_generation == 0
+        || payload.revocation_generation != revocation.generation
+        || !valid_window
+        || !valid_revocations
     {
         return Err(WindowsImageVerificationError::InvalidPromotion);
     }
     Ok(PromotionVerification {
         payload: digest(&payload_bytes),
-        public_key: digest(&public_key),
         envelope: digest(&bytes),
+        promotion_serial: payload.promotion_serial,
+        revocation_generation: payload.revocation_generation,
+        issued_at_unix_millis: payload.issued_at_unix_millis,
+        expires_at_unix_millis: payload.expires_at_unix_millis,
     })
+}
+
+fn require_production_evidence(
+    dispositions: &BTreeMap<EvidenceKind, EvidenceDisposition>,
+) -> Result<(), WindowsImageVerificationError> {
+    if dispositions.len() != 4 || dispositions.values().any(|value| value.candidate_fixture) {
+        return Err(WindowsImageVerificationError::InvalidPromotion);
+    }
+    Ok(())
+}
+
+fn valid_signed_window(issued: u64, expires: u64, now: u64) -> bool {
+    issued > 0
+        && expires > issued
+        && expires.saturating_sub(issued) <= MAX_PROMOTION_LIFETIME_MILLIS
+        && issued <= now.saturating_add(MAX_PROMOTION_FUTURE_SKEW_MILLIS)
+        && now < expires
 }
 
 struct PromotionVerification {
     payload: Sha256Digest,
-    public_key: Sha256Digest,
     envelope: Sha256Digest,
+    promotion_serial: u64,
+    revocation_generation: u64,
+    issued_at_unix_millis: u64,
+    expires_at_unix_millis: u64,
 }
 
 fn read_evidence(path: &Path, maximum: usize) -> Result<Vec<u8>, WindowsImageVerificationError> {
@@ -749,6 +927,10 @@ struct EvidenceReferenceDocument {
     #[serde(default)]
     generation: Option<u64>,
     #[serde(default)]
+    issued_at_unix_millis: Option<u64>,
+    #[serde(default)]
+    expires_at_unix_millis: Option<u64>,
+    #[serde(default)]
     revoked_images: Vec<String>,
 }
 
@@ -774,6 +956,9 @@ struct PromotionEnvelope {
 struct PromotionPayload {
     schema_version: u16,
     decision: String,
+    promotion_serial: u64,
+    issued_at_unix_millis: u64,
+    expires_at_unix_millis: u64,
     profile_id: String,
     base_image: String,
     image: String,
@@ -809,8 +994,8 @@ pub(super) struct RawWindowsImageContractConfig {
 #[serde(deny_unknown_fields)]
 struct RawWindowsImagePromotionConfig {
     envelope_path: PathBuf,
+    trust_bundle_id: String,
     key_id: String,
-    public_key_base64: String,
 }
 
 impl RawWindowsImageContractConfig {
@@ -839,15 +1024,13 @@ impl RawWindowsImageContractConfig {
                     || promotion.key_id.len() > 128
                     || !promotion.key_id.is_ascii()
                     || promotion.key_id.bytes().any(|byte| byte.is_ascii_control())
-                    || promotion.public_key_base64.is_empty()
-                    || promotion.public_key_base64.len() > 256
                 {
                     return Err(WindowsImageVerificationError::InvalidEvidence);
                 }
                 Ok(WindowsImagePromotionConfig {
                     envelope_path: promotion.envelope_path,
+                    trust_bundle_id: WindowsPromotionTrustBundleId::new(promotion.trust_bundle_id)?,
                     key_id: promotion.key_id,
-                    public_key_base64: promotion.public_key_base64,
                 })
             })
             .transpose()?;
@@ -870,17 +1053,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admission_only_permits_actions_after_external_promotion() {
-        assert!(!WindowsImageAdmission::Unverified.permits_actions());
-        assert!(!WindowsImageAdmission::Candidate.permits_actions());
-        assert!(WindowsImageAdmission::Promoted.permits_actions());
+    fn local_image_state_never_represents_capability_authority() {
+        assert!(!WindowsImageAdmission::Unverified.is_promotion_pending());
+        assert!(!WindowsImageAdmission::Candidate.is_promotion_pending());
+        assert!(WindowsImageAdmission::PromotionPending.is_promotion_pending());
     }
 
     #[test]
     fn promotion_payload_serialization_is_canonical_and_field_ordered() {
         let payload = PromotionPayload {
-            schema_version: 1,
+            schema_version: PROMOTION_PAYLOAD_SCHEMA_VERSION,
             decision: "promote".to_owned(),
+            promotion_serial: 8,
+            issued_at_unix_millis: 1_800_000_000_000,
+            expires_at_unix_millis: 1_800_000_300_000,
             profile_id: "automata.dev/windows-2025-x64-hyperv-v1".to_owned(),
             base_image: format!("base@example@sha256:{}", "a".repeat(64)),
             image: format!("image@example@sha256:{}", "b".repeat(64)),
@@ -919,14 +1105,79 @@ mod tests {
         let reference: EvidenceReferenceDocument = parse(&bytes).expect("parse reference");
 
         assert_eq!(reference.candidate_fixture, None);
-        assert_eq!(
-            validate_evidence_reference_document(
-                &reference,
+        let disposition = validate_evidence_reference_document(
+            &reference,
+            EvidenceKind::Provenance,
+            "automata.dev/windows-2025-x64-hyperv-v1",
+            &image,
+        )
+        .expect("production reference");
+        assert!(!disposition.candidate_fixture);
+        assert!(disposition.revocation.is_none());
+    }
+
+    #[test]
+    fn signed_candidate_disposition_is_permanently_promotion_ineligible() {
+        let dispositions = BTreeMap::from([
+            (
                 EvidenceKind::Provenance,
-                "automata.dev/windows-2025-x64-hyperv-v1",
-                &image,
+                EvidenceDisposition {
+                    candidate_fixture: true,
+                    revocation: None,
+                },
             ),
-            Ok(None)
+            (
+                EvidenceKind::Sbom,
+                EvidenceDisposition {
+                    candidate_fixture: false,
+                    revocation: None,
+                },
+            ),
+            (
+                EvidenceKind::PatchReport,
+                EvidenceDisposition {
+                    candidate_fixture: false,
+                    revocation: None,
+                },
+            ),
+            (
+                EvidenceKind::Revocations,
+                EvidenceDisposition {
+                    candidate_fixture: false,
+                    revocation: Some(RevocationMetadata {
+                        generation: 1,
+                        issued_at_unix_millis: Some(1),
+                        expires_at_unix_millis: Some(2),
+                    }),
+                },
+            ),
+        ]);
+        assert_eq!(
+            require_production_evidence(&dispositions),
+            Err(WindowsImageVerificationError::InvalidPromotion)
         );
+    }
+
+    #[test]
+    fn stale_and_overlong_promotion_or_revocation_windows_fail_closed() {
+        let now = 1_800_000_000_000;
+        assert!(!valid_signed_window(now - 10_000, now, now));
+        assert!(!valid_signed_window(
+            now,
+            now + MAX_PROMOTION_LIFETIME_MILLIS + 1,
+            now
+        ));
+        assert!(valid_signed_window(now - 1, now + 1, now));
+    }
+
+    #[test]
+    fn promotion_trust_bundle_id_is_closed_and_non_path_like() {
+        assert!(WindowsPromotionTrustBundleId::new("windows-prod.v1").is_ok());
+        for invalid in ["ab", "Windows.v1", "../keys", "https://keys", "-keys"] {
+            assert!(
+                WindowsPromotionTrustBundleId::new(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 }

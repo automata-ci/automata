@@ -1,4 +1,3 @@
-use std::time::Duration;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -6,6 +5,7 @@ use std::{
         atomic::{AtomicBool, AtomicI64, Ordering},
     },
 };
+use std::{io::Cursor, time::Duration};
 
 use async_trait::async_trait;
 use automata_ci_action_github::JavascriptRuntime;
@@ -76,7 +76,9 @@ use automata_ci_workflow_service::{
     WORKFLOW_EVENT_MEDIA_TYPE, WORKFLOW_PLAN_MEDIA_TYPE,
 };
 use bytes::Bytes;
+use flate2::{Compression, write::GzEncoder};
 use sha2::{Digest as _, Sha256};
+use tar::{Builder, EntryType, Header};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -3356,7 +3358,7 @@ impl ActionPreparationPort for NestedNode20ActionPreparer {
             ),
         )
         .expect("action definition");
-        let archive = Bytes::from_static(b"root-composite-action-archive");
+        let archive = prepared_action_archive("root-composite");
         let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
         PreparedAction::with_definition(digest, archive, "", definition)
             .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Internal))
@@ -3377,9 +3379,27 @@ fn prepared_javascript_action(runtime: JavascriptRuntime, label: &str) -> Prepar
         PreparedActionExecution::Javascript(Box::new(javascript)),
     )
     .expect("action definition");
-    let archive = Bytes::from(format!("{label}-action-archive"));
+    let archive = prepared_action_archive(label);
     let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
     PreparedAction::with_definition(digest, archive, "", definition).expect("prepared action")
+}
+
+fn prepared_action_archive(label: &str) -> Bytes {
+    let contents = format!("// {label}\n").into_bytes();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    {
+        let mut archive = Builder::new(&mut encoder);
+        let mut header = Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(u64::try_from(contents.len()).expect("action fixture size"));
+        header.set_entry_type(EntryType::Regular);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, "dist/index.js", Cursor::new(contents))
+            .expect("append action fixture");
+        archive.finish().expect("finish action fixture");
+    }
+    Bytes::from(encoder.finish().expect("encode action fixture"))
 }
 
 #[async_trait]
@@ -3408,7 +3428,7 @@ impl ActionPreparationPort for Node20ActionPreparer {
             PreparedActionExecution::Javascript(Box::new(javascript)),
         )
         .expect("action definition");
-        let archive = Bytes::from_static(b"node20-action-archive");
+        let archive = prepared_action_archive("node20");
         let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
         Ok(
             PreparedAction::with_definition(digest, archive, "", definition)

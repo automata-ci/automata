@@ -17,7 +17,10 @@ mod cache;
 mod model;
 mod resolver;
 
-pub use archive::{inspect_archive, validate_windows_materialization_archive};
+pub use archive::{
+    WindowsActionArchiveReport, inspect_archive, inspect_archive_bytes,
+    validate_windows_materialization_archive,
+};
 pub use cache::{
     ActionReferenceIndex, ActionReferenceIndexError, ActionReferenceIndexErrorKind,
     ImmutableActionReference, ImmutableActionReferenceError, IndexedActionBundle,

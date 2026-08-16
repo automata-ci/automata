@@ -549,7 +549,44 @@ pub struct JobContentReference {
     #[prost(string, tag = "4")]
     pub media_type: ::prost::alloc::string::String,
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WindowsActionArchiveFacts {
+    #[prost(uint32, tag = "1")]
+    pub entry_count: u32,
+    #[prost(uint32, tag = "2")]
+    pub regular_file_count: u32,
+    #[prost(uint64, tag = "3")]
+    pub expanded_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    pub maximum_regular_file_bytes: u64,
+    #[prost(uint32, tag = "5")]
+    pub maximum_depth: u32,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WindowsRepositoryActionArchive {
+    #[prost(uint32, tag = "1")]
+    pub ordinal: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub action_key_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub subpath: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub archive: ::core::option::Option<JobContentReference>,
+    #[prost(message, optional, tag = "5")]
+    pub facts: ::core::option::Option<WindowsActionArchiveFacts>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct WindowsRepositoryActionGraph {
+    #[prost(uint32, tag = "1")]
+    pub schema_version: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub policy_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub graph_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, repeated, tag = "4")]
+    pub archives: ::prost::alloc::vec::Vec<WindowsRepositoryActionArchive>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JobExecutionContext {
     #[prost(string, tag = "1")]
     pub workflow_name: ::prost::alloc::string::String,
@@ -574,6 +611,9 @@ pub struct JobExecutionContext {
     /// Current attempt initiator; actor remains the original run actor on reruns.
     #[prost(string, optional, tag = "10")]
     pub triggering_actor: ::core::option::Option<::prost::alloc::string::String>,
+    /// Complete immutable repository-action graph resolved before scheduling.
+    #[prost(message, optional, tag = "11")]
+    pub windows_action_graph: ::core::option::Option<WindowsRepositoryActionGraph>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExpressionDialect {

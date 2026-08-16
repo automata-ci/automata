@@ -20,15 +20,18 @@ use automata_ci_core::{
     MAX_STEP_ANNOTATION_PROPERTIES, MAX_STEP_ATTACHMENT_TEXT_BYTES, OperationId, OutputSensitivity,
     RuntimeBoolean, RuntimePositiveInteger, RuntimeTimeoutTemplate, SecretBinding, SemanticStep,
     StepAnnotation, StepAnnotationLevel, StepAnnotationProperty, StepResult, TrustOutputAuthority,
-    UnixMillis, ValueSource, ValueTemplate, WORKFLOW_EVENT_MEDIA_TYPE,
+    UnixMillis, ValueSource, ValueTemplate, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+    WORKFLOW_EVENT_MEDIA_TYPE, WindowsRepositoryActionArchive, WindowsRepositoryActionGraph,
+    windows_repository_action_key_sha256,
 };
 use automata_ci_execution::{
-    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, DestroySandbox,
-    ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionError, ExecutionErrorKind,
-    ExecutionOutput, ExecutionTermination, NetworkPolicy, ProviderCapabilities, ProviderError,
-    ProviderErrorKind, RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle,
-    SandboxLaunch, SandboxProvider, SandboxState, ServiceContainerBindings, ServiceContainerSpecs,
-    TargetPath, TargetPlatform,
+    ActionArchiveMaterialization, ActionGraphMaterializationRequest, Cancellation,
+    CancellationDisposition, CopyFromRequest, CopyToRequest, DestroySandbox, ExecutionArgv,
+    ExecutionCommand, ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput,
+    ExecutionTermination, NetworkPolicy, ProviderCapabilities, ProviderError, ProviderErrorKind,
+    RootFilesystemPolicy, SandboxCapability, SandboxGeneration, SandboxHandle, SandboxLaunch,
+    SandboxProvider, SandboxState, SealedActionTree, ServiceContainerBindings,
+    ServiceContainerSpecs, TargetPath, TargetPlatform,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -61,10 +64,10 @@ use crate::{
     CheckedOutLocalActionPreparer, ExecutionClock, ExecutionOperationIds, GithubContextPort,
     GithubContextRequest, GithubExecutionIdentity, GithubExecutionPhase, GithubJobExecutorConfig,
     GithubStepSnapshot, GithubToolchain, JobContentPort, LocalActionPreparationRequest,
-    OperationPurpose, PreparedAction, PreparedActionDefinition, PreparedActionExecution,
-    PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep, PreparedKeyValue,
-    PreparedLocalAction, PreparedValue, SandboxEnvironmentCatalog, SecretCustodyAcknowledger,
-    SecretPort, action_content, container_runtime,
+    OperationPurpose, PlannedActionPreparationRequest, PreparedAction, PreparedActionDefinition,
+    PreparedActionExecution, PreparedBoolean, PreparedCompositeAction, PreparedCompositeStep,
+    PreparedKeyValue, PreparedLocalAction, PreparedValue, SandboxEnvironmentCatalog,
+    SecretCustodyAcknowledger, SecretPort, action_content, container_runtime,
     environment::{
         EnvironmentBuilder, ResolvedActionInputs, ResolvedEnvironmentValue,
         validate_environment_overlay_names,
@@ -687,6 +690,29 @@ impl GithubJobExecutor {
         if workspace.platform() == TargetPlatform::Windows && !job.job().services().is_empty() {
             return Err(AdmissionRejection::InvalidJob);
         }
+        if workspace.platform() == TargetPlatform::Windows {
+            let mut has_repository_action = false;
+            for step in job.job().steps() {
+                let SemanticStep::Action { reference, .. } = step.kind() else {
+                    continue;
+                };
+                match reference {
+                    ActionReference::Repository { .. } => has_repository_action = true,
+                    // Checkout-created action content is mutable after the
+                    // lease and cannot enter the pre-execution sealed graph.
+                    ActionReference::Local { .. } | ActionReference::Container { .. } => {
+                        return Err(AdmissionRejection::InvalidJob);
+                    }
+                }
+            }
+            if has_repository_action && !capabilities.supports(SandboxCapability::SealedActionTrees)
+            {
+                return Err(AdmissionRejection::CapabilityChanged);
+            }
+            if has_repository_action != job.execution().windows_action_graph().is_some() {
+                return Err(AdmissionRejection::InvalidJob);
+            }
+        }
         container_runtime::validate_service_admission(job, capabilities)?;
         Ok(())
     }
@@ -737,7 +763,7 @@ impl GithubJobExecutor {
         if cancellation.is_cancelled() {
             return self.cancelled_job_result(attempt_id, &masker);
         }
-        let prepared_repository_actions = match self
+        let mut prepared_repository_actions = match self
             .preflight_repository_actions(request.job(), &cancellation)
             .await
         {
@@ -867,6 +893,7 @@ impl GithubJobExecutor {
         let Some(sandbox) = reconcile_cancelled_operation(sandbox, &cancellation)? else {
             return self.cancelled_job_result(attempt_id, &masker);
         };
+        let generation = sandbox.generation;
         let endpoint: Arc<dyn ExecutionEndpoint> = Arc::from(sandbox.endpoint);
         let services = sandbox.services;
         let execution_functions = self
@@ -897,6 +924,17 @@ impl GithubJobExecutor {
             &cancellation,
         );
         if reconcile_cancelled_operation(prepared, &cancellation)?.is_none() {
+            return self.cancelled_job_result(attempt_id, &masker);
+        }
+        let materialized = self.materialize_repository_action_graph(
+            endpoint.as_ref(),
+            &paths,
+            attempt_id,
+            generation,
+            &mut prepared_repository_actions,
+            &cancellation,
+        );
+        if reconcile_cancelled_operation(materialized, &cancellation)?.is_none() {
             return self.cancelled_job_result(attempt_id, &masker);
         }
         let copied = self.copy_bytes(
@@ -1134,6 +1172,8 @@ impl GithubJobExecutor {
                             working_directory,
                             environment,
                             timeout,
+                            sealed_action: None,
+                            action_phase: false,
                         };
                         cancellation_dominant(
                             self.run_phase(
@@ -1560,7 +1600,7 @@ impl GithubJobExecutor {
                 .prepare(ActionPreparationRequest::new(reference))
                 .await
                 .map_err(|error| ActionLoadError::Preparation(error.kind()))?;
-            planner.materials.insert(key, action.clone());
+            planner.materials.insert(key.clone(), action.clone());
             action
         };
         self.validate_action_materialization(&action)?;
@@ -1568,8 +1608,16 @@ impl GithubJobExecutor {
         let slot = preferred_action_slot
             .map_or_else(|| budget.action_slot(), Ok)
             .map_err(ActionLoadError::Executor)?;
-        let action_paths = self
-            .prepare_action_content(
+        let action_paths = if paths.workspace.platform() == TargetPlatform::Windows {
+            planner
+                .sealed_paths
+                .get(&key)
+                .cloned()
+                .ok_or(ActionLoadError::Preparation(
+                    ActionPreparationErrorKind::Content,
+                ))?
+        } else {
+            self.prepare_action_content(
                 endpoint,
                 paths,
                 request.lease().attempt_id(),
@@ -1577,7 +1625,8 @@ impl GithubJobExecutor {
                 &action,
                 cancellation,
             )
-            .map_err(ActionLoadError::Executor)?;
+            .map_err(ActionLoadError::Executor)?
+        };
         Ok(LoadedAction {
             definition: action.definition().clone(),
             paths: action_paths,
@@ -1588,7 +1637,12 @@ impl GithubJobExecutor {
         &self,
         job: &JobIrEnvelope,
         cancellation: &ExecutionCancellation,
-    ) -> Result<BTreeMap<String, PreparedAction>, ActionLoadError> {
+    ) -> Result<PreparedRepositoryActionGraph, ActionLoadError> {
+        if self.ports.toolchain.platform() == TargetPlatform::Windows {
+            return self
+                .preflight_planned_repository_actions(job, cancellation)
+                .await;
+        }
         let mut planner = ActionGraphPlanner::default();
         for step in job.job().steps() {
             if cancellation.is_cancelled() {
@@ -1607,14 +1661,198 @@ impl GithubJobExecutor {
                         ActionPreparationErrorKind::UnsupportedExecution,
                     ));
                 }
-                // Local metadata is created by earlier workflow code and can
-                // only be copied from the isolated workspace after provider
-                // creation. Its graph remains bounded and fail-closed by the
-                // same load/runtime checks before any local action phase.
+                ActionReference::Local { .. }
+                    if self.ports.toolchain.platform() == TargetPlatform::Windows =>
+                {
+                    return Err(ActionLoadError::Preparation(
+                        ActionPreparationErrorKind::UnsupportedExecution,
+                    ));
+                }
                 ActionReference::Local { .. } => {}
             }
         }
-        Ok(planner.materials)
+        Ok(PreparedRepositoryActionGraph {
+            order: planner.material_order,
+            materials: planner.materials,
+            sealed_paths: BTreeMap::new(),
+            plan_sha256: None,
+            planned: BTreeMap::new(),
+        })
+    }
+
+    async fn preflight_planned_repository_actions(
+        &self,
+        job: &JobIrEnvelope,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<PreparedRepositoryActionGraph, ActionLoadError> {
+        let declared = job.execution().windows_action_graph();
+        let mut cursor = PlannedActionCursor::new(declared);
+        let mut planner = ActionGraphPlanner::default();
+        for step in job.job().steps() {
+            if cancellation.is_cancelled() {
+                return Err(ActionLoadError::Executor(cancelled()));
+            }
+            let SemanticStep::Action { reference, .. } = step.kind() else {
+                continue;
+            };
+            match reference {
+                ActionReference::Repository { .. } => {
+                    self.preflight_planned_repository_action(
+                        reference,
+                        &mut planner,
+                        &mut cursor,
+                        cancellation,
+                    )
+                    .await?;
+                }
+                ActionReference::Local { .. } | ActionReference::Container { .. } => {
+                    return Err(ActionLoadError::Preparation(
+                        ActionPreparationErrorKind::UnsupportedExecution,
+                    ));
+                }
+            }
+        }
+        if !cursor.complete() {
+            return Err(ActionLoadError::Preparation(
+                ActionPreparationErrorKind::Content,
+            ));
+        }
+        let plan_sha256 = declared.map(WindowsRepositoryActionGraph::graph_sha256);
+        Ok(PreparedRepositoryActionGraph {
+            order: planner.material_order,
+            materials: planner.materials,
+            sealed_paths: BTreeMap::new(),
+            plan_sha256,
+            planned: cursor.materials,
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn preflight_planned_repository_action<'a>(
+        &'a self,
+        reference: &'a ActionReference,
+        planner: &'a mut ActionGraphPlanner,
+        cursor: &'a mut PlannedActionCursor<'_>,
+        cancellation: &'a ExecutionCancellation,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionLoadError>> + Send + 'a>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(ActionLoadError::Executor(cancelled()));
+            }
+            let key = action_reference_key(reference);
+            if !planner.enter(key.clone()) {
+                return Err(ActionLoadError::Preparation(
+                    ActionPreparationErrorKind::Metadata,
+                ));
+            }
+            let result = async {
+                let action = if let Some(action) = planner.materials.get(&key) {
+                    action.clone()
+                } else {
+                    let descriptor = cursor.next(reference)?.clone();
+                    let content = self
+                        .ports
+                        .content
+                        .load(descriptor.archive())
+                        .await
+                        .map_err(|error| ActionLoadError::Executor(map_port_error(error.kind())))?;
+                    if cancellation.is_cancelled() {
+                        return Err(ActionLoadError::Executor(cancelled()));
+                    }
+                    let expected_size = usize::try_from(descriptor.archive().encoded_size())
+                        .map_err(|_| {
+                            ActionLoadError::Preparation(
+                                ActionPreparationErrorKind::ResourceExhausted,
+                            )
+                        })?;
+                    if content.len() != expected_size
+                        || descriptor.archive().media_type() != WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE
+                        || automata_ci_core::Sha256Digest::from_bytes(
+                            Sha256::digest(&content).into(),
+                        ) != descriptor.archive().digest()
+                    {
+                        return Err(ActionLoadError::Preparation(
+                            ActionPreparationErrorKind::Content,
+                        ));
+                    }
+                    let report = validate_windows_materialization_archive(
+                        &content,
+                        ActionBundleLimits::default(),
+                    )
+                    .map_err(|_| {
+                        ActionLoadError::Preparation(ActionPreparationErrorKind::Content)
+                    })?;
+                    let facts = descriptor.facts();
+                    if report.entry_count() != facts.entry_count()
+                        || report.regular_file_count() != facts.regular_file_count()
+                        || report.expanded_bytes() != facts.expanded_bytes()
+                        || report.maximum_regular_file_bytes() != facts.maximum_regular_file_bytes()
+                        || report.maximum_depth() != facts.maximum_depth()
+                    {
+                        return Err(ActionLoadError::Preparation(
+                            ActionPreparationErrorKind::Content,
+                        ));
+                    }
+                    let action = self
+                        .ports
+                        .actions
+                        .prepare_planned(PlannedActionPreparationRequest::new(
+                            reference,
+                            &content,
+                            descriptor.archive().digest(),
+                            descriptor.subpath(),
+                        ))
+                        .await
+                        .map_err(|error| ActionLoadError::Preparation(error.kind()))?;
+                    if action.archive_digest() != descriptor.archive().digest()
+                        || action.subpath() != descriptor.subpath()
+                    {
+                        return Err(ActionLoadError::Preparation(
+                            ActionPreparationErrorKind::Content,
+                        ));
+                    }
+                    planner.material_order.push(key.clone());
+                    planner.materials.insert(key.clone(), action.clone());
+                    cursor.commit(key.clone(), descriptor)?;
+                    action
+                };
+                self.validate_action_materialization(&action)?;
+                self.require_action_runtimes(action.definition())?;
+                let children = match action.definition().execution() {
+                    PreparedActionExecution::Javascript(_) => Vec::new(),
+                    PreparedActionExecution::Composite(composite) => composite
+                        .steps()
+                        .iter()
+                        .filter_map(|step| match step {
+                            PreparedCompositeStep::Uses(step) => Some(step.reference().clone()),
+                            PreparedCompositeStep::Run(_) => None,
+                        })
+                        .collect::<Vec<_>>(),
+                };
+                for child in children {
+                    match &child {
+                        ActionReference::Repository { .. } => {
+                            self.preflight_planned_repository_action(
+                                &child,
+                                planner,
+                                cursor,
+                                cancellation,
+                            )
+                            .await?;
+                        }
+                        ActionReference::Local { .. } | ActionReference::Container { .. } => {
+                            return Err(ActionLoadError::Preparation(
+                                ActionPreparationErrorKind::UnsupportedExecution,
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            planner.leave();
+            result
+        })
     }
 
     fn preflight_repository_action<'a>(
@@ -1646,6 +1884,7 @@ impl GithubJobExecutor {
                     if cancellation.is_cancelled() {
                         return Err(ActionLoadError::Executor(cancelled()));
                     }
+                    planner.material_order.push(key.clone());
                     planner.materials.insert(key, action.clone());
                     action
                 };
@@ -1740,10 +1979,10 @@ impl GithubJobExecutor {
         events: &Arc<dyn ExecutionEvents>,
         cancellation: &ExecutionCancellation,
         job_deadline: Option<UnixMillis>,
-        prepared_repository_actions: BTreeMap<String, PreparedAction>,
+        prepared_repository_actions: PreparedRepositoryActionGraph,
     ) -> Result<PreloadedJobActions, ExecutorAdapterError> {
         let mut preloaded = BTreeMap::new();
-        let mut planner = ActionGraphPlanner::with_materials(prepared_repository_actions);
+        let mut planner = ActionGraphPlanner::with_graph(prepared_repository_actions);
         for (index, step) in request.job().job().steps().iter().enumerate() {
             if cancellation.is_cancelled() {
                 *status = GithubStatus::Cancelled;
@@ -2137,6 +2376,8 @@ impl GithubJobExecutor {
             working_directory: paths.workspace.clone(),
             environment,
             timeout,
+            sealed_action: action_paths.sealed.as_ref(),
+            action_phase: true,
         };
         let outcome = self.run_phase(
             endpoint,
@@ -2372,6 +2613,8 @@ impl GithubJobExecutor {
                     working_directory: paths.workspace.clone(),
                     environment,
                     timeout,
+                    sealed_action: loaded.paths.sealed.as_ref(),
+                    action_phase: true,
                 };
                 let outcome = self.run_phase(
                     endpoint,
@@ -2982,6 +3225,15 @@ impl GithubJobExecutor {
         cancellation: &ExecutionCancellation,
     ) -> Result<LoadedAction, ActionLoadError> {
         match reference {
+            ActionReference::Repository { .. }
+                if paths.workspace.platform() == TargetPlatform::Windows =>
+            {
+                // Every Windows repository action must have been present in
+                // the complete graph sealed before any workflow code ran.
+                Err(ActionLoadError::Preparation(
+                    ActionPreparationErrorKind::Content,
+                ))
+            }
             ActionReference::Repository { .. } => {
                 let action = self
                     .ports
@@ -3008,6 +3260,13 @@ impl GithubJobExecutor {
                     definition: action.definition().clone(),
                     paths: action_paths,
                 })
+            }
+            ActionReference::Local { .. }
+                if paths.workspace.platform() == TargetPlatform::Windows =>
+            {
+                Err(ActionLoadError::Preparation(
+                    ActionPreparationErrorKind::UnsupportedExecution,
+                ))
             }
             ActionReference::Local { .. } => {
                 let prepared = self.prepare_local_action(
@@ -3269,6 +3528,8 @@ impl GithubJobExecutor {
                     working_directory: paths.workspace.clone(),
                     environment,
                     timeout,
+                    sealed_action: action_paths.sealed.as_ref(),
+                    action_phase: true,
                 };
                 let outcome = self.run_phase(
                     endpoint,
@@ -3338,6 +3599,8 @@ impl GithubJobExecutor {
             working_directory: paths.workspace.clone(),
             environment,
             timeout,
+            sealed_action: action_paths.sealed.as_ref(),
+            action_phase: true,
         };
         self.run_phase(
             endpoint,
@@ -3627,6 +3890,8 @@ impl GithubJobExecutor {
                         working_directory,
                         environment,
                         timeout,
+                        sealed_action: action_paths.sealed.as_ref(),
+                        action_phase: true,
                     };
                     self.run_phase(
                         endpoint,
@@ -3882,7 +4147,100 @@ impl GithubJobExecutor {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
+    fn materialize_repository_action_graph(
+        &self,
+        endpoint: &dyn ExecutionEndpoint,
+        paths: &AttemptPaths,
+        attempt_id: AttemptId,
+        generation: SandboxGeneration,
+        graph: &mut PreparedRepositoryActionGraph,
+        cancellation: &ExecutionCancellation,
+    ) -> Result<(), ExecutorAdapterError> {
+        if paths.workspace.platform() != TargetPlatform::Windows {
+            return Ok(());
+        }
+        if graph.materials.is_empty() {
+            return Ok(());
+        }
+        if !endpoint
+            .capabilities()
+            .contains(&SandboxCapability::SealedActionTrees)
+            || graph.order.len() != graph.materials.len()
+            || graph.order.len() != graph.planned.len()
+            || !graph.sealed_paths.is_empty()
+        {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Unsupported,
+            ));
+        }
+        let mut pending = Vec::with_capacity(graph.order.len());
+        let mut archives = Vec::with_capacity(graph.order.len());
+        for (index, key) in graph.order.iter().enumerate() {
+            let ordinal = u32::try_from(index).map_err(|_| invalid_job())?;
+            let action = graph.materials.get(key).ok_or_else(invalid_job)?;
+            let declared = graph.planned.get(key).ok_or_else(invalid_job)?;
+            if declared.ordinal() != ordinal
+                || declared.subpath() != action.subpath()
+                || declared.archive().digest() != action.archive_digest()
+            {
+                return Err(invalid_job());
+            }
+            let action_paths = paths.action(ordinal, action.subpath())?;
+            let subpath = action.subpath().replace('/', "\\");
+            archives.push(
+                ActionArchiveMaterialization::new(
+                    ordinal,
+                    declared.action_key_sha256(),
+                    subpath,
+                    action_paths.extracted.clone(),
+                    action.archive().to_vec(),
+                    action.archive_digest(),
+                    declared.facts(),
+                )
+                .map_err(|_| invalid_job())?,
+            );
+            pending.push((key.clone(), action_paths));
+        }
+        let request = ActionGraphMaterializationRequest::new(
+            self.ports.operation_ids.operation_id(
+                attempt_id,
+                OperationPurpose::MaterializeActionGraph,
+                0,
+            ),
+            endpoint.handle().clone(),
+            generation,
+            graph.plan_sha256.ok_or_else(invalid_job)?,
+            archives,
+        )
+        .map_err(|_| invalid_job())?;
+        let expected_graph_sha256 = request.graph_sha256();
+        let sealed = endpoint
+            .materialize_action_graph(&request, &ProviderCancellationBridge(cancellation))
+            .map_err(map_execution_error)?;
+        if sealed.sandbox() != endpoint.handle()
+            || sealed.generation() != generation
+            || sealed.graph_sha256() != expected_graph_sha256
+            || sealed.trees().len() != pending.len()
+        {
+            return Err(invalid_job());
+        }
+        for ((key, mut action_paths), tree) in pending.into_iter().zip(sealed.trees()) {
+            if tree.sandbox() != endpoint.handle()
+                || tree.generation() != generation
+                || tree.graph_sha256() != expected_graph_sha256
+                || tree.root() != &action_paths.extracted
+                || tree.ordinal() as usize != graph.sealed_paths.len()
+            {
+                return Err(invalid_job());
+            }
+            action_paths.sealed = Some(tree.clone());
+            if graph.sealed_paths.insert(key, action_paths).is_some() {
+                return Err(invalid_job());
+            }
+        }
+        Ok(())
+    }
+
     fn prepare_action_content(
         &self,
         endpoint: &dyn ExecutionEndpoint,
@@ -3892,6 +4250,11 @@ impl GithubJobExecutor {
         action: &PreparedAction,
         cancellation: &ExecutionCancellation,
     ) -> Result<ActionPaths, ExecutorAdapterError> {
+        if paths.workspace.platform() != TargetPlatform::Posix {
+            return Err(ExecutorAdapterError::new(
+                ExecutorAdapterErrorKind::Unsupported,
+            ));
+        }
         let action_paths = paths.action(index, action.subpath())?;
         let prepare_ordinal = index.checked_add(1).ok_or_else(invalid_job)?;
         let prepare_operation = self.ports.operation_ids.operation_id(
@@ -3899,26 +4262,15 @@ impl GithubJobExecutor {
             OperationPurpose::PrepareDirectory,
             prepare_ordinal,
         );
-        let command = match paths.workspace.platform() {
-            TargetPlatform::Posix => action_content::prepare_directory_command(
-                prepare_operation,
-                required_tool(self.ports.toolchain.install())?,
-                &paths.workspace,
-                &action_paths.base,
-                &action_paths.extracted,
-                self.config.default_step_timeout(),
-                self.config.maximum_output_bytes(),
-            )?,
-            TargetPlatform::Windows => action_content::prepare_windows_directory_command(
-                prepare_operation,
-                required_tool(self.ports.toolchain.pwsh())?,
-                &paths.workspace,
-                &action_paths.base,
-                &action_paths.extracted,
-                self.config.default_step_timeout(),
-                self.config.maximum_output_bytes(),
-            )?,
-        };
+        let command = action_content::prepare_directory_command(
+            prepare_operation,
+            required_tool(self.ports.toolchain.install())?,
+            &paths.workspace,
+            &action_paths.base,
+            &action_paths.extracted,
+            self.config.default_step_timeout(),
+            self.config.maximum_output_bytes(),
+        )?;
         let output = endpoint
             .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
@@ -3935,38 +4287,6 @@ impl GithubJobExecutor {
         endpoint
             .copy_to(&request, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
-        if paths.workspace.platform() == TargetPlatform::Windows {
-            let sha256 =
-                self.ports.toolchain.sha256().ok_or_else(|| {
-                    ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported)
-                })?;
-            let command = action_content::verify_archive_command(
-                self.ports.operation_ids.operation_id(
-                    attempt_id,
-                    OperationPurpose::VerifyActionArchive,
-                    index,
-                ),
-                sha256,
-                &paths.workspace,
-                &action_paths.archive,
-                self.config.default_step_timeout(),
-                128,
-            )?;
-            let output = endpoint
-                .exec(&command, &ProviderCancellationBridge(cancellation))
-                .map_err(map_execution_error)?;
-            require_success(&output)?;
-            let stdout = output
-                .stdout()
-                .strip_suffix(b"\r\n")
-                .or_else(|| output.stdout().strip_suffix(b"\n"))
-                .unwrap_or(output.stdout());
-            if !output.stderr().is_empty()
-                || stdout != action.archive_digest().to_string().as_bytes()
-            {
-                return Err(invalid_job());
-            }
-        }
         let command = action_content::extract_archive_command(
             self.ports.operation_ids.operation_id(
                 attempt_id,
@@ -3984,27 +4304,6 @@ impl GithubJobExecutor {
             .exec(&command, &ProviderCancellationBridge(cancellation))
             .map_err(map_execution_error)?;
         require_success(&output)?;
-        if paths.workspace.platform() == TargetPlatform::Windows {
-            let command = action_content::verify_windows_tree_command(
-                self.ports.operation_ids.operation_id(
-                    attempt_id,
-                    OperationPurpose::VerifyActionTree,
-                    index,
-                ),
-                required_tool(self.ports.toolchain.pwsh())?,
-                &paths.workspace,
-                &action_paths.extracted,
-                self.config.default_step_timeout(),
-                self.config.maximum_output_bytes(),
-            )?;
-            let output = endpoint
-                .exec(&command, &ProviderCancellationBridge(cancellation))
-                .map_err(map_execution_error)?;
-            require_success(&output)?;
-            if !output.stdout().is_empty() || !output.stderr().is_empty() {
-                return Err(invalid_job());
-            }
-        }
         Ok(action_paths)
     }
 
@@ -4454,6 +4753,8 @@ impl GithubJobExecutor {
                 working_directory: paths.workspace.clone(),
                 environment,
                 timeout: templates.timeout.min(remaining),
+                sealed_action: post.paths.sealed.as_ref(),
+                action_phase: true,
             };
             if stop_posts_if_cancelled(cancellation, status, conclusion) {
                 posts.clear();
@@ -4883,7 +5184,11 @@ impl GithubJobExecutor {
         let endpoint = events
             .bind_endpoint(self.ports.provider.clone(), inspection, endpoint)
             .map_err(|_| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Internal))?;
-        Ok(ObtainedSandbox { endpoint, services })
+        Ok(ObtainedSandbox {
+            endpoint,
+            services,
+            generation,
+        })
     }
 
     fn prepare_attempt_directories(
@@ -5013,12 +5318,20 @@ impl GithubJobExecutor {
             .map_err(|error| {
                 observe_phase_failure(error, attempt_id, execution.phase, "build_phase_command")
             })?;
-        let output = endpoint
-            .exec(&command, &ProviderCancellationBridge(cancellation))
-            .map_err(map_execution_error)
-            .map_err(|error| {
-                observe_phase_failure(error, attempt_id, execution.phase, "execute_phase")
-            });
+        let output = if execution.action_phase
+            && execution.working_directory.platform() == TargetPlatform::Windows
+        {
+            let sealed = execution
+                .sealed_action
+                .ok_or_else(|| ExecutorAdapterError::new(ExecutorAdapterErrorKind::Unsupported))?;
+            endpoint.exec_sealed_action(&command, sealed, &ProviderCancellationBridge(cancellation))
+        } else {
+            endpoint.exec(&command, &ProviderCancellationBridge(cancellation))
+        }
+        .map_err(map_execution_error)
+        .map_err(|error| {
+            observe_phase_failure(error, attempt_id, execution.phase, "execute_phase")
+        });
         let Some(output) = reconcile_cancelled_operation(output, cancellation)? else {
             return Ok(CommandOutcome::Cancelled);
         };
@@ -5846,6 +6159,8 @@ struct PhaseExecution<'a> {
     working_directory: TargetPath,
     environment: automata_ci_execution::ExecutionEnvironment,
     timeout: Duration,
+    sealed_action: Option<&'a SealedActionTree>,
+    action_phase: bool,
 }
 
 struct CollectedPhase {
@@ -6462,15 +6777,19 @@ impl ActionLifecycleFlags {
 struct ActionGraphPlanner {
     active: Vec<String>,
     occurrences: u32,
+    material_order: Vec<String>,
     materials: BTreeMap<String, PreparedAction>,
+    sealed_paths: BTreeMap<String, ActionPaths>,
 }
 
 impl ActionGraphPlanner {
-    fn with_materials(materials: BTreeMap<String, PreparedAction>) -> Self {
+    fn with_graph(graph: PreparedRepositoryActionGraph) -> Self {
         Self {
             active: Vec::new(),
             occurrences: 0,
-            materials,
+            material_order: graph.order,
+            materials: graph.materials,
+            sealed_paths: graph.sealed_paths,
         }
     }
 
@@ -6485,6 +6804,96 @@ impl ActionGraphPlanner {
 
     fn leave(&mut self) {
         let _ = self.active.pop();
+    }
+}
+
+struct PreparedRepositoryActionGraph {
+    order: Vec<String>,
+    materials: BTreeMap<String, PreparedAction>,
+    sealed_paths: BTreeMap<String, ActionPaths>,
+    plan_sha256: Option<automata_ci_core::Sha256Digest>,
+    planned: BTreeMap<String, WindowsRepositoryActionArchive>,
+}
+
+struct PlannedActionCursor<'a> {
+    graph: Option<&'a WindowsRepositoryActionGraph>,
+    next_index: usize,
+    materials: BTreeMap<String, WindowsRepositoryActionArchive>,
+}
+
+impl<'a> PlannedActionCursor<'a> {
+    const fn new(graph: Option<&'a WindowsRepositoryActionGraph>) -> Self {
+        Self {
+            graph,
+            next_index: 0,
+            materials: BTreeMap::new(),
+        }
+    }
+
+    fn next(
+        &self,
+        reference: &ActionReference,
+    ) -> Result<&'a WindowsRepositoryActionArchive, ActionLoadError> {
+        let graph = self.graph.ok_or(ActionLoadError::Preparation(
+            ActionPreparationErrorKind::Content,
+        ))?;
+        let descriptor =
+            graph
+                .archives()
+                .get(self.next_index)
+                .ok_or(ActionLoadError::Preparation(
+                    ActionPreparationErrorKind::Content,
+                ))?;
+        let ActionReference::Repository {
+            revision, subpath, ..
+        } = reference
+        else {
+            return Err(ActionLoadError::Preparation(
+                ActionPreparationErrorKind::UnsupportedReference,
+            ));
+        };
+        if revision.len() != 40
+            || !revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || descriptor.ordinal() as usize != self.next_index
+            || descriptor.action_key_sha256()
+                != windows_repository_action_key_sha256(reference).map_err(|_| {
+                    ActionLoadError::Preparation(ActionPreparationErrorKind::Content)
+                })?
+            || descriptor.subpath() != subpath.as_deref().unwrap_or_default()
+        {
+            return Err(ActionLoadError::Preparation(
+                ActionPreparationErrorKind::Content,
+            ));
+        }
+        Ok(descriptor)
+    }
+
+    fn commit(
+        &mut self,
+        key: String,
+        descriptor: WindowsRepositoryActionArchive,
+    ) -> Result<(), ActionLoadError> {
+        if descriptor.ordinal() as usize != self.next_index
+            || self.materials.insert(key, descriptor).is_some()
+        {
+            return Err(ActionLoadError::Preparation(
+                ActionPreparationErrorKind::Content,
+            ));
+        }
+        self.next_index = self
+            .next_index
+            .checked_add(1)
+            .ok_or(ActionLoadError::Preparation(
+                ActionPreparationErrorKind::ResourceExhausted,
+            ))?;
+        Ok(())
+    }
+
+    fn complete(&self) -> bool {
+        self.graph
+            .is_none_or(|graph| self.next_index == graph.archives().len())
     }
 }
 
@@ -6888,6 +7297,7 @@ impl GithubEvaluationContext for ActionExpressionContext<'_> {
 struct ObtainedSandbox {
     endpoint: Box<dyn ExecutionEndpoint>,
     services: ServiceContainerBindings,
+    generation: SandboxGeneration,
 }
 
 struct MutableStepResult {
@@ -7008,6 +7418,7 @@ impl AttemptPaths {
             extracted,
             archive,
             directory,
+            sealed: None,
         })
     }
 }
@@ -7018,6 +7429,7 @@ struct ActionPaths {
     extracted: TargetPath,
     archive: TargetPath,
     directory: TargetPath,
+    sealed: Option<SealedActionTree>,
 }
 
 impl ActionPaths {
@@ -7027,6 +7439,7 @@ impl ActionPaths {
             extracted: directory.clone(),
             archive: directory.clone(),
             directory,
+            sealed: None,
         }
     }
 

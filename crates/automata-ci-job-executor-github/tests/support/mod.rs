@@ -12,6 +12,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use automata_ci_action::{ActionBundleLimits, validate_windows_materialization_archive};
 use automata_ci_action_github::JavascriptRuntime;
 use automata_ci_auth::secret::{SecretString, SharedSensitiveString};
 use automata_ci_core::{
@@ -24,18 +25,22 @@ use automata_ci_core::{
     ShellTemplate, StepId, StepIr, StrategyContext, TrustActorEvidence, TrustActorKind,
     TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy,
     TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion, UnixMillis, ValueSource,
-    ValueTemplate, WorkflowId,
+    ValueTemplate, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE, WindowsActionArchiveFacts,
+    WindowsRepositoryActionArchive, WindowsRepositoryActionGraph, WorkflowId,
+    windows_repository_action_key_sha256,
 };
 use automata_ci_execution::{
-    Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
-    ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionEnvironment, ExecutionError,
-    ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
-    ExecutionStage, ExecutionTermination, ImmutableImage, NetworkPolicy, OperationOutcome,
-    ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
-    ResourceLimits, RootFilesystemPolicy, SandboxCapability, SandboxCustody, SandboxEnvironment,
-    SandboxGeneration, SandboxHandle, SandboxInspection, SandboxPrivilegePolicy, SandboxProvider,
-    SandboxRecord, SandboxSpec, SandboxState, ServiceContainerBinding, ServiceContainerBindings,
-    ServiceNetwork, ServicePortBinding, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ActionGraphMaterializationRequest, Cancellation, CancellationDisposition, CopyFromRequest,
+    CopyToRequest, DestroyDisposition, DestroySandbox, ExecutionArgv, ExecutionCommand,
+    ExecutionEndpoint, ExecutionEnvironment, ExecutionError, ExecutionErrorKind, ExecutionOutput,
+    ExecutionOutputRecord, ExecutionOutputStream, ExecutionStage, ExecutionTermination,
+    ImmutableImage, NetworkPolicy, OperationOutcome, ProviderCapabilities, ProviderError,
+    ProviderErrorKind, ProviderId, ProviderStage, ResourceLimits, RootFilesystemPolicy,
+    SandboxCapability, SandboxCustody, SandboxEnvironment, SandboxGeneration, SandboxHandle,
+    SandboxInspection, SandboxPrivilegePolicy, SandboxProvider, SandboxRecord, SandboxSpec,
+    SandboxState, SealedActionGraph, SealedActionTree, ServiceContainerBinding,
+    ServiceContainerBindings, ServiceNetwork, ServicePortBinding, SignalRequest, TargetPath,
+    TargetPlatform, WaitRequest,
 };
 use automata_ci_expression_github::{
     ExtensionFunctionResult, GithubEvaluationContext, GithubExpressionEvaluator,
@@ -50,9 +55,9 @@ use automata_ci_job_executor_github::{
     ContextEnvironmentVariable, DeterministicOperationIds, ExecutionClock, GithubContextPort,
     GithubContextRequest, GithubContextSnapshot, GithubExecutionPhase, GithubJobExecutor,
     GithubJobExecutorConfig, GithubJobExecutorPorts, ImmutableSandboxEnvironmentCatalog,
-    JobContentPort, PortError, PortErrorKind, PreparedAction, PreparedActionDefinition,
-    PreparedActionExecution, PreparedInput, PreparedJavascriptAction, PreparedValue,
-    SecretCustodyAcknowledger, SecretPort, StaticGithubToolchain,
+    JobContentPort, PlannedActionPreparationRequest, PortError, PortErrorKind, PreparedAction,
+    PreparedActionDefinition, PreparedActionExecution, PreparedInput, PreparedJavascriptAction,
+    PreparedValue, SecretCustodyAcknowledger, SecretPort, StaticGithubToolchain,
 };
 use automata_ci_protocol::{
     JobRuntimeAuthorities, JobRuntimeAuthority, ProtocolLimits, RunnerSlotOrdinal,
@@ -186,12 +191,13 @@ impl Fixture {
     }
 
     pub fn windows_actions(actions: Vec<PreparedAction>, responses: Vec<PhaseResponse>) -> Self {
+        let content = Arc::new(FakeJobContent::with_actions(&actions));
         Self::with_platform_components_and_timeout_and_node(
             actions,
             responses,
             ExecutionEnvironment::empty(),
             false,
-            Arc::new(FakeJobContent::default()),
+            content,
             Arc::new(FakeContexts::windows_secretless()),
             Duration::from_mins(5),
             TargetPlatform::Windows,
@@ -535,6 +541,9 @@ impl Fixture {
             copy_from_calls: 0,
             copy_from_calls_since_exec: 0,
             copy_from_requests: Vec::new(),
+            materialized_action_graphs: Vec::new(),
+            sealed_action_execs: Vec::new(),
+            sealed_action_graph: None,
             cancellation_before_copy_from: None,
             responses: responses.into(),
         }));
@@ -542,6 +551,7 @@ impl Fixture {
             environment.clone(),
             Arc::clone(&endpoint_state),
             service_containers,
+            configure_node && platform == TargetPlatform::Windows,
         ));
         let catalog = Arc::new(
             ImmutableSandboxEnvironmentCatalog::new([environment.clone()]).expect("valid catalog"),
@@ -939,6 +949,7 @@ fn envelope_with_all_settings_and_profile(
         outputs,
         authority_profile,
         profile(),
+        None,
     )
 }
 
@@ -952,6 +963,7 @@ fn envelope_with_all_settings_and_environment_profile(
     outputs: Vec<JobOutputDefinition>,
     authority_profile: JobAuthorityProfile,
     environment_profile: EnvironmentProfile,
+    windows_action_graph: Option<WindowsRepositoryActionGraph>,
 ) -> JobIrEnvelope {
     let allocation = JobResourceAllocation::new(
         ResourceCapacity::new(100, 256 * 1024 * 1024, 0, 0),
@@ -983,6 +995,19 @@ fn envelope_with_all_settings_and_environment_profile(
     if let Some(working_directory) = working_directory {
         job = job.with_working_directory(working_directory);
     }
+    let mut execution = JobExecutionContext::new(
+        "CI",
+        "refs/heads/main",
+        "/__w/automata/automata",
+        event_reference(),
+        runtime_context,
+    )
+    .with_actor("octocat")
+    .with_run_number(42)
+    .with_run_attempt(1);
+    if let Some(graph) = windows_action_graph {
+        execution = execution.with_windows_action_graph(graph);
+    }
     JobIrEnvelope::new(
         WorkflowId::new(),
         JobSource::new(
@@ -992,16 +1017,7 @@ fn envelope_with_all_settings_and_environment_profile(
             ".ci/workflows/ci.yml",
             "push",
         ),
-        JobExecutionContext::new(
-            "CI",
-            "refs/heads/main",
-            "/__w/automata/automata",
-            event_reference(),
-            runtime_context,
-        )
-        .with_actor("octocat")
-        .with_run_number(42)
-        .with_run_attempt(1),
+        execution,
         job,
     )
 }
@@ -1201,6 +1217,42 @@ pub fn windows_profile() -> EnvironmentProfile {
     )
 }
 
+pub fn windows_repository_action_graph(
+    repository: &str,
+    action: &PreparedAction,
+) -> WindowsRepositoryActionGraph {
+    let reference = ActionReference::Repository {
+        repository: repository.to_owned(),
+        revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+        subpath: (!action.subpath().is_empty()).then(|| action.subpath().to_owned()),
+    };
+    let report =
+        validate_windows_materialization_archive(action.archive(), ActionBundleLimits::default())
+            .expect("valid Windows action archive");
+    let facts = WindowsActionArchiveFacts::new(
+        report.entry_count(),
+        report.regular_file_count(),
+        report.expanded_bytes(),
+        report.maximum_regular_file_bytes(),
+        report.maximum_depth(),
+    )
+    .expect("valid Windows action facts");
+    let archive = WindowsRepositoryActionArchive::new(
+        0,
+        windows_repository_action_key_sha256(&reference).expect("valid action key"),
+        action.subpath(),
+        JobContentReference::new(
+            "actions/windows-test.tgz",
+            action.archive_digest(),
+            u64::try_from(action.archive().len()).expect("bounded action archive"),
+            WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+        ),
+        facts,
+    )
+    .expect("valid Windows action descriptor");
+    WindowsRepositoryActionGraph::new(vec![archive]).expect("valid Windows action graph")
+}
+
 pub fn windows_envelope(steps: Vec<StepIr>) -> JobIrEnvelope {
     envelope_with_all_settings_and_environment_profile(
         steps,
@@ -1211,6 +1263,24 @@ pub fn windows_envelope(steps: Vec<StepIr>) -> JobIrEnvelope {
         Vec::new(),
         JobAuthorityProfile::Standard,
         windows_profile(),
+        None,
+    )
+}
+
+pub fn windows_envelope_with_action_graph(
+    steps: Vec<StepIr>,
+    graph: WindowsRepositoryActionGraph,
+) -> JobIrEnvelope {
+    envelope_with_all_settings_and_environment_profile(
+        steps,
+        BTreeMap::new(),
+        BTreeMap::new(),
+        None,
+        default_runtime_context_reference(),
+        Vec::new(),
+        JobAuthorityProfile::Standard,
+        windows_profile(),
+        Some(graph),
     )
 }
 
@@ -1227,6 +1297,7 @@ pub fn windows_envelope_with_output_definitions(
         outputs,
         JobAuthorityProfile::Standard,
         windows_profile(),
+        None,
     )
 }
 
@@ -1312,12 +1383,26 @@ fn default_runtime_context_reference() -> JobContentReference {
 #[derive(Debug)]
 struct FakeJobContent {
     runtime_context: Bytes,
+    action_archives: Vec<(Sha256Digest, Bytes)>,
 }
 
 impl Default for FakeJobContent {
     fn default() -> Self {
         Self {
             runtime_context: default_runtime_context_bytes(),
+            action_archives: Vec::new(),
+        }
+    }
+}
+
+impl FakeJobContent {
+    fn with_actions(actions: &[PreparedAction]) -> Self {
+        Self {
+            runtime_context: default_runtime_context_bytes(),
+            action_archives: actions
+                .iter()
+                .map(|action| (action.archive_digest(), action.archive().clone()))
+                .collect(),
         }
     }
 }
@@ -1329,6 +1414,12 @@ impl JobContentPort for FakeJobContent {
             Ok(Bytes::from_static(b"{}"))
         } else if reference.object_key() == "contexts/test-job.pb" {
             Ok(self.runtime_context.clone())
+        } else if let Some((_, archive)) = self
+            .action_archives
+            .iter()
+            .find(|(digest, _)| *digest == reference.digest())
+        {
+            Ok(archive.clone())
         } else {
             Err(PortError::new(PortErrorKind::InvalidData))
         }
@@ -1433,6 +1524,9 @@ pub struct EndpointState {
     pub copy_from_calls: usize,
     pub copy_from_calls_since_exec: usize,
     pub copy_from_requests: Vec<CopyFromRequest>,
+    pub materialized_action_graphs: Vec<ActionGraphMaterializationRequest>,
+    pub sealed_action_execs: Vec<(ExecutionCommand, SealedActionTree)>,
+    sealed_action_graph: Option<SealedActionGraph>,
     cancellation_before_copy_from: Option<ExecutionCancellation>,
     responses: VecDeque<PhaseResponse>,
 }
@@ -1528,6 +1622,82 @@ impl ExecutionEndpoint for FakeEndpoint {
 
     fn capabilities(&self) -> &[SandboxCapability] {
         &self.capabilities
+    }
+
+    fn materialize_action_graph(
+        &self,
+        request: &ActionGraphMaterializationRequest,
+        cancellation: &dyn Cancellation,
+    ) -> Result<SealedActionGraph, ExecutionError> {
+        if cancellation.disposition() == CancellationDisposition::Terminate {
+            return Err(ExecutionError::new(
+                ExecutionErrorKind::Cancelled,
+                ExecutionStage::MaterializeAction,
+            ));
+        }
+        if request.sandbox() != &self.handle
+            || !self
+                .capabilities
+                .contains(&SandboxCapability::SealedActionTrees)
+        {
+            return Err(ExecutionError::new(
+                ExecutionErrorKind::OwnershipMismatch,
+                ExecutionStage::MaterializeAction,
+            ));
+        }
+        let receipt = Sha256Digest::from_bytes([0x61; 32]);
+        let trees = request
+            .archives()
+            .iter()
+            .map(|archive| {
+                SealedActionTree::new(
+                    self.handle.clone(),
+                    request.generation(),
+                    "test-sealed-graph-v1",
+                    request.graph_sha256(),
+                    archive.ordinal(),
+                    archive.destination().clone(),
+                    receipt,
+                )
+                .expect("valid fake sealed tree")
+            })
+            .collect::<Vec<_>>();
+        let graph = SealedActionGraph::new(
+            self.handle.clone(),
+            request.generation(),
+            request.graph_sha256(),
+            receipt,
+            trees,
+        )
+        .expect("valid fake sealed graph");
+        let mut state = self.state.lock().expect("endpoint lock");
+        state.materialized_action_graphs.push(request.clone());
+        state.sealed_action_graph = Some(graph.clone());
+        Ok(graph)
+    }
+
+    fn exec_sealed_action(
+        &self,
+        request: &ExecutionCommand,
+        tree: &SealedActionTree,
+        cancellation: &dyn Cancellation,
+    ) -> Result<ExecutionOutput, ExecutionError> {
+        {
+            let mut state = self.state.lock().expect("endpoint lock");
+            let authorized = state.sealed_action_graph.as_ref().is_some_and(|graph| {
+                graph.sandbox() == &self.handle && graph.trees().contains(tree)
+            });
+            if !authorized {
+                return Err(ExecutionError::new(
+                    ExecutionErrorKind::OwnershipMismatch,
+                    ExecutionStage::ExecSealedAction,
+                ));
+            }
+            state
+                .sealed_action_execs
+                .push((request.clone(), tree.clone()));
+        }
+        self.exec(request, cancellation)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1849,6 +2019,7 @@ impl FakeProvider {
         environment: SandboxEnvironment,
         endpoint_state: Arc<Mutex<EndpointState>>,
         service_containers: bool,
+        sealed_action_trees: bool,
     ) -> Self {
         let id = ProviderId::new("fake").expect("valid provider");
         let handle = SandboxHandle::new(id.clone(), "sandbox-1").expect("valid handle");
@@ -1883,6 +2054,9 @@ impl FakeProvider {
         }
         if service_containers && environment.workspace().platform() == TargetPlatform::Posix {
             capabilities.push(SandboxCapability::ServiceContainers);
+        }
+        if sealed_action_trees {
+            capabilities.push(SandboxCapability::SealedActionTrees);
         }
         let capabilities = ProviderCapabilities::new(capabilities).expect("valid capabilities");
         Self {
@@ -2110,6 +2284,31 @@ impl ActionPreparationPort for FakeActionPreparer {
                     automata_ci_job_executor_github::ActionPreparationErrorKind::Resolution,
                 )
             })
+    }
+
+    async fn prepare_planned(
+        &self,
+        request: PlannedActionPreparationRequest<'_>,
+    ) -> Result<PreparedAction, ActionPreparationError> {
+        let action = self
+            .actions
+            .lock()
+            .expect("action lock")
+            .pop_front()
+            .ok_or_else(|| {
+                ActionPreparationError::new(
+                    automata_ci_job_executor_github::ActionPreparationErrorKind::Resolution,
+                )
+            })?;
+        if action.archive().as_ref() != request.archive().as_ref()
+            || action.archive_digest() != request.archive_sha256()
+            || action.subpath() != request.subpath()
+        {
+            return Err(ActionPreparationError::new(
+                automata_ci_job_executor_github::ActionPreparationErrorKind::Content,
+            ));
+        }
+        Ok(action)
     }
 }
 

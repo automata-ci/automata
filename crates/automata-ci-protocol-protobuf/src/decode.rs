@@ -1373,7 +1373,75 @@ fn job_execution_context(
     if let Some(run_attempt) = value.run_attempt {
         context = context.with_run_attempt(run_attempt);
     }
+    if let Some(graph) = value.windows_action_graph {
+        context = context.with_windows_action_graph(windows_repository_action_graph(graph)?);
+    }
     Ok(context)
+}
+
+fn windows_repository_action_graph(
+    value: wire::WindowsRepositoryActionGraph,
+) -> Result<core::WindowsRepositoryActionGraph, DecodeError> {
+    let policy_sha256 = sha256_digest(value.policy_sha256, "windows_action_graph.policy_sha256")?;
+    let graph_sha256 = sha256_digest(value.graph_sha256, "windows_action_graph.graph_sha256")?;
+    let mut archives = Vec::with_capacity(value.archives.len());
+    for archive in value.archives {
+        let action_key_sha256 = sha256_digest(
+            archive.action_key_sha256,
+            "windows_action_graph.archive.action_key_sha256",
+        )?;
+        let facts = required(archive.facts, "windows_action_graph.archive.facts")?;
+        let maximum_depth =
+            u16::try_from(facts.maximum_depth).map_err(|_| DecodeError::InvalidValue {
+                field: "windows_action_graph.archive.facts.maximum_depth",
+            })?;
+        let facts = core::WindowsActionArchiveFacts::new(
+            facts.entry_count,
+            facts.regular_file_count,
+            facts.expanded_bytes,
+            facts.maximum_regular_file_bytes,
+            maximum_depth,
+        )
+        .map_err(|_| DecodeError::InvalidValue {
+            field: "windows_action_graph.archive.facts",
+        })?;
+        archives.push(
+            core::WindowsRepositoryActionArchive::new(
+                archive.ordinal,
+                action_key_sha256,
+                archive.subpath,
+                job_content_reference(required(
+                    archive.archive,
+                    "windows_action_graph.archive.content",
+                )?)?,
+                facts,
+            )
+            .map_err(|_| DecodeError::InvalidValue {
+                field: "windows_action_graph.archive",
+            })?,
+        );
+    }
+    let graph = core::WindowsRepositoryActionGraph::new(archives).map_err(|_| {
+        DecodeError::InvalidValue {
+            field: "windows_action_graph",
+        }
+    })?;
+    if value.schema_version != u32::from(graph.schema_version())
+        || policy_sha256 != graph.policy_sha256()
+        || graph_sha256 != graph.graph_sha256()
+    {
+        return Err(DecodeError::InvalidValue {
+            field: "windows_action_graph",
+        });
+    }
+    Ok(graph)
+}
+
+fn sha256_digest(value: Vec<u8>, field: &'static str) -> Result<core::Sha256Digest, DecodeError> {
+    let bytes = value
+        .try_into()
+        .map_err(|_| DecodeError::InvalidValue { field })?;
+    Ok(core::Sha256Digest::from_bytes(bytes))
 }
 
 fn job_content_reference(

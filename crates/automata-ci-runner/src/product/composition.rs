@@ -63,7 +63,7 @@ use super::state::RuntimeMountSnapshot;
 use super::{
     ClientTlsMaterialError, ProductStateRootError, RunnerProductConfig, RunnerProductConfigError,
     RunnerProviderConfig, SecretSource, StandardGithubContext,
-    config::{ObjectStoreTlsTrust, promoted_windows_runtime_features, required_podman_state_root},
+    config::{ObjectStoreTlsTrust, required_podman_state_root},
     metrics::RunnerMetrics,
     profile_admission::{
         ProfileAdmissionError, ProfileAdmissionOutcome, ProfileAdmissionPolicy,
@@ -759,7 +759,7 @@ fn compose_with_provider(
         revalidate_provider_trust,
     );
     after_admitted_value(runtime_inventory, |runtime_inventory| {
-        let executor = build_executor(config, provider, ephemeral)?;
+        let executor = build_executor(config, provider, ephemeral, &runtime_inventory)?;
         let runtime_config = RunnerRuntimeConfig::new(
             runtime_inventory,
             protocol_limits,
@@ -824,20 +824,12 @@ fn admitted_runtime_inventory(
     buildkit_configured: bool,
     provider: &ProviderCapabilities,
 ) -> Result<RunnerCapabilities, RunnerProductError> {
-    let mut inventory = inventory_for_verified_provider(
+    let inventory = inventory_for_verified_provider(
         config.inventory(),
         service_proxy_configured,
         buildkit_configured,
         provider,
     );
-    if config
-        .windows_hyperv()
-        .is_some_and(|windows| windows.image_admission().permits_actions())
-    {
-        inventory = inventory.with_features(promoted_windows_runtime_features(
-            config.executor().toolchain(),
-        ));
-    }
     inventory
         .validate()
         .map_err(|_| RunnerProductError::SandboxProviderInvariant)?;
@@ -1235,6 +1227,7 @@ fn build_executor(
     config: &RunnerProductConfig,
     provider: Arc<dyn automata_ci_execution::SandboxProvider>,
     ephemeral: Arc<dyn RunnerEphemeralClient>,
+    runtime_inventory: &RunnerCapabilities,
 ) -> Result<Arc<dyn JobExecutor>, RunnerProductError> {
     let blobs = build_object_store(config)?;
     let action_preparer = build_action_preparer(config, &blobs)?;
@@ -1245,7 +1238,7 @@ fn build_executor(
     let environments = Arc::new(ImmutableSandboxEnvironmentCatalog::new(
         config.environments().values().cloned(),
     )?);
-    let toolchain = Arc::new(build_toolchain(config)?);
+    let toolchain = Arc::new(build_toolchain(config, runtime_inventory)?);
     let contexts = Arc::new(StandardGithubContext::new(
         config.runner_id(),
         config.inventory().platform().clone(),
@@ -1358,6 +1351,7 @@ fn load_s3_private_ca(certificate_source: &SecretSource) -> Result<S3TlsTrust, R
 #[allow(clippy::too_many_lines)]
 fn build_toolchain(
     config: &RunnerProductConfig,
+    authorized_inventory: &RunnerCapabilities,
 ) -> Result<StaticGithubToolchain, RunnerProductError> {
     let configured = config.executor().toolchain();
     let mut toolchain = match config.provider() {
@@ -1425,9 +1419,14 @@ fn build_toolchain(
     if let Some(path) = configured.python() {
         toolchain = toolchain.with_python(path.clone())?;
     }
-    let windows_actions = config
-        .windows_hyperv()
-        .is_some_and(|windows| windows.image_admission().permits_actions());
+    let windows_actions = matches!(config.provider(), RunnerProviderConfig::WindowsHyperV(_))
+        && [
+            automata_ci_core::RunnerFeature::JAVASCRIPT_ACTIONS,
+            automata_ci_core::RunnerFeature::COMPOSITE_ACTIONS,
+            automata_ci_core::RunnerFeature::REPOSITORY_ACTIONS,
+        ]
+        .into_iter()
+        .all(|feature| authorized_inventory.features().contains(&feature));
     if windows_actions {
         toolchain = toolchain.with_windows_action_materializer(
             configured
@@ -1789,7 +1788,8 @@ mod tests {
         ))
         .expect("internal Windows product fixture");
 
-        let toolchain = build_toolchain(&config).expect("shell-only Windows toolchain");
+        let toolchain =
+            build_toolchain(&config, config.inventory()).expect("shell-only Windows toolchain");
 
         assert!(toolchain.tar().is_none());
         assert!(toolchain.sha256().is_none());
@@ -1798,7 +1798,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn promoted_windows_features_exist_only_in_post_admission_inventory() {
+    fn image_state_never_adds_windows_action_features() {
         struct InjectedPromotedEvidence;
 
         impl super::super::windows_image::WindowsImageEvidenceVerifier for InjectedPromotedEvidence {
@@ -1810,10 +1810,13 @@ mod tests {
                 super::super::windows_image::WindowsImageVerificationError,
             > {
                 Ok(
-                    super::super::windows_image::WindowsImageVerification::promoted(
+                    super::super::windows_image::WindowsImageVerification::promotion_pending_fixture(
                         automata_ci_core::Sha256Digest::from_bytes([9; 32]),
                         automata_ci_core::Sha256Digest::from_bytes([10; 32]),
                         automata_ci_core::Sha256Digest::from_bytes([11; 32]),
+                        automata_ci_core::Sha256Digest::from_bytes([12; 32]),
+                        automata_ci_core::Sha256Digest::from_bytes([13; 32]),
+                        automata_ci_core::Sha256Digest::from_bytes([14; 32]),
                     ),
                 )
             }
@@ -1844,7 +1847,10 @@ mod tests {
             automata_ci_core::RunnerFeature::LOCAL_ACTIONS,
             automata_ci_core::RunnerFeature::NODE24_ACTIONS,
         ] {
-            assert!(admitted.features().contains(&feature), "missing {feature}");
+            assert!(
+                !admitted.features().contains(&feature),
+                "image/profile state alone leaked {feature}"
+            );
         }
     }
     #[derive(Debug, Default)]

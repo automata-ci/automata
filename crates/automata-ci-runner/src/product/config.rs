@@ -504,13 +504,7 @@ impl WindowsHyperVProductConfig {
         self.image_verification.promotion_payload_sha256()
     }
 
-    /// Returns the digest of the exact verified promotion public key.
-    #[must_use]
-    pub const fn promotion_public_key_sha256(&self) -> Option<Sha256Digest> {
-        self.image_verification.promotion_public_key_sha256()
-    }
-
-    /// Returns the digest of the complete verified promotion envelope.
+    /// Returns the digest of the complete promotion envelope pending broker verification.
     #[must_use]
     pub const fn promotion_envelope_sha256(&self) -> Option<Sha256Digest> {
         self.image_verification.promotion_envelope_sha256()
@@ -518,6 +512,22 @@ impl WindowsHyperVProductConfig {
 
     pub(super) const fn evidence_digests(&self) -> Option<[Sha256Digest; 4]> {
         self.image_verification.evidence_digests()
+    }
+
+    pub(super) const fn promotion_serial(&self) -> Option<u64> {
+        self.image_verification.promotion_serial()
+    }
+
+    pub(super) const fn revocation_generation(&self) -> Option<u64> {
+        self.image_verification.revocation_generation()
+    }
+
+    pub(super) const fn promotion_issued_at_unix_millis(&self) -> Option<u64> {
+        self.image_verification.promotion_issued_at_unix_millis()
+    }
+
+    pub(super) const fn promotion_expires_at_unix_millis(&self) -> Option<u64> {
+        self.image_verification.promotion_expires_at_unix_millis()
     }
 }
 
@@ -1919,14 +1929,13 @@ fn executor_runtime_features(
     features
 }
 
-pub(super) fn promoted_windows_runtime_features(
+pub(super) fn windows_broker_admission_feature_ceiling(
     toolchain: &ToolchainConfig,
 ) -> BTreeSet<RunnerFeature> {
     let mut features = executor_runtime_features(toolchain, ProviderKind::WindowsHyperV);
     features.extend([
         RunnerFeature::COMPOSITE_ACTIONS,
         RunnerFeature::REPOSITORY_ACTIONS,
-        RunnerFeature::LOCAL_ACTIONS,
     ]);
     for (available, feature) in [
         (toolchain.node12().is_some(), RunnerFeature::NODE12_ACTIONS),

@@ -21,6 +21,8 @@ pub enum SandboxCapability {
     CopyTo,
     /// Copies bounded bytes out of a sandbox target path.
     CopyFrom,
+    /// Atomically materializes and executes immutable, provider-sealed action trees.
+    SealedActionTrees,
     /// Injects validated process-environment variables at execution time.
     EnvironmentInjection,
     /// Enforces a sandbox with networking completely disabled.

@@ -9,7 +9,8 @@ use automata_ci_blob::{
 use automata_ci_core::{
     JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobRuntimeContext,
     PlanSourceOrigin, RunId, Sha256Digest, TrustSnapshot, TrustSourceClass, UnixMillis,
-    WorkflowJobKey, WorkflowPlan,
+    WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE, WindowsRepositoryActionArchive,
+    WindowsRepositoryActionGraph, WorkflowJobKey, WorkflowPlan,
 };
 use automata_ci_expression_github::{GithubObject, GithubValue};
 use automata_ci_job_executor_github::ActionPreparationPort;
@@ -33,7 +34,7 @@ use uuid::Uuid;
 
 use crate::activation_preparation::prepared_from_receipt;
 use crate::runtime_requirements::{
-    RuntimeRequirementDiscoveryError, discover_runtime_requirements,
+    RuntimeRequirementDiscovery, RuntimeRequirementDiscoveryError, discover_runtime_requirements,
 };
 use crate::{
     ActivateLogicalJobRequest, ActivationStatus, AdmissionClock, AutonomousActivationLease,
@@ -684,8 +685,8 @@ impl GithubLogicalJobOrchestrationService {
         let Ok(profiles) = runtime_profile_catalog(prepared.runtime_policy()) else {
             return Ok(activation_relational_failure());
         };
-        let runtime_features = if activation.instances().is_empty() {
-            std::collections::BTreeSet::new()
+        let runtime_discovery = if activation.instances().is_empty() {
+            RuntimeRequirementDiscovery::empty()
         } else {
             let references = match crate::logical_projection::logical_action_references(logical_job)
             {
@@ -707,7 +708,7 @@ impl GithubLogicalJobOrchestrationService {
                 .await
             };
             match discovery {
-                Ok(features) => features,
+                Ok(discovery) => discovery,
                 Err(RuntimeRequirementDiscoveryError::Cancelled) => {
                     return Err(AutonomousWorkflowLeaseError::Shutdown);
                 }
@@ -758,7 +759,7 @@ impl GithubLogicalJobOrchestrationService {
                     logical_job,
                     instance,
                     &profiles,
-                    &runtime_features,
+                    &runtime_discovery,
                     &activation_evaluator,
                     permission_ceiling.as_ref(),
                     gate_evidence,
@@ -853,24 +854,34 @@ impl GithubLogicalJobOrchestrationService {
         job: crate::ValidatedLogicalJob<'_>,
         instance: &crate::ActivatedJobInstance,
         profiles: &GithubRunnerProfileCatalog,
-        runtime_features: &std::collections::BTreeSet<automata_ci_core::RunnerFeature>,
+        runtime_discovery: &RuntimeRequirementDiscovery,
         activation_evaluator: &GithubLogicalActivationEvaluator,
         permission_ceiling: Option<&automata_ci_store::ReusableWorkflowPermissionSnapshot>,
         gate_evidence: ActivationGateEvidence,
     ) -> Result<ActivatedLogicalInstanceDescriptor, SelectedActivationFailure> {
-        let (runtime_payload, job_payload) = self
+        let (runtime_payload, job_payload, action_payloads) = self
             .project_instance_payloads(
                 prepared,
                 job,
                 instance,
                 profiles,
-                runtime_features,
+                runtime_discovery,
                 activation_evaluator,
                 permission_ceiling,
             )
             .map_err(SelectedActivationFailure::Operation)?;
         let runtime_descriptor = runtime_payload.descriptor().clone();
         let job_descriptor = job_payload.descriptor().clone();
+        for payload in action_payloads {
+            lease
+                .before_io(shutdown)
+                .map_err(SelectedActivationFailure::Lease)?;
+            self.blobs
+                .put_if_absent(payload)
+                .await
+                .map_err(GithubLogicalJobOrchestrationError::Blob)
+                .map_err(SelectedActivationFailure::Operation)?;
+        }
         lease
             .before_io(shutdown)
             .map_err(SelectedActivationFailure::Lease)?;
@@ -905,10 +916,11 @@ impl GithubLogicalJobOrchestrationService {
         job: crate::ValidatedLogicalJob<'_>,
         instance: &crate::ActivatedJobInstance,
         profiles: &GithubRunnerProfileCatalog,
-        runtime_features: &std::collections::BTreeSet<automata_ci_core::RunnerFeature>,
+        runtime_discovery: &RuntimeRequirementDiscovery,
         activation_evaluator: &GithubLogicalActivationEvaluator,
         permission_ceiling: Option<&automata_ci_store::ReusableWorkflowPermissionSnapshot>,
-    ) -> Result<(BlobPayload, BlobPayload), GithubLogicalJobOrchestrationError> {
+    ) -> Result<(BlobPayload, BlobPayload, Vec<BlobPayload>), GithubLogicalJobOrchestrationError>
+    {
         let runtime_key = instance_object_key(prepared.target(), instance, "runtime-context.pb")?;
         let runtime_bytes = automata_ci_protocol_protobuf::encode_job_runtime_context(
             instance.runtime_context(),
@@ -939,6 +951,11 @@ impl GithubLogicalJobOrchestrationService {
         if let Some(actor) = prepared.execution().triggering_actor() {
             execution = execution.with_triggering_actor(actor);
         }
+        let (action_payloads, action_graph) =
+            repository_action_payloads(prepared.target(), instance, runtime_discovery)?;
+        if let Some(graph) = action_graph {
+            execution = execution.with_windows_action_graph(graph);
+        }
         let job_id = deterministic_job_id(prepared.target(), instance);
         let mut projection = ProjectGithubLogicalJobRequest::new(
             job,
@@ -953,7 +970,7 @@ impl GithubLogicalJobOrchestrationService {
             prepared.runtime_policy().policy().resource_policy(),
         )
         .with_trust_snapshot(prepared.execution().trust_snapshot())
-        .with_runtime_features(runtime_features.iter().cloned())
+        .with_runtime_features(runtime_discovery.features().iter().cloned())
         .with_activation_evaluation(activation_evaluator, prepared.status());
         if let Some(permission_ceiling) = permission_ceiling {
             projection = projection.with_permission_ceiling(permission_ceiling);
@@ -975,7 +992,7 @@ impl GithubLogicalJobOrchestrationService {
                 .map_err(|_| GithubLogicalJobOrchestrationError::Internal)?,
             Bytes::from(encoded_job),
         );
-        Ok((runtime_payload, job_payload))
+        Ok((runtime_payload, job_payload, action_payloads))
     }
 }
 
@@ -1479,6 +1496,52 @@ fn instance_object_key(
         instance.identity().matrix_digest(),
     ))
     .map_err(|_| GithubLogicalJobOrchestrationError::Internal)
+}
+
+fn repository_action_payloads(
+    target: &LogicalJobOrchestrationTarget,
+    instance: &crate::ActivatedJobInstance,
+    discovery: &RuntimeRequirementDiscovery,
+) -> Result<
+    (Vec<BlobPayload>, Option<WindowsRepositoryActionGraph>),
+    GithubLogicalJobOrchestrationError,
+> {
+    if discovery.actions().is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    let media_type = MediaType::new(WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE)
+        .map_err(|_| GithubLogicalJobOrchestrationError::Internal)?;
+    let mut payloads = Vec::with_capacity(discovery.actions().len());
+    let mut archives = Vec::with_capacity(discovery.actions().len());
+    for (ordinal, action) in discovery.actions().iter().enumerate() {
+        let prepared = action.prepared();
+        let key = instance_object_key(
+            target,
+            instance,
+            &format!("action-{ordinal:04}-{}.tar.gz", prepared.archive_digest()),
+        )?;
+        let payload = BlobPayload::from_bytes(key, media_type.clone(), prepared.archive().clone());
+        if payload.descriptor().digest() != prepared.archive_digest() {
+            return Err(GithubLogicalJobOrchestrationError::Internal);
+        }
+        let reference = descriptor_content_reference(payload.descriptor());
+        let ordinal =
+            u32::try_from(ordinal).map_err(|_| GithubLogicalJobOrchestrationError::Internal)?;
+        archives.push(
+            WindowsRepositoryActionArchive::new(
+                ordinal,
+                action.key_sha256(),
+                prepared.subpath(),
+                reference,
+                action.facts(),
+            )
+            .map_err(|_| GithubLogicalJobOrchestrationError::Internal)?,
+        );
+        payloads.push(payload);
+    }
+    let graph = WindowsRepositoryActionGraph::new(archives)
+        .map_err(|_| GithubLogicalJobOrchestrationError::Internal)?;
+    Ok((payloads, Some(graph)))
 }
 
 fn deterministic_job_id(

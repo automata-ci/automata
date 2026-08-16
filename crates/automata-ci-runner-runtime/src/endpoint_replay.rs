@@ -10,10 +10,11 @@ use std::{
 
 use automata_ci_core::{LeaseGuard, OperationId, RunnerSessionId};
 use automata_ci_execution::{
-    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, ExecutionCommand,
-    ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput, ExecutionSignal,
-    ExecutionStage, SandboxCapability, SandboxCustody, SandboxInspection, SandboxProvider,
-    SandboxState, SignalRequest, TargetPath, TargetPlatform, WaitRequest,
+    ActionGraphMaterializationRequest, Cancellation, CancellationDisposition, CopyFromRequest,
+    CopyToRequest, ExecutionCommand, ExecutionEndpoint, ExecutionError, ExecutionErrorKind,
+    ExecutionOutput, ExecutionSignal, ExecutionStage, SandboxCapability, SandboxCustody,
+    SandboxInspection, SandboxProvider, SandboxState, SealedActionReadRequest, SealedActionTree,
+    SignalRequest, TargetPath, TargetPlatform, WaitRequest,
 };
 use automata_ci_protocol::RunnerSlotOrdinal;
 use automata_ci_runner_journal::{
@@ -31,7 +32,7 @@ use zeroize::Zeroizing;
 
 use crate::{ExecutionEventError, content::ContentOperationCoordinator, endpoint_result};
 
-const ENDPOINT_REPLAY_SCHEMA_VERSION: u16 = 2;
+const ENDPOINT_REPLAY_SCHEMA_VERSION: u16 = 3;
 const FINGERPRINT_DOMAIN: &[u8] = b"automata-ci/runner/endpoint-request";
 
 pub(crate) struct DurableExecutionEndpoint {
@@ -481,6 +482,14 @@ impl DurableExecutionEndpoint {
         fingerprint.bytes(operation_id.as_uuid().as_bytes());
         fingerprint
     }
+
+    fn exact_sandbox_binding(
+        &self,
+        sandbox: &automata_ci_execution::SandboxHandle,
+        generation: automata_ci_execution::SandboxGeneration,
+    ) -> bool {
+        sandbox == self.inspection.handle() && generation == self.inspection.generation()
+    }
 }
 
 impl fmt::Debug for DurableExecutionEndpoint {
@@ -510,20 +519,7 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
         cancellation: &dyn Cancellation,
     ) -> Result<ExecutionOutput, ExecutionError> {
         let mut fingerprint = self.fingerprint(EndpointOperationKind::Exec, request.operation_id());
-        fingerprint.target_path(request.argv().program());
-        fingerprint.usize(request.argv().arguments().len());
-        for argument in request.argv().arguments() {
-            fingerprint.text(argument);
-        }
-        fingerprint.target_path(request.working_directory());
-        fingerprint.usize(request.environment().values().len());
-        for variable in request.environment().values() {
-            fingerprint.text(variable.name().as_str());
-            fingerprint.text(variable.value().expose());
-            fingerprint.byte(u8::from(variable.is_secret()));
-        }
-        fingerprint.duration(request.timeout());
-        fingerprint.usize(request.output_limit());
+        fingerprint.command(request);
         let request_digest = fingerprint.finish();
         let reservation = endpoint_result::exec_reservation(request).ok_or_else(|| {
             execution_error(ExecutionErrorKind::InvalidState, ExecutionStage::Exec)
@@ -632,6 +628,115 @@ impl ExecutionEndpoint for DurableExecutionEndpoint {
             |observed| self.inner.copy_from(request, observed),
             |result| endpoint_result::encode_bytes(result, request),
             |encoded| endpoint_result::decode_bytes(encoded, request),
+        )
+    }
+
+    fn materialize_action_graph(
+        &self,
+        request: &ActionGraphMaterializationRequest,
+        cancellation: &dyn Cancellation,
+    ) -> Result<automata_ci_execution::SealedActionGraph, ExecutionError> {
+        if !self.exact_sandbox_binding(request.sandbox(), request.generation()) {
+            return Err(execution_error(
+                ExecutionErrorKind::InvalidState,
+                ExecutionStage::MaterializeAction,
+            ));
+        }
+        let mut fingerprint = self.fingerprint(
+            EndpointOperationKind::MaterializeActionGraph,
+            request.operation_id(),
+        );
+        fingerprint.action_graph(request);
+        let reservation = endpoint_result::sealed_graph_reservation(request).ok_or_else(|| {
+            execution_error(
+                ExecutionErrorKind::InvalidState,
+                ExecutionStage::MaterializeAction,
+            )
+        })?;
+        self.run(
+            request.operation_id(),
+            EndpointOperationKind::MaterializeActionGraph,
+            fingerprint.finish(),
+            reservation,
+            ExecutionStage::MaterializeAction,
+            cancellation,
+            |observed| self.inner.materialize_action_graph(request, observed),
+            |result| endpoint_result::encode_sealed_graph(result, request),
+            |encoded| endpoint_result::decode_sealed_graph(encoded, request),
+        )
+    }
+
+    fn read_sealed_action(
+        &self,
+        request: &SealedActionReadRequest,
+        cancellation: &dyn Cancellation,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        if !self.exact_sandbox_binding(request.tree().sandbox(), request.tree().generation()) {
+            return Err(execution_error(
+                ExecutionErrorKind::InvalidState,
+                ExecutionStage::ReadSealedAction,
+            ));
+        }
+        let mut fingerprint = self.fingerprint(
+            EndpointOperationKind::ReadSealedAction,
+            request.operation_id(),
+        );
+        fingerprint.sealed_tree(request.tree());
+        fingerprint.text(request.relative_path());
+        fingerprint.usize(request.byte_limit());
+        let reservation = endpoint_result::sealed_read_reservation(request).ok_or_else(|| {
+            execution_error(
+                ExecutionErrorKind::InvalidState,
+                ExecutionStage::ReadSealedAction,
+            )
+        })?;
+        self.run(
+            request.operation_id(),
+            EndpointOperationKind::ReadSealedAction,
+            fingerprint.finish(),
+            reservation,
+            ExecutionStage::ReadSealedAction,
+            cancellation,
+            |observed| self.inner.read_sealed_action(request, observed),
+            |result| endpoint_result::encode_sealed_read(result, request),
+            |encoded| endpoint_result::decode_sealed_read(encoded, request),
+        )
+    }
+
+    fn exec_sealed_action(
+        &self,
+        request: &ExecutionCommand,
+        tree: &SealedActionTree,
+        cancellation: &dyn Cancellation,
+    ) -> Result<ExecutionOutput, ExecutionError> {
+        if !self.exact_sandbox_binding(tree.sandbox(), tree.generation()) {
+            return Err(execution_error(
+                ExecutionErrorKind::InvalidState,
+                ExecutionStage::ExecSealedAction,
+            ));
+        }
+        let mut fingerprint = self.fingerprint(
+            EndpointOperationKind::ExecSealedAction,
+            request.operation_id(),
+        );
+        fingerprint.command(request);
+        fingerprint.sealed_tree(tree);
+        let reservation = endpoint_result::sealed_exec_reservation(request).ok_or_else(|| {
+            execution_error(
+                ExecutionErrorKind::InvalidState,
+                ExecutionStage::ExecSealedAction,
+            )
+        })?;
+        self.run(
+            request.operation_id(),
+            EndpointOperationKind::ExecSealedAction,
+            fingerprint.finish(),
+            reservation,
+            ExecutionStage::ExecSealedAction,
+            cancellation,
+            |observed| self.inner.exec_sealed_action(request, tree, observed),
+            |result| endpoint_result::encode_sealed_exec(result, request),
+            |encoded| endpoint_result::decode_sealed_exec(encoded, request),
         )
     }
 }
@@ -769,6 +874,70 @@ impl Fingerprint {
         self.text(value.as_str());
     }
 
+    fn digest(&mut self, value: automata_ci_core::Sha256Digest) {
+        self.bytes(value.as_bytes());
+    }
+
+    fn sandbox(&mut self, value: &automata_ci_execution::SandboxHandle) {
+        self.text(value.provider().as_str());
+        self.text(value.opaque());
+    }
+
+    fn command(&mut self, request: &ExecutionCommand) {
+        self.target_path(request.argv().program());
+        self.usize(request.argv().arguments().len());
+        for argument in request.argv().arguments() {
+            self.text(argument);
+        }
+        self.target_path(request.working_directory());
+        self.usize(request.environment().values().len());
+        for variable in request.environment().values() {
+            self.text(variable.name().as_str());
+            self.text(variable.value().expose());
+            self.byte(u8::from(variable.is_secret()));
+        }
+        self.duration(request.timeout());
+        self.usize(request.output_limit());
+    }
+
+    fn action_graph(&mut self, request: &ActionGraphMaterializationRequest) {
+        self.sandbox(request.sandbox());
+        self.u64(request.generation().get());
+        self.digest(request.plan_sha256());
+        self.digest(request.graph_sha256());
+        let policy = request.archive_policy();
+        self.u64(u64::from(policy.maximum_entries()));
+        self.u64(policy.maximum_file_bytes());
+        self.u64(policy.maximum_expanded_bytes());
+        self.u16(policy.maximum_depth());
+        self.u16(policy.maximum_path_bytes());
+        self.usize(request.archives().len());
+        for archive in request.archives() {
+            self.u64(u64::from(archive.ordinal()));
+            self.digest(archive.action_key_sha256());
+            self.text(archive.subpath());
+            self.target_path(archive.destination());
+            self.usize(archive.content().len());
+            self.digest(archive.sha256());
+            let facts = archive.facts();
+            self.u64(u64::from(facts.entry_count()));
+            self.u64(u64::from(facts.regular_file_count()));
+            self.u64(facts.expanded_bytes());
+            self.u64(facts.maximum_regular_file_bytes());
+            self.u16(facts.maximum_depth());
+        }
+    }
+
+    fn sealed_tree(&mut self, tree: &SealedActionTree) {
+        self.sandbox(tree.sandbox());
+        self.u64(tree.generation().get());
+        self.text(tree.graph_opaque());
+        self.digest(tree.graph_sha256());
+        self.u64(u64::from(tree.ordinal()));
+        self.target_path(tree.root());
+        self.digest(tree.receipt_sha256());
+    }
+
     fn finish(self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.0.finalize().into())
     }
@@ -781,6 +950,9 @@ const fn operation_kind_tag(kind: EndpointOperationKind) -> u8 {
         EndpointOperationKind::Wait => 2,
         EndpointOperationKind::CopyTo => 3,
         EndpointOperationKind::CopyFrom => 4,
+        EndpointOperationKind::MaterializeActionGraph => 5,
+        EndpointOperationKind::ReadSealedAction => 6,
+        EndpointOperationKind::ExecSealedAction => 7,
     }
 }
 
@@ -797,4 +969,245 @@ fn map_event_error(error: &ExecutionEventError, stage: ExecutionStage) -> Execut
         }
     };
     execution_error(kind, stage)
+}
+
+#[cfg(test)]
+mod tests {
+    use automata_ci_core::{
+        JobContentReference, Sha256Digest, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+        WindowsActionArchiveFacts, WindowsRepositoryActionArchive, WindowsRepositoryActionGraph,
+    };
+    use automata_ci_execution::{
+        ActionArchiveMaterialization, ProviderId, SandboxGeneration, SandboxHandle,
+    };
+
+    use super::*;
+
+    fn digest(bytes: &[u8]) -> Sha256Digest {
+        Sha256Digest::from_bytes(Sha256::digest(bytes).into())
+    }
+
+    fn graph_request(
+        content: &[u8],
+        sandbox_opaque: &str,
+        generation: u64,
+        plan_marker: u8,
+        action_marker: u8,
+        subpath: &str,
+        destination: &str,
+    ) -> ActionGraphMaterializationRequest {
+        let action_key_sha256 = Sha256Digest::from_bytes([action_marker; 32]);
+        let content_sha256 = digest(content);
+        let facts = WindowsActionArchiveFacts::new(1, 1, 16, 16, 1).expect("facts");
+        let planned = WindowsRepositoryActionArchive::new(
+            0,
+            action_key_sha256,
+            subpath,
+            JobContentReference::new(
+                format!("windows-actions/{plan_marker:02x}.tar.gz"),
+                content_sha256,
+                u64::try_from(content.len()).expect("archive size"),
+                WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+            ),
+            facts,
+        )
+        .expect("planned archive");
+        let plan_sha256 = WindowsRepositoryActionGraph::new(vec![planned])
+            .expect("planned graph")
+            .graph_sha256();
+        let archive = ActionArchiveMaterialization::new(
+            0,
+            action_key_sha256,
+            subpath,
+            TargetPath::windows(destination).expect("destination"),
+            content.to_vec(),
+            content_sha256,
+            facts,
+        )
+        .expect("archive");
+        ActionGraphMaterializationRequest::new(
+            OperationId::new(),
+            SandboxHandle::new(
+                ProviderId::new("windows-hyperv").expect("provider"),
+                sandbox_opaque,
+            )
+            .expect("sandbox"),
+            SandboxGeneration::new(generation).expect("generation"),
+            plan_sha256,
+            vec![archive],
+        )
+        .expect("graph request")
+    }
+
+    fn graph_fingerprint(request: &ActionGraphMaterializationRequest) -> [u8; 32] {
+        let mut fingerprint = Fingerprint::new();
+        fingerprint.action_graph(request);
+        *fingerprint.finish()
+    }
+
+    fn tree(
+        request: &ActionGraphMaterializationRequest,
+        graph_opaque: &str,
+        root: &str,
+        receipt_marker: u8,
+    ) -> SealedActionTree {
+        SealedActionTree::new(
+            request.sandbox().clone(),
+            request.generation(),
+            graph_opaque,
+            request.graph_sha256(),
+            0,
+            TargetPath::windows(root).expect("tree root"),
+            Sha256Digest::from_bytes([receipt_marker; 32]),
+        )
+        .expect("tree")
+    }
+
+    fn sealed_read_fingerprint(tree: &SealedActionTree, path: &str, limit: usize) -> [u8; 32] {
+        let mut fingerprint = Fingerprint::new();
+        fingerprint.sealed_tree(tree);
+        fingerprint.text(path);
+        fingerprint.usize(limit);
+        *fingerprint.finish()
+    }
+
+    fn command(argument: &str) -> ExecutionCommand {
+        ExecutionCommand::new(
+            OperationId::new(),
+            automata_ci_execution::ExecutionArgv::new(
+                TargetPath::windows(r"C:\Program Files\nodejs\node.exe").expect("program"),
+                vec![argument.to_owned()],
+            )
+            .expect("argv"),
+            TargetPath::windows(r"C:\actions\0000").expect("working directory"),
+            automata_ci_execution::ExecutionEnvironment::empty(),
+            Duration::from_secs(30),
+            4096,
+        )
+        .expect("command")
+    }
+
+    fn sealed_exec_fingerprint(command: &ExecutionCommand, tree: &SealedActionTree) -> [u8; 32] {
+        let mut fingerprint = Fingerprint::new();
+        fingerprint.command(command);
+        fingerprint.sealed_tree(tree);
+        *fingerprint.finish()
+    }
+
+    #[test]
+    fn sealed_action_operation_tags_are_closed_and_disjoint() {
+        assert_eq!(
+            [
+                EndpointOperationKind::Exec,
+                EndpointOperationKind::Signal,
+                EndpointOperationKind::Wait,
+                EndpointOperationKind::CopyTo,
+                EndpointOperationKind::CopyFrom,
+                EndpointOperationKind::MaterializeActionGraph,
+                EndpointOperationKind::ReadSealedAction,
+                EndpointOperationKind::ExecSealedAction,
+            ]
+            .map(operation_kind_tag),
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn graph_replay_fingerprint_binds_content_and_sandbox_generation() {
+        let baseline = graph_request(
+            b"first archive",
+            "sandbox-a",
+            7,
+            0x31,
+            0x41,
+            "",
+            r"C:\actions\0000",
+        );
+        let changed_content = graph_request(
+            b"other archive",
+            "sandbox-a",
+            7,
+            0x31,
+            0x41,
+            "",
+            r"C:\actions\0000",
+        );
+        let changed_binding = graph_request(
+            b"first archive",
+            "sandbox-b",
+            8,
+            0x31,
+            0x41,
+            "",
+            r"C:\actions\0000",
+        );
+        let changed_identity = graph_request(
+            b"first archive",
+            "sandbox-a",
+            7,
+            0x32,
+            0x42,
+            "nested",
+            r"C:\actions\0001",
+        );
+        let baseline = graph_fingerprint(&baseline);
+
+        assert_ne!(baseline, graph_fingerprint(&changed_content));
+        assert_ne!(baseline, graph_fingerprint(&changed_binding));
+        assert_ne!(baseline, graph_fingerprint(&changed_identity));
+    }
+
+    #[test]
+    fn sealed_tree_replay_fingerprint_binds_handle_receipt_path_and_limit() {
+        let graph = graph_request(
+            b"first archive",
+            "sandbox-a",
+            7,
+            0x31,
+            0x41,
+            "",
+            r"C:\actions\0000",
+        );
+        let baseline_tree = tree(&graph, "sealed-graph-a", r"C:\actions\0000", 0x51);
+        let changed_handle = tree(&graph, "sealed-graph-b", r"C:\actions\0000", 0x51);
+        let changed_receipt = tree(&graph, "sealed-graph-a", r"C:\actions\0000", 0x52);
+        let changed_root = tree(&graph, "sealed-graph-a", r"C:\actions\0001", 0x51);
+        let baseline = sealed_read_fingerprint(&baseline_tree, "action.yml", 4096);
+
+        for changed in [
+            sealed_read_fingerprint(&changed_handle, "action.yml", 4096),
+            sealed_read_fingerprint(&changed_receipt, "action.yml", 4096),
+            sealed_read_fingerprint(&changed_root, "action.yml", 4096),
+            sealed_read_fingerprint(&baseline_tree, "action.yaml", 4096),
+            sealed_read_fingerprint(&baseline_tree, "action.yml", 2048),
+        ] {
+            assert_ne!(baseline, changed);
+        }
+    }
+
+    #[test]
+    fn sealed_exec_replay_fingerprint_binds_command_and_tree() {
+        let graph = graph_request(
+            b"first archive",
+            "sandbox-a",
+            7,
+            0x31,
+            0x41,
+            "",
+            r"C:\actions\0000",
+        );
+        let baseline_tree = tree(&graph, "sealed-graph-a", r"C:\actions\0000", 0x51);
+        let changed_tree = tree(&graph, "sealed-graph-a", r"C:\actions\0000", 0x52);
+        let baseline_command = command("main.js");
+        let baseline = sealed_exec_fingerprint(&baseline_command, &baseline_tree);
+
+        assert_ne!(
+            baseline,
+            sealed_exec_fingerprint(&command("post.js"), &baseline_tree)
+        );
+        assert_ne!(
+            baseline,
+            sealed_exec_fingerprint(&baseline_command, &changed_tree)
+        );
+    }
 }

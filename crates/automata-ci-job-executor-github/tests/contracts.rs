@@ -121,12 +121,13 @@ fn extracted_executor_seams_retain_operation_identity_coordinates() {
         .split_whitespace()
         .collect::<String>();
     for expected in [
+        "OperationPurpose::MaterializeActionGraph,0",
+        ".materialize_action_graph(&request,&ProviderCancellationBridge(cancellation))",
+        ".exec_sealed_action(&command,sealed,&ProviderCancellationBridge(cancellation))",
         "letprepare_ordinal=index.checked_add(1).ok_or_else(invalid_job)?;",
         "OperationPurpose::PrepareDirectory,prepare_ordinal",
         "OperationPurpose::CopyActionArchive,index",
-        "OperationPurpose::VerifyActionArchive,index",
         "OperationPurpose::ExtractActionArchive,index",
-        "OperationPurpose::VerifyActionTree,index",
         "container_runtime::sandbox_spec(&self.config,request,operation_id,generation",
     ] {
         assert!(
@@ -151,7 +152,7 @@ fn extracted_executor_seams_retain_operation_identity_coordinates() {
         action_content
             .matches("ExecutionCommand::new(operation_id,")
             .count(),
-        5
+        2
     );
 
     let container_runtime = include_str!("../src/container_runtime.rs")

@@ -37,6 +37,22 @@ pub trait ActionPreparationPort: fmt::Debug + Send + Sync {
         &self,
         request: ActionPreparationRequest<'_>,
     ) -> Result<PreparedAction, ActionPreparationError>;
+
+    /// Decodes a repository action solely from immutable bytes already
+    /// committed into `JobIR`, without SCM or credential access.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized failure when the implementation cannot consume the
+    /// pre-scheduling artifact or any exact identity/metadata check fails.
+    async fn prepare_planned(
+        &self,
+        _request: PlannedActionPreparationRequest<'_>,
+    ) -> Result<PreparedAction, ActionPreparationError> {
+        Err(ActionPreparationError::new(
+            crate::ActionPreparationErrorKind::UnsupportedReference,
+        ))
+    }
 }
 
 /// Loads and verifies immutable content explicitly referenced by `JobIR`.
@@ -74,6 +90,57 @@ impl<'a> ActionPreparationRequest<'a> {
     #[must_use]
     pub const fn reference(self) -> &'a ActionReference {
         self.reference
+    }
+}
+
+/// Credential-free immutable action bytes committed by pre-scheduling.
+#[derive(Clone, Copy, Debug)]
+pub struct PlannedActionPreparationRequest<'a> {
+    reference: &'a ActionReference,
+    archive: &'a Bytes,
+    archive_sha256: automata_ci_core::Sha256Digest,
+    subpath: &'a str,
+}
+
+impl<'a> PlannedActionPreparationRequest<'a> {
+    /// Binds a semantic reference to its exact admitted archive identity.
+    #[must_use]
+    pub const fn new(
+        reference: &'a ActionReference,
+        archive: &'a Bytes,
+        archive_sha256: automata_ci_core::Sha256Digest,
+        subpath: &'a str,
+    ) -> Self {
+        Self {
+            reference,
+            archive,
+            archive_sha256,
+            subpath,
+        }
+    }
+
+    /// Returns the exact repository action reference.
+    #[must_use]
+    pub const fn reference(self) -> &'a ActionReference {
+        self.reference
+    }
+
+    /// Returns immutable bytes loaded through the `JobIR` content port.
+    #[must_use]
+    pub const fn archive(self) -> &'a Bytes {
+        self.archive
+    }
+
+    /// Returns the exact admitted archive digest.
+    #[must_use]
+    pub const fn archive_sha256(self) -> automata_ci_core::Sha256Digest {
+        self.archive_sha256
+    }
+
+    /// Returns the canonical admitted archive subpath.
+    #[must_use]
+    pub const fn subpath(self) -> &'a str {
+        self.subpath
     }
 }
 
@@ -650,6 +717,8 @@ pub enum OperationPurpose {
     VerifyActionArchive = 13,
     /// Verifies the extracted Windows action tree contains no reparse point.
     VerifyActionTree = 14,
+    /// Atomically materializes the complete immutable Windows action graph.
+    MaterializeActionGraph = 15,
 }
 
 /// Derives deterministic IDs for retryable endpoint operations.

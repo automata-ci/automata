@@ -2,8 +2,15 @@
 
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
+use automata_ci_action::{
+    ActionBundleLimits, WindowsActionArchiveReport, validate_windows_materialization_archive,
+};
 use automata_ci_action_github::JavascriptRuntime;
-use automata_ci_core::{ActionReference, RunnerFeature};
+use automata_ci_core::{
+    ActionReference, MAX_WINDOWS_ACTION_GRAPH_ARCHIVES, MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES,
+    MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES, MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, RunnerFeature,
+    Sha256Digest, WindowsActionArchiveFacts, windows_repository_action_key_sha256,
+};
 use automata_ci_job_executor_github::{
     ActionPreparationErrorKind, ActionPreparationPort, ActionPreparationRequest, PreparedAction,
     PreparedActionExecution, PreparedCompositeStep, PreparedValue, static_shell_requirement,
@@ -19,9 +26,59 @@ const MAX_ACTION_INVOCATIONS: u32 = 10_000;
 #[derive(Default)]
 struct DiscoveryState {
     active: Vec<String>,
+    order: Vec<String>,
     invocations: u32,
     prepared: BTreeMap<String, PreparedAction>,
+    reports: BTreeMap<String, WindowsActionArchiveReport>,
+    key_digests: BTreeMap<String, Sha256Digest>,
+    compressed_bytes: u64,
+    expanded_bytes: u64,
+    regular_files: u64,
     features: std::collections::BTreeSet<RunnerFeature>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiscoveredRepositoryAction {
+    key_sha256: Sha256Digest,
+    prepared: PreparedAction,
+    facts: WindowsActionArchiveFacts,
+}
+
+impl DiscoveredRepositoryAction {
+    pub(crate) const fn key_sha256(&self) -> Sha256Digest {
+        self.key_sha256
+    }
+
+    pub(crate) const fn prepared(&self) -> &PreparedAction {
+        &self.prepared
+    }
+
+    pub(crate) const fn facts(&self) -> WindowsActionArchiveFacts {
+        self.facts
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeRequirementDiscovery {
+    features: std::collections::BTreeSet<RunnerFeature>,
+    actions: Vec<DiscoveredRepositoryAction>,
+}
+
+impl RuntimeRequirementDiscovery {
+    pub(crate) fn empty() -> Self {
+        Self {
+            features: std::collections::BTreeSet::new(),
+            actions: Vec::new(),
+        }
+    }
+
+    pub(crate) const fn features(&self) -> &std::collections::BTreeSet<RunnerFeature> {
+        &self.features
+    }
+
+    pub(crate) fn actions(&self) -> &[DiscoveredRepositoryAction] {
+        &self.actions
+    }
 }
 
 /// Sanitized failure while deriving immutable action requirements before scheduling.
@@ -49,7 +106,7 @@ pub(crate) async fn discover_runtime_requirements(
     references: &[ActionReference],
     cancellation: &CancellationToken,
     before_prepare: &mut (dyn FnMut() -> Result<(), AutonomousWorkflowLeaseError> + Send),
-) -> Result<std::collections::BTreeSet<RunnerFeature>, RuntimeRequirementDiscoveryError> {
+) -> Result<RuntimeRequirementDiscovery, RuntimeRequirementDiscoveryError> {
     let mut state = DiscoveryState::default();
     for reference in references {
         match reference {
@@ -69,9 +126,41 @@ pub(crate) async fn discover_runtime_requirements(
             }
         }
     }
-    Ok(state.features)
+    let mut discovered = Vec::with_capacity(state.order.len());
+    for key in state.order {
+        let prepared = state
+            .prepared
+            .remove(&key)
+            .ok_or(RuntimeRequirementDiscoveryError::Invalid)?;
+        let report = state
+            .reports
+            .remove(&key)
+            .ok_or(RuntimeRequirementDiscoveryError::Invalid)?;
+        let key_sha256 = state
+            .key_digests
+            .remove(&key)
+            .ok_or(RuntimeRequirementDiscoveryError::Invalid)?;
+        let facts = WindowsActionArchiveFacts::new(
+            report.entry_count(),
+            report.regular_file_count(),
+            report.expanded_bytes(),
+            report.maximum_regular_file_bytes(),
+            report.maximum_depth(),
+        )
+        .map_err(|_| RuntimeRequirementDiscoveryError::Invalid)?;
+        discovered.push(DiscoveredRepositoryAction {
+            key_sha256,
+            prepared,
+            facts,
+        });
+    }
+    Ok(RuntimeRequirementDiscovery {
+        features: state.features,
+        actions: discovered,
+    })
 }
 
+#[allow(clippy::too_many_lines)]
 fn discover_repository_action<'a>(
     actions: &'a dyn ActionPreparationPort,
     reference: &'a ActionReference,
@@ -113,6 +202,39 @@ fn discover_repository_action<'a>(
                     }
                     result = preparation => result.map_err(classify_preparation_error)?,
                 };
+                let report = validate_windows_materialization_archive(
+                    prepared.archive(),
+                    ActionBundleLimits::default(),
+                )
+                .map_err(|_| RuntimeRequirementDiscoveryError::Invalid)?;
+                let compressed = u64::try_from(prepared.archive().len())
+                    .map_err(|_| RuntimeRequirementDiscoveryError::Invalid)?;
+                state.compressed_bytes = state
+                    .compressed_bytes
+                    .checked_add(compressed)
+                    .ok_or(RuntimeRequirementDiscoveryError::Invalid)?;
+                state.expanded_bytes = state
+                    .expanded_bytes
+                    .checked_add(report.expanded_bytes())
+                    .ok_or(RuntimeRequirementDiscoveryError::Invalid)?;
+                state.regular_files = state
+                    .regular_files
+                    .checked_add(u64::from(report.regular_file_count()))
+                    .ok_or(RuntimeRequirementDiscoveryError::Invalid)?;
+                if state.order.len() >= MAX_WINDOWS_ACTION_GRAPH_ARCHIVES
+                    || state.compressed_bytes > MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES
+                    || state.expanded_bytes > MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES
+                    || state.regular_files > MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES
+                {
+                    return Err(RuntimeRequirementDiscoveryError::Invalid);
+                }
+                state.order.push(key.clone());
+                state.reports.insert(key.clone(), report);
+                state.key_digests.insert(
+                    key.clone(),
+                    windows_repository_action_key_sha256(reference)
+                        .map_err(|_| RuntimeRequirementDiscoveryError::Invalid)?,
+                );
                 state.prepared.insert(key.clone(), prepared.clone());
                 prepared
             };
@@ -227,7 +349,10 @@ mod tests {
     };
     use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
     use bytes::Bytes;
+    use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest as _, Sha256};
+    use std::io::Write as _;
+    use tar::{Builder, Header};
 
     use super::*;
 
@@ -270,7 +395,30 @@ mod tests {
     }
 
     fn action_with_definition(label: &str, definition: PreparedActionDefinition) -> PreparedAction {
-        let archive = Bytes::from(format!("prepared-{label}-archive"));
+        let metadata = format!("name: {label}\nruns:\n  using: node20\n  main: dist/index.js\n");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut archive = Builder::new(&mut encoder);
+            for (path, bytes) in [
+                ("repository/action.yml", metadata.as_bytes()),
+                (
+                    "repository/dist/index.js",
+                    b"console.log('fixture');".as_slice(),
+                ),
+            ] {
+                let mut header = Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_mtime(0);
+                header.set_cksum();
+                archive
+                    .append_data(&mut header, path, bytes)
+                    .expect("append archive entry");
+            }
+            archive.finish().expect("finish tar");
+        }
+        encoder.flush().expect("flush gzip");
+        let archive = Bytes::from(encoder.finish().expect("finish gzip"));
         let digest = Sha256Digest::from_bytes(Sha256::digest(&archive).into());
         PreparedAction::with_definition(digest, archive, "", definition).expect("prepared action")
     }
@@ -346,7 +494,7 @@ mod tests {
             checkpoints += 1;
             Ok(())
         };
-        let features = discover_runtime_requirements(
+        let discovery = discover_runtime_requirements(
             Some(&actions_port),
             &[root],
             &CancellationToken::new(),
@@ -355,7 +503,7 @@ mod tests {
         .await
         .expect("requirements");
         assert_eq!(
-            features,
+            discovery.features().clone(),
             std::collections::BTreeSet::from([
                 RunnerFeature::SHELL_STEPS,
                 RunnerFeature::BASH_SHELL,
@@ -366,6 +514,7 @@ mod tests {
                 RunnerFeature::REPOSITORY_ACTIONS,
             ])
         );
+        assert_eq!(discovery.actions().len(), 3);
         assert_eq!(actions.calls.lock().expect("calls").len(), 3);
         assert_eq!(checkpoints, 3);
     }

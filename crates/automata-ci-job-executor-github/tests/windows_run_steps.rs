@@ -300,13 +300,13 @@ async fn safe_windows_command_templates_execute_as_direct_argv() {
 }
 
 #[test]
-fn windows_action_steps_are_rejected_during_admission() {
+fn windows_action_steps_require_the_admitted_sealed_action_capability() {
     let fixture = Fixture::windows(Vec::new());
     let job = windows_envelope(vec![action_step("checkout", "actions/checkout")]);
 
     assert_eq!(
         fixture.executor.admit(&job),
-        Err(AdmissionRejection::InvalidJob)
+        Err(AdmissionRejection::CapabilityChanged)
     );
     assert_eq!(fixture.provider.counts(), (0, 0, 0));
 }

@@ -13,17 +13,16 @@ use automata_ci_core::{
 use automata_ci_execution::{
     NetworkPolicy, RootFilesystemPolicy, SandboxLaunch, SandboxPrivilegePolicy,
 };
+use automata_ci_protocol::WindowsRunnerAdmissionIssueRequest;
 use automata_ci_runner::product::{
     RunnerProductConfig, RunnerProductConfigError, WindowsEnrollmentAdmissionRequest,
     WindowsEnrollmentIntent, WindowsHostInputKind, WindowsImageAdmission,
     windows_enrollment_admission_request,
 };
 use base64::Engine as _;
-use ring::{
-    rand::SystemRandom,
-    signature::{Ed25519KeyPair, KeyPair as _},
-};
+use ring::{rand::SystemRandom, signature::Ed25519KeyPair};
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 
 static NEXT_EVIDENCE_ROOT: AtomicUsize = AtomicUsize::new(0);
 const BROKER_HOST_ID: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -39,7 +38,6 @@ fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) 
         RunnerFeature::JAVASCRIPT_ACTIONS,
         RunnerFeature::COMPOSITE_ACTIONS,
         RunnerFeature::REPOSITORY_ACTIONS,
-        RunnerFeature::LOCAL_ACTIONS,
         RunnerFeature::NODE24_ACTIONS,
     ] {
         assert!(
@@ -51,6 +49,14 @@ fn assert_admitted_action_features(request: &WindowsEnrollmentAdmissionRequest) 
             "active admission must prove exact registration feature {feature}"
         );
     }
+    assert!(
+        !request
+            .binding()
+            .capabilities()
+            .features()
+            .contains(&RunnerFeature::LOCAL_ACTIONS),
+        "workspace-local actions must remain ineligible on Windows"
+    );
 }
 
 fn assert_host_input_contract(request: &WindowsEnrollmentAdmissionRequest, config_path: &Path) {
@@ -165,6 +171,68 @@ impl EvidenceFixture {
         write_secure_fixture(&path, &bytes);
         path
     }
+
+    fn make_production_eligible(&mut self, now_millis: u64) {
+        let mut evidence_digests = BTreeSet::new();
+        for (field, name) in [
+            ("provenance", "provenance.json"),
+            ("sbom", "sbom.spdx.json"),
+            ("patch_report", "patch-report.json"),
+            ("revocations", "revocations.json"),
+        ] {
+            let path = self.root.join(name);
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).expect("read evidence"))
+                    .expect("parse evidence");
+            document
+                .as_object_mut()
+                .expect("evidence object")
+                .remove("candidate_fixture");
+            if field == "revocations" {
+                document["issued_at_unix_millis"] = serde_json::json!(now_millis - 60_000);
+                document["expires_at_unix_millis"] = serde_json::json!(now_millis + 600_000);
+            }
+            let bytes = serde_json::to_vec(&document).expect("serialize production evidence");
+            fs::write(&path, &bytes).expect("write production evidence");
+            evidence_digests.insert((field, sha256_hex(&bytes)));
+        }
+
+        let manifest_path = self.root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        for (field, digest) in evidence_digests {
+            manifest["evidence"][field]["sha256"] = serde_json::json!(digest);
+        }
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("serialize manifest");
+        fs::write(&manifest_path, &manifest_bytes).expect("write manifest");
+        let manifest_sha256 = sha256_hex(&manifest_bytes);
+
+        let lock_path = self.root.join("image.lock.json");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&fs::read(&lock_path).expect("read lock")).expect("parse lock");
+        lock["manifest_sha256"] = serde_json::json!(manifest_sha256.clone());
+        let lock_bytes = serde_json::to_vec(&lock).expect("serialize lock");
+        fs::write(&lock_path, &lock_bytes).expect("write lock");
+
+        self.config["windows_hyperv"]["image_contract"]["manifest_sha256"] =
+            serde_json::json!(manifest_sha256.clone());
+        self.config["windows_hyperv"]["image_contract"]["lock_sha256"] =
+            serde_json::json!(sha256_hex(&lock_bytes));
+        self.config["inventory"]["environment_profiles"][0]["manifest_sha256"] =
+            serde_json::json!(manifest_sha256);
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 impl Drop for EvidenceFixture {
@@ -178,15 +246,18 @@ impl Drop for EvidenceFixture {
 struct TestPromotionPayload {
     schema_version: u16,
     decision: &'static str,
+    promotion_serial: u64,
+    issued_at_unix_millis: u64,
+    expires_at_unix_millis: u64,
     profile_id: &'static str,
     base_image: String,
     image: String,
-    manifest_sha256: &'static str,
-    lock_sha256: &'static str,
-    provenance_sha256: &'static str,
-    sbom_sha256: &'static str,
-    patch_report_sha256: &'static str,
-    revocations_sha256: &'static str,
+    manifest_sha256: String,
+    lock_sha256: String,
+    provenance_sha256: String,
+    sbom_sha256: String,
+    patch_report_sha256: String,
+    revocations_sha256: String,
     revocation_generation: u64,
     provenance_accepted: bool,
     sbom_accepted: bool,
@@ -194,10 +265,17 @@ struct TestPromotionPayload {
     revocations_accepted: bool,
 }
 
-fn add_promotion(fixture: &mut EvidenceFixture) {
+fn add_promotion(fixture: &mut EvidenceFixture, now_millis: u64) {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root.join("manifest.json")).expect("read current manifest"),
+    )
+    .expect("parse current manifest");
     let payload = TestPromotionPayload {
-        schema_version: 1,
+        schema_version: 2,
         decision: "promote",
+        promotion_serial: 7,
+        issued_at_unix_millis: now_millis - 1_000,
+        expires_at_unix_millis: now_millis + 300_000,
         profile_id: "automata.dev/windows-2025-x64-hyperv-v1",
         base_image: format!(
             "mcr.microsoft.com/windows/servercore@sha256:{}",
@@ -207,12 +285,30 @@ fn add_promotion(fixture: &mut EvidenceFixture) {
             "registry.example/automata/windows-runner@sha256:{}",
             "1".repeat(64)
         ),
-        manifest_sha256: "8469373351b458633450cd4f28e24b18fa756832a7917c9d8ae2a82ad6241c23",
-        lock_sha256: "181bc78f2993a8221f0ab4aa6d01f53ef05b02ac1755ffd84c1c0abf0f3c6747",
-        provenance_sha256: "8450f524b6efd5cc9017b805dd8803a1079dbc222c23ad4e890994d662f8bb25",
-        sbom_sha256: "280ba2ce2e4ce8767a7392fbc8176e6d98aebaf6e6e4595e49d88eeab6fcb655",
-        patch_report_sha256: "fd34d37ea605013011baa61331834de11ffd476584a4ba9cc2bc09ed0356d9fb",
-        revocations_sha256: "f08001567b8098fe63060a8eeaf12fb2e9dcb4be383c2480f9d887728ed3c223",
+        manifest_sha256: fixture.config["windows_hyperv"]["image_contract"]["manifest_sha256"]
+            .as_str()
+            .expect("manifest digest")
+            .to_owned(),
+        lock_sha256: fixture.config["windows_hyperv"]["image_contract"]["lock_sha256"]
+            .as_str()
+            .expect("lock digest")
+            .to_owned(),
+        provenance_sha256: manifest["evidence"]["provenance"]["sha256"]
+            .as_str()
+            .expect("provenance digest")
+            .to_owned(),
+        sbom_sha256: manifest["evidence"]["sbom"]["sha256"]
+            .as_str()
+            .expect("SBOM digest")
+            .to_owned(),
+        patch_report_sha256: manifest["evidence"]["patch_report"]["sha256"]
+            .as_str()
+            .expect("patch digest")
+            .to_owned(),
+        revocations_sha256: manifest["evidence"]["revocations"]["sha256"]
+            .as_str()
+            .expect("revocation digest")
+            .to_owned(),
         revocation_generation: 1,
         provenance_accepted: true,
         sbom_accepted: true,
@@ -234,8 +330,8 @@ fn add_promotion(fixture: &mut EvidenceFixture) {
     write_secure_fixture(&envelope_path, &envelope_bytes);
     fixture.config["windows_hyperv"]["image_contract"]["promotion"] = serde_json::json!({
         "envelope_path": envelope_path.to_string_lossy(),
-        "key_id": "test.windows-image-promotion.v1",
-        "public_key_base64": encoder.encode(key.public_key().as_ref())
+        "trust_bundle_id": "windows-promotion.test.v1",
+        "key_id": "test.windows-image-promotion.v1"
     });
 }
 
@@ -406,19 +502,47 @@ fn candidate_evidence_is_verified_but_does_not_publish_action_capabilities() {
 }
 
 #[test]
+fn a_signed_candidate_fixture_is_permanently_ineligible_for_broker_submission() {
+    let mut fixture = EvidenceFixture::new();
+    let now_millis = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_millis(),
+    )
+    .expect("time fits u64");
+    add_promotion(&mut fixture, now_millis);
+
+    assert_eq!(
+        RunnerProductConfig::load(&fixture.write_config("signed-candidate-runner.json"))
+            .expect_err("candidate fixture marker must win before signature handling"),
+        RunnerProductConfigError::InvalidWindowsImage
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
 fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admission() {
     let mut fixture = EvidenceFixture::new();
-    add_promotion(&mut fixture);
+    let now_millis = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_millis(),
+    )
+    .expect("time fits u64");
+    fixture.make_production_eligible(now_millis);
+    add_promotion(&mut fixture, now_millis);
     let config_path = fixture.write_config("promoted-runner.json");
-    let config =
-        RunnerProductConfig::load(&config_path).expect("signed external promotion verifies");
+    let config = RunnerProductConfig::load(&config_path)
+        .expect("production evidence envelope is ready for broker verification");
 
     assert_eq!(
         config
             .windows_hyperv()
             .expect("Windows provider")
             .image_admission(),
-        WindowsImageAdmission::Promoted
+        WindowsImageAdmission::PromotionPending
     );
     for feature in [
         RunnerFeature::JAVASCRIPT_ACTIONS,
@@ -457,10 +581,8 @@ fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admissio
         windows.runtime_sha256()
     );
     assert_eq!(
-        request.binding().promotion_public_key_sha256(),
-        windows
-            .promotion_public_key_sha256()
-            .expect("verified promotion public key")
+        request.binding().promotion_trust_bundle_id(),
+        "windows-promotion.test.v1"
     );
     assert_eq!(
         request.binding().promotion_envelope_sha256(),
@@ -496,6 +618,33 @@ fn exact_external_promotion_keeps_actions_pending_for_active_enrollment_admissio
     );
     assert_admitted_action_features(&request);
     assert_host_input_contract(&request, &config_path);
+
+    let issue = request
+        .to_protocol_issue_request()
+        .expect("build canonical broker issue request");
+    let canonical = issue.canonical_bytes().expect("canonical issue bytes");
+    assert_eq!(
+        WindowsRunnerAdmissionIssueRequest::from_canonical_bytes(&canonical)
+            .expect("broker parses exact canonical bytes"),
+        issue
+    );
+    let binding = request
+        .to_protocol_binding()
+        .expect("build signed-envelope binding");
+    assert_eq!(
+        binding.broker_profile().request_binding_sha256(),
+        issue.request_sha256().expect("issue request digest")
+    );
+    let mut forged: serde_json::Value =
+        serde_json::from_slice(&canonical).expect("issue request JSON");
+    forged["forged_evidence_sha256"] = serde_json::json!("f".repeat(64));
+    assert!(
+        WindowsRunnerAdmissionIssueRequest::from_canonical_bytes(
+            &serde_json::to_vec(&forged).expect("forged issue JSON"),
+        )
+        .is_err(),
+        "runner-supplied evidence and unknown fields must not enter issuance"
+    );
 }
 
 #[test]
@@ -512,7 +661,7 @@ fn evidence_verification_rejects_a_same_basename_tool_substitution() {
 }
 
 #[test]
-fn evidence_verification_fails_closed_on_missing_evidence_and_bad_signature() {
+fn evidence_verification_fails_closed_on_missing_evidence_and_malformed_authenticator() {
     let fixture = EvidenceFixture::new();
     fs::remove_file(fixture.root.join("sbom.spdx.json")).expect("remove SBOM fixture");
     assert_eq!(
@@ -522,19 +671,27 @@ fn evidence_verification_fails_closed_on_missing_evidence_and_bad_signature() {
     );
 
     let mut fixture = EvidenceFixture::new();
-    add_promotion(&mut fixture);
+    let now_millis = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("current time")
+            .as_millis(),
+    )
+    .expect("time fits u64");
+    fixture.make_production_eligible(now_millis);
+    add_promotion(&mut fixture, now_millis);
     let envelope_path = fixture.root.join("promotion.json");
     let mut envelope: serde_json::Value =
         serde_json::from_slice(&fs::read(&envelope_path).expect("read promotion envelope"))
             .expect("parse promotion envelope");
     envelope["signature_base64"] =
-        serde_json::json!(base64::engine::general_purpose::STANDARD.encode([0_u8; 64]));
+        serde_json::json!(base64::engine::general_purpose::STANDARD.encode([0_u8; 63]));
     let envelope_bytes =
         serde_json::to_vec(&envelope).expect("serialize corrupt promotion envelope");
     write_secure_fixture(&envelope_path, &envelope_bytes);
     assert_eq!(
-        RunnerProductConfig::load(&fixture.write_config("bad-signature-runner.json"))
-            .expect_err("an invalid promotion signature must fail closed"),
+        RunnerProductConfig::load(&fixture.write_config("malformed-authenticator-runner.json"))
+            .expect_err("a malformed promotion authenticator must fail fast"),
         RunnerProductConfigError::InvalidWindowsImage
     );
 }

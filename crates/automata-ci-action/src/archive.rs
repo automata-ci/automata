@@ -18,6 +18,51 @@ const DOCKERFILE: &[u8] = b"Dockerfile";
 const DOCKERFILE_LOWER: &[u8] = b"dockerfile";
 const TAR_BLOCK_BYTES: usize = 512;
 const TAR_BLOCK_BYTES_U64: u64 = TAR_BLOCK_BYTES as u64;
+const WINDOWS_MAX_ENTRY_DEPTH: usize = 64;
+const WINDOWS_MAX_REGULAR_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Exact bounded expansion facts reproduced while validating a Windows action
+/// archive before scheduling and again by the privileged materializer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowsActionArchiveReport {
+    entry_count: u32,
+    regular_file_count: u32,
+    expanded_bytes: u64,
+    maximum_regular_file_bytes: u64,
+    maximum_depth: u16,
+}
+
+impl WindowsActionArchiveReport {
+    /// Returns every tar entry counted against the archive ceiling.
+    #[must_use]
+    pub const fn entry_count(self) -> u32 {
+        self.entry_count
+    }
+
+    /// Returns the number of regular files in the archive.
+    #[must_use]
+    pub const fn regular_file_count(self) -> u32 {
+        self.regular_file_count
+    }
+
+    /// Returns the aggregate declared expanded bytes consumed by all entries.
+    #[must_use]
+    pub const fn expanded_bytes(self) -> u64 {
+        self.expanded_bytes
+    }
+
+    /// Returns the largest declared regular-file size.
+    #[must_use]
+    pub const fn maximum_regular_file_bytes(self) -> u64 {
+        self.maximum_regular_file_bytes
+    }
+
+    /// Returns the deepest materialized path below the archive root.
+    #[must_use]
+    pub const fn maximum_depth(self) -> u16 {
+        self.maximum_depth
+    }
+}
 
 /// Validates a compressed SCM archive and selects one action definition.
 ///
@@ -61,10 +106,11 @@ pub fn inspect_archive(
 ///
 /// Returns a bounded archive error for malformed input, unsafe Windows paths,
 /// links or special entries, case-fold collisions, or resource exhaustion.
+#[allow(clippy::too_many_lines)]
 pub fn validate_windows_materialization_archive(
     bytes: &[u8],
     limits: ActionBundleLimits,
-) -> Result<(), ActionArchiveError> {
+) -> Result<WindowsActionArchiveReport, ActionArchiveError> {
     if u64::try_from(bytes.len())
         .ok()
         .is_none_or(|length| length > limits.compressed().maximum_bytes())
@@ -79,6 +125,9 @@ pub fn validate_windows_materialization_archive(
     let mut expanded_bytes = 0_u64;
     let mut path_index_bytes = 0_usize;
     let mut saw_repository_entry = false;
+    let mut regular_file_count = 0_u32;
+    let mut maximum_regular_file_bytes = 0_u64;
+    let mut maximum_depth = 0_u16;
     let entries = archive
         .entries()
         .map_err(|_| ActionArchiveError::Malformed)?
@@ -126,6 +175,11 @@ pub fn validate_windows_materialization_archive(
         let (archive_root, relative) = components
             .split_first()
             .ok_or(ActionArchiveError::UnsafePath)?;
+        if relative.len() > WINDOWS_MAX_ENTRY_DEPTH {
+            return Err(ActionArchiveError::ResourceLimit);
+        }
+        maximum_depth = maximum_depth
+            .max(u16::try_from(relative.len()).map_err(|_| ActionArchiveError::ResourceLimit)?);
         if let Some(expected_root) = &root {
             if expected_root != archive_root {
                 return Err(ActionArchiveError::UnsafePath);
@@ -142,6 +196,15 @@ pub fn validate_windows_materialization_archive(
         )?;
 
         let declared_size = declared_size(&entry)?;
+        if entry_type.is_file() && declared_size > WINDOWS_MAX_REGULAR_FILE_BYTES {
+            return Err(ActionArchiveError::ResourceLimit);
+        }
+        if entry_type.is_file() {
+            regular_file_count = regular_file_count
+                .checked_add(1)
+                .ok_or(ActionArchiveError::ResourceLimit)?;
+            maximum_regular_file_bytes = maximum_regular_file_bytes.max(declared_size);
+        }
         expanded_bytes = checked_expanded_size(expanded_bytes, declared_size, limits)?;
         consume_entry(&mut entry, declared_size)?;
     }
@@ -150,7 +213,14 @@ pub fn validate_windows_materialization_archive(
         .maximum_expanded_bytes()
         .checked_sub(expanded_bytes)
         .ok_or(ActionArchiveError::ResourceLimit)?;
-    verify_trailing_zeros(&mut decoder, remaining_bytes)
+    verify_trailing_zeros(&mut decoder, remaining_bytes)?;
+    Ok(WindowsActionArchiveReport {
+        entry_count: u32::try_from(entry_count).map_err(|_| ActionArchiveError::ResourceLimit)?,
+        regular_file_count,
+        expanded_bytes,
+        maximum_regular_file_bytes,
+        maximum_depth,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -318,7 +388,7 @@ fn windows_short_name_shaped(stem: &[u8]) -> bool {
 /// # Errors
 ///
 /// Returns the same fail-closed errors as [`inspect_archive`].
-pub(crate) fn inspect_archive_bytes(
+pub fn inspect_archive_bytes(
     bytes: &Bytes,
     subpath: &ActionSubpath,
     limits: ActionBundleLimits,

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     ActionReference, ContainerSpec, ExpressionInstruction, ExpressionProgram, JobInstanceIdentity,
     JobIrVersion, JobOutputDefinition, JobPermissionRequest, JobValidationError, RuntimeBoolean,
-    RuntimePositiveInteger, SemanticStep, StepIr, ValueTemplate,
+    RuntimePositiveInteger, SemanticStep, StepIr, ValueTemplate, WindowsRepositoryActionGraph,
 };
 
 use crate::{
@@ -162,6 +162,8 @@ pub struct JobExecutionContext {
     run_attempt: Option<u32>,
     event: JobContentReference,
     runtime_context: JobContentReference,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_action_graph: Option<WindowsRepositoryActionGraph>,
 }
 
 impl JobExecutionContext {
@@ -185,6 +187,7 @@ impl JobExecutionContext {
             run_attempt: None,
             event,
             runtime_context,
+            windows_action_graph: None,
         }
     }
 
@@ -220,6 +223,15 @@ impl JobExecutionContext {
     #[must_use]
     pub const fn with_run_attempt(mut self, run_attempt: u32) -> Self {
         self.run_attempt = Some(run_attempt);
+        self
+    }
+
+    /// Commits the complete immutable repository-action graph resolved before
+    /// this job becomes schedulable. Windows execution must not lazily fetch
+    /// repository actions that are absent from this graph.
+    #[must_use]
+    pub fn with_windows_action_graph(mut self, graph: WindowsRepositoryActionGraph) -> Self {
+        self.windows_action_graph = Some(graph);
         self
     }
 
@@ -281,6 +293,12 @@ impl JobExecutionContext {
     #[must_use]
     pub const fn runtime_context(&self) -> &JobContentReference {
         &self.runtime_context
+    }
+
+    /// Returns the complete pre-scheduling Windows repository-action graph.
+    #[must_use]
+    pub const fn windows_action_graph(&self) -> Option<&WindowsRepositoryActionGraph> {
+        self.windows_action_graph.as_ref()
     }
 }
 
@@ -572,7 +590,14 @@ fn validate_execution_context(context: &JobExecutionContext) -> Result<(), JobVa
     if context.run_attempt == Some(0) {
         return Err(JobValidationError::ZeroRunAttempt);
     }
-    validate_content_reference(&context.event)
+    validate_content_reference(&context.event)?;
+    validate_content_reference(&context.runtime_context)?;
+    if let Some(graph) = &context.windows_action_graph {
+        graph
+            .validate()
+            .map_err(|source| JobValidationError::InvalidWindowsActionGraph { source })?;
+    }
+    Ok(())
 }
 
 fn validate_content_reference(reference: &JobContentReference) -> Result<(), JobValidationError> {

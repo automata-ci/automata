@@ -45,10 +45,12 @@ pub use automata_ci_core::{
 };
 pub use capability::{ProviderCapabilities, SandboxCapability};
 pub use endpoint::{
-    Cancellation, CancellationDisposition, CopyFromRequest, CopyToRequest, EnvironmentName,
-    EnvironmentValue, EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint,
-    ExecutionEnvironment, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
-    ExecutionSignal, ExecutionTermination, MAX_ENDPOINT_OPERATIONS_PER_JOB, NeverCancelled,
+    ActionArchiveMaterialization, ActionGraphMaterializationRequest, Cancellation,
+    CancellationDisposition, CopyFromRequest, CopyToRequest, EnvironmentName, EnvironmentValue,
+    EnvironmentVariable, ExecutionArgv, ExecutionCommand, ExecutionEndpoint, ExecutionEnvironment,
+    ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream, ExecutionSignal,
+    ExecutionTermination, MAX_ENDPOINT_OPERATIONS_PER_JOB, NeverCancelled,
+    SealedActionArchivePolicy, SealedActionGraph, SealedActionReadRequest, SealedActionTree,
     SignalRequest, WaitRequest,
 };
 pub use error::{

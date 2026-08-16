@@ -1,9 +1,19 @@
 use std::{collections::BTreeSet, fmt, time::Duration};
 
+use automata_ci_core::{
+    MAX_WINDOWS_ACTION_ARCHIVE_DEPTH, MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES,
+    MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES,
+    MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES, MAX_WINDOWS_ACTION_GRAPH_ARCHIVES,
+    MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES, MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES,
+    MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, WindowsActionArchiveFacts,
+};
+use sha2::{Digest as _, Sha256};
+
 use crate::{
     MAX_COPY_BYTES, MAX_EXECUTION_ARGUMENTS, MAX_EXECUTION_ARGV_BYTES, MAX_EXECUTION_OUTPUT_BYTES,
     MAX_EXECUTION_OUTPUT_RECORD_BYTES, MAX_EXECUTION_OUTPUT_RECORDS, OperationId,
-    SandboxCapability, SandboxHandle, TargetPath, ValueError, error::ExecutionError,
+    SandboxCapability, SandboxGeneration, SandboxHandle, TargetPath, ValueError,
+    error::ExecutionError,
 };
 
 const MAX_COMMAND_TIMEOUT: Duration = Duration::from_hours(24);
@@ -56,7 +66,11 @@ impl Cancellation for NeverCancelled {
 }
 
 /// Endpoint calls made before the first workflow step.
-const ENDPOINT_JOB_SETUP_OPERATIONS: usize = 2;
+///
+/// Windows repository actions add one whole-graph materialization transaction
+/// to the two provider-neutral setup calls. This is a maximum, so non-Windows
+/// jobs simply leave that durable-operation slot unused.
+const ENDPOINT_JOB_SETUP_OPERATIONS: usize = 3;
 
 /// Maximum endpoint calls made by one admitted literal run step.
 const ENDPOINT_OPERATIONS_PER_RUN_STEP: usize = 15;
@@ -790,6 +804,616 @@ impl fmt::Debug for CopyToRequest {
     }
 }
 
+/// One immutable archive in a complete, ordered action graph.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ActionArchiveMaterialization {
+    ordinal: u32,
+    action_key_sha256: crate::Sha256Digest,
+    subpath: String,
+    destination: TargetPath,
+    content: Vec<u8>,
+    sha256: crate::Sha256Digest,
+    facts: WindowsActionArchiveFacts,
+}
+
+/// Fixed expansion and namespace policy independently enforced by the broker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)]
+pub struct SealedActionArchivePolicy {
+    maximum_entries: u32,
+    maximum_file_bytes: u64,
+    maximum_expanded_bytes: u64,
+    maximum_depth: u16,
+    maximum_path_bytes: u16,
+}
+
+impl SealedActionArchivePolicy {
+    const WINDOWS_V1: Self = Self {
+        maximum_entries: MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES,
+        maximum_file_bytes: MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES,
+        maximum_expanded_bytes: MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES,
+        maximum_depth: MAX_WINDOWS_ACTION_ARCHIVE_DEPTH,
+        maximum_path_bytes: MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES,
+    };
+
+    /// Returns the maximum tar-entry count, including metadata entries.
+    #[must_use]
+    pub const fn maximum_entries(self) -> u32 {
+        self.maximum_entries
+    }
+
+    /// Returns the maximum expanded bytes permitted for one regular file.
+    #[must_use]
+    pub const fn maximum_file_bytes(self) -> u64 {
+        self.maximum_file_bytes
+    }
+
+    /// Returns the maximum aggregate declared expanded bytes per archive.
+    #[must_use]
+    pub const fn maximum_expanded_bytes(self) -> u64 {
+        self.maximum_expanded_bytes
+    }
+
+    /// Returns the maximum materialized component depth below the archive root.
+    #[must_use]
+    pub const fn maximum_depth(self) -> u16 {
+        self.maximum_depth
+    }
+
+    /// Returns the maximum encoded path bytes for one archive entry.
+    #[must_use]
+    pub const fn maximum_path_bytes(self) -> u16 {
+        self.maximum_path_bytes
+    }
+}
+
+impl ActionArchiveMaterialization {
+    /// Builds one graph entry from an already validated immutable archive.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Windows destinations, empty/oversized archives, and zero
+    /// digest placeholders.
+    pub fn new(
+        ordinal: u32,
+        action_key_sha256: crate::Sha256Digest,
+        subpath: impl Into<String>,
+        destination: TargetPath,
+        content: Vec<u8>,
+        sha256: crate::Sha256Digest,
+        facts: WindowsActionArchiveFacts,
+    ) -> Result<Self, ValueError> {
+        let subpath = subpath.into();
+        let content_digest = crate::Sha256Digest::from_bytes(Sha256::digest(&content).into());
+        if destination.platform() != crate::TargetPlatform::Windows
+            || !valid_sealed_absolute_path(destination.as_str())
+            || content.is_empty()
+            || content.len() > MAX_COPY_BYTES
+            || action_key_sha256.as_bytes().iter().all(|byte| *byte == 0)
+            || sha256.as_bytes().iter().all(|byte| *byte == 0)
+            || content_digest != sha256
+            || (!subpath.is_empty() && !valid_sealed_relative_path(&subpath))
+        {
+            return Err(ValueError::InvalidByteLimit);
+        }
+        Ok(Self {
+            ordinal,
+            action_key_sha256,
+            subpath,
+            destination,
+            content,
+            sha256,
+            facts,
+        })
+    }
+
+    /// Returns this entry's exact zero-based graph ordinal.
+    #[must_use]
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns the digest of the canonical action reference key.
+    #[must_use]
+    pub const fn action_key_sha256(&self) -> crate::Sha256Digest {
+        self.action_key_sha256
+    }
+
+    /// Returns the validated subpath selected within this immutable archive.
+    #[must_use]
+    pub fn subpath(&self) -> &str {
+        &self.subpath
+    }
+
+    /// Returns the new provider-owned destination root.
+    #[must_use]
+    pub const fn destination(&self) -> &TargetPath {
+        &self.destination
+    }
+
+    /// Returns the immutable archive bytes.
+    #[must_use]
+    pub fn content(&self) -> &[u8] {
+        &self.content
+    }
+
+    /// Returns the archive digest the provider must reproduce before writing.
+    #[must_use]
+    pub const fn sha256(&self) -> crate::Sha256Digest {
+        self.sha256
+    }
+
+    /// Returns the expansion facts independently reproduced before scheduling.
+    #[must_use]
+    pub const fn facts(&self) -> WindowsActionArchiveFacts {
+        self.facts
+    }
+}
+
+impl fmt::Debug for ActionArchiveMaterialization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActionArchiveMaterialization")
+            .field("ordinal", &self.ordinal)
+            .field("action_key_sha256", &self.action_key_sha256)
+            .field("subpath", &self.subpath)
+            .field("destination", &self.destination)
+            .field("content_bytes", &self.content.len())
+            .field("sha256", &self.sha256)
+            .field("facts", &self.facts)
+            .field("content", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Complete immutable action graph materialized in one provider transaction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActionGraphMaterializationRequest {
+    operation_id: OperationId,
+    sandbox: SandboxHandle,
+    generation: SandboxGeneration,
+    plan_sha256: crate::Sha256Digest,
+    graph_sha256: crate::Sha256Digest,
+    archive_policy: SealedActionArchivePolicy,
+    archives: Vec<ActionArchiveMaterialization>,
+}
+
+impl ActionGraphMaterializationRequest {
+    /// Builds one exact ordered graph request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty/oversized graph, a zero graph digest, non-contiguous
+    /// ordinals, repeated destinations, or an aggregate archive over 16 MiB.
+    pub fn new(
+        operation_id: OperationId,
+        sandbox: SandboxHandle,
+        generation: SandboxGeneration,
+        plan_sha256: crate::Sha256Digest,
+        archives: Vec<ActionArchiveMaterialization>,
+    ) -> Result<Self, ValueError> {
+        if archives.is_empty()
+            || archives.len() > MAX_WINDOWS_ACTION_GRAPH_ARCHIVES
+            || plan_sha256.as_bytes().iter().all(|byte| *byte == 0)
+            || archives
+                .iter()
+                .enumerate()
+                .any(|(index, archive)| usize::try_from(archive.ordinal) != Ok(index))
+            || archives
+                .iter()
+                .map(|archive| archive.content.len())
+                .try_fold(0_usize, usize::checked_add)
+                .is_none_or(|bytes| {
+                    u64::try_from(bytes)
+                        .ok()
+                        .is_none_or(|bytes| bytes > MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES)
+                })
+            || archives
+                .iter()
+                .map(|archive| archive.facts.expanded_bytes())
+                .try_fold(0_u64, u64::checked_add)
+                .is_none_or(|bytes| bytes > MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES)
+            || archives
+                .iter()
+                .map(|archive| u64::from(archive.facts.regular_file_count()))
+                .try_fold(0_u64, u64::checked_add)
+                .is_none_or(|files| files > MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES)
+        {
+            return Err(ValueError::InvalidByteLimit);
+        }
+        let mut destinations = archives
+            .iter()
+            .map(|archive| archive.destination.as_str().to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        destinations.sort_unstable();
+        for (index, destination) in destinations.iter().enumerate() {
+            if destinations[index + 1..].iter().any(|other| {
+                destination == other
+                    || other.starts_with(&(destination.clone() + "\\"))
+                    || destination.starts_with(&(other.clone() + "\\"))
+            }) {
+                return Err(ValueError::InvalidTargetPath);
+            }
+        }
+        let archive_policy = SealedActionArchivePolicy::WINDOWS_V1;
+        let graph_sha256 = action_graph_sha256(archive_policy, plan_sha256, &archives);
+        Ok(Self {
+            operation_id,
+            sandbox,
+            generation,
+            plan_sha256,
+            graph_sha256,
+            archive_policy,
+            archives,
+        })
+    }
+
+    /// Returns the stable correlation identifier.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Returns the exact sandbox which must own the sealed graph.
+    #[must_use]
+    pub const fn sandbox(&self) -> &SandboxHandle {
+        &self.sandbox
+    }
+
+    /// Returns the lease-fencing generation which must own the sealed graph.
+    #[must_use]
+    pub const fn generation(&self) -> SandboxGeneration {
+        self.generation
+    }
+
+    /// Returns the pre-scheduling graph identity committed into `JobIR`.
+    #[must_use]
+    pub const fn plan_sha256(&self) -> crate::Sha256Digest {
+        self.plan_sha256
+    }
+
+    /// Returns the canonical complete graph digest.
+    #[must_use]
+    pub const fn graph_sha256(&self) -> crate::Sha256Digest {
+        self.graph_sha256
+    }
+
+    /// Returns the fixed broker-enforced archive expansion policy.
+    #[must_use]
+    pub const fn archive_policy(&self) -> SealedActionArchivePolicy {
+        self.archive_policy
+    }
+
+    /// Returns every archive in deterministic graph order.
+    #[must_use]
+    pub fn archives(&self) -> &[ActionArchiveMaterialization] {
+        &self.archives
+    }
+}
+
+fn action_graph_sha256(
+    policy: SealedActionArchivePolicy,
+    plan_sha256: crate::Sha256Digest,
+    archives: &[ActionArchiveMaterialization],
+) -> crate::Sha256Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(b"automata.windows.sealed-action-graph.v1\0");
+    hasher.update(policy.maximum_entries.to_le_bytes());
+    hasher.update(policy.maximum_file_bytes.to_le_bytes());
+    hasher.update(policy.maximum_expanded_bytes.to_le_bytes());
+    hasher.update(policy.maximum_depth.to_le_bytes());
+    hasher.update(policy.maximum_path_bytes.to_le_bytes());
+    hasher.update(plan_sha256.as_bytes());
+    hasher.update(
+        u64::try_from(archives.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    for archive in archives {
+        hasher.update(archive.ordinal.to_le_bytes());
+        hasher.update(archive.action_key_sha256.as_bytes());
+        hasher.update(archive.sha256.as_bytes());
+        hasher.update(archive.facts.entry_count().to_le_bytes());
+        hasher.update(archive.facts.regular_file_count().to_le_bytes());
+        hasher.update(archive.facts.expanded_bytes().to_le_bytes());
+        hasher.update(archive.facts.maximum_regular_file_bytes().to_le_bytes());
+        hasher.update(archive.facts.maximum_depth().to_le_bytes());
+        update_graph_string(&mut hasher, &archive.subpath);
+        update_graph_string(&mut hasher, archive.destination.as_str());
+    }
+    crate::Sha256Digest::from_bytes(hasher.finalize().into())
+}
+
+fn update_graph_string(hasher: &mut Sha256, value: &str) {
+    hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
+/// Opaque provider receipt for one immutable, sandbox-bound action tree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedActionTree {
+    sandbox: SandboxHandle,
+    generation: SandboxGeneration,
+    graph_opaque: String,
+    graph_sha256: crate::Sha256Digest,
+    ordinal: u32,
+    root: TargetPath,
+    receipt_sha256: crate::Sha256Digest,
+}
+
+impl SealedActionTree {
+    /// Creates a provider result after atomic materialization and sealing.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-portable handles, non-Windows roots, and zero receipts.
+    pub fn new(
+        sandbox: SandboxHandle,
+        generation: SandboxGeneration,
+        graph_opaque: impl Into<String>,
+        graph_sha256: crate::Sha256Digest,
+        ordinal: u32,
+        root: TargetPath,
+        receipt_sha256: crate::Sha256Digest,
+    ) -> Result<Self, ValueError> {
+        let graph_opaque = graph_opaque.into();
+        let valid_opaque = !graph_opaque.is_empty()
+            && graph_opaque.len() <= crate::MAX_SANDBOX_HANDLE_BYTES
+            && graph_opaque
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte));
+        if !valid_opaque
+            || root.platform() != crate::TargetPlatform::Windows
+            || !valid_sealed_absolute_path(root.as_str())
+            || graph_sha256.as_bytes().iter().all(|byte| *byte == 0)
+            || receipt_sha256.as_bytes().iter().all(|byte| *byte == 0)
+        {
+            return Err(ValueError::InvalidSandboxHandle);
+        }
+        Ok(Self {
+            sandbox,
+            generation,
+            graph_opaque,
+            graph_sha256,
+            ordinal,
+            root,
+            receipt_sha256,
+        })
+    }
+
+    /// Returns the exact sandbox ownership binding.
+    #[must_use]
+    pub const fn sandbox(&self) -> &SandboxHandle {
+        &self.sandbox
+    }
+
+    /// Returns the lease-fencing generation which owns this tree.
+    #[must_use]
+    pub const fn generation(&self) -> SandboxGeneration {
+        self.generation
+    }
+
+    /// Returns the provider-owned opaque seal handle.
+    #[must_use]
+    pub fn graph_opaque(&self) -> &str {
+        &self.graph_opaque
+    }
+
+    /// Returns the canonical complete graph digest bound into this tree seal.
+    #[must_use]
+    pub const fn graph_sha256(&self) -> crate::Sha256Digest {
+        self.graph_sha256
+    }
+
+    /// Returns this tree's exact ordinal in the sealed graph.
+    #[must_use]
+    pub const fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Returns the published read-only tree root.
+    #[must_use]
+    pub const fn root(&self) -> &TargetPath {
+        &self.root
+    }
+
+    /// Returns the authenticated materialization receipt digest.
+    #[must_use]
+    pub const fn receipt_sha256(&self) -> crate::Sha256Digest {
+        self.receipt_sha256
+    }
+}
+
+/// Provider result proving that a complete graph was sealed before execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedActionGraph {
+    sandbox: SandboxHandle,
+    generation: SandboxGeneration,
+    graph_sha256: crate::Sha256Digest,
+    receipt_sha256: crate::Sha256Digest,
+    trees: Vec<SealedActionTree>,
+}
+
+impl SealedActionGraph {
+    /// Creates a provider-authenticated complete graph result.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty graphs, zero digests, mismatched sandbox ownership,
+    /// graph handles, or non-contiguous tree ordinals.
+    pub fn new(
+        sandbox: SandboxHandle,
+        generation: SandboxGeneration,
+        graph_sha256: crate::Sha256Digest,
+        receipt_sha256: crate::Sha256Digest,
+        trees: Vec<SealedActionTree>,
+    ) -> Result<Self, ValueError> {
+        let graph_opaque = trees.first().map(SealedActionTree::graph_opaque);
+        if trees.is_empty()
+            || graph_sha256.as_bytes().iter().all(|byte| *byte == 0)
+            || receipt_sha256.as_bytes().iter().all(|byte| *byte == 0)
+            || trees.iter().enumerate().any(|(index, tree)| {
+                tree.sandbox() != &sandbox
+                    || tree.generation() != generation
+                    || tree.graph_sha256() != graph_sha256
+                    || usize::try_from(tree.ordinal()) != Ok(index)
+                    || Some(tree.graph_opaque()) != graph_opaque
+            })
+        {
+            return Err(ValueError::InvalidSandboxHandle);
+        }
+        Ok(Self {
+            sandbox,
+            generation,
+            graph_sha256,
+            receipt_sha256,
+            trees,
+        })
+    }
+
+    /// Returns the exact sandbox ownership binding.
+    #[must_use]
+    pub const fn sandbox(&self) -> &SandboxHandle {
+        &self.sandbox
+    }
+
+    /// Returns the lease-fencing generation which owns the graph.
+    #[must_use]
+    pub const fn generation(&self) -> SandboxGeneration {
+        self.generation
+    }
+
+    /// Returns the canonical graph digest reproduced by the provider.
+    #[must_use]
+    pub const fn graph_sha256(&self) -> crate::Sha256Digest {
+        self.graph_sha256
+    }
+
+    /// Returns the authenticated whole-graph receipt digest.
+    #[must_use]
+    pub const fn receipt_sha256(&self) -> crate::Sha256Digest {
+        self.receipt_sha256
+    }
+
+    /// Returns sealed trees in exact request order.
+    #[must_use]
+    pub fn trees(&self) -> &[SealedActionTree] {
+        &self.trees
+    }
+}
+
+/// Bounded read through an already validated sealed-tree handle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SealedActionReadRequest {
+    operation_id: OperationId,
+    tree: SealedActionTree,
+    relative_path: String,
+    byte_limit: usize,
+}
+
+impl SealedActionReadRequest {
+    /// Creates a read which cannot name an absolute, alternate-stream, device,
+    /// dot-segment, or ambiguous Windows path.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid relative paths and zero/oversized limits.
+    pub fn new(
+        operation_id: OperationId,
+        tree: SealedActionTree,
+        relative_path: impl Into<String>,
+        byte_limit: usize,
+    ) -> Result<Self, ValueError> {
+        let relative_path = relative_path.into();
+        if !valid_sealed_relative_path(&relative_path)
+            || byte_limit == 0
+            || byte_limit > MAX_COPY_BYTES
+        {
+            return Err(ValueError::InvalidTargetPath);
+        }
+        Ok(Self {
+            operation_id,
+            tree,
+            relative_path,
+            byte_limit,
+        })
+    }
+
+    /// Returns the stable correlation identifier.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Returns the provider-owned tree seal.
+    #[must_use]
+    pub const fn tree(&self) -> &SealedActionTree {
+        &self.tree
+    }
+
+    /// Returns the validated relative target.
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    /// Returns the maximum response bytes.
+    #[must_use]
+    pub const fn byte_limit(&self) -> usize {
+        self.byte_limit
+    }
+}
+
+fn valid_sealed_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4_096
+        && value.is_ascii()
+        && !value.contains('/')
+        && !value.starts_with('\\')
+        && value.split('\\').all(valid_sealed_windows_component)
+}
+
+fn valid_sealed_absolute_path(value: &str) -> bool {
+    value.is_ascii()
+        && value.len() >= 4
+        && value.as_bytes()[0].is_ascii_uppercase()
+        && &value.as_bytes()[1..3] == b":\\"
+        && value
+            .split('\\')
+            .skip(1)
+            .all(valid_sealed_windows_component)
+}
+
+fn valid_sealed_windows_component(component: &str) -> bool {
+    if component.is_empty()
+        || matches!(component, "." | "..")
+        || component.ends_with([' ', '.'])
+        || !component.is_ascii()
+        || component
+            .bytes()
+            .any(|byte| matches!(byte, b':' | b'*' | b'?' | b'"' | b'<' | b'>' | b'|'))
+    {
+        return false;
+    }
+    let stem = component.split('.').next().unwrap_or_default();
+    let folded = stem.to_ascii_uppercase();
+    if matches!(folded.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
+        || folded
+            .strip_prefix("COM")
+            .or_else(|| folded.strip_prefix("LPT"))
+            .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
+    {
+        return false;
+    }
+    !stem.rsplit_once('~').is_some_and(|(prefix, suffix)| {
+        !prefix.is_empty()
+            && prefix.len() <= 6
+            && !suffix.is_empty()
+            && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            && suffix.as_bytes()[0] != b'0'
+    })
+}
+
 /// Bounded copy-from-sandbox request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CopyFromRequest {
@@ -937,4 +1561,364 @@ pub trait ExecutionEndpoint: fmt::Debug + Send + Sync {
         request: &CopyFromRequest,
         cancellation: &dyn Cancellation,
     ) -> Result<Vec<u8>, ExecutionError>;
+
+    /// Atomically materializes and seals a complete immutable action graph.
+    ///
+    /// Implementations must reproduce every archive and graph digest before
+    /// the first destination write, create all entries beneath a provider-
+    /// owned root using no-follow handles, reject reparse points, hard links,
+    /// alternate streams and Windows namespace aliases, seal the tree against
+    /// the workload identity, and retain ownership handles through execution.
+    /// No action process may execute until this transaction has committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed endpoint failure. The default fails closed.
+    fn materialize_action_graph(
+        &self,
+        _request: &ActionGraphMaterializationRequest,
+        _cancellation: &dyn Cancellation,
+    ) -> Result<SealedActionGraph, ExecutionError> {
+        Err(ExecutionError::new(
+            crate::ExecutionErrorKind::UnsupportedCapability,
+            crate::ExecutionStage::MaterializeAction,
+        ))
+    }
+
+    /// Reads bounded metadata through a provider-owned sealed-tree handle.
+    /// Implementations must treat every public value as untrusted and match
+    /// the opaque handle, sandbox identity and generation, graph digest, tree
+    /// ordinal, root identity, and authenticated receipt against their live
+    /// broker ledger before opening the retained handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed endpoint failure. The default fails closed.
+    fn read_sealed_action(
+        &self,
+        _request: &SealedActionReadRequest,
+        _cancellation: &dyn Cancellation,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        Err(ExecutionError::new(
+            crate::ExecutionErrorKind::UnsupportedCapability,
+            crate::ExecutionStage::ReadSealedAction,
+        ))
+    }
+
+    /// Executes one command while the provider reattests and retains a sealed
+    /// tree's root identity, volume, link count, streams, owner and DACL.
+    /// Public receipt structs are transport values, not authority: every field
+    /// must match the broker's live sandbox-generation and graph ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed endpoint failure. The default fails closed.
+    fn exec_sealed_action(
+        &self,
+        _request: &ExecutionCommand,
+        _tree: &SealedActionTree,
+        _cancellation: &dyn Cancellation,
+    ) -> Result<ExecutionOutput, ExecutionError> {
+        Err(ExecutionError::new(
+            crate::ExecutionErrorKind::UnsupportedCapability,
+            crate::ExecutionStage::ExecSealedAction,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod sealed_action_tests {
+    use automata_ci_core::{
+        JobContentReference, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE, WindowsRepositoryActionArchive,
+        WindowsRepositoryActionGraph,
+    };
+    use sha2::{Digest as _, Sha256};
+
+    use super::*;
+
+    #[derive(Debug)]
+    struct ProviderNeutralEndpoint {
+        handle: SandboxHandle,
+    }
+
+    impl ExecutionEndpoint for ProviderNeutralEndpoint {
+        fn handle(&self) -> &SandboxHandle {
+            &self.handle
+        }
+
+        fn capabilities(&self) -> &[SandboxCapability] {
+            &[]
+        }
+
+        fn exec(
+            &self,
+            _request: &ExecutionCommand,
+            _cancellation: &dyn Cancellation,
+        ) -> Result<ExecutionOutput, ExecutionError> {
+            unreachable!("not used by sealed-action default tests")
+        }
+
+        fn signal(
+            &self,
+            _request: SignalRequest,
+            _cancellation: &dyn Cancellation,
+        ) -> Result<(), ExecutionError> {
+            unreachable!("not used by sealed-action default tests")
+        }
+
+        fn wait(
+            &self,
+            _request: WaitRequest,
+            _cancellation: &dyn Cancellation,
+        ) -> Result<i32, ExecutionError> {
+            unreachable!("not used by sealed-action default tests")
+        }
+
+        fn copy_to(
+            &self,
+            _request: &CopyToRequest,
+            _cancellation: &dyn Cancellation,
+        ) -> Result<(), ExecutionError> {
+            unreachable!("not used by sealed-action default tests")
+        }
+
+        fn copy_from(
+            &self,
+            _request: &CopyFromRequest,
+            _cancellation: &dyn Cancellation,
+        ) -> Result<Vec<u8>, ExecutionError> {
+            unreachable!("not used by sealed-action default tests")
+        }
+    }
+
+    fn digest(bytes: &[u8]) -> crate::Sha256Digest {
+        crate::Sha256Digest::from_bytes(Sha256::digest(bytes).into())
+    }
+
+    fn sandbox(name: &str) -> SandboxHandle {
+        SandboxHandle::new(
+            crate::ProviderId::new("windows-hyperv").expect("provider"),
+            name,
+        )
+        .expect("sandbox")
+    }
+
+    fn archive(
+        ordinal: u32,
+        destination: &str,
+        subpath: &str,
+    ) -> Result<ActionArchiveMaterialization, ValueError> {
+        let content = format!("archive-{ordinal}").into_bytes();
+        ActionArchiveMaterialization::new(
+            ordinal,
+            crate::Sha256Digest::from_bytes([ordinal.to_le_bytes()[0].saturating_add(1); 32]),
+            subpath,
+            TargetPath::windows(destination)?,
+            content.clone(),
+            digest(&content),
+            WindowsActionArchiveFacts::new(1, 1, 1, 1, 1).expect("facts"),
+        )
+    }
+
+    fn graph_request(operation_id: OperationId) -> ActionGraphMaterializationRequest {
+        let content = b"archive-0";
+        let planned = WindowsRepositoryActionArchive::new(
+            0,
+            crate::Sha256Digest::from_bytes([1; 32]),
+            "",
+            JobContentReference::new(
+                "windows-actions/00.tar.gz",
+                digest(content),
+                u64::try_from(content.len()).expect("archive size"),
+                WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+            ),
+            WindowsActionArchiveFacts::new(1, 1, 1, 1, 1).expect("facts"),
+        )
+        .expect("planned archive");
+        let plan_sha256 = WindowsRepositoryActionGraph::new(vec![planned])
+            .expect("planned graph")
+            .graph_sha256();
+        let archives = vec![archive(0, r"C:\actions\0000", "").expect("archive")];
+        ActionGraphMaterializationRequest::new(
+            operation_id,
+            sandbox("sandbox-a"),
+            SandboxGeneration::new(7).expect("generation"),
+            plan_sha256,
+            archives,
+        )
+        .expect("graph request")
+    }
+
+    #[test]
+    fn endpoint_budget_reserves_one_atomic_graph_setup_operation() {
+        assert_eq!(
+            MAX_ENDPOINT_OPERATIONS_PER_JOB,
+            automata_ci_core::MAX_LOGICAL_STEPS * ENDPOINT_OPERATIONS_PER_RUN_STEP + 3
+        );
+    }
+
+    #[test]
+    fn provider_neutral_endpoint_defaults_fail_closed_for_sealed_actions() {
+        let request = graph_request(OperationId::new());
+        let tree = SealedActionTree::new(
+            request.sandbox().clone(),
+            request.generation(),
+            "graph-opaque-v1",
+            request.graph_sha256(),
+            0,
+            request.archives()[0].destination().clone(),
+            crate::Sha256Digest::from_bytes([0x61; 32]),
+        )
+        .expect("tree");
+        let read =
+            SealedActionReadRequest::new(OperationId::new(), tree.clone(), "action.yml", 1024)
+                .expect("read request");
+        let command = ExecutionCommand::new(
+            OperationId::new(),
+            ExecutionArgv::new(
+                TargetPath::windows(r"C:\Program Files\nodejs\node.exe").expect("program"),
+                vec!["main.js".to_owned()],
+            )
+            .expect("argv"),
+            tree.root().clone(),
+            ExecutionEnvironment::empty(),
+            Duration::from_secs(30),
+            1024,
+        )
+        .expect("command");
+        let endpoint = ProviderNeutralEndpoint {
+            handle: request.sandbox().clone(),
+        };
+
+        for (error, stage) in [
+            (
+                endpoint
+                    .materialize_action_graph(&request, &NeverCancelled)
+                    .expect_err("materialization must fail closed"),
+                crate::ExecutionStage::MaterializeAction,
+            ),
+            (
+                endpoint
+                    .read_sealed_action(&read, &NeverCancelled)
+                    .expect_err("sealed read must fail closed"),
+                crate::ExecutionStage::ReadSealedAction,
+            ),
+            (
+                endpoint
+                    .exec_sealed_action(&command, &tree, &NeverCancelled)
+                    .expect_err("sealed execution must fail closed"),
+                crate::ExecutionStage::ExecSealedAction,
+            ),
+        ] {
+            assert_eq!(
+                error.kind(),
+                crate::ExecutionErrorKind::UnsupportedCapability
+            );
+            assert_eq!(error.stage(), stage);
+        }
+    }
+
+    #[test]
+    fn graph_rejects_case_insensitive_destination_ancestor_overlap() {
+        let archives = vec![
+            archive(0, r"C:\actions\Foo", "").expect("first"),
+            archive(1, r"C:\actions\foo\child", "").expect("second"),
+        ];
+        assert_eq!(
+            ActionGraphMaterializationRequest::new(
+                OperationId::new(),
+                sandbox("sandbox-a"),
+                SandboxGeneration::new(7).expect("generation"),
+                crate::Sha256Digest::from_bytes([0x31; 32]),
+                archives,
+            ),
+            Err(ValueError::InvalidTargetPath)
+        );
+    }
+
+    #[test]
+    fn archive_rejects_windows_namespace_aliases() {
+        for destination in [
+            r"C:\actions\CON.txt",
+            r"C:\actions\file.js:evil",
+            r"C:\actions\LONGFI~1.JS",
+            r"C:\actions\CLOCK$",
+        ] {
+            assert!(archive(0, destination, "").is_err(), "{destination}");
+        }
+        for subpath in [
+            "CON.txt",
+            r"folder\file.js:evil",
+            "LONGFI~1.JS",
+            r"\\server\share",
+            r"\??\C:\device",
+        ] {
+            assert!(
+                archive(0, r"C:\actions\safe", subpath).is_err(),
+                "{subpath}"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_graph_rejects_sandbox_generation_and_graph_substitution() {
+        let owner = sandbox("sandbox-a");
+        let other = sandbox("sandbox-b");
+        let generation = SandboxGeneration::new(7).expect("generation");
+        let other_generation = SandboxGeneration::new(8).expect("generation");
+        let graph_sha256 = crate::Sha256Digest::from_bytes([0x41; 32]);
+        let other_graph_sha256 = crate::Sha256Digest::from_bytes([0x42; 32]);
+        let receipt_sha256 = crate::Sha256Digest::from_bytes([0x51; 32]);
+        let tree = SealedActionTree::new(
+            owner.clone(),
+            generation,
+            "graph-opaque-v1",
+            graph_sha256,
+            0,
+            TargetPath::windows(r"C:\actions\0000").expect("root"),
+            crate::Sha256Digest::from_bytes([0x61; 32]),
+        )
+        .expect("tree");
+
+        assert!(
+            SealedActionGraph::new(
+                owner.clone(),
+                generation,
+                graph_sha256,
+                receipt_sha256,
+                vec![tree.clone()],
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            SealedActionGraph::new(
+                other,
+                generation,
+                graph_sha256,
+                receipt_sha256,
+                vec![tree.clone()],
+            ),
+            Err(ValueError::InvalidSandboxHandle)
+        );
+        assert_eq!(
+            SealedActionGraph::new(
+                owner.clone(),
+                other_generation,
+                graph_sha256,
+                receipt_sha256,
+                vec![tree.clone()],
+            ),
+            Err(ValueError::InvalidSandboxHandle)
+        );
+        assert_eq!(
+            SealedActionGraph::new(
+                owner,
+                generation,
+                other_graph_sha256,
+                receipt_sha256,
+                vec![tree],
+            ),
+            Err(ValueError::InvalidSandboxHandle)
+        );
+    }
 }

@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use super::{ExpressionProgramError, StepId, ValueTemplateError};
+use super::{ExpressionProgramError, StepId, ValueTemplateError, WindowsActionGraphError};
 
 /// Validation failure that must stop a plan before execution.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -38,6 +38,13 @@ pub enum JobValidationError {
     /// A content reference had invalid key, digest, size, or media-type evidence.
     #[error("execution content reference is invalid")]
     InvalidContentReference,
+    /// The immutable repository-action graph was malformed or exceeded its
+    /// fixed Windows materialization bounds.
+    #[error("invalid Windows repository-action graph: {source}")]
+    InvalidWindowsActionGraph {
+        /// Exact graph validation failure.
+        source: WindowsActionGraphError,
+    },
     /// A logical job or output name violated length, whitespace, or control-byte rules.
     #[error("logical {field} is empty, overlong, padded, or contains control characters")]
     InvalidLogicalName {

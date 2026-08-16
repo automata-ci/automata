@@ -35,15 +35,13 @@ pub use files::{SecretSource, SecureInputError};
 pub use state::ProductStateRootError;
 pub use tls::ClientTlsMaterialError;
 pub use windows_enrollment_admission::{
-    ValidatedWindowsEnrollmentAdmission, WindowsEnrollmentAdmissionBinding,
-    WindowsEnrollmentAdmissionError, WindowsEnrollmentAdmissionEvidence,
-    WindowsEnrollmentAdmissionHandle, WindowsEnrollmentAdmissionPort,
-    WindowsEnrollmentAdmissionReceipt, WindowsEnrollmentAdmissionRequest, WindowsEnrollmentIntent,
-    WindowsEnrollmentProbePolicy, WindowsHostInputDescriptor, WindowsHostInputKind,
-    current_unix_seconds, probe_windows_enrollment_request, windows_enrollment_admission_request,
+    WindowsEnrollmentAdmissionBinding, WindowsEnrollmentAdmissionError,
+    WindowsEnrollmentAdmissionRequest, WindowsEnrollmentIntent, WindowsEnrollmentProbePolicy,
+    WindowsHostInputDescriptor, WindowsHostInputKind, probe_windows_enrollment_request,
+    windows_enrollment_admission_request,
 };
 pub use windows_image::{
     FilesystemWindowsImageEvidenceVerifier, WindowsImageAdmission, WindowsImageContractConfig,
     WindowsImageEvidenceVerifier, WindowsImagePromotionConfig, WindowsImageVerification,
-    WindowsImageVerificationError, WindowsImageVerificationRequest,
+    WindowsImageVerificationError, WindowsImageVerificationRequest, WindowsPromotionTrustBundleId,
 };

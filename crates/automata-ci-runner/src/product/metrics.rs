@@ -7,12 +7,13 @@ use std::{
 
 use automata_ci_core::JobLifecycle;
 use automata_ci_execution::{
-    Cancellation, CopyFromRequest, CopyToRequest, DestroyDisposition, DestroySandbox,
-    ExecutionCommand, ExecutionEndpoint, ExecutionError, ExecutionErrorKind, ExecutionOutput,
-    ExecutionStage, ExecutionTermination, ProviderCapabilities, ProviderError, ProviderErrorKind,
-    ProviderId, ProviderStage, SandboxCapability, SandboxHandle, SandboxInspection,
-    SandboxProvider, SandboxRecord, SandboxSpec, ServiceContainerBindings, SignalRequest,
-    WaitRequest,
+    ActionGraphMaterializationRequest, Cancellation, CopyFromRequest, CopyToRequest,
+    DestroyDisposition, DestroySandbox, ExecutionCommand, ExecutionEndpoint, ExecutionError,
+    ExecutionErrorKind, ExecutionOutput, ExecutionStage, ExecutionTermination,
+    ProviderCapabilities, ProviderError, ProviderErrorKind, ProviderId, ProviderStage,
+    SandboxCapability, SandboxHandle, SandboxInspection, SandboxProvider, SandboxRecord,
+    SandboxSpec, SealedActionGraph, SealedActionReadRequest, SealedActionTree,
+    ServiceContainerBindings, SignalRequest, WaitRequest,
 };
 use automata_ci_metrics::{
     BuildInfo as MetricsBuildInfo, BuildInfoError, Counter, ExporterLimits, Family, Gauge,
@@ -1934,6 +1935,9 @@ enum SandboxProviderOperation {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum SandboxEndpointOperation {
     Exec,
+    MaterializeActionGraph,
+    ReadSealedAction,
+    ExecSealedAction,
     Signal,
     Wait,
     CopyTo,
@@ -2016,7 +2020,7 @@ impl SandboxMetrics {
         let endpoint_bytes = Family::<DirectionLabels, Counter>::default();
         registry.register_with_unit(
             "runner_sandbox_endpoint",
-            "Complete stdout, stderr, copy-in, and copy-out payload bytes",
+            "Complete stdout, stderr, copy, and sealed-action payload bytes",
             Unit::Bytes,
             endpoint_bytes.clone(),
         );
@@ -2081,7 +2085,16 @@ impl SandboxMetrics {
                 .inc_by(0);
         }
 
-        for operation in ["exec", "signal", "wait", "copy_to", "copy_from"] {
+        for operation in [
+            "exec",
+            "materialize_action_graph",
+            "read_sealed_action",
+            "exec_sealed_action",
+            "signal",
+            "wait",
+            "copy_to",
+            "copy_from",
+        ] {
             self.endpoint_in_flight
                 .get_or_create(&OperationLabels { operation })
                 .set(0);
@@ -2107,7 +2120,14 @@ impl SandboxMetrics {
                 .get_or_create(&KindLabels { kind })
                 .inc_by(0);
         }
-        for direction in ["stdout", "stderr", "copy_to", "copy_from"] {
+        for direction in [
+            "stdout",
+            "stderr",
+            "copy_to",
+            "copy_from",
+            "action_graph_in",
+            "sealed_action_out",
+        ] {
             self.endpoint_bytes
                 .get_or_create(&DirectionLabels { direction })
                 .inc_by(0);
@@ -2412,6 +2432,62 @@ impl ExecutionEndpoint for ObservedExecutionEndpoint {
         }
         result
     }
+
+    fn materialize_action_graph(
+        &self,
+        request: &ActionGraphMaterializationRequest,
+        cancellation: &dyn Cancellation,
+    ) -> Result<SealedActionGraph, ExecutionError> {
+        let result = self.call(SandboxEndpointOperation::MaterializeActionGraph, || {
+            self.inner.materialize_action_graph(request, cancellation)
+        });
+        if result.is_ok() {
+            let bytes = request
+                .archives()
+                .iter()
+                .map(|archive| archive.content().len())
+                .fold(0_u64, |total, bytes| {
+                    total.saturating_add(saturating_u64(bytes))
+                });
+            self.metrics
+                .endpoint_bytes
+                .get_or_create(&DirectionLabels {
+                    direction: "action_graph_in",
+                })
+                .inc_by(bytes);
+        }
+        result
+    }
+
+    fn read_sealed_action(
+        &self,
+        request: &SealedActionReadRequest,
+        cancellation: &dyn Cancellation,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        let result = self.call(SandboxEndpointOperation::ReadSealedAction, || {
+            self.inner.read_sealed_action(request, cancellation)
+        });
+        if let Ok(bytes) = &result {
+            self.metrics
+                .endpoint_bytes
+                .get_or_create(&DirectionLabels {
+                    direction: "sealed_action_out",
+                })
+                .inc_by(saturating_u64(bytes.len()));
+        }
+        result
+    }
+
+    fn exec_sealed_action(
+        &self,
+        request: &ExecutionCommand,
+        tree: &SealedActionTree,
+        cancellation: &dyn Cancellation,
+    ) -> Result<ExecutionOutput, ExecutionError> {
+        self.call(SandboxEndpointOperation::ExecSealedAction, || {
+            self.inner.exec_sealed_action(request, tree, cancellation)
+        })
+    }
 }
 
 const fn provider_operation_label(value: SandboxProviderOperation) -> &'static str {
@@ -2427,6 +2503,9 @@ const fn provider_operation_label(value: SandboxProviderOperation) -> &'static s
 const fn endpoint_operation_label(value: SandboxEndpointOperation) -> &'static str {
     match value {
         SandboxEndpointOperation::Exec => "exec",
+        SandboxEndpointOperation::MaterializeActionGraph => "materialize_action_graph",
+        SandboxEndpointOperation::ReadSealedAction => "read_sealed_action",
+        SandboxEndpointOperation::ExecSealedAction => "exec_sealed_action",
         SandboxEndpointOperation::Signal => "signal",
         SandboxEndpointOperation::Wait => "wait",
         SandboxEndpointOperation::CopyTo => "copy_to",
@@ -2800,6 +2879,15 @@ const fn podman_stage_label(value: PodmanCommandStage) -> &'static str {
         PodmanCommandStage::Endpoint(ExecutionStage::Wait) => "endpoint_wait",
         PodmanCommandStage::Endpoint(ExecutionStage::CopyTo) => "endpoint_copy_to",
         PodmanCommandStage::Endpoint(ExecutionStage::CopyFrom) => "endpoint_copy_from",
+        PodmanCommandStage::Endpoint(ExecutionStage::MaterializeAction) => {
+            "endpoint_materialize_action"
+        }
+        PodmanCommandStage::Endpoint(ExecutionStage::ReadSealedAction) => {
+            "endpoint_read_sealed_action"
+        }
+        PodmanCommandStage::Endpoint(ExecutionStage::ExecSealedAction) => {
+            "endpoint_exec_sealed_action"
+        }
     }
 }
 
@@ -3830,7 +3918,14 @@ mod tests {
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .count();
-        assert!(series < 1_000, "runner target exceeded its series budget");
+        // The sealed-action endpoint adds three closed operation labels and
+        // two closed byte directions. Keep the complete preinitialized
+        // runner target within one binary-sized cardinality budget rather
+        // than hiding those reachable tuples behind lazy initialization.
+        assert!(
+            series <= 1_024,
+            "runner target exceeded its series budget: {series}"
+        );
     }
 
     #[test]

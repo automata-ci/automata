@@ -21,6 +21,12 @@ pub enum EndpointOperationKind {
     CopyTo,
     /// Copies bounded bytes out of the sandbox.
     CopyFrom,
+    /// Atomically materializes and seals one complete action graph.
+    MaterializeActionGraph,
+    /// Reads bounded metadata through a sealed action-tree handle.
+    ReadSealedAction,
+    /// Executes while retaining and reattesting a sealed action tree.
+    ExecSealedAction,
 }
 
 /// Protected fixed-size commitment to an exact endpoint request.

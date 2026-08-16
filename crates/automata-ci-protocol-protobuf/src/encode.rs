@@ -739,6 +739,42 @@ fn job_execution_context(value: &core::JobExecutionContext) -> wire::JobExecutio
         runtime_context: Some(job_content_reference(value.runtime_context())),
         run_id_alias: value.run_id_alias().map(core::RunIdAlias::get),
         triggering_actor: value.triggering_actor().map(str::to_owned),
+        windows_action_graph: value
+            .windows_action_graph()
+            .map(windows_repository_action_graph),
+    }
+}
+
+fn windows_repository_action_graph(
+    value: &core::WindowsRepositoryActionGraph,
+) -> wire::WindowsRepositoryActionGraph {
+    wire::WindowsRepositoryActionGraph {
+        schema_version: u32::from(value.schema_version()),
+        policy_sha256: value.policy_sha256().as_bytes().to_vec(),
+        graph_sha256: value.graph_sha256().as_bytes().to_vec(),
+        archives: value
+            .archives()
+            .iter()
+            .map(|archive| wire::WindowsRepositoryActionArchive {
+                ordinal: archive.ordinal(),
+                action_key_sha256: archive.action_key_sha256().as_bytes().to_vec(),
+                subpath: archive.subpath().to_owned(),
+                archive: Some(job_content_reference(archive.archive())),
+                facts: Some(windows_action_archive_facts(archive.facts())),
+            })
+            .collect(),
+    }
+}
+
+fn windows_action_archive_facts(
+    value: core::WindowsActionArchiveFacts,
+) -> wire::WindowsActionArchiveFacts {
+    wire::WindowsActionArchiveFacts {
+        entry_count: value.entry_count(),
+        regular_file_count: value.regular_file_count(),
+        expanded_bytes: value.expanded_bytes(),
+        maximum_regular_file_bytes: value.maximum_regular_file_bytes(),
+        maximum_depth: u32::from(value.maximum_depth()),
     }
 }
 

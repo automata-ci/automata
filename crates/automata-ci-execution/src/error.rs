@@ -223,6 +223,12 @@ pub enum ExecutionStage {
     CopyTo,
     /// Copying bounded bytes out of the sandbox.
     CopyFrom,
+    /// Atomically materializing a provider-owned sealed action tree.
+    MaterializeAction,
+    /// Reading bounded metadata through a sealed action-tree handle.
+    ReadSealedAction,
+    /// Executing while a provider reattests and retains a sealed action tree.
+    ExecSealedAction,
 }
 
 /// Bounded execution failure classification.

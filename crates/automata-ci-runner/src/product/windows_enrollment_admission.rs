@@ -1,17 +1,27 @@
+#![cfg_attr(test, allow(dead_code))]
+
 use std::{
     collections::BTreeMap,
-    fmt,
     net::IpAddr,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use automata_ci_core::{
-    EnvironmentProfile, JobResourceAllocation, RunnerCapabilities, RunnerId, Sha256Digest,
+    EnvironmentProfile, JobResourceAllocation, OperationId, RunnerCapabilities, RunnerId,
+    Sha256Digest,
 };
 use automata_ci_execution::{
-    NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment,
+    NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment, SandboxLaunch,
     SandboxPrivilegePolicy, SandboxProvider, TargetPath,
+};
+use automata_ci_protocol::{
+    WindowsAdmissionArgv, WindowsAdmissionBackendContract, WindowsAdmissionEnvironmentVariable,
+    WindowsAdmissionHostInput, WindowsAdmissionHostInputKind, WindowsAdmissionImage,
+    WindowsAdmissionLaunchContract, WindowsAdmissionProbeContract,
+    WindowsAdmissionPromotionRequest, WindowsAdmissionResourceLimits, WindowsBrokerProfileBinding,
+    WindowsEnrollmentTransactionBinding, WindowsImagePromotionBinding, WindowsPromotionValidity,
+    WindowsRunnerAdmissionBinding, WindowsRunnerAdmissionIssueRequest,
 };
 use automata_ci_sandbox_windows::WINDOWS_HYPERV_PROVIDER_ID;
 use serde::Serialize;
@@ -21,17 +31,25 @@ use uuid::Uuid;
 
 use super::{
     RunnerProductConfig,
-    config::promoted_windows_runtime_features,
+    config::windows_broker_admission_feature_ceiling,
     profile_admission::{
         ProfileAdmissionOutcome, ProfileAdmissionPolicy, WINDOWS_PROFILE_PROBE_SCHEMA_VERSION,
         admit_environment_profiles, windows_profile_probe_contract_sha256,
     },
 };
 
+#[cfg(test)]
 const MAX_ID_BYTES: usize = 128;
 const MAX_SERVER_ORIGIN_BYTES: usize = 2_048;
 const MAX_RUNNER_NAME_BYTES: usize = 255;
+#[cfg(test)]
 const MAX_RECEIPT_LIFETIME_SECONDS: u64 = 15 * 60;
+#[cfg(test)]
+const WINDOWS_ENROLLMENT_RECEIPT_SCHEMA_VERSION: u16 = 1;
+#[cfg(test)]
+const MIN_RECEIPT_AUTHENTICATOR_BYTES: usize = 16;
+#[cfg(test)]
+const MAX_RECEIPT_AUTHENTICATOR_BYTES: usize = 512;
 const WINDOWS_HOST_INPUT_KINDS: [WindowsHostInputKind; 9] = [
     WindowsHostInputKind::Configuration,
     WindowsHostInputKind::BackendExecutable,
@@ -208,10 +226,14 @@ pub struct WindowsEnrollmentAdmissionBinding {
     probe_policy: WindowsEnrollmentProbePolicy,
     manifest_sha256: Sha256Digest,
     lock_sha256: Sha256Digest,
+    promotion_trust_bundle_id: String,
     promotion_key_id: String,
     promotion_payload_sha256: Sha256Digest,
-    promotion_public_key_sha256: Sha256Digest,
     promotion_envelope_sha256: Sha256Digest,
+    promotion_serial: u64,
+    revocation_generation: u64,
+    promotion_issued_at_unix_millis: u64,
+    promotion_expires_at_unix_millis: u64,
     capabilities: RunnerCapabilities,
     capabilities_sha256: Sha256Digest,
 }
@@ -307,7 +329,13 @@ impl WindowsEnrollmentAdmissionBinding {
         self.lock_sha256
     }
 
-    /// Returns the verified external promotion-authority key identifier.
+    /// Returns the broker/control-owned versioned promotion trust bundle.
+    #[must_use]
+    pub fn promotion_trust_bundle_id(&self) -> &str {
+        &self.promotion_trust_bundle_id
+    }
+
+    /// Returns the requested external promotion-authority key identifier.
     #[must_use]
     pub fn promotion_key_id(&self) -> &str {
         &self.promotion_key_id
@@ -319,16 +347,34 @@ impl WindowsEnrollmentAdmissionBinding {
         self.promotion_payload_sha256
     }
 
-    /// Returns the digest of the exact verified promotion public key.
-    #[must_use]
-    pub const fn promotion_public_key_sha256(&self) -> Sha256Digest {
-        self.promotion_public_key_sha256
-    }
-
-    /// Returns the digest of the complete verified promotion envelope.
+    /// Returns the digest of the complete envelope pending broker verification.
     #[must_use]
     pub const fn promotion_envelope_sha256(&self) -> Sha256Digest {
         self.promotion_envelope_sha256
+    }
+
+    /// Returns the signed monotonic promotion serial the broker must advance.
+    #[must_use]
+    pub const fn promotion_serial(&self) -> u64 {
+        self.promotion_serial
+    }
+
+    /// Returns the signed revocation generation the broker must advance.
+    #[must_use]
+    pub const fn revocation_generation(&self) -> u64 {
+        self.revocation_generation
+    }
+
+    /// Returns the signed promotion issue time.
+    #[must_use]
+    pub const fn promotion_issued_at_unix_millis(&self) -> u64 {
+        self.promotion_issued_at_unix_millis
+    }
+
+    /// Returns the signed promotion expiry time.
+    #[must_use]
+    pub const fn promotion_expires_at_unix_millis(&self) -> u64 {
+        self.promotion_expires_at_unix_millis
     }
 
     /// Returns the exact post-admission registration inventory.
@@ -341,6 +387,231 @@ impl WindowsEnrollmentAdmissionBinding {
     #[must_use]
     pub const fn capabilities_sha256(&self) -> Sha256Digest {
         self.capabilities_sha256
+    }
+
+    /// Converts this runner-generated request into the canonical, evidence-
+    /// free protocol binding which the broker must prove and sign.
+    ///
+    /// This method cannot construct admission evidence, a custody handle, or
+    /// registered capability authority. Those values exist only in the
+    /// canonical broker-signed protocol envelope and are independently
+    /// verified by control.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any request which cannot satisfy the shared protocol schema.
+    pub fn to_protocol_binding(
+        &self,
+    ) -> Result<WindowsRunnerAdmissionBinding, WindowsEnrollmentAdmissionError> {
+        let issue_request = self.to_protocol_issue_request()?;
+        let image = self
+            .environment
+            .image()
+            .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let transaction = WindowsEnrollmentTransactionBinding::new(
+            self.runner_id,
+            OperationId::from_uuid(self.intent.operation_id),
+            self.control_endpoint.clone(),
+            self.intent.server_origin.clone(),
+            digest_bytes(self.intent.runner_name.as_bytes()),
+            self.intent.enrollment_token_sha256,
+            self.intent.csr_sha256,
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let image = WindowsAdmissionImage::new(self.image.clone(), image.digest())
+            .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let broker_profile = WindowsBrokerProfileBinding::new(
+            self.backend_id.clone(),
+            self.sandbox_provider_id.clone(),
+            issue_request
+                .request_sha256()
+                .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?,
+            self.profile.clone(),
+            image,
+            self.probe_policy.contract_sha256,
+            self.probe_policy.network == NetworkPolicy::Disabled,
+            true,
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let promotion = WindowsImagePromotionBinding::new(
+            self.promotion_trust_bundle_id.clone(),
+            self.promotion_key_id.clone(),
+            self.promotion_payload_sha256,
+            self.promotion_envelope_sha256,
+            self.promotion_serial,
+            self.revocation_generation,
+            WindowsPromotionValidity::new(
+                self.promotion_issued_at_unix_millis,
+                self.promotion_expires_at_unix_millis,
+            )
+            .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?,
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        WindowsRunnerAdmissionBinding::new(
+            transaction,
+            broker_profile,
+            promotion,
+            self.capabilities.clone(),
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)
+    }
+
+    /// Converts the complete runner proposal into the strict, serializable,
+    /// non-authoritative broker issue request.
+    ///
+    /// The broker must independently reopen every host input, verify the
+    /// promotion with its own trust policy/high-water ledger, reproduce the
+    /// exact probe, and sign the resulting admission envelope. This DTO and
+    /// its digest alone convey no registration authority.
+    ///
+    /// # Errors
+    ///
+    /// Rejects secret-bearing defaults or any launch, host-input, promotion,
+    /// resource, or tool field outside the shared protocol contract.
+    #[allow(clippy::too_many_lines)]
+    pub fn to_protocol_issue_request(
+        &self,
+    ) -> Result<WindowsRunnerAdmissionIssueRequest, WindowsEnrollmentAdmissionError> {
+        let executable = self
+            .backend_executable
+            .to_str()
+            .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let timeout = u64::try_from(self.backend_operation_timeout.as_millis())
+            .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let backend = WindowsAdmissionBackendContract::new(
+            executable,
+            self.backend_executable_sha256,
+            timeout,
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let host_inputs = self
+            .host_inputs
+            .iter()
+            .map(|input| {
+                WindowsAdmissionHostInput::new(
+                    protocol_host_input_kind(input.kind),
+                    input
+                        .absolute_path
+                        .to_str()
+                        .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?,
+                    input.expected_sha256,
+                )
+                .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let SandboxLaunch::WindowsHyperVContainer { image, keepalive } = self.environment.launch()
+        else {
+            return Err(WindowsEnrollmentAdmissionError::InvalidRequest);
+        };
+        let image = WindowsAdmissionImage::new(image.reference(), image.digest())
+            .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let keepalive =
+            WindowsAdmissionArgv::new(keepalive.program().as_str(), keepalive.arguments().to_vec())
+                .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let default_environment = self
+            .environment
+            .default_environment()
+            .values()
+            .iter()
+            .map(|variable| {
+                if variable.is_secret() {
+                    return Err(WindowsEnrollmentAdmissionError::InvalidRequest);
+                }
+                WindowsAdmissionEnvironmentVariable::new(
+                    variable.name().as_str(),
+                    variable.value().expose(),
+                )
+                .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let resources = protocol_resource_limits(self.probe_policy.resources)?;
+        let launch = WindowsAdmissionLaunchContract::new(
+            self.profile.clone(),
+            image,
+            keepalive,
+            self.environment.workspace().as_str(),
+            default_environment,
+            resources,
+            self.probe_policy.allocation,
+            self.probe_policy.network == NetworkPolicy::Disabled,
+            self.probe_policy.root_filesystem == RootFilesystemPolicy::Writable,
+            self.probe_policy.privilege == SandboxPrivilegePolicy::Unprivileged,
+            true,
+            true,
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let probe = WindowsAdmissionProbeContract::new(
+            self.probe_policy.contract_schema_version,
+            self.probe_policy.contract_sha256,
+            resources,
+            self.probe_policy.allocation,
+            self.probe_policy.network == NetworkPolicy::Disabled,
+            self.probe_policy.root_filesystem == RootFilesystemPolicy::Writable,
+            self.probe_policy.privilege == SandboxPrivilegePolicy::Unprivileged,
+            self.probe_policy.pwsh.as_str(),
+            self.probe_policy.powershell.as_str(),
+            self.probe_policy.cmd.as_str(),
+            self.probe_policy
+                .python
+                .as_ref()
+                .map(|path| path.as_str().to_owned()),
+            self.probe_policy.tar.as_str(),
+            self.probe_policy.sha256.as_str(),
+            self.probe_policy
+                .node12
+                .as_ref()
+                .map(|path| path.as_str().to_owned()),
+            self.probe_policy
+                .node16
+                .as_ref()
+                .map(|path| path.as_str().to_owned()),
+            self.probe_policy
+                .node20
+                .as_ref()
+                .map(|path| path.as_str().to_owned()),
+            self.probe_policy
+                .node24
+                .as_ref()
+                .map(|path| path.as_str().to_owned()),
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let envelope_path = self
+            .host_inputs
+            .iter()
+            .find(|input| input.kind == WindowsHostInputKind::PromotionEnvelope)
+            .and_then(|input| input.absolute_path.to_str())
+            .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let promotion = WindowsAdmissionPromotionRequest::new(
+            envelope_path,
+            self.promotion_trust_bundle_id.clone(),
+            self.promotion_key_id.clone(),
+            self.manifest_sha256,
+            self.lock_sha256,
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        let transaction = WindowsEnrollmentTransactionBinding::new(
+            self.runner_id,
+            OperationId::from_uuid(self.intent.operation_id),
+            self.control_endpoint.clone(),
+            self.intent.server_origin.clone(),
+            digest_bytes(self.intent.runner_name.as_bytes()),
+            self.intent.enrollment_token_sha256,
+            self.intent.csr_sha256,
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+        WindowsRunnerAdmissionIssueRequest::new(
+            transaction,
+            self.intent.runner_name.clone(),
+            self.backend_id.clone(),
+            self.sandbox_provider_id.clone(),
+            backend,
+            host_inputs,
+            launch,
+            probe,
+            promotion,
+            self.capabilities.clone(),
+        )
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)
     }
 }
 
@@ -494,6 +765,30 @@ impl WindowsEnrollmentAdmissionRequest {
     pub const fn probe_policy(&self) -> &WindowsEnrollmentProbePolicy {
         self.binding.probe_policy()
     }
+
+    /// Returns the canonical evidence-free binding for the broker/control
+    /// admission envelope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a request which cannot satisfy the shared protocol schema.
+    pub fn to_protocol_binding(
+        &self,
+    ) -> Result<WindowsRunnerAdmissionBinding, WindowsEnrollmentAdmissionError> {
+        self.binding.to_protocol_binding()
+    }
+
+    /// Returns the complete canonical proposal the broker must independently
+    /// verify before it may mint a signed admission envelope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any field outside the shared non-authoritative issue schema.
+    pub fn to_protocol_issue_request(
+        &self,
+    ) -> Result<WindowsRunnerAdmissionIssueRequest, WindowsEnrollmentAdmissionError> {
+        self.binding.to_protocol_issue_request()
+    }
 }
 
 /// Executes the shared, versioned lifecycle and tool probe for enrollment.
@@ -555,11 +850,13 @@ pub fn probe_windows_enrollment_request(
     }
 }
 
-/// Builds the active-admission request for a promoted Windows image.
+/// Builds the active-admission request for a promotion-pending Windows image.
 ///
 /// A candidate or unverified image returns `None` and retains the shell-only
-/// durable inventory. A promoted image must produce and validate a receipt
-/// before its returned inventory may be sent during enrollment.
+/// durable inventory. Local envelope checks are only fail-fast: the broker must
+/// independently resolve the trust bundle/key, verify every host input and
+/// signature, advance durable serial floors, and return an authenticated
+/// receipt before its inventory may be sent during enrollment.
 ///
 /// # Errors
 ///
@@ -573,7 +870,7 @@ pub fn windows_enrollment_admission_request(
     let Some(windows) = config.windows_hyperv() else {
         return Ok(None);
     };
-    if !windows.image_admission().permits_actions() {
+    if !windows.image_admission().is_promotion_pending() {
         return Ok(None);
     }
     if !valid_backend_id(backend_id) || config.executor().network() != NetworkPolicy::Disabled {
@@ -594,18 +891,16 @@ pub fn windows_enrollment_admission_request(
     let promotion_payload_sha256 = windows
         .promotion_payload_sha256()
         .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
-    let promotion_public_key_sha256 = windows
-        .promotion_public_key_sha256()
-        .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
     let promotion_envelope_sha256 = windows
         .promotion_envelope_sha256()
         .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
-    let capabilities = config
-        .inventory()
-        .clone()
-        .with_features(promoted_windows_runtime_features(
-            config.executor().toolchain(),
-        ));
+    let capabilities =
+        config
+            .inventory()
+            .clone()
+            .with_features(windows_broker_admission_feature_ceiling(
+                config.executor().toolchain(),
+            ));
     capabilities
         .validate()
         .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
@@ -631,10 +926,22 @@ pub fn windows_enrollment_admission_request(
             probe_policy: windows_enrollment_probe_policy(config, allocation)?,
             manifest_sha256: windows.image_contract().manifest_sha256(),
             lock_sha256: windows.image_contract().lock_sha256(),
+            promotion_trust_bundle_id: promotion.trust_bundle_id().as_str().to_owned(),
             promotion_key_id: promotion.key_id().to_owned(),
             promotion_payload_sha256,
-            promotion_public_key_sha256,
             promotion_envelope_sha256,
+            promotion_serial: windows
+                .promotion_serial()
+                .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?,
+            revocation_generation: windows
+                .revocation_generation()
+                .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?,
+            promotion_issued_at_unix_millis: windows
+                .promotion_issued_at_unix_millis()
+                .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?,
+            promotion_expires_at_unix_millis: windows
+                .promotion_expires_at_unix_millis()
+                .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?,
             capabilities,
             capabilities_sha256,
         },
@@ -725,9 +1032,15 @@ fn valid_host_inputs(inputs: &[WindowsHostInputDescriptor]) -> bool {
             .iter()
             .zip(WINDOWS_HOST_INPUT_KINDS)
             .all(|(input, kind)| input.kind == kind)
-        && !inputs.iter().any(|input| {
-            super::files::validate_absolute_path(&input.absolute_path).is_err()
-                || zero_digest(input.expected_sha256)
+        && inputs.iter().all(|input| {
+            input.absolute_path.to_str().is_some_and(|path| {
+                WindowsAdmissionHostInput::new(
+                    protocol_host_input_kind(input.kind),
+                    path,
+                    input.expected_sha256,
+                )
+                .is_ok()
+            })
         })
 }
 
@@ -773,16 +1086,14 @@ fn windows_enrollment_probe_policy(
 }
 
 /// Opaque broker-custody handle retained across an interrupted enrollment.
+#[cfg(test)]
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct WindowsEnrollmentAdmissionHandle(String);
 
+#[cfg(test)]
 impl WindowsEnrollmentAdmissionHandle {
-    /// Creates a bounded opaque handle returned by the trusted custody port.
-    ///
-    /// # Errors
-    ///
-    /// Rejects empty, oversized, non-ASCII, or control-bearing values.
-    pub fn new(value: impl Into<String>) -> Result<Self, WindowsEnrollmentAdmissionError> {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(value: impl Into<String>) -> Result<Self, WindowsEnrollmentAdmissionError> {
         let value = value.into();
         if !valid_id(&value) {
             return Err(WindowsEnrollmentAdmissionError::InvalidReceipt);
@@ -797,8 +1108,9 @@ impl WindowsEnrollmentAdmissionHandle {
     }
 }
 
-impl fmt::Debug for WindowsEnrollmentAdmissionHandle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+#[cfg(test)]
+impl std::fmt::Debug for WindowsEnrollmentAdmissionHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("WindowsEnrollmentAdmissionHandle")
             .field("value", &"[OPAQUE]")
@@ -807,34 +1119,45 @@ impl fmt::Debug for WindowsEnrollmentAdmissionHandle {
 }
 
 /// Digests of the independently authenticated evidence consumed by admission.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct WindowsEnrollmentAdmissionEvidence {
     broker_attestation: Sha256Digest,
     host_input_attestation: Sha256Digest,
     image_attestation: Sha256Digest,
     network_attestation: Sha256Digest,
-    authority_receipt: Sha256Digest,
+    authority_attestation: Sha256Digest,
+    profile_contract: Sha256Digest,
+    promotion_trust_bundle: Sha256Digest,
+    promotion_public_key: Sha256Digest,
+    cleanup_receipt: Sha256Digest,
 }
 
+#[cfg(test)]
 impl WindowsEnrollmentAdmissionEvidence {
-    /// Creates the five exact authenticated evidence digests.
-    ///
-    /// # Errors
-    ///
-    /// Rejects a zero placeholder digest.
-    pub fn new(
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
         broker_attestation_sha256: Sha256Digest,
         host_input_attestation_sha256: Sha256Digest,
         image_attestation_sha256: Sha256Digest,
         network_attestation_sha256: Sha256Digest,
-        authority_receipt_sha256: Sha256Digest,
+        authority_attestation_sha256: Sha256Digest,
+        profile_contract_sha256: Sha256Digest,
+        promotion_trust_bundle_sha256: Sha256Digest,
+        promotion_public_key_sha256: Sha256Digest,
+        cleanup_receipt_sha256: Sha256Digest,
     ) -> Result<Self, WindowsEnrollmentAdmissionError> {
         let digests = [
             broker_attestation_sha256,
             host_input_attestation_sha256,
             image_attestation_sha256,
             network_attestation_sha256,
-            authority_receipt_sha256,
+            authority_attestation_sha256,
+            profile_contract_sha256,
+            promotion_trust_bundle_sha256,
+            promotion_public_key_sha256,
+            cleanup_receipt_sha256,
         ];
         if digests.iter().copied().any(zero_digest) {
             return Err(WindowsEnrollmentAdmissionError::InvalidReceipt);
@@ -844,7 +1167,11 @@ impl WindowsEnrollmentAdmissionEvidence {
             host_input_attestation: host_input_attestation_sha256,
             image_attestation: image_attestation_sha256,
             network_attestation: network_attestation_sha256,
-            authority_receipt: authority_receipt_sha256,
+            authority_attestation: authority_attestation_sha256,
+            profile_contract: profile_contract_sha256,
+            promotion_trust_bundle: promotion_trust_bundle_sha256,
+            promotion_public_key: promotion_public_key_sha256,
+            cleanup_receipt: cleanup_receipt_sha256,
         })
     }
 
@@ -872,40 +1199,85 @@ impl WindowsEnrollmentAdmissionEvidence {
         self.network_attestation
     }
 
-    /// Returns the authenticated durable receipt digest.
+    /// Returns the control-authority admission attestation digest.
     #[must_use]
-    pub const fn authority_receipt_sha256(self) -> Sha256Digest {
-        self.authority_receipt
+    pub const fn authority_attestation_sha256(self) -> Sha256Digest {
+        self.authority_attestation
+    }
+
+    /// Returns the broker-minted exact launch/profile contract digest.
+    #[must_use]
+    pub const fn profile_contract_sha256(self) -> Sha256Digest {
+        self.profile_contract
+    }
+
+    /// Returns the digest of the broker/control-owned versioned trust bundle.
+    #[must_use]
+    pub const fn promotion_trust_bundle_sha256(self) -> Sha256Digest {
+        self.promotion_trust_bundle
+    }
+
+    /// Returns the exact approved promotion key digest selected by the broker.
+    #[must_use]
+    pub const fn promotion_public_key_sha256(self) -> Sha256Digest {
+        self.promotion_public_key
+    }
+
+    /// Returns the precommitted durable cleanup/tombstone receipt digest.
+    #[must_use]
+    pub const fn cleanup_receipt_sha256(self) -> Sha256Digest {
+        self.cleanup_receipt
     }
 }
 
 /// Unvalidated receipt returned from the trusted active-admission port.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsEnrollmentAdmissionReceipt {
+    schema_version: u16,
+    issuer_key_id: String,
+    nonce: Sha256Digest,
     handle: WindowsEnrollmentAdmissionHandle,
     binding: WindowsEnrollmentAdmissionBinding,
     evidence: WindowsEnrollmentAdmissionEvidence,
     issued_at_unix_seconds: u64,
     expires_at_unix_seconds: u64,
+    authenticator: Vec<u8>,
 }
 
+#[cfg(test)]
 impl WindowsEnrollmentAdmissionReceipt {
-    /// Creates a receipt returned by an authenticated broker custody adapter.
-    #[must_use]
-    pub const fn new(
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments, clippy::large_types_passed_by_value)]
+    pub(crate) fn new(
+        issuer_key_id: impl Into<String>,
+        nonce: Sha256Digest,
         handle: WindowsEnrollmentAdmissionHandle,
         binding: WindowsEnrollmentAdmissionBinding,
         evidence: WindowsEnrollmentAdmissionEvidence,
         issued_at_unix_seconds: u64,
         expires_at_unix_seconds: u64,
-    ) -> Self {
-        Self {
+        authenticator: Vec<u8>,
+    ) -> Result<Self, WindowsEnrollmentAdmissionError> {
+        let issuer_key_id = issuer_key_id.into();
+        if !valid_id(&issuer_key_id)
+            || zero_digest(nonce)
+            || !(MIN_RECEIPT_AUTHENTICATOR_BYTES..=MAX_RECEIPT_AUTHENTICATOR_BYTES)
+                .contains(&authenticator.len())
+        {
+            return Err(WindowsEnrollmentAdmissionError::InvalidReceipt);
+        }
+        Ok(Self {
+            schema_version: WINDOWS_ENROLLMENT_RECEIPT_SCHEMA_VERSION,
+            issuer_key_id,
+            nonce,
             handle,
             binding,
             evidence,
             issued_at_unix_seconds,
             expires_at_unix_seconds,
-        }
+            authenticator,
+        })
     }
 
     /// Returns the opaque broker-custody handle retained by this receipt.
@@ -938,6 +1310,18 @@ impl WindowsEnrollmentAdmissionReceipt {
         self.expires_at_unix_seconds
     }
 
+    /// Returns the opaque broker receipt issuer/key identifier.
+    #[must_use]
+    pub fn issuer_key_id(&self) -> &str {
+        &self.issuer_key_id
+    }
+
+    /// Returns the broker-minted one-use receipt nonce.
+    #[must_use]
+    pub const fn nonce(&self) -> Sha256Digest {
+        self.nonce
+    }
+
     /// Validates current bindings and freshness, then exposes enrollment authority.
     ///
     /// # Errors
@@ -947,11 +1331,19 @@ impl WindowsEnrollmentAdmissionReceipt {
         self,
         request: &WindowsEnrollmentAdmissionRequest,
         now_unix_seconds: u64,
+        authority: &dyn WindowsEnrollmentAdmissionPort,
     ) -> Result<ValidatedWindowsEnrollmentAdmission, WindowsEnrollmentAdmissionError> {
-        if self.binding != request.binding
+        if self.schema_version != WINDOWS_ENROLLMENT_RECEIPT_SCHEMA_VERSION
+            || !valid_id(&self.issuer_key_id)
+            || zero_digest(self.nonce)
+            || !(MIN_RECEIPT_AUTHENTICATOR_BYTES..=MAX_RECEIPT_AUTHENTICATOR_BYTES)
+                .contains(&self.authenticator.len())
+            || self.binding != request.binding
             || canonical_digest(&self.binding.capabilities)? != self.binding.capabilities_sha256
             || self.binding.capabilities.validate().is_err()
             || !valid_host_inputs(&self.binding.host_inputs)
+            || !valid_binding_authority(&self.binding)
+            || !valid_evidence(&self.evidence)
         {
             return Err(WindowsEnrollmentAdmissionError::Mismatch);
         }
@@ -967,16 +1359,66 @@ impl WindowsEnrollmentAdmissionReceipt {
         if now_unix_seconds >= self.expires_at_unix_seconds {
             return Err(WindowsEnrollmentAdmissionError::Expired);
         }
-        Ok(ValidatedWindowsEnrollmentAdmission { receipt: self })
+        let now_millis = now_unix_seconds
+            .checked_mul(1_000)
+            .ok_or(WindowsEnrollmentAdmissionError::Clock)?;
+        if self.binding.promotion_issued_at_unix_millis > now_millis {
+            return Err(WindowsEnrollmentAdmissionError::Clock);
+        }
+        if now_millis >= self.binding.promotion_expires_at_unix_millis {
+            return Err(WindowsEnrollmentAdmissionError::Expired);
+        }
+        let payload = self.signed_payload()?;
+        authority.verify_receipt_authenticator(
+            &self.issuer_key_id,
+            &payload,
+            &self.authenticator,
+        )?;
+        let receipt_sha256 = receipt_digest(&payload, &self.authenticator);
+        Ok(ValidatedWindowsEnrollmentAdmission {
+            receipt: self,
+            receipt_sha256,
+        })
+    }
+
+    fn signed_payload(&self) -> Result<Vec<u8>, WindowsEnrollmentAdmissionError> {
+        let document = WindowsEnrollmentReceiptSignedPayload {
+            schema_version: self.schema_version,
+            issuer_key_id: &self.issuer_key_id,
+            nonce: self.nonce,
+            handle: self.handle.as_str(),
+            binding_sha256: binding_digest(&self.binding)?,
+            evidence: self.evidence,
+            issued_at_unix_seconds: self.issued_at_unix_seconds,
+            expires_at_unix_seconds: self.expires_at_unix_seconds,
+        };
+        serde_json::to_vec(&document).map_err(|_| WindowsEnrollmentAdmissionError::InvalidReceipt)
     }
 }
 
+#[cfg(test)]
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct WindowsEnrollmentReceiptSignedPayload<'a> {
+    schema_version: u16,
+    issuer_key_id: &'a str,
+    nonce: Sha256Digest,
+    handle: &'a str,
+    binding_sha256: Sha256Digest,
+    evidence: WindowsEnrollmentAdmissionEvidence,
+    issued_at_unix_seconds: u64,
+    expires_at_unix_seconds: u64,
+}
+
 /// Receipt whose exact binding and freshness have been validated for enrollment.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedWindowsEnrollmentAdmission {
     receipt: WindowsEnrollmentAdmissionReceipt,
+    receipt_sha256: Sha256Digest,
 }
 
+#[cfg(test)]
 impl ValidatedWindowsEnrollmentAdmission {
     /// Rechecks freshness and returns the post-admission registration inventory.
     ///
@@ -1008,7 +1450,7 @@ impl ValidatedWindowsEnrollmentAdmission {
     /// Returns the authenticated durable receipt digest for exact retry binding.
     #[must_use]
     pub const fn receipt_sha256(&self) -> Sha256Digest {
-        self.receipt.evidence.authority_receipt
+        self.receipt_sha256
     }
 
     /// Returns the receipt expiry checked at each use.
@@ -1022,9 +1464,16 @@ impl ValidatedWindowsEnrollmentAdmission {
     pub const fn evidence(&self) -> WindowsEnrollmentAdmissionEvidence {
         self.receipt.evidence
     }
+
+    /// Returns the broker-minted profile contract retained for placement grants.
+    #[must_use]
+    pub const fn profile_contract_sha256(&self) -> Sha256Digest {
+        self.receipt.evidence.profile_contract
+    }
 }
 
 /// Trusted active-probe and opaque-custody boundary implemented by the broker lane.
+#[cfg(test)]
 pub trait WindowsEnrollmentAdmissionPort: Send + Sync {
     /// Runs fresh broker/image/network admission and durably retains its receipt.
     /// Implementations must invoke [`probe_windows_enrollment_request`] with the
@@ -1051,6 +1500,16 @@ pub trait WindowsEnrollmentAdmissionPort: Send + Sync {
         request: &WindowsEnrollmentAdmissionRequest,
     ) -> Result<WindowsEnrollmentAdmissionReceipt, WindowsEnrollmentAdmissionError>;
 
+    /// Verifies the receipt's broker signature or MAC through the canonical
+    /// authenticated broker trust root. Runner configuration never supplies
+    /// issuer keys.
+    fn verify_receipt_authenticator(
+        &self,
+        issuer_key_id: &str,
+        signed_payload: &[u8],
+        authenticator: &[u8],
+    ) -> Result<(), WindowsEnrollmentAdmissionError>;
+
     /// Completes broker custody only after enrollment credentials are durable.
     /// The broker must bind both values, prohibit handle reuse, and retain a
     /// tombstone so repeating the exact completion after a crash succeeds.
@@ -1061,8 +1520,7 @@ pub trait WindowsEnrollmentAdmissionPort: Send + Sync {
     /// not durable. An exact already-completed pair returns success.
     fn complete(
         &self,
-        handle: &WindowsEnrollmentAdmissionHandle,
-        receipt_sha256: Sha256Digest,
+        admission: &ValidatedWindowsEnrollmentAdmission,
     ) -> Result<(), WindowsEnrollmentAdmissionError>;
 }
 
@@ -1071,9 +1529,10 @@ pub trait WindowsEnrollmentAdmissionPort: Send + Sync {
 /// # Errors
 ///
 /// Fails closed if the clock is before the Unix epoch or does not fit `u64`.
+#[cfg(test)]
 pub fn current_unix_seconds() -> Result<u64, WindowsEnrollmentAdmissionError> {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|_| WindowsEnrollmentAdmissionError::Clock)
 }
@@ -1104,6 +1563,7 @@ pub enum WindowsEnrollmentAdmissionError {
     Clock,
 }
 
+#[cfg(test)]
 fn valid_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_ID_BYTES
@@ -1122,12 +1582,194 @@ fn zero_digest(digest: Sha256Digest) -> bool {
     digest.as_bytes().iter().all(|byte| *byte == 0)
 }
 
+fn digest_bytes(bytes: &[u8]) -> Sha256Digest {
+    Sha256Digest::from_bytes(Sha256::digest(bytes).into())
+}
+
+const fn protocol_host_input_kind(kind: WindowsHostInputKind) -> WindowsAdmissionHostInputKind {
+    match kind {
+        WindowsHostInputKind::Configuration => WindowsAdmissionHostInputKind::Configuration,
+        WindowsHostInputKind::BackendExecutable => WindowsAdmissionHostInputKind::BackendExecutable,
+        WindowsHostInputKind::ImageManifest => WindowsAdmissionHostInputKind::ImageManifest,
+        WindowsHostInputKind::ImageLock => WindowsAdmissionHostInputKind::ImageLock,
+        WindowsHostInputKind::Provenance => WindowsAdmissionHostInputKind::Provenance,
+        WindowsHostInputKind::Sbom => WindowsAdmissionHostInputKind::Sbom,
+        WindowsHostInputKind::PatchReport => WindowsAdmissionHostInputKind::PatchReport,
+        WindowsHostInputKind::Revocations => WindowsAdmissionHostInputKind::Revocations,
+        WindowsHostInputKind::PromotionEnvelope => WindowsAdmissionHostInputKind::PromotionEnvelope,
+    }
+}
+
+fn protocol_resource_limits(
+    limits: ResourceLimits,
+) -> Result<WindowsAdmissionResourceLimits, WindowsEnrollmentAdmissionError> {
+    WindowsAdmissionResourceLimits::new(limits.memory_bytes(), limits.cpu_millis(), limits.pids())
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)
+}
+
+#[cfg(test)]
+fn valid_evidence(evidence: &WindowsEnrollmentAdmissionEvidence) -> bool {
+    [
+        evidence.broker_attestation,
+        evidence.host_input_attestation,
+        evidence.image_attestation,
+        evidence.network_attestation,
+        evidence.authority_attestation,
+        evidence.profile_contract,
+        evidence.promotion_trust_bundle,
+        evidence.promotion_public_key,
+        evidence.cleanup_receipt,
+    ]
+    .into_iter()
+    .all(|digest| !zero_digest(digest))
+}
+
+#[cfg(test)]
+fn valid_binding_authority(binding: &WindowsEnrollmentAdmissionBinding) -> bool {
+    super::windows_image::WindowsPromotionTrustBundleId::new(
+        binding.promotion_trust_bundle_id.clone(),
+    )
+    .is_ok()
+        && valid_id(&binding.promotion_key_id)
+        && !zero_digest(binding.promotion_payload_sha256)
+        && !zero_digest(binding.promotion_envelope_sha256)
+        && binding.promotion_serial > 0
+        && binding.revocation_generation > 0
+        && binding.promotion_issued_at_unix_millis > 0
+        && binding.promotion_expires_at_unix_millis > binding.promotion_issued_at_unix_millis
+}
+
 fn canonical_digest<T: Serialize>(
     value: &T,
 ) -> Result<Sha256Digest, WindowsEnrollmentAdmissionError> {
     let bytes =
         serde_json::to_vec(value).map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
     Ok(Sha256Digest::from_bytes(Sha256::digest(bytes).into()))
+}
+
+#[cfg(test)]
+#[derive(Serialize)]
+struct WindowsEnrollmentBindingSignatureDocument<'a> {
+    schema_version: u16,
+    runner_id: RunnerId,
+    control_endpoint: &'a str,
+    enrollment_operation_id: Uuid,
+    enrollment_server_origin: &'a str,
+    runner_name: &'a str,
+    enrollment_token_sha256: Sha256Digest,
+    csr_sha256: Sha256Digest,
+    backend_id: &'a str,
+    sandbox_provider_id: &'a str,
+    backend_executable: &'a str,
+    backend_executable_sha256: Sha256Digest,
+    backend_operation_timeout_millis: u64,
+    host_inputs: &'a [WindowsHostInputDescriptor],
+    profile: &'a EnvironmentProfile,
+    image: &'a str,
+    environment_sha256: Sha256Digest,
+    probe_contract_schema_version: u16,
+    probe_contract_sha256: Sha256Digest,
+    manifest_sha256: Sha256Digest,
+    lock_sha256: Sha256Digest,
+    promotion_trust_bundle_id: &'a str,
+    promotion_key_id: &'a str,
+    promotion_payload_sha256: Sha256Digest,
+    promotion_envelope_sha256: Sha256Digest,
+    promotion_serial: u64,
+    revocation_generation: u64,
+    promotion_issued_at_unix_millis: u64,
+    promotion_expires_at_unix_millis: u64,
+    capabilities_sha256: Sha256Digest,
+}
+
+#[cfg(test)]
+fn binding_digest(
+    binding: &WindowsEnrollmentAdmissionBinding,
+) -> Result<Sha256Digest, WindowsEnrollmentAdmissionError> {
+    let executable = binding
+        .backend_executable
+        .to_str()
+        .ok_or(WindowsEnrollmentAdmissionError::InvalidRequest)?;
+    let timeout = u64::try_from(binding.backend_operation_timeout.as_millis())
+        .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
+    canonical_digest(&WindowsEnrollmentBindingSignatureDocument {
+        schema_version: 1,
+        runner_id: binding.runner_id,
+        control_endpoint: &binding.control_endpoint,
+        enrollment_operation_id: binding.intent.operation_id,
+        enrollment_server_origin: &binding.intent.server_origin,
+        runner_name: &binding.intent.runner_name,
+        enrollment_token_sha256: binding.intent.enrollment_token_sha256,
+        csr_sha256: binding.intent.csr_sha256,
+        backend_id: &binding.backend_id,
+        sandbox_provider_id: &binding.sandbox_provider_id,
+        backend_executable: executable,
+        backend_executable_sha256: binding.backend_executable_sha256,
+        backend_operation_timeout_millis: timeout,
+        host_inputs: &binding.host_inputs,
+        profile: &binding.profile,
+        image: &binding.image,
+        environment_sha256: sandbox_environment_digest(&binding.environment)?,
+        probe_contract_schema_version: binding.probe_policy.contract_schema_version,
+        probe_contract_sha256: binding.probe_policy.contract_sha256,
+        manifest_sha256: binding.manifest_sha256,
+        lock_sha256: binding.lock_sha256,
+        promotion_trust_bundle_id: &binding.promotion_trust_bundle_id,
+        promotion_key_id: &binding.promotion_key_id,
+        promotion_payload_sha256: binding.promotion_payload_sha256,
+        promotion_envelope_sha256: binding.promotion_envelope_sha256,
+        promotion_serial: binding.promotion_serial,
+        revocation_generation: binding.revocation_generation,
+        promotion_issued_at_unix_millis: binding.promotion_issued_at_unix_millis,
+        promotion_expires_at_unix_millis: binding.promotion_expires_at_unix_millis,
+        capabilities_sha256: binding.capabilities_sha256,
+    })
+}
+
+#[cfg(test)]
+fn sandbox_environment_digest(
+    environment: &SandboxEnvironment,
+) -> Result<Sha256Digest, WindowsEnrollmentAdmissionError> {
+    let SandboxLaunch::WindowsHyperVContainer { image, keepalive } = environment.launch() else {
+        return Err(WindowsEnrollmentAdmissionError::InvalidRequest);
+    };
+    let mut digest = Sha256::new();
+    digest.update(b"automata.windows-enrollment-environment.v1\0");
+    update_digest_string(&mut digest, environment.attestation().id().as_str());
+    digest.update(environment.attestation().digest().as_bytes());
+    update_digest_string(&mut digest, image.reference());
+    digest.update(image.digest().as_bytes());
+    update_digest_string(&mut digest, keepalive.program().as_str());
+    digest.update((keepalive.arguments().len() as u64).to_be_bytes());
+    for argument in keepalive.arguments() {
+        update_digest_string(&mut digest, argument);
+    }
+    update_digest_string(&mut digest, environment.workspace().as_str());
+    let values = environment.default_environment().values();
+    digest.update((values.len() as u64).to_be_bytes());
+    for variable in values {
+        update_digest_string(&mut digest, variable.name().as_str());
+        update_digest_string(&mut digest, variable.value().expose());
+        digest.update([u8::from(variable.is_secret())]);
+    }
+    Ok(Sha256Digest::from_bytes(digest.finalize().into()))
+}
+
+#[cfg(test)]
+fn update_digest_string(digest: &mut Sha256, value: &str) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value.as_bytes());
+}
+
+#[cfg(test)]
+fn receipt_digest(payload: &[u8], authenticator: &[u8]) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    digest.update(b"automata.windows-enrollment-receipt.v1\0");
+    digest.update((payload.len() as u64).to_be_bytes());
+    digest.update(payload);
+    digest.update((authenticator.len() as u64).to_be_bytes());
+    digest.update(authenticator);
+    Sha256Digest::from_bytes(digest.finalize().into())
 }
 
 #[cfg(test)]
@@ -1259,10 +1901,14 @@ mod tests {
                 probe_policy: test_probe_policy(resources),
                 manifest_sha256: Sha256Digest::from_bytes([3; 32]),
                 lock_sha256: Sha256Digest::from_bytes([4; 32]),
+                promotion_trust_bundle_id: "windows-promotion.test.v1".to_owned(),
                 promotion_key_id: "promotion.test/v1".to_owned(),
                 promotion_payload_sha256: Sha256Digest::from_bytes([5; 32]),
-                promotion_public_key_sha256: Sha256Digest::from_bytes([13; 32]),
                 promotion_envelope_sha256: Sha256Digest::from_bytes([14; 32]),
+                promotion_serial: 7,
+                revocation_generation: 4,
+                promotion_issued_at_unix_millis: NOW * 1_000 - 1_000,
+                promotion_expires_at_unix_millis: (NOW + 300) * 1_000,
                 capabilities,
                 capabilities_sha256,
             },
@@ -1270,7 +1916,9 @@ mod tests {
     }
 
     fn receipt(request: &WindowsEnrollmentAdmissionRequest) -> WindowsEnrollmentAdmissionReceipt {
-        WindowsEnrollmentAdmissionReceipt::new(
+        let mut receipt = WindowsEnrollmentAdmissionReceipt::new(
+            "broker-receipt.test.v1",
+            Sha256Digest::from_bytes([15; 32]),
             WindowsEnrollmentAdmissionHandle::new("receipt-1").expect("handle"),
             request.binding.clone(),
             WindowsEnrollmentAdmissionEvidence::new(
@@ -1279,11 +1927,26 @@ mod tests {
                 Sha256Digest::from_bytes([8; 32]),
                 Sha256Digest::from_bytes([9; 32]),
                 Sha256Digest::from_bytes([10; 32]),
+                Sha256Digest::from_bytes([11; 32]),
+                Sha256Digest::from_bytes([12; 32]),
+                Sha256Digest::from_bytes([13; 32]),
+                Sha256Digest::from_bytes([14; 32]),
             )
             .expect("evidence"),
             NOW,
             NOW + 300,
+            vec![0; 32],
         )
+        .expect("receipt");
+        receipt.authenticator = test_authenticator(&receipt.signed_payload().expect("payload"));
+        receipt
+    }
+
+    fn test_authenticator(payload: &[u8]) -> Vec<u8> {
+        let mut digest = Sha256::new();
+        digest.update(b"test-broker-receipt-key\0");
+        digest.update(payload);
+        digest.finalize().to_vec()
     }
 
     #[derive(Debug)]
@@ -1294,7 +1957,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct RestartingPortState {
         retained: Option<WindowsEnrollmentAdmissionReceipt>,
-        completed: Option<(WindowsEnrollmentAdmissionHandle, Sha256Digest)>,
+        completed: Option<(WindowsEnrollmentAdmissionHandle, Sha256Digest, Sha256Digest)>,
     }
 
     impl WindowsEnrollmentAdmissionPort for RestartingPort {
@@ -1325,22 +1988,44 @@ mod tests {
                 .ok_or(WindowsEnrollmentAdmissionError::Unavailable)
         }
 
+        fn verify_receipt_authenticator(
+            &self,
+            issuer_key_id: &str,
+            signed_payload: &[u8],
+            authenticator: &[u8],
+        ) -> Result<(), WindowsEnrollmentAdmissionError> {
+            if issuer_key_id != "broker-receipt.test.v1"
+                || authenticator != test_authenticator(signed_payload)
+            {
+                return Err(WindowsEnrollmentAdmissionError::InvalidReceipt);
+            }
+            Ok(())
+        }
+
         fn complete(
             &self,
-            handle: &WindowsEnrollmentAdmissionHandle,
-            receipt_sha256: Sha256Digest,
+            admission: &ValidatedWindowsEnrollmentAdmission,
         ) -> Result<(), WindowsEnrollmentAdmissionError> {
             let mut state = self.state.lock().expect("receipt lock");
-            if state.completed.as_ref() == Some(&(handle.clone(), receipt_sha256)) {
+            let completed = (
+                admission.handle().clone(),
+                admission.receipt_sha256(),
+                admission.evidence().cleanup_receipt_sha256(),
+            );
+            if state.completed.as_ref() == Some(&completed) {
                 return Ok(());
             }
             let Some(retained) = state.retained.as_ref() else {
                 return Err(WindowsEnrollmentAdmissionError::Unavailable);
             };
-            if retained.handle != *handle || retained.evidence.authority_receipt != receipt_sha256 {
+            let payload = retained.signed_payload()?;
+            if retained.handle != *admission.handle()
+                || receipt_digest(&payload, &retained.authenticator) != admission.receipt_sha256()
+                || retained.evidence.cleanup_receipt
+                    != admission.evidence().cleanup_receipt_sha256()
+            {
                 return Err(WindowsEnrollmentAdmissionError::Mismatch);
             }
-            let completed = (handle.clone(), receipt_sha256);
             if state
                 .completed
                 .as_ref()
@@ -1367,12 +2052,12 @@ mod tests {
         let issued = port
             .issue(&request)
             .expect("issue")
-            .validate(&request, NOW)
+            .validate(&request, NOW, &port)
             .expect("validate issued receipt");
         let resumed = port
             .resume(issued.handle(), &request)
             .expect("resume")
-            .validate(&request, NOW + 1)
+            .validate(&request, NOW + 1, &port)
             .expect("validate resumed receipt");
 
         assert_eq!(issued.receipt_sha256(), resumed.receipt_sha256());
@@ -1385,13 +2070,8 @@ mod tests {
             Err(WindowsEnrollmentAdmissionError::Expired),
             "a previously validated value cannot outlive its receipt"
         );
-        assert_eq!(
-            port.complete(resumed.handle(), Sha256Digest::from_bytes([99; 32]),),
-            Err(WindowsEnrollmentAdmissionError::Mismatch)
-        );
-        port.complete(resumed.handle(), resumed.receipt_sha256())
-            .expect("complete custody");
-        port.complete(resumed.handle(), resumed.receipt_sha256())
+        port.complete(&resumed).expect("complete custody");
+        port.complete(&resumed)
             .expect("exact completion is idempotent after a crash");
         assert_eq!(
             port.resume(resumed.handle(), &request),
@@ -1402,10 +2082,13 @@ mod tests {
     #[test]
     fn tamper_capability_superset_and_binding_substitution_fail_closed() {
         let request = request([RunnerFeature::SHELL_STEPS]);
+        let port = RestartingPort {
+            state: Mutex::new(RestartingPortState::default()),
+        };
         let mut tampered = receipt(&request);
         tampered.binding.image = format!("registry.example/other@sha256:{}", "a".repeat(64));
         assert_eq!(
-            tampered.validate(&request, NOW),
+            tampered.validate(&request, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch)
         );
 
@@ -1417,7 +2100,7 @@ mod tests {
         superset.binding.capabilities_sha256 =
             canonical_digest(&superset.binding.capabilities).expect("superset digest");
         assert_eq!(
-            superset.validate(&request, NOW),
+            superset.validate(&request, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch)
         );
 
@@ -1427,7 +2110,7 @@ mod tests {
                 .expect("substituted Node"),
         );
         assert_eq!(
-            receipt(&request).validate(&changed_probe, NOW),
+            receipt(&request).validate(&changed_probe, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch),
             "a custody receipt must not cross an exact tool-probe policy change"
         );
@@ -1436,7 +2119,7 @@ mod tests {
         changed_probe_contract.binding.probe_policy.contract_sha256 =
             Sha256Digest::from_bytes([76; 32]);
         assert_eq!(
-            receipt(&request).validate(&changed_probe_contract, NOW),
+            receipt(&request).validate(&changed_probe_contract, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch),
             "a probe-semantic change invalidates retained custody"
         );
@@ -1444,7 +2127,7 @@ mod tests {
         let mut changed_backend = request.clone();
         changed_backend.binding.backend_executable_sha256 = Sha256Digest::from_bytes([88; 32]);
         assert_eq!(
-            receipt(&request).validate(&changed_backend, NOW),
+            receipt(&request).validate(&changed_backend, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch),
             "backend executable substitution invalidates retained custody"
         );
@@ -1452,15 +2135,16 @@ mod tests {
         let mut changed_provider = request.clone();
         changed_provider.binding.sandbox_provider_id = "substituted-provider".to_owned();
         assert_eq!(
-            receipt(&request).validate(&changed_provider, NOW),
+            receipt(&request).validate(&changed_provider, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch),
             "sandbox-provider substitution invalidates retained custody"
         );
 
         let mut changed_authority = request.clone();
-        changed_authority.binding.promotion_public_key_sha256 = Sha256Digest::from_bytes([77; 32]);
+        changed_authority.binding.promotion_trust_bundle_id =
+            "windows-promotion.test.v2".to_owned();
         assert_eq!(
-            receipt(&request).validate(&changed_authority, NOW),
+            receipt(&request).validate(&changed_authority, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch),
             "promotion trust-anchor rotation invalidates retained custody"
         );
@@ -1468,7 +2152,7 @@ mod tests {
         let mut changed_transaction = request.clone();
         changed_transaction.binding.intent.operation_id = Uuid::from_u128(2);
         assert_eq!(
-            receipt(&request).validate(&changed_transaction, NOW),
+            receipt(&request).validate(&changed_transaction, NOW, &port),
             Err(WindowsEnrollmentAdmissionError::Mismatch),
             "one receipt cannot authorize a second enrollment operation"
         );
@@ -1529,6 +2213,9 @@ mod tests {
     #[test]
     fn future_expired_zero_and_overlong_lifetimes_fail_closed() {
         let request = request([RunnerFeature::SHELL_STEPS]);
+        let port = RestartingPort {
+            state: Mutex::new(RestartingPortState::default()),
+        };
         for (issued, expires, now, expected) in [
             (
                 NOW + 1,
@@ -1558,7 +2245,36 @@ mod tests {
             let mut receipt = receipt(&request);
             receipt.issued_at_unix_seconds = issued;
             receipt.expires_at_unix_seconds = expires;
-            assert_eq!(receipt.validate(&request, now), Err(expected));
+            assert_eq!(receipt.validate(&request, now, &port), Err(expected));
         }
+    }
+
+    #[test]
+    fn forged_nonzero_authenticator_nonce_and_cleanup_binding_fail_closed() {
+        let request = request([RunnerFeature::SHELL_STEPS]);
+        let port = RestartingPort {
+            state: Mutex::new(RestartingPortState::default()),
+        };
+
+        let mut forged = receipt(&request);
+        forged.authenticator = vec![77; 32];
+        assert_eq!(
+            forged.validate(&request, NOW, &port),
+            Err(WindowsEnrollmentAdmissionError::InvalidReceipt)
+        );
+
+        let mut nonce = receipt(&request);
+        nonce.nonce = Sha256Digest::from_bytes([88; 32]);
+        assert_eq!(
+            nonce.validate(&request, NOW, &port),
+            Err(WindowsEnrollmentAdmissionError::InvalidReceipt)
+        );
+
+        let mut cleanup = receipt(&request);
+        cleanup.evidence.cleanup_receipt = Sha256Digest::from_bytes([99; 32]);
+        assert_eq!(
+            cleanup.validate(&request, NOW, &port),
+            Err(WindowsEnrollmentAdmissionError::InvalidReceipt)
+        );
     }
 }

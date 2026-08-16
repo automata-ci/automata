@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use automata_ci_action::{
     ActionBundleLimits, ActionDefinitionDocument, ActionResolveErrorKind, ActionResolver,
-    ActionSubpath, RepositoryActionRequest,
+    ActionSubpath, RepositoryActionRequest, inspect_archive_bytes,
 };
 use automata_ci_action_github::{
     ActionMetadataDecoder, CompositeRunStep, CompositeStep, CompositeUsesStep,
@@ -15,14 +15,15 @@ use automata_ci_execution::{TargetPath, TargetPlatform};
 use automata_ci_scm::{RepositoryId, RevisionSpec};
 use automata_ci_workflow_github::{GithubConditionCompiler, GithubConditionPhase};
 use bytes::Bytes;
+use sha2::{Digest as _, Sha256};
 
 use crate::{
-    ActionPreparationError, ActionPreparationPort, ActionPreparationRequest, PreparedAction,
-    PreparedActionDefinition, PreparedActionExecution, PreparedBoolean, PreparedCompositeAction,
-    PreparedCompositeRunStep, PreparedCompositeStep, PreparedCompositeStepMetadata,
-    PreparedCompositeUsesStep, PreparedInput, PreparedJavascriptAction, PreparedKeyValue,
-    PreparedLocalAction, PreparedOutput, PreparedValue, PreparedValueSegment,
-    RepositoryCredentialPort,
+    ActionPreparationError, ActionPreparationPort, ActionPreparationRequest,
+    PlannedActionPreparationRequest, PreparedAction, PreparedActionDefinition,
+    PreparedActionExecution, PreparedBoolean, PreparedCompositeAction, PreparedCompositeRunStep,
+    PreparedCompositeStep, PreparedCompositeStepMetadata, PreparedCompositeUsesStep, PreparedInput,
+    PreparedJavascriptAction, PreparedKeyValue, PreparedLocalAction, PreparedOutput, PreparedValue,
+    PreparedValueSegment, RepositoryCredentialPort,
     error::{ActionPreparationErrorKind, PortErrorKind},
 };
 
@@ -380,6 +381,64 @@ impl ActionPreparationPort for ResolvedBundleActionPreparer {
             Some(RepositoryActionSource {
                 repository: bundle.repository().as_str(),
                 revision: bundle.resolved_revision().as_str(),
+            }),
+        )
+    }
+
+    async fn prepare_planned(
+        &self,
+        request: PlannedActionPreparationRequest<'_>,
+    ) -> Result<PreparedAction, ActionPreparationError> {
+        let ActionReference::Repository {
+            repository,
+            revision,
+            subpath,
+        } = request.reference()
+        else {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::UnsupportedReference,
+            ));
+        };
+        if revision.len() != 40
+            || !revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::UnsupportedReference,
+            ));
+        }
+        let expected_subpath = subpath.as_deref().unwrap_or_default();
+        if expected_subpath != request.subpath()
+            || automata_ci_core::Sha256Digest::from_bytes(Sha256::digest(request.archive()).into())
+                != request.archive_sha256()
+        {
+            return Err(ActionPreparationError::new(
+                ActionPreparationErrorKind::Content,
+            ));
+        }
+        let action_subpath = if expected_subpath.is_empty() {
+            ActionSubpath::root()
+        } else {
+            ActionSubpath::new(expected_subpath.to_owned())
+                .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Content))?
+        };
+        let definition =
+            inspect_archive_bytes(request.archive(), &action_subpath, self.bundle_limits)
+                .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Content))?;
+        let metadata = self
+            .decoder
+            .decode(&definition)
+            .map_err(|_| ActionPreparationError::new(ActionPreparationErrorKind::Metadata))?;
+        prepare_metadata(
+            &metadata,
+            request.archive_sha256(),
+            request.archive().clone(),
+            expected_subpath,
+            &self.conditions,
+            Some(RepositoryActionSource {
+                repository,
+                revision,
             }),
         )
     }

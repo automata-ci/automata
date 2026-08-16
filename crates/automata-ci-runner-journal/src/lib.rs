@@ -46,7 +46,7 @@ pub use observer::{
 ///
 /// Obsolete or future schemas fail closed rather than being interpreted by
 /// compatibility readers.
-pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 5;
+pub const RUNNER_JOURNAL_SCHEMA_VERSION: u16 = 6;
 
 /// Largest delivery enqueue timestamp accepted by the durable journal.
 ///

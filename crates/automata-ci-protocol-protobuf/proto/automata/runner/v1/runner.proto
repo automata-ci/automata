@@ -398,6 +398,29 @@ message JobContentReference {
   string media_type = 4;
 }
 
+message WindowsActionArchiveFacts {
+  uint32 entry_count = 1;
+  uint32 regular_file_count = 2;
+  uint64 expanded_bytes = 3;
+  uint64 maximum_regular_file_bytes = 4;
+  uint32 maximum_depth = 5;
+}
+
+message WindowsRepositoryActionArchive {
+  uint32 ordinal = 1;
+  bytes action_key_sha256 = 2;
+  string subpath = 3;
+  JobContentReference archive = 4;
+  WindowsActionArchiveFacts facts = 5;
+}
+
+message WindowsRepositoryActionGraph {
+  uint32 schema_version = 1;
+  bytes policy_sha256 = 2;
+  bytes graph_sha256 = 3;
+  repeated WindowsRepositoryActionArchive archives = 4;
+}
+
 message JobExecutionContext {
   string workflow_name = 1;
   string git_ref = 2;
@@ -412,6 +435,8 @@ message JobExecutionContext {
   optional uint64 run_id_alias = 9;
   // Current attempt initiator; actor remains the original run actor on reruns.
   optional string triggering_actor = 10;
+  // Complete immutable repository-action graph resolved before scheduling.
+  optional WindowsRepositoryActionGraph windows_action_graph = 11;
 }
 
 message ExpressionDialect {

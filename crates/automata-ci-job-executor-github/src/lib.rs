@@ -38,8 +38,8 @@ pub use port::{
     DeterministicOperationIds, ExecutionClock, ExecutionOperationIds, GithubContextPort,
     GithubContextRequest, GithubContextSnapshot, GithubExecutionIdentity, GithubExecutionPhase,
     GithubStepSnapshot, GithubToolchain, JobContentPort, NoRepositoryCredentials, NoSecrets,
-    OperationPurpose, RepositoryCredentialPort, SandboxEnvironmentCatalog,
-    SecretCustodyAcknowledger, SecretPort, SystemExecutionClock,
+    OperationPurpose, PlannedActionPreparationRequest, RepositoryCredentialPort,
+    SandboxEnvironmentCatalog, SecretCustodyAcknowledger, SecretPort, SystemExecutionClock,
 };
 pub use prepared::{
     PreparedAction, PreparedActionDefinition, PreparedActionError, PreparedActionExecution,

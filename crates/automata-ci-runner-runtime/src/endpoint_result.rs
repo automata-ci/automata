@@ -1,7 +1,8 @@
 use automata_ci_execution::{
-    CopyFromRequest, ExecutionCommand, ExecutionError, ExecutionErrorKind, ExecutionOutput,
-    ExecutionOutputRecord, ExecutionOutputStream, ExecutionStage, ExecutionTermination,
-    MAX_EXECUTION_OUTPUT_RECORDS,
+    ActionGraphMaterializationRequest, CopyFromRequest, ExecutionCommand, ExecutionError,
+    ExecutionErrorKind, ExecutionOutput, ExecutionOutputRecord, ExecutionOutputStream,
+    ExecutionStage, ExecutionTermination, MAX_EXECUTION_OUTPUT_RECORDS, MAX_SANDBOX_HANDLE_BYTES,
+    SealedActionGraph, SealedActionReadRequest, SealedActionTree, TargetPath,
 };
 
 const MAGIC: &[u8; 8] = b"AERES001";
@@ -18,9 +19,43 @@ pub(crate) fn exec_reservation(request: &ExecutionCommand) -> Option<u64> {
         .and_then(|value| u64::try_from(value).ok())
 }
 
+pub(crate) fn sealed_exec_reservation(request: &ExecutionCommand) -> Option<u64> {
+    exec_reservation(request)
+}
+
 pub(crate) fn copy_from_reservation(request: &CopyFromRequest) -> Option<u64> {
     request
         .byte_limit()
+        .checked_add(MAGIC.len() + 8)
+        .and_then(|value| u64::try_from(value).ok())
+}
+
+pub(crate) fn sealed_read_reservation(request: &SealedActionReadRequest) -> Option<u64> {
+    bytes_reservation(request.byte_limit())
+}
+
+pub(crate) fn sealed_graph_reservation(request: &ActionGraphMaterializationRequest) -> Option<u64> {
+    let fixed = MAGIC
+        .len()
+        .checked_add(1)?
+        .checked_add(1)?
+        .checked_add(32)?
+        .checked_add(4)?;
+    let trees = request
+        .archives()
+        .iter()
+        .try_fold(0_usize, |total, archive| {
+            total
+                .checked_add(4 + MAX_SANDBOX_HANDLE_BYTES)
+                .and_then(|value| value.checked_add(4))
+                .and_then(|value| value.checked_add(4 + archive.destination().as_str().len()))
+                .and_then(|value| value.checked_add(32))
+        })?;
+    u64::try_from(fixed.checked_add(trees)?).ok()
+}
+
+fn bytes_reservation(byte_limit: usize) -> Option<u64> {
+    byte_limit
         .checked_add(MAGIC.len() + 8)
         .and_then(|value| u64::try_from(value).ok())
 }
@@ -33,7 +68,37 @@ pub(crate) fn encode_exec(
     result: &Result<ExecutionOutput, ExecutionError>,
     request: &ExecutionCommand,
 ) -> Result<Vec<u8>, ()> {
-    let mut encoded = header(0);
+    encode_execution_output(result, request, 0, ExecutionStage::Exec)
+}
+
+pub(crate) fn decode_exec(
+    encoded: &[u8],
+    request: &ExecutionCommand,
+) -> Result<Result<ExecutionOutput, ExecutionError>, ()> {
+    decode_execution_output(encoded, request, 0, ExecutionStage::Exec)
+}
+
+pub(crate) fn encode_sealed_exec(
+    result: &Result<ExecutionOutput, ExecutionError>,
+    request: &ExecutionCommand,
+) -> Result<Vec<u8>, ()> {
+    encode_execution_output(result, request, 7, ExecutionStage::ExecSealedAction)
+}
+
+pub(crate) fn decode_sealed_exec(
+    encoded: &[u8],
+    request: &ExecutionCommand,
+) -> Result<Result<ExecutionOutput, ExecutionError>, ()> {
+    decode_execution_output(encoded, request, 7, ExecutionStage::ExecSealedAction)
+}
+
+fn encode_execution_output(
+    result: &Result<ExecutionOutput, ExecutionError>,
+    request: &ExecutionCommand,
+    kind: u8,
+    stage: ExecutionStage,
+) -> Result<Vec<u8>, ()> {
+    let mut encoded = header(kind);
     match result {
         Ok(output) => {
             let output_bytes = output
@@ -59,16 +124,18 @@ pub(crate) fn encode_exec(
                 put_bytes(&mut encoded, record.bytes())?;
             }
         }
-        Err(error) => encode_error(&mut encoded, *error, ExecutionStage::Exec)?,
+        Err(error) => encode_error(&mut encoded, *error, stage)?,
     }
     Ok(encoded)
 }
 
-pub(crate) fn decode_exec(
+fn decode_execution_output(
     encoded: &[u8],
     request: &ExecutionCommand,
+    kind: u8,
+    stage: ExecutionStage,
 ) -> Result<Result<ExecutionOutput, ExecutionError>, ()> {
-    let mut reader = Reader::new(encoded, 0)?;
+    let mut reader = Reader::new(encoded, kind)?;
     match reader.byte()? {
         STATUS_SUCCESS => {
             let termination = decode_termination(&mut reader)?;
@@ -106,7 +173,7 @@ pub(crate) fn decode_exec(
                 .map(Ok)
                 .map_err(|_| ())
         }
-        STATUS_ERROR => decode_error(&mut reader, ExecutionStage::Exec).map(Err),
+        STATUS_ERROR => decode_error(&mut reader, stage).map(Err),
         _ => Err(()),
     }
 }
@@ -203,6 +270,164 @@ pub(crate) fn decode_bytes(
     }
 }
 
+pub(crate) fn encode_sealed_read(
+    result: &Result<Vec<u8>, ExecutionError>,
+    request: &SealedActionReadRequest,
+) -> Result<Vec<u8>, ()> {
+    encode_bounded_bytes(
+        result,
+        request.byte_limit(),
+        6,
+        ExecutionStage::ReadSealedAction,
+    )
+}
+
+pub(crate) fn decode_sealed_read(
+    encoded: &[u8],
+    request: &SealedActionReadRequest,
+) -> Result<Result<Vec<u8>, ExecutionError>, ()> {
+    decode_bounded_bytes(
+        encoded,
+        request.byte_limit(),
+        6,
+        ExecutionStage::ReadSealedAction,
+    )
+}
+
+fn encode_bounded_bytes(
+    result: &Result<Vec<u8>, ExecutionError>,
+    byte_limit: usize,
+    kind: u8,
+    stage: ExecutionStage,
+) -> Result<Vec<u8>, ()> {
+    let mut encoded = header(kind);
+    match result {
+        Ok(bytes) => {
+            if bytes.len() > byte_limit {
+                return Err(());
+            }
+            encoded.push(STATUS_SUCCESS);
+            put_bytes(&mut encoded, bytes)?;
+        }
+        Err(error) => encode_error(&mut encoded, *error, stage)?,
+    }
+    Ok(encoded)
+}
+
+fn decode_bounded_bytes(
+    encoded: &[u8],
+    byte_limit: usize,
+    kind: u8,
+    stage: ExecutionStage,
+) -> Result<Result<Vec<u8>, ExecutionError>, ()> {
+    let mut reader = Reader::new(encoded, kind)?;
+    match reader.byte()? {
+        STATUS_SUCCESS => {
+            let bytes = reader.bytes()?;
+            if bytes.len() > byte_limit {
+                return Err(());
+            }
+            let bytes = bytes.to_vec();
+            reader.finish()?;
+            Ok(Ok(bytes))
+        }
+        STATUS_ERROR => decode_error(&mut reader, stage).map(Err),
+        _ => Err(()),
+    }
+}
+
+pub(crate) fn encode_sealed_graph(
+    result: &Result<SealedActionGraph, ExecutionError>,
+    request: &ActionGraphMaterializationRequest,
+) -> Result<Vec<u8>, ()> {
+    let mut encoded = header(5);
+    match result {
+        Ok(graph) => {
+            if !sealed_graph_matches_request(graph, request) {
+                return Err(());
+            }
+            encoded.push(STATUS_SUCCESS);
+            put_digest(&mut encoded, graph.receipt_sha256());
+            put_u32(&mut encoded, graph.trees().len())?;
+            for tree in graph.trees() {
+                put_text(&mut encoded, tree.graph_opaque())?;
+                encoded.extend_from_slice(&tree.ordinal().to_be_bytes());
+                put_text(&mut encoded, tree.root().as_str())?;
+                put_digest(&mut encoded, tree.receipt_sha256());
+            }
+        }
+        Err(error) => encode_error(&mut encoded, *error, ExecutionStage::MaterializeAction)?,
+    }
+    Ok(encoded)
+}
+
+pub(crate) fn decode_sealed_graph(
+    encoded: &[u8],
+    request: &ActionGraphMaterializationRequest,
+) -> Result<Result<SealedActionGraph, ExecutionError>, ()> {
+    let mut reader = Reader::new(encoded, 5)?;
+    match reader.byte()? {
+        STATUS_SUCCESS => {
+            let receipt = reader.digest()?;
+            let count = reader.length()?;
+            if count != request.archives().len() {
+                return Err(());
+            }
+            let mut trees = Vec::with_capacity(count);
+            for archive in request.archives() {
+                let graph_opaque = reader.text()?;
+                let ordinal = reader.u32()?;
+                let root = TargetPath::windows(reader.text()?).map_err(|_| ())?;
+                let tree_receipt = reader.digest()?;
+                if ordinal != archive.ordinal() || &root != archive.destination() {
+                    return Err(());
+                }
+                trees.push(
+                    SealedActionTree::new(
+                        request.sandbox().clone(),
+                        request.generation(),
+                        graph_opaque,
+                        request.graph_sha256(),
+                        ordinal,
+                        root,
+                        tree_receipt,
+                    )
+                    .map_err(|_| ())?,
+                );
+            }
+            reader.finish()?;
+            SealedActionGraph::new(
+                request.sandbox().clone(),
+                request.generation(),
+                request.graph_sha256(),
+                receipt,
+                trees,
+            )
+            .map(Ok)
+            .map_err(|_| ())
+        }
+        STATUS_ERROR => decode_error(&mut reader, ExecutionStage::MaterializeAction).map(Err),
+        _ => Err(()),
+    }
+}
+
+fn sealed_graph_matches_request(
+    graph: &SealedActionGraph,
+    request: &ActionGraphMaterializationRequest,
+) -> bool {
+    graph.sandbox() == request.sandbox()
+        && graph.generation() == request.generation()
+        && graph.graph_sha256() == request.graph_sha256()
+        && graph.trees().len() == request.archives().len()
+        && graph
+            .trees()
+            .iter()
+            .zip(request.archives())
+            .all(|(tree, archive)| {
+                tree.ordinal() == archive.ordinal() && tree.root() == archive.destination()
+            })
+}
+
 fn header(kind: u8) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(MAGIC.len() + 16);
     encoded.extend_from_slice(MAGIC);
@@ -275,6 +500,9 @@ const fn stage_tag(stage: ExecutionStage) -> u8 {
         ExecutionStage::Wait => 2,
         ExecutionStage::CopyTo => 3,
         ExecutionStage::CopyFrom => 4,
+        ExecutionStage::MaterializeAction => 5,
+        ExecutionStage::ReadSealedAction => 6,
+        ExecutionStage::ExecSealedAction => 7,
     }
 }
 
@@ -285,6 +513,9 @@ const fn decode_stage(tag: u8) -> Result<ExecutionStage, ()> {
         2 => Ok(ExecutionStage::Wait),
         3 => Ok(ExecutionStage::CopyTo),
         4 => Ok(ExecutionStage::CopyFrom),
+        5 => Ok(ExecutionStage::MaterializeAction),
+        6 => Ok(ExecutionStage::ReadSealedAction),
+        7 => Ok(ExecutionStage::ExecSealedAction),
         _ => Err(()),
     }
 }
@@ -317,6 +548,14 @@ fn put_u32(encoded: &mut Vec<u8>, value: usize) -> Result<(), ()> {
     let value = u32::try_from(value).map_err(|_| ())?;
     encoded.extend_from_slice(&value.to_be_bytes());
     Ok(())
+}
+
+fn put_digest(encoded: &mut Vec<u8>, digest: automata_ci_core::Sha256Digest) {
+    encoded.extend_from_slice(digest.as_bytes());
+}
+
+fn put_text(encoded: &mut Vec<u8>, value: &str) -> Result<(), ()> {
+    put_bytes(encoded, value.as_bytes())
 }
 
 fn put_bytes(encoded: &mut Vec<u8>, bytes: &[u8]) -> Result<(), ()> {
@@ -359,6 +598,20 @@ impl<'a> Reader<'a> {
         usize::try_from(u32::from_be_bytes(self.array()?)).map_err(|_| ())
     }
 
+    fn u32(&mut self) -> Result<u32, ()> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+
+    fn digest(&mut self) -> Result<automata_ci_core::Sha256Digest, ()> {
+        Ok(automata_ci_core::Sha256Digest::from_bytes(self.array()?))
+    }
+
+    fn text(&mut self) -> Result<String, ()> {
+        let bytes = self.bytes()?;
+        let value = std::str::from_utf8(bytes).map_err(|_| ())?;
+        Ok(value.to_owned())
+    }
+
     fn bytes(&mut self) -> Result<&'a [u8], ()> {
         let length = self.length()?;
         self.take(length)
@@ -380,11 +633,16 @@ impl<'a> Reader<'a> {
 mod tests {
     use std::time::Duration;
 
-    use automata_ci_core::OperationId;
-    use automata_ci_execution::{
-        CopyFromRequest, ExecutionArgv, ExecutionEnvironment, ExecutionOutputRecord,
-        ExecutionOutputStream, TargetPath,
+    use automata_ci_core::{
+        JobContentReference, OperationId, Sha256Digest, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+        WindowsActionArchiveFacts, WindowsRepositoryActionArchive, WindowsRepositoryActionGraph,
     };
+    use automata_ci_execution::{
+        ActionArchiveMaterialization, CopyFromRequest, ExecutionArgv, ExecutionEnvironment,
+        ExecutionOutputRecord, ExecutionOutputStream, ProviderId, SandboxGeneration, SandboxHandle,
+        TargetPath,
+    };
+    use sha2::{Digest as _, Sha256};
 
     use super::*;
 
@@ -418,6 +676,72 @@ mod tests {
             false,
         )
         .expect("output")
+    }
+
+    fn digest(bytes: &[u8]) -> Sha256Digest {
+        Sha256Digest::from_bytes(Sha256::digest(bytes).into())
+    }
+
+    fn graph_request() -> ActionGraphMaterializationRequest {
+        let content = b"sealed archive".to_vec();
+        let action_key_sha256 = Sha256Digest::from_bytes([0x21; 32]);
+        let content_sha256 = digest(&content);
+        let facts = WindowsActionArchiveFacts::new(1, 1, 14, 14, 1).expect("facts");
+        let planned = WindowsRepositoryActionArchive::new(
+            0,
+            action_key_sha256,
+            "",
+            JobContentReference::new(
+                "windows-actions/0.tar.gz",
+                content_sha256,
+                u64::try_from(content.len()).expect("archive size"),
+                WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+            ),
+            facts,
+        )
+        .expect("planned archive");
+        let plan_sha256 = WindowsRepositoryActionGraph::new(vec![planned])
+            .expect("planned graph")
+            .graph_sha256();
+        let archive = ActionArchiveMaterialization::new(
+            0,
+            action_key_sha256,
+            "",
+            TargetPath::windows(r"C:\actions\0000").expect("destination"),
+            content,
+            content_sha256,
+            facts,
+        )
+        .expect("archive");
+        ActionGraphMaterializationRequest::new(
+            OperationId::new(),
+            SandboxHandle::new(
+                ProviderId::new("windows-hyperv").expect("provider"),
+                "sandbox-1",
+            )
+            .expect("sandbox"),
+            SandboxGeneration::new(7).expect("generation"),
+            plan_sha256,
+            vec![archive],
+        )
+        .expect("graph request")
+    }
+
+    fn sealed_tree(
+        request: &ActionGraphMaterializationRequest,
+        root: TargetPath,
+        receipt: u8,
+    ) -> SealedActionTree {
+        SealedActionTree::new(
+            request.sandbox().clone(),
+            request.generation(),
+            "sealed-graph-1",
+            request.graph_sha256(),
+            0,
+            root,
+            Sha256Digest::from_bytes([receipt; 32]),
+        )
+        .expect("sealed tree")
     }
 
     #[test]
@@ -500,5 +824,70 @@ mod tests {
             .expect("narrow request");
         let encoded = encode_bytes(&Ok(b"abcd".to_vec()), &broad).expect("encode broad bytes");
         assert!(decode_bytes(&encoded, &narrow).is_err());
+    }
+
+    #[test]
+    fn sealed_graph_codec_round_trips_exact_request_bound_receipts() {
+        let request = graph_request();
+        let tree = sealed_tree(&request, request.archives()[0].destination().clone(), 0x41);
+        let expected = SealedActionGraph::new(
+            request.sandbox().clone(),
+            request.generation(),
+            request.graph_sha256(),
+            Sha256Digest::from_bytes([0x51; 32]),
+            vec![tree],
+        )
+        .expect("sealed graph");
+        let encoded = encode_sealed_graph(&Ok(expected.clone()), &request).expect("encode graph");
+        assert!(
+            u64::try_from(encoded.len()).expect("length")
+                <= sealed_graph_reservation(&request).expect("reservation")
+        );
+        assert_eq!(
+            decode_sealed_graph(&encoded, &request).expect("decode graph"),
+            Ok(expected)
+        );
+
+        let substituted = SealedActionGraph::new(
+            request.sandbox().clone(),
+            request.generation(),
+            request.graph_sha256(),
+            Sha256Digest::from_bytes([0x52; 32]),
+            vec![sealed_tree(
+                &request,
+                TargetPath::windows(r"C:\actions\other").expect("other root"),
+                0x42,
+            )],
+        )
+        .expect("structurally valid substituted graph");
+        assert!(encode_sealed_graph(&Ok(substituted), &request).is_err());
+    }
+
+    #[test]
+    fn sealed_read_and_exec_codecs_reapply_stage_and_result_bounds() {
+        let graph = graph_request();
+        let tree = sealed_tree(&graph, graph.archives()[0].destination().clone(), 0x61);
+        let broad = SealedActionReadRequest::new(OperationId::new(), tree.clone(), "action.yml", 4)
+            .expect("broad read");
+        let narrow = SealedActionReadRequest::new(broad.operation_id(), tree, "action.yml", 3)
+            .expect("narrow read");
+        let encoded = encode_sealed_read(&Ok(b"data".to_vec()), &broad).expect("encode read");
+        assert_eq!(
+            decode_sealed_read(&encoded, &broad).expect("decode read"),
+            Ok(b"data".to_vec())
+        );
+        assert!(decode_sealed_read(&encoded, &narrow).is_err());
+
+        let command = command(1024);
+        let expected = output(ExecutionTermination::Exited(0));
+        let encoded =
+            encode_sealed_exec(&Ok(expected.clone()), &command).expect("encode sealed exec");
+        assert_eq!(
+            decode_sealed_exec(&encoded, &command).expect("decode sealed exec"),
+            Ok(expected)
+        );
+        let wrong_stage =
+            ExecutionError::new(ExecutionErrorKind::InvalidState, ExecutionStage::Exec);
+        assert!(encode_sealed_exec(&Err(wrong_stage), &command).is_err());
     }
 }

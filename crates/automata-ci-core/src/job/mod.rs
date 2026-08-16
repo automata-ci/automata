@@ -1,5 +1,6 @@
 //! Versioned, provider-neutral workflow job intermediate representation.
 
+mod action_graph;
 mod container;
 mod context;
 mod error;
@@ -13,6 +14,16 @@ mod step;
 mod template;
 mod version;
 
+pub use action_graph::{
+    MAX_WINDOWS_ACTION_ARCHIVE_DEPTH, MAX_WINDOWS_ACTION_ARCHIVE_ENTRIES,
+    MAX_WINDOWS_ACTION_ARCHIVE_EXPANDED_BYTES, MAX_WINDOWS_ACTION_ARCHIVE_FILE_BYTES,
+    MAX_WINDOWS_ACTION_ARCHIVE_PATH_BYTES, MAX_WINDOWS_ACTION_GRAPH_ARCHIVES,
+    MAX_WINDOWS_ACTION_GRAPH_COMPRESSED_BYTES, MAX_WINDOWS_ACTION_GRAPH_EXPANDED_BYTES,
+    MAX_WINDOWS_ACTION_GRAPH_REGULAR_FILES, WINDOWS_ACTION_ARCHIVE_MEDIA_TYPE,
+    WINDOWS_ACTION_GRAPH_SCHEMA_VERSION, WindowsActionArchiveFacts, WindowsActionGraphError,
+    WindowsRepositoryActionArchive, WindowsRepositoryActionGraph,
+    windows_action_archive_policy_sha256, windows_repository_action_key_sha256,
+};
 pub use container::{
     ContainerCredentials, ContainerPort, ContainerSpec, MountSource, TransportProtocol, VolumeMount,
 };
