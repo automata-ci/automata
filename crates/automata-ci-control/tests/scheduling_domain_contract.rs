@@ -207,6 +207,42 @@ fn registered_service_container_ceiling_requires_live_observation() {
 }
 
 #[test]
+fn pre_enrollment_admitted_windows_actions_survive_live_capability_intersection() {
+    let runner_id = runner_id(7);
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.example/windows-server-2025-hyperv")
+            .expect("profile ID"),
+        Sha256Digest::from_bytes([7; 32]),
+    );
+    let action_features = [
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::NODE12_ACTIONS,
+        RunnerFeature::NODE16_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ];
+    let admitted = RunnerCapabilities::new(
+        runner_id,
+        RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
+    )
+    .with_features(action_features.clone())
+    .with_environment_profiles([profile]);
+
+    let effective = intersect_runner_capabilities(&admitted, &admitted)
+        .expect("the exact registered and independently observed inventory must intersect");
+
+    for feature in action_features {
+        assert!(
+            effective.features().contains(&feature),
+            "a pre-enrollment admitted and live-observed Windows feature must remain schedulable"
+        );
+    }
+}
+
+#[test]
 fn routing_requirement_json_rejects_unknown_schema_before_admission() {
     let mut encoded =
         serde_json::to_value(RunnerRequirements::default()).expect("requirements must serialize");

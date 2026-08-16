@@ -149,6 +149,33 @@ impl StaticGithubToolchain {
         })
     }
 
+    /// Adds the exact archive and SHA-256 tools used to materialize immutable
+    /// repository actions inside a Windows sandbox.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate materializer configuration or non-Windows paths.
+    pub fn with_windows_action_materializer(
+        mut self,
+        tar: TargetPath,
+        sha256: TargetPath,
+    ) -> Result<Self, PortError> {
+        if self.platform != TargetPlatform::Windows
+            || self.tar.is_some()
+            || self.sha256.is_some()
+            || !valid_tool(&tar, TargetPlatform::Windows)
+            || !valid_tool(&sha256, TargetPlatform::Windows)
+        {
+            return Err(PortError::new(PortErrorKind::InvalidData));
+        }
+        self.tar = Some(tar);
+        self.sha256 = Some(
+            ExecutionArgv::new(sha256, Vec::<String>::new())
+                .map_err(|_| PortError::new(PortErrorKind::InvalidData))?,
+        );
+        Ok(self)
+    }
+
     /// Creates the required system tool paths for an ARM64 macOS runner profile.
     ///
     /// # Errors

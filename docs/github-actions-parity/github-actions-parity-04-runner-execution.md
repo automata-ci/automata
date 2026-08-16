@@ -69,10 +69,21 @@ Tasks:
     rejects a source-required feature outside that exact set before runtime or
     Job IR blob publication. Unknown feature identifiers, duplicate or excessive
     sets, historical mappings without the feature-policy section, and Windows
-    profiles that claim action or Node execution fail closed. The current Linux
-    example claims only its configured Bash, `sh`, Python, Node 24, action, and
-    command-file/summary toolchain features; Windows claims no action or Node
-    runtime.
+    profiles that claim action or Node execution without the corresponding
+    accepted profile ceiling fail closed. The current Linux example claims only
+    its configured Bash, `sh`, Python, Node 24, action, and command-file/summary
+    toolchain features. The checked-in Windows candidate remains shell-only.
+  - [x] Windows runner product loading separately verifies a digest-bound
+    Server 2025 manifest/lock, typed digest/media references for provenance,
+    SPDX SBOM, patch and revocation artifacts, and an external Ed25519 promotion
+    envelope. Runner composition adds composite,
+    repository, local-action, JavaScript, and exact Node-generation features
+    only after promotion and successful fresh-sandbox tool probes. An
+    authenticated, short-lived broker-custody receipt contract can carry that
+    exact set into Windows enrollment; the restricted-broker caller remains an
+    integration gate. That caller must make startup independently re-probe
+    before live advertisement. Missing, stale, or mismatched
+    receipt/image/tool/runtime evidence fails closed.
   - [x] Keep temporary placement absence distinct from terminal semantic
     admission. A job that passed its immutable profile ceiling but has no
     currently eligible runner remains durable `NoWork`; admission never derives
@@ -232,6 +243,10 @@ Remaining tasks:
 - [ ] Enforce repository and organization action allowlists and immutable-SHA
   policy.
 - [ ] Verify archive digests, paths, links, and subpath containment.
+  - [x] The Windows component gate rejects traversal, links, special entries,
+    reserved/illegal names, case-insensitive collisions, stale destinations,
+    digest mismatch, and post-extraction reparse escape before action metadata
+    or code, and performs extraction only inside the sandbox.
 - [ ] Cache only immutable action content.
 - [ ] Keep credentials out of logs and durable action metadata.
 

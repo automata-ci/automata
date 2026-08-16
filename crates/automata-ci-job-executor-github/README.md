@@ -108,6 +108,28 @@ generations and no `PATH` probe. The current Ubuntu profile advertises only its
 pinned Node 24 executable. Container-action execution and `runs.plugin` remain
 unsupported.
 
+On an admitted Windows action profile, repository archives are bounded and
+validated before provider mutation. The validator permits only regular files
+and directories under the expected archive root and rejects traversal, links,
+special entries, Windows device names, alternate-stream/illegal characters,
+trailing dots or spaces, non-ASCII names, and case-insensitive collisions. The
+executor refuses a stale destination, creates it inside the job container,
+copies the archive through the sandbox content port, verifies the exact digest
+with the configured hash helper, extracts with the configured `tar.exe`, then
+performs a PowerShell root/reparse-point scan before reading metadata or
+executing an action. Every stage is ordered and fail-closed; archive extraction
+and action hooks never run on the host. JavaScript pre/main/post use only the
+metadata-selected, exact Node-generation path. A missing tar, hash helper,
+Node runtime, digest match, or tree check rejects the job.
+
+Checked-out Windows local actions use the exact configured `pwsh.exe` for their
+JIT metadata probe. The probe receives runner-owned candidate paths through a
+closed internal environment, proves the action directory remains below the job
+workspace, and rejects a reparse point in the workspace path or action tree
+before metadata is copied back. Windows local JavaScript and composite phases
+then use the same exact Node and shell contracts as materialized repository
+actions.
+
 The control-plane activation boundary anonymously resolves exact-commit public
 repository metadata before Job IR publication and carries the complete
 statically knowable runtime feature set in `RunnerRequirements`:

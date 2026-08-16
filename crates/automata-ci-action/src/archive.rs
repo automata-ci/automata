@@ -43,6 +43,270 @@ pub fn inspect_archive(
     inspect_archive_bytes(snapshot.bytes(), subpath, limits)
 }
 
+/// Validates that an already-inspected repository archive can be materialized
+/// into a Windows job workspace without entering an ambiguous NTFS namespace.
+///
+/// This is deliberately narrower than the provider-neutral archive contract.
+/// Windows materialization rejects every link, reparse-capable entry type,
+/// case-insensitive collision, alternate-data-stream separator, reserved DOS
+/// name, trailing space or dot, and non-ASCII member name. The initial Windows
+/// profile therefore fails closed instead of guessing about Unicode
+/// normalization or link-creation privileges.
+///
+/// Callers must invoke this before creating or attaching a sandbox. The
+/// archive is decoded independently so a prepared-action object cannot bypass
+/// the target-platform materialization policy.
+///
+/// # Errors
+///
+/// Returns a bounded archive error for malformed input, unsafe Windows paths,
+/// links or special entries, case-fold collisions, or resource exhaustion.
+pub fn validate_windows_materialization_archive(
+    bytes: &[u8],
+    limits: ActionBundleLimits,
+) -> Result<(), ActionArchiveError> {
+    if u64::try_from(bytes.len())
+        .ok()
+        .is_none_or(|length| length > limits.compressed().maximum_bytes())
+    {
+        return Err(ActionArchiveError::ResourceLimit);
+    }
+    let decoder = MultiGzDecoder::new(Cursor::new(bytes));
+    let mut archive = tar::Archive::new(decoder);
+    let mut root = None::<Vec<u8>>;
+    let mut namespace_paths = BTreeMap::<String, WindowsNamespaceEntry>::new();
+    let mut entry_count = 0_usize;
+    let mut expanded_bytes = 0_u64;
+    let mut path_index_bytes = 0_usize;
+    let mut saw_repository_entry = false;
+    let entries = archive
+        .entries()
+        .map_err(|_| ActionArchiveError::Malformed)?
+        .raw(true);
+    for entry in entries {
+        entry_count = entry_count
+            .checked_add(1)
+            .ok_or(ActionArchiveError::ResourceLimit)?;
+        if entry_count > limits.maximum_entries() {
+            return Err(ActionArchiveError::ResourceLimit);
+        }
+        let mut entry = entry.map_err(|_| ActionArchiveError::Malformed)?;
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_pax_global_extensions() {
+            if saw_repository_entry {
+                return Err(ActionArchiveError::Malformed);
+            }
+            let declared_size = declared_size(&entry)?;
+            expanded_bytes = checked_expanded_size(expanded_bytes, declared_size, limits)?;
+            validate_global_pax(&mut entry, declared_size, limits.maximum_definition_bytes())?;
+            continue;
+        }
+        if entry_type.is_gnu_longname()
+            || entry_type.is_gnu_longlink()
+            || entry_type.is_pax_local_extensions()
+        {
+            return Err(ActionArchiveError::UnsupportedEntry);
+        }
+        saw_repository_entry = true;
+        if !(entry_type.is_dir() || entry_type.is_file()) {
+            return Err(ActionArchiveError::UnsupportedEntry);
+        }
+
+        let path = entry.path_bytes();
+        if path.len() > limits.maximum_entry_path_bytes() {
+            return Err(ActionArchiveError::ResourceLimit);
+        }
+        let components = archive_components(&path)?;
+        if components
+            .iter()
+            .any(|component| !valid_windows_archive_component(component))
+        {
+            return Err(ActionArchiveError::UnsafePath);
+        }
+        let (archive_root, relative) = components
+            .split_first()
+            .ok_or(ActionArchiveError::UnsafePath)?;
+        if let Some(expected_root) = &root {
+            if expected_root != archive_root {
+                return Err(ActionArchiveError::UnsafePath);
+            }
+        } else {
+            root = Some(archive_root.clone());
+        }
+        record_windows_relative_namespace(
+            relative,
+            entry_type.is_dir(),
+            &mut namespace_paths,
+            &mut path_index_bytes,
+            limits,
+        )?;
+
+        let declared_size = declared_size(&entry)?;
+        expanded_bytes = checked_expanded_size(expanded_bytes, declared_size, limits)?;
+        consume_entry(&mut entry, declared_size)?;
+    }
+    let mut decoder = archive.into_inner();
+    let remaining_bytes = limits
+        .maximum_expanded_bytes()
+        .checked_sub(expanded_bytes)
+        .ok_or(ActionArchiveError::ResourceLimit)?;
+    verify_trailing_zeros(&mut decoder, remaining_bytes)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsNamespaceKind {
+    ImplicitDirectory,
+    Directory,
+    File,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WindowsNamespaceEntry {
+    spelling: String,
+    kind: WindowsNamespaceKind,
+}
+
+fn record_windows_relative_namespace(
+    relative: &[Vec<u8>],
+    entry_is_directory: bool,
+    namespace_paths: &mut BTreeMap<String, WindowsNamespaceEntry>,
+    path_index_bytes: &mut usize,
+    limits: ActionBundleLimits,
+) -> Result<(), ActionArchiveError> {
+    let components = relative
+        .iter()
+        .map(|component| std::str::from_utf8(component))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ActionArchiveError::UnsafePath)?;
+    record_windows_namespace_path(
+        namespace_paths,
+        String::new(),
+        String::new(),
+        if components.is_empty() {
+            if entry_is_directory {
+                WindowsNamespaceKind::Directory
+            } else {
+                WindowsNamespaceKind::File
+            }
+        } else {
+            WindowsNamespaceKind::ImplicitDirectory
+        },
+        path_index_bytes,
+        limits,
+    )?;
+    let mut spelling = String::new();
+    let mut folded = String::new();
+    for (index, component) in components.iter().enumerate() {
+        if index > 0 {
+            spelling.push('\\');
+            folded.push('\\');
+        }
+        spelling.push_str(component);
+        folded.push_str(&component.to_ascii_lowercase());
+        record_windows_namespace_path(
+            namespace_paths,
+            folded.clone(),
+            spelling.clone(),
+            if index + 1 != components.len() {
+                WindowsNamespaceKind::ImplicitDirectory
+            } else if entry_is_directory {
+                WindowsNamespaceKind::Directory
+            } else {
+                WindowsNamespaceKind::File
+            },
+            path_index_bytes,
+            limits,
+        )?;
+    }
+    Ok(())
+}
+
+fn record_windows_namespace_path(
+    namespace_paths: &mut BTreeMap<String, WindowsNamespaceEntry>,
+    folded: String,
+    spelling: String,
+    kind: WindowsNamespaceKind,
+    path_index_bytes: &mut usize,
+    limits: ActionBundleLimits,
+) -> Result<(), ActionArchiveError> {
+    if let Some(existing) = namespace_paths.get_mut(&folded) {
+        if existing.spelling != spelling {
+            return Err(ActionArchiveError::DuplicatePath);
+        }
+        return match (existing.kind, kind) {
+            (
+                WindowsNamespaceKind::ImplicitDirectory | WindowsNamespaceKind::Directory,
+                WindowsNamespaceKind::ImplicitDirectory,
+            ) => Ok(()),
+            (WindowsNamespaceKind::ImplicitDirectory, WindowsNamespaceKind::Directory) => {
+                existing.kind = WindowsNamespaceKind::Directory;
+                Ok(())
+            }
+            _ => Err(ActionArchiveError::DuplicatePath),
+        };
+    }
+    *path_index_bytes = path_index_bytes
+        .checked_add(folded.len())
+        .ok_or(ActionArchiveError::ResourceLimit)?;
+    if *path_index_bytes > limits.maximum_path_index_bytes() {
+        return Err(ActionArchiveError::ResourceLimit);
+    }
+    namespace_paths.insert(folded, WindowsNamespaceEntry { spelling, kind });
+    Ok(())
+}
+
+fn valid_windows_archive_component(component: &[u8]) -> bool {
+    if component.is_empty()
+        || !component.is_ascii()
+        || component.ends_with(b" ")
+        || component.ends_with(b".")
+        || component.iter().any(|byte| {
+            byte.is_ascii_control()
+                || matches!(byte, b'<' | b'>' | b':' | b'"' | b'|' | b'?' | b'*')
+        })
+    {
+        return false;
+    }
+    if component == b"." || component == b".." {
+        return false;
+    }
+    if component.starts_with(b".") {
+        return true;
+    }
+    let stem = component
+        .split(|byte| *byte == b'.')
+        .next()
+        .unwrap_or(component);
+    let stem = stem
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'.'))
+        .map_or(&[][..], |last| &stem[..=last]);
+    if stem.is_empty() || windows_short_name_shaped(stem) {
+        return false;
+    }
+    let upper = stem.iter().map(u8::to_ascii_uppercase).collect::<Vec<_>>();
+    !matches!(
+        upper.as_slice(),
+        b"CON" | b"PRN" | b"AUX" | b"NUL" | b"CLOCK$" | b"CONIN$" | b"CONOUT$"
+    ) && !upper
+        .strip_prefix(b"COM")
+        .or_else(|| upper.strip_prefix(b"LPT"))
+        .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix[0], b'1'..=b'9'))
+}
+
+fn windows_short_name_shaped(stem: &[u8]) -> bool {
+    let Some(tilde) = stem.iter().rposition(|byte| *byte == b'~') else {
+        return false;
+    };
+    let (prefix, suffix) = stem.split_at(tilde);
+    let digits = &suffix[1..];
+    !prefix.is_empty()
+        && prefix.len() <= 6
+        && !digits.is_empty()
+        && matches!(digits[0], b'1'..=b'9')
+        && digits[1..].iter().all(u8::is_ascii_digit)
+}
+
 /// Validates immutable archive bytes and selects one action definition.
 ///
 /// Callers must verify immutable content identity and enforce
