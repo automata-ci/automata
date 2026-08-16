@@ -34,7 +34,7 @@ use automata_ci_runner_transport::PreparedRequest;
 use sha2::{Digest as _, Sha256};
 use tokio::{sync::Mutex as AsyncMutex, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use crate::content::ContentOperationCoordinator;
@@ -1784,6 +1784,26 @@ impl RunnerSessionSupervisor {
         let executor_events = Arc::clone(&events);
         let executor_signal = signal.clone();
         let execution_started = self.inner.ports.clock.monotonic_now();
+        let heartbeat_interval =
+            Duration::from_millis(u64::from(session.timing.heartbeat_interval_millis()));
+        let initial_lease_deadline = watchdog.deadline();
+        info!(
+            stage = "execution_supervision",
+            runner_id = %self.inner.config.capabilities().runner_id(),
+            session_id = %session.negotiated.session_id(),
+            attempt_id = %lease.attempt_id(),
+            slot = durable.slot().get(),
+            lifecycle = ?durable.lifecycle(),
+            heartbeat_interval_millis = heartbeat_interval.as_millis(),
+            local_lease_remaining_millis = self
+                .inner
+                .ports
+                .clock
+                .monotonic_now()
+                .remaining_until(initial_lease_deadline)
+                .as_millis(),
+            "accepted job entering independently renewed execution supervision"
+        );
         self.observe(RunnerRuntimeEvent::JobStarted {
             mode: if durable.lifecycle() == JobLifecycle::Preparing {
                 RuntimeJobStartMode::Fresh
@@ -1797,8 +1817,6 @@ impl RunnerSessionSupervisor {
                 .await
         });
 
-        let heartbeat_interval =
-            Duration::from_millis(u64::from(session.timing.heartbeat_interval_millis()));
         let mut heartbeat_schedule = HeartbeatSchedule::new(
             self.inner.ports.clock.monotonic_now(),
             heartbeat_interval,
@@ -2238,6 +2256,14 @@ impl RunnerSessionSupervisor {
                 biased;
                 due = &mut heartbeat_due => {
                     due?;
+                    info!(
+                        stage = "lease_heartbeat",
+                        runner_id = %self.inner.config.capabilities().runner_id(),
+                        session_id = %session.negotiated.session_id(),
+                        slot = slot.get(),
+                        action = "renewal_started",
+                        "active lease heartbeat became due"
+                    );
                     self.heartbeat_once(
                         session,
                         slot,
@@ -2250,6 +2276,14 @@ impl RunnerSessionSupervisor {
                     heartbeat_schedule.renewed(
                         self.inner.ports.clock.monotonic_now(),
                         watchdog.deadline(),
+                    );
+                    info!(
+                        stage = "lease_heartbeat",
+                        runner_id = %self.inner.config.capabilities().runner_id(),
+                        session_id = %session.negotiated.session_id(),
+                        slot = slot.get(),
+                        action = "renewal_committed",
+                        "active lease heartbeat committed"
                     );
                     if log_caught_up {
                         return Ok(());
