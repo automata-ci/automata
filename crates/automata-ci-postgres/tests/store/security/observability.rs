@@ -1422,7 +1422,7 @@ async fn insert_artifact_state(
         INSERT INTO workflow_artifacts (
             upload_id, tenant_id, repository_id, run_id, job_id, attempt_id,
             fencing_token, name, protocol_version, mime_type, created_at_seconds
-        ) VALUES ($1, $2, $3, $4, $5, $6, 1, 'pending', 1, 'application/octet-stream', 10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, 1, 'pending', 7, 'application/octet-stream', 10)
         RETURNING id
         ",
     )
@@ -1446,7 +1446,7 @@ async fn insert_artifact_state(
             finalization_generation, finalization_claimed_size_bytes,
             finalization_claim_expires_at_seconds, manifest_bytes
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, 1, 'reserved', 1, 'application/octet-stream',
+            $1, $2, $3, $4, $5, $6, 1, 'reserved', 7, 'application/octet-stream',
             'pending', $7, 0, 'metrics/manifest-reserved', $8, 1,
             'application/json', 10, 'reserved', 20, 1, 0, 100, $9
         )
@@ -1476,7 +1476,7 @@ async fn insert_artifact_state(
             finalization_claimed_size_bytes, finalization_claim_expires_at_seconds,
             manifest_bytes
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, 1, 'finalized', 1, 'application/octet-stream',
+            $1, $2, $3, $4, $5, $6, 1, 'finalized', 7, 'application/octet-stream',
             'finalized', $7, 0, 'metrics/manifest-finalized', $8, 1,
             'application/json', 10, 40, 'ready', 30, 1, 0, 100, $9
         )
