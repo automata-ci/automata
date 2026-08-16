@@ -132,6 +132,36 @@ pub fn try_claim_attempt_matches_runnable(
     request.placement_matches(candidate)
 }
 
+/// Rehydrates and verifies a Windows placement grant from a locked durable receipt.
+///
+/// # Errors
+///
+/// Rejects any mismatch between the persisted fields and the canonical binding digest.
+#[allow(clippy::too_many_arguments)]
+pub fn windows_hyperv_placement_grant(
+    request_key: crate::lease::LeaseRequestKey,
+    attempt_id: AttemptId,
+    lease_id: automata_ci_core::LeaseId,
+    job_ir: automata_ci_store::JobIrMetadata,
+    trust_binding_digest: Sha256Digest,
+    environment_profile: automata_ci_core::EnvironmentProfile,
+    issued_at: UnixMillis,
+    expires_at: UnixMillis,
+    binding_digest: Sha256Digest,
+) -> Result<crate::lease::WindowsHyperVPlacementGrant, crate::lease::WindowsPlacementGrantError> {
+    crate::lease::WindowsHyperVPlacementGrant::from_persisted(
+        request_key,
+        attempt_id,
+        lease_id,
+        job_ir,
+        trust_binding_digest,
+        environment_profile,
+        issued_at,
+        expires_at,
+        binding_digest,
+    )
+}
+
 /// Inspects the cursor embedded in a terminal no-work request.
 #[must_use]
 pub const fn no_work_lease_request_cursor(

@@ -6,15 +6,20 @@ use automata_ci_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::WindowsRunnerPlacementRenewalEnvelope;
+
 use super::MessageValidationError;
 use super::{MessageHeader, RunnerSlotOrdinal, ServerCommandHeader};
 
 /// Runner request for at most one assignment to one stable slot.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LeaseRequest {
     header: MessageHeader,
     slot: RunnerSlotOrdinal,
     acknowledges_operation_id: Option<OperationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_placement_renewal: Option<WindowsRunnerPlacementRenewalEnvelope>,
 }
 
 impl LeaseRequest {
@@ -25,6 +30,7 @@ impl LeaseRequest {
             header,
             slot,
             acknowledges_operation_id: None,
+            windows_placement_renewal: None,
         }
     }
 
@@ -40,7 +46,21 @@ impl LeaseRequest {
             header,
             slot,
             acknowledges_operation_id: Some(acknowledges_operation_id),
+            windows_placement_renewal: None,
         }
+    }
+
+    /// Attaches a broker-signed placement renewal to this authenticated poll.
+    ///
+    /// The renewal remains runner-to-control admission material and is never
+    /// copied into a lease offer.
+    #[must_use]
+    pub fn with_windows_placement_renewal(
+        mut self,
+        renewal: WindowsRunnerPlacementRenewalEnvelope,
+    ) -> Self {
+        self.windows_placement_renewal = Some(renewal);
+        self
     }
 
     #[must_use]
@@ -60,6 +80,14 @@ impl LeaseRequest {
     #[must_use]
     pub const fn acknowledges_operation_id(&self) -> Option<OperationId> {
         self.acknowledges_operation_id
+    }
+
+    /// Returns the optional Windows placement renewal carried by this poll.
+    #[must_use]
+    pub const fn windows_placement_renewal(
+        &self,
+    ) -> Option<&WindowsRunnerPlacementRenewalEnvelope> {
+        self.windows_placement_renewal.as_ref()
     }
 
     /// Validates locally provable lease-request invariants.

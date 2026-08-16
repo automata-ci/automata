@@ -105,6 +105,7 @@ fn obsolete_versioned_filename_is_never_silently_reinitialized() {
 
 #[test]
 fn previous_schema_is_rejected_without_rewrite() {
+    assert_eq!(RUNNER_JOURNAL_SCHEMA_VERSION, 7);
     let (scratch, fixture) = initialized();
     let root = scratch.state_root();
     let path = journal_file(root.as_path());
@@ -126,6 +127,54 @@ fn previous_schema_is_rejected_without_rewrite() {
         fs::read_to_string(path).expect("unchanged rejected journal"),
         previous
     );
+}
+
+#[test]
+fn current_v7_schema_requires_explicit_windows_broker_grant_field() {
+    assert_eq!(RUNNER_JOURNAL_SCHEMA_VERSION, 7);
+    let scratch = Scratch::new("missing-windows-broker-grant-v7");
+    let fixture = Fixture::new();
+    let root = scratch.state_root();
+    let journal = fixture.open(&scratch);
+    let offer = fixture.offer(1);
+    journal.begin_session(fixture.binding()).expect("session");
+    journal
+        .record_lease_offer(fixture.session_id, offer.clone())
+        .expect("offer");
+    journal
+        .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
+        .expect("accept");
+    journal
+        .record_runtime_authority_delivery(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            fixture.runtime_authority_delivery(&offer),
+        )
+        .expect("authority delivery");
+    drop(journal);
+
+    let path = journal_file(root.as_path());
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("current v7 journal"))
+            .expect("valid journal JSON");
+    assert_eq!(value["schema_version"], serde_json::json!(7));
+    let delivery = value["slots"][0]["runtime_authority_delivery"]
+        .as_object_mut()
+        .expect("runtime-authority delivery object");
+    assert_eq!(
+        delivery.remove("windows_hyperv_broker_grant"),
+        Some(serde_json::Value::Null)
+    );
+    fs::write(
+        &path,
+        serde_json::to_vec(&value).expect("encode missing-field fixture"),
+    )
+    .expect("write missing-field fixture");
+    assert!(matches!(
+        FileJournal::open(root, fixture.runner_id),
+        Err(JournalError::Corrupt)
+    ));
 }
 
 #[test]

@@ -699,6 +699,12 @@ fn validate_collection(
 /// [`super::RemoteErrorCode`] and a sanitized message.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum MessageValidationError {
+    /// A signed Windows broker grant contained malformed invariant fields.
+    #[error("Windows Hyper-V broker grant is malformed")]
+    InvalidWindowsHyperVBrokerGrant,
+    /// A signed Windows broker grant disagreed with its containing lease offer.
+    #[error("Windows Hyper-V broker grant does not match its lease offer")]
+    WindowsHyperVBrokerGrantCorrelationMismatch,
     /// The message-structure schema is not the one understood by this build.
     #[error("unsupported message schema {received}; this build supports {supported}")]
     UnsupportedMessageSchema {

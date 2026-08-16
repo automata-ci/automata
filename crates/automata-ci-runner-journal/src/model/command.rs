@@ -1,7 +1,10 @@
-use automata_ci_core::{Lease, OperationId, Sha256Digest, UnixMillis};
+use automata_ci_core::{
+    Lease, OperationId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
+    WindowsHyperVBrokerGrant,
+};
 use automata_ci_protocol::{
     CommandSequence, LeaseRejectionReason, ManagedSecretBindingOverlay, RunnerSlotOrdinal,
-    RuntimeAuthorityDeliveryBinding, RuntimeAuthorityGeneration,
+    RuntimeAuthorityDeliveryBinding, RuntimeAuthorityGeneration, runtime_authority_delivery_digest,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -216,6 +219,41 @@ impl LeaseOfferRecord {
     }
 }
 
+pub(super) fn validate_windows_hyperv_broker_grant(
+    grant: &WindowsHyperVBrokerGrant,
+    runner_id: RunnerId,
+    session_id: RunnerSessionId,
+    delivery_request_operation_id: OperationId,
+    binding: RuntimeAuthorityDeliveryBinding,
+    lease: &Lease,
+    job_ir: &JobIrContentRef,
+) -> Result<(), JournalInvariantError> {
+    grant
+        .claims()
+        .validate()
+        .map_err(|_| JournalInvariantError::InvalidWindowsHyperVBrokerGrant)?;
+    let claims = grant.claims();
+    let correlated = claims.runner_id() == runner_id
+        && claims.runner_id() == lease.runner_id()
+        && claims.runner_session_id() == session_id
+        && claims.slot() == binding.slot().get()
+        && claims.attempt_id() == binding.attempt_id()
+        && claims.attempt_id() == lease.attempt_id()
+        && claims.lease_id() == lease.lease_id()
+        && claims.fencing_token() == lease.fencing_token()
+        && claims.accepted_offer_operation_id() == binding.offer_operation_id()
+        && claims.accepted_offer_sequence() == binding.offer_sequence().get()
+        && claims.post_accept_operation_id() == delivery_request_operation_id
+        && claims.job_ir_version() == job_ir.version()
+        && job_ir.content().public_plaintext_bytes() == Some(claims.job_ir_encoded_size())
+        && job_ir.content().public_plaintext_sha256() == Some(claims.job_ir_digest())
+        && claims.issued_at() == lease.issued_at()
+        && claims.expires_at() == lease.expires_at();
+    correlated
+        .then_some(())
+        .ok_or(JournalInvariantError::InvalidWindowsHyperVBrokerGrant)
+}
+
 /// Crash-durable adoption state for one post-accept authority grant.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -225,6 +263,8 @@ pub struct RuntimeAuthorityDeliveryRecord {
     acknowledgement_operation_id: OperationId,
     bundle_digest: Sha256Digest,
     content: RuntimeAuthorityContentRef,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    windows_hyperv_broker_grant: Option<WindowsHyperVBrokerGrant>,
     acknowledged: bool,
 }
 
@@ -241,6 +281,7 @@ impl RuntimeAuthorityDeliveryRecord {
         acknowledgement_operation_id: OperationId,
         bundle_digest: Sha256Digest,
         content: RuntimeAuthorityContentRef,
+        windows_hyperv_broker_grant: Option<WindowsHyperVBrokerGrant>,
     ) -> Result<Self, JournalInvariantError> {
         let record = Self {
             binding,
@@ -248,6 +289,7 @@ impl RuntimeAuthorityDeliveryRecord {
             acknowledgement_operation_id,
             bundle_digest,
             content,
+            windows_hyperv_broker_grant,
             acknowledged: false,
         };
         record.validate()?;
@@ -284,6 +326,12 @@ impl RuntimeAuthorityDeliveryRecord {
         &self.content
     }
 
+    /// Returns the post-accept one-use Windows broker capability, when present.
+    #[must_use]
+    pub const fn windows_hyperv_broker_grant(&self) -> Option<&WindowsHyperVBrokerGrant> {
+        self.windows_hyperv_broker_grant.as_ref()
+    }
+
     /// Reports whether the control plane acknowledged protected adoption.
     #[must_use]
     pub const fn is_acknowledged(&self) -> bool {
@@ -311,8 +359,16 @@ impl RuntimeAuthorityDeliveryRecord {
 
     pub(crate) fn validate(&self) -> Result<(), JournalInvariantError> {
         self.content.validate()?;
+        let authorities_sha256 = self
+            .content
+            .content()
+            .public_plaintext_sha256()
+            .ok_or(JournalInvariantError::InvalidRuntimeAuthorityDelivery)?;
         if self.binding.generation().get() == 0
-            || self.content.content().public_plaintext_sha256() != Some(self.bundle_digest)
+            || runtime_authority_delivery_digest(
+                authorities_sha256,
+                self.windows_hyperv_broker_grant.as_ref(),
+            ) != self.bundle_digest
         {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
         }

@@ -89,6 +89,9 @@ pub enum RunnerLeaseRequestStage {
     SessionHeartbeat,
     /// Resolution of an already-completed request.
     CompletedRequestReplay,
+    /// Verification and atomic durable advancement of a broker-signed Windows
+    /// placement-admission renewal.
+    PlacementRenewal,
     /// Durable command replay before polling for work.
     PrePollCommandReplay,
     /// Scheduler polling and attempt claim.

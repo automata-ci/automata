@@ -348,6 +348,23 @@ pub struct LeaseRequest {
     /// Present on every successor and absent only on the first request for a slot.
     #[prost(bytes = "vec", optional, tag = "3")]
     pub acknowledges_operation_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Optional only because non-Windows runners have no broker admission. A
+    /// Windows runner refreshes this before the signed placement horizon.
+    #[prost(message, optional, tag = "4")]
+    pub windows_placement_renewal: ::core::option::Option<
+        WindowsRunnerPlacementRenewalEnvelope,
+    >,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WindowsRunnerPlacementRenewalEnvelope {
+    #[prost(uint32, tag = "1")]
+    pub schema_version: u32,
+    #[prost(string, tag = "2")]
+    pub issuer_key_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signed_payload: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub authenticator: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Lease {
@@ -400,6 +417,88 @@ pub struct LeaseOffer {
     pub job: ::core::option::Option<JobIrEnvelope>,
     #[prost(message, optional, tag = "6")]
     pub managed_secret_bindings: ::core::option::Option<ManagedSecretBindingOverlay>,
+}
+/// Signed, value-free authority for one exact restricted host placement. It
+/// contains no credential, engine endpoint, host path, command, or HCS document.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WindowsHyperVBrokerGrant {
+    #[prost(uint32, tag = "1")]
+    pub schema: u32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub key_id_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "3")]
+    pub claims: ::core::option::Option<WindowsHyperVBrokerGrantClaims>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub ed25519_signature: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WindowsHyperVBrokerGrantClaims {
+    #[prost(bytes = "vec", tag = "1")]
+    pub host_id_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub placement_binding_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub attempt_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub job_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub run_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub poll_operation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "7")]
+    pub runner_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub runner_session_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "9")]
+    pub runner_generation: u64,
+    #[prost(uint64, tag = "10")]
+    pub session_epoch: u64,
+    #[prost(uint32, tag = "11")]
+    pub slot: u32,
+    #[prost(bytes = "vec", tag = "12")]
+    pub lease_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "13")]
+    pub fencing_token: u64,
+    #[prost(uint32, tag = "14")]
+    pub job_ir_version: u32,
+    #[prost(uint64, tag = "15")]
+    pub job_ir_encoded_size: u64,
+    #[prost(bytes = "vec", tag = "16")]
+    pub job_ir_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "17")]
+    pub job_ir_object_key_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "18")]
+    pub trust_binding_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(string, tag = "19")]
+    pub environment_profile_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "20")]
+    pub environment_profile_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(int64, tag = "21")]
+    pub issued_at_unix_millis: i64,
+    #[prost(int64, tag = "22")]
+    pub expires_at_unix_millis: i64,
+    #[prost(bytes = "vec", tag = "23")]
+    pub accepted_offer_operation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint64, tag = "24")]
+    pub accepted_offer_sequence: u64,
+    #[prost(bytes = "vec", tag = "25")]
+    pub post_accept_operation_id: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "26")]
+    pub post_accept_request_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag = "27")]
+    pub job_resource_allocation: ::core::option::Option<JobResourceAllocation>,
+    #[prost(bytes = "vec", tag = "28")]
+    pub profile_contract_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(uint32, tag = "29")]
+    pub sandbox_pids_limit: u32,
+    #[prost(bytes = "vec", tag = "30")]
+    pub sandbox_spec_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "31")]
+    pub sealed_action_policy_sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", optional, tag = "32")]
+    pub windows_action_graph_sha256: ::core::option::Option<
+        ::prost::alloc::vec::Vec<u8>,
+    >,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ManagedSecretBindingOverlayEntry {
@@ -1194,6 +1293,8 @@ pub struct RuntimeAuthorityGrant {
     pub bundle_sha256: ::prost::alloc::vec::Vec<u8>,
     #[prost(message, optional, tag = "4")]
     pub authorities: ::core::option::Option<JobRuntimeAuthorities>,
+    #[prost(message, optional, tag = "5")]
+    pub windows_hyperv_broker_grant: ::core::option::Option<WindowsHyperVBrokerGrant>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RuntimeAuthorityAck {

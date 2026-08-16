@@ -487,6 +487,7 @@ fn record_test_runtime_authority(
         acknowledgement_operation_id,
         digest,
         content,
+        None,
     )
     .expect("authority delivery");
     journal

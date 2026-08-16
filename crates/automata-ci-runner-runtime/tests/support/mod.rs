@@ -33,6 +33,7 @@ use automata_ci_protocol::{
     RuntimeAuthorityCredential, RuntimeAuthorityDeliveryBinding, RuntimeAuthorityEndpoint,
     RuntimeAuthorityGrant, RuntimeAuthorityName, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
     ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner, SessionDisposition,
+    runtime_authority_delivery_digest,
 };
 use automata_ci_protocol_protobuf::{decode_job_ir, encode_job_ir, encode_runtime_authorities};
 use automata_ci_runner_journal::{
@@ -6020,7 +6021,10 @@ fn record_test_authority_delivery_with_expiries_and_acknowledgement(
         encode_runtime_authorities(&authorities, &job, &fixture.lease, &limits)
             .expect("encode runtime authorities"),
     );
-    let bundle_digest = Sha256Digest::from_bytes(Sha256::digest(&encoded_authorities).into());
+    let bundle_digest = runtime_authority_delivery_digest(
+        Sha256Digest::from_bytes(Sha256::digest(&encoded_authorities).into()),
+        None,
+    );
     let request_operation_id = OperationId::new();
     let acknowledgement_operation_id = OperationId::new();
     let publication = spool
@@ -6046,6 +6050,7 @@ fn record_test_authority_delivery_with_expiries_and_acknowledgement(
             acknowledgement_operation_id,
             bundle_digest,
             content,
+            None,
         )?;
         journal.record_runtime_authority_delivery(
             fixture.session_id,
@@ -6096,7 +6101,10 @@ fn runtime_authority_grant_for(
     ServerToRunner::RuntimeAuthorityGrant(Box::new(RuntimeAuthorityGrant::new(
         reply_header(request.header()),
         binding,
-        Sha256Digest::from_bytes(Sha256::digest(&encoded).into()),
+        runtime_authority_delivery_digest(
+            Sha256Digest::from_bytes(Sha256::digest(&encoded).into()),
+            None,
+        ),
         authorities,
     )))
 }

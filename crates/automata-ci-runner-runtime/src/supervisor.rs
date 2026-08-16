@@ -17,6 +17,7 @@ use automata_ci_protocol::{
     RemoteErrorCode, RunnerHello, RunnerSlotOrdinal, RunnerToServer, RuntimeAuthorityAck,
     RuntimeAuthorityDeliveryBinding, RuntimeAuthorityRequest, SUPPORTED_PROTOCOL_RANGE,
     ServerHello, ServerTiming, ServerToRunner, SessionDisposition, SessionResume,
+    runtime_authority_delivery_digest,
 };
 use automata_ci_protocol_protobuf::{
     decode_job_ir, decode_runner_frame, decode_runtime_authorities, encode_job_ir,
@@ -53,7 +54,7 @@ use crate::{
     RuntimeJobConclusion, RuntimeJobStartMode, RuntimeLeaseDisposition, RuntimeLeasePollOutcome,
     RuntimeOperationOutcome, RuntimeReconnectReason, RuntimeRemoteErrorDisposition,
     RuntimeRemoteErrorKind, RuntimeRetryCause, RuntimeSessionMode, RuntimeSessionOutcome,
-    RuntimeSleeper, RuntimeTerminalResultStage, StableIdDomain,
+    RuntimeSleeper, RuntimeTerminalResultStage, StableIdDomain, WindowsPlacementRenewalSource,
 };
 
 /// Dependency-injected boundaries used by [`RunnerSessionSupervisor`].
@@ -66,6 +67,7 @@ pub struct RunnerRuntimePorts {
     sleeper: Arc<dyn RuntimeSleeper>,
     ids: Arc<dyn RuntimeIdSource>,
     observer: Arc<dyn RunnerRuntimeObserver>,
+    windows_placement_renewals: Option<Arc<dyn WindowsPlacementRenewalSource>>,
 }
 
 impl RunnerRuntimePorts {
@@ -90,6 +92,7 @@ impl RunnerRuntimePorts {
             sleeper,
             ids,
             observer: Arc::new(NoopRunnerRuntimeObserver),
+            windows_placement_renewals: None,
         }
     }
 
@@ -97,6 +100,17 @@ impl RunnerRuntimePorts {
     #[must_use]
     pub fn with_observer(mut self, observer: Arc<dyn RunnerRuntimeObserver>) -> Self {
         self.observer = observer;
+        self
+    }
+
+    /// Installs durable broker-signed placement renewal acquisition. This is
+    /// configured only for the brokered Windows runtime composition.
+    #[must_use]
+    pub fn with_windows_placement_renewal_source(
+        mut self,
+        source: Arc<dyn WindowsPlacementRenewalSource>,
+    ) -> Self {
+        self.windows_placement_renewals = Some(source);
         self
     }
 }
@@ -113,6 +127,10 @@ impl fmt::Debug for RunnerRuntimePorts {
             .field("sleeper", &"configured")
             .field("ids", &"configured")
             .field("observer", &"configured")
+            .field(
+                "windows_placement_renewals",
+                &self.windows_placement_renewals.is_some(),
+            )
             .finish()
     }
 }
@@ -543,12 +561,30 @@ impl RunnerSessionSupervisor {
         cancellation: CancellationToken,
     ) -> Result<(), RunnerRuntimeError> {
         let started = self.inner.ports.clock.monotonic_now();
-        let (checkpoint, prepared) = self.prepare_lease_poll(session, slot)?;
+        let windows_placement_renewal = match self.inner.ports.windows_placement_renewals.as_ref() {
+            Some(source) => Some(
+                source
+                    .current_or_refresh(self.inner.ports.clock.wall_now(), cancellation.clone())
+                    .await
+                    .map_err(RunnerRuntimeError::PlacementRenewal)?,
+            ),
+            None => None,
+        };
+        let windows_placement_renewal_sha256 = windows_placement_renewal
+            .as_ref()
+            .map(automata_ci_protocol::WindowsRunnerPlacementRenewalEnvelope::envelope_sha256);
+        let (checkpoint, prepared) =
+            self.prepare_lease_poll(session, slot, windows_placement_renewal)?;
         loop {
             let reply = self.exchange(&prepared, cancellation.clone()).await?;
             match reply.message().message() {
                 ServerToRunner::NoWork(no_work) => {
                     self.advance_lease_poll(session, slot, checkpoint.current_operation_id())?;
+                    self.acknowledge_windows_placement_renewal(
+                        windows_placement_renewal_sha256,
+                        cancellation.clone(),
+                    )
+                    .await?;
                     self.observe(RunnerRuntimeEvent::LeasePoll {
                         outcome: RuntimeLeasePollOutcome::NoWork,
                         duration: self.elapsed_since(started),
@@ -564,6 +600,11 @@ impl RunnerSessionSupervisor {
                     self.advance_lease_poll(session, slot, checkpoint.current_operation_id())?;
                     self.flush_command_ack(session, cancellation.clone())
                         .await?;
+                    self.acknowledge_windows_placement_renewal(
+                        windows_placement_renewal_sha256,
+                        cancellation.clone(),
+                    )
+                    .await?;
                     self.observe(RunnerRuntimeEvent::LeasePoll {
                         outcome: RuntimeLeasePollOutcome::LeaseOffer,
                         duration: self.elapsed_since(started),
@@ -576,6 +617,11 @@ impl RunnerSessionSupervisor {
                     self.advance_lease_poll(session, slot, checkpoint.current_operation_id())?;
                     self.flush_command_ack(session, cancellation.clone())
                         .await?;
+                    self.acknowledge_windows_placement_renewal(
+                        windows_placement_renewal_sha256,
+                        cancellation.clone(),
+                    )
+                    .await?;
                     self.observe(RunnerRuntimeEvent::LeasePoll {
                         outcome: RuntimeLeasePollOutcome::Cancellation,
                         duration: self.elapsed_since(started),
@@ -596,10 +642,33 @@ impl RunnerSessionSupervisor {
         }
     }
 
+    async fn acknowledge_windows_placement_renewal(
+        &self,
+        renewal_envelope_sha256: Option<Sha256Digest>,
+        cancellation: CancellationToken,
+    ) -> Result<(), RunnerRuntimeError> {
+        let Some(renewal_envelope_sha256) = renewal_envelope_sha256 else {
+            return Ok(());
+        };
+        self.inner
+            .ports
+            .windows_placement_renewals
+            .as_ref()
+            .ok_or(RunnerRuntimeError::PlacementRenewal(
+                crate::PlacementRenewalError::InvalidState,
+            ))?
+            .acknowledge(renewal_envelope_sha256, cancellation)
+            .await
+            .map_err(RunnerRuntimeError::PlacementRenewal)
+    }
+
     fn prepare_lease_poll(
         &self,
         session: RuntimeSession,
         slot: RunnerSlotOrdinal,
+        windows_placement_renewal: Option<
+            automata_ci_protocol::WindowsRunnerPlacementRenewalEnvelope,
+        >,
     ) -> Result<(LeasePollCheckpoint, PreparedRequest), RunnerRuntimeError> {
         let snapshot = self.inner.ports.journal.prepare_lease_poll(
             session.negotiated.session_id(),
@@ -614,10 +683,13 @@ impl RunnerSessionSupervisor {
             .lease_poll_checkpoint(slot)
             .ok_or(RunnerRuntimeError::ExecutorContract)?;
         let header = Self::request_header(session, checkpoint.current_operation_id());
-        let request = match checkpoint.acknowledges_operation_id() {
+        let mut request = match checkpoint.acknowledges_operation_id() {
             Some(predecessor) => LeaseRequest::successor(header, slot, predecessor),
             None => LeaseRequest::first(header, slot),
         };
+        if let Some(renewal) = windows_placement_renewal {
+            request = request.with_windows_placement_renewal(renewal);
+        }
         let prepared = PreparedRequest::for_session(
             RunnerToServer::LeaseRequest(request),
             session.negotiated,
@@ -1305,8 +1377,10 @@ impl RunnerSessionSupervisor {
                         )
                         .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?,
                     );
-                    let bundle_digest =
-                        Sha256Digest::from_bytes(Sha256::digest(encoded.as_slice()).into());
+                    let bundle_digest = runtime_authority_delivery_digest(
+                        Sha256Digest::from_bytes(Sha256::digest(encoded.as_slice()).into()),
+                        grant.windows_hyperv_broker_grant(),
+                    );
                     if bundle_digest != grant.bundle_digest() {
                         return Err(RunnerRuntimeError::InvalidDurablePayload);
                     }
@@ -1318,6 +1392,7 @@ impl RunnerSessionSupervisor {
                         acknowledgement_operation_id,
                         bundle_digest,
                         &encoded,
+                        grant.windows_hyperv_broker_grant(),
                     );
                 }
                 ServerToRunner::LeaseOffer(_) | ServerToRunner::CancelJob(_) => {
@@ -1416,6 +1491,7 @@ impl RunnerSessionSupervisor {
         acknowledgement_operation_id: OperationId,
         bundle_digest: Sha256Digest,
         encoded: &[u8],
+        windows_hyperv_broker_grant: Option<&automata_ci_core::WindowsHyperVBrokerGrant>,
     ) -> Result<(), RunnerRuntimeError> {
         self.inner.content_operations.publish_reclaiming_capacity(
             self.inner.ports.journal.as_ref(),
@@ -1435,6 +1511,7 @@ impl RunnerSessionSupervisor {
                         acknowledgement_operation_id,
                         bundle_digest,
                         content,
+                        windows_hyperv_broker_grant.cloned(),
                     )
                     .map_err(automata_ci_runner_journal::JournalError::Invariant)?;
                     self.inner.ports.journal.record_runtime_authority_delivery(
@@ -1801,6 +1878,14 @@ impl RunnerSessionSupervisor {
         if let Some(overlay) = durable.offer().managed_secret_bindings() {
             request = request
                 .with_managed_secret_bindings(overlay.clone())
+                .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
+        }
+        if let Some(grant) = durable
+            .runtime_authority_delivery()
+            .and_then(RuntimeAuthorityDeliveryRecord::windows_hyperv_broker_grant)
+        {
+            request = request
+                .with_windows_hyperv_broker_grant(grant.clone())
                 .map_err(|_| RunnerRuntimeError::InvalidDurablePayload)?;
         }
         let executor = Arc::clone(&self.inner.ports.executor);

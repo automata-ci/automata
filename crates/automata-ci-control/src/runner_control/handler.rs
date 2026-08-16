@@ -12,8 +12,10 @@ use automata_ci_blob::{
     BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
 use automata_ci_core::{
-    JobAuthorityProfile, JobIrEnvelope, JobIrVersionRange, JobLifecycle, LogAck, OperationId,
-    Sha256Digest, TrustSecretAuthority, UnixMillis,
+    JobAuthorityProfile, JobIrEnvelope, JobIrVersionRange, JobLifecycle, LogAck, OperatingSystem,
+    OperationId, Sha256Digest, TrustCacheAuthority, TrustEnvironmentAuthority, TrustOidcAuthority,
+    TrustOutputAuthority, TrustPermissionAuthority, TrustResultsAuthority, TrustSecretAuthority,
+    UnixMillis,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
@@ -23,7 +25,8 @@ use automata_ci_protocol::{
     RunnerToServer, RuntimeAuthorityAck, RuntimeAuthorityGrant, RuntimeAuthorityRequest,
     SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
     SessionDisposition, SessionOrphanAuthorization, SessionResume, ValidatedRunnerToServer,
-    negotiate_job_ir, negotiate_protocol,
+    WindowsRunnerAdmissionTrustStore, negotiate_job_ir, negotiate_protocol,
+    runtime_authority_delivery_digest, verify_windows_runner_placement_renewal,
 };
 use automata_ci_protocol_protobuf::{
     decode_server_frame as decode_server_protobuf, encode_runtime_authorities, encode_server_frame,
@@ -55,12 +58,17 @@ use super::durable::{
 };
 use super::observer::NoopRunnerControlObserver;
 use super::port::{
-    AuthorizedRunnerRegistration, ControlIdGenerator, ControlPortError, DesiredRunnerState,
-    JobIrObjectReader, LeaseOfferClaim, LeaseOfferClaimStatus, LeaseOfferCommand,
-    LeaseOfferCommandPublisher, LeaseOfferPublishOutcome, LeaseOfferReplayResolution, LeasePoller,
-    ManagedSecretBindingIssuer, RunnerRegistrationAuthorizer, RunnerSessionFenceResolver,
-    RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer, decode_durable_server_command,
-    is_durable_lease_offer_command,
+    AuthorizeWindowsHyperVBrokerGrant, AuthorizedRunnerRegistration,
+    CommitWindowsHyperVBrokerGrantDelivery, CommitWindowsHyperVPlacementRenewal,
+    ControlIdGenerator, ControlPortError, DesiredRunnerState, JobIrObjectReader, LeaseOfferClaim,
+    LeaseOfferClaimStatus, LeaseOfferCommand, LeaseOfferCommandPublisher, LeaseOfferPublishOutcome,
+    LeaseOfferReplayResolution, LeasePoller, ManagedSecretBindingIssuer,
+    RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
+    RuntimeAuthorityIssuer, WindowsHyperVBrokerGrantAuthorizationRepository,
+    WindowsHyperVBrokerGrantIssuanceAuthorization, WindowsHyperVBrokerGrantIssueRequest,
+    WindowsHyperVBrokerGrantIssuer, WindowsHyperVCurrentAdmissionReader,
+    WindowsHyperVPlacementEvidence, WindowsHyperVPlacementRenewalRepository,
+    decode_durable_server_command, is_durable_lease_offer_command,
 };
 use super::repository::{
     RunnerCommandOutbox, RunnerOperationReceiptRepository, RunnerSessionRepository,
@@ -80,6 +88,24 @@ const JOB_RESULT_KIND: &str = "automata.runner.job-result.v1";
 const LOG_BATCH_KIND: &str = "automata.runner.log-batch.v1";
 const RUNTIME_AUTHORITY_REQUEST_KIND: &str = "automata.runner.runtime-authority-request.v2";
 const RUNTIME_AUTHORITY_ACK_KIND: &str = "automata.runner.runtime-authority-ack.v2";
+
+fn windows_job_is_offline_credential_free(job: &JobIrEnvelope) -> bool {
+    let job = job.job();
+    let authority = job.trust_snapshot().authority();
+    job.requirements().operating_system() == Some(&OperatingSystem::Windows)
+        && job.authority_profile() == JobAuthorityProfile::CredentialFree
+        && job
+            .permission_request()
+            .grants()
+            .is_some_and(<[_]>::is_empty)
+        && authority.permissions() == TrustPermissionAuthority::DenyAll
+        && authority.secrets() == TrustSecretAuthority::Denied
+        && authority.cache() == TrustCacheAuthority::Denied
+        && authority.environment() == TrustEnvironmentAuthority::Denied
+        && authority.oidc() == TrustOidcAuthority::Denied
+        && authority.outputs() == TrustOutputAuthority::Untrusted
+        && authority.results() == TrustResultsAuthority::Denied
+}
 
 enum PendingCommand {
     Found(ServerToRunner),
@@ -365,6 +391,12 @@ pub struct RunnerControlPorts {
     durability: RunnerDurabilityPorts,
     runtime_authorities: Option<Arc<dyn RuntimeAuthorityIssuer>>,
     managed_secret_bindings: Option<Arc<dyn ManagedSecretBindingIssuer>>,
+    windows_hyperv_broker_grants: Option<Arc<dyn WindowsHyperVBrokerGrantIssuer>>,
+    windows_hyperv_grant_authorizations:
+        Option<Arc<dyn WindowsHyperVBrokerGrantAuthorizationRepository>>,
+    windows_hyperv_current_admissions: Option<Arc<dyn WindowsHyperVCurrentAdmissionReader>>,
+    windows_hyperv_placement_renewals: Option<Arc<dyn WindowsHyperVPlacementRenewalRepository>>,
+    windows_admission_trust: Option<Arc<dyn WindowsRunnerAdmissionTrustStore>>,
     clock: Arc<dyn LeaseClock>,
     ids: Arc<dyn ControlIdGenerator>,
 }
@@ -391,6 +423,11 @@ impl RunnerControlPorts {
             durability,
             runtime_authorities: None,
             managed_secret_bindings: None,
+            windows_hyperv_broker_grants: None,
+            windows_hyperv_grant_authorizations: None,
+            windows_hyperv_current_admissions: None,
+            windows_hyperv_placement_renewals: None,
+            windows_admission_trust: None,
             clock,
             ids,
         }
@@ -416,6 +453,51 @@ impl RunnerControlPorts {
         issuer: Arc<dyn ManagedSecretBindingIssuer>,
     ) -> Self {
         self.managed_secret_bindings = Some(issuer);
+        self
+    }
+
+    /// Installs signed, value-free grant issuance for restricted Windows hosts.
+    /// An exact Windows Hyper-V placement fails closed without this port.
+    #[must_use]
+    pub fn with_windows_hyperv_broker_grant_issuer(
+        mut self,
+        issuer: Arc<dyn WindowsHyperVBrokerGrantIssuer>,
+    ) -> Self {
+        self.windows_hyperv_broker_grants = Some(issuer);
+        self
+    }
+
+    /// Installs the transactional, one-use durable authorization boundary for
+    /// Windows broker-grant signing and delivery.
+    #[must_use]
+    pub fn with_windows_hyperv_broker_grant_authorizations(
+        mut self,
+        repository: Arc<dyn WindowsHyperVBrokerGrantAuthorizationRepository>,
+    ) -> Self {
+        self.windows_hyperv_grant_authorizations = Some(repository);
+        self
+    }
+
+    /// Installs the sole server-owned source of current Windows admission state.
+    #[must_use]
+    pub fn with_windows_hyperv_current_admission_reader(
+        mut self,
+        reader: Arc<dyn WindowsHyperVCurrentAdmissionReader>,
+    ) -> Self {
+        self.windows_hyperv_current_admissions = Some(reader);
+        self
+    }
+
+    /// Installs the transactional Windows placement-renewal repository and
+    /// server-owned scoped broker trust store as one fail-closed pair.
+    #[must_use]
+    pub fn with_windows_hyperv_placement_renewals(
+        mut self,
+        repository: Arc<dyn WindowsHyperVPlacementRenewalRepository>,
+        trust_store: Arc<dyn WindowsRunnerAdmissionTrustStore>,
+    ) -> Self {
+        self.windows_hyperv_placement_renewals = Some(repository);
+        self.windows_admission_trust = Some(trust_store);
         self
     }
 }
@@ -1009,6 +1091,30 @@ impl DurableRunnerControlHandler {
                     .await;
             }
 
+            if let Some(envelope) = request.windows_placement_renewal() {
+                stage = RunnerLeaseRequestStage::PlacementRenewal;
+                Self::not_cancelled(cancellation)?;
+                let now = u64::try_from(self.ports.clock.now().get())
+                    .map_err(|_| app(ApplicationErrorKind::Internal))?;
+                let trust = self
+                    .ports
+                    .windows_admission_trust
+                    .as_deref()
+                    .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?;
+                let verified = verify_windows_runner_placement_renewal(envelope, trust, now)
+                    .map_err(|_| app(ApplicationErrorKind::Conflict))?;
+                let commit =
+                    CommitWindowsHyperVPlacementRenewal::new(fence, envelope.clone(), verified)
+                        .map_err(port_application_error)?;
+                self.ports
+                    .windows_hyperv_placement_renewals
+                    .as_ref()
+                    .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?
+                    .commit(commit)
+                    .await
+                    .map_err(port_application_error)?;
+            }
+
             stage = RunnerLeaseRequestStage::PrePollCommandReplay;
             match self
                 .next_pending_command(fence, snapshot.protocol_version(), replay_after)
@@ -1351,6 +1457,50 @@ impl DurableRunnerControlHandler {
         )
         .map_err(|_| app(ApplicationErrorKind::Internal))?;
         Self::not_cancelled(cancellation)?;
+        let windows_hyperv_placement = claimed.windows_placement_grant().cloned();
+        let is_windows_job =
+            job.job().requirements().operating_system() == Some(&OperatingSystem::Windows);
+        if is_windows_job {
+            // The only currently supported Windows slice is a completely
+            // offline, credential-free job. Reject it before any managed
+            // secret issuer is invoked or an offer becomes runner-visible.
+            if !windows_job_is_offline_credential_free(&job) {
+                return Err(app(ApplicationErrorKind::Unavailable));
+            }
+            if self.ports.windows_hyperv_broker_grants.is_none() {
+                return Err(app(ApplicationErrorKind::Internal));
+            }
+        }
+        if is_windows_job != windows_hyperv_placement.is_some() {
+            // A Windows job without its server-derived placement proof, or a
+            // proof attached to another platform, is durable scheduler
+            // corruption. Never let either shape fall through to the legacy
+            // direct provider path.
+            return Err(app(ApplicationErrorKind::Internal));
+        }
+        if let Some(placement) = windows_hyperv_placement.as_ref() {
+            // Scheduling evidence is not admission authority. Consult the
+            // server-owned signed-admission store before publishing anything
+            // runner-visible, then consult it again after acceptance when the
+            // one-use broker grant is minted. This prevents a long-lived
+            // runner inventory or a stale placement record from outliving a
+            // promotion revocation/high-water update.
+            let current = self
+                .ports
+                .windows_hyperv_current_admissions
+                .as_ref()
+                .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?
+                .current(fence, placement.environment_profile())
+                .await
+                .map_err(port_application_error)?
+                .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?;
+            if current.runner_id() != claimed.lease().runner_id()
+                || current.environment_profile() != placement.environment_profile()
+                || current.placement_valid_until() < claimed.lease().expires_at()
+            {
+                return Err(app(ApplicationErrorKind::Unavailable));
+            }
+        }
         let authority_slot = StableRunnerSlot::new(claim.slot().get())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
         *stage = RunnerLeaseRequestStage::OfferRuntimeAuthorityRequest;
@@ -1364,27 +1514,33 @@ impl DurableRunnerControlHandler {
         )
         .map_err(|_| app(ApplicationErrorKind::Internal))?;
         *stage = RunnerLeaseRequestStage::OfferManagedSecretBindingIssue;
-        let managed_secret_bindings = match (
-            job.job().authority_profile(),
-            job.job().trust_snapshot().authority().secrets(),
-            self.ports.managed_secret_bindings.as_ref(),
-        ) {
-            (JobAuthorityProfile::Standard, TrustSecretAuthority::Eligible, Some(issuer)) => issuer
-                .issue(authority_request)
-                .await
-                .map_err(port_application_error)?,
-            (
-                JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard,
-                TrustSecretAuthority::Denied,
-                _,
-            )
-            | (
-                JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard,
-                TrustSecretAuthority::Eligible,
-                None,
-            )
-            | (JobAuthorityProfile::CredentialFree, TrustSecretAuthority::Eligible, Some(_)) => {
-                ManagedSecretBindingOverlay::empty(claim.lease())
+        let managed_secret_bindings = if is_windows_job {
+            ManagedSecretBindingOverlay::empty(claim.lease())
+        } else {
+            match (
+                job.job().authority_profile(),
+                job.job().trust_snapshot().authority().secrets(),
+                self.ports.managed_secret_bindings.as_ref(),
+            ) {
+                (JobAuthorityProfile::Standard, TrustSecretAuthority::Eligible, Some(issuer)) => {
+                    issuer
+                        .issue(authority_request)
+                        .await
+                        .map_err(port_application_error)?
+                }
+                (
+                    JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard,
+                    TrustSecretAuthority::Denied,
+                    _,
+                )
+                | (
+                    JobAuthorityProfile::CredentialFree | JobAuthorityProfile::Standard,
+                    TrustSecretAuthority::Eligible,
+                    None,
+                )
+                | (JobAuthorityProfile::CredentialFree, TrustSecretAuthority::Eligible, Some(_)) => {
+                    ManagedSecretBindingOverlay::empty(claim.lease())
+                }
             }
         };
         *stage = RunnerLeaseRequestStage::OfferManagedSecretBindingValidation;
@@ -1392,13 +1548,21 @@ impl DurableRunnerControlHandler {
             .validate_for(claim.lease())
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
         Self::not_cancelled(cancellation)?;
+        if windows_hyperv_placement.is_some() && !managed_secret_bindings.bindings().is_empty() {
+            return Err(app(ApplicationErrorKind::Unavailable));
+        }
         let publish_at = claimed.lease().issued_at();
         *stage = RunnerLeaseRequestStage::OfferCommandConstruction;
-        let command = LeaseOfferCommand::try_new(claim, job.clone(), publish_at)
+        let mut command = LeaseOfferCommand::try_new(claim, job.clone(), publish_at)
             .and_then(|command| {
                 command.with_managed_secret_bindings(managed_secret_bindings.clone())
             })
             .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        if let Some(placement) = windows_hyperv_placement.as_ref() {
+            command = command
+                .with_windows_hyperv_placement(placement)
+                .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        }
         *stage = RunnerLeaseRequestStage::OfferCommandPublication;
         let publication = self
             .ports
@@ -1495,7 +1659,26 @@ impl DurableRunnerControlHandler {
 
             stage = RunnerRuntimeAuthorityRequestStage::AuthorityIssue;
             let offer = admission.offer();
-            let authorities = self.issue_runtime_authorities(&job, offer).await?;
+            let windows_job =
+                job.job().requirements().operating_system() == Some(&OperatingSystem::Windows);
+            if windows_job
+                && (!offer.command_projection_valid() || offer.windows_hyperv_placement().is_none())
+                || !windows_job && offer.windows_hyperv_placement().is_some()
+            {
+                return Err(app(ApplicationErrorKind::Unavailable));
+            }
+            let windows_hyperv_placement = offer.windows_hyperv_placement();
+            let authorities = self
+                .issue_post_accept_authorities(&job, offer, windows_job)
+                .await?;
+            // Windows authority plaintext may never enter runner transport.
+            if windows_hyperv_placement.is_some() && !authorities.as_slice().is_empty() {
+                return Err(app(ApplicationErrorKind::Unavailable));
+            }
+            let windows_hyperv_delivery = self
+                .issue_windows_hyperv_broker_grant(windows_hyperv_placement, &job, &admission)
+                .await?;
+            let accepted_lease = offer.lease().clone();
 
             stage = RunnerRuntimeAuthorityRequestStage::AuthorityValidation;
             authorities
@@ -1503,7 +1686,12 @@ impl DurableRunnerControlHandler {
                 .map_err(|_| app(ApplicationErrorKind::Internal))?;
 
             stage = RunnerRuntimeAuthorityRequestStage::BundleEncoding;
-            let bundle_digest = self.runtime_authority_bundle_digest(&authorities, &job, offer)?;
+            let bundle_digest = self.runtime_authority_bundle_digest(
+                &authorities,
+                &job,
+                offer,
+                windows_hyperv_delivery.as_ref().map(|(grant, _)| grant),
+            )?;
             if admission
                 .committed_bundle_digest()
                 .is_some_and(|committed| committed != bundle_digest)
@@ -1521,20 +1709,36 @@ impl DurableRunnerControlHandler {
             Self::not_cancelled(cancellation)?;
 
             stage = RunnerRuntimeAuthorityRequestStage::DurableCommit;
-            self.ports
-                .durability
-                .runtime_authority_deliveries
-                .commit_runtime_authority_delivery(commit)
-                .await
-                .map_err(store_application_error)?;
-            Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(
-                RuntimeAuthorityGrant::new(
-                    self.reply_header(request.header()),
-                    request.binding(),
-                    bundle_digest,
-                    authorities,
-                ),
-            )))
+            if let Some((grant, authorization)) = windows_hyperv_delivery.as_ref() {
+                let commit = CommitWindowsHyperVBrokerGrantDelivery::new(
+                    authorization.clone(),
+                    commit,
+                    grant,
+                )
+                .map_err(port_application_error)?;
+                self.ports
+                    .windows_hyperv_grant_authorizations
+                    .as_ref()
+                    .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?
+                    .commit(commit)
+                    .await
+                    .map_err(port_application_error)?;
+            } else {
+                self.ports
+                    .durability
+                    .runtime_authority_deliveries
+                    .commit_runtime_authority_delivery(commit)
+                    .await
+                    .map_err(store_application_error)?;
+            }
+            self.runtime_authority_response(
+                request,
+                bundle_digest,
+                authorities,
+                windows_hyperv_delivery.map(|(grant, _)| grant),
+                &job,
+                &accepted_lease,
+            )
         }
         .await;
         if let Err(error) = &result {
@@ -1549,6 +1753,7 @@ impl DurableRunnerControlHandler {
         authorities: &JobRuntimeAuthorities,
         job: &JobIrEnvelope,
         offer: &AcceptedRuntimeAuthorityOffer,
+        windows_hyperv_broker_grant: Option<&automata_ci_core::WindowsHyperVBrokerGrant>,
     ) -> Result<Sha256Digest, ApplicationError> {
         let encoded = Zeroizing::new(
             encode_runtime_authorities(
@@ -1559,7 +1764,110 @@ impl DurableRunnerControlHandler {
             )
             .map_err(|_| app(ApplicationErrorKind::Internal))?,
         );
-        Ok(sha256(&encoded))
+        Ok(runtime_authority_delivery_digest(
+            sha256(&encoded),
+            windows_hyperv_broker_grant,
+        ))
+    }
+
+    fn runtime_authority_response(
+        &self,
+        request: &RuntimeAuthorityRequest,
+        bundle_digest: Sha256Digest,
+        authorities: JobRuntimeAuthorities,
+        windows_grant: Option<automata_ci_core::WindowsHyperVBrokerGrant>,
+        job: &JobIrEnvelope,
+        lease: &automata_ci_core::Lease,
+    ) -> Result<ServerToRunner, ApplicationError> {
+        let mut grant = RuntimeAuthorityGrant::new(
+            self.reply_header(request.header()),
+            request.binding(),
+            bundle_digest,
+            authorities,
+        );
+        if let Some(windows_grant) = windows_grant {
+            grant = grant
+                .with_windows_hyperv_broker_grant(windows_grant, job, lease)
+                .map_err(|_| app(ApplicationErrorKind::Internal))?;
+        }
+        Ok(ServerToRunner::RuntimeAuthorityGrant(Box::new(grant)))
+    }
+
+    async fn issue_windows_hyperv_broker_grant(
+        &self,
+        placement: Option<&WindowsHyperVPlacementEvidence>,
+        job: &JobIrEnvelope,
+        delivery: &super::durable::RuntimeAuthorityDeliveryAdmission,
+    ) -> Result<
+        Option<(
+            automata_ci_core::WindowsHyperVBrokerGrant,
+            WindowsHyperVBrokerGrantIssuanceAuthorization,
+        )>,
+        ApplicationError,
+    > {
+        let Some(placement) = placement else {
+            return Ok(None);
+        };
+        let offer = delivery.offer();
+        let current = self
+            .ports
+            .windows_hyperv_current_admissions
+            .as_ref()
+            .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?
+            .current(offer.request().session(), placement.environment_profile())
+            .await
+            .map_err(port_application_error)?
+            .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?;
+        let issuance = WindowsHyperVBrokerGrantIssueRequest::new(
+            placement,
+            &current,
+            offer,
+            job,
+            delivery.request().request(),
+        )
+        .map_err(port_application_error)?;
+        let issuer = self
+            .ports
+            .windows_hyperv_broker_grants
+            .as_ref()
+            .ok_or_else(|| app(ApplicationErrorKind::Internal))?;
+        let proposal = issuer.propose(&issuance).map_err(port_application_error)?;
+        let request = AuthorizeWindowsHyperVBrokerGrant::new(delivery.clone(), current, proposal)
+            .map_err(port_application_error)?;
+        let authorization = self
+            .ports
+            .windows_hyperv_grant_authorizations
+            .as_ref()
+            .ok_or_else(|| app(ApplicationErrorKind::Unavailable))?
+            .authorize(request)
+            .await
+            .map_err(port_application_error)?;
+        let grant = issuer
+            .issue(&authorization)
+            .map_err(port_application_error)?;
+        Ok(Some((grant, authorization)))
+    }
+
+    async fn issue_post_accept_authorities(
+        &self,
+        job: &JobIrEnvelope,
+        offer: &AcceptedRuntimeAuthorityOffer,
+        windows_hyperv: bool,
+    ) -> Result<JobRuntimeAuthorities, ApplicationError> {
+        if !windows_hyperv {
+            return self.issue_runtime_authorities(job, offer).await;
+        }
+        // Recheck the complete sealed job and durable offer before either
+        // authority issuer can be reached. A corrupt or substituted Windows
+        // offer cannot mint provider authority as a side effect of rejection.
+        if !windows_job_is_offline_credential_free(job)
+            || !offer.command_projection_valid()
+            || !offer.managed_secret_bindings_empty()
+        {
+            return Err(app(ApplicationErrorKind::Unavailable));
+        }
+        JobRuntimeAuthorities::new(Vec::new(), job, offer.lease())
+            .map_err(|_| app(ApplicationErrorKind::Internal))
     }
 
     async fn issue_runtime_authorities(

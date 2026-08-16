@@ -80,6 +80,7 @@ pub struct ClaimedLeasePoll {
     lease: Lease,
     slot: RunnerSlotOrdinal,
     job_ir: JobIrMetadata,
+    windows_placement_grant: Option<Box<super::WindowsHyperVPlacementGrant>>,
     replayed: bool,
 }
 
@@ -96,8 +97,19 @@ impl ClaimedLeasePoll {
             lease,
             slot,
             job_ir,
+            windows_placement_grant: None,
             replayed,
         }
+    }
+
+    /// Attaches the server-only placement proof returned by the durable claim.
+    #[must_use]
+    pub fn with_windows_placement_grant(
+        mut self,
+        grant: Option<super::WindowsHyperVPlacementGrant>,
+    ) -> Self {
+        self.windows_placement_grant = grant.map(Box::new);
+        self
     }
 
     /// Returns the exclusive core-domain lease and fencing token.
@@ -116,6 +128,12 @@ impl ClaimedLeasePoll {
     #[must_use]
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.job_ir
+    }
+
+    /// Returns the exact Windows placement proof for a Windows Hyper-V claim.
+    #[must_use]
+    pub fn windows_placement_grant(&self) -> Option<&super::WindowsHyperVPlacementGrant> {
+        self.windows_placement_grant.as_deref()
     }
 
     /// Reports whether a durable terminal receipt was replayed.
@@ -475,12 +493,15 @@ impl<'a> LeasePollService<'a> {
                 }
                 let slot = RunnerSlotOrdinal::new(request_key.slot().ordinal())
                     .map_err(|_| LeasePollInvariant::ReceiptAssignmentMismatch)?;
-                Ok(LeasePollOutcome::Claimed(ClaimedLeasePoll::new(
-                    claimed.lease().clone(),
-                    slot,
-                    claimed.job_ir().clone(),
-                    replayed,
-                )))
+                Ok(LeasePollOutcome::Claimed(
+                    ClaimedLeasePoll::new(
+                        claimed.lease().clone(),
+                        slot,
+                        claimed.job_ir().clone(),
+                        replayed,
+                    )
+                    .with_windows_placement_grant(claimed.windows_placement_grant().cloned()),
+                ))
             }
             TryClaimOutcome::Rejected(reason) => Ok(LeasePollOutcome::Rejected {
                 reason: *reason,

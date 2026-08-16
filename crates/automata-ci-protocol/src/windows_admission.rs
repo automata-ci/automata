@@ -9,7 +9,7 @@
 
 use automata_ci_core::{
     EnvironmentProfile, IsolationLevel, OperatingSystem, OperationId, RunnerCapabilities,
-    RunnerFeature, RunnerId, SandboxFeature, Sha256Digest,
+    RunnerFeature, RunnerId, SandboxFeature, Sha256Digest, windows_action_archive_policy_sha256,
 };
 use ring::signature;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -18,7 +18,7 @@ use thiserror::Error;
 use url::Url;
 
 /// Schema version of the canonical Windows admission payload and envelope.
-pub const WINDOWS_RUNNER_ADMISSION_SCHEMA_VERSION: u16 = 1;
+pub const WINDOWS_RUNNER_ADMISSION_SCHEMA_VERSION: u16 = 2;
 /// Fixed sandbox provider authorized by this receipt contract.
 pub const WINDOWS_RUNNER_ADMISSION_PROVIDER_ID: &str = "windows-hyperv";
 
@@ -34,7 +34,7 @@ const MAX_ADMISSION_LIFETIME_MILLIS: u64 = 15 * 60 * 1_000;
 const MAX_PROMOTION_LIFETIME_MILLIS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const ED25519_PUBLIC_KEY_BYTES: usize = 32;
 const ED25519_SIGNATURE_BYTES: usize = 64;
-const RECEIPT_DIGEST_DOMAIN: &[u8] = b"automata.windows-runner-admission-envelope.v1\0";
+const RECEIPT_DIGEST_DOMAIN: &[u8] = b"automata.windows-runner-admission-envelope.v2\0";
 
 /// Exact enrollment transaction named by the broker admission.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -234,6 +234,8 @@ pub struct WindowsBrokerProfileBinding {
     probe_contract_sha256: Sha256Digest,
     network_disabled: bool,
     sealed_action_trees: bool,
+    sealed_action_policy_sha256: Sha256Digest,
+    sandbox_pids_limit: u32,
 }
 
 #[derive(Deserialize)]
@@ -247,6 +249,8 @@ struct UncheckedWindowsBrokerProfileBinding {
     probe_contract_sha256: Sha256Digest,
     network_disabled: bool,
     sealed_action_trees: bool,
+    sealed_action_policy_sha256: Sha256Digest,
+    sandbox_pids_limit: u32,
 }
 
 impl<'de> Deserialize<'de> for WindowsBrokerProfileBinding {
@@ -264,6 +268,8 @@ impl<'de> Deserialize<'de> for WindowsBrokerProfileBinding {
             value.probe_contract_sha256,
             value.network_disabled,
             value.sealed_action_trees,
+            value.sealed_action_policy_sha256,
+            value.sandbox_pids_limit,
         )
         .map_err(D::Error::custom)
     }
@@ -286,6 +292,8 @@ impl WindowsBrokerProfileBinding {
         probe_contract_sha256: Sha256Digest,
         network_disabled: bool,
         sealed_action_trees: bool,
+        sealed_action_policy_sha256: Sha256Digest,
+        sandbox_pids_limit: u32,
     ) -> Result<Self, WindowsRunnerAdmissionError> {
         let broker_host_id = broker_host_id.into();
         let sandbox_provider_id = sandbox_provider_id.into();
@@ -295,6 +303,8 @@ impl WindowsBrokerProfileBinding {
             || zero_digest(profile.digest())
             || zero_digest(probe_contract_sha256)
             || !network_disabled
+            || sealed_action_policy_sha256 != windows_action_archive_policy_sha256()
+            || sandbox_pids_limit == 0
         {
             return Err(WindowsRunnerAdmissionError::InvalidBrokerProfile);
         }
@@ -307,6 +317,8 @@ impl WindowsBrokerProfileBinding {
             probe_contract_sha256,
             network_disabled,
             sealed_action_trees,
+            sealed_action_policy_sha256,
+            sandbox_pids_limit,
         })
     }
 
@@ -357,6 +369,20 @@ impl WindowsBrokerProfileBinding {
     #[must_use]
     pub const fn sealed_action_trees(&self) -> bool {
         self.sealed_action_trees
+    }
+
+    /// Returns the exact sealed-action namespace policy authenticated by the broker.
+    #[must_use]
+    pub const fn sealed_action_policy_sha256(&self) -> Sha256Digest {
+        self.sealed_action_policy_sha256
+    }
+
+    /// Returns the broker-admitted hard process ceiling authenticated by the
+    /// receipt. Placement grants must copy this value from the current durable
+    /// admission rather than mutable runner inventory.
+    #[must_use]
+    pub const fn sandbox_pids_limit(&self) -> u32 {
+        self.sandbox_pids_limit
     }
 }
 
@@ -1201,6 +1227,16 @@ impl WindowsRunnerAdmissionEnvelope {
         &self.authenticator
     }
 
+    /// Returns the domain-separated digest of this complete signed envelope.
+    ///
+    /// This is a transport commitment only. It does not verify the signature
+    /// or authorize capabilities; callers must still use
+    /// [`verify_windows_runner_admission`] for that purpose.
+    #[must_use]
+    pub fn envelope_sha256(&self) -> Sha256Digest {
+        envelope_digest(self)
+    }
+
     /// Decodes the already canonical, structurally validated claims.
     ///
     /// # Errors
@@ -1352,7 +1388,7 @@ pub fn verify_windows_runner_admission(
     validate_current_window(claims.validity, now_unix_millis)?;
     validate_current_promotion(claims.binding.promotion.validity, now_unix_millis)?;
     Ok(VerifiedWindowsRunnerAdmission {
-        envelope_sha256: envelope_digest(envelope),
+        envelope_sha256: envelope.envelope_sha256(),
         claims,
     })
 }
@@ -1673,6 +1709,8 @@ mod tests {
             digest(7),
             true,
             true,
+            windows_action_archive_policy_sha256(),
+            64,
         )
         .expect("broker profile");
         let promotion = WindowsImagePromotionBinding::new(

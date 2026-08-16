@@ -6,12 +6,14 @@ use std::{
 };
 
 use automata_ci_core::{
-    AttemptId, FencingToken, JobIrVersion, JobLifecycle, Lease, LeaseId, LogSequence, LogStreamId,
-    OperationId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
+    AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken, JobId, JobIrVersion,
+    JobLifecycle, JobResourceAllocation, Lease, LeaseId, LogSequence, LogStreamId, OperationId,
+    ResourceCapacity, RunId, RunnerId, RunnerSessionId, Sha256Digest, UnixMillis,
+    WindowsHyperVBrokerGrant, WindowsHyperVBrokerGrantClaims, windows_action_archive_policy_sha256,
 };
 use automata_ci_protocol::{
     CommandSequence, INITIAL_RUNTIME_AUTHORITY_GENERATION, PROTOCOL_MAX_VERSION, RunnerSlotOrdinal,
-    RuntimeAuthorityDeliveryBinding,
+    RuntimeAuthorityDeliveryBinding, runtime_authority_delivery_digest,
 };
 use automata_ci_runner_journal::{
     ContentKind, DurableCommand, DurableContentRef, FileJournal, JobIrContentRef, LeaseOfferRecord,
@@ -284,13 +286,118 @@ impl Fixture {
             ),
             OperationId::new(),
             OperationId::new(),
-            content
-                .content()
-                .public_plaintext_sha256()
-                .expect("runtime authority has a public digest"),
+            runtime_authority_delivery_digest(
+                content
+                    .content()
+                    .public_plaintext_sha256()
+                    .expect("runtime authority has a public digest"),
+                None,
+            ),
             content,
+            None,
         )
         .expect("valid runtime-authority delivery")
+    }
+
+    pub fn windows_hyperv_broker_grant(
+        &self,
+        offer: &LeaseOfferRecord,
+        post_accept_operation_id: OperationId,
+        session_id: RunnerSessionId,
+    ) -> WindowsHyperVBrokerGrant {
+        let capacity = ResourceCapacity::new(2_000, 2 * 1024 * 1024 * 1024, 0, 0);
+        let allocation =
+            JobResourceAllocation::new(capacity, capacity).expect("valid Windows allocation");
+        let claims = WindowsHyperVBrokerGrantClaims::new(
+            Sha256Digest::from_bytes([0x11; 32]),
+            Sha256Digest::from_bytes([0x12; 32]),
+            self.lease.attempt_id(),
+            JobId::new(),
+            RunId::new(),
+            OperationId::new(),
+            offer.command().operation_id(),
+            offer.command().sequence().get(),
+            post_accept_operation_id,
+            Sha256Digest::from_bytes([0x13; 32]),
+            self.runner_id,
+            session_id,
+            1,
+            1,
+            offer.slot().get(),
+            self.lease.lease_id(),
+            self.lease.fencing_token(),
+            offer.job_ir().version(),
+            offer
+                .job_ir()
+                .content()
+                .public_plaintext_bytes()
+                .expect("job IR has a public size"),
+            offer
+                .job_ir()
+                .content()
+                .public_plaintext_sha256()
+                .expect("job IR has a public digest"),
+            Sha256Digest::from_bytes([0x14; 32]),
+            allocation,
+            64,
+            Sha256Digest::from_bytes([0x15; 32]),
+            EnvironmentProfile::new(
+                EnvironmentProfileId::new("example.test/windows").expect("valid profile id"),
+                Sha256Digest::from_bytes([0x16; 32]),
+            ),
+            Sha256Digest::from_bytes([0x17; 32]),
+            windows_action_archive_policy_sha256(),
+            None,
+            self.lease.issued_at(),
+            self.lease.expires_at(),
+        )
+        .expect("valid Windows broker grant claims");
+        WindowsHyperVBrokerGrant::new(Sha256Digest::from_bytes([0x18; 32]), claims, [0x19; 64])
+            .expect("valid Windows broker grant")
+    }
+
+    pub fn runtime_authority_delivery_with_windows_grant(
+        &self,
+        offer: &LeaseOfferRecord,
+    ) -> RuntimeAuthorityDeliveryRecord {
+        self.runtime_authority_delivery_with_windows_grant_for_session(offer, self.session_id)
+    }
+
+    pub fn runtime_authority_delivery_with_windows_grant_for_session(
+        &self,
+        offer: &LeaseOfferRecord,
+        session_id: RunnerSessionId,
+    ) -> RuntimeAuthorityDeliveryRecord {
+        let content = Self::runtime_authority();
+        let request_operation_id = OperationId::new();
+        let grant = self.windows_hyperv_broker_grant(offer, request_operation_id, session_id);
+        RuntimeAuthorityDeliveryRecord::new(
+            RuntimeAuthorityDeliveryBinding::new(
+                self.lease.attempt_id(),
+                offer.slot(),
+                self.lease.guard(),
+                offer.command().operation_id(),
+                offer.command().sequence(),
+                offer
+                    .job_ir()
+                    .content()
+                    .public_plaintext_sha256()
+                    .expect("job IR has a public digest"),
+                INITIAL_RUNTIME_AUTHORITY_GENERATION,
+            ),
+            request_operation_id,
+            OperationId::new(),
+            runtime_authority_delivery_digest(
+                content
+                    .content()
+                    .public_plaintext_sha256()
+                    .expect("runtime authority has a public digest"),
+                Some(&grant),
+            ),
+            content,
+            Some(grant),
+        )
+        .expect("valid Windows runtime-authority delivery")
     }
 
     pub fn terminal_result() -> TerminalResultRecord {

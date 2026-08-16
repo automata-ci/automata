@@ -1,6 +1,6 @@
 use std::{fmt, num::NonZeroU16};
 
-use automata_ci_core::{JobResourceAllocation, RunnerId};
+use automata_ci_core::{JobResourceAllocation, RunnerId, Sha256Digest, WindowsHyperVBrokerGrant};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -49,6 +49,8 @@ pub struct SandboxSpec {
     resources: ResourceLimits,
     resource_allocation: Option<JobResourceAllocation>,
     services: ServiceContainerSpecs,
+    windows_action_graph_sha256: Option<Sha256Digest>,
+    windows_hyperv_broker_grant: Option<WindowsHyperVBrokerGrant>,
 }
 
 impl SandboxSpec {
@@ -83,6 +85,8 @@ impl SandboxSpec {
             resources,
             resource_allocation: None,
             services: ServiceContainerSpecs::empty(),
+            windows_action_graph_sha256: None,
+            windows_hyperv_broker_grant: None,
         }
     }
 
@@ -213,6 +217,35 @@ impl SandboxSpec {
     #[must_use]
     pub const fn services(&self) -> &ServiceContainerSpecs {
         &self.services
+    }
+
+    /// Carries the exact action-graph identity derived from verified immutable
+    /// `JobIR`. This value is not authority by itself; restricted providers
+    /// must compare it with a signed server admission.
+    #[must_use]
+    pub const fn with_windows_action_graph_sha256(mut self, digest: Option<Sha256Digest>) -> Self {
+        self.windows_action_graph_sha256 = digest;
+        self
+    }
+
+    /// Returns the verified `JobIR` action-graph identity, when one was admitted.
+    #[must_use]
+    pub const fn windows_action_graph_sha256(&self) -> Option<Sha256Digest> {
+        self.windows_action_graph_sha256
+    }
+
+    /// Attaches the signed capability consumed only by a restricted Windows
+    /// Hyper-V broker. Other providers must reject this authority.
+    #[must_use]
+    pub fn with_windows_hyperv_broker_grant(mut self, grant: WindowsHyperVBrokerGrant) -> Self {
+        self.windows_hyperv_broker_grant = Some(grant);
+        self
+    }
+
+    /// Returns the signed Windows broker capability, when the request requires it.
+    #[must_use]
+    pub const fn windows_hyperv_broker_grant(&self) -> Option<&WindowsHyperVBrokerGrant> {
+        self.windows_hyperv_broker_grant.as_ref()
     }
 }
 

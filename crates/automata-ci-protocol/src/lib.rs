@@ -10,11 +10,13 @@ pub mod message;
 pub mod negotiation;
 pub mod windows_admission;
 pub mod windows_admission_issue;
+pub mod windows_admission_renewal;
 
 pub use message::*;
 pub use negotiation::*;
 pub use windows_admission::*;
 pub use windows_admission_issue::*;
+pub use windows_admission_renewal::*;
 
 /// Current schema version for the message structs in this crate.
 ///

@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use automata_ci_core::{
     EnvironmentProfile, JobResourceAllocation, OperatingSystem, RunnerCapabilities, RunnerFeature,
-    Sha256Digest,
+    Sha256Digest, windows_action_archive_policy_sha256,
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use sha2::{Digest as _, Sha256};
@@ -22,9 +22,9 @@ use crate::{
 };
 
 /// Schema version of the broker-verifiable issue request.
-pub const WINDOWS_RUNNER_ADMISSION_ISSUE_SCHEMA_VERSION: u16 = 1;
+pub const WINDOWS_RUNNER_ADMISSION_ISSUE_SCHEMA_VERSION: u16 = 2;
 
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.windows-runner-admission-issue.v1\0";
+const REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.windows-runner-admission-issue.v2\0";
 const MAX_CANONICAL_REQUEST_BYTES: usize = 512 * 1024;
 const MAX_HOST_PATH_BYTES: usize = 4_096;
 const MAX_TARGET_PATH_BYTES: usize = 4_096;
@@ -344,6 +344,7 @@ pub struct WindowsAdmissionLaunchContract {
     unprivileged: bool,
     hyperv_isolation: bool,
     sealed_action_trees: bool,
+    sealed_action_policy_sha256: Sha256Digest,
 }
 
 impl WindowsAdmissionLaunchContract {
@@ -368,6 +369,7 @@ impl WindowsAdmissionLaunchContract {
         unprivileged: bool,
         hyperv_isolation: bool,
         sealed_action_trees: bool,
+        sealed_action_policy_sha256: Sha256Digest,
     ) -> Result<Self, WindowsRunnerAdmissionIssueError> {
         let value = Self {
             profile,
@@ -382,6 +384,7 @@ impl WindowsAdmissionLaunchContract {
             unprivileged,
             hyperv_isolation,
             sealed_action_trees,
+            sealed_action_policy_sha256,
         };
         value.validate()?;
         Ok(value)
@@ -459,6 +462,12 @@ impl WindowsAdmissionLaunchContract {
         self.sealed_action_trees
     }
 
+    /// Returns the exact sealed-action namespace policy requested for admission.
+    #[must_use]
+    pub const fn sealed_action_policy_sha256(&self) -> Sha256Digest {
+        self.sealed_action_policy_sha256
+    }
+
     fn validate(&self) -> Result<(), WindowsRunnerAdmissionIssueError> {
         let mut names = BTreeSet::new();
         let environment_bytes =
@@ -486,7 +495,7 @@ impl WindowsAdmissionLaunchContract {
             || !self.writable_disposable_root
             || !self.unprivileged
             || !self.hyperv_isolation
-            || !self.sealed_action_trees
+            || self.sealed_action_policy_sha256 != windows_action_archive_policy_sha256()
         {
             return Err(WindowsRunnerAdmissionIssueError::InvalidLaunch);
         }
@@ -1030,6 +1039,23 @@ fn validate_node_capabilities(
     request: &WindowsRunnerAdmissionIssueRequest,
 ) -> Result<(), WindowsRunnerAdmissionIssueError> {
     let features = request.capability_ceiling.features();
+    let action_features = [
+        RunnerFeature::JAVASCRIPT_ACTIONS,
+        RunnerFeature::COMPOSITE_ACTIONS,
+        RunnerFeature::REPOSITORY_ACTIONS,
+        RunnerFeature::LOCAL_ACTIONS,
+        RunnerFeature::NODE12_ACTIONS,
+        RunnerFeature::NODE16_ACTIONS,
+        RunnerFeature::NODE20_ACTIONS,
+        RunnerFeature::NODE24_ACTIONS,
+    ];
+    if !request.launch.sealed_action_trees {
+        return action_features
+            .iter()
+            .all(|feature| !features.contains(feature))
+            .then_some(())
+            .ok_or(WindowsRunnerAdmissionIssueError::InvalidCapabilities);
+    }
     let generations = [
         (
             RunnerFeature::NODE12_ACTIONS,

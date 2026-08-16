@@ -1,9 +1,13 @@
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
-use std::time::Duration;
 
+use async_trait::async_trait;
 use automata_ci_auth::{
     authorization::SecretExposureClass,
     machine::{AuthenticatedMachine, ExternalRunnerIdentity},
@@ -20,23 +24,33 @@ use automata_ci_control::runner_control::durable::{
     LeaseResponseAction, PublishedLeaseOffer, RunnerControlValueError,
 };
 use automata_ci_control::runner_control::{
-    AuthorizeRuntimeAuthorityDelivery, AuthorizedRunnerRegistration, ControlPortError,
-    DesiredRunnerState, DurableRunnerControlHandler, LeaseOfferClaimStatus, LeaseOfferObservation,
-    LeaseOfferPublishOutcome, LeaseOfferReplayResolution, PublishedCommand, RunnerControlConfig,
+    AuthorizeRuntimeAuthorityDelivery, AuthorizeWindowsHyperVBrokerGrant,
+    AuthorizedRunnerRegistration, CommitWindowsHyperVBrokerGrantDelivery, ControlPortError,
+    DesiredRunnerState, DurableRunnerControlHandler, Ed25519WindowsHyperVBrokerGrantIssuer,
+    LeaseOfferClaimStatus, LeaseOfferObservation, LeaseOfferPublishOutcome,
+    LeaseOfferReplayResolution, ManagedSecretBindingIssuer, PublishedCommand, RunnerControlConfig,
     RunnerControlFailure, RunnerControlMessageKind, RunnerControlMessageOutcome,
     RunnerControlObserver, RunnerControlPorts, RunnerDurabilityPorts, RunnerDurableDisposition,
     RunnerDurableMessageKind, RunnerHandshakeOutcome, RunnerHandshakeRejection,
     RunnerIdentityPorts, RunnerLeasePorts, RunnerLeaseRequestStage,
-    RuntimeAuthorityDeliveryAdmission, repository::RunnerCommandOutbox as _,
+    RuntimeAuthorityDeliveryAdmission, RuntimeAuthorityDeliveryDisposition,
+    RuntimeAuthorityDeliveryRepository, RuntimeAuthorityIssueRequest,
+    WindowsHyperVBrokerGrantAuthorizationRepository, WindowsHyperVBrokerGrantIssuanceAuthorization,
+    WindowsHyperVBrokerGrantIssueRequest, WindowsHyperVBrokerGrantIssuer,
+    WindowsHyperVBrokerGrantProposal, WindowsHyperVCurrentAdmission,
+    WindowsHyperVCurrentAdmissionReader, repository::RunnerCommandOutbox as _,
 };
 use automata_ci_core::{
-    Architecture, AttemptId, FencingToken, JobAuthorityProfile, JobConclusion, JobId,
-    JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobIrVersionRange, JobLifecycle,
-    JobPermissionRequest, JobResult, JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId,
-    LogChannel, LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, RunId,
-    RunValueTemplates, RunnerCapabilities, RunnerGroup, RunnerId, RunnerLabel, RunnerPlatform,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SecretBinding, SemanticStep, Sha256Digest,
-    ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    Architecture, AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken,
+    JobAuthorityProfile, JobConclusion, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope,
+    JobIrVersion, JobIrVersionRange, JobLifecycle, JobPermissionGrant, JobPermissionRequest,
+    JobResourceAllocation, JobResult, JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId,
+    LogChannel, LogFrame, LogSequence, LogStreamId, OperatingSystem, OperationId, PermissionLevel,
+    ResourceCapacity, RunId, RunValueTemplates, RunnerCapabilities, RunnerFeature, RunnerGroup,
+    RunnerId, RunnerLabel, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
+    SecretBinding, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TrustEventKind,
+    TrustEvidence, TrustOidcAuthority, TrustOriginKind, TrustPermissionAuthority, TrustPolicy,
+    TrustResultsAuthority, UnixMillis, ValueTemplate, WindowsHyperVBrokerGrant, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandAck, CommandCursor, CommandSequence, HandshakeErrorCode,
@@ -61,6 +75,7 @@ use automata_ci_store::{
 };
 use sha2::{Digest as _, Sha256};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use super::runner_control_support::{
     AuthorityIssuer, Authorizer, Clock, Commands, Ids, IngressObjects, Objects, Poller, Publisher,
@@ -78,9 +93,120 @@ struct Harness {
     ingress_objects: Arc<IngressObjects>,
     publisher: Arc<Publisher>,
     authority_issuer: Arc<AuthorityIssuer>,
+    managed_secret_issuer: Arc<RecordingManagedSecretBindingIssuer>,
+    windows_broker_grant_issuer: Arc<RecordingWindowsHyperVBrokerGrantIssuer>,
+    windows_current_admissions: Arc<RecordingWindowsCurrentAdmissions>,
     transactions: Arc<Transactions>,
     receipts: Arc<Receipts>,
     commands: Arc<Commands>,
+}
+
+#[derive(Debug, Default)]
+struct RecordingManagedSecretBindingIssuer {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ManagedSecretBindingIssuer for RecordingManagedSecretBindingIssuer {
+    async fn issue(
+        &self,
+        request: RuntimeAuthorityIssueRequest<'_>,
+    ) -> Result<ManagedSecretBindingOverlay, ControlPortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ManagedSecretBindingOverlay::empty(request.lease()))
+    }
+}
+
+struct RecordingWindowsHyperVBrokerGrantIssuer {
+    inner: Ed25519WindowsHyperVBrokerGrantIssuer,
+    calls: AtomicUsize,
+}
+
+impl std::fmt::Debug for RecordingWindowsHyperVBrokerGrantIssuer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RecordingWindowsHyperVBrokerGrantIssuer")
+            .field("calls", &self.calls.load(Ordering::SeqCst))
+            .finish_non_exhaustive()
+    }
+}
+
+impl WindowsHyperVBrokerGrantIssuer for RecordingWindowsHyperVBrokerGrantIssuer {
+    fn propose(
+        &self,
+        request: &WindowsHyperVBrokerGrantIssueRequest<'_>,
+    ) -> Result<WindowsHyperVBrokerGrantProposal, ControlPortError> {
+        self.inner.propose(request)
+    }
+
+    fn issue(
+        &self,
+        authorization: &WindowsHyperVBrokerGrantIssuanceAuthorization,
+    ) -> Result<WindowsHyperVBrokerGrant, ControlPortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.issue(authorization)
+    }
+}
+
+#[async_trait]
+impl WindowsHyperVBrokerGrantAuthorizationRepository for Transactions {
+    async fn authorize(
+        &self,
+        request: AuthorizeWindowsHyperVBrokerGrant,
+    ) -> Result<WindowsHyperVBrokerGrantIssuanceAuthorization, ControlPortError> {
+        let authorized_at = request.proposal().claims().issued_at();
+        let valid_until = std::cmp::min(
+            request.proposal().claims().expires_at(),
+            request.delivery().offer().offer_valid_until(),
+        );
+        WindowsHyperVBrokerGrantIssuanceAuthorization::new(
+            request,
+            Sha256Digest::from_bytes([0x89; 32]),
+            authorized_at,
+            valid_until,
+        )
+    }
+
+    async fn commit(
+        &self,
+        request: CommitWindowsHyperVBrokerGrantDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, ControlPortError> {
+        RuntimeAuthorityDeliveryRepository::commit_runtime_authority_delivery(
+            self,
+            request.delivery().clone(),
+        )
+        .await
+        .map_err(|_| ControlPortError::Conflict)
+    }
+}
+
+#[derive(Debug)]
+struct RecordingWindowsCurrentAdmissions {
+    host_id: Sha256Digest,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl WindowsHyperVCurrentAdmissionReader for RecordingWindowsCurrentAdmissions {
+    async fn current(
+        &self,
+        session: RunnerSessionFence,
+        environment_profile: &EnvironmentProfile,
+    ) -> Result<Option<WindowsHyperVCurrentAdmission>, ControlPortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        WindowsHyperVCurrentAdmission::new(
+            session.runner_id(),
+            self.host_id,
+            environment_profile.clone(),
+            Sha256Digest::from_bytes([0x7b; 32]),
+            automata_ci_core::windows_action_archive_policy_sha256(),
+            None,
+            64,
+            UnixMillis::new(100_000),
+            UnixMillis::new(1_000),
+        )
+        .map(Some)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -197,6 +323,19 @@ fn harness(
     let ingress_objects = Arc::new(IngressObjects::default());
     let publisher = Arc::new(Publisher::default());
     let authority_issuer = Arc::new(AuthorityIssuer::default());
+    let managed_secret_issuer = Arc::new(RecordingManagedSecretBindingIssuer::default());
+    let windows_broker_grant_issuer = Arc::new(RecordingWindowsHyperVBrokerGrantIssuer {
+        inner: Ed25519WindowsHyperVBrokerGrantIssuer::new(
+            Zeroizing::new([0x5a; 32]),
+            BTreeMap::from([(runner_id, Sha256Digest::from_bytes([0x6b; 32]))]),
+        )
+        .expect("Windows broker grant issuer"),
+        calls: AtomicUsize::new(0),
+    });
+    let windows_current_admissions = Arc::new(RecordingWindowsCurrentAdmissions {
+        host_id: Sha256Digest::from_bytes([0x6b; 32]),
+        calls: AtomicUsize::new(0),
+    });
     let observer = Arc::new(RecordingRunnerControlObserver::default());
     let ports = RunnerControlPorts::new(
         RunnerIdentityPorts::new(authorizer.clone(), resolver.clone(), sessions.clone()),
@@ -212,7 +351,11 @@ fn harness(
         Arc::new(Clock(UnixMillis::new(2_000))),
         Arc::new(Ids),
     )
-    .with_runtime_authority_issuer(authority_issuer.clone());
+    .with_runtime_authority_issuer(authority_issuer.clone())
+    .with_managed_secret_binding_issuer(managed_secret_issuer.clone())
+    .with_windows_hyperv_broker_grant_issuer(windows_broker_grant_issuer.clone())
+    .with_windows_hyperv_broker_grant_authorizations(transactions.clone())
+    .with_windows_hyperv_current_admission_reader(windows_current_admissions.clone());
     (
         Harness {
             handler: DurableRunnerControlHandler::new(ports, RunnerControlConfig::default())
@@ -226,6 +369,9 @@ fn harness(
             ingress_objects,
             publisher,
             authority_issuer,
+            managed_secret_issuer,
+            windows_broker_grant_issuer,
+            windows_current_admissions,
             transactions,
             receipts,
             commands,
@@ -484,6 +630,86 @@ fn claimed_credential_free_job() -> JobIrEnvelope {
     )
 }
 
+fn claimed_windows_credential_free_job() -> JobIrEnvelope {
+    let windows = claimed_windows_job(JobAuthorityProfile::CredentialFree);
+    let deny_all = TrustPolicy::current()
+        .evaluate(TrustEvidence::new(
+            TrustOriginKind::ProviderWebhook,
+            TrustEventKind::Push,
+        ))
+        .expect("deny-all trust snapshot");
+    JobIrEnvelope::new(
+        windows.workflow_id(),
+        windows.source().clone(),
+        windows.execution().clone(),
+        windows.job().clone().with_trust_snapshot(deny_all),
+    )
+}
+
+fn claimed_windows_job(authority_profile: JobAuthorityProfile) -> JobIrEnvelope {
+    let standard = claimed_job();
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.test/windows-2025").expect("profile ID"),
+        Sha256Digest::from_bytes([0x25; 32]),
+    );
+    let allocation = JobResourceAllocation::new(
+        ResourceCapacity::new(1_000, 2 * 1024 * 1024 * 1024, 0, 0),
+        ResourceCapacity::new(2_000, 4 * 1024 * 1024 * 1024, 0, 0),
+    )
+    .expect("Windows resource allocation");
+    let requirements = RunnerRequirements::default()
+        .with_windows_hyperv_container()
+        .with_architecture(Architecture::X86_64)
+        .with_environment_profile(profile)
+        .with_resource_allocation(allocation);
+    let mut job = JobIr::new(
+        standard.job().job_id(),
+        standard.job().run_id(),
+        standard.job().name(),
+        requirements,
+        standard.job().instance_identity().clone(),
+        standard.job().continue_on_error(),
+        standard.job().steps().to_vec(),
+    )
+    .with_trust_snapshot(standard.job().trust_snapshot().clone())
+    .with_authority_profile(authority_profile);
+    if authority_profile == JobAuthorityProfile::CredentialFree {
+        job = job.with_permission_request(JobPermissionRequest::Mapping(Vec::new()));
+    }
+    JobIrEnvelope::new(
+        standard.workflow_id(),
+        standard.source().clone(),
+        standard.execution().clone(),
+        job,
+    )
+}
+
+fn claimed_windows_authority_job(
+    permission_request: JobPermissionRequest,
+    features: impl IntoIterator<Item = RunnerFeature>,
+) -> JobIrEnvelope {
+    let windows = claimed_windows_job(JobAuthorityProfile::Standard);
+    let job = windows.job();
+    let rebuilt = JobIr::new(
+        job.job_id(),
+        job.run_id(),
+        job.name(),
+        job.requirements().clone().with_features(features),
+        job.instance_identity().clone(),
+        job.continue_on_error(),
+        job.steps().to_vec(),
+    )
+    .with_trust_snapshot(job.trust_snapshot().clone())
+    .with_authority_profile(JobAuthorityProfile::Standard)
+    .with_permission_request(permission_request);
+    JobIrEnvelope::new(
+        windows.workflow_id(),
+        windows.source().clone(),
+        windows.execution().clone(),
+        rebuilt,
+    )
+}
+
 fn claimed_runtime_authorities(job: &JobIrEnvelope, lease: &Lease) -> JobRuntimeAuthorities {
     if job.job().authority_profile() == JobAuthorityProfile::CredentialFree {
         return JobRuntimeAuthorities::new(Vec::new(), job, lease)
@@ -512,6 +738,9 @@ fn test_offer_command(
     job: &JobIrEnvelope,
     lease: &Lease,
 ) -> DurableRunnerCommand {
+    if job.job().requirements().operating_system() == Some(&OperatingSystem::Windows) {
+        return test_windows_offer_command(fence, operation_id, sequence, slot, job, lease);
+    }
     test_offer_command_with_bindings(
         fence,
         operation_id,
@@ -520,6 +749,67 @@ fn test_offer_command(
         job,
         lease,
         &ManagedSecretBindingOverlay::empty(lease),
+    )
+}
+
+fn test_windows_offer_command(
+    fence: RunnerSessionFence,
+    operation_id: OperationId,
+    sequence: CommandSequence,
+    slot: RunnerSlotOrdinal,
+    job: &JobIrEnvelope,
+    lease: &Lease,
+) -> DurableRunnerCommand {
+    test_windows_offer_command_with_bindings(
+        fence,
+        operation_id,
+        sequence,
+        slot,
+        job,
+        lease,
+        &ManagedSecretBindingOverlay::empty(lease),
+    )
+}
+
+fn test_windows_offer_command_with_bindings(
+    fence: RunnerSessionFence,
+    operation_id: OperationId,
+    sequence: CommandSequence,
+    slot: RunnerSlotOrdinal,
+    job: &JobIrEnvelope,
+    lease: &Lease,
+    managed_secret_bindings: &ManagedSecretBindingOverlay,
+) -> DurableRunnerCommand {
+    let environment_profile = job
+        .job()
+        .requirements()
+        .environment_profile()
+        .expect("Windows environment profile");
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "job": job,
+        "lease": lease,
+        "managed_secret_bindings": managed_secret_bindings,
+        "windows_hyperv_placement": {
+            "placement_binding_digest": Sha256Digest::from_bytes([0x71; 32]),
+            "trust_binding_digest": Sha256Digest::from_bytes([0x72; 32]),
+            "environment_profile": environment_profile,
+        },
+        "protocol_version": SUPPORTED_PROTOCOL_RANGE.max().get(),
+        "schema": 4,
+        "slot": slot.get(),
+    }))
+    .expect("Windows offer payload");
+    DurableRunnerCommand::new(
+        EnqueueRunnerCommand::new(
+            fence,
+            operation_id,
+            RunnerOperationKind::new("automata.runner.lease-offer.v4").expect("offer kind"),
+            RunnerCommandPayload::new(DocumentSchema::new(4).expect("schema"), payload)
+                .expect("offer payload"),
+            UnixMillis::new(2_000),
+        ),
+        StoreCommandSequence::new(sequence.get()).expect("sequence"),
+        true,
     )
 }
 
@@ -593,6 +883,17 @@ fn install_runtime_authority_exchange(
     runner_id: RunnerId,
     job: JobIrEnvelope,
 ) -> RuntimeAuthorityExchangeFixture {
+    install_runtime_authority_exchange_with_binding(harness, fence, runner_id, job, false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn install_runtime_authority_exchange_with_binding(
+    harness: &Harness,
+    fence: RunnerSessionFence,
+    runner_id: RunnerId,
+    job: JobIrEnvelope,
+    include_managed_secret_binding: bool,
+) -> RuntimeAuthorityExchangeFixture {
     let encoded = encode_job_ir(&job, &ProtocolLimits::default()).expect("JobIR");
     let metadata = JobIrMetadata::new(
         job.job().job_id(),
@@ -615,14 +916,37 @@ fn install_runtime_authority_exchange(
     let slot = RunnerSlotOrdinal::new(1).expect("slot");
     let offer_operation_id = OperationId::new();
     let offer_sequence = CommandSequence::new(1).expect("sequence");
-    let command = test_offer_command(
-        fence,
-        offer_operation_id,
-        offer_sequence,
-        slot,
-        &job,
-        &lease,
-    );
+    let command = if include_managed_secret_binding {
+        let overlay = ManagedSecretBindingOverlay::new(
+            &lease,
+            [(
+                "DATABASE_TOKEN".to_owned(),
+                SecretBinding::new("00000000-0000-4000-8000-000000000001")
+                    .expect("grant")
+                    .with_version_id("00000000-0000-4000-8000-000000000011")
+                    .expect("version"),
+            )],
+        )
+        .expect("managed-secret overlay");
+        test_windows_offer_command_with_bindings(
+            fence,
+            offer_operation_id,
+            offer_sequence,
+            slot,
+            &job,
+            &lease,
+            &overlay,
+        )
+    } else {
+        test_offer_command(
+            fence,
+            offer_operation_id,
+            offer_sequence,
+            slot,
+            &job,
+            &lease,
+        )
+    };
     let offer_request = RunnerOperationRequest::new(
         fence,
         OperationId::new(),
@@ -691,6 +1015,51 @@ fn install_runtime_authority_exchange(
         job,
         lease,
     }
+}
+
+fn install_claimed_offer_without_windows_grant(
+    harness: &Harness,
+    fence: RunnerSessionFence,
+    runner_id: RunnerId,
+    job: &JobIrEnvelope,
+) -> RunnerToServer {
+    let encoded = encode_job_ir(job, &ProtocolLimits::default()).expect("JobIR");
+    let metadata = JobIrMetadata::new(
+        job.job().job_id(),
+        job.job().run_id(),
+        job.version(),
+        u64::try_from(encoded.len()).expect("size"),
+        Sha256Digest::from_bytes(Sha256::digest(&encoded).into()),
+        ObjectKey::new("job-ir/windows-preflight.pb").expect("object key"),
+    )
+    .expect("metadata");
+    let lease = Lease::new(
+        LeaseId::new(),
+        AttemptId::new(),
+        runner_id,
+        FencingToken::new(5).expect("fencing token"),
+        UnixMillis::new(1_500),
+        UnixMillis::new(10_000),
+    )
+    .expect("lease");
+    let slot = RunnerSlotOrdinal::new(1).expect("slot");
+    *harness.poller.outcome.lock().expect("poll outcome lock") = Some(LeasePollOutcome::Claimed(
+        ClaimedLeasePoll::new(lease, slot, metadata, false),
+    ));
+    *harness.objects.bytes.lock().expect("object bytes lock") = Some(encoded);
+    *harness
+        .publisher
+        .inspection
+        .lock()
+        .expect("inspection result lock") = Some(Ok(LeaseOfferClaimStatus::Current));
+    RunnerToServer::LeaseRequest(LeaseRequest::first(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        slot,
+    ))
 }
 
 const TRUTH_SESSION: u16 = 1 << 0;
@@ -830,6 +1199,7 @@ async fn post_accept_authority_delivery_replays_by_digest_and_acknowledges_custo
     };
     assert_eq!(first_grant.binding(), fixture.binding);
     assert_eq!(first_grant.authorities().as_slice().len(), 1);
+    assert!(first_grant.windows_hyperv_broker_grant().is_none());
     assert_eq!(
         first_grant.authorities().as_slice()[0]
             .credential()
@@ -838,6 +1208,13 @@ async fn post_accept_authority_delivery_replays_by_digest_and_acknowledges_custo
     );
     let bundle_digest = first_grant.bundle_digest();
     assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        harness
+            .windows_broker_grant_issuer
+            .calls
+            .load(Ordering::SeqCst),
+        0
+    );
     assert_eq!(harness.objects.calls.load(Ordering::SeqCst), 1);
     {
         let commits = harness
@@ -979,8 +1356,16 @@ async fn credential_free_post_accept_delivery_is_empty_without_invoking_an_issue
         panic!("credential-free post-accept request must return an empty grant")
     };
     assert!(grant.authorities().as_slice().is_empty());
+    assert!(grant.windows_hyperv_broker_grant().is_none());
     assert_eq!(grant.binding(), fixture.binding);
     assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness
+            .windows_broker_grant_issuer
+            .calls
+            .load(Ordering::SeqCst),
+        0
+    );
     assert_eq!(
         fixture.job.job().authority_profile(),
         JobAuthorityProfile::CredentialFree
@@ -991,6 +1376,372 @@ async fn credential_free_post_accept_delivery_is_empty_without_invoking_an_issue
     grant
         .validate_for(*request, &fixture.job, &fixture.lease)
         .expect("credential-free grant remains exactly bound to the accepted attempt");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn credential_free_windows_grant_is_post_accept_exact_and_replays_by_digest() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let fixture = install_runtime_authority_exchange(
+        &harness,
+        fence,
+        runner_id,
+        claimed_windows_credential_free_job(),
+    );
+
+    let first = exchange(&harness, &identity, &fixture.request).await;
+    let ServerToRunner::RuntimeAuthorityGrant(first) = first else {
+        panic!("accepted Windows request must return a post-accept grant")
+    };
+    assert!(first.authorities().as_slice().is_empty());
+    let first_broker_grant = first
+        .windows_hyperv_broker_grant()
+        .expect("credential-free Windows job still needs broker authority");
+    assert_eq!(first_broker_grant.claims().runner_id(), runner_id);
+    assert_eq!(
+        first_broker_grant.claims().runner_session_id(),
+        fence.session_id()
+    );
+    assert_eq!(
+        first_broker_grant.claims().attempt_id(),
+        fixture.lease.attempt_id()
+    );
+    assert_eq!(
+        first_broker_grant.claims().lease_id(),
+        fixture.lease.lease_id()
+    );
+    assert_eq!(
+        first_broker_grant.claims().fencing_token(),
+        fixture.lease.fencing_token()
+    );
+    assert_eq!(
+        first_broker_grant.claims().windows_action_graph_sha256(),
+        None,
+        "the durable current-admission projection owns graph absence"
+    );
+    let first_delivery_digest = first.bundle_digest();
+    let first_grant_digest = first_broker_grant.digest();
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness
+            .windows_broker_grant_issuer
+            .calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        harness
+            .windows_current_admissions
+            .calls
+            .load(Ordering::SeqCst),
+        1,
+        "post-accept issuance must re-read the current durable admission"
+    );
+
+    let replay = exchange(&harness, &identity, &fixture.request).await;
+    let ServerToRunner::RuntimeAuthorityGrant(replay) = replay else {
+        panic!("lost post-accept response must replay the exact grant")
+    };
+    assert_eq!(replay.bundle_digest(), first_delivery_digest);
+    assert_eq!(
+        replay
+            .windows_hyperv_broker_grant()
+            .expect("replayed broker grant")
+            .digest(),
+        first_grant_digest
+    );
+    assert_eq!(
+        harness
+            .windows_current_admissions
+            .calls
+            .load(Ordering::SeqCst),
+        2,
+        "lost-response replay must recheck admission freshness before returning authority"
+    );
+    assert_eq!(
+        harness
+            .transactions
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock")
+            .len(),
+        1
+    );
+
+    let acknowledgement = RunnerToServer::RuntimeAuthorityAck(RuntimeAuthorityAck::new(
+        MessageHeader::request(
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            fence.session_id(),
+            OperationId::new(),
+        ),
+        fixture.binding,
+        first_delivery_digest,
+    ));
+    assert!(matches!(
+        exchange(&harness, &identity, &acknowledgement).await,
+        ServerToRunner::OperationAck(_)
+    ));
+    assert!(matches!(
+        exchange(&harness, &identity, &acknowledgement).await,
+        ServerToRunner::OperationAck(_)
+    ));
+    assert_eq!(
+        harness
+            .transactions
+            .runtime_authority_acknowledgements
+            .lock()
+            .expect("runtime-authority acknowledgement lock")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn secret_bearing_windows_authority_is_rejected_before_grant_or_commit() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let fixture = install_runtime_authority_exchange(
+        &harness,
+        fence,
+        runner_id,
+        claimed_windows_job(JobAuthorityProfile::Standard),
+    );
+
+    assert_eq!(
+        exchange_result(&harness, &identity, &fixture.request)
+            .await
+            .expect_err("plaintext Windows runtime authority must fail closed")
+            .kind(),
+        ApplicationErrorKind::Unavailable
+    );
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness.managed_secret_issuer.calls.load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        harness
+            .windows_broker_grant_issuer
+            .calls
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert!(
+        harness
+            .transactions
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn windows_online_authority_modes_reject_before_any_issuer_call() {
+    let cases = [
+        (
+            "results-standard",
+            claimed_windows_authority_job(JobPermissionRequest::Mapping(Vec::new()), []),
+        ),
+        (
+            "repository-token",
+            claimed_windows_authority_job(
+                JobPermissionRequest::mapping([JobPermissionGrant::new(
+                    "contents",
+                    PermissionLevel::Read,
+                )]),
+                [],
+            ),
+        ),
+        (
+            "oidc",
+            claimed_windows_authority_job(
+                JobPermissionRequest::mapping([JobPermissionGrant::new(
+                    "id-token",
+                    PermissionLevel::Write,
+                )]),
+                [RunnerFeature::OIDC_TOKENS],
+            ),
+        ),
+    ];
+
+    for (case, job) in cases {
+        match case {
+            "results-standard" => assert_eq!(
+                job.job().trust_snapshot().authority().results(),
+                TrustResultsAuthority::Standard
+            ),
+            "repository-token" => assert_ne!(
+                job.job().trust_snapshot().authority().permissions(),
+                TrustPermissionAuthority::DenyAll
+            ),
+            "oidc" => assert_eq!(
+                job.job().trust_snapshot().authority().oidc(),
+                TrustOidcAuthority::Eligible
+            ),
+            _ => unreachable!(),
+        }
+        let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+        let fence = install_session(&harness, runner_id, generation);
+        let fixture = install_runtime_authority_exchange(&harness, fence, runner_id, job);
+
+        let error = exchange_result(&harness, &identity, &fixture.request)
+            .await
+            .expect_err("online Windows authority must fail closed");
+        assert_eq!(
+            error.kind(),
+            ApplicationErrorKind::Unavailable,
+            "{case} must fail closed"
+        );
+        assert_eq!(
+            harness.authority_issuer.calls.load(Ordering::SeqCst),
+            0,
+            "{case} reached the runtime-authority issuer"
+        );
+        assert_eq!(
+            harness.managed_secret_issuer.calls.load(Ordering::SeqCst),
+            0,
+            "{case} reached the managed-secret issuer"
+        );
+        assert_eq!(
+            harness
+                .windows_broker_grant_issuer
+                .calls
+                .load(Ordering::SeqCst),
+            0,
+            "{case} reached the broker-grant issuer"
+        );
+        assert!(
+            harness
+                .transactions
+                .runtime_authority_commits
+                .lock()
+                .expect("runtime-authority commit lock")
+                .is_empty(),
+            "{case} committed a rejected delivery"
+        );
+    }
+}
+
+#[tokio::test]
+async fn windows_offer_preflight_rejects_online_authority_before_secret_issuance_or_publication() {
+    let cases = [
+        claimed_windows_authority_job(JobPermissionRequest::Mapping(Vec::new()), []),
+        claimed_windows_authority_job(
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "contents",
+                PermissionLevel::Read,
+            )]),
+            [],
+        ),
+        claimed_windows_authority_job(
+            JobPermissionRequest::mapping([JobPermissionGrant::new(
+                "id-token",
+                PermissionLevel::Write,
+            )]),
+            [RunnerFeature::OIDC_TOKENS],
+        ),
+    ];
+
+    for job in cases {
+        let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+        let fence = install_session(&harness, runner_id, generation);
+        let request = install_claimed_offer_without_windows_grant(&harness, fence, runner_id, &job);
+
+        assert_eq!(
+            exchange_result(&harness, &identity, &request)
+                .await
+                .expect_err("online Windows job must fail before offer publication")
+                .kind(),
+            ApplicationErrorKind::Unavailable
+        );
+        assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            harness.managed_secret_issuer.calls.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(harness.publisher.publications.load(Ordering::SeqCst), 0);
+        assert!(
+            harness
+                .publisher
+                .published_commands
+                .lock()
+                .expect("published commands lock")
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn credential_free_windows_without_server_placement_never_falls_back_to_a_direct_offer() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let job = claimed_windows_credential_free_job();
+    let request = install_claimed_offer_without_windows_grant(&harness, fence, runner_id, &job);
+
+    assert_eq!(
+        exchange_result(&harness, &identity, &request)
+            .await
+            .expect_err("missing server placement must fail closed")
+            .kind(),
+        ApplicationErrorKind::Internal
+    );
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness.managed_secret_issuer.calls.load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(harness.publisher.publications.load(Ordering::SeqCst), 0);
+    assert!(
+        harness
+            .publisher
+            .published_commands
+            .lock()
+            .expect("published commands lock")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn credential_free_windows_rejects_a_nonempty_durable_secret_overlay_before_issuance() {
+    let (harness, identity, runner_id, generation) = harness(DesiredRunnerState::Active);
+    let fence = install_session(&harness, runner_id, generation);
+    let fixture = install_runtime_authority_exchange_with_binding(
+        &harness,
+        fence,
+        runner_id,
+        claimed_windows_credential_free_job(),
+        true,
+    );
+
+    assert_eq!(
+        exchange_result(&harness, &identity, &fixture.request)
+            .await
+            .expect_err("a secret-bound Windows offer must fail closed")
+            .kind(),
+        ApplicationErrorKind::Unavailable
+    );
+    assert_eq!(harness.authority_issuer.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        harness.managed_secret_issuer.calls.load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(
+        harness
+            .windows_broker_grant_issuer
+            .calls
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert!(
+        harness
+            .transactions
+            .runtime_authority_commits
+            .lock()
+            .expect("runtime-authority commit lock")
+            .is_empty()
+    );
 }
 
 fn durable_test_response(response: &ServerToRunner) -> RunnerOperationResponse {

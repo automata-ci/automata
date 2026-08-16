@@ -42,9 +42,10 @@ pub use observer::{
 pub use port::{
     AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
     ExecutionCancellationReason, ExecutionEventError, ExecutionEvents, ExecutionRequest,
-    ExecutorError, ExecutorErrorKind, ExecutorFuture, JobExecutor, LogEvent, RuntimeClock,
-    RuntimeIdSource, RuntimeSleeper, SleepFuture, StableIdDomain, SystemRuntimeClock,
-    SystemRuntimeIds, TokioRuntimeSleeper,
+    ExecutorError, ExecutorErrorKind, ExecutorFuture, JobExecutor, LogEvent, PlacementRenewalError,
+    RuntimeClock, RuntimeIdSource, RuntimeSleeper, SleepFuture, StableIdDomain, SystemRuntimeClock,
+    SystemRuntimeIds, TokioRuntimeSleeper, WindowsPlacementRenewalAckFuture,
+    WindowsPlacementRenewalFuture, WindowsPlacementRenewalSource,
 };
 pub use supervisor::{RunnerRuntimePorts, RunnerSessionSupervisor};
 pub use watchdog::{LeaseWatchdog, MonotonicMillis};

@@ -240,6 +240,16 @@ message LeaseRequest {
   uint32 slot = 2;
   // Present on every successor and absent only on the first request for a slot.
   optional bytes acknowledges_operation_id = 3;
+  // Optional only because non-Windows runners have no broker admission. A
+  // Windows runner refreshes this before the signed placement horizon.
+  WindowsRunnerPlacementRenewalEnvelope windows_placement_renewal = 4;
+}
+
+message WindowsRunnerPlacementRenewalEnvelope {
+  uint32 schema_version = 1;
+  string issuer_key_id = 2;
+  bytes signed_payload = 3;
+  bytes authenticator = 4;
 }
 
 message Lease {
@@ -278,7 +288,52 @@ message LeaseOffer {
   Lease lease = 3;
   JobIrEnvelope job = 4;
   reserved 5;
+  reserved "windows_hyperv_broker_grant";
   ManagedSecretBindingOverlay managed_secret_bindings = 6;
+}
+
+// Signed, value-free authority for one exact restricted host placement. It
+// contains no credential, engine endpoint, host path, command, or HCS document.
+message WindowsHyperVBrokerGrant {
+  uint32 schema = 1;
+  bytes key_id_sha256 = 2;
+  WindowsHyperVBrokerGrantClaims claims = 3;
+  bytes ed25519_signature = 4;
+}
+
+message WindowsHyperVBrokerGrantClaims {
+  bytes host_id_sha256 = 1;
+  bytes placement_binding_sha256 = 2;
+  bytes attempt_id = 3;
+  bytes job_id = 4;
+  bytes run_id = 5;
+  bytes poll_operation_id = 6;
+  bytes runner_id = 7;
+  bytes runner_session_id = 8;
+  uint64 runner_generation = 9;
+  uint64 session_epoch = 10;
+  uint32 slot = 11;
+  bytes lease_id = 12;
+  uint64 fencing_token = 13;
+  uint32 job_ir_version = 14;
+  uint64 job_ir_encoded_size = 15;
+  bytes job_ir_sha256 = 16;
+  bytes job_ir_object_key_sha256 = 17;
+  bytes trust_binding_sha256 = 18;
+  string environment_profile_id = 19;
+  bytes environment_profile_sha256 = 20;
+  int64 issued_at_unix_millis = 21;
+  int64 expires_at_unix_millis = 22;
+  bytes accepted_offer_operation_id = 23;
+  uint64 accepted_offer_sequence = 24;
+  bytes post_accept_operation_id = 25;
+  bytes post_accept_request_sha256 = 26;
+  JobResourceAllocation job_resource_allocation = 27;
+  bytes profile_contract_sha256 = 28;
+  uint32 sandbox_pids_limit = 29;
+  bytes sandbox_spec_sha256 = 30;
+  bytes sealed_action_policy_sha256 = 31;
+  optional bytes windows_action_graph_sha256 = 32;
 }
 
 message ManagedSecretBindingOverlayEntry {
@@ -833,6 +888,7 @@ message RuntimeAuthorityGrant {
   RuntimeAuthorityDeliveryBinding binding = 2;
   bytes bundle_sha256 = 3;
   JobRuntimeAuthorities authorities = 4;
+  WindowsHyperVBrokerGrant windows_hyperv_broker_grant = 5;
 }
 
 message RuntimeAuthorityAck {

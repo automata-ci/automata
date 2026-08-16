@@ -888,7 +888,11 @@ fn decode_groups(
 fn lease_request(value: wire::LeaseRequest) -> Result<protocol::LeaseRequest, DecodeError> {
     let header = message_header(required(value.header, "lease_request.header")?)?;
     let slot = runner_slot(value.slot, "lease_request.slot")?;
-    value.acknowledges_operation_id.map_or_else(
+    let renewal = value
+        .windows_placement_renewal
+        .map(windows_placement_renewal)
+        .transpose()?;
+    let mut request = value.acknowledges_operation_id.map_or_else(
         || Ok(protocol::LeaseRequest::first(header, slot)),
         |operation_id| {
             Ok(protocol::LeaseRequest::successor(
@@ -900,7 +904,33 @@ fn lease_request(value: wire::LeaseRequest) -> Result<protocol::LeaseRequest, De
                 )?),
             ))
         },
+    )?;
+    if let Some(renewal) = renewal {
+        request = request.with_windows_placement_renewal(renewal);
+    }
+    Ok(request)
+}
+
+fn windows_placement_renewal(
+    value: wire::WindowsRunnerPlacementRenewalEnvelope,
+) -> Result<protocol::WindowsRunnerPlacementRenewalEnvelope, DecodeError> {
+    let schema_version =
+        u16::try_from(value.schema_version).map_err(|_| DecodeError::IntegerOutOfRange {
+            field: "lease_request.windows_placement_renewal.schema_version",
+        })?;
+    if schema_version != protocol::WINDOWS_RUNNER_PLACEMENT_RENEWAL_SCHEMA_VERSION {
+        return Err(DecodeError::InvalidValue {
+            field: "lease_request.windows_placement_renewal.schema_version",
+        });
+    }
+    protocol::WindowsRunnerPlacementRenewalEnvelope::new(
+        value.issuer_key_id,
+        value.signed_payload,
+        value.authenticator,
     )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "lease_request.windows_placement_renewal",
+    })
 }
 
 fn lease_offer(
@@ -915,17 +945,175 @@ fn lease_offer(
         .managed_secret_bindings
         .map(|overlay| managed_secret_binding_overlay(overlay, &lease, limits))
         .transpose()?;
-    let offer = protocol::LeaseOffer::new(header, slot, lease, job);
-    match managed_secret_bindings {
-        Some(overlay) => {
+    let mut offer = protocol::LeaseOffer::new(header, slot, lease, job);
+    if let Some(overlay) = managed_secret_bindings {
+        offer =
             offer
                 .with_managed_secret_bindings(overlay)
                 .map_err(|_| DecodeError::InvalidValue {
                     field: "lease_offer.managed_secret_bindings",
-                })
-        }
-        None => Ok(offer),
+                })?;
     }
+    Ok(offer)
+}
+
+fn windows_hyperv_broker_grant(
+    value: wire::WindowsHyperVBrokerGrant,
+) -> Result<core::WindowsHyperVBrokerGrant, DecodeError> {
+    let schema = u16::try_from(value.schema).map_err(|_| DecodeError::IntegerOutOfRange {
+        field: "windows_hyperv_broker_grant.schema",
+    })?;
+    let key_id = sha256_digest(
+        value.key_id_sha256,
+        "windows_hyperv_broker_grant.key_id_sha256",
+    )?;
+    let claims = windows_hyperv_broker_grant_claims(required(
+        value.claims,
+        "windows_hyperv_broker_grant.claims",
+    )?)?;
+    core::WindowsHyperVBrokerGrant::from_parts(schema, key_id, claims, value.ed25519_signature)
+        .map_err(|_| DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant",
+        })
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn windows_hyperv_broker_grant_claims(
+    value: wire::WindowsHyperVBrokerGrantClaims,
+) -> Result<core::WindowsHyperVBrokerGrantClaims, DecodeError> {
+    let slot = u16::try_from(value.slot).map_err(|_| DecodeError::IntegerOutOfRange {
+        field: "windows_hyperv_broker_grant.claims.slot",
+    })?;
+    let job_ir_version =
+        u16::try_from(value.job_ir_version).map_err(|_| DecodeError::IntegerOutOfRange {
+            field: "windows_hyperv_broker_grant.claims.job_ir_version",
+        })?;
+    let profile_id =
+        core::EnvironmentProfileId::new(value.environment_profile_id).map_err(|_| {
+            DecodeError::InvalidValue {
+                field: "windows_hyperv_broker_grant.claims.environment_profile_id",
+            }
+        })?;
+    let profile = core::EnvironmentProfile::new(
+        profile_id,
+        sha256_digest(
+            value.environment_profile_sha256,
+            "windows_hyperv_broker_grant.claims.environment_profile_sha256",
+        )?,
+    );
+    let job_resource_allocation = decode_resource_allocation(required(
+        value.job_resource_allocation,
+        "windows_hyperv_broker_grant.claims.job_resource_allocation",
+    )?)?;
+    let expected_sandbox_spec_sha256 = sha256_digest(
+        value.sandbox_spec_sha256,
+        "windows_hyperv_broker_grant.claims.sandbox_spec_sha256",
+    )?;
+    let windows_action_graph_sha256 = value
+        .windows_action_graph_sha256
+        .map(|digest| {
+            sha256_digest(
+                digest,
+                "windows_hyperv_broker_grant.claims.windows_action_graph_sha256",
+            )
+        })
+        .transpose()?;
+    let claims = core::WindowsHyperVBrokerGrantClaims::new(
+        sha256_digest(
+            value.host_id_sha256,
+            "windows_hyperv_broker_grant.claims.host_id_sha256",
+        )?,
+        sha256_digest(
+            value.placement_binding_sha256,
+            "windows_hyperv_broker_grant.claims.placement_binding_sha256",
+        )?,
+        core::AttemptId::from_uuid(uuid(
+            value.attempt_id,
+            "windows_hyperv_broker_grant.claims.attempt_id",
+        )?),
+        core::JobId::from_uuid(uuid(
+            value.job_id,
+            "windows_hyperv_broker_grant.claims.job_id",
+        )?),
+        core::RunId::from_uuid(uuid(
+            value.run_id,
+            "windows_hyperv_broker_grant.claims.run_id",
+        )?),
+        core::OperationId::from_uuid(uuid(
+            value.poll_operation_id,
+            "windows_hyperv_broker_grant.claims.poll_operation_id",
+        )?),
+        core::OperationId::from_uuid(uuid(
+            value.accepted_offer_operation_id,
+            "windows_hyperv_broker_grant.claims.accepted_offer_operation_id",
+        )?),
+        value.accepted_offer_sequence,
+        core::OperationId::from_uuid(uuid(
+            value.post_accept_operation_id,
+            "windows_hyperv_broker_grant.claims.post_accept_operation_id",
+        )?),
+        sha256_digest(
+            value.post_accept_request_sha256,
+            "windows_hyperv_broker_grant.claims.post_accept_request_sha256",
+        )?,
+        core::RunnerId::from_uuid(uuid(
+            value.runner_id,
+            "windows_hyperv_broker_grant.claims.runner_id",
+        )?),
+        core::RunnerSessionId::from_uuid(uuid(
+            value.runner_session_id,
+            "windows_hyperv_broker_grant.claims.runner_session_id",
+        )?),
+        value.runner_generation,
+        value.session_epoch,
+        slot,
+        core::LeaseId::from_uuid(uuid(
+            value.lease_id,
+            "windows_hyperv_broker_grant.claims.lease_id",
+        )?),
+        core::FencingToken::new(value.fencing_token).map_err(|_| DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant.claims.fencing_token",
+        })?,
+        core::JobIrVersion::new(job_ir_version).map_err(|_| DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant.claims.job_ir_version",
+        })?,
+        value.job_ir_encoded_size,
+        sha256_digest(
+            value.job_ir_sha256,
+            "windows_hyperv_broker_grant.claims.job_ir_sha256",
+        )?,
+        sha256_digest(
+            value.job_ir_object_key_sha256,
+            "windows_hyperv_broker_grant.claims.job_ir_object_key_sha256",
+        )?,
+        job_resource_allocation,
+        value.sandbox_pids_limit,
+        sha256_digest(
+            value.trust_binding_sha256,
+            "windows_hyperv_broker_grant.claims.trust_binding_sha256",
+        )?,
+        profile,
+        sha256_digest(
+            value.profile_contract_sha256,
+            "windows_hyperv_broker_grant.claims.profile_contract_sha256",
+        )?,
+        sha256_digest(
+            value.sealed_action_policy_sha256,
+            "windows_hyperv_broker_grant.claims.sealed_action_policy_sha256",
+        )?,
+        windows_action_graph_sha256,
+        core::UnixMillis::new(value.issued_at_unix_millis),
+        core::UnixMillis::new(value.expires_at_unix_millis),
+    )
+    .map_err(|_| DecodeError::InvalidValue {
+        field: "windows_hyperv_broker_grant.claims",
+    })?;
+    if claims.sandbox_spec_sha256() != expected_sandbox_spec_sha256 {
+        return Err(DecodeError::InvalidValue {
+            field: "windows_hyperv_broker_grant.claims.sandbox_spec_sha256",
+        });
+    }
+    Ok(claims)
 }
 
 fn runtime_authority_delivery_binding(
@@ -991,7 +1179,7 @@ fn runtime_authority_grant(
         required(value.authorities, "runtime_authority_grant.authorities")?,
         limits,
     )?;
-    Ok(protocol::RuntimeAuthorityGrant::new(
+    let mut grant = protocol::RuntimeAuthorityGrant::new(
         message_header(required(value.header, "runtime_authority_grant.header")?)?,
         runtime_authority_delivery_binding(required(
             value.binding,
@@ -999,7 +1187,19 @@ fn runtime_authority_grant(
         )?)?,
         core::Sha256Digest::from_bytes(bundle_digest),
         authorities,
-    ))
+    );
+    if let Some(windows_grant) = value
+        .windows_hyperv_broker_grant
+        .map(windows_hyperv_broker_grant)
+        .transpose()?
+    {
+        grant = grant
+            .with_unbound_windows_hyperv_broker_grant(windows_grant)
+            .map_err(|_| DecodeError::InvalidValue {
+                field: "runtime_authority_grant.windows_hyperv_broker_grant",
+            })?;
+    }
+    Ok(grant)
 }
 
 fn runtime_authority_ack(

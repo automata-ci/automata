@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use crate::cancellation::{
     CANCEL_JOB_COMMAND_KIND, CANCEL_JOB_COMMAND_SCHEMA, CancelJobCommandPayload,
@@ -15,13 +15,15 @@ use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
 use automata_ci_core::{
-    JobIrEnvelope, JobIrVersion, Lease, OperationId, RunnerId, RunnerSessionId, Sha256Digest,
-    UnixMillis,
+    EnvironmentProfile, JobIrEnvelope, JobIrVersion, Lease, OperationId, RunnerId, RunnerSessionId,
+    Sha256Digest, UnixMillis, WindowsHyperVBrokerGrant, WindowsHyperVBrokerGrantClaims,
+    windows_action_archive_policy_sha256,
 };
 use automata_ci_protocol::{
     CancelJob, CommandSequence, JobRuntimeAuthorities, LeaseOffer, LeaseRequest,
     MAX_CONFIGURABLE_FRAME_BYTES, ManagedSecretBindingOverlay, ProtocolLimits, ProtocolVersion,
-    RunnerSlotOrdinal, ServerCommandHeader, ServerToRunner,
+    RunnerSlotOrdinal, ServerCommandHeader, ServerToRunner, VerifiedWindowsRunnerPlacementRenewal,
+    WindowsRunnerPlacementRenewalEnvelope,
 };
 use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_store::{
@@ -31,25 +33,41 @@ use automata_ci_store::{
     RunnerGeneration, RunnerOperationKind, RunnerOperationRequest, RunnerProtocolVersion,
     RunnerSessionFence, StableRunnerSlot,
 };
+use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 use super::durable::{
-    CurrentRunnerSession, CurrentRunnerSessionRepository, LeaseOfferClaim as StoreLeaseOfferClaim,
+    AcceptedRuntimeAuthorityOffer, CommitRuntimeAuthorityDelivery, CurrentRunnerSession,
+    CurrentRunnerSessionRepository, LeaseOfferClaim as StoreLeaseOfferClaim,
     LeaseOfferClaimStatus as StoreLeaseOfferClaimStatus, PublishLeaseOffer, PublishedLeaseOffer,
-    RunnerLeaseOfferRepository,
+    RunnerLeaseOfferRepository, RuntimeAuthorityDeliveryAdmission,
+    RuntimeAuthorityDeliveryDisposition,
 };
 
 /// Immutable media type used for standalone protobuf `JobIR` objects.
 pub const JOB_IR_PROTOBUF_MEDIA_TYPE: &str = "application/vnd.automata.job-ir.protobuf";
 
 const LEASE_REQUEST_KIND: &str = "automata.runner.lease-request.v1";
-const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
-const LEASE_OFFER_COMMAND_SCHEMA: u16 = 2;
+const LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v4";
+const LEASE_OFFER_COMMAND_SCHEMA: u16 = 4;
+const LEGACY_LEASE_OFFER_COMMAND_KIND: &str = "automata.runner.lease-offer.v2";
+const LEGACY_LEASE_OFFER_COMMAND_SCHEMA: u16 = 2;
 
 #[derive(serde::Serialize)]
 struct LeaseOfferCommandPayloadRef<'a> {
+    job: &'a JobIrEnvelope,
+    lease: &'a Lease,
+    managed_secret_bindings: &'a ManagedSecretBindingOverlay,
+    windows_hyperv_placement: &'a Option<WindowsHyperVPlacementEvidence>,
+    protocol_version: u16,
+    schema: u16,
+    slot: u16,
+}
+
+#[derive(serde::Serialize)]
+struct LegacyLeaseOfferCommandPayloadRef<'a> {
     job: &'a JobIrEnvelope,
     lease: &'a Lease,
     managed_secret_bindings: &'a ManagedSecretBindingOverlay,
@@ -61,6 +79,18 @@ struct LeaseOfferCommandPayloadRef<'a> {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DurableLeaseOfferCommandPayload {
+    job: JobIrEnvelope,
+    lease: Lease,
+    managed_secret_bindings: ManagedSecretBindingOverlay,
+    windows_hyperv_placement: Option<WindowsHyperVPlacementEvidence>,
+    protocol_version: u16,
+    schema: u16,
+    slot: u16,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyDurableLeaseOfferCommandPayload {
     job: JobIrEnvelope,
     lease: Lease,
     managed_secret_bindings: ManagedSecretBindingOverlay,
@@ -351,6 +381,795 @@ pub trait ManagedSecretBindingIssuer: fmt::Debug + Send + Sync {
         &self,
         request: RuntimeAuthorityIssueRequest<'_>,
     ) -> Result<ManagedSecretBindingOverlay, ControlPortError>;
+}
+
+/// Server-side issuer for the value-free capability consumed by a restricted
+/// Windows host broker.
+pub trait WindowsHyperVBrokerGrantIssuer: fmt::Debug + Send + Sync {
+    /// Builds the exact unsigned proposal for transactional durable admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized configuration or contract failure when the current
+    /// admission, accepted offer, or durable `JobIR` do not bind exactly.
+    fn propose(
+        &self,
+        request: &WindowsHyperVBrokerGrantIssueRequest<'_>,
+    ) -> Result<WindowsHyperVBrokerGrantProposal, ControlPortError>;
+
+    /// Signs only a proposal carrying a store-minted one-use authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized configuration or signing failure when the runner
+    /// has no exact host mapping or the placement cannot be signed.
+    fn issue(
+        &self,
+        authorization: &WindowsHyperVBrokerGrantIssuanceAuthorization,
+    ) -> Result<WindowsHyperVBrokerGrant, ControlPortError>;
+}
+
+/// Current server-verified Windows placement admission.
+///
+/// This is deliberately not the short-lived enrollment receipt. Implementations
+/// return this value only while the latest broker-signed, independently
+/// refreshed host/input/promotion evidence remains fresh and equal to the
+/// durable revocation/serial high-water state. Mutable runner inventory or
+/// configuration is not an authority source for this record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsHyperVCurrentAdmission {
+    runner_id: RunnerId,
+    broker_host_id: Sha256Digest,
+    environment_profile: EnvironmentProfile,
+    profile_contract_sha256: Sha256Digest,
+    sealed_action_policy_sha256: Sha256Digest,
+    windows_action_graph_sha256: Option<Sha256Digest>,
+    sandbox_pids_limit: u32,
+    placement_valid_until: UnixMillis,
+}
+
+impl WindowsHyperVCurrentAdmission {
+    /// Constructs a current admission returned by a server-owned durable store.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nil identities, zero digests/process limits, or an already
+    /// expired record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        runner_id: RunnerId,
+        broker_host_id: Sha256Digest,
+        environment_profile: EnvironmentProfile,
+        profile_contract_sha256: Sha256Digest,
+        sealed_action_policy_sha256: Sha256Digest,
+        windows_action_graph_sha256: Option<Sha256Digest>,
+        sandbox_pids_limit: u32,
+        placement_valid_until: UnixMillis,
+        observed_at: UnixMillis,
+    ) -> Result<Self, ControlPortError> {
+        if runner_id.as_uuid().is_nil()
+            || [
+                broker_host_id,
+                environment_profile.digest(),
+                profile_contract_sha256,
+                sealed_action_policy_sha256,
+            ]
+            .iter()
+            .any(|digest| digest.as_bytes().iter().all(|byte| *byte == 0))
+            || windows_action_graph_sha256
+                .as_ref()
+                .is_some_and(|digest| digest.as_bytes().iter().all(|byte| *byte == 0))
+            || sandbox_pids_limit == 0
+            || sealed_action_policy_sha256 != windows_action_archive_policy_sha256()
+            || placement_valid_until <= observed_at
+        {
+            return Err(ControlPortError::Corrupt);
+        }
+        Ok(Self {
+            runner_id,
+            broker_host_id,
+            environment_profile,
+            profile_contract_sha256,
+            sealed_action_policy_sha256,
+            windows_action_graph_sha256,
+            sandbox_pids_limit,
+            placement_valid_until,
+        })
+    }
+
+    /// Returns the admitted runner.
+    #[must_use]
+    pub const fn runner_id(&self) -> RunnerId {
+        self.runner_id
+    }
+
+    /// Returns the exact broker host bound by the signed enrollment receipt.
+    #[must_use]
+    pub const fn broker_host_id(&self) -> Sha256Digest {
+        self.broker_host_id
+    }
+
+    /// Returns the exact admitted environment profile.
+    #[must_use]
+    pub const fn environment_profile(&self) -> &EnvironmentProfile {
+        &self.environment_profile
+    }
+
+    /// Returns the broker-minted durable launch contract identity.
+    #[must_use]
+    pub const fn profile_contract_sha256(&self) -> Sha256Digest {
+        self.profile_contract_sha256
+    }
+
+    /// Returns the current sealed-action namespace policy admitted by the broker.
+    #[must_use]
+    pub const fn sealed_action_policy_sha256(&self) -> Sha256Digest {
+        self.sealed_action_policy_sha256
+    }
+
+    /// Returns the exact durable action graph admitted for the current job.
+    #[must_use]
+    pub const fn windows_action_graph_sha256(&self) -> Option<Sha256Digest> {
+        self.windows_action_graph_sha256
+    }
+
+    /// Returns the broker-admitted hard process ceiling.
+    #[must_use]
+    pub const fn sandbox_pids_limit(&self) -> u32 {
+        self.sandbox_pids_limit
+    }
+
+    /// Returns the exclusive placement-admission freshness horizon.
+    ///
+    /// This horizon is bounded by the latest broker host/input observation and
+    /// signed image-promotion expiry. It must never be populated from the
+    /// one-time enrollment receipt expiry.
+    #[must_use]
+    pub const fn placement_valid_until(&self) -> UnixMillis {
+        self.placement_valid_until
+    }
+}
+
+/// Reads the current signed Windows placement admission from durable state.
+///
+/// Implementations atomically choose the latest broker-signed renewal, require
+/// its promotion serial and revocation generation to equal current server
+/// high-water marks, sample database time only after locking the exact session,
+/// require that time before the independently attested placement horizon, and
+/// return `None` after expiry or revocation. The immutable enrollment receipt
+/// is not a renewable placement record.
+#[async_trait]
+pub trait WindowsHyperVCurrentAdmissionReader: fmt::Debug + Send + Sync {
+    /// Resolves the sole Windows placement authority for an exact runner/profile.
+    async fn current(
+        &self,
+        session: RunnerSessionFence,
+        environment_profile: &EnvironmentProfile,
+    ) -> Result<Option<WindowsHyperVCurrentAdmission>, ControlPortError>;
+}
+
+/// Exact authenticated-session request to advance a Windows placement head.
+///
+/// Signature verification performed by the handler is deliberately only a
+/// fail-fast check. The durable implementation must verify the raw envelope
+/// again with its own configured trust store after locking renewal head,
+/// promotion/revocation high-water, runner, and the exact session fence. It
+/// samples database time only after those locks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitWindowsHyperVPlacementRenewal {
+    session: RunnerSessionFence,
+    envelope: WindowsRunnerPlacementRenewalEnvelope,
+    verified: VerifiedWindowsRunnerPlacementRenewal,
+}
+
+impl CommitWindowsHyperVPlacementRenewal {
+    /// Constructs one structurally and cryptographically fail-fast-verified
+    /// renewal for an exact authenticated session.
+    ///
+    /// # Errors
+    ///
+    /// Rejects runner, envelope-digest, or network-policy substitution.
+    pub fn new(
+        session: RunnerSessionFence,
+        envelope: WindowsRunnerPlacementRenewalEnvelope,
+        verified: VerifiedWindowsRunnerPlacementRenewal,
+    ) -> Result<Self, ControlPortError> {
+        let claims = verified.claims();
+        if claims.runner_id() != session.runner_id()
+            || claims.binding().transaction().runner_id() != session.runner_id()
+            || !claims.binding().broker_profile().network_disabled()
+            || verified.envelope_sha256() != envelope.envelope_sha256()
+        {
+            return Err(ControlPortError::Corrupt);
+        }
+        Ok(Self {
+            session,
+            envelope,
+            verified,
+        })
+    }
+
+    /// Returns the exact authenticated runner-session fence.
+    #[must_use]
+    pub const fn session(&self) -> RunnerSessionFence {
+        self.session
+    }
+
+    /// Returns the complete untrusted wire envelope for independent durable
+    /// verification and byte-exact replay comparison.
+    #[must_use]
+    pub const fn envelope(&self) -> &WindowsRunnerPlacementRenewalEnvelope {
+        &self.envelope
+    }
+
+    /// Returns the handler's fail-fast verification result.
+    #[must_use]
+    pub const fn fail_fast_verified(&self) -> &VerifiedWindowsRunnerPlacementRenewal {
+        &self.verified
+    }
+}
+
+/// Whether an exact placement renewal advanced the durable head or replayed it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowsHyperVPlacementRenewalDisposition {
+    /// The exact next serial was appended and made current.
+    Committed,
+    /// The same runner, serial, envelope, and nonce were already current.
+    Replayed,
+}
+
+/// Atomic durable Windows placement-renewal boundary.
+///
+/// A new envelope is valid only at exactly `current_serial + 1`. Repeating the
+/// same runner/serial/envelope/nonce is idempotent; a lower serial, a gap, or an
+/// equal serial with different bytes is a conflict. The implementation must
+/// append the verified renewal and advance its current pointer in one
+/// transaction. The signed exclusive placement horizon is at most fifteen
+/// minutes and never exceeds promotion expiry.
+#[async_trait]
+pub trait WindowsHyperVPlacementRenewalRepository: fmt::Debug + Send + Sync {
+    /// Independently verifies and atomically commits one renewal.
+    async fn commit(
+        &self,
+        request: CommitWindowsHyperVPlacementRenewal,
+    ) -> Result<WindowsHyperVPlacementRenewalDisposition, ControlPortError>;
+}
+
+/// Exact accepted-offer evidence passed to the server-owned broker signer.
+pub struct WindowsHyperVBrokerGrantIssueRequest<'a> {
+    placement: &'a WindowsHyperVPlacementEvidence,
+    admission: &'a WindowsHyperVCurrentAdmission,
+    offer: &'a AcceptedRuntimeAuthorityOffer,
+    job: &'a JobIrEnvelope,
+    post_accept_request: &'a RunnerOperationRequest,
+}
+
+impl fmt::Debug for WindowsHyperVBrokerGrantIssueRequest<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WindowsHyperVBrokerGrantIssueRequest")
+            .field(
+                "placement_binding_digest",
+                &self.placement.placement_binding_digest(),
+            )
+            .field(
+                "profile_contract_sha256",
+                &self.admission.profile_contract_sha256(),
+            )
+            .field("offer_operation_id", &self.offer.command().operation_id())
+            .field(
+                "post_accept_operation_id",
+                &self.post_accept_request.operation_id(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> WindowsHyperVBrokerGrantIssueRequest<'a> {
+    /// Constructs issuance input only after the durable store authorized the
+    /// post-accept delivery for this exact offer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any session, lease, `JobIR`, environment, or request mismatch.
+    pub fn new(
+        placement: &'a WindowsHyperVPlacementEvidence,
+        admission: &'a WindowsHyperVCurrentAdmission,
+        offer: &'a AcceptedRuntimeAuthorityOffer,
+        job: &'a JobIrEnvelope,
+        post_accept_request: &'a RunnerOperationRequest,
+    ) -> Result<Self, ControlPortError> {
+        if post_accept_request.session() != offer.request().session()
+            || post_accept_request.kind().as_str() != "automata.runner.runtime-authority-request.v2"
+            || job.version() != offer.job_ir().version()
+            || job.job().job_id() != offer.job_ir().job_id()
+            || job.job().run_id() != offer.job_ir().run_id()
+            || job.job().requirements().resource_allocation().is_none()
+            || job.job().requirements().environment_profile()
+                != Some(placement.environment_profile())
+            || admission.runner_id() != offer.lease().runner_id()
+            || admission.environment_profile() != placement.environment_profile()
+            || admission.placement_valid_until() < offer.lease().expires_at()
+            || admission.windows_action_graph_sha256()
+                != job
+                    .execution()
+                    .windows_action_graph()
+                    .map(automata_ci_core::WindowsRepositoryActionGraph::graph_sha256)
+            || job.execution().windows_action_graph().is_some_and(|graph| {
+                graph.policy_sha256() != admission.sealed_action_policy_sha256()
+            })
+        {
+            return Err(ControlPortError::Corrupt);
+        }
+        Ok(Self {
+            placement,
+            admission,
+            offer,
+            job,
+            post_accept_request,
+        })
+    }
+
+    /// Returns the server-retained placement evidence.
+    #[must_use]
+    pub const fn placement(&self) -> &WindowsHyperVPlacementEvidence {
+        self.placement
+    }
+
+    /// Returns the current durable signed runner admission.
+    #[must_use]
+    pub const fn admission(&self) -> &WindowsHyperVCurrentAdmission {
+        self.admission
+    }
+
+    /// Returns the exact accepted durable offer.
+    #[must_use]
+    pub const fn offer(&self) -> &AcceptedRuntimeAuthorityOffer {
+        self.offer
+    }
+
+    /// Returns the verified immutable `JobIR`.
+    #[must_use]
+    pub const fn job(&self) -> &JobIrEnvelope {
+        self.job
+    }
+
+    /// Returns the post-accept request admitted by durable state.
+    #[must_use]
+    pub const fn post_accept_request(&self) -> &RunnerOperationRequest {
+        self.post_accept_request
+    }
+
+    fn proposal(
+        &self,
+        key_id: Sha256Digest,
+        host_id: Sha256Digest,
+    ) -> Result<WindowsHyperVBrokerGrantProposal, ControlPortError> {
+        let offer = self.offer();
+        let lease = offer.lease();
+        let session = offer.request().session();
+        let metadata = offer.job_ir();
+        let object_key_digest = {
+            let mut digest = Sha256::new();
+            digest.update(b"automata.windows-hyperv-job-ir-object-key.v1\0");
+            digest.update(metadata.object_key().as_str().as_bytes());
+            Sha256Digest::from_bytes(digest.finalize().into())
+        };
+        let resource_allocation = self
+            .job()
+            .job()
+            .requirements()
+            .resource_allocation()
+            .ok_or(ControlPortError::Corrupt)?;
+        let claims = WindowsHyperVBrokerGrantClaims::new(
+            host_id,
+            self.placement().placement_binding_digest(),
+            lease.attempt_id(),
+            metadata.job_id(),
+            metadata.run_id(),
+            offer.request().operation_id(),
+            offer.command().operation_id(),
+            offer.command().sequence().get(),
+            self.post_accept_request().operation_id(),
+            self.post_accept_request().request_digest(),
+            session.runner_id(),
+            session.session_id(),
+            session.runner_generation().get(),
+            session.session_epoch().get(),
+            offer.slot().ordinal(),
+            lease.lease_id(),
+            lease.fencing_token(),
+            metadata.version(),
+            metadata.encoded_size(),
+            metadata.digest(),
+            object_key_digest,
+            resource_allocation,
+            self.admission().sandbox_pids_limit(),
+            self.placement().trust_binding_digest(),
+            self.placement().environment_profile().clone(),
+            self.admission().profile_contract_sha256(),
+            self.admission().sealed_action_policy_sha256(),
+            self.admission().windows_action_graph_sha256(),
+            lease.issued_at(),
+            lease.expires_at(),
+        )
+        .map_err(|_| ControlPortError::Corrupt)?;
+        Ok(WindowsHyperVBrokerGrantProposal::new(key_id, claims))
+    }
+}
+
+/// Exact unsigned Windows broker grant proposed for transactional admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsHyperVBrokerGrantProposal {
+    key_id: Sha256Digest,
+    claims: WindowsHyperVBrokerGrantClaims,
+    signing_payload_sha256: Sha256Digest,
+}
+
+impl WindowsHyperVBrokerGrantProposal {
+    fn new(key_id: Sha256Digest, claims: WindowsHyperVBrokerGrantClaims) -> Self {
+        let payload = WindowsHyperVBrokerGrant::signing_bytes_for(key_id, &claims);
+        let signing_payload_sha256 = Sha256Digest::from_bytes(Sha256::digest(payload).into());
+        Self {
+            key_id,
+            claims,
+            signing_payload_sha256,
+        }
+    }
+
+    /// Returns the exact signing-key identity.
+    #[must_use]
+    pub const fn key_id(&self) -> Sha256Digest {
+        self.key_id
+    }
+
+    /// Returns every proposed value-free grant claim.
+    #[must_use]
+    pub const fn claims(&self) -> &WindowsHyperVBrokerGrantClaims {
+        &self.claims
+    }
+
+    /// Returns the commitment reserved by the transactional store.
+    #[must_use]
+    pub const fn signing_payload_sha256(&self) -> Sha256Digest {
+        self.signing_payload_sha256
+    }
+}
+
+/// Store request which must revalidate a current renewal, exact session, and
+/// accepted offer under one lock order before grant signing can occur.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorizeWindowsHyperVBrokerGrant {
+    delivery: RuntimeAuthorityDeliveryAdmission,
+    admission: WindowsHyperVCurrentAdmission,
+    proposal: WindowsHyperVBrokerGrantProposal,
+}
+
+impl AuthorizeWindowsHyperVBrokerGrant {
+    /// Binds a proposal to the exact durable post-accept delivery admission.
+    ///
+    /// # Errors
+    ///
+    /// Rejects session, offer, runner, or post-accept request substitution.
+    pub fn new(
+        delivery: RuntimeAuthorityDeliveryAdmission,
+        admission: WindowsHyperVCurrentAdmission,
+        proposal: WindowsHyperVBrokerGrantProposal,
+    ) -> Result<Self, ControlPortError> {
+        let offer = delivery.offer();
+        let claims = proposal.claims();
+        if claims.runner_id() != offer.lease().runner_id()
+            || claims.runner_session_id() != offer.request().session().session_id()
+            || claims.runner_generation() != offer.request().session().runner_generation().get()
+            || claims.session_epoch() != offer.request().session().session_epoch().get()
+            || claims.accepted_offer_operation_id() != offer.command().operation_id()
+            || claims.post_accept_operation_id() != delivery.request().request().operation_id()
+            || claims.post_accept_request_digest() != delivery.request().request().request_digest()
+            || claims.runner_id() != admission.runner_id()
+            || claims.host_id() != admission.broker_host_id()
+            || claims.environment_profile() != admission.environment_profile()
+            || claims.profile_contract_sha256() != admission.profile_contract_sha256()
+            || claims.sealed_action_policy_sha256() != admission.sealed_action_policy_sha256()
+            || claims.windows_action_graph_sha256() != admission.windows_action_graph_sha256()
+            || claims.sandbox_pids_limit() != admission.sandbox_pids_limit()
+            || claims.expires_at() > admission.placement_valid_until()
+        {
+            return Err(ControlPortError::Corrupt);
+        }
+        Ok(Self {
+            delivery,
+            admission,
+            proposal,
+        })
+    }
+
+    /// Returns the exact accepted runtime-authority delivery.
+    #[must_use]
+    pub const fn delivery(&self) -> &RuntimeAuthorityDeliveryAdmission {
+        &self.delivery
+    }
+
+    /// Returns the server-owned current admission revalidated transactionally.
+    #[must_use]
+    pub const fn admission(&self) -> &WindowsHyperVCurrentAdmission {
+        &self.admission
+    }
+
+    /// Returns the exact unsigned grant payload.
+    #[must_use]
+    pub const fn proposal(&self) -> &WindowsHyperVBrokerGrantProposal {
+        &self.proposal
+    }
+}
+
+/// One-use grant reservation minted only by the transactional durable port.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsHyperVBrokerGrantIssuanceAuthorization {
+    request: AuthorizeWindowsHyperVBrokerGrant,
+    reservation_nonce: Sha256Digest,
+    authorized_at: UnixMillis,
+    valid_until: UnixMillis,
+}
+
+impl WindowsHyperVBrokerGrantIssuanceAuthorization {
+    /// Constructs a durable reservation after the store completed all locks
+    /// and sampled its own clock.
+    ///
+    /// # Errors
+    ///
+    /// Rejects placeholder or out-of-horizon reservations.
+    pub fn new(
+        request: AuthorizeWindowsHyperVBrokerGrant,
+        reservation_nonce: Sha256Digest,
+        authorized_at: UnixMillis,
+        valid_until: UnixMillis,
+    ) -> Result<Self, ControlPortError> {
+        let claims = request.proposal().claims();
+        if reservation_nonce.as_bytes().iter().all(|byte| *byte == 0)
+            || authorized_at < claims.issued_at()
+            || authorized_at >= valid_until
+            || valid_until > claims.expires_at()
+            || valid_until > request.delivery().offer().offer_valid_until()
+            || valid_until > request.admission().placement_valid_until()
+        {
+            return Err(ControlPortError::Corrupt);
+        }
+        Ok(Self {
+            request,
+            reservation_nonce,
+            authorized_at,
+            valid_until,
+        })
+    }
+
+    /// Returns the exact durable reservation request.
+    #[must_use]
+    pub const fn request(&self) -> &AuthorizeWindowsHyperVBrokerGrant {
+        &self.request
+    }
+
+    /// Returns the one-use durable reservation identity.
+    #[must_use]
+    pub const fn reservation_nonce(&self) -> Sha256Digest {
+        self.reservation_nonce
+    }
+
+    /// Returns the database time sampled after all authorization locks.
+    #[must_use]
+    pub const fn authorized_at(&self) -> UnixMillis {
+        self.authorized_at
+    }
+
+    /// Returns the exclusive reservation horizon.
+    #[must_use]
+    pub const fn valid_until(&self) -> UnixMillis {
+        self.valid_until
+    }
+}
+
+/// Exact atomic commit consuming a Windows grant reservation together with its
+/// metadata-only runtime-authority delivery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitWindowsHyperVBrokerGrantDelivery {
+    authorization: WindowsHyperVBrokerGrantIssuanceAuthorization,
+    delivery: CommitRuntimeAuthorityDelivery,
+    grant_digest: Sha256Digest,
+}
+
+impl CommitWindowsHyperVBrokerGrantDelivery {
+    /// Binds the signed grant and normal delivery commit to one reservation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a delivery, proposal, key, claims, digest, or horizon mismatch.
+    pub fn new(
+        authorization: WindowsHyperVBrokerGrantIssuanceAuthorization,
+        delivery: CommitRuntimeAuthorityDelivery,
+        grant: &WindowsHyperVBrokerGrant,
+    ) -> Result<Self, ControlPortError> {
+        if delivery.admission() != authorization.request().delivery()
+            || grant.key_id() != authorization.request().proposal().key_id()
+            || grant.claims() != authorization.request().proposal().claims()
+            || delivery.committed_at() < authorization.authorized_at()
+            || delivery.committed_at() >= authorization.valid_until()
+        {
+            return Err(ControlPortError::Corrupt);
+        }
+        Ok(Self {
+            authorization,
+            delivery,
+            grant_digest: grant.digest(),
+        })
+    }
+
+    /// Returns the exact one-use reservation to consume.
+    #[must_use]
+    pub const fn authorization(&self) -> &WindowsHyperVBrokerGrantIssuanceAuthorization {
+        &self.authorization
+    }
+
+    /// Returns the metadata-only runtime-authority delivery commit.
+    #[must_use]
+    pub const fn delivery(&self) -> &CommitRuntimeAuthorityDelivery {
+        &self.delivery
+    }
+
+    /// Returns the digest of the exact signed grant delivered to the runner.
+    #[must_use]
+    pub const fn grant_digest(&self) -> Sha256Digest {
+        self.grant_digest
+    }
+}
+
+/// Transactional store boundary for post-accept Windows grant delivery.
+///
+/// `authorize` locks renewal head, promotion/revocation high-water, runner,
+/// exact session, and accepted offer in that order, samples database time, and
+/// atomically persists a one-use reservation for the exact proposal. Any head,
+/// high-water, or session transition must serialize against live reservations.
+/// `commit` atomically consumes that reservation while committing the normal
+/// runtime-authority delivery digest. A detached current read is never grant
+/// authority.
+#[async_trait]
+pub trait WindowsHyperVBrokerGrantAuthorizationRepository: fmt::Debug + Send + Sync {
+    /// Reserves one exact unsigned grant after all current-state checks.
+    async fn authorize(
+        &self,
+        request: AuthorizeWindowsHyperVBrokerGrant,
+    ) -> Result<WindowsHyperVBrokerGrantIssuanceAuthorization, ControlPortError>;
+
+    /// Atomically consumes the exact reservation and commits delivery.
+    async fn commit(
+        &self,
+        request: CommitWindowsHyperVBrokerGrantDelivery,
+    ) -> Result<RuntimeAuthorityDeliveryDisposition, ControlPortError>;
+}
+
+/// Deterministic Ed25519 issuer backed by a server-owned signing seed and an
+/// explicit runner-to-host registry.
+pub struct Ed25519WindowsHyperVBrokerGrantIssuer {
+    signing_seed: Zeroizing<[u8; 32]>,
+    public_key: [u8; 32],
+    key_id: Sha256Digest,
+    hosts: BTreeMap<RunnerId, Sha256Digest>,
+}
+
+impl fmt::Debug for Ed25519WindowsHyperVBrokerGrantIssuer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Ed25519WindowsHyperVBrokerGrantIssuer")
+            .field("key_id", &self.key_id)
+            .field("mapped_runners", &self.hosts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Ed25519WindowsHyperVBrokerGrantIssuer {
+    /// Creates an issuer from an exact 32-byte server secret and an explicit
+    /// durable runner-to-broker-host mapping.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty map, nil runner identity, zero host digest, or invalid
+    /// Ed25519 seed.
+    pub fn new(
+        signing_seed: Zeroizing<[u8; 32]>,
+        hosts: BTreeMap<RunnerId, Sha256Digest>,
+    ) -> Result<Self, WindowsHyperVBrokerGrantIssuerError> {
+        if hosts.is_empty() {
+            return Err(WindowsHyperVBrokerGrantIssuerError::EmptyHostMap);
+        }
+        if hosts.iter().any(|(runner, host)| {
+            runner.as_uuid().is_nil() || host.as_bytes().iter().all(|byte| *byte == 0)
+        }) {
+            return Err(WindowsHyperVBrokerGrantIssuerError::InvalidHostMap);
+        }
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(signing_seed.as_ref())
+            .map_err(|_| WindowsHyperVBrokerGrantIssuerError::InvalidSigningSeed)?;
+        let public_key = key_pair
+            .public_key()
+            .as_ref()
+            .try_into()
+            .map_err(|_| WindowsHyperVBrokerGrantIssuerError::InvalidSigningSeed)?;
+        let key_id = Sha256Digest::from_bytes(Sha256::digest(public_key).into());
+        Ok(Self {
+            signing_seed,
+            public_key,
+            key_id,
+            hosts,
+        })
+    }
+
+    /// Returns the public verification key installed on broker hosts.
+    #[must_use]
+    pub fn public_key(&self) -> &[u8] {
+        &self.public_key
+    }
+
+    /// Returns the digest used to select this verification key.
+    #[must_use]
+    pub const fn key_id(&self) -> Sha256Digest {
+        self.key_id
+    }
+}
+
+impl WindowsHyperVBrokerGrantIssuer for Ed25519WindowsHyperVBrokerGrantIssuer {
+    fn propose(
+        &self,
+        request: &WindowsHyperVBrokerGrantIssueRequest<'_>,
+    ) -> Result<WindowsHyperVBrokerGrantProposal, ControlPortError> {
+        let runner_id = request.offer().lease().runner_id();
+        let host_id = self
+            .hosts
+            .get(&runner_id)
+            .copied()
+            .ok_or(ControlPortError::Corrupt)?;
+        if request.admission().broker_host_id() != host_id {
+            return Err(ControlPortError::Corrupt);
+        }
+        request.proposal(self.key_id, host_id)
+    }
+
+    fn issue(
+        &self,
+        authorization: &WindowsHyperVBrokerGrantIssuanceAuthorization,
+    ) -> Result<WindowsHyperVBrokerGrant, ControlPortError> {
+        let proposal = authorization.request().proposal();
+        let claims = proposal.claims();
+        let expected_host_id = self
+            .hosts
+            .get(&claims.runner_id())
+            .copied()
+            .ok_or(ControlPortError::Corrupt)?;
+        if proposal.key_id() != self.key_id || claims.host_id() != expected_host_id {
+            return Err(ControlPortError::Corrupt);
+        }
+        let key_pair = Ed25519KeyPair::from_seed_unchecked(self.signing_seed.as_ref())
+            .map_err(|_| ControlPortError::Corrupt)?;
+        let signing_bytes = WindowsHyperVBrokerGrant::signing_bytes_for(self.key_id, claims);
+        if Sha256Digest::from_bytes(Sha256::digest(&signing_bytes).into())
+            != proposal.signing_payload_sha256()
+        {
+            return Err(ControlPortError::Corrupt);
+        }
+        let signature = key_pair.sign(&signing_bytes);
+        WindowsHyperVBrokerGrant::new(self.key_id, claims.clone(), signature.as_ref())
+            .map_err(|_| ControlPortError::Corrupt)
+    }
+}
+
+/// Invalid configuration of the Ed25519 Windows broker grant issuer.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum WindowsHyperVBrokerGrantIssuerError {
+    /// No restricted host mapping was configured.
+    #[error("Windows Hyper-V broker host map cannot be empty")]
+    EmptyHostMap,
+    /// A runner identity or host digest used a zero sentinel.
+    #[error("Windows Hyper-V broker host map contains an invalid identity")]
+    InvalidHostMap,
+    /// The server signing seed could not initialize an Ed25519 key.
+    #[error("Windows Hyper-V broker signing seed is invalid")]
+    InvalidSigningSeed,
 }
 
 /// Optional server-side authority contribution for permission-gated features.
@@ -655,12 +1474,63 @@ pub enum LeaseOfferClaimStatus {
     ClaimSuperseded,
 }
 
+/// Value-free server-retained evidence needed to mint a broker capability
+/// only after the exact offer has been durably accepted.
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowsHyperVPlacementEvidence {
+    placement_binding_digest: Sha256Digest,
+    trust_binding_digest: Sha256Digest,
+    environment_profile: EnvironmentProfile,
+}
+
+impl WindowsHyperVPlacementEvidence {
+    fn from_placement(placement: &crate::lease::WindowsHyperVPlacementGrant) -> Self {
+        Self {
+            placement_binding_digest: placement.binding_digest(),
+            trust_binding_digest: placement.trust_binding_digest(),
+            environment_profile: placement.environment_profile().clone(),
+        }
+    }
+
+    /// Returns the digest of the original locked placement decision.
+    #[must_use]
+    pub const fn placement_binding_digest(&self) -> Sha256Digest {
+        self.placement_binding_digest
+    }
+
+    /// Returns the authenticated trust/requirements binding.
+    #[must_use]
+    pub const fn trust_binding_digest(&self) -> Sha256Digest {
+        self.trust_binding_digest
+    }
+
+    /// Returns the exact content-attested environment profile.
+    #[must_use]
+    pub const fn environment_profile(&self) -> &EnvironmentProfile {
+        &self.environment_profile
+    }
+
+    fn is_valid_for(
+        &self,
+        job: &JobIrEnvelope,
+        placement: &crate::lease::WindowsHyperVPlacementGrant,
+    ) -> bool {
+        self == &Self::from_placement(placement)
+            && job.job().requirements().environment_profile() == Some(&self.environment_profile)
+            && [self.placement_binding_digest, self.trust_binding_digest]
+                .iter()
+                .all(|digest| digest.as_bytes().iter().any(|byte| *byte != 0))
+    }
+}
+
 /// Fully verified lease-offer body awaiting one durable command identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LeaseOfferCommand {
     claim: LeaseOfferClaim,
     job: JobIrEnvelope,
     managed_secret_bindings: ManagedSecretBindingOverlay,
+    windows_hyperv_placement: Option<WindowsHyperVPlacementEvidence>,
     offer_valid_until: UnixMillis,
     created_at: UnixMillis,
 }
@@ -680,6 +1550,9 @@ pub enum LeaseOfferCommandError {
     /// Secret-binding metadata is not bound to the exact leased attempt.
     #[error("lease-offer managed-secret bindings are invalid")]
     InvalidManagedSecretBindings,
+    /// The Windows broker capability does not match the exact claim and `JobIR`.
+    #[error("lease-offer Windows Hyper-V broker grant is invalid")]
+    InvalidWindowsHyperVBrokerGrant,
     /// The command was created outside the lease validity interval.
     #[error("lease-offer creation time is outside its validity interval")]
     InvalidCreationTime,
@@ -713,11 +1586,40 @@ impl LeaseOfferCommand {
         let offer_valid_until = claim.lease().expires_at();
         Ok(Self {
             managed_secret_bindings: ManagedSecretBindingOverlay::empty(claim.lease()),
+            windows_hyperv_placement: None,
             claim,
             job,
             offer_valid_until,
             created_at,
         })
+    }
+
+    /// Retains value-free placement evidence for post-accept broker issuance.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every cross-binding disagreement with the durable claim,
+    /// verified `JobIR`, environment profile, session, slot, or lease fence.
+    pub fn with_windows_hyperv_placement(
+        mut self,
+        placement: &crate::lease::WindowsHyperVPlacementGrant,
+    ) -> Result<Self, LeaseOfferCommandError> {
+        if placement.attempt_id() != self.claim.lease().attempt_id()
+            || placement.lease_id() != self.claim.lease().lease_id()
+            || placement.session() != self.claim.session()
+            || placement.slot().ordinal() != self.claim.slot().get()
+            || placement.job_ir() != self.claim.job_ir_metadata()
+            || placement.issued_at() != self.claim.lease().issued_at()
+            || placement.expires_at() != self.claim.lease().expires_at()
+        {
+            return Err(LeaseOfferCommandError::InvalidWindowsHyperVBrokerGrant);
+        }
+        let evidence = WindowsHyperVPlacementEvidence::from_placement(placement);
+        if !evidence.is_valid_for(&self.job, placement) {
+            return Err(LeaseOfferCommandError::InvalidWindowsHyperVBrokerGrant);
+        }
+        self.windows_hyperv_placement = Some(evidence);
+        Ok(self)
     }
 
     /// Replaces the empty default with the exact lease-scoped binding overlay.
@@ -780,6 +1682,11 @@ impl LeaseOfferCommand {
     #[must_use]
     pub const fn managed_secret_bindings(&self) -> &ManagedSecretBindingOverlay {
         &self.managed_secret_bindings
+    }
+    /// Returns server-retained evidence for post-accept broker issuance.
+    #[must_use]
+    pub const fn windows_hyperv_placement(&self) -> Option<&WindowsHyperVPlacementEvidence> {
+        self.windows_hyperv_placement.as_ref()
     }
     /// Returns the exclusive minimum of the lease and runtime-authority expiries.
     #[must_use]
@@ -958,6 +1865,7 @@ fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool 
                     job: &payload.job,
                     lease: &payload.lease,
                     managed_secret_bindings: &payload.managed_secret_bindings,
+                    windows_hyperv_placement: &payload.windows_hyperv_placement,
                     protocol_version: payload.protocol_version,
                     schema: payload.schema,
                     slot: payload.slot,
@@ -973,8 +1881,45 @@ fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool 
                 &payload.job,
                 &payload.lease,
                 &payload.managed_secret_bindings,
+                payload.windows_hyperv_placement.as_ref(),
                 payload.protocol_version,
                 payload.schema,
+                LEASE_OFFER_COMMAND_SCHEMA,
+                payload.slot,
+            )
+        }
+        (LEGACY_LEASE_OFFER_COMMAND_KIND, LEGACY_LEASE_OFFER_COMMAND_SCHEMA) => {
+            let Ok(payload) = serde_json::from_slice::<LegacyDurableLeaseOfferCommandPayload>(
+                command.payload().bytes(),
+            ) else {
+                return false;
+            };
+            let mut canonical = Zeroizing::new(Vec::new());
+            if serde_json::to_writer(
+                &mut *canonical,
+                &LegacyLeaseOfferCommandPayloadRef {
+                    job: &payload.job,
+                    lease: &payload.lease,
+                    managed_secret_bindings: &payload.managed_secret_bindings,
+                    protocol_version: payload.protocol_version,
+                    schema: payload.schema,
+                    slot: payload.slot,
+                },
+            )
+            .is_err()
+                || canonical.as_slice() != command.payload().bytes()
+            {
+                return false;
+            }
+            durable_payload_matches(
+                published,
+                &payload.job,
+                &payload.lease,
+                &payload.managed_secret_bindings,
+                None,
+                payload.protocol_version,
+                payload.schema,
+                LEGACY_LEASE_OFFER_COMMAND_SCHEMA,
                 payload.slot,
             )
         }
@@ -982,16 +1927,19 @@ fn durable_lease_offer_payload_matches(published: &PublishedLeaseOffer) -> bool 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn durable_payload_matches(
     published: &PublishedLeaseOffer,
     job: &JobIrEnvelope,
     lease: &Lease,
     managed_secret_bindings: &ManagedSecretBindingOverlay,
+    windows_hyperv_placement: Option<&WindowsHyperVPlacementEvidence>,
     protocol_version: u16,
     schema: u16,
+    expected_schema: u16,
     slot: u16,
 ) -> bool {
-    if schema != LEASE_OFFER_COMMAND_SCHEMA
+    if schema != expected_schema
         || protocol_version != published.protocol_version().get()
         || slot != published.slot().get()
         || lease != published.lease()
@@ -1001,6 +1949,27 @@ fn durable_payload_matches(
     if validate_lease_offer_payload(job, lease, managed_secret_bindings, published.job_ir())
         .is_err()
     {
+        return false;
+    }
+    if windows_hyperv_placement.is_some_and(|placement| {
+        placement.environment_profile()
+            != job
+                .job()
+                .requirements()
+                .environment_profile()
+                .unwrap_or_else(|| {
+                    // A retained Windows placement is invalid for a job without
+                    // an exact environment profile.
+                    placement.environment_profile()
+                })
+            || job.job().requirements().environment_profile().is_none()
+            || [
+                placement.placement_binding_digest(),
+                placement.trust_binding_digest(),
+            ]
+            .iter()
+            .any(|digest| digest.as_bytes().iter().all(|byte| *byte == 0))
+    }) {
         return false;
     }
     let created_at = published.command().request().created_at();
@@ -1136,6 +2105,7 @@ impl LeaseOfferCommandPublisher for StoreLeaseOfferCommandPublisher {
                 job: command.job(),
                 lease: command.lease(),
                 managed_secret_bindings: command.managed_secret_bindings(),
+                windows_hyperv_placement: &command.windows_hyperv_placement,
                 protocol_version: command.protocol_version().get(),
                 schema: LEASE_OFFER_COMMAND_SCHEMA,
                 slot: command.slot().get(),
@@ -1202,28 +2172,61 @@ pub(crate) fn decode_durable_server_command(
         sequence,
     );
     let message = match request.kind().as_str() {
-        LEASE_OFFER_COMMAND_KIND => {
-            if request.payload().schema().get() != LEASE_OFFER_COMMAND_SCHEMA {
-                return Err(ControlPortError::Corrupt);
-            }
-            let payload: DurableLeaseOfferCommandPayload =
-                serde_json::from_slice(request.payload().bytes())
-                    .map_err(|_| ControlPortError::Corrupt)?;
-            if payload.schema != LEASE_OFFER_COMMAND_SCHEMA
-                || payload.protocol_version != protocol_version.get()
-                || payload.lease.runner_id() != request.session().runner_id()
-                || payload
-                    .managed_secret_bindings
-                    .validate_for(&payload.lease)
-                    .is_err()
+        LEASE_OFFER_COMMAND_KIND | LEGACY_LEASE_OFFER_COMMAND_KIND => {
+            let (
+                job,
+                lease,
+                managed_secret_bindings,
+                windows_hyperv_placement,
+                payload_version,
+                payload_schema,
+                payload_slot,
+            ) = if request.kind().as_str() == LEASE_OFFER_COMMAND_KIND {
+                if request.payload().schema().get() != LEASE_OFFER_COMMAND_SCHEMA {
+                    return Err(ControlPortError::Corrupt);
+                }
+                let payload: DurableLeaseOfferCommandPayload =
+                    serde_json::from_slice(request.payload().bytes())
+                        .map_err(|_| ControlPortError::Corrupt)?;
+                (
+                    payload.job,
+                    payload.lease,
+                    payload.managed_secret_bindings,
+                    payload.windows_hyperv_placement,
+                    payload.protocol_version,
+                    payload.schema,
+                    payload.slot,
+                )
+            } else {
+                if request.payload().schema().get() != LEGACY_LEASE_OFFER_COMMAND_SCHEMA {
+                    return Err(ControlPortError::Corrupt);
+                }
+                let payload: LegacyDurableLeaseOfferCommandPayload =
+                    serde_json::from_slice(request.payload().bytes())
+                        .map_err(|_| ControlPortError::Corrupt)?;
+                (
+                    payload.job,
+                    payload.lease,
+                    payload.managed_secret_bindings,
+                    None,
+                    payload.protocol_version,
+                    payload.schema,
+                    payload.slot,
+                )
+            };
+            if payload_schema != request.payload().schema().get()
+                || payload_version != protocol_version.get()
+                || lease.runner_id() != request.session().runner_id()
+                || managed_secret_bindings.validate_for(&lease).is_err()
             {
                 return Err(ControlPortError::Corrupt);
             }
             let slot =
-                RunnerSlotOrdinal::new(payload.slot).map_err(|_| ControlPortError::Corrupt)?;
-            let offer = LeaseOffer::new(header, slot, payload.lease, payload.job)
-                .with_managed_secret_bindings(payload.managed_secret_bindings)
+                RunnerSlotOrdinal::new(payload_slot).map_err(|_| ControlPortError::Corrupt)?;
+            let offer = LeaseOffer::new(header, slot, lease, job)
+                .with_managed_secret_bindings(managed_secret_bindings)
                 .map_err(|_| ControlPortError::Corrupt)?;
+            let _ = windows_hyperv_placement;
             ServerToRunner::LeaseOffer(Box::new(offer))
         }
         CANCEL_JOB_COMMAND_KIND => {
@@ -1251,8 +2254,62 @@ pub(crate) fn decode_durable_server_command(
     Ok(message)
 }
 
+/// Loads the server-retained broker grant from an exact durable lease offer.
+///
+/// This value is deliberately omitted from [`LeaseOffer`] and becomes
+/// runner-visible only through the accepted runtime-authority delivery path.
+pub(crate) fn durable_windows_hyperv_placement(
+    command: &DurableRunnerCommand,
+) -> Result<Option<WindowsHyperVPlacementEvidence>, ControlPortError> {
+    match command.request().kind().as_str() {
+        LEASE_OFFER_COMMAND_KIND => {
+            if command.request().payload().schema().get() != LEASE_OFFER_COMMAND_SCHEMA {
+                return Err(ControlPortError::Corrupt);
+            }
+            let payload: DurableLeaseOfferCommandPayload =
+                serde_json::from_slice(command.request().payload().bytes())
+                    .map_err(|_| ControlPortError::Corrupt)?;
+            Ok(payload.windows_hyperv_placement)
+        }
+        LEGACY_LEASE_OFFER_COMMAND_KIND => Ok(None),
+        _ => Err(ControlPortError::Corrupt),
+    }
+}
+
+/// Loads the exact value-free managed-secret overlay committed to a durable
+/// lease offer. This is rechecked before any post-accept Windows authority is
+/// minted so a substituted durable command cannot reach an issuer.
+pub(crate) fn durable_managed_secret_bindings(
+    command: &DurableRunnerCommand,
+) -> Result<ManagedSecretBindingOverlay, ControlPortError> {
+    match command.request().kind().as_str() {
+        LEASE_OFFER_COMMAND_KIND => {
+            if command.request().payload().schema().get() != LEASE_OFFER_COMMAND_SCHEMA {
+                return Err(ControlPortError::Corrupt);
+            }
+            let payload: DurableLeaseOfferCommandPayload =
+                serde_json::from_slice(command.request().payload().bytes())
+                    .map_err(|_| ControlPortError::Corrupt)?;
+            Ok(payload.managed_secret_bindings)
+        }
+        LEGACY_LEASE_OFFER_COMMAND_KIND => {
+            if command.request().payload().schema().get() != LEGACY_LEASE_OFFER_COMMAND_SCHEMA {
+                return Err(ControlPortError::Corrupt);
+            }
+            let payload: LegacyDurableLeaseOfferCommandPayload =
+                serde_json::from_slice(command.request().payload().bytes())
+                    .map_err(|_| ControlPortError::Corrupt)?;
+            Ok(payload.managed_secret_bindings)
+        }
+        _ => Err(ControlPortError::Corrupt),
+    }
+}
+
 pub(crate) fn is_durable_lease_offer_command(command: &DurableRunnerCommand) -> bool {
-    command.request().kind().as_str() == LEASE_OFFER_COMMAND_KIND
+    matches!(
+        command.request().kind().as_str(),
+        LEASE_OFFER_COMMAND_KIND | LEGACY_LEASE_OFFER_COMMAND_KIND
+    )
 }
 
 /// Object-safe lease-poll boundary used by the handler and test fakes.

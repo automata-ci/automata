@@ -433,7 +433,7 @@ impl SlotSnapshot {
         session: &SessionSnapshot,
     ) -> Result<(), JournalInvariantError> {
         self.offer.validate()?;
-        self.validate_runtime_authority_delivery()?;
+        self.validate_runtime_authority_delivery(runner_id, session)?;
         if self.offer.lease().runner_id() != runner_id {
             return Err(JournalInvariantError::LeaseRunnerMismatch);
         }
@@ -526,7 +526,11 @@ impl SlotSnapshot {
         Ok(())
     }
 
-    fn validate_runtime_authority_delivery(&self) -> Result<(), JournalInvariantError> {
+    fn validate_runtime_authority_delivery(
+        &self,
+        runner_id: RunnerId,
+        session: &SessionSnapshot,
+    ) -> Result<(), JournalInvariantError> {
         let Some(delivery) = &self.runtime_authority_delivery else {
             return Ok(());
         };
@@ -542,6 +546,17 @@ impl SlotSnapshot {
                 != Some(binding.job_ir_digest())
         {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
+        }
+        if let Some(grant) = delivery.windows_hyperv_broker_grant() {
+            super::command::validate_windows_hyperv_broker_grant(
+                grant,
+                runner_id,
+                session.session_id(),
+                delivery.request_operation_id(),
+                binding,
+                self.offer.lease(),
+                self.offer.job_ir(),
+            )?;
         }
         Ok(())
     }
@@ -1257,6 +1272,7 @@ impl StoredJournal {
         guard: LeaseGuard,
         delivery: RuntimeAuthorityDeliveryRecord,
     ) -> Result<bool, JournalInvariantError> {
+        let runner_id = self.runner_id;
         let slot = self.slot_mut(session_id, slot, guard)?;
         if slot.offer_status != LeaseOfferStatus::Accepted {
             return Err(JournalInvariantError::OfferNotAccepted);
@@ -1272,6 +1288,17 @@ impl StoredJournal {
                 != Some(binding.job_ir_digest())
         {
             return Err(JournalInvariantError::InvalidRuntimeAuthorityDelivery);
+        }
+        if let Some(grant) = delivery.windows_hyperv_broker_grant() {
+            super::command::validate_windows_hyperv_broker_grant(
+                grant,
+                runner_id,
+                session_id,
+                delivery.request_operation_id(),
+                binding,
+                slot.offer.lease(),
+                slot.offer.job_ir(),
+            )?;
         }
         match &slot.runtime_authority_delivery {
             Some(existing) if existing == &delivery => Ok(false),

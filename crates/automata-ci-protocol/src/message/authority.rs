@@ -4,10 +4,12 @@ use std::{fmt, sync::Arc};
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_core::{
-    AttemptId, FencingToken, JobAuthorityProfile, JobId, JobIrEnvelope, Lease, LeaseGuard,
-    OperationId, RunId, Sha256Digest, TrustPermissionAuthority, UnixMillis,
+    Architecture, AttemptId, FencingToken, IsolationLevel, JobAuthorityProfile, JobId,
+    JobIrEnvelope, Lease, LeaseGuard, OperatingSystem, OperationId, RunId, SandboxFeature,
+    Sha256Digest, TrustPermissionAuthority, UnixMillis,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -774,6 +776,16 @@ pub struct RuntimeAuthorityGrant {
     binding: RuntimeAuthorityDeliveryBinding,
     bundle_digest: Sha256Digest,
     authorities: JobRuntimeAuthorities,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    windows_hyperv_broker_grant: Option<automata_ci_core::WindowsHyperVBrokerGrant>,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 impl RuntimeAuthorityGrant {
@@ -790,7 +802,46 @@ impl RuntimeAuthorityGrant {
             binding,
             bundle_digest,
             authorities,
+            windows_hyperv_broker_grant: None,
         }
+    }
+
+    /// Attaches the one-use restricted-broker capability delivered only after
+    /// durable acceptance of the exact offer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects claims that disagree with the accepted attempt, lease fence,
+    /// immutable `JobIR`, or authority-delivery binding.
+    pub fn with_windows_hyperv_broker_grant(
+        mut self,
+        grant: automata_ci_core::WindowsHyperVBrokerGrant,
+        job: &JobIrEnvelope,
+        lease: &Lease,
+    ) -> Result<Self, RuntimeAuthorityDeliveryError> {
+        validate_post_accept_windows_grant(&grant, self.binding, None, job, lease)?;
+        self.windows_hyperv_broker_grant = Some(grant);
+        Ok(self)
+    }
+
+    /// Attaches a structurally valid broker capability at a frame-decoding
+    /// boundary where the accepted offer is not yet available.
+    ///
+    /// Callers must invoke [`Self::validate_for`] before adopting the value.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed claims. Correlation is intentionally deferred.
+    pub fn with_unbound_windows_hyperv_broker_grant(
+        mut self,
+        grant: automata_ci_core::WindowsHyperVBrokerGrant,
+    ) -> Result<Self, RuntimeAuthorityDeliveryError> {
+        grant
+            .claims()
+            .validate()
+            .map_err(|_| RuntimeAuthorityDeliveryError::InvalidWindowsHyperVBrokerGrant)?;
+        self.windows_hyperv_broker_grant = Some(grant);
+        Ok(self)
     }
 
     /// Returns the correlated reply header.
@@ -815,6 +866,15 @@ impl RuntimeAuthorityGrant {
     #[must_use]
     pub const fn authorities(&self) -> &JobRuntimeAuthorities {
         &self.authorities
+    }
+
+    /// Returns the one-use Windows broker capability, when this accepted job
+    /// requires the restricted Hyper-V provider.
+    #[must_use]
+    pub const fn windows_hyperv_broker_grant(
+        &self,
+    ) -> Option<&automata_ci_core::WindowsHyperVBrokerGrant> {
+        self.windows_hyperv_broker_grant.as_ref()
     }
 
     /// Validates locally provable response invariants.
@@ -853,8 +913,107 @@ impl RuntimeAuthorityGrant {
         }
         self.authorities
             .validate_for(job, lease)
-            .map_err(|_| RuntimeAuthorityDeliveryError::InvalidAuthorities)
+            .map_err(|_| RuntimeAuthorityDeliveryError::InvalidAuthorities)?;
+        match (
+            requires_exact_windows_hyperv(job),
+            &self.windows_hyperv_broker_grant,
+        ) {
+            (true, Some(grant)) => validate_post_accept_windows_grant(
+                grant,
+                self.binding,
+                Some(request.header),
+                job,
+                lease,
+            )?,
+            (false, None) => {}
+            // The post-accept broker capability is mandatory for the one
+            // exact Windows boundary and forbidden for every other profile.
+            (true, None) | (false, Some(_)) => {
+                return Err(RuntimeAuthorityDeliveryError::InvalidWindowsHyperVBrokerGrant);
+            }
+        }
+        Ok(())
     }
+}
+
+fn requires_exact_windows_hyperv(job: &JobIrEnvelope) -> bool {
+    let requirements = job.job().requirements();
+    requirements.operating_system() == Some(&OperatingSystem::Windows)
+        && requirements.architecture() == Some(&Architecture::X86_64)
+        && requirements.minimum_isolation() >= IsolationLevel::VirtualMachine
+        && requirements
+            .sandbox_features()
+            .contains(&SandboxFeature::WINDOWS_HYPERV_CONTAINER)
+        && requirements.environment_profile().is_some()
+        && requirements.resource_allocation().is_some()
+}
+
+const RUNTIME_AUTHORITY_DELIVERY_DIGEST_DOMAIN: &[u8] = b"automata.runtime-authority-delivery.v2\0";
+
+/// Computes the exact digest acknowledged for a post-accept delivery.
+///
+/// Deliveries without a broker grant retain the legacy authority digest. When
+/// a grant is present, the digest covers both protected authority content and
+/// the broker capability so a lost response can replay only the identical
+/// bundle.
+#[must_use]
+pub fn runtime_authority_delivery_digest(
+    authorities_sha256: Sha256Digest,
+    windows_hyperv_broker_grant: Option<&automata_ci_core::WindowsHyperVBrokerGrant>,
+) -> Sha256Digest {
+    let Some(windows_hyperv_broker_grant) = windows_hyperv_broker_grant else {
+        return authorities_sha256;
+    };
+    let mut digest = Sha256::new();
+    digest.update(RUNTIME_AUTHORITY_DELIVERY_DIGEST_DOMAIN);
+    digest.update(authorities_sha256.as_bytes());
+    digest.update([1]);
+    digest.update(windows_hyperv_broker_grant.digest().as_bytes());
+    Sha256Digest::from_bytes(digest.finalize().into())
+}
+
+fn validate_post_accept_windows_grant(
+    grant: &automata_ci_core::WindowsHyperVBrokerGrant,
+    binding: RuntimeAuthorityDeliveryBinding,
+    request_header: Option<super::MessageHeader>,
+    job: &JobIrEnvelope,
+    lease: &Lease,
+) -> Result<(), RuntimeAuthorityDeliveryError> {
+    grant
+        .claims()
+        .validate()
+        .map_err(|_| RuntimeAuthorityDeliveryError::InvalidWindowsHyperVBrokerGrant)?;
+    let claims = grant.claims();
+    if !requires_exact_windows_hyperv(job)
+        || claims.attempt_id() != binding.attempt_id()
+        || claims.attempt_id() != lease.attempt_id()
+        || claims.lease_id() != lease.lease_id()
+        || claims.fencing_token() != lease.fencing_token()
+        || claims.runner_id() != lease.runner_id()
+        || claims.job_id() != job.job().job_id()
+        || claims.run_id() != job.job().run_id()
+        || claims.job_ir_version() != job.version()
+        || claims.job_ir_digest() != binding.job_ir_digest()
+        || claims.accepted_offer_operation_id() != binding.offer_operation_id()
+        || claims.accepted_offer_sequence() != binding.offer_sequence().get()
+        || claims.issued_at() != lease.issued_at()
+        || claims.expires_at() != lease.expires_at()
+        || job.job().requirements().environment_profile() != Some(claims.environment_profile())
+        || claims.windows_action_graph_sha256()
+            != job
+                .execution()
+                .windows_action_graph()
+                .map(automata_ci_core::WindowsRepositoryActionGraph::graph_sha256)
+    {
+        return Err(RuntimeAuthorityDeliveryError::InvalidWindowsHyperVBrokerGrant);
+    }
+    if let Some(header) = request_header
+        && (claims.post_accept_operation_id() != header.operation_id()
+            || claims.runner_session_id() != header.session_id())
+    {
+        return Err(RuntimeAuthorityDeliveryError::InvalidWindowsHyperVBrokerGrant);
+    }
+    Ok(())
 }
 
 /// Runner acknowledgement after an exact grant is protected and journaled.
@@ -928,4 +1087,23 @@ pub enum RuntimeAuthorityDeliveryError {
     /// Delivered authority material does not match the exact job and lease.
     #[error("runtime-authority grant is invalid for the job and lease")]
     InvalidAuthorities,
+    /// The restricted-broker capability disagrees with the accepted offer.
+    #[error("Windows Hyper-V broker grant is invalid for the accepted offer")]
+    InvalidWindowsHyperVBrokerGrant,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_authority_delivery_digest;
+    use automata_ci_core::Sha256Digest;
+
+    #[test]
+    fn delivery_without_windows_grant_preserves_legacy_authority_digest() {
+        let authorities_sha256 = Sha256Digest::from_bytes([0x5a; 32]);
+
+        assert_eq!(
+            runtime_authority_delivery_digest(authorities_sha256, None),
+            authorities_sha256
+        );
+    }
 }

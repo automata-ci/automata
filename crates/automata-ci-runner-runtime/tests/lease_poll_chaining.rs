@@ -6,22 +6,30 @@ use std::{
 };
 
 use automata_ci_core::{
-    AttemptId, FencingToken, Lease, LeaseId, OperationId, RunnerId, RunnerSessionId, UnixMillis,
+    Architecture, AttemptId, EnvironmentProfile, EnvironmentProfileId, FencingToken,
+    IsolationLevel, Lease, LeaseId, OperatingSystem, OperationId, RunnerCapabilities,
+    RunnerFeature, RunnerId, RunnerPlatform, RunnerSessionId, SandboxCapabilities, SandboxFeature,
+    Sha256Digest, UnixMillis,
 };
 use automata_ci_protocol::{
     CancelJob, CommandCursor, CommandSequence, ErrorMessage, LeaseOffer, MessageHeader,
     NegotiatedSession, NoWork, OperationAck, RemoteErrorCode, RunnerSlotOrdinal, RunnerToServer,
     SUPPORTED_PROTOCOL_RANGE, ServerCommandHeader, ServerHello, ServerTiming, ServerToRunner,
-    SessionDisposition,
+    SessionDisposition, WINDOWS_RUNNER_ADMISSION_PROVIDER_ID, WindowsAdmissionImage,
+    WindowsAdmissionValidity, WindowsAuthorityAdmissionEvidence, WindowsBrokerAdmissionEvidence,
+    WindowsBrokerProfileBinding, WindowsEnrollmentTransactionBinding, WindowsImagePromotionBinding,
+    WindowsPromotionValidity, WindowsRunnerAdmissionBinding, WindowsRunnerAdmissionEvidence,
+    WindowsRunnerPlacementRenewalClaims, WindowsRunnerPlacementRenewalEnvelope,
 };
 use automata_ci_runner_journal::{
     CommitFault, CommitFaultInjector, CommitStage, FileJournal, FileJournalOptions, JournalError,
     RunnerJournal, SessionBinding,
 };
 use automata_ci_runner_runtime::{
-    RunnerRuntimeControlClient, RunnerRuntimeError, RunnerRuntimePorts, RunnerSessionSupervisor,
-    RuntimeControlError, RuntimeControlErrorKind, RuntimeControlFuture, RuntimeControlReply,
-    RuntimeControlRetry, SystemRuntimeIds,
+    PlacementRenewalError, RunnerRuntimeControlClient, RunnerRuntimeError, RunnerRuntimePorts,
+    RunnerSessionSupervisor, RuntimeControlError, RuntimeControlErrorKind, RuntimeControlFuture,
+    RuntimeControlReply, RuntimeControlRetry, SystemRuntimeIds, WindowsPlacementRenewalAckFuture,
+    WindowsPlacementRenewalFuture, WindowsPlacementRenewalSource,
 };
 use automata_ci_runner_spool::FileSpool;
 use automata_ci_runner_transport::PreparedRequest;
@@ -32,6 +40,7 @@ struct PollObservation {
     slot: RunnerSlotOrdinal,
     operation_id: OperationId,
     acknowledges_operation_id: Option<OperationId>,
+    windows_placement_renewal_sha256: Option<Sha256Digest>,
     canonical_bytes: Vec<u8>,
 }
 
@@ -44,9 +53,175 @@ impl PollObservation {
             slot: poll.slot(),
             operation_id: poll.header().operation_id(),
             acknowledges_operation_id: poll.acknowledges_operation_id(),
+            windows_placement_renewal_sha256: poll
+                .windows_placement_renewal()
+                .map(WindowsRunnerPlacementRenewalEnvelope::envelope_sha256),
             canonical_bytes: request.canonical_bytes().to_vec(),
         }
     }
+}
+
+#[derive(Debug)]
+struct RotatingRenewalSource {
+    envelopes: [WindowsRunnerPlacementRenewalEnvelope; 2],
+    current: Mutex<usize>,
+    acknowledgements: Mutex<Vec<Sha256Digest>>,
+}
+
+impl RotatingRenewalSource {
+    fn new(runner_id: RunnerId) -> Self {
+        Self {
+            envelopes: [
+                renewal_envelope(runner_id, 1),
+                renewal_envelope(runner_id, 2),
+            ],
+            current: Mutex::new(0),
+            acknowledgements: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn acknowledgements(&self) -> Vec<Sha256Digest> {
+        self.acknowledgements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn assert_acknowledgements(&self, expected: &[Sha256Digest]) {
+        assert_eq!(self.acknowledgements(), expected);
+    }
+}
+
+impl WindowsPlacementRenewalSource for RotatingRenewalSource {
+    fn current_or_refresh(
+        &self,
+        _observed_at: UnixMillis,
+        cancellation: CancellationToken,
+    ) -> WindowsPlacementRenewalFuture<'_> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(PlacementRenewalError::Cancelled);
+            }
+            let current = *self.current.lock().unwrap_or_else(PoisonError::into_inner);
+            Ok(self.envelopes[current].clone())
+        })
+    }
+
+    fn acknowledge(
+        &self,
+        renewal_envelope_sha256: Sha256Digest,
+        _cancellation: CancellationToken,
+    ) -> WindowsPlacementRenewalAckFuture<'_> {
+        Box::pin(async move {
+            let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.envelopes[*current].envelope_sha256() != renewal_envelope_sha256 {
+                return Err(PlacementRenewalError::InvalidState);
+            }
+            self.acknowledgements
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(renewal_envelope_sha256);
+            if *current + 1 < self.envelopes.len() {
+                *current += 1;
+            }
+            Ok(())
+        })
+    }
+}
+
+fn renewal_digest(byte: u8) -> Sha256Digest {
+    Sha256Digest::from_bytes([byte; 32])
+}
+
+fn renewal_envelope(runner_id: RunnerId, serial: u64) -> WindowsRunnerPlacementRenewalEnvelope {
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.example/windows-server-2025").expect("profile ID"),
+        renewal_digest(4),
+    );
+    let capabilities = RunnerCapabilities::new(
+        runner_id,
+        RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
+    )
+    .with_sandbox(SandboxCapabilities::new(
+        IsolationLevel::VirtualMachine,
+        [SandboxFeature::WINDOWS_HYPERV_CONTAINER],
+    ))
+    .with_features([RunnerFeature::SHELL_STEPS])
+    .with_environment_profiles([profile.clone()]);
+    let transaction = WindowsEnrollmentTransactionBinding::new(
+        runner_id,
+        OperationId::new(),
+        "https://control.example.test/",
+        "https://enroll.example.test/",
+        renewal_digest(1),
+        renewal_digest(2),
+        renewal_digest(3),
+    )
+    .expect("transaction");
+    let image_digest = renewal_digest(5);
+    let image = WindowsAdmissionImage::new(
+        format!("registry.example.test/automata/windows@sha256:{image_digest}"),
+        image_digest,
+    )
+    .expect("image");
+    let broker_profile = WindowsBrokerProfileBinding::new(
+        "a".repeat(64),
+        WINDOWS_RUNNER_ADMISSION_PROVIDER_ID,
+        renewal_digest(6),
+        profile,
+        image,
+        renewal_digest(7),
+        true,
+        false,
+        automata_ci_core::windows_action_archive_policy_sha256(),
+        64,
+    )
+    .expect("broker profile");
+    let promotion = WindowsImagePromotionBinding::new(
+        "production.windows.v1",
+        "promotion-key-v1",
+        renewal_digest(8),
+        renewal_digest(9),
+        41,
+        19,
+        WindowsPromotionValidity::new(1_000, 100_000).expect("promotion validity"),
+    )
+    .expect("promotion");
+    let binding =
+        WindowsRunnerAdmissionBinding::new(transaction, broker_profile, promotion, capabilities)
+            .expect("binding");
+    let broker = WindowsBrokerAdmissionEvidence::new(
+        renewal_digest(10),
+        renewal_digest(11),
+        renewal_digest(12),
+        renewal_digest(13),
+        renewal_digest(14),
+    )
+    .expect("broker evidence");
+    let authority = WindowsAuthorityAdmissionEvidence::new(
+        renewal_digest(15),
+        renewal_digest(16),
+        renewal_digest(17),
+        renewal_digest(18),
+    )
+    .expect("authority evidence");
+    let claims = WindowsRunnerPlacementRenewalClaims::new(
+        "broker-admission-v1",
+        runner_id,
+        serial,
+        renewal_digest(u8::try_from(20_u64 + serial).expect("fixture serial")),
+        renewal_digest(30),
+        binding,
+        WindowsRunnerAdmissionEvidence::new(broker, authority),
+        WindowsAdmissionValidity::new(9_000, 40_000).expect("renewal validity"),
+    )
+    .expect("renewal claims");
+    WindowsRunnerPlacementRenewalEnvelope::new(
+        "broker-admission-v1",
+        claims.canonical_bytes().expect("canonical renewal claims"),
+        vec![u8::try_from(40_u64 + serial).expect("fixture signature byte"); 64],
+    )
+    .expect("renewal envelope")
 }
 
 #[derive(Debug, Default)]
@@ -464,21 +639,37 @@ fn runtime(
     journal: Arc<dyn RunnerJournal>,
     spool: Arc<FileSpool>,
 ) -> RunnerSessionSupervisor {
+    runtime_with_renewals(runner_id, slots, client, journal, spool, None)
+}
+
+fn runtime_with_renewals(
+    runner_id: RunnerId,
+    slots: u16,
+    client: Arc<dyn RunnerRuntimeControlClient>,
+    journal: Arc<dyn RunnerJournal>,
+    spool: Arc<FileSpool>,
+    renewal_source: Option<Arc<dyn WindowsPlacementRenewalSource>>,
+) -> RunnerSessionSupervisor {
+    let ports = RunnerRuntimePorts::new(
+        client,
+        journal,
+        spool,
+        Arc::new(support::NeverExecutor),
+        Arc::new(support::FixedClock::new(10_000, 50)),
+        Arc::new(support::ImmediateSleeper),
+        Arc::new(SystemRuntimeIds),
+    );
+    let ports = match renewal_source {
+        Some(source) => ports.with_windows_placement_renewal_source(source),
+        None => ports,
+    };
     RunnerSessionSupervisor::new(
         support::config_with_slots_and_retry(
             runner_id,
             slots,
             automata_ci_runner_runtime::RetryPolicy::default(),
         ),
-        RunnerRuntimePorts::new(
-            client,
-            journal,
-            spool,
-            Arc::new(support::NeverExecutor),
-            Arc::new(support::FixedClock::new(10_000, 50)),
-            Arc::new(support::ImmediateSleeper),
-            Arc::new(SystemRuntimeIds),
-        ),
+        ports,
     )
 }
 
@@ -487,6 +678,7 @@ async fn run_one_successful_no_work(
     session_id: RunnerSessionId,
     journal: Arc<dyn RunnerJournal>,
     spool: Arc<FileSpool>,
+    renewal_source: Arc<dyn WindowsPlacementRenewalSource>,
 ) -> Vec<PollObservation> {
     let shutdown = CancellationToken::new();
     let client = Arc::new(NoWorkClient::new(
@@ -496,11 +688,58 @@ async fn run_one_successful_no_work(
         0,
         Some(shutdown.clone()),
     ));
-    runtime(runner_id, 1, client.clone(), journal, spool)
-        .run(shutdown)
-        .await
-        .expect("one successful no-work response");
+    runtime_with_renewals(
+        runner_id,
+        1,
+        client.clone(),
+        journal,
+        spool,
+        Some(renewal_source),
+    )
+    .run(shutdown)
+    .await
+    .expect("one successful no-work response");
     client.observations()
+}
+
+fn seed_lease_poll(
+    journal: &dyn RunnerJournal,
+    session_id: RunnerSessionId,
+    slot: RunnerSlotOrdinal,
+) -> OperationId {
+    journal
+        .begin_session(SessionBinding::new(
+            session_id,
+            SUPPORTED_PROTOCOL_RANGE.max(),
+            automata_ci_core::JobIrVersion::current(),
+        ))
+        .expect("seed session");
+    let operation_id = OperationId::new();
+    journal
+        .prepare_lease_poll(session_id, slot, operation_id)
+        .expect("durable checkpoint before first send");
+    operation_id
+}
+
+fn assert_failed_rotation_poll(
+    client: &NoWorkClient,
+    operation_id: OperationId,
+    renewal_sha256: Sha256Digest,
+    source: &RotatingRenewalSource,
+) -> Vec<PollObservation> {
+    let poll = client.observations();
+    assert_eq!(poll.len(), 1);
+    assert_eq!(poll[0].operation_id, operation_id);
+    assert_eq!(poll[0].acknowledges_operation_id, None);
+    assert_eq!(
+        poll[0].windows_placement_renewal_sha256,
+        Some(renewal_sha256)
+    );
+    assert!(
+        source.acknowledgements().is_empty(),
+        "the renewal must not rotate before the poll successor is durable"
+    );
+    poll
 }
 
 #[tokio::test]
@@ -606,18 +845,11 @@ async fn crashes_before_send_after_response_and_after_rotate_reconstruct_exact_p
     let runner_id = RunnerId::new();
     let session_id = RunnerSessionId::new();
     let slot = RunnerSlotOrdinal::new(1).expect("slot");
+    let renewal_source = Arc::new(RotatingRenewalSource::new(runner_id));
+    let first_renewal_sha256 = renewal_source.envelopes[0].envelope_sha256();
+    let second_renewal_sha256 = renewal_source.envelopes[1].envelope_sha256();
     let (journal, spool) = support::durable_ports(&scratch, runner_id);
-    journal
-        .begin_session(SessionBinding::new(
-            session_id,
-            SUPPORTED_PROTOCOL_RANGE.max(),
-            automata_ci_core::JobIrVersion::current(),
-        ))
-        .expect("seed session");
-    let before_send_operation = OperationId::new();
-    journal
-        .prepare_lease_poll(session_id, slot, before_send_operation)
-        .expect("durable checkpoint before first send");
+    let before_send_operation = seed_lease_poll(journal.as_ref(), session_id, slot);
     drop(journal);
 
     let faulting = Arc::new(
@@ -630,12 +862,13 @@ async fn crashes_before_send_after_response_and_after_rotate_reconstruct_exact_p
         .expect("faulting journal"),
     );
     let first_client = Arc::new(NoWorkClient::new(session_id, 1, 1, 0, None));
-    let first_runtime = runtime(
+    let first_runtime = runtime_with_renewals(
         runner_id,
         1,
         first_client.clone(),
         faulting.clone(),
         spool.clone(),
+        Some(renewal_source.clone()),
     );
     let error = first_runtime
         .run(CancellationToken::new())
@@ -645,23 +878,31 @@ async fn crashes_before_send_after_response_and_after_rotate_reconstruct_exact_p
         error,
         RunnerRuntimeError::Journal(JournalError::InjectedFault(CommitStage::FileSynced))
     ));
-    let first_poll = first_client.observations();
-    assert_eq!(first_poll.len(), 1);
-    assert_eq!(first_poll[0].operation_id, before_send_operation);
-    assert_eq!(first_poll[0].acknowledges_operation_id, None);
+    let first_poll = assert_failed_rotation_poll(
+        first_client.as_ref(),
+        before_send_operation,
+        first_renewal_sha256,
+        renewal_source.as_ref(),
+    );
     drop(first_runtime);
     drop(faulting);
 
     let retry_journal = Arc::new(
         FileJournal::open(scratch.journal_root(), runner_id).expect("reopen after failed rotation"),
     );
-    let retried_poll =
-        run_one_successful_no_work(runner_id, session_id, retry_journal.clone(), spool.clone())
-            .await;
+    let retried_poll = run_one_successful_no_work(
+        runner_id,
+        session_id,
+        retry_journal.clone(),
+        spool.clone(),
+        renewal_source.clone(),
+    )
+    .await;
     assert_eq!(
         retried_poll, first_poll,
         "operation and canonical bytes retry exactly"
     );
+    renewal_source.assert_acknowledgements(&[first_renewal_sha256]);
     let rotated = *retry_journal
         .snapshot()
         .expect("rotated snapshot")
@@ -680,13 +921,25 @@ async fn crashes_before_send_after_response_and_after_rotate_reconstruct_exact_p
         FileJournal::open(scratch.journal_root(), runner_id)
             .expect("reopen after durable rotation"),
     );
-    let resumed = run_one_successful_no_work(runner_id, session_id, resumed_journal, spool).await;
+    let resumed = run_one_successful_no_work(
+        runner_id,
+        session_id,
+        resumed_journal,
+        spool,
+        renewal_source.clone(),
+    )
+    .await;
     assert_eq!(resumed.len(), 1);
     assert_eq!(resumed[0].operation_id, rotated.current_operation_id());
     assert_eq!(
         resumed[0].acknowledges_operation_id,
         rotated.acknowledges_operation_id()
     );
+    assert_eq!(
+        resumed[0].windows_placement_renewal_sha256,
+        Some(second_renewal_sha256)
+    );
+    renewal_source.assert_acknowledgements(&[first_renewal_sha256, second_renewal_sha256]);
 }
 
 #[tokio::test]

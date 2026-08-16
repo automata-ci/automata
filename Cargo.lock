@@ -414,6 +414,7 @@ dependencies = [
  "automata-ci-runner-transport",
  "automata-ci-store",
  "flate2",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",

@@ -15,6 +15,11 @@ use automata_ci_store::{
 };
 use thiserror::Error;
 
+use super::port::{
+    WindowsHyperVPlacementEvidence, durable_managed_secret_bindings,
+    durable_windows_hyperv_placement,
+};
+
 const MAX_UNCOMPRESSED_RUNNER_LOG_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DURABLE_LOG_SEQUENCE: u64 = 9_223_372_036_854_775_807;
 
@@ -78,6 +83,9 @@ pub struct AcceptedRuntimeAuthorityOffer {
     job_ir: JobIrMetadata,
     offer_valid_until: UnixMillis,
     command: RuntimeAuthorityOfferCommand,
+    windows_hyperv_placement: Option<WindowsHyperVPlacementEvidence>,
+    managed_secret_bindings_empty: bool,
+    command_projection_valid: bool,
 }
 
 impl AcceptedRuntimeAuthorityOffer {
@@ -104,6 +112,9 @@ impl AcceptedRuntimeAuthorityOffer {
             job_ir,
             offer_valid_until,
             command,
+            windows_hyperv_placement: None,
+            managed_secret_bindings_empty: false,
+            command_projection_valid: false,
         })
     }
 
@@ -147,6 +158,26 @@ impl AcceptedRuntimeAuthorityOffer {
     #[must_use]
     pub const fn command(&self) -> RuntimeAuthorityOfferCommand {
         self.command
+    }
+
+    /// Returns the value-free Windows placement retained before the encrypted
+    /// lease-offer payload is erased.
+    #[must_use]
+    pub const fn windows_hyperv_placement(&self) -> Option<&WindowsHyperVPlacementEvidence> {
+        self.windows_hyperv_placement.as_ref()
+    }
+
+    /// Reports whether the retained offer carried no managed-secret bindings.
+    #[must_use]
+    pub const fn managed_secret_bindings_empty(&self) -> bool {
+        self.managed_secret_bindings_empty
+    }
+
+    /// Reports whether every value-free security projection was decoded from
+    /// the exact durable command before its payload was erased.
+    #[must_use]
+    pub const fn command_projection_valid(&self) -> bool {
+        self.command_projection_valid
     }
 }
 
@@ -449,6 +480,14 @@ impl PublishedLeaseOffer {
 
 impl From<PublishedLeaseOffer> for AcceptedRuntimeAuthorityOffer {
     fn from(offer: PublishedLeaseOffer) -> Self {
+        let (windows_hyperv_placement, managed_secret_bindings_empty, command_projection_valid) =
+            match (
+                durable_windows_hyperv_placement(&offer.command),
+                durable_managed_secret_bindings(&offer.command),
+            ) {
+                (Ok(placement), Ok(bindings)) => (placement, bindings.bindings().is_empty(), true),
+                _ => (None, false, false),
+            };
         let command = RuntimeAuthorityOfferCommand::new(
             offer.command.request().operation_id(),
             offer.command.sequence(),
@@ -462,6 +501,9 @@ impl From<PublishedLeaseOffer> for AcceptedRuntimeAuthorityOffer {
             job_ir: offer.job_ir,
             offer_valid_until: offer.offer_valid_until,
             command,
+            windows_hyperv_placement,
+            managed_secret_bindings_empty,
+            command_projection_valid,
         }
     }
 }

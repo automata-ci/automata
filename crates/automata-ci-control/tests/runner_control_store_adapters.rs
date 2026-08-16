@@ -695,11 +695,11 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
         assert_eq!(request.command().operation_id(), server_operation_id);
         assert_eq!(
             request.command().kind().as_str(),
-            "automata.runner.lease-offer.v2"
+            "automata.runner.lease-offer.v4"
         );
         let body: serde_json::Value =
             serde_json::from_slice(request.command().payload().bytes()).expect("offer JSON");
-        assert_eq!(body["schema"], 2);
+        assert_eq!(body["schema"], 4);
         assert_eq!(body["protocol_version"], 2);
         assert_eq!(body["slot"], 2);
         assert_eq!(
@@ -724,6 +724,7 @@ async fn durable_offer_adapter_publishes_exact_typed_body_and_identity() {
                 "protocol_version",
                 "schema",
                 "slot",
+                "windows_hyperv_placement",
             ],
             "the outbox schema has no managed-secret value or authority bearer field"
         );

@@ -47,14 +47,21 @@ pub use observer::{
     RunnerLeaseRequestStage, RunnerRuntimeAuthorityRequestStage,
 };
 pub use port::{
-    AuthorizedRunnerRegistration, CompositeRuntimeAuthorityIssuer, ControlIdGenerator,
-    ControlPortError, DesiredRunnerState, ImmutableBlobJobIrReader, JOB_IR_PROTOBUF_MEDIA_TYPE,
+    AuthorizeWindowsHyperVBrokerGrant, AuthorizedRunnerRegistration,
+    CommitWindowsHyperVBrokerGrantDelivery, CommitWindowsHyperVPlacementRenewal,
+    CompositeRuntimeAuthorityIssuer, ControlIdGenerator, ControlPortError, DesiredRunnerState,
+    Ed25519WindowsHyperVBrokerGrantIssuer, ImmutableBlobJobIrReader, JOB_IR_PROTOBUF_MEDIA_TYPE,
     JobIrObjectReader, LeaseOfferClaim, LeaseOfferClaimStatus, LeaseOfferCommand,
     LeaseOfferCommandError, LeaseOfferCommandPublisher, LeaseOfferPublishOutcome,
     LeaseOfferReplayResolution, LeasePollAdapter, LeasePoller, ManagedSecretBindingIssuer,
     OptionalRuntimeAuthorityIssuer, PublishedCommand, RandomControlIdGenerator,
     RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, RuntimeAuthorityIssueRequest,
     RuntimeAuthorityIssueRequestError, RuntimeAuthorityIssuer, StoreLeaseOfferCommandPublisher,
-    StoreRunnerSessionFenceResolver,
+    StoreRunnerSessionFenceResolver, WindowsHyperVBrokerGrantAuthorizationRepository,
+    WindowsHyperVBrokerGrantIssuanceAuthorization, WindowsHyperVBrokerGrantIssueRequest,
+    WindowsHyperVBrokerGrantIssuer, WindowsHyperVBrokerGrantIssuerError,
+    WindowsHyperVBrokerGrantProposal, WindowsHyperVCurrentAdmission,
+    WindowsHyperVCurrentAdmissionReader, WindowsHyperVPlacementEvidence,
+    WindowsHyperVPlacementRenewalDisposition, WindowsHyperVPlacementRenewalRepository,
 };
 pub use verify::{JobIrBlobError, verify_job_ir_blob};

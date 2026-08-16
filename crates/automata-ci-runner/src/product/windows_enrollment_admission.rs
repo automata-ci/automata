@@ -9,7 +9,7 @@ use std::{
 
 use automata_ci_core::{
     EnvironmentProfile, JobResourceAllocation, OperationId, RunnerCapabilities, RunnerId,
-    Sha256Digest,
+    Sha256Digest, windows_action_archive_policy_sha256,
 };
 use automata_ci_execution::{
     NetworkPolicy, ResourceLimits, RootFilesystemPolicy, SandboxEnvironment, SandboxLaunch,
@@ -431,6 +431,8 @@ impl WindowsEnrollmentAdmissionBinding {
             self.probe_policy.contract_sha256,
             self.probe_policy.network == NetworkPolicy::Disabled,
             true,
+            windows_action_archive_policy_sha256(),
+            self.probe_policy.resources.pids(),
         )
         .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
         let promotion = WindowsImagePromotionBinding::new(
@@ -538,6 +540,7 @@ impl WindowsEnrollmentAdmissionBinding {
             self.probe_policy.privilege == SandboxPrivilegePolicy::Unprivileged,
             true,
             true,
+            windows_action_archive_policy_sha256(),
         )
         .map_err(|_| WindowsEnrollmentAdmissionError::InvalidRequest)?;
         let probe = WindowsAdmissionProbeContract::new(

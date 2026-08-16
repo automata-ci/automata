@@ -9,12 +9,90 @@ use automata_ci_runner_journal::{
     EndpointRequestContentRef, JournalError, JournalInvariantError, JournalSnapshot,
     LeaseOfferStatus, LogSegment, LogSegmentAcknowledgement, LogSegmentPublication,
     OutboundOperationSequence, ProviderName, ProviderOperation, ProviderOperationKind,
-    ProviderOperationOutcome, RunnerJournal, SandboxHandle, SandboxIdentity,
+    ProviderOperationOutcome, RUNNER_JOURNAL_SCHEMA_VERSION, RunnerJournal, SandboxHandle,
+    SandboxIdentity,
 };
 use static_assertions::assert_obj_safe;
 use support::{Fixture, Scratch, record_and_ack_runtime_authority, record_and_ack_terminal};
 
 assert_obj_safe!(RunnerJournal);
+
+#[test]
+fn windows_broker_grant_uses_v7_and_survives_durable_reopen_exactly() {
+    assert_eq!(RUNNER_JOURNAL_SCHEMA_VERSION, 7);
+    let scratch = Scratch::new("windows-broker-grant-v7");
+    let fixture = Fixture::new();
+    let offer = fixture.offer(1);
+    let journal = fixture.open(&scratch);
+    journal
+        .begin_session(fixture.binding())
+        .expect("begin session");
+    journal
+        .record_lease_offer(fixture.session_id, offer.clone())
+        .expect("record offer");
+    journal
+        .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
+        .expect("accept lease");
+    let delivery = fixture.runtime_authority_delivery_with_windows_grant(&offer);
+    let expected_grant = delivery
+        .windows_hyperv_broker_grant()
+        .expect("Windows broker grant")
+        .clone();
+    let expected_bundle_digest = delivery.bundle_digest();
+    journal
+        .record_runtime_authority_delivery(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            delivery,
+        )
+        .expect("record Windows authority delivery");
+    drop(journal);
+
+    let reopened = fixture.open(&scratch);
+    let recovered = reopened.snapshot().expect("reopen v7 journal");
+    let recovered_delivery = recovered
+        .slot(fixture.slot)
+        .expect("slot")
+        .runtime_authority_delivery()
+        .expect("runtime-authority delivery");
+    assert_eq!(recovered_delivery.bundle_digest(), expected_bundle_digest);
+    assert_eq!(
+        recovered_delivery.windows_hyperv_broker_grant(),
+        Some(&expected_grant)
+    );
+}
+
+#[test]
+fn windows_broker_grant_must_match_the_durable_session() {
+    let scratch = Scratch::new("windows-broker-grant-session");
+    let fixture = Fixture::new();
+    let offer = fixture.offer(1);
+    let journal = fixture.open(&scratch);
+    journal
+        .begin_session(fixture.binding())
+        .expect("begin session");
+    journal
+        .record_lease_offer(fixture.session_id, offer.clone())
+        .expect("record offer");
+    journal
+        .accept_lease(fixture.session_id, fixture.slot, fixture.lease.guard())
+        .expect("accept lease");
+    let delivery = fixture
+        .runtime_authority_delivery_with_windows_grant_for_session(&offer, RunnerSessionId::new());
+
+    assert!(matches!(
+        journal.record_runtime_authority_delivery(
+            fixture.session_id,
+            fixture.slot,
+            fixture.lease.guard(),
+            delivery,
+        ),
+        Err(JournalError::Invariant(
+            JournalInvariantError::InvalidWindowsHyperVBrokerGrant
+        ))
+    ));
+}
 
 #[test]
 fn endpoint_operation_kinds_survive_durable_reopen_exactly() {

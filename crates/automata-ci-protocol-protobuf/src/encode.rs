@@ -474,6 +474,20 @@ fn lease_request(value: &protocol::LeaseRequest) -> wire::LeaseRequest {
         acknowledges_operation_id: value
             .acknowledges_operation_id()
             .map(|operation_id| uuid_bytes(operation_id.as_uuid())),
+        windows_placement_renewal: value
+            .windows_placement_renewal()
+            .map(windows_placement_renewal),
+    }
+}
+
+fn windows_placement_renewal(
+    value: &protocol::WindowsRunnerPlacementRenewalEnvelope,
+) -> wire::WindowsRunnerPlacementRenewalEnvelope {
+    wire::WindowsRunnerPlacementRenewalEnvelope {
+        schema_version: u32::from(value.schema_version()),
+        issuer_key_id: value.issuer_key_id().to_owned(),
+        signed_payload: value.signed_payload().to_vec(),
+        authenticator: value.authenticator().to_vec(),
     }
 }
 
@@ -486,6 +500,58 @@ fn lease_offer(value: &protocol::LeaseOffer) -> wire::LeaseOffer {
         managed_secret_bindings: value
             .managed_secret_bindings()
             .map(managed_secret_binding_overlay),
+    }
+}
+
+fn windows_hyperv_broker_grant(
+    value: &core::WindowsHyperVBrokerGrant,
+) -> wire::WindowsHyperVBrokerGrant {
+    wire::WindowsHyperVBrokerGrant {
+        schema: u32::from(value.schema()),
+        key_id_sha256: value.key_id().as_bytes().to_vec(),
+        claims: Some(windows_hyperv_broker_grant_claims(value.claims())),
+        ed25519_signature: value.signature().to_vec(),
+    }
+}
+
+fn windows_hyperv_broker_grant_claims(
+    value: &core::WindowsHyperVBrokerGrantClaims,
+) -> wire::WindowsHyperVBrokerGrantClaims {
+    wire::WindowsHyperVBrokerGrantClaims {
+        host_id_sha256: value.host_id().as_bytes().to_vec(),
+        placement_binding_sha256: value.placement_binding_digest().as_bytes().to_vec(),
+        attempt_id: uuid_bytes(value.attempt_id().as_uuid()),
+        job_id: uuid_bytes(value.job_id().as_uuid()),
+        run_id: uuid_bytes(value.run_id().as_uuid()),
+        poll_operation_id: uuid_bytes(value.poll_operation_id().as_uuid()),
+        runner_id: uuid_bytes(value.runner_id().as_uuid()),
+        runner_session_id: uuid_bytes(value.runner_session_id().as_uuid()),
+        runner_generation: value.runner_generation(),
+        session_epoch: value.session_epoch(),
+        slot: u32::from(value.slot()),
+        lease_id: uuid_bytes(value.lease_id().as_uuid()),
+        fencing_token: value.fencing_token().get(),
+        job_ir_version: u32::from(value.job_ir_version().get()),
+        job_ir_encoded_size: value.job_ir_encoded_size(),
+        job_ir_sha256: value.job_ir_digest().as_bytes().to_vec(),
+        job_ir_object_key_sha256: value.job_ir_object_key_digest().as_bytes().to_vec(),
+        trust_binding_sha256: value.trust_binding_digest().as_bytes().to_vec(),
+        environment_profile_id: value.environment_profile().id().as_str().to_owned(),
+        environment_profile_sha256: value.environment_profile().digest().as_bytes().to_vec(),
+        issued_at_unix_millis: value.issued_at().get(),
+        expires_at_unix_millis: value.expires_at().get(),
+        accepted_offer_operation_id: uuid_bytes(value.accepted_offer_operation_id().as_uuid()),
+        accepted_offer_sequence: value.accepted_offer_sequence(),
+        post_accept_operation_id: uuid_bytes(value.post_accept_operation_id().as_uuid()),
+        post_accept_request_sha256: value.post_accept_request_digest().as_bytes().to_vec(),
+        job_resource_allocation: Some(job_resource_allocation(value.job_resource_allocation())),
+        profile_contract_sha256: value.profile_contract_sha256().as_bytes().to_vec(),
+        sandbox_pids_limit: value.sandbox_pids_limit(),
+        sandbox_spec_sha256: value.sandbox_spec_sha256().as_bytes().to_vec(),
+        sealed_action_policy_sha256: value.sealed_action_policy_sha256().as_bytes().to_vec(),
+        windows_action_graph_sha256: value
+            .windows_action_graph_sha256()
+            .map(|digest| digest.as_bytes().to_vec()),
     }
 }
 
@@ -518,6 +584,9 @@ fn runtime_authority_grant(value: &protocol::RuntimeAuthorityGrant) -> wire::Run
         binding: Some(runtime_authority_delivery_binding(value.binding())),
         bundle_sha256: value.bundle_digest().as_bytes().to_vec(),
         authorities: Some(runtime_authorities(value.authorities())),
+        windows_hyperv_broker_grant: value
+            .windows_hyperv_broker_grant()
+            .map(windows_hyperv_broker_grant),
     }
 }
 
@@ -1451,4 +1520,84 @@ const fn remote_error_code(value: protocol::RemoteErrorCode) -> i32 {
 
 fn uuid_bytes(value: Uuid) -> Vec<u8> {
     value.as_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{DecodeError, decode::windows_hyperv_broker_grant_claims as decode_claims};
+
+    fn claims(
+        windows_action_graph_sha256: Option<core::Sha256Digest>,
+    ) -> core::WindowsHyperVBrokerGrantClaims {
+        let capacity = core::ResourceCapacity::new(2_000, 2 * 1024 * 1024 * 1024, 0, 0);
+        core::WindowsHyperVBrokerGrantClaims::new(
+            core::Sha256Digest::from_bytes([1; 32]),
+            core::Sha256Digest::from_bytes([2; 32]),
+            core::AttemptId::new(),
+            core::JobId::new(),
+            core::RunId::new(),
+            core::OperationId::new(),
+            core::OperationId::new(),
+            1,
+            core::OperationId::new(),
+            core::Sha256Digest::from_bytes([3; 32]),
+            core::RunnerId::new(),
+            core::RunnerSessionId::new(),
+            1,
+            1,
+            1,
+            core::LeaseId::new(),
+            core::FencingToken::new(1).expect("fencing token"),
+            core::JobIrVersion::current(),
+            128,
+            core::Sha256Digest::from_bytes([4; 32]),
+            core::Sha256Digest::from_bytes([5; 32]),
+            core::JobResourceAllocation::new(capacity, capacity).expect("allocation"),
+            64,
+            core::Sha256Digest::from_bytes([6; 32]),
+            core::EnvironmentProfile::new(
+                core::EnvironmentProfileId::new("example.test/windows").expect("profile id"),
+                core::Sha256Digest::from_bytes([7; 32]),
+            ),
+            core::Sha256Digest::from_bytes([8; 32]),
+            core::windows_action_archive_policy_sha256(),
+            windows_action_graph_sha256,
+            core::UnixMillis::new(100),
+            core::UnixMillis::new(200),
+        )
+        .expect("claims")
+    }
+
+    #[test]
+    fn windows_action_graph_digest_roundtrips_and_mutation_fails_closed() {
+        for graph_sha256 in [None, Some(core::Sha256Digest::from_bytes([0x41; 32]))] {
+            let expected = claims(graph_sha256);
+            let wire = windows_hyperv_broker_grant_claims(&expected);
+            assert_eq!(
+                wire.windows_action_graph_sha256,
+                graph_sha256.map(|digest| digest.as_bytes().to_vec())
+            );
+            assert_eq!(decode_claims(wire).expect("roundtrip"), expected);
+        }
+
+        let expected = claims(Some(core::Sha256Digest::from_bytes([0x41; 32])));
+        let mut mutated = windows_hyperv_broker_grant_claims(&expected);
+        mutated.windows_action_graph_sha256 = Some(vec![0x42; 32]);
+        assert!(matches!(
+            decode_claims(mutated),
+            Err(DecodeError::InvalidValue {
+                field: "windows_hyperv_broker_grant.claims.sandbox_spec_sha256"
+            })
+        ));
+
+        let mut malformed = windows_hyperv_broker_grant_claims(&expected);
+        malformed.windows_action_graph_sha256 = Some(vec![0x41; 31]);
+        assert!(matches!(
+            decode_claims(malformed),
+            Err(DecodeError::InvalidValue {
+                field: "windows_hyperv_broker_grant.claims.windows_action_graph_sha256"
+            })
+        ));
+    }
 }

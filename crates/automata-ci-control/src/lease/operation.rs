@@ -17,6 +17,8 @@ use super::runnable::{AuthenticatedPlacementTrust, RunnableAttempt, RunnableCurs
 const LEASE_REQUEST_DIGEST_DOMAIN: &[u8] = b"automata.store.lease-request.v2\0";
 const WINDOWS_PLACEMENT_GRANT_DIGEST_DOMAIN: &[u8] =
     b"automata.control.windows-hyperv-placement-grant.v1\0";
+const WINDOWS_PLACEMENT_TRUST_DIGEST_DOMAIN: &[u8] =
+    b"automata.control.windows-hyperv-placement-trust.v1\0";
 
 /// Canonical identity of one runner lease poll before scheduling selects work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -532,7 +534,7 @@ pub struct TryClaimAttempt {
     observed_at: UnixMillis,
     expires_at: UnixMillis,
     cursor: RunnableCursorAdvance,
-    windows_placement_grant: Option<WindowsHyperVPlacementGrant>,
+    windows_placement_grant: Option<Box<WindowsHyperVPlacementGrant>>,
 }
 
 /// Server-only one-use authority for one exact Windows Hyper-V placement.
@@ -552,7 +554,7 @@ pub struct WindowsHyperVPlacementGrant {
     slot: StableRunnerSlot,
     lease_id: LeaseId,
     job_ir: JobIrMetadata,
-    trust: AuthenticatedPlacementTrust,
+    trust_binding_digest: Sha256Digest,
     environment_profile: EnvironmentProfile,
     issued_at: UnixMillis,
     expires_at: UnixMillis,
@@ -595,6 +597,7 @@ impl WindowsHyperVPlacementGrant {
         if expires_at <= issued_at {
             return Err(WindowsPlacementGrantError::InvalidValidityInterval);
         }
+        let trust_binding_digest = trust_binding_digest(&trust);
         let mut grant = Self {
             attempt_id: candidate.attempt_id(),
             job_id: candidate.job_id(),
@@ -604,7 +607,7 @@ impl WindowsHyperVPlacementGrant {
             slot: request_key.slot(),
             lease_id,
             job_ir: candidate.job_ir().clone(),
-            trust,
+            trust_binding_digest,
             environment_profile,
             issued_at,
             expires_at,
@@ -652,15 +655,7 @@ impl WindowsHyperVPlacementGrant {
         digest.update(self.job_ir.encoded_size().to_be_bytes());
         digest.update(self.job_ir.digest().as_bytes());
         field(&mut digest, self.job_ir.object_key().as_str().as_bytes());
-        digest.update(self.trust.snapshot_schema().to_be_bytes());
-        digest.update(self.trust.policy_revision().get().to_be_bytes());
-        digest.update(self.trust.policy_digest().as_bytes());
-        digest.update(self.trust.snapshot_digest().as_bytes());
-        digest.update(match self.trust.authority_profile() {
-            automata_ci_core::JobAuthorityProfile::Standard => [0],
-            automata_ci_core::JobAuthorityProfile::CredentialFree => [1],
-        });
-        digest.update(self.trust.requirements_digest().as_bytes());
+        digest.update(self.trust_binding_digest.as_bytes());
         field(
             &mut digest,
             self.environment_profile.id().as_str().as_bytes(),
@@ -675,6 +670,18 @@ impl WindowsHyperVPlacementGrant {
     #[must_use]
     pub const fn attempt_id(&self) -> AttemptId {
         self.attempt_id
+    }
+
+    /// Returns the exact job authorized by this value.
+    #[must_use]
+    pub const fn job_id(&self) -> automata_ci_core::JobId {
+        self.job_id
+    }
+
+    /// Returns the exact workflow run authorized by this value.
+    #[must_use]
+    pub const fn run_id(&self) -> automata_ci_core::RunId {
+        self.run_id
     }
 
     /// Returns the exact poll operation authorized by this one-use value.
@@ -701,6 +708,18 @@ impl WindowsHyperVPlacementGrant {
         self.lease_id
     }
 
+    /// Returns the immutable `JobIR` object metadata bound into this value.
+    #[must_use]
+    pub const fn job_ir(&self) -> &JobIrMetadata {
+        &self.job_ir
+    }
+
+    /// Returns the compact digest of authenticated trust and requirements.
+    #[must_use]
+    pub const fn trust_binding_digest(&self) -> Sha256Digest {
+        self.trust_binding_digest
+    }
+
     /// Returns the immutable content-attested Windows environment profile.
     #[must_use]
     pub const fn environment_profile(&self) -> &EnvironmentProfile {
@@ -713,11 +732,75 @@ impl WindowsHyperVPlacementGrant {
         self.expires_at
     }
 
+    /// Returns the inclusive issue time.
+    #[must_use]
+    pub const fn issued_at(&self) -> UnixMillis {
+        self.issued_at
+    }
+
     /// Returns the canonical domain-separated binding digest.
     #[must_use]
     pub const fn binding_digest(&self) -> Sha256Digest {
         self.binding_digest
     }
+
+    #[cfg(feature = "adapter-spi")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_persisted(
+        request_key: LeaseRequestKey,
+        attempt_id: AttemptId,
+        lease_id: LeaseId,
+        job_ir: JobIrMetadata,
+        trust_binding_digest: Sha256Digest,
+        environment_profile: EnvironmentProfile,
+        issued_at: UnixMillis,
+        expires_at: UnixMillis,
+        binding_digest: Sha256Digest,
+    ) -> Result<Self, WindowsPlacementGrantError> {
+        let grant = Self {
+            attempt_id,
+            job_id: job_ir.job_id(),
+            run_id: job_ir.run_id(),
+            operation_id: request_key.operation_id(),
+            session: request_key.session(),
+            slot: request_key.slot(),
+            lease_id,
+            job_ir,
+            trust_binding_digest,
+            environment_profile,
+            issued_at,
+            expires_at,
+            binding_digest,
+        };
+        if expires_at <= issued_at || grant.compute_binding_digest() != binding_digest {
+            return Err(WindowsPlacementGrantError::PersistedBindingMismatch);
+        }
+        Ok(grant)
+    }
+}
+
+fn trust_binding_digest(trust: &AuthenticatedPlacementTrust) -> Sha256Digest {
+    let encoded = serde_json::to_vec(&(
+        trust.snapshot_schema(),
+        trust.policy_revision(),
+        trust.policy_digest(),
+        trust.snapshot_digest(),
+        trust.source(),
+        trust.authority(),
+        trust.evidence_complete(),
+        trust.authority_profile(),
+        trust.requirements_digest(),
+    ))
+    .expect("closed authenticated placement trust is infallibly serializable");
+    domain_digest(WINDOWS_PLACEMENT_TRUST_DIGEST_DOMAIN, &encoded)
+}
+
+fn domain_digest(domain: &[u8], value: &[u8]) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    digest.update(value);
+    Sha256Digest::from_bytes(digest.finalize().into())
 }
 
 /// Closed local reasons that prevent a Windows candidate becoming a lease.
@@ -741,6 +824,12 @@ pub enum WindowsPlacementGrantError {
     /// The proposed grant has an empty or reversed validity interval.
     #[error("Windows placement grant validity interval is invalid")]
     InvalidValidityInterval,
+    /// Persisted grant material no longer matches its canonical digest.
+    #[error("persisted Windows placement grant binding is corrupt")]
+    PersistedBindingMismatch,
+    /// A grant was attached to a different durable claimed attempt fence.
+    #[error("Windows placement grant does not match the claimed attempt fence")]
+    ClaimBindingMismatch,
 }
 
 impl TryClaimAttempt {
@@ -809,7 +898,8 @@ impl TryClaimAttempt {
             expires_at,
             candidate,
         )
-        .map_err(ClaimCommandError::InvalidWindowsPlacementGrant)?;
+        .map_err(ClaimCommandError::InvalidWindowsPlacementGrant)?
+        .map(Box::new);
         Ok(request)
     }
 
@@ -869,8 +959,8 @@ impl TryClaimAttempt {
 
     /// Returns a server-only Windows placement grant when this is a Windows claim.
     #[must_use]
-    pub const fn windows_placement_grant(&self) -> Option<&WindowsHyperVPlacementGrant> {
-        self.windows_placement_grant.as_ref()
+    pub fn windows_placement_grant(&self) -> Option<&WindowsHyperVPlacementGrant> {
+        self.windows_placement_grant.as_deref()
     }
 
     #[cfg(feature = "adapter-spi")]
@@ -892,7 +982,8 @@ impl TryClaimAttempt {
             .as_ref()
             .map(|grant| grant.rebased(observed_at, expires_at))
             .transpose()
-            .map_err(ClaimCommandError::InvalidWindowsPlacementGrant)?;
+            .map_err(ClaimCommandError::InvalidWindowsPlacementGrant)?
+            .map(Box::new);
         Ok(request)
     }
 
@@ -905,7 +996,7 @@ impl TryClaimAttempt {
             self.expires_at,
             candidate,
         )
-        .is_ok_and(|expected| expected.as_ref() == self.windows_placement_grant.as_ref())
+        .is_ok_and(|expected| expected.as_ref() == self.windows_placement_grant.as_deref())
     }
 
     /// Returns the opaque authoritative scan cursor used by an adapter.
@@ -985,6 +1076,7 @@ pub struct ClaimedAttempt {
     lease: Lease,
     assignment: AttemptAssignment,
     job_ir: JobIrMetadata,
+    windows_placement_grant: Option<Box<WindowsHyperVPlacementGrant>>,
 }
 
 impl ClaimedAttempt {
@@ -1003,7 +1095,32 @@ impl ClaimedAttempt {
             lease,
             assignment,
             job_ir,
+            windows_placement_grant: None,
         })
+    }
+
+    /// Attaches the exact locked Windows placement authority to the claimed fence.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any disagreement in attempt, lease, session, slot, `JobIR`, or
+    /// validity interval. A non-Windows claim leaves this field absent.
+    pub fn with_windows_placement_grant(
+        mut self,
+        grant: WindowsHyperVPlacementGrant,
+    ) -> Result<Self, WindowsPlacementGrantError> {
+        if grant.attempt_id() != self.lease.attempt_id()
+            || grant.lease_id() != self.lease.lease_id()
+            || grant.session() != self.assignment.session()
+            || grant.slot() != self.assignment.slot()
+            || grant.job_ir() != &self.job_ir
+            || grant.issued_at() != self.lease.issued_at()
+            || grant.expires_at() != self.lease.expires_at()
+        {
+            return Err(WindowsPlacementGrantError::ClaimBindingMismatch);
+        }
+        self.windows_placement_grant = Some(Box::new(grant));
+        Ok(self)
     }
 
     /// Returns the acquired lease.
@@ -1022,6 +1139,12 @@ impl ClaimedAttempt {
     #[must_use]
     pub const fn job_ir(&self) -> &JobIrMetadata {
         &self.job_ir
+    }
+
+    /// Returns the server-derived Windows placement authority, when required.
+    #[must_use]
+    pub fn windows_placement_grant(&self) -> Option<&WindowsHyperVPlacementGrant> {
+        self.windows_placement_grant.as_deref()
     }
 }
 

@@ -101,6 +101,9 @@ pub enum JournalInvariantError {
     /// A value-free secret overlay is malformed or names another lease fence.
     #[error("managed-secret binding overlay is invalid for the offered lease")]
     InvalidManagedSecretBindings,
+    /// A persisted Windows broker capability is malformed or not lease-bound.
+    #[error("invalid Windows Hyper-V broker grant")]
+    InvalidWindowsHyperVBrokerGrant,
     /// Terminal-result content is empty, oversized, or has the wrong kind.
     #[error("terminal-result content reference has the wrong kind or exceeds its size limit")]
     InvalidTerminalResultContent,

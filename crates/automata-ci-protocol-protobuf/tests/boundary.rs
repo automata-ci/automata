@@ -532,6 +532,7 @@ fn missing_or_unknown_required_oneofs_are_rejected() {
                 header: None,
                 slot: 1,
                 acknowledges_operation_id: None,
+                windows_placement_renewal: None,
             },
         )),
     };
@@ -567,6 +568,7 @@ fn uuid_fields_require_exactly_sixteen_bytes_without_echoing_contents() {
                 header: Some(header),
                 slot: 1,
                 acknowledges_operation_id: None,
+                windows_placement_renewal: None,
             },
         )),
     };
@@ -589,6 +591,7 @@ fn uuid_fields_require_exactly_sixteen_bytes_without_echoing_contents() {
                 header: Some(wire_header(false)),
                 slot: 1,
                 acknowledges_operation_id: Some(acknowledgement),
+                windows_placement_renewal: None,
             },
         )),
     };
@@ -614,6 +617,7 @@ fn lease_request_self_acknowledgement_is_rejected_after_wire_conversion() {
                 header: Some(header),
                 slot: 1,
                 acknowledges_operation_id: Some(operation_id),
+                windows_placement_renewal: None,
             },
         )),
     };
@@ -1131,6 +1135,7 @@ fn only_the_current_protocol_is_accepted() {
                 header: Some(wire_header(false)),
                 slot: 1,
                 acknowledges_operation_id: None,
+                windows_placement_renewal: None,
             },
         )),
     };
@@ -1164,6 +1169,7 @@ fn message_job_ir_and_requirements_schema_skew_are_rejected_without_reconstructi
                 header: Some(wire_header(false)),
                 slot: 1,
                 acknowledges_operation_id: None,
+                windows_placement_renewal: None,
             },
         )),
     };

@@ -55,6 +55,9 @@ pub enum RunnerRuntimeError {
     /// Protected payload storage failed.
     #[error("runner protected content operation failed")]
     Spool(#[source] SpoolError),
+    /// Broker-signed Windows placement authority could not be refreshed.
+    #[error("Windows placement renewal failed")]
+    PlacementRenewal(#[source] crate::PlacementRenewalError),
     /// A standalone or durable protobuf payload was invalid.
     #[error("runner durable protobuf payload is invalid")]
     InvalidDurablePayload,

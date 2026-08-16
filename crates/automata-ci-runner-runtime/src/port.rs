@@ -8,12 +8,14 @@ use std::{
 
 use automata_ci_core::{
     AttemptId, JobIrEnvelope, JobLifecycle, JobResult, Lease, LeaseGuard, LogChannel, OperationId,
-    RunnerId, RunnerSessionId, UnixMillis,
+    RunnerId, RunnerSessionId, Sha256Digest, UnixMillis, WindowsHyperVBrokerGrant,
 };
 use automata_ci_execution::{
     ExecutionEndpoint, SandboxCustody, SandboxEnvironment, SandboxInspection, SandboxProvider,
 };
-use automata_ci_protocol::{JobRuntimeAuthorities, ManagedSecretBindingOverlay};
+use automata_ci_protocol::{
+    JobRuntimeAuthorities, ManagedSecretBindingOverlay, WindowsRunnerPlacementRenewalEnvelope,
+};
 use automata_ci_protocol::{LeaseRejectionReason, RunnerSlotOrdinal};
 use automata_ci_runner_journal::{
     DurableContentRef, ProviderFailureOutcome, ProviderOperationKind, SandboxIdentity,
@@ -80,6 +82,7 @@ pub struct ExecutionRequest {
     job: JobIrEnvelope,
     runtime_authorities: JobRuntimeAuthorities,
     managed_secret_bindings: Option<ManagedSecretBindingOverlay>,
+    windows_hyperv_broker_grant: Option<WindowsHyperVBrokerGrant>,
     job_content: DurableContentRef,
     environment: SandboxEnvironment,
     recovery_lifecycle: JobLifecycle,
@@ -113,6 +116,7 @@ impl ExecutionRequest {
             job,
             runtime_authorities,
             managed_secret_bindings: None,
+            windows_hyperv_broker_grant: None,
             job_content,
             environment,
             recovery_lifecycle,
@@ -178,6 +182,55 @@ impl ExecutionRequest {
         self.managed_secret_bindings.as_ref()
     }
 
+    /// Attaches the signed capability for the exact restricted Windows broker placement.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a grant bound to another session, slot, runner, attempt, lease,
+    /// fence, job, run, `JobIR`, profile, or validity interval.
+    pub fn with_windows_hyperv_broker_grant(
+        mut self,
+        grant: WindowsHyperVBrokerGrant,
+    ) -> Result<Self, ExecutorError> {
+        let claims = grant.claims();
+        claims
+            .validate()
+            .map_err(|_| ExecutorError::new(ExecutorErrorKind::InvalidJob))?;
+        let metadata_profile = self.job.job().requirements().environment_profile();
+        if claims.runner_session_id() != self.session_id
+            || claims.slot() != self.slot.get()
+            || claims.runner_id() != self.lease.runner_id()
+            || claims.attempt_id() != self.lease.attempt_id()
+            || claims.lease_id() != self.lease.lease_id()
+            || claims.fencing_token() != self.lease.fencing_token()
+            || claims.job_id() != self.job.job().job_id()
+            || claims.run_id() != self.job.job().run_id()
+            || claims.job_ir_version() != self.job.version()
+            || self.job_content.public_plaintext_bytes() != Some(claims.job_ir_encoded_size())
+            || self.job_content.public_plaintext_sha256() != Some(claims.job_ir_digest())
+            || claims.issued_at() != self.lease.issued_at()
+            || claims.expires_at() != self.lease.expires_at()
+            || metadata_profile != Some(claims.environment_profile())
+            || self.environment.attestation() != claims.environment_profile()
+            || claims.windows_action_graph_sha256()
+                != self
+                    .job
+                    .execution()
+                    .windows_action_graph()
+                    .map(automata_ci_core::WindowsRepositoryActionGraph::graph_sha256)
+        {
+            return Err(ExecutorError::new(ExecutorErrorKind::InvalidJob));
+        }
+        self.windows_hyperv_broker_grant = Some(grant);
+        Ok(self)
+    }
+
+    /// Returns the signed restricted-broker capability, when present.
+    #[must_use]
+    pub const fn windows_hyperv_broker_grant(&self) -> Option<&WindowsHyperVBrokerGrant> {
+        self.windows_hyperv_broker_grant.as_ref()
+    }
+
     /// Returns the durable protected `JobIR` content identity.
     #[must_use]
     pub const fn job_content(&self) -> &DurableContentRef {
@@ -218,6 +271,13 @@ impl fmt::Debug for ExecutionRequest {
                     .managed_secret_bindings
                     .as_ref()
                     .map_or(0, |overlay| overlay.bindings().len()),
+            )
+            .field(
+                "windows_hyperv_broker_grant",
+                &self
+                    .windows_hyperv_broker_grant
+                    .as_ref()
+                    .map(WindowsHyperVBrokerGrant::digest),
             )
             .field("environment", &self.environment)
             .field("recovery_lifecycle", &self.recovery_lifecycle)
@@ -607,6 +667,60 @@ pub trait RuntimeClock: fmt::Debug + Send + Sync {
     fn wall_now(&self) -> UnixMillis;
     /// Returns process-local monotonic time used for leases and deadlines.
     fn monotonic_now(&self) -> MonotonicMillis;
+}
+
+/// Future returned by the durable Windows placement-renewal source.
+pub type WindowsPlacementRenewalFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<WindowsRunnerPlacementRenewalEnvelope, PlacementRenewalError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+/// Future returned after control durably commits one exact renewal.
+pub type WindowsPlacementRenewalAckFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), PlacementRenewalError>> + Send + 'a>>;
+
+/// Runner-side durable source of broker-signed placement renewals.
+///
+/// Implementations serialize refresh across all slots, retain the exact last
+/// envelope and broker custody handle across restart, and reuse a still-fresh
+/// envelope. A refresh advances the broker serial by exactly one. Losing a
+/// control response must therefore replay byte-identical envelope bytes rather
+/// than mint another serial.
+pub trait WindowsPlacementRenewalSource: fmt::Debug + Send + Sync {
+    /// Returns a current retained envelope or durably acquires its exact
+    /// successor from the broker.
+    fn current_or_refresh(
+        &self,
+        observed_at: UnixMillis,
+        cancellation: CancellationToken,
+    ) -> WindowsPlacementRenewalFuture<'_>;
+
+    /// Durably acknowledges control acceptance of one exact envelope.
+    ///
+    /// The broker must replay the same serial until this succeeds. An exact
+    /// repeated acknowledgement is idempotent; a substituted digest fails.
+    fn acknowledge(
+        &self,
+        renewal_envelope_sha256: Sha256Digest,
+        cancellation: CancellationToken,
+    ) -> WindowsPlacementRenewalAckFuture<'_>;
+}
+
+/// Value-free failure to acquire durable Windows placement authority.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum PlacementRenewalError {
+    /// Broker or durable custody is temporarily unavailable.
+    #[error("Windows placement renewal is unavailable")]
+    Unavailable,
+    /// Retained custody or a broker response violated the renewal contract.
+    #[error("Windows placement renewal state is invalid")]
+    InvalidState,
+    /// Local shutdown cancelled renewal acquisition.
+    #[error("Windows placement renewal was cancelled")]
+    Cancelled,
 }
 
 /// Production runtime clock.
