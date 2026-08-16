@@ -1047,6 +1047,199 @@ async fn caller_authority_and_snake_case_are_fail_closed() {
     assert_eq!(malformed_int64.status(), StatusCode::BAD_REQUEST);
 }
 
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoMetadata {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoCreateRequest {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<ProtoMetadata>,
+    #[prost(string, tag = "2")]
+    key: String,
+    #[prost(string, tag = "3")]
+    version: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoCreateResponse {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(string, tag = "2")]
+    signed_upload_url: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoFinalizeRequest {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<ProtoMetadata>,
+    #[prost(string, tag = "2")]
+    key: String,
+    #[prost(int64, tag = "3")]
+    size_bytes: i64,
+    #[prost(string, tag = "4")]
+    version: String,
+}
+
+#[derive(Clone, Copy, PartialEq, prost::Message)]
+struct ProtoFinalizeResponse {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(int64, tag = "2")]
+    entry_id: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoGetRequest {
+    #[prost(message, optional, tag = "1")]
+    metadata: Option<ProtoMetadata>,
+    #[prost(string, tag = "2")]
+    key: String,
+    #[prost(string, repeated, tag = "3")]
+    restore_keys: Vec<String>,
+    #[prost(string, tag = "4")]
+    version: String,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct ProtoGetResponse {
+    #[prost(bool, tag = "1")]
+    ok: bool,
+    #[prost(string, tag = "2")]
+    signed_download_url: String,
+    #[prost(string, tag = "3")]
+    matched_key: String,
+}
+
+#[tokio::test]
+async fn protobuf_cache_v2_round_trip_matches_current_ghac_clients() {
+    const CREATE: &str = "/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry";
+    const FINALIZE: &str =
+        "/twirp/github.actions.results.api.v1.CacheService/FinalizeCacheEntryUpload";
+    const GET: &str = "/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL";
+    let fixture = fixture();
+    let key = "/sccache/.sccache_check";
+    let version = "cb1f7e366526abf6ae1eead078b47c23b3cb3bd4371944adbb7fae50b8e89210";
+
+    let missing = send_protobuf(
+        &fixture.router,
+        &fixture.token,
+        GET,
+        &ProtoGetRequest {
+            metadata: None,
+            key: key.to_owned(),
+            restore_keys: Vec::new(),
+            version: version.to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::OK);
+    let missing = protobuf_body::<ProtoGetResponse>(missing).await;
+    assert!(!missing.ok);
+
+    let created = send_protobuf(
+        &fixture.router,
+        &fixture.token,
+        CREATE,
+        &ProtoCreateRequest {
+            metadata: None,
+            key: key.to_owned(),
+            version: version.to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let created = protobuf_body::<ProtoCreateResponse>(created).await;
+    assert!(created.ok);
+    let upload_url = Url::parse(&created.signed_upload_url).expect("protobuf upload URL");
+    let upload = fixture
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(path_and_query(&upload_url))
+                .header(header::CONTENT_LENGTH, 1)
+                .body(Body::from(Bytes::from_static(b"x")))
+                .expect("protobuf cache upload request"),
+        )
+        .await
+        .expect("protobuf cache upload response");
+    assert_eq!(upload.status(), StatusCode::CREATED);
+
+    let finalized = send_protobuf(
+        &fixture.router,
+        &fixture.token,
+        FINALIZE,
+        &ProtoFinalizeRequest {
+            metadata: None,
+            key: key.to_owned(),
+            size_bytes: 1,
+            version: version.to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(finalized.status(), StatusCode::OK);
+    let finalized = protobuf_body::<ProtoFinalizeResponse>(finalized).await;
+    assert!(finalized.ok);
+    assert!(finalized.entry_id > 0);
+
+    let matched = send_protobuf(
+        &fixture.router,
+        &fixture.token,
+        GET,
+        &ProtoGetRequest {
+            metadata: None,
+            key: key.to_owned(),
+            restore_keys: Vec::new(),
+            version: version.to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(matched.status(), StatusCode::OK);
+    let matched = protobuf_body::<ProtoGetResponse>(matched).await;
+    assert!(matched.ok);
+    assert_eq!(matched.matched_key, key);
+    assert!(!matched.signed_download_url.is_empty());
+}
+
+async fn send_protobuf(
+    router: &axum::Router,
+    token: &str,
+    path: &str,
+    message: &impl prost::Message,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/protobuf")
+                .body(Body::from(message.encode_to_vec()))
+                .expect("protobuf request"),
+        )
+        .await
+        .expect("protobuf response")
+}
+
+async fn protobuf_body<T>(response: axum::response::Response) -> T
+where
+    T: prost::Message + Default,
+{
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/protobuf"
+    );
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("protobuf response body")
+        .to_bytes();
+    T::decode(bytes).expect("protobuf response message")
+}
+
 async fn send_json(
     router: &axum::Router,
     token: &str,

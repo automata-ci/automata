@@ -422,6 +422,12 @@ impl FakePodman {
         state.network.is_some() && state.pod.is_none() && state.containers.is_empty()
     }
 
+    pub(crate) fn retain_network_only(&self) {
+        let mut state = self.state.lock().expect("fake lock");
+        state.pod = None;
+        state.containers.clear();
+    }
+
     pub(crate) fn no_swap_verifications(&self) -> u32 {
         self.state.lock().expect("fake lock").no_swap_verifications
     }

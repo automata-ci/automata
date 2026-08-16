@@ -5,10 +5,11 @@ use crate::support;
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use automata_ci_execution::{
-    DestroySandbox, EnvironmentName, EnvironmentValue, EnvironmentVariable, ExecutionEnvironment,
-    ImmutableImage, NeverCancelled, OperationId, OperationOutcome, ProviderErrorKind,
-    SandboxCapability, SandboxProvider, ServiceContainerSpec, ServiceContainerSpecs,
-    ServiceHealthOverrides, ServiceHealthPolicy, ServicePort, ServiceTransportProtocol,
+    DestroyDisposition, DestroySandbox, EnvironmentName, EnvironmentValue, EnvironmentVariable,
+    ExecutionEnvironment, ImmutableImage, NeverCancelled, OperationId, OperationOutcome,
+    ProviderErrorKind, SandboxCapability, SandboxProvider, ServiceContainerSpec,
+    ServiceContainerSpecs, ServiceHealthOverrides, ServiceHealthPolicy, ServicePort,
+    ServiceTransportProtocol,
 };
 use automata_ci_sandbox_podman::{
     CommandOutput, PodmanCommandExecutor, PodmanConfigurationError, PodmanLimits, PodmanOpenError,
@@ -869,6 +870,48 @@ fn stale_service_manifest_fingerprint_is_rejected_before_destroy_mutation() {
             &NeverCancelled,
         )
         .expect("cleanup restored sandbox");
+}
+
+#[test]
+fn destroy_reconciles_owned_core_remnants_without_a_service_manifest() {
+    let fixture = Fixture::new_with_service_proxy("service-partial-cleanup");
+    let operation_id = OperationId::new();
+    let record = fixture
+        .provider
+        .create(&service_spec(operation_id), &NeverCancelled)
+        .expect("create service sandbox");
+    fs::remove_file(service_manifest_path(fixture.scratch.path(), operation_id))
+        .expect("simulate manifest cleanup before process crash");
+    fixture.fake.retain_network_only();
+
+    let disposition = fixture
+        .provider
+        .destroy(
+            &DestroySandbox::new(
+                OperationId::new(),
+                record.handle().clone(),
+                record.generation(),
+            ),
+            &NeverCancelled,
+        )
+        .expect("reconcile exact owned network remnant");
+
+    assert_eq!(disposition, DestroyDisposition::Destroyed);
+    assert!(fixture.fake.is_empty());
+    assert_eq!(
+        fixture
+            .provider
+            .destroy(
+                &DestroySandbox::new(
+                    OperationId::new(),
+                    record.handle().clone(),
+                    record.generation(),
+                ),
+                &NeverCancelled,
+            )
+            .expect("replay reconciled cleanup"),
+        DestroyDisposition::AlreadyAbsent
+    );
 }
 
 #[test]

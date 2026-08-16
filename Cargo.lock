@@ -772,6 +772,7 @@ dependencies = [
  "bytes",
  "futures",
  "http-body-util",
+ "prost",
  "ring",
  "serde",
  "serde_json",
