@@ -1242,6 +1242,7 @@ mod tests {
             uuid::Uuid::new_v4().simple()
         ));
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind stalled Docker socket");
+        let (stalled_tx, stalled_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept stalled request");
             read_request_headers(&mut stream).await;
@@ -1249,6 +1250,9 @@ mod tests {
                 .write_all(prefix)
                 .await
                 .expect("write stalled prefix");
+            stalled_tx
+                .send(())
+                .expect("report that the exact response is stalled");
             let mut byte = [0_u8; 1];
             let closed = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
                 .await
@@ -1257,20 +1261,26 @@ mod tests {
             assert_eq!(closed, 0, "cancelled connection must not remain detached");
         });
         let transport = fake_transport(&socket);
+        let mut request = Box::pin(transport.json::<serde_json::Value, ()>(
+            http::Method::GET,
+            "/stalled",
+            None,
+            http::StatusCode::OK,
+            16,
+        ));
+        tokio::select! {
+            result = &mut request => panic!("request ended before cancellation: {result:?}"),
+            stalled = tokio::time::timeout(Duration::from_secs(1), stalled_rx) => {
+                stalled
+                    .expect("request reaches the stalled response boundary")
+                    .expect("fake server reports the stalled response");
+            }
+        }
         assert_eq!(
-            deadline(
-                Duration::from_millis(25),
-                transport.json::<serde_json::Value, ()>(
-                    http::Method::GET,
-                    "/stalled",
-                    None,
-                    http::StatusCode::OK,
-                    16,
-                ),
-            )
-            .await,
+            deadline(Duration::from_millis(25), request.as_mut()).await,
             Err(TransportError::RequestFailed)
         );
+        drop(request);
         finish_fake_response(&socket, server).await;
     }
 
