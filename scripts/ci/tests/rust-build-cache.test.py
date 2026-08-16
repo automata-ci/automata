@@ -16,6 +16,7 @@ SCCACHE_ACTION = (
 CACHE_ACTION = (
     "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5"
 )
+SCRATCH_PREPARATION = 'run: install -d -m 0700 -- "$TMPDIR"'
 RUST_JOBS = (
     "verify",
     "rust_lint",
@@ -47,6 +48,12 @@ def main() -> None:
         )
         assert SCCACHE_ACTION in body, f"{job} lost the pinned sccache installer"
         assert "version: v0.17.0" in body, f"{job} changed the sccache binary"
+        assert body.count(SCRATCH_PREPARATION) == 1, (
+            f"{job} must prepare its private scratch directory exactly once"
+        )
+        assert body.index(SCRATCH_PREPARATION) < body.index(SCCACHE_ACTION), (
+            f"{job} must prepare its scratch directory before sccache starts"
+        )
         assert CACHE_ACTION in body, f"{job} lost the pinned Cargo cache action"
         assert "~/.cargo/registry/cache" in body
         assert "~/.cargo/registry/index" in body

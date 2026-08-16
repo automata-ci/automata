@@ -30,10 +30,7 @@ fn default_source_ceiling_has_exact_raw_byte_boundaries() {
     assert_eq!(report.diagnostics().len(), 1);
     assert_eq!(report.diagnostics()[0].code(), "yaml.source_too_large");
 
-    for prefix in [
-        "\u{feff}on: push\njobs: {}\n#",
-        "on: push\r\njobs: {}\r\n#",
-    ] {
+    for prefix in ["\u{feff}on: push\njobs: {}\n#", "on: push\r\njobs: {}\r\n#"] {
         let source = workflow_variant_with_exact_bytes(prefix, MAX_GITHUB_WORKFLOW_SOURCE_BYTES);
         let report = GithubWorkflowFrontend::default().parse(request(&source));
         assert!(

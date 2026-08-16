@@ -887,8 +887,8 @@ fn typed_values_and_nested_sources_fail_closed() {
         json!(8);
     cases.push(("authority-policy", authority_revision));
     let mut workflow_authority_revision = manifest(vec![private_repository()]);
-    workflow_authority_revision["repositories"][0]["authorities"]
-        ["workflow_permissions_read"]["policy_revision"] = json!(8);
+    workflow_authority_revision["repositories"][0]["authorities"]["workflow_permissions_read"]["policy_revision"] =
+        json!(8);
     cases.push(("workflow-authority-policy", workflow_authority_revision));
     let mut missing_workflow_authority = manifest(vec![private_repository()]);
     missing_workflow_authority["repositories"][0]["authorities"]
@@ -900,15 +900,15 @@ fn typed_values_and_nested_sources_fail_closed() {
     let checks_authority_id = duplicate_checks_authority["repositories"][0]["authorities"]
         ["checks_write"]["authority_id"]
         .clone();
-    duplicate_checks_authority["repositories"][0]["authorities"]
-        ["workflow_permissions_read"]["authority_id"] = checks_authority_id;
+    duplicate_checks_authority["repositories"][0]["authorities"]["workflow_permissions_read"]["authority_id"] =
+        checks_authority_id;
     cases.push(("duplicate-checks-authority", duplicate_checks_authority));
     let mut duplicate_private_authority = manifest(vec![private_repository()]);
     let private_authority_id = duplicate_private_authority["repositories"][0]["authorities"]
         ["private_repository_source_read"]["authority_id"]
         .clone();
-    duplicate_private_authority["repositories"][0]["authorities"]
-        ["workflow_permissions_read"]["authority_id"] = private_authority_id;
+    duplicate_private_authority["repositories"][0]["authorities"]["workflow_permissions_read"]["authority_id"] =
+        private_authority_id;
     cases.push(("duplicate-private-authority", duplicate_private_authority));
 
     for (case, value) in cases {

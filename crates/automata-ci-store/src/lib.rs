@@ -15,8 +15,8 @@ mod github_repository_dispatch;
 mod github_schedule;
 mod github_service_authority;
 mod github_subject_evidence;
-mod live_log_ticket;
 mod github_workflow_permissions;
+mod live_log_ticket;
 mod logical_activation;
 mod logical_activation_preparation;
 mod logical_instance_result;
@@ -203,19 +203,19 @@ pub use github_subject_evidence::{
     ManifestPinnedGithubDeliveryReceipt, RecordGithubWorkflowRunSubjectEvidence,
     ValidateGithubWorkflowRunSubjectEvidenceReplay,
 };
+pub use github_workflow_permissions::{
+    FinalizeGithubWorkflowPermissionObservation,
+    GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
+    GithubWorkflowPermissionDefaultsObservation, GithubWorkflowPermissionDefaultsObservationError,
+    GithubWorkflowPermissionDefaultsObservationRepository,
+    GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
+    ReconcileGithubWorkflowPermissionHandoff,
+};
 pub use live_log_ticket::{
     HUMAN_LIVE_LOG_PROTOCOL_VERSION, HumanLiveLogBrowserOrigin, HumanLiveLogScope,
     HumanLiveLogTicketRepository, HumanLiveLogTicketValueError, IssueHumanLiveLogTicket,
     IssueHumanLiveLogTicketOutcome, IssuedHumanLiveLogTicket, MAX_HUMAN_LIVE_LOG_TICKET_LIFETIME,
     RedeemHumanLiveLogTicket, RedeemedHumanLiveLogTicket,
-};
-pub use github_workflow_permissions::{
-    FinalizeGithubWorkflowPermissionObservation, GithubWorkflowPermissionDefaultsObservation,
-    GithubWorkflowPermissionDefaultsObservationError,
-    GithubWorkflowPermissionDefaultsObservationRepository,
-    GITHUB_WORKFLOW_PERMISSION_DEFAULT_FRESHNESS_MILLIS,
-    GithubWorkflowPermissionHandoffReconciliation, GithubWorkflowPermissionObservationCandidate,
-    ReconcileGithubWorkflowPermissionHandoff,
 };
 pub use logical_activation::{
     ActivatedLogicalInstanceDescriptor, ClaimLogicalJobActivation, ClaimedLogicalJobActivation,
