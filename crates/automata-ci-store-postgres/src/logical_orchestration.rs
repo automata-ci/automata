@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use automata_ci_auth::delegated_actor::RepositoryMutationActor;
 use automata_ci_core::{
     JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
     TRUST_SNAPSHOT_V1_MEDIA_TYPE, UnixMillis, WorkflowId,
 };
 use sha2::{Digest as _, Sha256};
-use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
+use sqlx::{AssertSqlSafe, Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
 
 use super::{
@@ -25,21 +26,30 @@ use super::{
         validate_github_workflow_run_subject_evidence_in_transaction,
         validate_github_workflow_selection_in_transaction,
     },
-    secret_management::{AuthorizedHumanRepositoryAction, authorize_human_repository_action},
+    secret_management::{
+        AuthorizedWorkflowDispatchActor, AuthorizedWorkflowDispatchActorSource,
+        authorize_workflow_dispatch_actor,
+    },
 };
 use automata_ci_store::{
     AdmissionObject, AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim,
-    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource, EventControlSubject,
-    EventControlSubjectId, EventSubjectId, EventSubjectOrigin, EventSubjectProgress,
-    EventSubjectSelection, EventSubjectStoreError, EventSubjectTerminalKind,
-    EventSubjectTerminalOutcome, GithubScheduleFireClaim, GithubSubjectEvidenceStoreError,
-    JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
-    LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
-    LogicalWorkflowInvocationId, LogicalWorkflowJobKind, ObjectKey,
-    RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject, RepositoryId,
-    ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError,
-    ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH, WORKFLOW_PLAN_SCHEMA,
-    WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError, WorkflowSnapshotId,
+    AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
+    BeginWorkflowDispatchSourceResolution, CompleteWorkflowDispatchSourceResolution,
+    EventControlSubject, EventControlSubjectId, EventSubjectId, EventSubjectOrigin,
+    EventSubjectProgress, EventSubjectSelection, EventSubjectStoreError, EventSubjectTerminalKind,
+    EventSubjectTerminalOutcome, GithubProviderManifestRevision, GithubScheduleFireClaim,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceClaimFence, GithubServerServiceRevision, GithubServerServiceWorkerId,
+    GithubSubjectEvidenceStoreError, JobEnvironmentRequirement, LOGICAL_ORCHESTRATION_SCHEMA,
+    LogicalWorkflowAdmissionReceipt, LogicalWorkflowAdmissionRepository,
+    LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobKind,
+    ObjectKey, ProviderConnectionId, RecordGithubWorkflowRunSubjectEvidence, RegisterEventSubject,
+    RepositoryId, ResolveAuthenticatedWorkflowDispatchSource, Sha256Digest, StoreError,
+    TenantScope, ValidateGithubWorkflowRunSubjectEvidenceReplay, WORKFLOW_ADMISSION_EPOCH,
+    WORKFLOW_PLAN_SCHEMA, WorkflowAdmissionIdempotency, WorkflowAdmissionStoreError,
+    WorkflowDispatchSourceClaim, WorkflowDispatchSourceResolutionOutcome,
+    WorkflowDispatchSourceResolutionRepository, WorkflowDispatchSourceResolutionStoreError,
+    WorkflowSnapshotId,
 };
 
 enum SubjectEvidenceAdmission {
@@ -61,6 +71,33 @@ const WORKFLOW_DISPATCH_AUDIT_RESOURCE_KIND: &str = "workflow_run";
 const WORKFLOW_DISPATCH_AUDIT_ID_DOMAIN: &[u8] = b"automata.workflow-dispatch.audit.v1\0";
 // SHA-256 prefix for `automata.logical-admission.idempotency-lock.v1`.
 const LOGICAL_ADMISSION_IDEMPOTENCY_LOCK_NAMESPACE: i64 = 0x2fee_1fa8_b154_7857;
+const WORKFLOW_DISPATCH_SOURCE_CLOCK_SKEW_MILLIS: i64 = 60_000;
+
+#[async_trait]
+impl WorkflowDispatchSourceResolutionRepository for PostgresStore {
+    async fn begin_workflow_dispatch_source_resolution(
+        &self,
+        request: BeginWorkflowDispatchSourceResolution,
+    ) -> Result<WorkflowDispatchSourceResolutionOutcome, WorkflowDispatchSourceResolutionStoreError>
+    {
+        begin_dispatch_source_resolution(self, request).await
+    }
+
+    async fn complete_workflow_dispatch_source_resolution(
+        &self,
+        request: CompleteWorkflowDispatchSourceResolution,
+    ) -> Result<AuthenticatedWorkflowDispatchSource, WorkflowDispatchSourceResolutionStoreError>
+    {
+        complete_dispatch_source_resolution(self, request).await
+    }
+
+    async fn abandon_workflow_dispatch_source_resolution(
+        &self,
+        claim: WorkflowDispatchSourceClaim,
+    ) -> Result<(), WorkflowDispatchSourceResolutionStoreError> {
+        abandon_dispatch_source_resolution(self, claim).await
+    }
+}
 
 const fn logical_workflow_job_kind_name(kind: LogicalWorkflowJobKind) -> &'static str {
     match kind {
@@ -95,6 +132,753 @@ fn decode_commit_sha_bytes(value: &str) -> Result<Vec<u8>, LogicalWorkflowAdmiss
         })
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| StoreError::corrupt_data("validated commit SHA is not canonical").into())
+}
+
+const DISPATCH_SOURCE_RESOLUTION_COLUMNS: &str = r"
+    tenant_id, operation_id, principal_id, repository_id, workflow_id,
+    workflow_path, git_ref, scm_provider, provider_repository_id,
+    repository_owner, repository_name, github_repository_owner_id,
+    provider_connection_id, provider_manifest_revision, provider_manifest_digest,
+    private_source_authority_id, private_source_authority_identity_digest,
+    private_source_authority_app_configuration_revision,
+    private_source_authority_policy_revision, state, claim_owner_id,
+    claim_fence, claimed_at_ms, claim_expires_at_ms, commit_sha,
+    source_digest, source_object_key, source_size_bytes, source_media_type,
+    created_at_ms, resolved_at_ms
+";
+
+const DISPATCH_SOURCE_RESOLUTION_RETURNING_COLUMNS: &str = r"
+    resolution.tenant_id, resolution.operation_id, resolution.principal_id,
+    resolution.repository_id, resolution.workflow_id, resolution.workflow_path,
+    resolution.git_ref, resolution.scm_provider, resolution.provider_repository_id,
+    resolution.repository_owner, resolution.repository_name,
+    resolution.github_repository_owner_id, resolution.provider_connection_id,
+    resolution.provider_manifest_revision, resolution.provider_manifest_digest,
+    resolution.private_source_authority_id,
+    resolution.private_source_authority_identity_digest,
+    resolution.private_source_authority_app_configuration_revision,
+    resolution.private_source_authority_policy_revision, resolution.state,
+    resolution.claim_owner_id, resolution.claim_fence, resolution.claimed_at_ms,
+    resolution.claim_expires_at_ms, resolution.commit_sha, resolution.source_digest,
+    resolution.source_object_key, resolution.source_size_bytes,
+    resolution.source_media_type, resolution.created_at_ms, resolution.resolved_at_ms
+";
+
+#[allow(clippy::too_many_lines)] // Keep reauthorization, operation locking, and manifest pinning atomic.
+async fn begin_dispatch_source_resolution(
+    store: &PostgresStore,
+    request: BeginWorkflowDispatchSourceResolution,
+) -> Result<WorkflowDispatchSourceResolutionOutcome, WorkflowDispatchSourceResolutionStoreError> {
+    let mut transaction = store.pool.begin().await.map_err(source_operation_error)?;
+    let actor = authorize_workflow_dispatch_actor(
+        &mut transaction,
+        request.actor(),
+        WORKFLOW_DISPATCH_PERMISSION,
+        request.repository_id().as_uuid(),
+    )
+    .await
+    .map_err(WorkflowDispatchSourceResolutionStoreError::Store)?
+    .ok_or(WorkflowDispatchSourceResolutionStoreError::AuthorityRejected)?;
+    if !authorized_dispatch_actor_matches(&actor, request.actor()) {
+        return Err(WorkflowDispatchSourceResolutionStoreError::AuthorityRejected);
+    }
+    let now = dispatch_source_database_now(&mut transaction).await?;
+    if now.get().abs_diff(request.observed_at().get())
+        > u64::try_from(WORKFLOW_DISPATCH_SOURCE_CLOCK_SKEW_MILLIS).unwrap_or(u64::MAX)
+    {
+        return Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected);
+    }
+
+    let existing_query = format!(
+        "SELECT {DISPATCH_SOURCE_RESOLUTION_COLUMNS} \
+         FROM workflow_dispatch_source_resolutions \
+         WHERE tenant_id = $1 AND operation_id = $2 FOR UPDATE"
+    );
+    if let Some(existing) = sqlx::query(AssertSqlSafe(existing_query))
+        .bind(&actor.tenant_id)
+        .bind(request.operation_id().as_uuid())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(source_operation_error)?
+    {
+        validate_dispatch_source_operation(&existing, &actor, &request)?;
+        if existing
+            .try_get::<String, _>("state")
+            .map_err(source_operation_error)?
+            == "resolved"
+        {
+            let source = resolved_dispatch_source_from_row(&existing)?;
+            transaction.commit().await.map_err(source_operation_error)?;
+            return Ok(WorkflowDispatchSourceResolutionOutcome::Resolved(source));
+        }
+        let expires_at = existing
+            .try_get::<i64, _>("claim_expires_at_ms")
+            .map_err(source_operation_error)?;
+        let current_owner = existing
+            .try_get::<Uuid, _>("claim_owner_id")
+            .map_err(source_operation_error)?;
+        if expires_at > now.get() && current_owner != request.worker_id().as_uuid() {
+            return Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected);
+        }
+        if expires_at <= now.get() {
+            ensure_dispatch_source_manifest_current(&mut transaction, &existing).await?;
+            let expires_at = now
+                .get()
+                .checked_add(request.claim_millis())
+                .ok_or(WorkflowDispatchSourceResolutionStoreError::ClaimRejected)?;
+            let update_query = format!(
+                "UPDATE workflow_dispatch_source_resolutions \
+                 SET claim_owner_id = $3, claim_fence = claim_fence + 1, \
+                     claimed_at_ms = $4, claim_expires_at_ms = $5 \
+                 WHERE tenant_id = $1 AND operation_id = $2 \
+                   AND state = 'claimed' AND claim_fence < 9223372036854775807 \
+                 RETURNING {DISPATCH_SOURCE_RESOLUTION_COLUMNS}"
+            );
+            let updated = sqlx::query(AssertSqlSafe(update_query))
+                .bind(&actor.tenant_id)
+                .bind(request.operation_id().as_uuid())
+                .bind(request.worker_id().as_uuid())
+                .bind(now.get())
+                .bind(expires_at)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(source_operation_error)?
+                .ok_or(WorkflowDispatchSourceResolutionStoreError::ClaimRejected)?;
+            let claim = dispatch_source_claim_from_row(&updated)?;
+            transaction.commit().await.map_err(source_operation_error)?;
+            return Ok(WorkflowDispatchSourceResolutionOutcome::Claimed(claim));
+        }
+        let claim = dispatch_source_claim_from_row(&existing)?;
+        transaction.commit().await.map_err(source_operation_error)?;
+        return Ok(WorkflowDispatchSourceResolutionOutcome::Claimed(claim));
+    }
+
+    let target = sqlx::query(
+        r"
+        SELECT repository.scm_provider, repository.provider_repository_id,
+               repository.owner AS repository_owner,
+               repository.name AS repository_name, workflow.path AS workflow_path,
+               current_manifest.provider_connection_id,
+               current_manifest.manifest_revision,
+               current_manifest.manifest_digest,
+               manifest.github_repository_owner_id,
+               manifest.repository_visibility,
+               authority.id AS private_source_authority_id,
+               authority.identity_digest AS private_source_authority_identity_digest,
+               authority.app_configuration_revision
+                   AS private_source_authority_app_configuration_revision,
+               authority.policy_revision AS private_source_authority_policy_revision
+        FROM repositories AS repository
+        JOIN workflow_definitions AS workflow
+          ON workflow.repository_id = repository.id
+         AND workflow.id = $3
+        JOIN github_provider_manifest_current AS current_manifest
+          ON current_manifest.tenant_id = repository.tenant_id
+         AND current_manifest.repository_id = repository.id
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = current_manifest.tenant_id
+         AND manifest.repository_id = current_manifest.repository_id
+         AND manifest.provider_connection_id = current_manifest.provider_connection_id
+         AND manifest.manifest_revision = current_manifest.manifest_revision
+         AND manifest.manifest_digest = current_manifest.manifest_digest
+        LEFT JOIN github_server_service_authorities AS authority
+          ON authority.tenant_id = manifest.tenant_id
+         AND authority.repository_id = manifest.repository_id
+         AND authority.provider_connection_id = manifest.provider_connection_id
+         AND authority.provider_installation_id = manifest.provider_installation_id
+         AND authority.github_app_id = manifest.github_app_id
+         AND authority.github_repository_id = manifest.github_repository_id
+         AND authority.github_repository_name = manifest.github_repository_name
+         AND authority.app_configuration_revision = manifest.app_configuration_revision
+         AND authority.policy_revision = manifest.policy_revision
+         AND authority.service_scope = 'private_repository_source_read'
+         AND authority.state = 'active'
+        WHERE repository.tenant_id = $1
+          AND repository.id = $2
+          AND repository.scm_provider = 'github'
+          AND workflow.enabled = TRUE
+          AND manifest.github_repository_owner_id IS NOT NULL
+        ",
+    )
+    .bind(&actor.tenant_id)
+    .bind(request.repository_id().as_uuid())
+    .bind(request.workflow_id().as_uuid())
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(source_operation_error)?
+    .ok_or(WorkflowDispatchSourceResolutionStoreError::NotFound)?;
+    let visibility = target
+        .try_get::<String, _>("repository_visibility")
+        .map_err(source_operation_error)?;
+    let private_authority = target
+        .try_get::<Option<Uuid>, _>("private_source_authority_id")
+        .map_err(source_operation_error)?;
+    if (visibility == "private") != private_authority.is_some()
+        || !matches!(visibility.as_str(), "public" | "private")
+    {
+        return Err(WorkflowDispatchSourceResolutionStoreError::NotFound);
+    }
+    let expires_at = now
+        .get()
+        .checked_add(request.claim_millis())
+        .ok_or(WorkflowDispatchSourceResolutionStoreError::ClaimRejected)?;
+    let insert_query = format!(
+        "INSERT INTO workflow_dispatch_source_resolutions (\
+            tenant_id, operation_id, principal_id, repository_id, workflow_id,\
+            workflow_path, git_ref, scm_provider, provider_repository_id,\
+            repository_owner, repository_name, github_repository_owner_id,\
+            provider_connection_id, provider_manifest_revision, provider_manifest_digest,\
+            private_source_authority_id, private_source_authority_identity_digest,\
+            private_source_authority_app_configuration_revision,\
+            private_source_authority_policy_revision, state, claim_owner_id, claim_fence,\
+            claimed_at_ms, claim_expires_at_ms, created_at_ms\
+         ) VALUES (\
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,\
+            $15, $16, $17, $18, $19, 'claimed', $20, 1, $21, $22, $21\
+         ) RETURNING {DISPATCH_SOURCE_RESOLUTION_COLUMNS}"
+    );
+    let row = sqlx::query(AssertSqlSafe(insert_query))
+        .bind(&actor.tenant_id)
+        .bind(request.operation_id().as_uuid())
+        .bind(actor.principal_id)
+        .bind(request.repository_id().as_uuid())
+        .bind(request.workflow_id().as_uuid())
+        .bind(
+            target
+                .try_get::<String, _>("workflow_path")
+                .map_err(source_operation_error)?,
+        )
+        .bind(request.git_ref())
+        .bind(
+            target
+                .try_get::<String, _>("scm_provider")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<String, _>("provider_repository_id")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<String, _>("repository_owner")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<String, _>("repository_name")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<i64, _>("github_repository_owner_id")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<Uuid, _>("provider_connection_id")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<i64, _>("manifest_revision")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<Vec<u8>, _>("manifest_digest")
+                .map_err(source_operation_error)?,
+        )
+        .bind(private_authority)
+        .bind(
+            target
+                .try_get::<Option<Vec<u8>>, _>("private_source_authority_identity_digest")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<Option<i64>, _>("private_source_authority_app_configuration_revision")
+                .map_err(source_operation_error)?,
+        )
+        .bind(
+            target
+                .try_get::<Option<i64>, _>("private_source_authority_policy_revision")
+                .map_err(source_operation_error)?,
+        )
+        .bind(request.worker_id().as_uuid())
+        .bind(now.get())
+        .bind(expires_at)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(source_operation_error)?;
+    let claim = dispatch_source_claim_from_row(&row)?;
+    transaction.commit().await.map_err(source_operation_error)?;
+    Ok(WorkflowDispatchSourceResolutionOutcome::Claimed(claim))
+}
+
+async fn complete_dispatch_source_resolution(
+    store: &PostgresStore,
+    request: CompleteWorkflowDispatchSourceResolution,
+) -> Result<AuthenticatedWorkflowDispatchSource, WorkflowDispatchSourceResolutionStoreError> {
+    let claim = request.claim();
+    let mut transaction = store.pool.begin().await.map_err(source_operation_error)?;
+    let now = dispatch_source_database_now(&mut transaction).await?;
+    let update_query = format!(
+        "UPDATE workflow_dispatch_source_resolutions AS resolution \
+         SET state = 'resolved', claim_owner_id = NULL, claimed_at_ms = NULL,\
+             claim_expires_at_ms = NULL, commit_sha = $18, source_digest = $19,\
+             source_object_key = $20, source_size_bytes = $21, source_media_type = $22,\
+             resolved_at_ms = $23 \
+         FROM github_provider_manifest_current AS current_manifest \
+         WHERE resolution.tenant_id = $1 AND resolution.operation_id = $2 \
+           AND resolution.repository_id = $3 AND resolution.workflow_id = $4 \
+           AND resolution.workflow_path = $5 AND resolution.git_ref = $6 \
+           AND resolution.provider_connection_id = $7 \
+           AND resolution.provider_manifest_revision = $8 \
+           AND resolution.provider_manifest_digest = $9 \
+           AND resolution.private_source_authority_id IS NOT DISTINCT FROM $10 \
+           AND resolution.private_source_authority_identity_digest IS NOT DISTINCT FROM $11 \
+           AND resolution.private_source_authority_app_configuration_revision \
+               IS NOT DISTINCT FROM $12 \
+           AND resolution.private_source_authority_policy_revision IS NOT DISTINCT FROM $13 \
+           AND resolution.state = 'claimed' AND resolution.claim_owner_id = $14 \
+           AND resolution.claim_fence = $15 AND resolution.claimed_at_ms = $16 \
+           AND resolution.claim_expires_at_ms = $17 \
+           AND resolution.claim_expires_at_ms > $23 \
+           AND current_manifest.tenant_id = resolution.tenant_id \
+           AND current_manifest.repository_id = resolution.repository_id \
+           AND current_manifest.provider_connection_id = resolution.provider_connection_id \
+           AND current_manifest.manifest_revision = resolution.provider_manifest_revision \
+           AND current_manifest.manifest_digest = resolution.provider_manifest_digest \
+         RETURNING {DISPATCH_SOURCE_RESOLUTION_RETURNING_COLUMNS}"
+    );
+    let commit_sha = decode_source_commit_sha_bytes(request.commit_sha())?;
+    let size = i64::try_from(request.source().encoded_size())
+        .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?;
+    let private_authority = claim.private_source_authority();
+    let row = sqlx::query(AssertSqlSafe(update_query))
+        .bind(claim.tenant().as_str())
+        .bind(claim.operation_id().as_uuid())
+        .bind(claim.repository_id().as_uuid())
+        .bind(claim.workflow_id().as_uuid())
+        .bind(claim.workflow_path())
+        .bind(claim.git_ref())
+        .bind(claim.connection_id().as_uuid())
+        .bind(
+            i64::try_from(claim.manifest_revision().get())
+                .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+        )
+        .bind(claim.manifest_digest().as_bytes().as_slice())
+        .bind(private_authority.map(|selector| selector.authority_id().as_uuid()))
+        .bind(private_authority.map(|selector| selector.identity_digest().as_bytes().to_vec()))
+        .bind(
+            private_authority
+                .map(|selector| i64::try_from(selector.app_configuration_revision().get()))
+                .transpose()
+                .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+        )
+        .bind(
+            private_authority
+                .map(|selector| i64::try_from(selector.policy_revision().get()))
+                .transpose()
+                .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+        )
+        .bind(claim.worker_id().as_uuid())
+        .bind(
+            i64::try_from(claim.fence().get())
+                .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+        )
+        .bind(claim.claimed_at().get())
+        .bind(claim.expires_at().get())
+        .bind(commit_sha)
+        .bind(request.source().digest().as_bytes().as_slice())
+        .bind(request.source().object_key().as_str())
+        .bind(size)
+        .bind(request.source().media_type())
+        .bind(now.get())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(source_operation_error)?
+        .ok_or(WorkflowDispatchSourceResolutionStoreError::ClaimRejected)?;
+    let source = resolved_dispatch_source_from_row(&row)?;
+    transaction.commit().await.map_err(source_operation_error)?;
+    Ok(source)
+}
+
+async fn abandon_dispatch_source_resolution(
+    store: &PostgresStore,
+    claim: WorkflowDispatchSourceClaim,
+) -> Result<(), WorkflowDispatchSourceResolutionStoreError> {
+    let deleted = sqlx::query(
+        r"
+        DELETE FROM workflow_dispatch_source_resolutions
+        WHERE tenant_id = $1 AND operation_id = $2 AND state = 'claimed'
+          AND repository_id = $3 AND workflow_id = $4 AND workflow_path = $5
+          AND git_ref = $6 AND provider_connection_id = $7
+          AND provider_manifest_revision = $8 AND provider_manifest_digest = $9
+          AND private_source_authority_id IS NOT DISTINCT FROM $10
+          AND private_source_authority_identity_digest IS NOT DISTINCT FROM $11
+          AND private_source_authority_app_configuration_revision IS NOT DISTINCT FROM $12
+          AND private_source_authority_policy_revision IS NOT DISTINCT FROM $13
+          AND claim_owner_id = $14 AND claim_fence = $15
+          AND claimed_at_ms = $16 AND claim_expires_at_ms = $17
+        ",
+    )
+    .bind(claim.tenant().as_str())
+    .bind(claim.operation_id().as_uuid())
+    .bind(claim.repository_id().as_uuid())
+    .bind(claim.workflow_id().as_uuid())
+    .bind(claim.workflow_path())
+    .bind(claim.git_ref())
+    .bind(claim.connection_id().as_uuid())
+    .bind(
+        i64::try_from(claim.manifest_revision().get())
+            .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+    )
+    .bind(claim.manifest_digest().as_bytes().as_slice())
+    .bind(
+        claim
+            .private_source_authority()
+            .map(|selector| selector.authority_id().as_uuid()),
+    )
+    .bind(
+        claim
+            .private_source_authority()
+            .map(|selector| selector.identity_digest().as_bytes().to_vec()),
+    )
+    .bind(
+        claim
+            .private_source_authority()
+            .map(|selector| i64::try_from(selector.app_configuration_revision().get()))
+            .transpose()
+            .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+    )
+    .bind(
+        claim
+            .private_source_authority()
+            .map(|selector| i64::try_from(selector.policy_revision().get()))
+            .transpose()
+            .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+    )
+    .bind(claim.worker_id().as_uuid())
+    .bind(
+        i64::try_from(claim.fence().get())
+            .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?,
+    )
+    .bind(claim.claimed_at().get())
+    .bind(claim.expires_at().get())
+    .execute(&store.pool)
+    .await
+    .map_err(source_operation_error)?;
+    if deleted.rows_affected() != 1 {
+        return Err(WorkflowDispatchSourceResolutionStoreError::ClaimRejected);
+    }
+    Ok(())
+}
+
+fn validate_dispatch_source_operation(
+    row: &PgRow,
+    actor: &AuthorizedWorkflowDispatchActor,
+    request: &BeginWorkflowDispatchSourceResolution,
+) -> Result<(), WorkflowDispatchSourceResolutionStoreError> {
+    let exact = row
+        .try_get::<String, _>("tenant_id")
+        .map_err(source_operation_error)?
+        == actor.tenant_id
+        && row
+            .try_get::<Uuid, _>("principal_id")
+            .map_err(source_operation_error)?
+            == actor.principal_id
+        && row
+            .try_get::<Uuid, _>("repository_id")
+            .map_err(source_operation_error)?
+            == request.repository_id().as_uuid()
+        && row
+            .try_get::<Uuid, _>("workflow_id")
+            .map_err(source_operation_error)?
+            == request.workflow_id().as_uuid()
+        && row
+            .try_get::<String, _>("git_ref")
+            .map_err(source_operation_error)?
+            == request.git_ref();
+    if exact {
+        Ok(())
+    } else {
+        Err(WorkflowDispatchSourceResolutionStoreError::Conflict)
+    }
+}
+
+async fn ensure_dispatch_source_manifest_current(
+    transaction: &mut Transaction<'_, Postgres>,
+    row: &PgRow,
+) -> Result<(), WorkflowDispatchSourceResolutionStoreError> {
+    let current = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT EXISTS (
+            SELECT 1 FROM github_provider_manifest_current
+            WHERE tenant_id = $1 AND repository_id = $2
+              AND provider_connection_id = $3 AND manifest_revision = $4
+              AND manifest_digest = $5
+        )
+        ",
+    )
+    .bind(
+        row.try_get::<String, _>("tenant_id")
+            .map_err(source_operation_error)?,
+    )
+    .bind(
+        row.try_get::<Uuid, _>("repository_id")
+            .map_err(source_operation_error)?,
+    )
+    .bind(
+        row.try_get::<Uuid, _>("provider_connection_id")
+            .map_err(source_operation_error)?,
+    )
+    .bind(
+        row.try_get::<i64, _>("provider_manifest_revision")
+            .map_err(source_operation_error)?,
+    )
+    .bind(
+        row.try_get::<Vec<u8>, _>("provider_manifest_digest")
+            .map_err(source_operation_error)?,
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(source_operation_error)?;
+    if current {
+        Ok(())
+    } else {
+        Err(WorkflowDispatchSourceResolutionStoreError::Conflict)
+    }
+}
+
+fn dispatch_source_claim_from_row(
+    row: &PgRow,
+) -> Result<WorkflowDispatchSourceClaim, WorkflowDispatchSourceResolutionStoreError> {
+    if row
+        .try_get::<String, _>("state")
+        .map_err(source_operation_error)?
+        != "claimed"
+    {
+        return Err(source_corrupt("source-resolution row is not claimed"));
+    }
+    let tenant = TenantScope::from_authenticated_tenant_id(
+        row.try_get::<String, _>("tenant_id")
+            .map_err(source_operation_error)?,
+    )
+    .map_err(|_| source_corrupt("source-resolution tenant is invalid"))?;
+    let authority_id = row
+        .try_get::<Option<Uuid>, _>("private_source_authority_id")
+        .map_err(source_operation_error)?;
+    let authority_digest = row
+        .try_get::<Option<Vec<u8>>, _>("private_source_authority_identity_digest")
+        .map_err(source_operation_error)?;
+    let authority_app_revision = row
+        .try_get::<Option<i64>, _>("private_source_authority_app_configuration_revision")
+        .map_err(source_operation_error)?;
+    let authority_policy_revision = row
+        .try_get::<Option<i64>, _>("private_source_authority_policy_revision")
+        .map_err(source_operation_error)?;
+    let private_source_authority = match (
+        authority_id,
+        authority_digest,
+        authority_app_revision,
+        authority_policy_revision,
+    ) {
+        (None, None, None, None) => None,
+        (Some(id), Some(digest), Some(app_revision), Some(policy_revision)) => {
+            Some(GithubServerServiceAuthoritySelector::from_durable_parts(
+                tenant.clone(),
+                GithubServerServiceAuthorityId::from_uuid(id)
+                    .map_err(|_| source_corrupt("source authority ID is invalid"))?,
+                source_digest(&digest)?,
+                source_revision(app_revision)?,
+                source_revision(policy_revision)?,
+            ))
+        }
+        _ => return Err(source_corrupt("source authority selector is incomplete")),
+    };
+    WorkflowDispatchSourceClaim::from_durable_parts(
+        tenant,
+        RepositoryId::from_uuid(
+            row.try_get("repository_id")
+                .map_err(source_operation_error)?,
+        ),
+        WorkflowId::from_uuid(row.try_get("workflow_id").map_err(source_operation_error)?),
+        row.try_get::<String, _>("workflow_path")
+            .map_err(source_operation_error)?,
+        row.try_get::<String, _>("git_ref")
+            .map_err(source_operation_error)?,
+        OperationId::from_uuid(
+            row.try_get("operation_id")
+                .map_err(source_operation_error)?,
+        ),
+        ProviderConnectionId::from_uuid(
+            row.try_get("provider_connection_id")
+                .map_err(source_operation_error)?,
+        )
+        .map_err(|_| source_corrupt("source connection ID is invalid"))?,
+        GithubProviderManifestRevision::new(source_positive_u64(
+            row,
+            "provider_manifest_revision",
+        )?)
+        .map_err(|_| source_corrupt("source manifest revision is invalid"))?,
+        source_digest(
+            &row.try_get::<Vec<u8>, _>("provider_manifest_digest")
+                .map_err(source_operation_error)?,
+        )?,
+        private_source_authority,
+        GithubServerServiceWorkerId::from_uuid(
+            row.try_get("claim_owner_id")
+                .map_err(source_operation_error)?,
+        )
+        .map_err(|_| source_corrupt("source claim owner is invalid"))?,
+        GithubServerServiceClaimFence::new(source_positive_u64(row, "claim_fence")?)
+            .map_err(|_| source_corrupt("source claim fence is invalid"))?,
+        UnixMillis::new(
+            row.try_get("claimed_at_ms")
+                .map_err(source_operation_error)?,
+        ),
+        UnixMillis::new(
+            row.try_get("claim_expires_at_ms")
+                .map_err(source_operation_error)?,
+        ),
+    )
+    .map_err(|_| source_corrupt("source claim is invalid"))
+}
+
+fn resolved_dispatch_source_from_row(
+    row: &PgRow,
+) -> Result<AuthenticatedWorkflowDispatchSource, WorkflowDispatchSourceResolutionStoreError> {
+    if row
+        .try_get::<String, _>("state")
+        .map_err(source_operation_error)?
+        != "resolved"
+    {
+        return Err(source_corrupt("source-resolution row is not resolved"));
+    }
+    let provider = row
+        .try_get::<String, _>("scm_provider")
+        .map_err(source_operation_error)?;
+    let repository = automata_ci_store::AdmissionRepository::new(
+        RepositoryId::from_uuid(
+            row.try_get("repository_id")
+                .map_err(source_operation_error)?,
+        ),
+        provider,
+        row.try_get::<String, _>("provider_repository_id")
+            .map_err(source_operation_error)?,
+        row.try_get::<String, _>("repository_owner")
+            .map_err(source_operation_error)?,
+        row.try_get::<String, _>("repository_name")
+            .map_err(source_operation_error)?,
+    )
+    .map_err(|_| source_corrupt("resolved repository is invalid"))?;
+    let digest = source_digest(
+        &row.try_get::<Vec<u8>, _>("source_digest")
+            .map_err(source_operation_error)?,
+    )?;
+    let size = source_positive_u64(row, "source_size_bytes")?;
+    let object = AdmissionObject::new(
+        digest,
+        ObjectKey::new(
+            row.try_get::<String, _>("source_object_key")
+                .map_err(source_operation_error)?,
+        )
+        .map_err(|_| source_corrupt("resolved source object key is invalid"))?,
+        size,
+        &row.try_get::<String, _>("source_media_type")
+            .map_err(source_operation_error)?,
+    )
+    .map_err(|_| source_corrupt("resolved source descriptor is invalid"))?;
+    let commit = row
+        .try_get::<Vec<u8>, _>("commit_sha")
+        .map_err(source_operation_error)?;
+    AuthenticatedWorkflowDispatchSource::new(
+        repository,
+        source_positive_u64(row, "github_repository_owner_id")?.to_string(),
+        WorkflowId::from_uuid(row.try_get("workflow_id").map_err(source_operation_error)?),
+        row.try_get::<String, _>("workflow_path")
+            .map_err(source_operation_error)?,
+        row.try_get::<String, _>("git_ref")
+            .map_err(source_operation_error)?,
+        lower_hex(&commit),
+        object,
+    )
+    .map_err(|_| source_corrupt("resolved dispatch source is invalid"))
+}
+
+fn source_digest(bytes: &[u8]) -> Result<Sha256Digest, WorkflowDispatchSourceResolutionStoreError> {
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| source_corrupt("source-resolution digest is invalid"))?;
+    Ok(Sha256Digest::from_bytes(bytes))
+}
+
+fn source_revision(
+    value: i64,
+) -> Result<GithubServerServiceRevision, WorkflowDispatchSourceResolutionStoreError> {
+    let value =
+        u64::try_from(value).map_err(|_| source_corrupt("source authority revision is invalid"))?;
+    GithubServerServiceRevision::new(value)
+        .map_err(|_| source_corrupt("source authority revision is invalid"))
+}
+
+fn source_positive_u64(
+    row: &PgRow,
+    column: &str,
+) -> Result<u64, WorkflowDispatchSourceResolutionStoreError> {
+    row.try_get::<i64, _>(column)
+        .map_err(source_operation_error)
+        .and_then(|value| {
+            u64::try_from(value)
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| source_corrupt("source-resolution positive integer is invalid"))
+        })
+}
+
+fn decode_source_commit_sha_bytes(
+    value: &str,
+) -> Result<Vec<u8>, WorkflowDispatchSourceResolutionStoreError> {
+    if !matches!(value.len(), 40 | 64) {
+        return Err(WorkflowDispatchSourceResolutionStoreError::Conflict);
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let digit = |byte| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                _ => None,
+            };
+            digit(pair[0])
+                .zip(digit(pair[1]))
+                .map(|(high, low)| (high << 4) | low)
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(WorkflowDispatchSourceResolutionStoreError::Conflict)
+}
+
+async fn dispatch_source_database_now(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<UnixMillis, WorkflowDispatchSourceResolutionStoreError> {
+    let now = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(source_operation_error)?;
+    Ok(UnixMillis::new(now))
+}
+
+fn source_corrupt(message: &'static str) -> WorkflowDispatchSourceResolutionStoreError {
+    WorkflowDispatchSourceResolutionStoreError::Store(StoreError::corrupt_data(message))
+}
+
+fn source_operation_error(error: sqlx::Error) -> WorkflowDispatchSourceResolutionStoreError {
+    WorkflowDispatchSourceResolutionStoreError::Store(StoreError::operation(error))
 }
 
 #[async_trait]
@@ -168,7 +952,7 @@ async fn resolve_authenticated_dispatch_source(
     request: ResolveAuthenticatedWorkflowDispatchSource,
 ) -> Result<Option<AuthenticatedWorkflowDispatchSource>, LogicalWorkflowAdmissionStoreError> {
     let mut transaction = store.pool.begin().await.map_err(operation_error)?;
-    let actor = authorize_human_repository_action(
+    let actor = authorize_workflow_dispatch_actor(
         &mut transaction,
         request.actor(),
         WORKFLOW_DISPATCH_PERMISSION,
@@ -178,12 +962,7 @@ async fn resolve_authenticated_dispatch_source(
     let Some(actor) = actor else {
         return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
     };
-    if actor.tenant_id != request.actor().tenant_id().as_str()
-        || actor.authorization_revision
-            != i64::try_from(request.actor().authorization_revision().value()).unwrap_or(i64::MAX)
-        || actor.principal_id.hyphenated().to_string() != request.actor().principal_id().as_str()
-        || actor.session_id.hyphenated().to_string() != request.actor().session_id().as_str()
-    {
+    if !authorized_dispatch_actor_matches(&actor, request.actor()) {
         return Err(StoreError::corrupt_data(
             "reauthorized workflow dispatch source actor disagrees with its request",
         )
@@ -962,6 +1741,13 @@ async fn validate_manual_dispatch_source_authority(
     let source_size = i64::try_from(claim.source().encoded_size()).map_err(|_| {
         StoreError::corrupt_data("workflow dispatch source size exceeds durable bounds")
     })?;
+    if resolved_manual_dispatch_source_authorized(transaction, command, claim, source_size).await? {
+        return Ok(());
+    }
+
+    // Retain the internal exact-source path for callers that already hold a
+    // Core-authenticated historical admission. The public HTTP contract never
+    // accepts a commit SHA and always uses the durable resolution above.
     let exact = sqlx::query_scalar::<_, bool>(
         r"
         SELECT TRUE
@@ -1020,16 +1806,63 @@ async fn validate_manual_dispatch_source_authority(
     }
 }
 
+async fn resolved_manual_dispatch_source_authorized(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &AdmitLogicalWorkflowRun,
+    claim: &AuthenticatedWorkflowDispatchClaim,
+    source_size: i64,
+) -> Result<bool, LogicalWorkflowAdmissionStoreError> {
+    let principal_id = Uuid::parse_str(claim.actor().principal_id().as_str()).map_err(|_| {
+        StoreError::corrupt_data("workflow dispatch principal identity is not a durable UUID")
+    })?;
+    let resolved = sqlx::query_scalar::<_, bool>(
+        r"
+        SELECT TRUE
+        FROM workflow_dispatch_source_resolutions AS resolution
+        WHERE resolution.tenant_id = $1
+          AND resolution.repository_id = $2
+          AND resolution.workflow_id = $3
+          AND resolution.workflow_path = $4
+          AND resolution.git_ref = $5
+          AND resolution.commit_sha = $6
+          AND resolution.source_digest = $7
+          AND resolution.source_object_key = $8
+          AND resolution.source_size_bytes = $9
+          AND resolution.source_media_type = $10
+          AND resolution.operation_id = $11
+          AND resolution.principal_id = $12
+          AND resolution.state = 'resolved'
+        FOR SHARE OF resolution
+        ",
+    )
+    .bind(command.tenant().as_str())
+    .bind(command.repository().id().as_uuid())
+    .bind(claim.workflow_id().as_uuid())
+    .bind(claim.workflow_path())
+    .bind(claim.git_ref())
+    .bind(decode_commit_sha_bytes(claim.commit_sha())?)
+    .bind(claim.source().digest().as_bytes().as_slice())
+    .bind(claim.source().object_key().as_str())
+    .bind(source_size)
+    .bind(claim.source().media_type())
+    .bind(claim.operation_id().as_uuid())
+    .bind(principal_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    Ok(resolved == Some(true))
+}
+
 async fn authorize_dispatch_subject(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     subject_evidence: &SubjectEvidenceAdmission,
-) -> Result<Option<AuthorizedHumanRepositoryAction>, LogicalWorkflowAdmissionStoreError> {
+) -> Result<Option<AuthorizedWorkflowDispatchActor>, LogicalWorkflowAdmissionStoreError> {
     let SubjectEvidenceAdmission::AuthenticatedWorkflowDispatch { claim } = subject_evidence else {
         return Ok(None);
     };
     require_existing_dispatch_repository(transaction, command).await?;
-    let actor = authorize_human_repository_action(
+    let actor = authorize_workflow_dispatch_actor(
         transaction,
         claim.actor(),
         WORKFLOW_DISPATCH_PERMISSION,
@@ -1040,10 +1873,7 @@ async fn authorize_dispatch_subject(
         return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
     };
     if actor.tenant_id != command.tenant().as_str()
-        || actor.authorization_revision
-            != i64::try_from(claim.actor().authorization_revision().value()).unwrap_or(i64::MAX)
-        || actor.principal_id.hyphenated().to_string() != claim.actor().principal_id().as_str()
-        || actor.session_id.hyphenated().to_string() != claim.actor().session_id().as_str()
+        || !authorized_dispatch_actor_matches(&actor, claim.actor())
     {
         return Err(StoreError::corrupt_data(
             "reauthorized workflow dispatch actor disagrees with its claim",
@@ -1109,7 +1939,7 @@ async fn record_new_subject_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     subject_evidence: &SubjectEvidenceAdmission,
-    dispatch_actor: Option<&AuthorizedHumanRepositoryAction>,
+    dispatch_actor: Option<&AuthorizedWorkflowDispatchActor>,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
         SubjectEvidenceAdmission::AuthenticatedGithub {
@@ -1146,7 +1976,7 @@ async fn validate_replayed_subject_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     subject_evidence: &SubjectEvidenceAdmission,
-    dispatch_actor: Option<&AuthorizedHumanRepositoryAction>,
+    dispatch_actor: Option<&AuthorizedWorkflowDispatchActor>,
     admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     match subject_evidence {
@@ -1190,9 +2020,16 @@ async fn record_workflow_dispatch_audit(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     claim: &AuthenticatedWorkflowDispatchClaim,
-    actor: &AuthorizedHumanRepositoryAction,
+    actor: &AuthorizedWorkflowDispatchActor,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let event_id = workflow_dispatch_audit_event_id(command.request_digest());
+    let (session_id, request_id) = match &actor.source {
+        AuthorizedWorkflowDispatchActorSource::CoreSession {
+            session_id,
+            request_id,
+        } => (Some(*session_id), request_id.as_deref()),
+        AuthorizedWorkflowDispatchActorSource::Delegated { .. } => (None, None),
+    };
     sqlx::query(
         r"
         INSERT INTO security_audit_events (
@@ -1209,15 +2046,57 @@ async fn record_workflow_dispatch_audit(
     .bind(&actor.tenant_id)
     .bind(command.admitted_at().get())
     .bind(actor.principal_id)
-    .bind(actor.session_id)
+    .bind(session_id)
     .bind(actor.authorization_revision)
     .bind(WORKFLOW_DISPATCH_AUDIT_ACTION)
     .bind(WORKFLOW_DISPATCH_AUDIT_RESOURCE_KIND)
     .bind(command.run_id().to_string())
-    .bind(actor.request_id.as_deref())
+    .bind(request_id)
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
+    if let AuthorizedWorkflowDispatchActorSource::Delegated {
+        issuer,
+        subject,
+        external_session_id,
+        assertion_id,
+        authenticated_at_seconds,
+        issued_at_seconds,
+        expires_at_seconds,
+    } = &actor.source
+    {
+        let authenticated_at_ms = seconds_to_millis(*authenticated_at_seconds)?;
+        let issued_at_ms = seconds_to_millis(*issued_at_seconds)?;
+        let expires_at_ms = seconds_to_millis(*expires_at_seconds)?;
+        if command.admitted_at().get() < issued_at_ms
+            || command.admitted_at().get() >= expires_at_ms
+        {
+            return Err(LogicalWorkflowAdmissionStoreError::WorkflowDispatchAuthorityRejected);
+        }
+        sqlx::query(
+            r"
+            INSERT INTO delegated_actor_audit_evidence (
+                event_id, tenant_id, principal_id, issuer, subject,
+                external_session_id, assertion_id, authenticated_at_ms,
+                issued_at_ms, expires_at_ms
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (event_id) DO NOTHING
+            ",
+        )
+        .bind(event_id)
+        .bind(&actor.tenant_id)
+        .bind(actor.principal_id)
+        .bind(issuer)
+        .bind(subject)
+        .bind(external_session_id)
+        .bind(assertion_id)
+        .bind(authenticated_at_ms)
+        .bind(issued_at_ms)
+        .bind(expires_at_ms)
+        .execute(&mut **transaction)
+        .await
+        .map_err(operation_error)?;
+    }
     validate_workflow_dispatch_audit(transaction, command, claim, actor, command.admitted_at())
         .await?;
     pin_workflow_dispatch_runtime_policy(transaction, command).await
@@ -1272,7 +2151,7 @@ async fn validate_workflow_dispatch_audit(
     transaction: &mut Transaction<'_, Postgres>,
     command: &AdmitLogicalWorkflowRun,
     claim: &AuthenticatedWorkflowDispatchClaim,
-    actor: &AuthorizedHumanRepositoryAction,
+    actor: &AuthorizedWorkflowDispatchActor,
     admitted_at: UnixMillis,
 ) -> Result<(), LogicalWorkflowAdmissionStoreError> {
     let row = sqlx::query(
@@ -1296,10 +2175,24 @@ async fn validate_workflow_dispatch_audit(
         .into());
     };
     let resource_id = command.run_id().to_string();
-    let exact = row
-        .try_get::<String, _>("tenant_id")
-        .map_err(operation_error)?
-        == actor.tenant_id
+    let audit_session_id = row
+        .try_get::<Option<Uuid>, _>("actor_session_id")
+        .map_err(operation_error)?;
+    let event_id = workflow_dispatch_audit_event_id(command.request_digest());
+    let actor_evidence_exact = validate_dispatch_actor_audit_evidence(
+        transaction,
+        event_id,
+        actor,
+        audit_session_id,
+        admitted_at,
+    )
+    .await?;
+    let exact = actor_evidence_exact
+        && authorized_dispatch_actor_matches(actor, claim.actor())
+        && row
+            .try_get::<String, _>("tenant_id")
+            .map_err(operation_error)?
+            == actor.tenant_id
         && row
             .try_get::<i64, _>("occurred_at_ms")
             .map_err(operation_error)?
@@ -1312,10 +2205,6 @@ async fn validate_workflow_dispatch_audit(
             .try_get::<Option<Uuid>, _>("actor_principal_id")
             .map_err(operation_error)?
             == Some(actor.principal_id)
-        && row
-            .try_get::<Option<Uuid>, _>("actor_session_id")
-            .map_err(operation_error)?
-            == Some(actor.session_id)
         && row
             .try_get::<Option<i64>, _>("authorization_revision")
             .map_err(operation_error)?
@@ -1336,12 +2225,7 @@ async fn validate_workflow_dispatch_audit(
             .try_get::<Option<String>, _>("resource_id")
             .map_err(operation_error)?
             .as_deref()
-            == Some(resource_id.as_str())
-        && claim.actor().tenant_id().as_str() == actor.tenant_id
-        && claim.actor().principal_id().as_str() == actor.principal_id.hyphenated().to_string()
-        && claim.actor().session_id().as_str() == actor.session_id.hyphenated().to_string()
-        && i64::try_from(claim.actor().authorization_revision().value()).ok()
-            == Some(actor.authorization_revision);
+            == Some(resource_id.as_str());
     if !exact {
         return Err(StoreError::corrupt_data(
             "workflow dispatch admission audit evidence is inconsistent",
@@ -1349,6 +2233,129 @@ async fn validate_workflow_dispatch_audit(
         .into());
     }
     Ok(())
+}
+
+async fn validate_dispatch_actor_audit_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    event_id: Uuid,
+    actor: &AuthorizedWorkflowDispatchActor,
+    audit_session_id: Option<Uuid>,
+    admitted_at: UnixMillis,
+) -> Result<bool, LogicalWorkflowAdmissionStoreError> {
+    let evidence = sqlx::query(
+        r"
+        SELECT tenant_id, principal_id, issuer, subject, external_session_id,
+               issued_at_ms, expires_at_ms
+        FROM delegated_actor_audit_evidence
+        WHERE event_id = $1
+        FOR SHARE
+        ",
+    )
+    .bind(event_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(operation_error)?;
+    match (&actor.source, audit_session_id, evidence) {
+        (
+            AuthorizedWorkflowDispatchActorSource::CoreSession { session_id, .. },
+            Some(audit_session_id),
+            None,
+        ) => Ok(*session_id == audit_session_id),
+        (
+            AuthorizedWorkflowDispatchActorSource::Delegated {
+                issuer,
+                subject,
+                external_session_id,
+                ..
+            },
+            None,
+            Some(evidence),
+        ) => {
+            // A replay can carry a freshly signed assertion for the same
+            // external session. The current assertion was reauthorized above;
+            // this row intentionally preserves the assertion that first
+            // admitted the run.
+            let issued_at_ms = evidence
+                .try_get::<i64, _>("issued_at_ms")
+                .map_err(operation_error)?;
+            let expires_at_ms = evidence
+                .try_get::<i64, _>("expires_at_ms")
+                .map_err(operation_error)?;
+            Ok(evidence
+                .try_get::<String, _>("tenant_id")
+                .map_err(operation_error)?
+                == actor.tenant_id
+                && evidence
+                    .try_get::<Uuid, _>("principal_id")
+                    .map_err(operation_error)?
+                    == actor.principal_id
+                && evidence
+                    .try_get::<String, _>("issuer")
+                    .map_err(operation_error)?
+                    == *issuer
+                && evidence
+                    .try_get::<Uuid, _>("subject")
+                    .map_err(operation_error)?
+                    == *subject
+                && evidence
+                    .try_get::<Uuid, _>("external_session_id")
+                    .map_err(operation_error)?
+                    == *external_session_id
+                && admitted_at.get() >= issued_at_ms
+                && admitted_at.get() < expires_at_ms)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn authorized_dispatch_actor_matches(
+    authorized: &AuthorizedWorkflowDispatchActor,
+    requested: &RepositoryMutationActor,
+) -> bool {
+    if requested.tenant_id().as_str() != authorized.tenant_id
+        || requested.principal_id().as_str() != authorized.principal_id.hyphenated().to_string()
+        || i64::try_from(requested.authorization_revision()).ok()
+            != Some(authorized.authorization_revision)
+    {
+        return false;
+    }
+    match (&authorized.source, requested) {
+        (
+            AuthorizedWorkflowDispatchActorSource::CoreSession { session_id, .. },
+            RepositoryMutationActor::CoreSession(requested),
+        ) => requested.session_id().as_str() == session_id.hyphenated().to_string(),
+        (
+            AuthorizedWorkflowDispatchActorSource::Delegated {
+                issuer,
+                subject,
+                external_session_id,
+                assertion_id,
+                authenticated_at_seconds,
+                issued_at_seconds,
+                expires_at_seconds,
+            },
+            RepositoryMutationActor::Delegated(requested),
+        ) => {
+            let assertion = requested.assertion();
+            assertion.issuer() == issuer
+                && assertion.subject() == *subject
+                && assertion.session_id() == *external_session_id
+                && assertion.assertion_id() == *assertion_id
+                && assertion.authenticated_at().as_seconds() == *authenticated_at_seconds
+                && assertion.issued_at().as_seconds() == *issued_at_seconds
+                && assertion.expires_at().as_seconds() == *expires_at_seconds
+        }
+        _ => false,
+    }
+}
+
+fn seconds_to_millis(seconds: u64) -> Result<i64, LogicalWorkflowAdmissionStoreError> {
+    seconds
+        .checked_mul(1_000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| {
+            StoreError::corrupt_data("delegated actor time is outside PostgreSQL").into()
+        })
 }
 
 fn workflow_dispatch_audit_event_id(request_digest: Sha256Digest) -> Uuid {

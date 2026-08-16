@@ -2,12 +2,13 @@ use std::fmt;
 
 use async_trait::async_trait;
 use automata_ci_auth::{
+    delegated_actor::{DelegatedRepositoryMutationActor, RepositoryMutationActor},
     management::{ManagementActor, ManagementRevision},
     time::UnixTimestamp,
 };
 use automata_ci_core::UnixMillis;
 use sha2::{Digest as _, Sha256};
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgPool, Postgres, Row as _, Transaction};
 use uuid::Uuid;
 
 use automata_ci_store::{
@@ -2356,6 +2357,187 @@ pub(super) struct AuthorizedHumanRepositoryAction {
     pub(super) request_id: Option<String>,
 }
 
+/// Transactionally reauthorized actor for one workflow dispatch.
+pub(super) struct AuthorizedWorkflowDispatchActor {
+    pub(super) tenant_id: String,
+    pub(super) principal_id: Uuid,
+    pub(super) authorization_revision: i64,
+    pub(super) source: AuthorizedWorkflowDispatchActorSource,
+}
+
+/// Exact session or assertion evidence retained for workflow-dispatch audit.
+pub(super) enum AuthorizedWorkflowDispatchActorSource {
+    CoreSession {
+        session_id: Uuid,
+        request_id: Option<String>,
+    },
+    Delegated {
+        issuer: String,
+        subject: Uuid,
+        external_session_id: Uuid,
+        assertion_id: Uuid,
+        authenticated_at_seconds: u64,
+        issued_at_seconds: u64,
+        expires_at_seconds: u64,
+    },
+}
+
+/// Reauthorizes a Core session or delegated assertion for workflow dispatch.
+///
+/// Both variants reload current Core-owned principal, membership revision, and
+/// exact repository permission while holding the transaction. An external
+/// session identifier is never interpreted as a `human_sessions` row.
+pub(super) async fn authorize_workflow_dispatch_actor(
+    transaction: &mut Transaction<'_, Postgres>,
+    actor: &RepositoryMutationActor,
+    permission: &str,
+    repository_id: Uuid,
+) -> Result<Option<AuthorizedWorkflowDispatchActor>, StoreError> {
+    match actor {
+        RepositoryMutationActor::CoreSession(actor) => {
+            authorize_human_repository_action(transaction, actor, permission, repository_id)
+                .await
+                .map(|authorized| {
+                    authorized.map(|authorized| AuthorizedWorkflowDispatchActor {
+                        tenant_id: authorized.tenant_id,
+                        principal_id: authorized.principal_id,
+                        authorization_revision: authorized.authorization_revision,
+                        source: AuthorizedWorkflowDispatchActorSource::CoreSession {
+                            session_id: authorized.session_id,
+                            request_id: authorized.request_id,
+                        },
+                    })
+                })
+        }
+        RepositoryMutationActor::Delegated(actor) => {
+            authorize_delegated_workflow_dispatch_actor(
+                transaction,
+                actor,
+                permission,
+                repository_id,
+            )
+            .await
+        }
+    }
+}
+
+async fn authorize_delegated_workflow_dispatch_actor(
+    transaction: &mut Transaction<'_, Postgres>,
+    actor: &DelegatedRepositoryMutationActor,
+    permission: &str,
+    repository_id: Uuid,
+) -> Result<Option<AuthorizedWorkflowDispatchActor>, StoreError> {
+    let principal_id =
+        canonical_uuid(actor.principal_id().as_str()).map_err(map_human_action_error)?;
+    let expected_revision = i64::try_from(actor.authorization_revision())
+        .map_err(|_| StoreError::corrupt_data("delegated actor revision is outside PostgreSQL"))?;
+    let now_ms = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(map_sql_error)
+    .map_err(map_human_action_error)?;
+    let assertion = actor.assertion();
+    let issued_at_ms = delegated_timestamp_millis(assertion.issued_at(), "issue")?;
+    let expires_at_ms = delegated_timestamp_millis(assertion.expires_at(), "expiry")?;
+    if issued_at_ms > now_ms.saturating_add(30_000) || expires_at_ms <= now_ms {
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r"
+        SELECT identity.principal_id,
+               principal.status AS principal_status,
+               membership.status AS membership_status,
+               membership.authorization_revision
+        FROM delegated_actor_identities AS identity
+        JOIN human_principals AS principal ON principal.id = identity.principal_id
+        JOIN tenant_human_memberships AS membership
+          ON membership.principal_id = identity.principal_id
+         AND membership.tenant_id = $3
+        WHERE identity.issuer = $1
+          AND identity.subject = $2
+        FOR SHARE OF identity, principal, membership
+        ",
+    )
+    .bind(assertion.issuer())
+    .bind(assertion.subject())
+    .bind(actor.tenant_id().as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(map_sql_error)
+    .map_err(map_human_action_error)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mapped_principal = row
+        .try_get::<Uuid, _>("principal_id")
+        .map_err(map_sql_error)
+        .map_err(map_human_action_error)?;
+    let principal_status = row
+        .try_get::<String, _>("principal_status")
+        .map_err(map_sql_error)
+        .map_err(map_human_action_error)?;
+    let membership_status = row
+        .try_get::<String, _>("membership_status")
+        .map_err(map_sql_error)
+        .map_err(map_human_action_error)?;
+    let current_revision = row
+        .try_get::<i64, _>("authorization_revision")
+        .map_err(map_sql_error)
+        .map_err(map_human_action_error)?;
+    if !matches!(principal_status.as_str(), "active" | "disabled")
+        || !matches!(membership_status.as_str(), "active" | "suspended")
+        || current_revision <= 0
+    {
+        return Err(StoreError::corrupt_data(
+            "delegated actor authority state is invalid",
+        ));
+    }
+    if mapped_principal != principal_id
+        || principal_status != "active"
+        || membership_status != "active"
+        || current_revision != expected_revision
+        || !actor_has_direct_permission(
+            transaction,
+            actor.tenant_id().as_str(),
+            principal_id,
+            now_ms,
+            permission,
+            Some(repository_id),
+        )
+        .await
+        .map_err(map_human_action_error)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(AuthorizedWorkflowDispatchActor {
+        tenant_id: actor.tenant_id().as_str().to_owned(),
+        principal_id,
+        authorization_revision: current_revision,
+        source: AuthorizedWorkflowDispatchActorSource::Delegated {
+            issuer: assertion.issuer().to_owned(),
+            subject: assertion.subject(),
+            external_session_id: assertion.session_id(),
+            assertion_id: assertion.assertion_id(),
+            authenticated_at_seconds: assertion.authenticated_at().as_seconds(),
+            issued_at_seconds: assertion.issued_at().as_seconds(),
+            expires_at_seconds: assertion.expires_at().as_seconds(),
+        },
+    }))
+}
+
+fn delegated_timestamp_millis(
+    timestamp: UnixTimestamp,
+    field: &'static str,
+) -> Result<i64, StoreError> {
+    timestamp
+        .as_seconds()
+        .checked_mul(1_000)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| StoreError::corrupt_data(format!("delegated actor {field} time is invalid")))
+}
+
 /// Reauthorizes one existing human session for an exact repository-scoped
 /// permission while retaining the row locks for the caller's transaction.
 ///
@@ -2595,7 +2777,30 @@ async fn actor_has_permission(
     permission: &str,
     repository_id: Option<Uuid>,
 ) -> Result<bool, SecretManagementRepositoryError> {
-    let direct: bool = sqlx::query_scalar(
+    let direct = actor_has_direct_permission(
+        transaction,
+        &actor.tenant_id,
+        actor.principal_id,
+        actor.now_ms,
+        permission,
+        repository_id,
+    )
+    .await?;
+    if direct || actor.provider_id != "github" {
+        return Ok(direct);
+    }
+    actor_has_github_mapping_permission(transaction, actor, permission, repository_id).await
+}
+
+async fn actor_has_direct_permission(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    principal_id: Uuid,
+    now_ms: i64,
+    permission: &str,
+    repository_id: Option<Uuid>,
+) -> Result<bool, SecretManagementRepositoryError> {
+    sqlx::query_scalar(
         r"
         SELECT EXISTS (
             SELECT 1
@@ -2623,18 +2828,14 @@ async fn actor_has_permission(
         )
         ",
     )
-    .bind(&actor.tenant_id)
-    .bind(actor.principal_id)
-    .bind(actor.now_ms)
+    .bind(tenant_id)
+    .bind(principal_id)
+    .bind(now_ms)
     .bind(permission)
     .bind(repository_id)
     .fetch_one(&mut **transaction)
     .await
-    .map_err(map_sql_error)?;
-    if direct || actor.provider_id != "github" {
-        return Ok(direct);
-    }
-    actor_has_github_mapping_permission(transaction, actor, permission, repository_id).await
+    .map_err(map_sql_error)
 }
 
 #[derive(FromRow)]

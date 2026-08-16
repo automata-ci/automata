@@ -1105,6 +1105,7 @@ async fn revalidate_handoff_consumer(
                 | GithubServerServiceAction::FetchPrivateRepositoryChangedFiles
                 | GithubServerServiceAction::FetchPrivatePullRequestFiles
                 | GithubServerServiceAction::DiscoverPrivateRepositorySchedules
+                | GithubServerServiceAction::ResolveWorkflowDispatchSource
                 | GithubServerServiceAction::ObserveWorkflowPermissionDefaults => {
                     return Err(GithubServerServiceStoreError::HandoffRejected);
                 }
@@ -1153,6 +1154,15 @@ async fn revalidate_handoff_consumer(
             .map(UnixMillis::new)
         }
         GithubServerServiceScope::PrivateRepositorySourceRead => {
+            if consumer.action() == GithubServerServiceAction::ResolveWorkflowDispatchSource {
+                return revalidate_workflow_dispatch_source_consumer(
+                    connection,
+                    identity,
+                    consumer,
+                    observed_at,
+                )
+                .await;
+            }
             if consumer.action() == GithubServerServiceAction::DiscoverPrivateRepositorySchedules {
                 return revalidate_schedule_discovery_consumer(
                     connection,
@@ -1306,6 +1316,74 @@ async fn revalidate_delivery_consumer(
     .await
     .map_err(operation_error)
     .map(|value| value.map(UnixMillis::new))
+}
+
+async fn revalidate_workflow_dispatch_source_consumer(
+    connection: &mut PgConnection,
+    identity: &GithubServerServiceAuthorityIdentity,
+    consumer: GithubServerServiceConsumerClaim,
+    observed_at: UnixMillis,
+) -> Result<UnixMillis, GithubServerServiceStoreError> {
+    if consumer.revision().get() != 1 {
+        return Err(GithubServerServiceStoreError::HandoffRejected);
+    }
+    sqlx::query_scalar::<_, i64>(
+        r"
+        SELECT resolution.claim_expires_at_ms
+        FROM workflow_dispatch_source_resolutions AS resolution
+        JOIN github_provider_manifest_current AS current_manifest
+          ON current_manifest.tenant_id = resolution.tenant_id
+         AND current_manifest.repository_id = resolution.repository_id
+         AND current_manifest.provider_connection_id = resolution.provider_connection_id
+         AND current_manifest.manifest_revision = resolution.provider_manifest_revision
+         AND current_manifest.manifest_digest = resolution.provider_manifest_digest
+        JOIN github_provider_manifest_revisions AS manifest
+          ON manifest.tenant_id = current_manifest.tenant_id
+         AND manifest.repository_id = current_manifest.repository_id
+         AND manifest.provider_connection_id = current_manifest.provider_connection_id
+         AND manifest.manifest_revision = current_manifest.manifest_revision
+         AND manifest.manifest_digest = current_manifest.manifest_digest
+        WHERE resolution.tenant_id = $1
+          AND resolution.operation_id = $2
+          AND resolution.repository_id = $3
+          AND resolution.state = 'claimed'
+          AND resolution.claim_owner_id = $4
+          AND resolution.claim_fence = $5
+          AND resolution.claimed_at_ms <= $6
+          AND resolution.claim_expires_at_ms > $6
+          AND resolution.private_source_authority_id = $7
+          AND resolution.private_source_authority_identity_digest = $8
+          AND resolution.private_source_authority_app_configuration_revision = $9
+          AND resolution.private_source_authority_policy_revision = $10
+          AND manifest.repository_visibility = 'private'
+          AND manifest.provider_installation_id = $11
+          AND manifest.github_app_id = $12
+          AND manifest.github_repository_id = $13
+          AND manifest.github_repository_name = $14
+          AND manifest.app_configuration_revision = $9
+          AND manifest.policy_revision = $10
+        FOR SHARE OF resolution, current_manifest, manifest
+        ",
+    )
+    .bind(identity.tenant().as_str())
+    .bind(consumer.consumer_id().as_uuid())
+    .bind(identity.repository_id().as_uuid())
+    .bind(consumer.owner().as_uuid())
+    .bind(pg_bigint(consumer.fence().get()))
+    .bind(observed_at.get())
+    .bind(identity.authority_id().as_uuid())
+    .bind(identity.identity_digest().as_bytes().as_slice())
+    .bind(pg_bigint(identity.app_configuration_revision().get()))
+    .bind(pg_bigint(identity.policy_revision().get()))
+    .bind(pg_bigint(identity.installation_id().get()))
+    .bind(pg_bigint(identity.github_app_id().get()))
+    .bind(pg_bigint(identity.github_repository_id().get()))
+    .bind(identity.github_repository_name().as_str())
+    .fetch_optional(connection)
+    .await
+    .map_err(operation_error)?
+    .map(UnixMillis::new)
+    .ok_or(GithubServerServiceStoreError::HandoffRejected)
 }
 
 async fn revalidate_schedule_discovery_consumer(
@@ -3308,6 +3386,9 @@ fn decode_github_server_service_action(value: &str) -> Option<GithubServerServic
         }
         "observe_workflow_permission_defaults" => {
             Some(GithubServerServiceAction::ObserveWorkflowPermissionDefaults)
+        }
+        "resolve_workflow_dispatch_source" => {
+            Some(GithubServerServiceAction::ResolveWorkflowDispatchSource)
         }
         _ => None,
     }

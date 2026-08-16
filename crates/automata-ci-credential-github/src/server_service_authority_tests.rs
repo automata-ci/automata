@@ -1417,6 +1417,7 @@ fn action_handoff_id(action: GithubServerServiceAction) -> GithubServerServiceHa
         GithubServerServiceAction::DiscoverPrivateRepositorySchedules => 0x707,
         GithubServerServiceAction::ObserveWorkflowPermissionDefaults => 0x708,
         GithubServerServiceAction::FetchPrivatePullRequestFiles => 0x709,
+        GithubServerServiceAction::ResolveWorkflowDispatchSource => 0x70a,
     };
     handoff_id(value)
 }

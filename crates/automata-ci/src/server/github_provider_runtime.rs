@@ -56,6 +56,7 @@ use automata_ci_github_delivery::{
 };
 use automata_ci_key_management::{EnvelopeCodec, KeyEncryptionProvider};
 use automata_ci_protocol::RuntimeAuthorityEndpoint;
+use automata_ci_scm::ScmProvider;
 use automata_ci_store::{
     GITHUB_PROVIDER_WEB_ORIGIN, GithubCheckProjectionOutbox, GithubCheckProjectionWorkerId,
     GithubCheckStoreError, GithubJobRuntimeAuthorityRepository,
@@ -888,6 +889,13 @@ impl GithubProviderRuntimeBuilder {
         .map_err(GithubProviderRuntimeBuildError::ScheduleWorker)?;
 
         let endpoint = provider_http_endpoint(config.transport())?;
+        let workflow_dispatch_source: Arc<dyn ScmProvider> = Arc::new(endpoint.clone());
+        let workflow_dispatch_credentials = match shape.source_mode() {
+            GithubProviderSourceMode::PublicOnly => None,
+            GithubProviderSourceMode::PublicAndPrivate => Some(adapters.clone()),
+        };
+        let workflow_dispatch_worker = GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())
+            .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let observation_owner = GithubServerServiceWorkerId::from_uuid(Uuid::new_v4())
             .map_err(|_| GithubProviderRuntimeBuildError::InvalidWorkerIdentity)?;
         let permission_defaults = Arc::new(WorkflowPermissionDefaultsRefresher {
@@ -1002,7 +1010,7 @@ impl GithubProviderRuntimeBuilder {
         }
         .map_err(GithubProviderRuntimeBuildError::DeliveryWorker)?;
 
-        let checks_credentials: Arc<dyn GithubChecksCredentialProvider> = adapters;
+        let checks_credentials: Arc<dyn GithubChecksCredentialProvider> = adapters.clone();
         let checks_outbox: Arc<dyn GithubCheckProjectionOutbox> = store.clone();
         let checks = Arc::new(
             GithubChecksPublisher::new(
@@ -1053,6 +1061,9 @@ impl GithubProviderRuntimeBuilder {
             job_authority_maintenance,
             job_authority_drain,
             job_runtime_authority_issuer,
+            workflow_dispatch_source,
+            workflow_dispatch_credentials,
+            workflow_dispatch_worker,
             release_drain,
             connection_ids,
             maintenance_authorities,
@@ -1151,6 +1162,9 @@ pub struct GithubProviderRuntime {
     job_authority_maintenance: Arc<GithubRuntimeAuthorityLifecycleCoordinator>,
     job_authority_drain: Arc<dyn JobRuntimeAuthorityDrainPort>,
     job_runtime_authority_issuer: Arc<dyn OptionalRuntimeAuthorityIssuer>,
+    workflow_dispatch_source: Arc<dyn ScmProvider>,
+    workflow_dispatch_credentials: Option<Arc<GithubProviderCredentialAdapters>>,
+    workflow_dispatch_worker: GithubServerServiceWorkerId,
     release_drain: Arc<dyn ReleaseDrainPort>,
     connection_ids: Arc<[ProviderConnectionId]>,
     maintenance_authorities: Arc<[GithubServerServiceAuthoritySelector]>,
@@ -1181,6 +1195,20 @@ impl GithubProviderRuntime {
     #[must_use]
     pub fn job_runtime_authority_issuer(&self) -> Arc<dyn OptionalRuntimeAuthorityIssuer> {
         self.job_runtime_authority_issuer.clone()
+    }
+
+    pub(super) fn workflow_dispatch_source(&self) -> Arc<dyn ScmProvider> {
+        self.workflow_dispatch_source.clone()
+    }
+
+    pub(super) fn workflow_dispatch_credentials(
+        &self,
+    ) -> Option<Arc<GithubProviderCredentialAdapters>> {
+        self.workflow_dispatch_credentials.clone()
+    }
+
+    pub(super) const fn workflow_dispatch_worker(&self) -> GithubServerServiceWorkerId {
+        self.workflow_dispatch_worker
     }
 
     /// Consumes the aggregate and runs its single background service instance.
@@ -1225,6 +1253,9 @@ impl GithubProviderRuntime {
             job_authority_maintenance,
             job_authority_drain,
             job_runtime_authority_issuer: _,
+            workflow_dispatch_source: _,
+            workflow_dispatch_credentials: _,
+            workflow_dispatch_worker: _,
             release_drain,
             connection_ids,
             maintenance_authorities,

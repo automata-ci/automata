@@ -560,7 +560,7 @@ impl LogicalWorkflowAdmissionRepository for DispatchRepository {
         self.source_calls.fetch_add(1, Ordering::SeqCst);
         let source = self.state.lock().expect("state lock").source.clone();
         Ok(source.filter(|source| {
-            request.actor() == &actor()
+            request.actor().core_session() == Some(&actor())
                 && request.repository_id() == source.repository().id()
                 && request.workflow_id() == source.workflow_id()
                 && request.git_ref() == source.git_ref()

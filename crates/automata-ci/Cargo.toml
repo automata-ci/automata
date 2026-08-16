@@ -94,7 +94,6 @@ automata-ci-build-support.workspace = true
 
 [dev-dependencies]
 automata-ci-postgres = { workspace = true, features = ["test-support"] }
-automata-ci-scm.workspace = true
 pem-rfc7468.workspace = true
 rcgen.workspace = true
 ring.workspace = true

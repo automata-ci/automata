@@ -526,35 +526,6 @@ impl ProductionComponents {
         }
         let live_log_stream_api =
             live_log_stream_router(Arc::clone(&live_log_service), live_log_origins);
-        let delegated_actor_api = config
-            .management()
-            .map(|management| -> Result<Router, ServerCompositionError> {
-                let issuer = management
-                    .authority()
-                    .delegated_actor_issuer()
-                    .as_str()
-                    .to_owned();
-                let verifier = DelegatedActorVerifier::new(DelegatedActorVerifierConfig {
-                    issuer: issuer.clone(),
-                    audience: management.authority().shard_id().as_str().to_owned(),
-                    jwks_url: management.delegated_actor_jwks_url().clone(),
-                })
-                .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
-                let resolver: Arc<dyn automata_ci_auth::delegated_actor::DelegatedActorResolver> =
-                    Arc::new(PostgresDelegatedActorResolver::new(
-                        store.postgres_pool().clone(),
-                    ));
-                let origin = HumanLiveLogBrowserOrigin::new(issuer)
-                    .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
-                Ok(delegated_actor_api_router(
-                    Arc::new(verifier),
-                    resolver,
-                    Arc::clone(&web_data),
-                    Arc::clone(&live_log_service),
-                    origin,
-                ))
-            })
-            .transpose()?;
         let mut human = build_human_api(
             config,
             store.clone(),
@@ -584,18 +555,64 @@ impl ProductionComponents {
             metrics,
         )
         .await?;
-        if github_provider.is_some() {
-            let admission_repository: Arc<dyn LogicalWorkflowAdmissionRepository> = store.clone();
-            let admission = WorkflowAdmissionService::with_system_ports(
-                Arc::clone(&blob_store),
-                admission_repository,
-                Arc::new(GithubWorkflowPlanVerifier::new()),
-            )
-            .with_observer(Arc::new(metrics.clone()));
-            let dispatch_backend: Arc<dyn WorkflowDispatchApiBackend> =
-                Arc::new(OperationalWorkflowDispatchBackend::new(
-                    GithubWorkflowDispatchService::new(admission),
-                ));
+        let workflow_dispatch_backend: Option<Arc<dyn WorkflowDispatchApiBackend>> =
+            github_provider.as_ref().map(|provider| {
+                let admission_repository: Arc<dyn LogicalWorkflowAdmissionRepository> =
+                    store.clone();
+                let source_resolutions: Arc<
+                    dyn automata_ci_store::WorkflowDispatchSourceResolutionRepository,
+                > = store.clone();
+                let manifests: Arc<dyn automata_ci_store::GithubProviderManifestRepository> =
+                    store.clone();
+                let admission = WorkflowAdmissionService::with_system_ports(
+                    Arc::clone(&blob_store),
+                    admission_repository,
+                    Arc::new(GithubWorkflowPlanVerifier::new()),
+                )
+                .with_observer(Arc::new(metrics.clone()));
+                let backend: Arc<dyn WorkflowDispatchApiBackend> =
+                    Arc::new(OperationalWorkflowDispatchBackend::new(
+                        GithubWorkflowDispatchService::new(admission),
+                        source_resolutions,
+                        manifests,
+                        provider.workflow_dispatch_source(),
+                        Arc::clone(&blob_store),
+                        provider.workflow_dispatch_credentials(),
+                        provider.workflow_dispatch_worker(),
+                    ));
+                backend
+            });
+        let delegated_actor_api = config
+            .management()
+            .map(|management| -> Result<Router, ServerCompositionError> {
+                let issuer = management
+                    .authority()
+                    .delegated_actor_issuer()
+                    .as_str()
+                    .to_owned();
+                let verifier = DelegatedActorVerifier::new(DelegatedActorVerifierConfig {
+                    issuer: issuer.clone(),
+                    audience: management.authority().shard_id().as_str().to_owned(),
+                    jwks_url: management.delegated_actor_jwks_url().clone(),
+                })
+                .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
+                let resolver: Arc<dyn automata_ci_auth::delegated_actor::DelegatedActorResolver> =
+                    Arc::new(PostgresDelegatedActorResolver::new(
+                        store.postgres_pool().clone(),
+                    ));
+                let origin = HumanLiveLogBrowserOrigin::new(issuer)
+                    .map_err(|_| ServerCompositionError::InvalidManagementConfiguration)?;
+                Ok(delegated_actor_api_router(
+                    Arc::new(verifier),
+                    resolver,
+                    Arc::clone(&web_data),
+                    Arc::clone(&live_log_service),
+                    origin,
+                    workflow_dispatch_backend.clone(),
+                ))
+            })
+            .transpose()?;
+        if let Some(dispatch_backend) = workflow_dispatch_backend {
             let dispatch_clock: Arc<dyn Clock> = Arc::new(SystemClock);
             human.router = human.router.merge(workflow_dispatch_api_router(
                 dispatch_backend,

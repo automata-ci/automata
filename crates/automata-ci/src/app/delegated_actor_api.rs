@@ -10,7 +10,8 @@ use std::{
 use automata_ci_auth::{
     delegated_actor::{
         DelegatedActorAssertion, DelegatedActorRequestSnapshot, DelegatedActorResolver,
-        DelegatedActorResolverError, ResolveDelegatedActorOutcome, ResolveDelegatedActorRequest,
+        DelegatedActorResolverError, DelegatedRepositoryMutationActor,
+        ResolveDelegatedActorOutcome, ResolveDelegatedActorRequest,
     },
     human::TenantId,
     time::UnixTimestamp,
@@ -46,6 +47,7 @@ use super::{
         service_error_response,
     },
     web::{RequestContext, Viewer},
+    workflow_dispatch_api::{WorkflowDispatchApiBackend, dispatch_delegated_workflow},
 };
 use automata_ci_core::WorkflowId;
 use automata_ci_store::HumanLiveLogBrowserOrigin;
@@ -65,6 +67,8 @@ pub const DELEGATED_ACTOR_RUN_PATH: &str =
 pub const DELEGATED_ACTOR_JOB_LOG_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}";
 /// Protected Core endpoint used by Cloud to authorize one browser log tail.
 pub const DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{owner}/{repository}/runs/{run_id}/jobs/{job_id}/live-ticket";
+/// Protected Core endpoint used by Cloud to dispatch one exact durable workflow source.
+pub const DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH: &str = "/internal/v1/workspaces/{workspace_id}/repositories/{repository_id}/workflows/{workflow_id}/dispatches";
 
 const MAX_ASSERTION_BYTES: usize = 8 * 1024;
 const MAX_JWT_SEGMENT_BYTES: usize = 6 * 1024;
@@ -385,6 +389,7 @@ struct DelegatedActorApiState {
     web_data: Arc<dyn WebData>,
     live_logs: Arc<LiveLogService>,
     browser_origin: HumanLiveLogBrowserOrigin,
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatchApiBackend>>,
 }
 
 impl std::fmt::Debug for DelegatedActorApiState {
@@ -396,6 +401,10 @@ impl std::fmt::Debug for DelegatedActorApiState {
             .field("web_data", &self.web_data)
             .field("live_logs", &self.live_logs)
             .field("browser_origin", &self.browser_origin)
+            .field(
+                "workflow_dispatch",
+                &self.workflow_dispatch.as_ref().map(|_| "[configured]"),
+            )
             .finish()
     }
 }
@@ -594,8 +603,9 @@ pub(crate) fn router(
     web_data: Arc<dyn WebData>,
     live_logs: Arc<LiveLogService>,
     browser_origin: HumanLiveLogBrowserOrigin,
+    workflow_dispatch: Option<Arc<dyn WorkflowDispatchApiBackend>>,
 ) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route(DELEGATED_ACTOR_VIEWER_PATH, get(workspace_viewer))
         .route(
             DELEGATED_ACTOR_REPOSITORIES_PATH,
@@ -607,14 +617,43 @@ pub(crate) fn router(
         .route(
             DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
             post(workspace_live_log_ticket),
-        )
-        .with_state(DelegatedActorApiState {
-            verifier,
-            resolver,
-            web_data,
-            live_logs,
-            browser_origin,
-        })
+        );
+    if workflow_dispatch.is_some() {
+        router = router.route(
+            DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH,
+            post(workspace_workflow_dispatch),
+        );
+    }
+    router.with_state(DelegatedActorApiState {
+        verifier,
+        resolver,
+        web_data,
+        live_logs,
+        browser_origin,
+        workflow_dispatch,
+    })
+}
+
+async fn workspace_workflow_dispatch(
+    State(state): State<DelegatedActorApiState>,
+    Path((workspace_id, repository_id, workflow_id)): Path<(String, String, String)>,
+    request: axum::extract::Request,
+) -> Response {
+    let Ok(workspace_uuid) = canonical_uuid(&workspace_id) else {
+        return status_response(StatusCode::NOT_FOUND);
+    };
+    let snapshot = match resolve_actor(&state, workspace_uuid, request.headers()).await {
+        Ok(snapshot) => snapshot,
+        Err(response) => return response,
+    };
+    let actor = match DelegatedRepositoryMutationActor::from_snapshot(&snapshot) {
+        Ok(actor) => actor.into(),
+        Err(_) => return status_response(StatusCode::INTERNAL_SERVER_ERROR),
+    };
+    let Some(backend) = state.workflow_dispatch.as_ref() else {
+        return status_response(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    dispatch_delegated_workflow(backend, actor, repository_id, workflow_id, request).await
 }
 
 async fn workspace_viewer(

@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use automata_ci_auth::{
+    delegated_actor::RepositoryMutationActor,
     management::{ManagementActor, ManagementRevision},
     request_auth::AuthenticatedRequestSnapshot,
     session::SessionKind,
@@ -84,11 +85,10 @@ pub(crate) const WORKFLOW_DISPATCH_PATH: &str =
 /// Exact, authority-bearing request passed from HTTP to product composition.
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct WorkflowDispatchApiRequest {
-    actor: ManagementActor,
+    actor: RepositoryMutationActor,
     repository_id: RepositoryId,
     workflow_id: WorkflowId,
     git_ref: String,
-    commit_sha: String,
     operation_id: OperationId,
     inputs: BTreeMap<WorkflowInputKey, WorkflowDispatchApiInputValue>,
 }
@@ -135,7 +135,7 @@ impl WorkflowDispatchApiInputValue {
 }
 
 impl WorkflowDispatchApiRequest {
-    pub(crate) const fn actor(&self) -> &ManagementActor {
+    pub(crate) const fn actor(&self) -> &RepositoryMutationActor {
         &self.actor
     }
 
@@ -149,10 +149,6 @@ impl WorkflowDispatchApiRequest {
 
     pub(crate) fn git_ref(&self) -> &str {
         &self.git_ref
-    }
-
-    pub(crate) fn commit_sha(&self) -> &str {
-        &self.commit_sha
     }
 
     pub(crate) const fn operation_id(&self) -> OperationId {
@@ -265,13 +261,49 @@ async fn prepare_request(
         return Err(ApiError::InvalidRequest);
     }
     let (repository_id, workflow_id) = exact_target(path)?;
-    let actor = actor_from_request(state, &request)?;
+    let actor = actor_from_request(state, &request)?.into();
     let document = json_document(request).await?;
+    request_from_document(actor, repository_id, workflow_id, document)
+}
+
+/// Validates and executes one dispatch for an already authenticated delegated actor.
+pub(crate) async fn dispatch_delegated_workflow(
+    backend: &Arc<dyn WorkflowDispatchApiBackend>,
+    actor: RepositoryMutationActor,
+    repository_id: String,
+    workflow_id: String,
+    request: Request,
+) -> Response {
+    if request.uri().query().is_some() {
+        return ApiError::InvalidRequest.into_response();
+    }
+    let target = exact_target_values(&repository_id, &workflow_id);
+    let (repository_id, workflow_id) = match target {
+        Ok(target) => target,
+        Err(error) => return error.into_response(),
+    };
+    let document = match json_document(request).await {
+        Ok(document) => document,
+        Err(error) => return error.into_response(),
+    };
+    let dispatch = match request_from_document(actor, repository_id, workflow_id, document) {
+        Ok(dispatch) => dispatch,
+        Err(error) => return error.into_response(),
+    };
+    match backend.dispatch(dispatch).await {
+        Ok(outcome) => success_response(outcome),
+        Err(error) => ApiError::from(error).into_response(),
+    }
+}
+
+fn request_from_document(
+    actor: RepositoryMutationActor,
+    repository_id: RepositoryId,
+    workflow_id: WorkflowId,
+    document: DispatchDocument,
+) -> Result<WorkflowDispatchApiRequest, ApiError> {
     let operation_id = OperationId::from_uuid(document.operation_id);
-    if operation_id.as_uuid().is_nil()
-        || !valid_git_ref(&document.git_ref)
-        || !valid_commit_sha(&document.commit_sha)
-    {
+    if operation_id.as_uuid().is_nil() || !valid_git_ref(&document.git_ref) {
         return Err(ApiError::InvalidRequest);
     }
     let inputs = validated_inputs(document.inputs)?;
@@ -280,7 +312,6 @@ async fn prepare_request(
         repository_id,
         workflow_id,
         git_ref: document.git_ref,
-        commit_sha: document.commit_sha,
         operation_id,
         inputs,
     })
@@ -315,8 +346,15 @@ fn exact_target(
     path: Result<Path<(String, String)>, PathRejection>,
 ) -> Result<(RepositoryId, WorkflowId), ApiError> {
     let Path((repository_id, workflow_id)) = path.map_err(|_| ApiError::InvalidRequest)?;
-    let repository_id = canonical_uuid(&repository_id)?;
-    let workflow_id = canonical_uuid(&workflow_id)?;
+    exact_target_values(&repository_id, &workflow_id)
+}
+
+fn exact_target_values(
+    repository_id: &str,
+    workflow_id: &str,
+) -> Result<(RepositoryId, WorkflowId), ApiError> {
+    let repository_id = canonical_uuid(repository_id)?;
+    let workflow_id = canonical_uuid(workflow_id)?;
     Ok((
         RepositoryId::from_uuid(repository_id),
         WorkflowId::from_uuid(workflow_id),
@@ -371,13 +409,6 @@ fn valid_git_ref(value: &str) -> bool {
         })
 }
 
-fn valid_commit_sha(value: &str) -> bool {
-    matches!(value.len(), 40 | 64)
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
 fn success_response(outcome: WorkflowDispatchApiOutcome) -> Response {
     json_response(
         if outcome.is_replay() {
@@ -397,7 +428,6 @@ fn success_response(outcome: WorkflowDispatchApiOutcome) -> Response {
 #[serde(deny_unknown_fields)]
 struct DispatchDocument {
     git_ref: String,
-    commit_sha: String,
     operation_id: Uuid,
     inputs: DispatchInputsDocument,
 }
@@ -482,6 +512,10 @@ mod tests {
 
     use automata_ci_auth::{
         authorization::AuthorizationContext,
+        delegated_actor::{
+            DelegatedActorAssertion, DelegatedActorRequestSnapshot,
+            DelegatedRepositoryMutationActor,
+        },
         human::{AuthenticatedHuman, PrincipalId, ProviderId, ProviderSubject, TenantId},
         request_auth::ViewerDisplayMetadata,
         session::{DurableSession, DurableSessionIdentity, SessionId},
@@ -652,13 +686,13 @@ mod tests {
         );
         assert_eq!(captured.workflow_id().as_uuid().to_string(), WORKFLOW_ID);
         assert_eq!(captured.git_ref(), "refs/heads/release");
-        assert_eq!(captured.commit_sha(), SHA);
         assert_eq!(captured.operation_id().to_string(), OPERATION_ID);
         assert_eq!(captured.actor().tenant_id().as_str(), "tenant-dispatch-api");
-        assert_eq!(captured.actor().now(), UnixTimestamp::from_seconds(777));
-        assert!(captured.actor().request_id().is_none());
+        let actor = captured.actor().core_session().expect("Core session actor");
+        assert_eq!(actor.now(), UnixTimestamp::from_seconds(777));
+        assert!(actor.request_id().is_none());
         let debug = format!("{captured:?}");
-        for redacted in ["refs/heads/release", SHA, "live", "neutral fixture"] {
+        for redacted in ["refs/heads/release", "live", "neutral fixture"] {
             assert!(!debug.contains(redacted), "Debug exposed {redacted}");
         }
         for retained in [REPOSITORY_ID, WORKFLOW_ID, OPERATION_ID] {
@@ -677,6 +711,34 @@ mod tests {
             input(inputs, "note"),
             &WorkflowDispatchApiInputValue::String("neutral fixture".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn delegated_request_retains_external_authority_without_a_core_session() {
+        let backend = RecordingBackend::success(false);
+        let dispatch_backend: Arc<dyn WorkflowDispatchApiBackend> = backend.clone();
+        let response = dispatch_delegated_workflow(
+            &dispatch_backend,
+            delegated_mutation_actor(),
+            REPOSITORY_ID.to_owned(),
+            WORKFLOW_ID.to_owned(),
+            request(PATH, None, "application/json", valid_body()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let requests = backend.requests();
+        let [captured] = requests.as_slice() else {
+            panic!("one delegated dispatch request expected");
+        };
+        assert!(captured.actor().core_session().is_none());
+        let actor = captured.actor().delegated().expect("delegated actor");
+        assert_eq!(actor.assertion().issuer(), "https://cloud.automata.example");
+        assert_eq!(
+            actor.assertion().session_id().hyphenated().to_string(),
+            captured.actor().correlation_session_id()
+        );
+        assert_eq!(captured.actor().authorization_revision(), 7);
     }
 
     #[tokio::test]
@@ -720,37 +782,37 @@ mod tests {
     async fn strict_bounded_json_rejects_source_authority_and_untyped_values() {
         let mut invalid_bodies = vec![
             json!({
-                "git_ref": "refs/heads/release", "commit_sha": SHA,
+                "git_ref": "refs/heads/release",
                 "operation_id": OPERATION_ID, "inputs": {}, "source": "on: push"
             })
             .to_string(),
             json!({
-                "git_ref": "refs/heads/release", "commit_sha": SHA,
+                "git_ref": "refs/heads/release",
                 "operation_id": OPERATION_ID, "inputs": {}, "actor": "forged"
             })
             .to_string(),
             json!({
-                "git_ref": "refs/heads/release", "commit_sha": SHA,
+                "git_ref": "refs/heads/release",
                 "operation_id": OPERATION_ID, "inputs": {"count": 3}
             })
             .to_string(),
             json!({
-                "git_ref": "release", "commit_sha": SHA,
-                "operation_id": OPERATION_ID, "inputs": {}
-            })
-            .to_string(),
-            json!({
-                "git_ref": "refs/heads/release", "commit_sha": SHA.to_uppercase(),
+                "git_ref": "release",
                 "operation_id": OPERATION_ID, "inputs": {}
             })
             .to_string(),
             json!({
                 "git_ref": "refs/heads/release", "commit_sha": SHA,
+                "operation_id": OPERATION_ID, "inputs": {}
+            })
+            .to_string(),
+            json!({
+                "git_ref": "refs/heads/release",
                 "operation_id": Uuid::nil(), "inputs": {}
             })
             .to_string(),
             format!(
-                "{{\"git_ref\":\"refs/heads/release\",\"commit_sha\":\"{SHA}\",\"operation_id\":\"{OPERATION_ID}\",\"inputs\":{{\"same\":true,\"same\":false}}}}"
+                "{{\"git_ref\":\"refs/heads/release\",\"operation_id\":\"{OPERATION_ID}\",\"inputs\":{{\"same\":true,\"same\":false}}}}"
             ),
         ];
         let excessive_inputs = (0..=MAX_GITHUB_WORKFLOW_DISPATCH_INPUTS)
@@ -758,7 +820,7 @@ mod tests {
             .collect::<serde_json::Map<_, _>>();
         invalid_bodies.push(
             json!({
-                "git_ref": "refs/heads/release", "commit_sha": SHA,
+                "git_ref": "refs/heads/release",
                 "operation_id": OPERATION_ID, "inputs": excessive_inputs
             })
             .to_string(),
@@ -774,7 +836,7 @@ mod tests {
         ] {
             invalid_bodies.push(
                 json!({
-                    "git_ref": git_ref, "commit_sha": SHA,
+                    "git_ref": git_ref,
                     "operation_id": OPERATION_ID, "inputs": {}
                 })
                 .to_string(),
@@ -782,7 +844,7 @@ mod tests {
         }
         invalid_bodies.push(
             json!({
-                "git_ref": "refs/heads/release", "commit_sha": SHA,
+                "git_ref": "refs/heads/release",
                 "operation_id": OPERATION_ID,
                 "inputs": {"oversized": "x".repeat(MAX_GITHUB_WORKFLOW_DISPATCH_INPUT_CHARACTERS)}
             })
@@ -956,7 +1018,6 @@ mod tests {
         Body::from(
             serde_json::to_vec(&json!({
                 "git_ref": git_ref,
-                "commit_sha": SHA,
                 "operation_id": OPERATION_ID,
                 "inputs": {
                     "target": "live",
@@ -1012,6 +1073,39 @@ mod tests {
             authorization,
         )
         .expect("authenticated snapshot")
+    }
+
+    fn delegated_mutation_actor() -> RepositoryMutationActor {
+        let tenant = TenantId::new("tenant-dispatch-api").expect("tenant");
+        let principal =
+            PrincipalId::new("55555555-5555-4555-8555-555555555555").expect("principal");
+        let assertion = DelegatedActorAssertion::new(
+            "https://cloud.automata.example",
+            Uuid::parse_str("77777777-7777-4777-8777-777777777777").expect("subject"),
+            Uuid::parse_str("66666666-6666-4666-8666-666666666666").expect("session"),
+            Uuid::parse_str("88888888-8888-4888-8888-888888888888").expect("assertion"),
+            UnixTimestamp::from_seconds(700),
+            UnixTimestamp::from_seconds(710),
+            UnixTimestamp::from_seconds(830),
+        )
+        .expect("assertion");
+        let authorization = AuthorizationContext::authenticated_at_revision(
+            tenant.clone(),
+            principal,
+            BTreeSet::new(),
+            7,
+        )
+        .expect("authorization context");
+        let snapshot = DelegatedActorRequestSnapshot::new(
+            assertion,
+            &tenant,
+            ViewerDisplayMetadata::new("Neutral User").expect("viewer"),
+            authorization,
+        )
+        .expect("delegated snapshot");
+        DelegatedRepositoryMutationActor::from_snapshot(&snapshot)
+            .expect("mutation actor")
+            .into()
     }
 
     fn input<'a>(

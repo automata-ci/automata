@@ -197,6 +197,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0048_windows_runner_admission.sql",
         "a80284bf98fcbbdd2516fdddbfd17ecd0981f8dc41fc874f670718e740ff702239a73695ad0a942af2275893b23994ca",
     ),
+    (
+        "0049_delegated_workflow_dispatch.sql",
+        "89a474f5fe3f355c0192b81697b07550ae85b816660e2a70e34614f5f94b9ccfc4098f65b43567e2cf742ad586ad769a",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;

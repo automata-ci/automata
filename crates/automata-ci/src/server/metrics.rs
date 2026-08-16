@@ -49,7 +49,7 @@ use crate::{
         delegated_actor_api::{
             DELEGATED_ACTOR_JOB_LOG_PATH, DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
             DELEGATED_ACTOR_REPOSITORIES_PATH, DELEGATED_ACTOR_RUN_PATH, DELEGATED_ACTOR_RUNS_PATH,
-            DELEGATED_ACTOR_VIEWER_PATH,
+            DELEGATED_ACTOR_VIEWER_PATH, DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH,
         },
         github_auth::{
             CLI_SESSION_PATH, GITHUB_DEVICE_BEGIN_PATH, GITHUB_DEVICE_POLL_PATH,
@@ -108,7 +108,7 @@ const RBAC_SETTINGS_ROUTE: &str = "/settings/access/{rbac}";
 const GITHUB_DEVICE_ROUTE: &str = "/api/v1/auth/device/{operation}";
 const REPOSITORY_SECRET_BROWSER_MUTATION_ROUTE: &str =
     "/{owner}/{repository}/settings/secrets/{mutation}";
-const HTTP_ROUTE_LABELS: [&str; 51] = [
+const HTTP_ROUTE_LABELS: [&str; 52] = [
     "/healthz",
     "/readyz",
     SHARD_CAPABILITIES_PATH,
@@ -118,6 +118,7 @@ const HTTP_ROUTE_LABELS: [&str; 51] = [
     DELEGATED_ACTOR_RUN_PATH,
     DELEGATED_ACTOR_JOB_LOG_PATH,
     DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
+    DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH,
     "/",
     "/setup",
     "/repositories",
@@ -1817,6 +1818,7 @@ fn http_route(matched_path: Option<&str>) -> &'static str {
         Some(DELEGATED_ACTOR_RUN_PATH) => DELEGATED_ACTOR_RUN_PATH,
         Some(DELEGATED_ACTOR_JOB_LOG_PATH) => DELEGATED_ACTOR_JOB_LOG_PATH,
         Some(DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH) => DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
+        Some(DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH) => DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH,
         Some("/") => "/",
         Some("/setup") => "/setup",
         Some("/repositories") => "/repositories",
@@ -2566,6 +2568,7 @@ mod tests {
             DELEGATED_ACTOR_RUN_PATH,
             DELEGATED_ACTOR_JOB_LOG_PATH,
             DELEGATED_ACTOR_LIVE_LOG_TICKET_PATH,
+            DELEGATED_ACTOR_WORKFLOW_DISPATCH_PATH,
         ];
 
         for route in operational_routes {

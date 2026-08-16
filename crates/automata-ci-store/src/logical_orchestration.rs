@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_auth::management::ManagementActor;
+use automata_ci_auth::delegated_actor::RepositoryMutationActor;
 use automata_ci_core::{
     MAX_LOGICAL_JOB_NEEDS, MAX_LOGICAL_JOBS, OperationId, RunId, TrustSnapshot, UnixMillis,
     WorkflowId, WorkflowJobKey, canonical_git_ref,
@@ -14,12 +14,19 @@ use uuid::Uuid;
 
 use crate::{
     AdmissionObject, AdmissionRepository, AuthenticatedGithubDeliveryClaim,
-    JobCredentialRequirements, LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, RepositoryId,
+    GithubProviderManifestRevision, GithubServerServiceAction,
+    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
+    GithubServerServiceConsumerClaim, GithubServerServiceConsumerId, GithubServerServiceRevision,
+    GithubServerServiceWorkerId, JobCredentialRequirements,
+    LOGICAL_ACTIVATION_RUNTIME_CONTEXT_MEDIA_TYPE, ProviderConnectionId, RepositoryId,
     Sha256Digest, StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 
 /// Logical-orchestration schema for phase-one admission.
 pub const LOGICAL_ORCHESTRATION_SCHEMA: u16 = 1;
+
+/// Maximum lease for one live provider source resolution.
+pub const MAX_WORKFLOW_DISPATCH_SOURCE_CLAIM_MILLIS: i64 = 15 * 60 * 1_000;
 
 const MAX_TEXT_BYTES: usize = 1_024;
 
@@ -168,11 +175,11 @@ impl AdmittedLogicalWorkflowJob {
 ///
 /// Input values are not repeated here. Their immutable event and base-context
 /// digests are bound alongside the exact repository, workflow, ref, and
-/// operation identity, while [`ManagementActor`] is reauthorized inside the
-/// admission transaction.
+/// operation identity, while [`RepositoryMutationActor`] is reauthorized
+/// inside the admission transaction.
 #[derive(Clone, Eq, PartialEq)]
 pub struct AuthenticatedWorkflowDispatchClaim {
-    actor: ManagementActor,
+    actor: RepositoryMutationActor,
     repository_id: RepositoryId,
     workflow_id: WorkflowId,
     workflow_path: String,
@@ -204,7 +211,7 @@ impl AuthenticatedWorkflowDispatchClaim {
     /// full Git ref before the repository adapter observes authority.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        actor: ManagementActor,
+        actor: impl Into<RepositoryMutationActor>,
         repository_id: RepositoryId,
         workflow_id: WorkflowId,
         workflow_path: impl Into<String>,
@@ -234,7 +241,7 @@ impl AuthenticatedWorkflowDispatchClaim {
             }
         }
         Ok(Self {
-            actor,
+            actor: actor.into(),
             repository_id,
             workflow_id,
             workflow_path,
@@ -249,7 +256,7 @@ impl AuthenticatedWorkflowDispatchClaim {
 
     /// Returns the current authenticated actor to reauthorize transactionally.
     #[must_use]
-    pub const fn actor(&self) -> &ManagementActor {
+    pub const fn actor(&self) -> &RepositoryMutationActor {
         &self.actor
     }
 
@@ -312,7 +319,7 @@ impl AuthenticatedWorkflowDispatchClaim {
 /// workflow source used by a control-plane manual dispatch.
 #[derive(Clone, Eq, PartialEq)]
 pub struct ResolveAuthenticatedWorkflowDispatchSource {
-    actor: ManagementActor,
+    actor: RepositoryMutationActor,
     repository_id: RepositoryId,
     workflow_id: WorkflowId,
     git_ref: String,
@@ -330,14 +337,14 @@ impl fmt::Debug for ResolveAuthenticatedWorkflowDispatchSource {
 }
 
 impl ResolveAuthenticatedWorkflowDispatchSource {
-    /// Creates an exact source lookup bound to current human-session evidence.
+    /// Creates an exact source lookup bound to current mutation authority.
     ///
     /// # Errors
     ///
     /// Rejects nil target identities, a noncanonical full ref, or a commit SHA
     /// other than 40 or 64 lowercase hexadecimal characters.
     pub fn new(
-        actor: ManagementActor,
+        actor: impl Into<RepositoryMutationActor>,
         repository_id: RepositoryId,
         workflow_id: WorkflowId,
         git_ref: impl Into<String>,
@@ -356,7 +363,7 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
         let commit_sha = commit_sha.into();
         decode_commit_sha(&commit_sha)?;
         Ok(Self {
-            actor,
+            actor: actor.into(),
             repository_id,
             workflow_id,
             git_ref,
@@ -364,9 +371,9 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
         })
     }
 
-    /// Returns current human-session evidence to reauthorize transactionally.
+    /// Returns current mutation authority to reauthorize transactionally.
     #[must_use]
-    pub const fn actor(&self) -> &ManagementActor {
+    pub const fn actor(&self) -> &RepositoryMutationActor {
         &self.actor
     }
 
@@ -381,7 +388,6 @@ impl ResolveAuthenticatedWorkflowDispatchSource {
     pub const fn workflow_id(&self) -> WorkflowId {
         self.workflow_id
     }
-
     /// Returns the exact full Git ref.
     #[must_use]
     pub fn git_ref(&self) -> &str {
@@ -498,6 +504,388 @@ impl AuthenticatedWorkflowDispatchSource {
     pub const fn source(&self) -> &AdmissionObject {
         &self.source
     }
+}
+
+/// Request to authorize and claim Core-owned source resolution for one manual dispatch.
+#[derive(Clone, Eq, PartialEq)]
+pub struct BeginWorkflowDispatchSourceResolution {
+    actor: RepositoryMutationActor,
+    repository_id: RepositoryId,
+    workflow_id: WorkflowId,
+    git_ref: String,
+    operation_id: OperationId,
+    worker_id: GithubServerServiceWorkerId,
+    observed_at: UnixMillis,
+    claim_millis: i64,
+}
+
+impl fmt::Debug for BeginWorkflowDispatchSourceResolution {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BeginWorkflowDispatchSourceResolution")
+            .field("repository_id", &self.repository_id)
+            .field("workflow_id", &self.workflow_id)
+            .field("operation_id", &self.operation_id)
+            .field("worker_id", &self.worker_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BeginWorkflowDispatchSourceResolution {
+    /// Creates a bounded source-resolution claim request.
+    ///
+    /// # Errors
+    ///
+    /// Rejects nil targets, an invalid ref, a pre-epoch observation, or an
+    /// excessive claim lease.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        actor: impl Into<RepositoryMutationActor>,
+        repository_id: RepositoryId,
+        workflow_id: WorkflowId,
+        git_ref: impl Into<String>,
+        operation_id: OperationId,
+        worker_id: GithubServerServiceWorkerId,
+        observed_at: UnixMillis,
+        claim_millis: i64,
+    ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
+        let git_ref = git_ref.into();
+        validate_text(&git_ref, "Git ref")?;
+        if repository_id.as_uuid().is_nil()
+            || workflow_id.as_uuid().is_nil()
+            || operation_id.as_uuid().is_nil()
+        {
+            return Err(LogicalWorkflowAdmissionValueError::NilUuid(
+                "workflow dispatch source target",
+            ));
+        }
+        if !canonical_workflow_dispatch_ref(&git_ref) {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidGitRef);
+        }
+        if observed_at.get() < 0
+            || claim_millis <= 0
+            || claim_millis > MAX_WORKFLOW_DISPATCH_SOURCE_CLAIM_MILLIS
+        {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidSourceResolutionClaim);
+        }
+        Ok(Self {
+            actor: actor.into(),
+            repository_id,
+            workflow_id,
+            git_ref,
+            operation_id,
+            worker_id,
+            observed_at,
+            claim_millis,
+        })
+    }
+
+    /// Returns current mutation authority for transactional reauthorization.
+    #[must_use]
+    pub const fn actor(&self) -> &RepositoryMutationActor {
+        &self.actor
+    }
+    /// Returns the exact repository target.
+    #[must_use]
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.repository_id
+    }
+    /// Returns the exact workflow target.
+    #[must_use]
+    pub const fn workflow_id(&self) -> WorkflowId {
+        self.workflow_id
+    }
+    /// Returns the caller-selected full Git ref.
+    #[must_use]
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+    /// Returns the caller's idempotency identity.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+    /// Returns the claiming product replica.
+    #[must_use]
+    pub const fn worker_id(&self) -> GithubServerServiceWorkerId {
+        self.worker_id
+    }
+    /// Returns caller-observed claim time.
+    #[must_use]
+    pub const fn observed_at(&self) -> UnixMillis {
+        self.observed_at
+    }
+    /// Returns the requested lease duration.
+    #[must_use]
+    pub const fn claim_millis(&self) -> i64 {
+        self.claim_millis
+    }
+}
+
+/// Exact live source-resolution claim pinned to a current provider manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkflowDispatchSourceClaim {
+    tenant: TenantScope,
+    repository_id: RepositoryId,
+    workflow_id: WorkflowId,
+    workflow_path: String,
+    git_ref: String,
+    operation_id: OperationId,
+    connection_id: ProviderConnectionId,
+    manifest_revision: GithubProviderManifestRevision,
+    manifest_digest: Sha256Digest,
+    private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+    worker_id: GithubServerServiceWorkerId,
+    fence: GithubServerServiceClaimFence,
+    claimed_at: UnixMillis,
+    expires_at: UnixMillis,
+}
+
+impl WorkflowDispatchSourceClaim {
+    /// Rehydrates one exact durable claim.
+    ///
+    /// # Errors
+    ///
+    /// Rejects incoherent identities, refs, or lease times.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_durable_parts(
+        tenant: TenantScope,
+        repository_id: RepositoryId,
+        workflow_id: WorkflowId,
+        workflow_path: impl Into<String>,
+        git_ref: impl Into<String>,
+        operation_id: OperationId,
+        connection_id: ProviderConnectionId,
+        manifest_revision: GithubProviderManifestRevision,
+        manifest_digest: Sha256Digest,
+        private_source_authority: Option<GithubServerServiceAuthoritySelector>,
+        worker_id: GithubServerServiceWorkerId,
+        fence: GithubServerServiceClaimFence,
+        claimed_at: UnixMillis,
+        expires_at: UnixMillis,
+    ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
+        let workflow_path = workflow_path.into();
+        let git_ref = git_ref.into();
+        validate_text(&workflow_path, "workflow path")?;
+        validate_text(&git_ref, "Git ref")?;
+        if repository_id.as_uuid().is_nil()
+            || workflow_id.as_uuid().is_nil()
+            || operation_id.as_uuid().is_nil()
+            || !canonical_workflow_dispatch_ref(&git_ref)
+            || claimed_at.get() < 0
+            || expires_at <= claimed_at
+            || expires_at.get().saturating_sub(claimed_at.get())
+                > MAX_WORKFLOW_DISPATCH_SOURCE_CLAIM_MILLIS
+            || private_source_authority
+                .as_ref()
+                .is_some_and(|selector| selector.tenant() != &tenant)
+        {
+            return Err(LogicalWorkflowAdmissionValueError::InvalidSourceResolutionClaim);
+        }
+        Ok(Self {
+            tenant,
+            repository_id,
+            workflow_id,
+            workflow_path,
+            git_ref,
+            operation_id,
+            connection_id,
+            manifest_revision,
+            manifest_digest,
+            private_source_authority,
+            worker_id,
+            fence,
+            claimed_at,
+            expires_at,
+        })
+    }
+
+    /// Returns the authenticated tenant.
+    #[must_use]
+    pub const fn tenant(&self) -> &TenantScope {
+        &self.tenant
+    }
+    /// Returns the repository target.
+    #[must_use]
+    pub const fn repository_id(&self) -> RepositoryId {
+        self.repository_id
+    }
+    /// Returns the workflow target.
+    #[must_use]
+    pub const fn workflow_id(&self) -> WorkflowId {
+        self.workflow_id
+    }
+    /// Returns the exact repository-relative workflow path.
+    #[must_use]
+    pub fn workflow_path(&self) -> &str {
+        &self.workflow_path
+    }
+    /// Returns the requested full Git ref.
+    #[must_use]
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+    /// Returns the idempotency identity.
+    #[must_use]
+    pub const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+    /// Returns the pinned provider connection.
+    #[must_use]
+    pub const fn connection_id(&self) -> ProviderConnectionId {
+        self.connection_id
+    }
+    /// Returns the pinned provider manifest revision.
+    #[must_use]
+    pub const fn manifest_revision(&self) -> GithubProviderManifestRevision {
+        self.manifest_revision
+    }
+    /// Returns the pinned provider manifest digest.
+    #[must_use]
+    pub const fn manifest_digest(&self) -> Sha256Digest {
+        self.manifest_digest
+    }
+    /// Returns private source authority, when the repository is private.
+    #[must_use]
+    pub const fn private_source_authority(&self) -> Option<&GithubServerServiceAuthoritySelector> {
+        self.private_source_authority.as_ref()
+    }
+    /// Returns the claiming worker.
+    #[must_use]
+    pub const fn worker_id(&self) -> GithubServerServiceWorkerId {
+        self.worker_id
+    }
+    /// Returns the monotonically advancing claim fence.
+    #[must_use]
+    pub const fn fence(&self) -> GithubServerServiceClaimFence {
+        self.fence
+    }
+    /// Returns claim acquisition time.
+    #[must_use]
+    pub const fn claimed_at(&self) -> UnixMillis {
+        self.claimed_at
+    }
+    /// Returns the exclusive claim expiry.
+    #[must_use]
+    pub const fn expires_at(&self) -> UnixMillis {
+        self.expires_at
+    }
+
+    /// Returns the exact least-authority credential consumer claim.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if this previously validated durable claim contains a nil
+    /// operation identity or the fixed positive consumer revision regresses.
+    #[must_use]
+    pub fn credential_consumer(&self) -> GithubServerServiceConsumerClaim {
+        let consumer_id = GithubServerServiceConsumerId::from_uuid(self.operation_id.as_uuid())
+            .expect("validated operation IDs are non-nil");
+        let revision = GithubServerServiceRevision::new(1)
+            .expect("the fixed source-resolution revision is positive");
+        GithubServerServiceConsumerClaim::new(
+            consumer_id,
+            self.worker_id,
+            self.fence,
+            GithubServerServiceAction::ResolveWorkflowDispatchSource,
+            revision,
+        )
+    }
+}
+
+/// Result of claiming a source operation or replaying its immutable resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkflowDispatchSourceResolutionOutcome {
+    /// This replica owns the live provider-resolution claim.
+    Claimed(WorkflowDispatchSourceClaim),
+    /// The operation was already pinned and may be replayed without provider I/O.
+    Resolved(AuthenticatedWorkflowDispatchSource),
+}
+
+/// Exact completion of a live source-resolution claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompleteWorkflowDispatchSourceResolution {
+    claim: WorkflowDispatchSourceClaim,
+    commit_sha: String,
+    source: AdmissionObject,
+}
+
+impl CompleteWorkflowDispatchSourceResolution {
+    /// Creates an exact immutable resolution completion.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed provider commit SHA.
+    pub fn new(
+        claim: WorkflowDispatchSourceClaim,
+        commit_sha: impl Into<String>,
+        source: AdmissionObject,
+    ) -> Result<Self, LogicalWorkflowAdmissionValueError> {
+        let commit_sha = commit_sha.into();
+        decode_commit_sha(&commit_sha)?;
+        Ok(Self {
+            claim,
+            commit_sha,
+            source,
+        })
+    }
+    /// Returns the exact live claim.
+    #[must_use]
+    pub const fn claim(&self) -> &WorkflowDispatchSourceClaim {
+        &self.claim
+    }
+    /// Returns the provider-resolved immutable revision.
+    #[must_use]
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+    /// Returns the immutable workflow-source object.
+    #[must_use]
+    pub const fn source(&self) -> &AdmissionObject {
+        &self.source
+    }
+}
+
+/// Durable boundary for Core-owned manual-dispatch source resolution.
+#[async_trait]
+pub trait WorkflowDispatchSourceResolutionRepository: fmt::Debug + Send + Sync {
+    /// Reauthorizes and claims an unresolved operation, or returns its prior pin.
+    async fn begin_workflow_dispatch_source_resolution(
+        &self,
+        request: BeginWorkflowDispatchSourceResolution,
+    ) -> Result<WorkflowDispatchSourceResolutionOutcome, WorkflowDispatchSourceResolutionStoreError>;
+
+    /// Atomically pins the immutable source descriptor and commit identity under the live claim.
+    async fn complete_workflow_dispatch_source_resolution(
+        &self,
+        request: CompleteWorkflowDispatchSourceResolution,
+    ) -> Result<AuthenticatedWorkflowDispatchSource, WorkflowDispatchSourceResolutionStoreError>;
+
+    /// Releases an unresolved exact claim after a definitive provider failure.
+    async fn abandon_workflow_dispatch_source_resolution(
+        &self,
+        claim: WorkflowDispatchSourceClaim,
+    ) -> Result<(), WorkflowDispatchSourceResolutionStoreError>;
+}
+
+/// Sanitized durable source-resolution failure.
+#[derive(Debug, Error)]
+pub enum WorkflowDispatchSourceResolutionStoreError {
+    /// The backing store failed or returned malformed data.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// Current Core or delegated authority rejected the target.
+    #[error("workflow dispatch source authority was rejected")]
+    AuthorityRejected,
+    /// The target repository, workflow, or provider manifest does not exist.
+    #[error("workflow dispatch source target was not found")]
+    NotFound,
+    /// The operation ID already names a different immutable request.
+    #[error("workflow dispatch source operation conflicts with durable state")]
+    Conflict,
+    /// Another replica owns the still-live exact claim.
+    #[error("workflow dispatch source claim is already owned")]
+    ClaimRejected,
 }
 
 /// Current logical workflow aggregate committed atomically at admission.
@@ -990,8 +1378,8 @@ impl LogicalWorkflowAdmissionReceipt {
 /// Atomic persistence boundary for current logical workflow admission.
 #[async_trait]
 pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
-    /// Resolves one exact source only when a current human session is allowed
-    /// to dispatch the repository and a prior signed GitHub admission proves
+    /// Resolves one exact source only when current Core or delegated authority
+    /// may dispatch the repository and a prior signed GitHub admission proves
     /// the same repository/workflow/ref/commit source descriptor.
     async fn resolve_authenticated_workflow_dispatch_source(
         &self,
@@ -1039,8 +1427,9 @@ pub trait LogicalWorkflowAdmissionRepository: std::fmt::Debug + Send + Sync {
         Err(LogicalWorkflowAdmissionStoreError::UnsupportedAdmissionSource)
     }
 
-    /// Commits one manual dispatch authorized by an Automata human session, or
-    /// validates its exact immutable evidence and current authority on replay.
+    /// Commits one manual dispatch authorized by a Core session or trusted
+    /// delegated actor, or validates its exact immutable evidence and current
+    /// authority on replay.
     ///
     /// Implementations must reauthorize `runs:dispatch` for the exact existing
     /// tenant/repository inside the admission transaction. They must bind the
@@ -1071,6 +1460,9 @@ pub enum LogicalWorkflowAdmissionValueError {
     /// The Git ref was not a full `refs/...` name.
     #[error("Git ref must be a canonical full refs/... name")]
     InvalidGitRef,
+    /// A source-resolution claim had invalid lease or identity evidence.
+    #[error("workflow dispatch source-resolution claim is invalid")]
+    InvalidSourceResolutionClaim,
     /// The run attempt did not fit the positive signed 32-bit storage boundary.
     #[error("workflow run attempt must fit a positive PostgreSQL INTEGER")]
     InvalidRunAttempt,
@@ -1142,7 +1534,7 @@ pub enum LogicalWorkflowAdmissionStoreError {
     /// This deployment requires immutable authenticated provider evidence.
     #[error("logical workflow admission source is not supported by current policy")]
     UnsupportedAdmissionSource,
-    /// Current human-session authority did not authorize the exact dispatch target.
+    /// Current Core or delegated authority did not authorize the exact dispatch target.
     #[error("workflow dispatch authority was rejected")]
     WorkflowDispatchAuthorityRejected,
 }

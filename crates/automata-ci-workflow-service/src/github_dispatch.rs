@@ -1,13 +1,15 @@
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
-use automata_ci_auth::management::ManagementActor;
+use automata_ci_auth::delegated_actor::RepositoryMutationActor;
 use automata_ci_core::{
     ContextValue, JobRuntimeContext, OperationId, SecretBinding, TrustActorEvidence,
     TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence, TrustOriginKind,
     TrustPolicy, TrustRepositoryEvidence, TrustSnapshot, TrustTokenRecursion,
     WorkflowEventProvenance, WorkflowId, canonical_git_ref,
 };
-use automata_ci_store::ResolveAuthenticatedWorkflowDispatchSource;
+use automata_ci_store::{
+    AuthenticatedWorkflowDispatchSource, ResolveAuthenticatedWorkflowDispatchSource,
+};
 use automata_ci_store::{RepositoryId, TenantScope, WorkflowAdmissionIdempotency};
 use automata_ci_workflow_github::{
     CompilationDisposition, CompileWorkflowRequest, Diagnostic, GithubEventMetadata,
@@ -50,7 +52,7 @@ const fn workflow_dispatch_evidence_text_byte_rejection(
 /// Exact, authenticated target authorized for a control-plane manual dispatch.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WorkflowDispatchAuthorization {
-    actor: ManagementActor,
+    actor: RepositoryMutationActor,
     repository_id: RepositoryId,
     workflow_id: WorkflowId,
 }
@@ -72,7 +74,7 @@ impl WorkflowDispatchAuthorization {
     ///
     /// Rejects nil durable target identities.
     pub fn new(
-        actor: ManagementActor,
+        actor: impl Into<RepositoryMutationActor>,
         repository_id: RepositoryId,
         workflow_id: WorkflowId,
     ) -> Result<Self, GithubWorkflowDispatchRequestError> {
@@ -80,15 +82,15 @@ impl WorkflowDispatchAuthorization {
             return Err(GithubWorkflowDispatchRequestError::InvalidTarget);
         }
         Ok(Self {
-            actor,
+            actor: actor.into(),
             repository_id,
             workflow_id,
         })
     }
 
-    /// Returns current human-session evidence for transactional reauthorization.
+    /// Returns current mutation authority for transactional reauthorization.
     #[must_use]
-    pub const fn actor(&self) -> &ManagementActor {
+    pub const fn actor(&self) -> &RepositoryMutationActor {
         &self.actor
     }
 
@@ -315,6 +317,37 @@ impl GithubWorkflowDispatchService {
         {
             return Err(GithubWorkflowDispatchError::DurableSourceMismatch);
         }
+        self.dispatch_from_authenticated_source(
+            request.authorization,
+            source,
+            bytes,
+            request.inputs,
+            request.operation_id,
+            request.display_title,
+        )
+        .await
+    }
+
+    /// Dispatches source resolved and immutably pinned by trusted Core composition.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed when the source target differs from current authorization,
+    /// compilation rejects it, or durable admission fails.
+    pub async fn dispatch_from_authenticated_source(
+        &self,
+        authorization: WorkflowDispatchAuthorization,
+        source: AuthenticatedWorkflowDispatchSource,
+        bytes: Bytes,
+        inputs: GithubWorkflowDispatchInputs,
+        operation_id: OperationId,
+        display_title: Option<String>,
+    ) -> Result<WorkflowAdmissionResult, GithubWorkflowDispatchError> {
+        if source.repository().id() != authorization.repository_id()
+            || source.workflow_id() != authorization.workflow_id()
+        {
+            return Err(GithubWorkflowDispatchError::DurableSourceMismatch);
+        }
         let repository = AdmissionRepositoryCoordinates::new(
             source.repository().provider(),
             source.repository().provider_repository_id(),
@@ -322,17 +355,17 @@ impl GithubWorkflowDispatchService {
             source.repository().name(),
         )?;
         let mut dispatch = GithubWorkflowDispatchRequest::new(
-            request.authorization,
+            authorization,
             repository,
             source.repository_owner_id(),
             source.workflow_path(),
             bytes,
-            request.commit_sha,
-            request.git_ref,
-            request.inputs,
-            request.operation_id,
+            source.commit_sha(),
+            source.git_ref(),
+            inputs,
+            operation_id,
         );
-        if let Some(display_title) = request.display_title {
+        if let Some(display_title) = display_title {
             dispatch = dispatch.with_display_title(display_title);
         }
         Box::pin(self.dispatch(dispatch)).await
@@ -495,6 +528,7 @@ impl GithubWorkflowDispatchEvidence {
         request: &GithubWorkflowDispatchRequest,
     ) -> Result<Self, GithubWorkflowDispatchEvidenceError> {
         let actor = request.authorization.actor();
+        let session_id = actor.correlation_session_id();
         let inputs = evidence_inputs(&request.inputs)?;
         let document = EvidenceDocument {
             schema: EVIDENCE_SCHEMA,
@@ -502,8 +536,8 @@ impl GithubWorkflowDispatchEvidence {
             authority: EvidenceAuthority {
                 tenant_id: actor.tenant_id().as_str().to_owned(),
                 principal_id: actor.principal_id().as_str().to_owned(),
-                session_id: actor.session_id().as_str().to_owned(),
-                authorization_revision: actor.authorization_revision().value(),
+                session_id,
+                authorization_revision: actor.authorization_revision(),
             },
             repository: EvidenceRepository {
                 repository_id: request.authorization.repository_id().as_uuid(),
@@ -633,13 +667,13 @@ impl GithubWorkflowDispatchEvidence {
 
     pub(crate) fn authority_matches(&self, authorization: &WorkflowDispatchAuthorization) -> bool {
         let actor = authorization.actor();
+        let session_id = actor.correlation_session_id();
         self.repository_id() == authorization.repository_id()
             && self.workflow_id() == authorization.workflow_id()
             && self.document.authority.tenant_id == actor.tenant_id().as_str()
             && self.document.authority.principal_id == actor.principal_id().as_str()
-            && self.document.authority.session_id == actor.session_id().as_str()
-            && self.document.authority.authorization_revision
-                == actor.authorization_revision().value()
+            && self.document.authority.session_id == session_id
+            && self.document.authority.authorization_revision == actor.authorization_revision()
     }
 }
 

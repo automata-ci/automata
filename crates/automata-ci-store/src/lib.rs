@@ -279,10 +279,14 @@ pub use logical_materialization::{
 pub use logical_orchestration::{
     AdmitLogicalWorkflowRun, AdmitLogicalWorkflowRunBuilder, AdmittedLogicalWorkflowJob,
     AuthenticatedWorkflowDispatchClaim, AuthenticatedWorkflowDispatchSource,
+    BeginWorkflowDispatchSourceResolution, CompleteWorkflowDispatchSourceResolution,
     LOGICAL_ORCHESTRATION_SCHEMA, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     LogicalWorkflowAdmissionValueError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, ResolveAuthenticatedWorkflowDispatchSource,
+    LogicalWorkflowJobKind, MAX_WORKFLOW_DISPATCH_SOURCE_CLAIM_MILLIS,
+    ResolveAuthenticatedWorkflowDispatchSource, WorkflowDispatchSourceClaim,
+    WorkflowDispatchSourceResolutionOutcome, WorkflowDispatchSourceResolutionRepository,
+    WorkflowDispatchSourceResolutionStoreError,
 };
 pub use logical_run_finalization::{
     ClaimLogicalRunFinalization, ClaimedLogicalRunFinalization, CommitLogicalRunFinalization,
