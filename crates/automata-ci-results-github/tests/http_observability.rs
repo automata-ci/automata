@@ -1,20 +1,13 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+mod observability_support;
 
-use async_trait::async_trait;
+use std::sync::Arc;
+
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType, MemoryBlobStore};
 use automata_ci_core::{AttemptId, FencingToken, JobId, RunId, Sha256Digest};
 use automata_ci_results_github::{
-    ARTIFACT_MANIFEST_MEDIA_TYPE, ArtifactBlockReservation, ArtifactFinalizationReservation,
-    ArtifactFinalizationWork, ArtifactId, ArtifactManifest, ArtifactManifestBlock, ArtifactName,
-    ArtifactRepository, ArtifactRepositoryError, ArtifactRepositoryErrorKind, ArtifactService,
-    BeginArtifactFinalization, CommitArtifactBlocks, CommittedArtifact, CompleteArtifactBlock,
-    CompleteArtifactFinalization, CreateArtifact, CreateArtifactOutcome, ExecutionAuthority,
-    FinalizeArtifactOutcome, GithubResultsApi, GithubResultsHttpLimits, ListArtifacts,
-    LoadArtifactFinalization, PublishedArtifactMetadata, RecordArtifactVerification,
-    RenewArtifactFinalization, ReserveArtifactBlock, ResultsHttpMethod, ResultsHttpRoute,
+    ARTIFACT_MANIFEST_MEDIA_TYPE, ArtifactId, ArtifactManifest, ArtifactManifestBlock,
+    ArtifactName, ArtifactRepository, ArtifactService, ExecutionAuthority, GithubResultsApi,
+    GithubResultsHttpLimits, PublishedArtifactMetadata, ResultsHttpMethod, ResultsHttpRoute,
     ResultsHttpStatusClass, ResultsIdGenerator, ResultsLimits, ResultsObserver, ResultsOperation,
     ResultsOperationOutcome, ResultsTransferDirection, RuntimeTokenClaims, RuntimeTokenVerifier,
     SignedDownloadCapability, SignedUploadCapability, SystemResultsClock, SystemResultsIdGenerator,
@@ -26,6 +19,10 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http_body_util::BodyExt as _;
+use observability_support::{
+    observer::{HttpEvent, RecordingObserver},
+    repository::{ReserveBlockBehavior, TestArtifactRepository},
+};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Notify;
 use tower::ServiceExt as _;
@@ -37,185 +34,6 @@ const CREATE_PATH: &str = "/twirp/github.actions.results.api.v1.ArtifactService/
 fn upload_path(upload_id: UploadId) -> String {
     let block_id = STANDARD.encode([7_u8; 48]);
     format!("/_apis/results/artifacts/{upload_id}/blob?se=100&sig=x&comp=block&blockid={block_id}")
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum HttpEvent {
-    Started(ResultsHttpMethod, ResultsHttpRoute),
-    Completed(ResultsHttpMethod, ResultsHttpRoute, ResultsHttpStatusClass),
-    Finished(ResultsHttpMethod, ResultsHttpRoute),
-}
-
-#[derive(Clone, Debug, Default)]
-struct RecordingObserver {
-    events: Arc<Mutex<Vec<HttpEvent>>>,
-    operations: Arc<Mutex<Vec<(ResultsOperation, ResultsOperationOutcome)>>>,
-    transfers: Arc<Mutex<Vec<(ResultsTransferDirection, u64)>>>,
-}
-
-impl ResultsObserver for RecordingObserver {
-    fn results_http_request_started(&self, method: ResultsHttpMethod, route: ResultsHttpRoute) {
-        self.events
-            .lock()
-            .expect("HTTP events lock")
-            .push(HttpEvent::Started(method, route));
-    }
-
-    fn observe_results_http_request(
-        &self,
-        method: ResultsHttpMethod,
-        route: ResultsHttpRoute,
-        status: ResultsHttpStatusClass,
-        _duration: Duration,
-    ) {
-        self.events
-            .lock()
-            .expect("HTTP events lock")
-            .push(HttpEvent::Completed(method, route, status));
-    }
-
-    fn results_http_request_finished(&self, method: ResultsHttpMethod, route: ResultsHttpRoute) {
-        self.events
-            .lock()
-            .expect("HTTP events lock")
-            .push(HttpEvent::Finished(method, route));
-    }
-
-    fn observe_transfer_bytes(&self, direction: ResultsTransferDirection, bytes: u64) {
-        self.transfers
-            .lock()
-            .expect("transfer observations lock")
-            .push((direction, bytes));
-    }
-
-    fn observe_operation(
-        &self,
-        operation: ResultsOperation,
-        outcome: ResultsOperationOutcome,
-        _duration: Duration,
-    ) {
-        self.operations
-            .lock()
-            .expect("operation observations lock")
-            .push((operation, outcome));
-    }
-}
-
-#[derive(Debug)]
-enum ReserveBehavior {
-    Unavailable,
-    Ready,
-    Pending {
-        entered: Arc<Notify>,
-        release: Arc<Notify>,
-    },
-}
-
-#[derive(Debug)]
-struct TestRepository {
-    reserve: ReserveBehavior,
-    download: Option<PublishedArtifactMetadata>,
-}
-
-impl Default for TestRepository {
-    fn default() -> Self {
-        Self {
-            reserve: ReserveBehavior::Unavailable,
-            download: None,
-        }
-    }
-}
-
-fn unavailable() -> ArtifactRepositoryError {
-    ArtifactRepositoryError::new(ArtifactRepositoryErrorKind::Unavailable)
-}
-
-#[async_trait]
-impl ArtifactRepository for TestRepository {
-    async fn create(
-        &self,
-        _request: CreateArtifact,
-    ) -> Result<CreateArtifactOutcome, ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn reserve_block(
-        &self,
-        _request: ReserveArtifactBlock,
-    ) -> Result<ArtifactBlockReservation, ArtifactRepositoryError> {
-        match &self.reserve {
-            ReserveBehavior::Unavailable => Err(unavailable()),
-            ReserveBehavior::Ready => Ok(ArtifactBlockReservation::Ready),
-            ReserveBehavior::Pending { entered, release } => {
-                entered.notify_one();
-                release.notified().await;
-                Err(unavailable())
-            }
-        }
-    }
-
-    async fn complete_block(
-        &self,
-        _request: CompleteArtifactBlock,
-    ) -> Result<(), ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn commit_blocks(
-        &self,
-        _request: CommitArtifactBlocks,
-    ) -> Result<CommittedArtifact, ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn begin_finalization(
-        &self,
-        _request: BeginArtifactFinalization,
-    ) -> Result<ArtifactFinalizationReservation, ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn load_finalization(
-        &self,
-        _request: LoadArtifactFinalization,
-    ) -> Result<ArtifactFinalizationWork, ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn renew_finalization(
-        &self,
-        _request: RenewArtifactFinalization,
-    ) -> Result<(), ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn record_verification(
-        &self,
-        _request: RecordArtifactVerification,
-    ) -> Result<(), ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn complete_finalization(
-        &self,
-        _request: CompleteArtifactFinalization,
-    ) -> Result<FinalizeArtifactOutcome, ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn list(
-        &self,
-        _request: ListArtifacts,
-    ) -> Result<Vec<PublishedArtifactMetadata>, ArtifactRepositoryError> {
-        Err(unavailable())
-    }
-
-    async fn resolve_download(
-        &self,
-        _request: automata_ci_results_github::ResolveArtifactDownload,
-    ) -> Result<PublishedArtifactMetadata, ArtifactRepositoryError> {
-        self.download.clone().ok_or_else(unavailable)
-    }
 }
 
 #[derive(Debug, Default)]
@@ -276,7 +94,7 @@ impl SignedDownloadCapability for TestAuthority {
 
 fn router(observer: Arc<dyn ResultsObserver>) -> axum::Router {
     router_with(
-        Arc::new(TestRepository::default()),
+        Arc::new(TestArtifactRepository::default()),
         Arc::new(MemoryBlobStore::default()),
         Arc::new(TestAuthority::default()),
         observer,
@@ -326,26 +144,28 @@ async fn matched_route_red_observation_is_finite_and_balanced() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        *recorder.events.lock().expect("HTTP events lock"),
-        vec![
+    let observations = recorder.snapshot();
+    assert!(matches!(
+        observations.http_events.as_slice(),
+        [
             HttpEvent::Started(ResultsHttpMethod::Post, ResultsHttpRoute::CreateArtifact),
-            HttpEvent::Completed(
-                ResultsHttpMethod::Post,
-                ResultsHttpRoute::CreateArtifact,
-                ResultsHttpStatusClass::ClientError,
-            ),
+            HttpEvent::Completed {
+                method: ResultsHttpMethod::Post,
+                route: ResultsHttpRoute::CreateArtifact,
+                status: ResultsHttpStatusClass::ClientError,
+                ..
+            },
             HttpEvent::Finished(ResultsHttpMethod::Post, ResultsHttpRoute::CreateArtifact),
         ]
-    );
+    ));
 }
 
 #[tokio::test]
 async fn successful_upload_counts_only_the_accepted_body() {
     let recorder = RecordingObserver::default();
-    let repository: Arc<dyn ArtifactRepository> = Arc::new(TestRepository {
-        reserve: ReserveBehavior::Ready,
-        download: None,
+    let repository: Arc<dyn ArtifactRepository> = Arc::new(TestArtifactRepository {
+        reserve_block: ReserveBlockBehavior::Ready,
+        ..TestArtifactRepository::default()
     });
     let authority = Arc::new(TestAuthority {
         accept_upload: true,
@@ -371,21 +191,20 @@ async fn successful_upload_counts_only_the_accepted_body() {
     .expect("response");
 
     assert_eq!(response.status(), StatusCode::CREATED);
+    let observations = recorder.snapshot();
     assert_eq!(
-        *recorder
+        observations
             .operations
-            .lock()
-            .expect("operation observations lock"),
+            .iter()
+            .map(|(operation, outcome, _)| (*operation, *outcome))
+            .collect::<Vec<_>>(),
         vec![(
             ResultsOperation::StageBlock,
             ResultsOperationOutcome::Success,
         )]
     );
     assert_eq!(
-        *recorder
-            .transfers
-            .lock()
-            .expect("transfer observations lock"),
+        observations.transfers,
         vec![(
             ResultsTransferDirection::Upload,
             u64::try_from(body.len()).expect("bounded body length"),
@@ -398,12 +217,12 @@ async fn dropped_request_records_cancelled_and_never_accepts_upload_bytes() {
     let recorder = RecordingObserver::default();
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let repository: Arc<dyn ArtifactRepository> = Arc::new(TestRepository {
-        reserve: ReserveBehavior::Pending {
+    let repository: Arc<dyn ArtifactRepository> = Arc::new(TestArtifactRepository {
+        reserve_block: ReserveBlockBehavior::Pending {
             entered: Arc::clone(&entered),
             release,
         },
-        download: None,
+        ..TestArtifactRepository::default()
     });
     let authority = Arc::new(TestAuthority {
         accept_upload: true,
@@ -433,35 +252,32 @@ async fn dropped_request_records_cancelled_and_never_accepts_upload_bytes() {
             .is_cancelled()
     );
 
-    assert_eq!(
-        *recorder.events.lock().expect("HTTP events lock"),
-        vec![
+    let observations = recorder.snapshot();
+    assert!(matches!(
+        observations.http_events.as_slice(),
+        [
             HttpEvent::Started(ResultsHttpMethod::Put, ResultsHttpRoute::Upload),
-            HttpEvent::Completed(
-                ResultsHttpMethod::Put,
-                ResultsHttpRoute::Upload,
-                ResultsHttpStatusClass::Cancelled,
-            ),
+            HttpEvent::Completed {
+                method: ResultsHttpMethod::Put,
+                route: ResultsHttpRoute::Upload,
+                status: ResultsHttpStatusClass::Cancelled,
+                ..
+            },
             HttpEvent::Finished(ResultsHttpMethod::Put, ResultsHttpRoute::Upload),
         ]
-    );
+    ));
     assert_eq!(
-        *recorder
+        observations
             .operations
-            .lock()
-            .expect("operation observations lock"),
+            .iter()
+            .map(|(operation, outcome, _)| (*operation, *outcome))
+            .collect::<Vec<_>>(),
         vec![(
             ResultsOperation::StageBlock,
             ResultsOperationOutcome::Cancelled,
         )]
     );
-    assert!(
-        recorder
-            .transfers
-            .lock()
-            .expect("transfer observations lock")
-            .is_empty()
-    );
+    assert!(observations.transfers.is_empty());
 }
 
 #[tokio::test]
@@ -555,9 +371,9 @@ async fn download_bytes_count_only_frames_yielded_before_client_body_cancellatio
         created_at_seconds: 10,
         expires_at_seconds: None,
     };
-    let repository: Arc<dyn ArtifactRepository> = Arc::new(TestRepository {
-        reserve: ReserveBehavior::Unavailable,
+    let repository: Arc<dyn ArtifactRepository> = Arc::new(TestArtifactRepository {
         download: Some(metadata),
+        ..TestArtifactRepository::default()
     });
     let object_port: Arc<dyn ImmutableBlobStore> = objects;
     let authority = Arc::new(TestAuthority {
@@ -582,22 +398,20 @@ async fn download_bytes_count_only_frames_yielded_before_client_body_cancellatio
     .await
     .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
+    let observations = recorder.snapshot();
     assert_eq!(
-        *recorder
+        observations
             .operations
-            .lock()
-            .expect("operation observations lock"),
+            .iter()
+            .map(|(operation, outcome, _)| (*operation, *outcome))
+            .collect::<Vec<_>>(),
         vec![(
             ResultsOperation::PrepareDownload,
             ResultsOperationOutcome::Success,
         )]
     );
     assert!(
-        recorder
-            .transfers
-            .lock()
-            .expect("transfer observations lock")
-            .is_empty(),
+        observations.transfers.is_empty(),
         "building a response must not count unpolled download bytes"
     );
 
@@ -612,11 +426,13 @@ async fn download_bytes_count_only_frames_yielded_before_client_body_cancellatio
         bytes::Bytes::from_static(b"first yielded block")
     );
     drop(response_body);
+    let observations = recorder.snapshot();
     assert_eq!(
-        *recorder
+        observations
             .operations
-            .lock()
-            .expect("operation observations lock"),
+            .iter()
+            .map(|(operation, outcome, _)| (*operation, *outcome))
+            .collect::<Vec<_>>(),
         vec![
             (
                 ResultsOperation::PrepareDownload,
@@ -629,10 +445,7 @@ async fn download_bytes_count_only_frames_yielded_before_client_body_cancellatio
         ]
     );
     assert_eq!(
-        *recorder
-            .transfers
-            .lock()
-            .expect("transfer observations lock"),
+        observations.transfers,
         vec![(
             ResultsTransferDirection::Download,
             u64::try_from(first.len()).expect("bounded block length"),
@@ -656,18 +469,19 @@ async fn unknown_path_never_becomes_a_metric_label() {
         .expect("response");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let events = recorder.events.lock().expect("HTTP events lock");
-    assert_eq!(
-        *events,
-        vec![
+    let observations = recorder.snapshot();
+    assert!(matches!(
+        observations.http_events.as_slice(),
+        [
             HttpEvent::Started(ResultsHttpMethod::Other, ResultsHttpRoute::Unknown),
-            HttpEvent::Completed(
-                ResultsHttpMethod::Other,
-                ResultsHttpRoute::Unknown,
-                ResultsHttpStatusClass::ClientError,
-            ),
+            HttpEvent::Completed {
+                method: ResultsHttpMethod::Other,
+                route: ResultsHttpRoute::Unknown,
+                status: ResultsHttpStatusClass::ClientError,
+                ..
+            },
             HttpEvent::Finished(ResultsHttpMethod::Other, ResultsHttpRoute::Unknown),
         ]
-    );
-    assert!(!format!("{events:?}").contains(private_path));
+    ));
+    assert!(!format!("{:?}", observations.http_events).contains(private_path));
 }

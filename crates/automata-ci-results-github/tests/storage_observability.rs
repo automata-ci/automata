@@ -1,7 +1,6 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+mod observability_support;
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use automata_ci_blob::{
@@ -9,36 +8,10 @@ use automata_ci_blob::{
     MediaType, MemoryBlobStore, PutBlobOutcome, VerifiedBlob,
 };
 use automata_ci_results_github::{
-    ObservedResultsBlobStore, ResultsBlobOperation, ResultsBlobOperationOutcome, ResultsObserver,
+    ObservedResultsBlobStore, ResultsBlobOperation, ResultsBlobOperationOutcome,
 };
+use observability_support::observer::RecordingObserver;
 use tokio::sync::Notify;
-
-#[derive(Clone, Debug, Default)]
-struct RecordingObserver {
-    operations: Arc<Mutex<Vec<(ResultsBlobOperation, ResultsBlobOperationOutcome, Duration)>>>,
-    bytes: Arc<Mutex<Vec<(ResultsBlobOperation, u64)>>>,
-}
-
-impl ResultsObserver for RecordingObserver {
-    fn observe_blob_operation(
-        &self,
-        operation: ResultsBlobOperation,
-        outcome: ResultsBlobOperationOutcome,
-        duration: Duration,
-    ) {
-        self.operations
-            .lock()
-            .expect("blob operation observations lock")
-            .push((operation, outcome, duration));
-    }
-
-    fn observe_blob_bytes(&self, operation: ResultsBlobOperation, bytes: u64) {
-        self.bytes
-            .lock()
-            .expect("blob byte observations lock")
-            .push((operation, bytes));
-    }
-}
 
 fn payload(key: &str, bytes: &'static [u8]) -> BlobPayload {
     BlobPayload::from_bytes(
@@ -67,10 +40,8 @@ async fn successful_put_and_get_record_only_closed_labels_and_actual_bytes() {
         .expect("get blob");
     assert_eq!(verified.bytes().as_ref(), b"immutable payload");
 
-    let operations = recorder
-        .operations
-        .lock()
-        .expect("blob operation observations lock");
+    let observations = recorder.snapshot();
+    let operations = &observations.blob_operations;
     assert_eq!(operations.len(), 2);
     assert_eq!(
         (operations[0].0, operations[0].1),
@@ -88,7 +59,7 @@ async fn successful_put_and_get_record_only_closed_labels_and_actual_bytes() {
     );
     assert!(!format!("{operations:?}").contains(private_key));
     assert_eq!(
-        *recorder.bytes.lock().expect("blob byte observations lock"),
+        observations.blob_bytes,
         vec![
             (ResultsBlobOperation::Put, descriptor.size()),
             (ResultsBlobOperation::Get, descriptor.size()),
@@ -139,10 +110,8 @@ async fn provider_errors_are_sanitized_and_never_emit_bytes() {
         BlobStoreErrorKind::Unavailable
     );
 
-    let operations = recorder
-        .operations
-        .lock()
-        .expect("blob operation observations lock");
+    let observations = recorder.snapshot();
+    let operations = &observations.blob_operations;
     assert_eq!(
         operations
             .iter()
@@ -159,13 +128,7 @@ async fn provider_errors_are_sanitized_and_never_emit_bytes() {
             ),
         ]
     );
-    assert!(
-        recorder
-            .bytes
-            .lock()
-            .expect("blob byte observations lock")
-            .is_empty()
-    );
+    assert!(observations.blob_bytes.is_empty());
 }
 
 #[derive(Debug)]
@@ -213,10 +176,8 @@ async fn dropped_provider_future_records_one_cancellation_without_bytes() {
             .is_cancelled()
     );
 
-    let operations = recorder
-        .operations
-        .lock()
-        .expect("blob operation observations lock");
+    let observations = recorder.snapshot();
+    let operations = &observations.blob_operations;
     assert_eq!(operations.len(), 1);
     assert_eq!(
         (operations[0].0, operations[0].1),
@@ -225,11 +186,5 @@ async fn dropped_provider_future_records_one_cancellation_without_bytes() {
             ResultsBlobOperationOutcome::Cancelled,
         )
     );
-    assert!(
-        recorder
-            .bytes
-            .lock()
-            .expect("blob byte observations lock")
-            .is_empty()
-    );
+    assert!(observations.blob_bytes.is_empty());
 }
