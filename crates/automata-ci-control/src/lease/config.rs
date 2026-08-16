@@ -64,12 +64,3 @@ impl LeasePollConfig {
         self.lease_time_to_live
     }
 }
-
-impl Default for LeasePollConfig {
-    fn default() -> Self {
-        Self::new(
-            RunnableScanLimit::new(100).expect("default scan limit is bounded"),
-            LeaseTimeToLive::from_millis(60_000).expect("default lease lifetime is positive"),
-        )
-    }
-}

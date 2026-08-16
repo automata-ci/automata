@@ -3,8 +3,9 @@ use std::{fmt, io::Write as _, sync::Arc, time::Instant};
 use crate::attempt::RenewLease;
 use crate::lease::{
     AuthenticatedRunnerSession, BeginLeaseRequest, ClaimedLeasePoll, CompleteLeaseRequest,
-    LeaseClock, LeasePollError, LeasePollOutcome, LeaseRequestCompletion, LeaseRequestKey,
-    RevokedLeaseOfferFallback, repository::RunnerLeaseRequestRepository,
+    LeaseClock, LeasePollConfig, LeasePollError, LeasePollOutcome, LeaseRequestCompletion,
+    LeaseRequestKey, LeaseTimeToLive, RevokedLeaseOfferFallback, RunnableScanLimit,
+    repository::RunnerLeaseRequestRepository,
 };
 use automata_ci_auth::machine::AuthenticatedMachine;
 use automata_ci_blob::{
@@ -184,6 +185,19 @@ impl RunnerControlConfig {
     #[must_use]
     pub const fn protocol_limits(self) -> ProtocolLimits {
         self.protocol_limits
+    }
+
+    /// Constructs the durable claim policy from this control protocol's lease duration.
+    ///
+    /// The initial database claim and every protocol renewal must share one lifetime. Keeping
+    /// construction here prevents a runner from being promised a different lease runway than the
+    /// durable scheduler actually granted.
+    #[must_use]
+    pub fn lease_poll_config(self, scan_limit: RunnableScanLimit) -> LeasePollConfig {
+        let lease_time_to_live =
+            LeaseTimeToLive::from_millis(i64::from(self.lease_duration_millis))
+                .expect("validated runner-control lease duration is positive");
+        LeasePollConfig::new(scan_limit, lease_time_to_live)
     }
 }
 

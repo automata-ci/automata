@@ -1,3 +1,4 @@
+use automata_ci_control::lease::RunnableScanLimit;
 use automata_ci_control::runner_control::{
     ControlIdGenerator, ControlPortError, ImmutableBlobJobIrReader, JOB_IR_PROTOBUF_MEDIA_TYPE,
     JobIrBlobError, JobIrObjectReader, LeaseOfferCommandPublisher, LeasePoller,
@@ -151,6 +152,18 @@ fn config_enforces_g1_timing_bounds_and_two_heartbeat_lease() {
             heartbeat_interval_millis: 1_001,
             lease_duration_millis: 2_001,
         })
+    );
+}
+
+#[test]
+fn durable_claim_lifetime_is_derived_from_runner_control_policy() {
+    let control = RunnerControlConfig::new(15_000, 300_000, 1_000, ProtocolLimits::default())
+        .expect("valid runner control policy");
+    let claims = control.lease_poll_config(RunnableScanLimit::new(100).expect("scan limit"));
+
+    assert_eq!(
+        claims.lease_time_to_live().as_millis(),
+        i64::from(control.lease_duration_millis())
     );
 }
 

@@ -3740,7 +3740,10 @@ async fn heartbeat_renews_exact_fence_and_replays_without_second_mutation() {
     assert_eq!(renewal.session(), fence);
     assert_eq!(renewal.attempt_id(), attempt_id);
     assert_eq!(renewal.guard(), guard);
-    assert_eq!(renewal.expires_at(), UnixMillis::new(62_000));
+    assert_eq!(
+        renewal.expires_at(),
+        UnixMillis::new(2_000 + i64::from(RunnerControlConfig::default().lease_duration_millis()))
+    );
     assert_eq!(harness.receipts.records.load(Ordering::SeqCst), 0);
 }
 
@@ -3820,7 +3823,13 @@ async fn heartbeat_uses_the_runtime_authority_ceiling_and_rejects_an_elapsed_cei
     assert!(matches!(
         response,
         ServerToRunner::LeaseRenewal(ref renewal)
-            if renewal.expires_at() == UnixMillis::new(62_000)
+            if renewal.expires_at()
+                == UnixMillis::new(
+                    2_000
+                        + i64::from(
+                            RunnerControlConfig::default().lease_duration_millis()
+                        )
+                )
     ));
     assert_eq!(harness.transactions.heartbeats.load(Ordering::SeqCst), 2);
     assert_eq!(

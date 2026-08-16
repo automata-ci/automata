@@ -20,7 +20,7 @@ use automata_ci_blob_s3::{
     S3BlobStore, S3BlobStoreConfig, S3BlobStoreConfigError, StaticS3Credentials,
 };
 use automata_ci_control::lease::{
-    LeaseClock, LeaseIdGenerator, LeasePollConfig, RandomLeaseIdGenerator, SystemLeaseClock,
+    LeaseClock, LeaseIdGenerator, RandomLeaseIdGenerator, RunnableScanLimit, SystemLeaseClock,
     repository::RunnerLeaseRequestRepository,
 };
 use automata_ci_control::maintenance::ControlPlaneMaintenanceRepository;
@@ -515,6 +515,9 @@ impl ProductionComponents {
         let lease_ids: Arc<dyn LeaseIdGenerator> = Arc::new(RandomLeaseIdGenerator);
         let control_ids: Arc<dyn ControlIdGenerator> = Arc::new(RandomControlIdGenerator);
         let scheduler: Arc<dyn SchedulerPolicy> = Arc::new(DeterministicScheduler);
+        let control_config = RunnerControlConfig::default();
+        let lease_poll_config = control_config
+            .lease_poll_config(RunnableScanLimit::new(100).expect("default scan limit is bounded"));
 
         let protected_environment_repository: Arc<dyn ProtectedEnvironmentRepository> =
             store.clone();
@@ -530,7 +533,7 @@ impl ProductionComponents {
                 scheduler,
                 Arc::clone(&lease_clock),
                 lease_ids,
-                LeasePollConfig::default(),
+                lease_poll_config,
             )
             .with_attempt_gate(protected_environment_gate)
             .with_observer(Arc::new(metrics.clone())),
@@ -563,7 +566,6 @@ impl ProductionComponents {
                 None
             };
 
-        let control_config = RunnerControlConfig::default();
         let ports = RunnerControlPorts::new(
             RunnerIdentityPorts::new(authorizer, fence_resolver, sessions),
             RunnerLeasePorts::new(lease_poller, job_ir_objects, lease_offers),
