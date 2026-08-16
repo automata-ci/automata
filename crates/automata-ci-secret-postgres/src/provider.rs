@@ -20,8 +20,8 @@ use super::{
         ReconcileCreateVersionRecord, ResolveVersionRecord,
     },
     support::{
-        ValidatedSecretDescriptor, canonical_uuid, encryption_context, locator, map_envelope_error,
-        version_id,
+        VERSION_MUTATION_REQUEST_PREFIX, ValidatedSecretDescriptor, canonical_uuid,
+        encryption_context, locator, map_envelope_error, version_id,
     },
 };
 
@@ -30,8 +30,6 @@ pub const BUILTIN_POSTGRES_PROVIDER_ID: &str = "builtin";
 
 /// Domain-separation purpose for encrypted built-in secret values.
 pub const BUILTIN_SECRET_VALUE_KEY_PURPOSE: &str = "secrets/builtin-value:v1";
-
-const VERSION_MUTATION_REQUEST_PREFIX: &str = "secret-version:";
 
 /// PostgreSQL-backed built-in implementation of the secret-provider boundary.
 pub struct PostgresSecretProvider {

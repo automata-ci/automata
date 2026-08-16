@@ -7,6 +7,8 @@ use automata_ci_secret::{
 };
 use uuid::Uuid;
 
+pub(super) const VERSION_MUTATION_REQUEST_PREFIX: &str = "secret-version:";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidatedSecretDescriptor {
     tenant_id: String,
