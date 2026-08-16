@@ -17,6 +17,7 @@ automata-ci-blob.workspace = true
 automata-ci-control.workspace = true
 automata-ci-core.workspace = true
 automata-ci-protocol.workspace = true
+automata-ci-store.workspace = true
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true

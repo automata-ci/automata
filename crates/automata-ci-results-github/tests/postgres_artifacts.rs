@@ -17,7 +17,7 @@ use automata_ci_results_github::{
     RecordArtifactVerification, RenewArtifactFinalization, ReserveArtifactBlock,
     ResolveArtifactDownload, UploadId,
 };
-use automata_ci_store::StableRunnerSlot;
+use automata_ci_store::{HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, StableRunnerSlot};
 use bytes::Bytes;
 use sqlx::PgPool;
 use support::{
@@ -392,7 +392,7 @@ async fn artifact_creation_inherits_the_locked_attempt_and_run_safety_matrix() -
                         requested_visibility.to_owned(),
                         effective_visibility.to_owned(),
                         publication_safety_reason.to_owned(),
-                        1,
+                        HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA,
                     )
                 );
             }
@@ -434,7 +434,7 @@ async fn artifact_create_replay_rejects_schema_valid_safety_tampering() -> TestR
                     publication_safety_reason, publication_safety_schema
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, 7, 'application/zip',
-                    1000, 'secretless', 'public', $9, $10, 1
+                    1000, 'secretless', 'public', $9, $10, $11
                 )
                 ",
             )
@@ -448,6 +448,7 @@ async fn artifact_create_replay_rejects_schema_valid_safety_tampering() -> TestR
             .bind(name)
             .bind(effective_visibility)
             .bind(publication_safety_reason)
+            .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
             .execute(database.pool())
             .await?;
 
@@ -488,7 +489,7 @@ async fn artifact_create_replay_rejects_noncurrent_publication_safety_schema() -
         .execute(database.pool())
         .await?;
 
-        for schema in [0_i32, 2_i32] {
+        for schema in [0_i32, HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA - 1] {
             sqlx::query(
                 "UPDATE workflow_artifacts SET publication_safety_schema = $2 WHERE upload_id = $1",
             )
@@ -1429,8 +1430,7 @@ async fn active_attempt_with_safety(
             created_at_ms, updated_at_ms, publication_policy_revision,
             requested_dashboard_visibility, effective_dashboard_visibility,
             requested_log_visibility, requested_artifact_visibility,
-            publication_safety_reason, publication_safety_schema,
-            runner_requirements_schema
+            publication_safety_reason, publication_safety_schema, runner_requirements_schema
         )
         SELECT
             $1, repository_id, workflow_id, snapshot_id, run_number + 1,
@@ -1438,7 +1438,7 @@ async fn active_attempt_with_safety(
             event_media_type, plan_digest, plan_object_key, plan_size_bytes,
             plan_media_type, plan_schema, workflow_name, head_sha, status,
             2, 2, 1, 'private', 'private', 'private', $3,
-            'repository_policy', 1, runner_requirements_schema
+            'repository_policy', $4, runner_requirements_schema
         FROM workflow_runs
         WHERE id = $2
         ",
@@ -1446,6 +1446,7 @@ async fn active_attempt_with_safety(
     .bind(run_id)
     .bind(seed.run_id.as_uuid())
     .bind(requested_artifact_visibility)
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
     sqlx::query(
@@ -1468,25 +1469,24 @@ async fn active_attempt_with_safety(
     .bind(seed.job_id.as_uuid())
     .execute(database.pool())
     .await?;
-    let raw_log_disposition = "persist";
     sqlx::query(
         r"
         INSERT INTO job_attempts (
             id, job_id, attempt_number, lifecycle, fencing_token,
             queued_at_ms, changed_at_ms, secret_exposure_class,
             raw_log_disposition, requested_log_visibility,
-            effective_log_visibility, output_safety_reason,
-            output_safety_schema, classified_at_ms
+            effective_log_visibility, output_safety_reason, output_safety_schema, classified_at_ms
         ) VALUES (
             $1, $2, 1, 'queued', 0, 3, 3, $3, $4,
-            'private', 'private', 'repository_policy', 1, 3
+            'private', 'private', 'repository_policy', $5, 3
         )
         ",
     )
     .bind(attempt_id.as_uuid())
     .bind(job_id.as_uuid())
     .bind(secret_exposure_class)
-    .bind(raw_log_disposition)
+    .bind("persist")
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
     let lease_observed_at = database_now_millis(database).await?;

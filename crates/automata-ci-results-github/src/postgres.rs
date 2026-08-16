@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use automata_ci_blob::{BlobDescriptor, BlobKey, BlobPayload, MediaType};
 use automata_ci_core::{AttemptId, FencingToken, JobId, RunId, Sha256Digest};
+use automata_ci_store::HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA;
 use bytes::Bytes;
 use sqlx::{PgPool, Row as _, Transaction};
 use uuid::Uuid;
@@ -21,7 +22,6 @@ use crate::{
 };
 
 const MAXIMUM_DURABLE_NAME_BYTES: usize = 255;
-const ARTIFACT_PUBLICATION_SAFETY_SCHEMA: i32 = 1;
 const MAXIMUM_FINALIZATION_CALLER_CLOCK_SKEW_SECONDS: u64 = 60;
 const ACTIVE_ARTIFACT_LIFECYCLES: &[&str] =
     &["leased", "preparing", "running", "cancelling", "finalizing"];
@@ -798,7 +798,7 @@ impl ArtifactSafetySnapshot {
             && row
                 .try_get::<i32, _>("publication_safety_schema")
                 .map_err(corrupt_error)?
-                == ARTIFACT_PUBLICATION_SAFETY_SCHEMA;
+                == HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA;
         if !exact {
             return Err(repository_error(ArtifactRepositoryErrorKind::CorruptData));
         }
@@ -902,7 +902,7 @@ async fn insert_new_artifact(
     .bind(scope.safety.requested_visibility())
     .bind(scope.safety.effective_visibility())
     .bind(scope.safety.publication_safety_reason())
-    .bind(ARTIFACT_PUBLICATION_SAFETY_SCHEMA)
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .fetch_one(&mut **transaction)
     .await
     .map_err(database_error)?;
