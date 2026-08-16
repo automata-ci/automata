@@ -12,7 +12,7 @@ use automata_ci_core::{
     Sha256Digest,
 };
 use ring::signature;
-use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
@@ -229,6 +229,7 @@ pub struct WindowsBrokerProfileBinding {
     image: WindowsAdmissionImage,
     probe_contract_sha256: Sha256Digest,
     network_disabled: bool,
+    sealed_action_trees: bool,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +242,7 @@ struct UncheckedWindowsBrokerProfileBinding {
     image: WindowsAdmissionImage,
     probe_contract_sha256: Sha256Digest,
     network_disabled: bool,
+    sealed_action_trees: bool,
 }
 
 impl<'de> Deserialize<'de> for WindowsBrokerProfileBinding {
@@ -257,6 +259,7 @@ impl<'de> Deserialize<'de> for WindowsBrokerProfileBinding {
             value.image,
             value.probe_contract_sha256,
             value.network_disabled,
+            value.sealed_action_trees,
         )
         .map_err(D::Error::custom)
     }
@@ -278,6 +281,7 @@ impl WindowsBrokerProfileBinding {
         image: WindowsAdmissionImage,
         probe_contract_sha256: Sha256Digest,
         network_disabled: bool,
+        sealed_action_trees: bool,
     ) -> Result<Self, WindowsRunnerAdmissionError> {
         let broker_host_id = broker_host_id.into();
         let sandbox_provider_id = sandbox_provider_id.into();
@@ -298,6 +302,7 @@ impl WindowsBrokerProfileBinding {
             image,
             probe_contract_sha256,
             network_disabled,
+            sealed_action_trees,
         })
     }
 
@@ -341,6 +346,13 @@ impl WindowsBrokerProfileBinding {
     #[must_use]
     pub const fn network_disabled(&self) -> bool {
         self.network_disabled
+    }
+
+    /// Reports whether the broker attested its opaque, ledger-bound sealed
+    /// action-tree materialization contract for this exact profile.
+    #[must_use]
+    pub const fn sealed_action_trees(&self) -> bool {
+        self.sealed_action_trees
     }
 }
 
@@ -595,6 +607,7 @@ impl WindowsRunnerAdmissionBinding {
                 .features()
                 .contains(&RunnerFeature::LOCAL_ACTIONS)
             || !valid_action_feature_relationships(&capabilities)
+            || (has_action_features(&capabilities) && !broker_profile.sealed_action_trees)
         {
             return Err(WindowsRunnerAdmissionError::InvalidCapabilities);
         }
@@ -1190,10 +1203,82 @@ impl WindowsRunnerAdmissionEnvelope {
     }
 }
 
-/// Immutable control-plane trust source for Windows admission issuer keys.
+/// Immutable control-plane trust policy for one Windows admission issuer.
+///
+/// Signing authority is scoped to one broker host, one exact environment
+/// profile, and one promotion trust bundle. A valid signature therefore cannot
+/// move an admitted capability set to another broker or profile merely because
+/// that broker happens to trust the same key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsRunnerAdmissionTrustAnchor {
+    ed25519_public_key: [u8; ED25519_PUBLIC_KEY_BYTES],
+    broker_host_id: String,
+    profile: EnvironmentProfile,
+    promotion_trust_bundle_id: String,
+}
+
+impl WindowsRunnerAdmissionTrustAnchor {
+    /// Creates a host/profile-scoped admission trust anchor.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a placeholder public key, noncanonical broker host identity,
+    /// placeholder profile digest, or noncanonical trust-bundle identity.
+    pub fn new(
+        ed25519_public_key: [u8; ED25519_PUBLIC_KEY_BYTES],
+        broker_host_id: impl Into<String>,
+        profile: EnvironmentProfile,
+        promotion_trust_bundle_id: impl Into<String>,
+    ) -> Result<Self, WindowsRunnerAdmissionError> {
+        let broker_host_id = broker_host_id.into();
+        let promotion_trust_bundle_id = promotion_trust_bundle_id.into();
+        if ed25519_public_key.iter().all(|byte| *byte == 0)
+            || !is_lower_hex_64(&broker_host_id)
+            || zero_digest(profile.digest())
+            || !valid_id(&promotion_trust_bundle_id)
+        {
+            return Err(WindowsRunnerAdmissionError::InvalidTrustAnchor);
+        }
+        Ok(Self {
+            ed25519_public_key,
+            broker_host_id,
+            profile,
+            promotion_trust_bundle_id,
+        })
+    }
+
+    /// Returns the exact Ed25519 public key.
+    #[must_use]
+    pub const fn ed25519_public_key(&self) -> &[u8; ED25519_PUBLIC_KEY_BYTES] {
+        &self.ed25519_public_key
+    }
+
+    /// Returns the only broker host this key may authorize.
+    #[must_use]
+    pub fn broker_host_id(&self) -> &str {
+        &self.broker_host_id
+    }
+
+    /// Returns the only environment profile this key may authorize.
+    #[must_use]
+    pub const fn profile(&self) -> &EnvironmentProfile {
+        &self.profile
+    }
+
+    /// Returns the only promotion trust bundle this key may authorize.
+    #[must_use]
+    pub fn promotion_trust_bundle_id(&self) -> &str {
+        &self.promotion_trust_bundle_id
+    }
+}
+
+/// Immutable control-plane trust source for Windows admission issuers.
 pub trait WindowsRunnerAdmissionTrustStore: Send + Sync {
-    /// Resolves one approved Ed25519 public key by exact issuer key ID.
-    fn ed25519_public_key(&self, issuer_key_id: &str) -> Option<[u8; ED25519_PUBLIC_KEY_BYTES]>;
+    /// Resolves one approved, scope-bound trust anchor by exact issuer key ID.
+    fn admission_trust_anchor(
+        &self,
+        issuer_key_id: &str,
+    ) -> Option<WindowsRunnerAdmissionTrustAnchor>;
 }
 
 /// Server-verified Windows registration authority.
@@ -1243,10 +1328,16 @@ pub fn verify_windows_runner_admission(
     if claims.issuer_key_id != envelope.issuer_key_id {
         return Err(WindowsRunnerAdmissionError::IssuerMismatch);
     }
-    let public_key = trust_store
-        .ed25519_public_key(&envelope.issuer_key_id)
+    let trust_anchor = trust_store
+        .admission_trust_anchor(&envelope.issuer_key_id)
         .ok_or(WindowsRunnerAdmissionError::UnknownIssuer)?;
-    signature::UnparsedPublicKey::new(&signature::ED25519, public_key)
+    if claims.binding.broker_profile.broker_host_id() != trust_anchor.broker_host_id()
+        || claims.binding.broker_profile.profile() != trust_anchor.profile()
+        || claims.binding.promotion.trust_bundle_id() != trust_anchor.promotion_trust_bundle_id()
+    {
+        return Err(WindowsRunnerAdmissionError::TrustScopeMismatch);
+    }
+    signature::UnparsedPublicKey::new(&signature::ED25519, trust_anchor.ed25519_public_key())
         .verify(&envelope.signed_payload, &envelope.authenticator)
         .map_err(|_| WindowsRunnerAdmissionError::InvalidSignature)?;
     validate_current_window(claims.validity, now_unix_millis)?;
@@ -1287,6 +1378,9 @@ pub enum WindowsRunnerAdmissionError {
     /// An evidence digest is a zero placeholder.
     #[error("invalid Windows admission evidence")]
     InvalidEvidence,
+    /// The configured issuer key is not bound to a valid immutable scope.
+    #[error("invalid Windows admission trust anchor")]
+    InvalidTrustAnchor,
     /// Claims contain an invalid issuer, nonce, or custody/completion commitment.
     #[error("invalid Windows admission claims")]
     InvalidClaims,
@@ -1311,6 +1405,10 @@ pub enum WindowsRunnerAdmissionError {
     /// The server trust store does not approve the named issuer.
     #[error("unknown Windows admission issuer")]
     UnknownIssuer,
+    /// A valid issuer signature attempted to authorize another broker, profile,
+    /// or promotion trust bundle.
+    #[error("Windows admission issuer trust scope mismatch")]
+    TrustScopeMismatch,
     /// The Ed25519 signature does not authenticate the canonical payload.
     #[error("invalid Windows admission signature")]
     InvalidSignature,
@@ -1428,11 +1526,19 @@ fn valid_action_feature_relationships(capabilities: &RunnerCapabilities) -> bool
         .into_iter()
         .any(|feature| features.contains(feature));
     let javascript = features.contains(&RunnerFeature::JAVASCRIPT_ACTIONS);
-    let any_action = javascript
-        || any_node
-        || features.contains(&RunnerFeature::COMPOSITE_ACTIONS)
-        || features.contains(&RunnerFeature::REPOSITORY_ACTIONS);
+    let any_action = has_action_features(capabilities);
     javascript == any_node && (!any_action || features.contains(&RunnerFeature::REPOSITORY_ACTIONS))
+}
+
+fn has_action_features(capabilities: &RunnerCapabilities) -> bool {
+    let features = capabilities.features();
+    features.contains(&RunnerFeature::JAVASCRIPT_ACTIONS)
+        || features.contains(&RunnerFeature::NODE12_ACTIONS)
+        || features.contains(&RunnerFeature::NODE16_ACTIONS)
+        || features.contains(&RunnerFeature::NODE20_ACTIONS)
+        || features.contains(&RunnerFeature::NODE24_ACTIONS)
+        || features.contains(&RunnerFeature::COMPOSITE_ACTIONS)
+        || features.contains(&RunnerFeature::REPOSITORY_ACTIONS)
 }
 
 fn envelope_digest(envelope: &WindowsRunnerAdmissionEnvelope) -> Sha256Digest {
@@ -1461,11 +1567,14 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000_000;
 
-    struct TrustStore(BTreeMap<String, [u8; 32]>);
+    struct TrustStore(BTreeMap<String, WindowsRunnerAdmissionTrustAnchor>);
 
     impl WindowsRunnerAdmissionTrustStore for TrustStore {
-        fn ed25519_public_key(&self, issuer_key_id: &str) -> Option<[u8; 32]> {
-            self.0.get(issuer_key_id).copied()
+        fn admission_trust_anchor(
+            &self,
+            issuer_key_id: &str,
+        ) -> Option<WindowsRunnerAdmissionTrustAnchor> {
+            self.0.get(issuer_key_id).cloned()
         }
     }
 
@@ -1476,6 +1585,34 @@ mod tests {
     fn key_pair() -> Ed25519KeyPair {
         let document = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("generate key");
         Ed25519KeyPair::from_pkcs8(document.as_ref()).expect("parse key")
+    }
+
+    fn trust_anchor(
+        key_pair: &Ed25519KeyPair,
+        broker_host_id: impl Into<String>,
+    ) -> WindowsRunnerAdmissionTrustAnchor {
+        WindowsRunnerAdmissionTrustAnchor::new(
+            key_pair
+                .public_key()
+                .as_ref()
+                .try_into()
+                .expect("public key"),
+            broker_host_id,
+            EnvironmentProfile::new(
+                EnvironmentProfileId::new("automata.example/windows-server-2025")
+                    .expect("profile ID"),
+                digest(4),
+            ),
+            "production.windows.v1",
+        )
+        .expect("trust anchor")
+    }
+
+    fn trust_store(issuer: &str, key_pair: &Ed25519KeyPair) -> TrustStore {
+        TrustStore(BTreeMap::from([(
+            issuer.to_owned(),
+            trust_anchor(key_pair, "a".repeat(64)),
+        )]))
     }
 
     fn claims(issuer: &str, receipt_expires: u64) -> WindowsRunnerAdmissionClaims {
@@ -1519,6 +1656,7 @@ mod tests {
             profile,
             image,
             digest(7),
+            true,
             true,
         )
         .expect("broker profile");
@@ -1583,14 +1721,7 @@ mod tests {
     fn server_verifies_canonical_receipt_and_derives_exact_capabilities() {
         let key_pair = key_pair();
         let envelope = signed_envelope("broker-admission-v1", &key_pair, NOW + 60_000);
-        let trust = TrustStore(BTreeMap::from([(
-            "broker-admission-v1".to_owned(),
-            key_pair
-                .public_key()
-                .as_ref()
-                .try_into()
-                .expect("public key"),
-        )]));
+        let trust = trust_store("broker-admission-v1", &key_pair);
 
         let verified = verify_windows_runner_admission(&envelope, &trust, NOW).expect("verified");
         assert_eq!(
@@ -1642,14 +1773,7 @@ mod tests {
     fn forged_nonzero_authenticator_unknown_issuer_and_expiry_fail_closed() {
         let key_pair = key_pair();
         let envelope = signed_envelope("broker-admission-v1", &key_pair, NOW + 60_000);
-        let trust = TrustStore(BTreeMap::from([(
-            "broker-admission-v1".to_owned(),
-            key_pair
-                .public_key()
-                .as_ref()
-                .try_into()
-                .expect("public key"),
-        )]));
+        let trust = trust_store("broker-admission-v1", &key_pair);
         let forged = WindowsRunnerAdmissionEnvelope::new(
             envelope.issuer_key_id.clone(),
             envelope.signed_payload.clone(),
@@ -1673,28 +1797,34 @@ mod tests {
     }
 
     #[test]
+    fn same_key_and_issuer_cannot_cross_broker_trust_scope() {
+        let key_pair = key_pair();
+        let mut claims = claims("broker-admission-v1", NOW + 60_000);
+        claims.binding.broker_profile.broker_host_id = "b".repeat(64);
+        let payload = claims.canonical_bytes().expect("canonical claims");
+        let envelope = WindowsRunnerAdmissionEnvelope::new(
+            "broker-admission-v1",
+            payload.clone(),
+            key_pair.sign(&payload).as_ref().to_vec(),
+        )
+        .expect("envelope");
+        let trust = trust_store("broker-admission-v1", &key_pair);
+
+        assert_eq!(
+            verify_windows_runner_admission(&envelope, &trust, NOW),
+            Err(WindowsRunnerAdmissionError::TrustScopeMismatch)
+        );
+    }
+
+    #[test]
     fn accept_all_runner_verifier_cannot_mint_server_capabilities() {
         let attacker = key_pair();
         let envelope = signed_envelope("attacker-broker-v1", &attacker, NOW + 60_000);
-        let local_accept_all = TrustStore(BTreeMap::from([(
-            "attacker-broker-v1".to_owned(),
-            attacker
-                .public_key()
-                .as_ref()
-                .try_into()
-                .expect("public key"),
-        )]));
+        let local_accept_all = trust_store("attacker-broker-v1", &attacker);
         assert!(verify_windows_runner_admission(&envelope, &local_accept_all, NOW).is_ok());
 
         let production = key_pair();
-        let server_trust = TrustStore(BTreeMap::from([(
-            "production-broker-v1".to_owned(),
-            production
-                .public_key()
-                .as_ref()
-                .try_into()
-                .expect("public key"),
-        )]));
+        let server_trust = trust_store("production-broker-v1", &production);
         assert_eq!(
             verify_windows_runner_admission(&envelope, &server_trust, NOW),
             Err(WindowsRunnerAdmissionError::UnknownIssuer)
@@ -1709,6 +1839,11 @@ mod tests {
             .as_array_mut()
             .expect("features")
             .push(serde_json::json!(RunnerFeature::LOCAL_ACTIONS.as_str()));
+        assert!(serde_json::from_value::<WindowsRunnerAdmissionBinding>(value).is_err());
+
+        let mut value = serde_json::to_value(claims("broker-admission-v1", NOW + 60_000).binding)
+            .expect("binding value");
+        value["broker_profile"]["sealed_action_trees"] = serde_json::json!(false);
         assert!(serde_json::from_value::<WindowsRunnerAdmissionBinding>(value).is_err());
     }
 }
