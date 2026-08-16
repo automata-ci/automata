@@ -48,6 +48,9 @@ def main() -> None:
     assert workflow.count('SCCACHE_IDLE_TIMEOUT: "0"') == 1, (
         "the job-scoped sccache server must survive until post-job statistics"
     )
+    assert workflow.count("SCCACHE_BASEDIRS: ${{ github.workspace }}") == 1, (
+        "sccache must normalize each ephemeral checkout to a stable source path"
+    )
     for job in RUST_JOBS:
         body = job_body(workflow, job)
         assert "RUSTC_WRAPPER: sccache" in body, f"{job} lost the rustc wrapper"
