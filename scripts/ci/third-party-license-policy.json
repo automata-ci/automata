@@ -22,6 +22,7 @@
       "ISC",
       "MIT",
       "MIT AND BSD-3-Clause",
+      "MIT AND Unicode-3.0",
       "MIT OR Apache-2.0",
       "MIT OR Apache-2.0 OR Zlib",
       "MIT OR Zlib OR Apache-2.0",
@@ -99,6 +100,13 @@
         ],
         "licenseTextFrom": "cargo:tonic@0.14.6",
         "reason": "The Prost integration crate is published from the tonic workspace without the repository license files."
+      },
+      {
+        "components": [
+          "cargo:bollard-stubs@1.53.1-rc.29.3.1"
+        ],
+        "licenseTextFrom": "cargo:bollard@0.21.0",
+        "reason": "The generated stubs crate is published from the Bollard project without its Apache-2.0 root license."
       }
     ],
     "reviewedFallbacks": [
