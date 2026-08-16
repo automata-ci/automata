@@ -7,9 +7,7 @@ use automata_ci_action::{
 use automata_ci_action_github::{
     ActionExecution, ActionMetadataDecoder, GithubActionMetadataDecoder, JavascriptRuntime,
 };
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_github::GithubHttpEndpoint;
 use automata_ci_scm::{RepositoryId, RevisionSpec};
 use url::Url;
@@ -45,7 +43,7 @@ async fn resolves_and_decodes_the_exact_checkout_action() {
         None,
     )
     .expect("test S3 credentials");
-    let blobs = S3BlobStore::new(config.client(credentials), &config);
+    let blobs = config.connect(credentials).expect("test S3 store");
     let github =
         GithubHttpEndpoint::github_dot_com("automata-live-test/0.1.0").expect("GitHub endpoint");
     let repository = RepositoryId::new("actions/checkout").expect("repository");

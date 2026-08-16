@@ -71,7 +71,7 @@ minutes.
 
 The checked-in
 [`runner.windows.example.json`](../crates/automata-ci-runner/config/runner.windows.example.json)
-selects `windows_hyperv` and schema version 3. It defines an absolute local
+selects `windows_hyperv` and schema version 4. It defines an absolute local
 container CLI path and SHA-256, a digest-qualified Windows Server Core image,
 an in-image guest executable, an in-container workspace, disabled networking,
 a writable container root, `ContainerUser`, and CPU, memory, and process

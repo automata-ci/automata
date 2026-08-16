@@ -191,6 +191,27 @@ artifact objects; runners verify those exact keys and publish immutable action
 bundles. A differing prefix fails closed as a missing object and is never
 searched or guessed.
 
+HTTPS object storage has one explicit trust mode. The default
+`--s3-tls-trust web-pki` uses the platform Web PKI roots. To trust a private
+service, select `--s3-tls-trust private-ca` and provide exactly one bounded CA
+certificate through `--s3-private-ca-source env:NAME` or
+`--s3-private-ca-source file:/absolute/path`. Private-CA mode starts from an
+empty root store, never adds Web PKI roots, and never retries under a different
+trust policy. The source is subject to the same secure-file and redaction rules
+as other privileged inputs and is capped at 1 MiB. It must be one canonical
+RFC 7468 certificate with 64-column Base64, LF line endings, one terminal LF,
+no preamble/trailing bytes, and `keyCertSign` whenever KeyUsage is present.
+
+For example, an HTTPS S3-compatible service with its own CA uses:
+
+```console
+automata server \
+  --s3-endpoint https://objects.internal.example/ \
+  --s3-tls-trust private-ca \
+  --s3-private-ca-source file:/run/secrets/object-store-ca.pem \
+  --s3-bucket automata
+```
+
 For local RustFS, explicitly allow a literal loopback HTTP endpoint:
 
 ```console
@@ -204,7 +225,10 @@ automata server \
 ```
 
 Plain HTTP object-store endpoints anywhere other than literal loopback are
-rejected even when the development option is present.
+rejected. `--s3-allow-loopback-http` is also rejected for an HTTPS endpoint or
+with private-CA trust, so it cannot remain as an inert or ambiguous setting.
+After argument validation, connection security is exactly one closed state:
+Web PKI HTTPS, exact-private-CA HTTPS, or literal-loopback plaintext.
 
 Object writes use provider-managed AES-256 (`SSE-S3`) by default. Set
 `--s3-kms-key-id` to select `SSE-KMS` with one exact non-secret key identity;

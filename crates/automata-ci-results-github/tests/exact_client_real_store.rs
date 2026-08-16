@@ -10,9 +10,7 @@ use std::{
 };
 
 use automata_ci_blob::ImmutableBlobStore;
-use automata_ci_blob_s3::{
-    S3AtRestEncryption, S3BlobStore, S3BlobStoreConfig, StaticS3Credentials,
-};
+use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use automata_ci_control::adapter_spi::{
     AcquireLease, InternalAttemptRepository as _, QueuedAttempt,
 };
@@ -331,14 +329,12 @@ fn real_results_router(
     .with_at_rest_encryption(S3AtRestEncryption::aws_kms(
         environment.s3_kms_key_id.clone(),
     )?);
-    let objects: Arc<dyn ImmutableBlobStore> = Arc::new(S3BlobStore::new(
-        s3_config.client(StaticS3Credentials::new(
+    let objects: Arc<dyn ImmutableBlobStore> =
+        Arc::new(s3_config.connect(StaticS3Credentials::new(
             environment.s3_access_key.clone(),
             environment.s3_secret_key.clone(),
             None,
-        )?),
-        &s3_config,
-    ));
+        )?)?);
     let observer = Arc::new(RecordingObserver::default());
     let public_observer: Arc<dyn ResultsObserver> = observer.clone();
     let objects: Arc<dyn ImmutableBlobStore> = Arc::new(ObservedResultsBlobStore::new(

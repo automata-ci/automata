@@ -16,9 +16,7 @@ use automata_ci_auth_postgres::{
     PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
 };
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
-use automata_ci_blob_s3::{
-    S3BlobStore, S3BlobStoreConfig, S3BlobStoreConfigError, StaticS3Credentials,
-};
+use automata_ci_blob_s3::S3BlobStoreConfigError;
 use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, RandomLeaseIdGenerator, RunnableScanLimit, SystemLeaseClock,
     repository::RunnerLeaseRequestRepository,
@@ -1814,40 +1812,15 @@ impl ReadinessProbe for ImmutableBlobReadinessProbe {
 fn build_blob_store(
     config: &ServerConfig,
 ) -> Result<Arc<dyn ImmutableBlobStore>, ServerCompositionError> {
-    let blob_config = if config.s3_endpoint.scheme() == "http" {
-        if !config.s3_allow_loopback_http {
-            return Err(ServerCompositionError::InsecureS3Endpoint);
+    let store = crate::object_store::connect(&config.s3).map_err(|error| match error {
+        crate::object_store::ObjectStoreConnectionError::Secret(error) => {
+            ServerCompositionError::Secret(error)
         }
-        S3BlobStoreConfig::loopback_development(
-            config.s3_endpoint.clone(),
-            config.s3_region.clone(),
-            config.s3_bucket.clone(),
-            config.s3_prefix.clone(),
-            config.s3_operation_timeout,
-        )?
-    } else {
-        S3BlobStoreConfig::new(
-            config.s3_endpoint.clone(),
-            config.s3_region.clone(),
-            config.s3_bucket.clone(),
-            config.s3_prefix.clone(),
-            config.s3_force_path_style,
-            config.s3_operation_timeout,
-        )?
-    };
-    let blob_config = blob_config.with_at_rest_encryption(config.s3_at_rest_encryption.clone());
-    let access_key = config.load_s3_access_key()?;
-    let secret_key = config.load_s3_secret_key()?;
-    let session_token = config.load_s3_session_token()?;
-    let credentials = StaticS3Credentials::new(
-        access_key.as_str(),
-        secret_key.as_str(),
-        session_token
-            .as_ref()
-            .map(|value| value.as_str().to_owned()),
-    )?;
-    let client = blob_config.client(credentials);
-    Ok(Arc::new(S3BlobStore::new(client, &blob_config)))
+        crate::object_store::ObjectStoreConnectionError::Configuration(error) => {
+            ServerCompositionError::S3(error)
+        }
+    })?;
+    Ok(Arc::new(store))
 }
 
 fn load_server_tls(config: &ServerConfig) -> Result<ServerTlsConfig, ServerCompositionError> {
@@ -1984,9 +1957,6 @@ pub enum ServerCompositionError {
     /// A fresh process-local autonomous workflow worker identity was invalid.
     #[error("autonomous workflow worker identity is invalid")]
     InvalidAutonomousWorkflowWorker,
-    /// Plain HTTP was not explicitly permitted for a loopback S3 endpoint.
-    #[error("plain HTTP S3 requires the explicit loopback-development option")]
-    InsecureS3Endpoint,
     /// A PEM source was malformed, empty, excessive, or contained multiple keys.
     #[error("runner TLS PEM material is invalid")]
     InvalidTlsPem,

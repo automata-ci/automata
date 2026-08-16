@@ -157,6 +157,15 @@ the private journal state root. A warm job
 therefore reads local disk first and falls back to the shared object store; it
 does not contact GitHub again.
 
+Runner product schema 4 requires an explicit object-store trust policy.
+`web_pki` uses platform roots; `private_ca` loads exactly one bounded CA through
+an existing secure-input descriptor and installs it into an otherwise empty
+root store. The PEM bytes must use canonical RFC 7468 64-column/LF encoding
+with one terminal LF and no surrounding data; a present KeyUsage must include
+`keyCertSign`. Private trust is HTTPS-only and never retries with Web PKI. The
+runner, server, and image initializer must select the same endpoint trust,
+bucket, and prefix for one installation.
+
 The local archive cache is bounded to 256 entries, 512 MiB total, and 16 MiB per
 compressed archive. Its sibling reference index is crash-durable and retains at
 most 4,096 exact references. Both are recreated automatically and require no
