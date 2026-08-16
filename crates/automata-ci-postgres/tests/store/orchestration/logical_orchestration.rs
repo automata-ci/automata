@@ -580,6 +580,7 @@ async fn assert_workflow_enable_state_history(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One assertion keeps the persisted admission shape auditable.
 async fn assert_logical_admission_shape(
     database: &TestDatabase,
     snapshot_id: WorkflowSnapshotId,

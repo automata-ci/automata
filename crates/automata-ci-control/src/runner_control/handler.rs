@@ -192,6 +192,11 @@ impl RunnerControlConfig {
     /// The initial database claim and every protocol renewal must share one lifetime. Keeping
     /// construction here prevents a runner from being promised a different lease runway than the
     /// durable scheduler actually granted.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a previously validated control configuration contains a nonpositive lease
+    /// duration, which its constructor forbids.
     #[must_use]
     pub fn lease_poll_config(self, scan_limit: RunnableScanLimit) -> LeasePollConfig {
         let lease_time_to_live =
@@ -1430,6 +1435,7 @@ impl DurableRunnerControlHandler {
         Ok(ServerToRunner::LeaseOffer(Box::new(offer)))
     }
 
+    #[allow(clippy::too_many_lines)] // One staged transaction preserves the exact authority audit trail.
     async fn handle_runtime_authority_request(
         &self,
         fence: RunnerSessionFence,

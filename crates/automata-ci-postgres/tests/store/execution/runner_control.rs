@@ -1805,6 +1805,7 @@ async fn lease_response_and_reported_lifecycle_are_atomic_fenced_and_replayed() 
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // The test verifies the complete expired-attempt replay transaction.
 async fn committed_lease_acceptance_replays_after_attempt_expiry() -> TestResult {
     run_with_database(|database| async move {
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;

@@ -418,9 +418,7 @@ fn prepare_definition(
                 input.name(),
                 default,
                 input.required().map(|value| value.text().to_owned()),
-                input
-                    .deprecation_message()
-                    .map(|value| value.text().to_owned()),
+                input.deprecation_message().map(MetadataScalar::text),
             )
             .map_err(|_| metadata_error())
         })

@@ -132,7 +132,11 @@ async fn renewal_ack_is_replayable_but_never_authorizes_work() -> TestResult {
             20_005,
         )
         .await?;
-        exercise_quarantined_activation(&database, &quarantined_activation).await?;
+        Box::pin(exercise_quarantined_activation(
+            &database,
+            &quarantined_activation,
+        ))
+        .await?;
 
         let mut quarantined_materialization =
             fixture(&database, "renewal-ack-materialization-q", 730_000, 3).await?;

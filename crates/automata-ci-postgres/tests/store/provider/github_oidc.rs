@@ -843,11 +843,11 @@ async fn seed_current_oidc_execution(
     database: &TestDatabase,
     signed_github_admission: bool,
 ) -> TestResult<(GithubOidcExecutionIdentity, GithubProviderManifest)> {
-    seed_current_profiled_execution(
+    Box::pin(seed_current_profiled_execution(
         database,
         signed_github_admission,
         automata_ci_core::JobAuthorityProfile::Standard,
-    )
+    ))
     .await
 }
 
@@ -1229,7 +1229,7 @@ fn assert_runtime_authority_insert_rejected(error: &sqlx::Error, expected_constr
 }
 
 async fn durable_oidc_fixture(database: &TestDatabase) -> TestResult<DurableOidcFixture> {
-    let (execution, manifest) = seed_current_oidc_execution(database, true).await?;
+    let (execution, manifest) = Box::pin(seed_current_oidc_execution(database, true)).await?;
     let base_millis = execution.lease().issued_at().get();
     let base_seconds = u64::try_from(base_millis)? / 1_000;
     let current_policy = GithubOidcCurrentPolicy::new(
@@ -1959,7 +1959,7 @@ async fn generic_admission_can_never_reserve_oidc_authority() -> TestResult {
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn authority_key_contention_crossing_lease_expiry_rolls_back_every_write() -> TestResult {
     run_with_database(|database| async move {
-        let fixture = durable_oidc_fixture(&database).await?;
+        let fixture = Box::pin(durable_oidc_fixture(&database)).await?;
         database
             .store()
             .retain_github_oidc_key(RetainGithubOidcKey::request_bearer(
@@ -2024,7 +2024,7 @@ async fn authority_key_contention_crossing_lease_expiry_rolls_back_every_write()
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn mint_key_contention_crossing_lease_expiry_rolls_back_slot_and_extension() -> TestResult {
     run_with_database(|database| async move {
-        let fixture = durable_oidc_fixture(&database).await?;
+        let fixture = Box::pin(durable_oidc_fixture(&database)).await?;
         let authority_repository = PostgresGithubOidcAuthorityRepository::new(
             database.store().clone(),
             fixture.clock.clone(),
@@ -2094,7 +2094,7 @@ async fn mint_key_contention_crossing_lease_expiry_rolls_back_slot_and_extension
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn mint_slot_contention_crossing_lease_expiry_preserves_immutable_replay() -> TestResult {
     run_with_database(|database| async move {
-        let fixture = durable_oidc_fixture(&database).await?;
+        let fixture = Box::pin(durable_oidc_fixture(&database)).await?;
         let authority_repository = PostgresGithubOidcAuthorityRepository::new(
             database.store().clone(),
             fixture.clock.clone(),
@@ -2163,7 +2163,7 @@ async fn runtime_authority_insert_requires_exact_historical_standard_profile_and
 {
     run_with_database(|database| async move {
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
-        let (execution, manifest) = seed_current_oidc_execution(&database, true).await?;
+        let (execution, manifest) = Box::pin(seed_current_oidc_execution(&database, true)).await?;
         let execution =
             rebase_runtime_authority_lease_to_database_time(&database, &clock, execution).await?;
         let rotated_at = database_now(&database).await?;
@@ -2239,11 +2239,11 @@ async fn runtime_authority_insert_rejects_credential_free_chain_without_key_occu
 {
     run_with_database(|database| async move {
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
-        let (execution, manifest) = seed_current_profiled_execution(
+        let (execution, manifest) = Box::pin(seed_current_profiled_execution(
             &database,
             true,
             automata_ci_core::JobAuthorityProfile::CredentialFree,
-        )
+        ))
         .await?;
         let execution =
             rebase_runtime_authority_lease_to_database_time(&database, &clock, execution).await?;
@@ -2277,7 +2277,7 @@ async fn runtime_authority_insert_rejects_credential_free_chain_without_key_occu
 #[allow(clippy::too_many_lines)]
 async fn authority_and_issuance_are_exact_current_and_durable() -> TestResult {
     run_with_database(|database| async move {
-        let fixture = durable_oidc_fixture(&database).await?;
+        let fixture = Box::pin(durable_oidc_fixture(&database)).await?;
         let rotated_at = database_now(&database).await?;
         database
             .store()

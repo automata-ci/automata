@@ -1470,8 +1470,12 @@ async fn insert_exact_runtime_authority_candidate(
 #[allow(clippy::too_many_lines)]
 async fn public_resolution_is_exact_and_rejects_every_execution_substitution() -> TestResult {
     run_with_database(|database| async move {
-        let (execution, manifest) =
-            seed_execution(&database, 100_000, ProviderRepositoryVisibility::Public).await?;
+        let (execution, manifest) = Box::pin(seed_execution(
+            &database,
+            100_000,
+            ProviderRepositoryVisibility::Public,
+        ))
+        .await?;
         let resolution = database
             .store()
             .resolve_github_job_runtime_authority(&execution)
@@ -1726,8 +1730,12 @@ async fn delayed_first_authority_issue_retains_completed_selection_lineage() -> 
     run_with_database(|database| async move {
         const FROZEN_NOW: i64 = 2_300_000_000_000;
         let clock = install_database_test_clock(&database, FROZEN_NOW).await?;
-        let (execution, manifest) =
-            seed_execution(&database, 150_000, ProviderRepositoryVisibility::Public).await?;
+        let (execution, manifest) = Box::pin(seed_execution(
+            &database,
+            150_000,
+            ProviderRepositoryVisibility::Public,
+        ))
+        .await?;
 
         set_database_test_clock(&clock, FROZEN_NOW + 240_000).await?;
         for _ in 0..2 {
@@ -1800,8 +1808,12 @@ async fn delayed_first_authority_issue_retains_completed_selection_lineage() -> 
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn private_resolution_requires_and_returns_the_exact_historical_installation() -> TestResult {
     run_with_database(|database| async move {
-        let (execution, manifest) =
-            seed_execution(&database, 200_000, ProviderRepositoryVisibility::Private).await?;
+        let (execution, manifest) = Box::pin(seed_execution(
+            &database,
+            200_000,
+            ProviderRepositoryVisibility::Private,
+        ))
+        .await?;
         let resolution = database
             .store()
             .resolve_github_job_runtime_authority(&execution)
@@ -1826,8 +1838,12 @@ async fn private_resolution_requires_and_returns_the_exact_historical_installati
 async fn current_manifest_rotation_cannot_reinterpret_historical_standard_authority() -> TestResult
 {
     run_with_database(|database| async move {
-        let (execution, manifest) =
-            seed_execution(&database, 300_000, ProviderRepositoryVisibility::Public).await?;
+        let (execution, manifest) = Box::pin(seed_execution(
+            &database,
+            300_000,
+            ProviderRepositoryVisibility::Public,
+        ))
+        .await?;
         let rotated_at = database_now(&database).await?;
         database
             .store()
@@ -1861,8 +1877,12 @@ async fn revocation_revalidation_samples_database_time_after_lock_and_rejects_st
 -> TestResult {
     run_with_database(|database| async move {
         let clock = TestClock::freeze_at_database_now(database.pool()).await?;
-        let (execution, manifest) =
-            seed_execution(&database, 350_000, ProviderRepositoryVisibility::Public).await?;
+        let (execution, manifest) = Box::pin(seed_execution(
+            &database,
+            350_000,
+            ProviderRepositoryVisibility::Public,
+        ))
+        .await?;
         let resolution = database
             .store()
             .resolve_github_job_runtime_authority(&execution)
@@ -2058,8 +2078,12 @@ async fn runtime_authority_direct_sql_guards_fail_closed() -> TestResult {
     run_with_database(|database| async move {
         const FROZEN_NOW: i64 = 2_400_000_000_000;
         let clock = install_database_test_clock(&database, FROZEN_NOW).await?;
-        let (execution, manifest) =
-            seed_execution(&database, 400_000, ProviderRepositoryVisibility::Public).await?;
+        let (execution, manifest) = Box::pin(seed_execution(
+            &database,
+            400_000,
+            ProviderRepositoryVisibility::Public,
+        ))
+        .await?;
         let resolution = database
             .store()
             .resolve_github_job_runtime_authority(&execution)
@@ -2396,11 +2420,16 @@ async fn assert_runtime_authority_inspection_waits_for_graph_lock(
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+#[allow(clippy::too_many_lines)] // One scenario verifies the complete authority tuple is immutable.
 async fn runtime_authority_locks_attempt_runner_session_and_historical_manifest() -> TestResult {
     run_with_database(|database| async move {
         let _clock = install_database_test_clock(&database, 2_500_000_000_000).await?;
-        let (execution, manifest) =
-            seed_execution(&database, 500_000, ProviderRepositoryVisibility::Public).await?;
+        let (execution, manifest) = Box::pin(seed_execution(
+            &database,
+            500_000,
+            ProviderRepositoryVisibility::Public,
+        ))
+        .await?;
         let resolution = database
             .store()
             .resolve_github_job_runtime_authority(&execution)

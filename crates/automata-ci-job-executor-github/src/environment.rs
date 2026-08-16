@@ -895,7 +895,7 @@ mod tests {
                 "Alpha Name",
                 None,
                 Some("true".to_owned()),
-                Some("Use replacement instead".to_owned()),
+                Some("Use replacement instead"),
             )
             .expect("alpha"),
             PreparedInput::new("middle", None).expect("middle"),

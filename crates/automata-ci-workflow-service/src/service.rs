@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -147,12 +148,12 @@ impl WorkflowAdmissionService {
     ///
     /// Fails closed on exact-source verification, invalid logical graph data,
     /// object-store failure, or atomic store rejection.
-    pub async fn admit(
+    pub fn admit(
         &self,
         request: WorkflowAdmissionRequest,
-    ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
-        self.admit_with_authority(request, AdmissionAuthority::ProviderNeutral)
-            .await
+    ) -> impl Future<Output = Result<WorkflowAdmissionResult, WorkflowAdmissionError>> + Send + '_
+    {
+        Box::pin(self.admit_with_authority(request, AdmissionAuthority::ProviderNeutral))
     }
 
     /// Publishes and admits one workflow selected from an authenticated GitHub
@@ -169,16 +170,16 @@ impl WorkflowAdmissionService {
     ///
     /// Fails closed on the same admission errors as [`Self::admit`], and when
     /// signed GitHub subject evidence is absent or does not match the request.
-    pub async fn admit_authenticated_github_delivery(
+    pub fn admit_authenticated_github_delivery(
         &self,
         request: WorkflowAdmissionRequest,
         current_claim: AuthenticatedGithubDeliveryClaim,
-    ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
-        self.admit_with_authority(
+    ) -> impl Future<Output = Result<WorkflowAdmissionResult, WorkflowAdmissionError>> + Send + '_
+    {
+        Box::pin(self.admit_with_authority(
             request,
             AdmissionAuthority::AuthenticatedGithub(current_claim),
-        )
-        .await
+        ))
     }
 
     /// Publishes and admits one invocation from an exact live scheduled fire.
@@ -187,13 +188,13 @@ impl WorkflowAdmissionService {
     ///
     /// Fails closed unless the operation idempotency, schedule event, source,
     /// manifest, pre-admission Check, and current fire fence all agree.
-    pub async fn admit_scheduled_github_workflow(
+    pub fn admit_scheduled_github_workflow(
         &self,
         request: WorkflowAdmissionRequest,
         claim: GithubScheduleFireClaim,
-    ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
-        self.admit_with_authority(request, AdmissionAuthority::ScheduledGithub(claim))
-            .await
+    ) -> impl Future<Output = Result<WorkflowAdmissionResult, WorkflowAdmissionError>> + Send + '_
+    {
+        Box::pin(self.admit_with_authority(request, AdmissionAuthority::ScheduledGithub(claim)))
     }
 
     /// Publishes and admits one authenticated Automata control-plane manual
@@ -207,16 +208,16 @@ impl WorkflowAdmissionService {
     ///
     /// Fails closed when evidence, exact target identity, current authority,
     /// immutable publication, or durable replay does not agree.
-    pub async fn admit_authenticated_workflow_dispatch(
+    pub fn admit_authenticated_workflow_dispatch(
         &self,
         request: WorkflowAdmissionRequest,
         authorization: WorkflowDispatchAuthorization,
-    ) -> Result<WorkflowAdmissionResult, WorkflowAdmissionError> {
-        self.admit_with_authority(
+    ) -> impl Future<Output = Result<WorkflowAdmissionResult, WorkflowAdmissionError>> + Send + '_
+    {
+        Box::pin(self.admit_with_authority(
             request,
             AdmissionAuthority::AuthenticatedWorkflowDispatch(authorization),
-        )
-        .await
+        ))
     }
 
     pub(crate) async fn resolve_authenticated_workflow_dispatch_source(
