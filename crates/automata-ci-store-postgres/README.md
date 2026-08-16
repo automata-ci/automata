@@ -5,8 +5,9 @@ provider, and managed-secret metadata repositories. This crate owns the SQLx
 migration lineage and concrete `PostgresStore` lifecycle.
 
 Portable callers should depend on the ports in `automata-ci-store` and
-`automata-ci-control`; the `automata-ci-postgres` facade preserves the existing
-`store` namespace for compatibility.
+`automata-ci-control`; product composition and integration tests import this
+concrete adapter directly. `automata-ci-postgres` owns only shared PostgreSQL
+test support.
 
 ## Schema migrations
 

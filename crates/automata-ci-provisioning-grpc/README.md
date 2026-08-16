@@ -16,9 +16,9 @@ it only when a complete private management-listener configuration is supplied;
 standalone self-hosted deployments expose no placeholder endpoint. The product
 maps a dedicated-CA-verified leaf certificate through an exact SHA-256 pin to a
 stable shard-scoped authority, and supplies the durable
-`automata-ci-postgres` management transaction adapters. Entitlement snapshots
-are complete, monotonically revisioned workspace aggregates; the contract does
-not allocate rolling per-job budget slices.
+`automata-ci-provisioning-postgres` management transaction adapters.
+Entitlement snapshots are complete, monotonically revisioned workspace
+aggregates; the contract does not allocate rolling per-job budget slices.
 
 The usage-export schema defines an authority-scoped, cursor-paginated feed of
 immutable actual-execution facts. It is intentionally not registered or

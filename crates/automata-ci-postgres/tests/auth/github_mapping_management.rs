@@ -16,7 +16,7 @@ use automata_ci_auth::{
     session::SessionId,
     time::UnixTimestamp,
 };
-use automata_ci_postgres::auth::PostgresGithubMappingManagementRepository;
+use automata_ci_auth_postgres::PostgresGithubMappingManagementRepository;
 use automata_ci_postgres::test_support::TestClock;
 use sqlx::PgPool;
 use uuid::Uuid;

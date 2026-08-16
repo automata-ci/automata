@@ -6,5 +6,6 @@ authority-scoped usage export. Provider credentials use the mandatory
 control-plane envelope key provider; readers return one repeatable-read current
 snapshot and never expose ciphertext as configuration.
 
-Portable callers should depend on `automata-ci-provisioning`; the
-`automata-ci-postgres` facade preserves the existing `provisioning` namespace.
+Portable callers should depend on `automata-ci-provisioning`; product
+composition and integration tests import this concrete adapter directly.
+`automata-ci-postgres` owns only shared PostgreSQL test support.

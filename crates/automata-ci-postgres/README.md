@@ -1,17 +1,9 @@
 # automata-ci-postgres
 
-Compatibility facade for Automata's domain-specific PostgreSQL adapters. Its
-public namespaces re-export the independently compiled adapter crates:
-
-- `auth` from `automata-ci-auth-postgres`;
-- `provisioning` from `automata-ci-provisioning-postgres`;
-- `runner_auth` from `automata-ci-runner-auth-postgres`;
-- `secret` from `automata-ci-secret-postgres`;
-- `store` from `automata-ci-store-postgres`.
-
-New code should depend directly on the smallest domain crate it uses. The
-facade preserves existing source compatibility and owns the consolidated
-PostgreSQL integration-test target and unstable `test-support` feature.
+Shared PostgreSQL integration-test support for Automata's independently
+compiled domain adapters. Product code depends directly on the smallest domain
+crate it uses; this package owns only the consolidated PostgreSQL test target,
+its cleanup utility, and the explicitly enabled `test-support` fixture API.
 
 Schema migrations belong to `automata-ci-store-postgres`. All PostgreSQL
 integration suites compile into the explicit `postgres` target; run the

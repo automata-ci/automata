@@ -796,6 +796,7 @@ dependencies = [
  "automata-ci-protocol",
  "automata-ci-protocol-protobuf",
  "automata-ci-store",
+ "automata-ci-store-postgres",
  "axum",
  "base64 0.23.1",
  "bytes",
@@ -1132,6 +1133,9 @@ dependencies = [
  "automata-ci-oidc-github",
  "automata-ci-schedule",
  "automata-ci-store",
+ "automata-ci-tls",
+ "percent-encoding",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1140,7 +1144,9 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

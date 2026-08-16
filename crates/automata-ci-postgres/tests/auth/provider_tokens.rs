@@ -10,8 +10,8 @@ use automata_ci_auth::{
         ProviderTokenVaultError, TokenVersion,
     },
 };
+use automata_ci_auth_postgres::PostgresProviderTokenVault;
 use automata_ci_key_management::{KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes};
-use automata_ci_postgres::auth::PostgresProviderTokenVault;
 use sqlx::PgPool;
 use uuid::Uuid;
 

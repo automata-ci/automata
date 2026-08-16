@@ -1,9 +1,9 @@
-use automata_ci_postgres::provisioning::PostgresWorkspaceProvisioner;
 use automata_ci_provisioning::{
     AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName, ExternalAccountSubject,
     OperationId, ProvisionWorkspaceCommand, ProvisioningAuthority, ProvisioningAuthorityId,
     ProvisioningFailureKind, ShardId, WorkspaceId, WorkspaceProvisioner,
 };
+use automata_ci_provisioning_postgres::PostgresWorkspaceProvisioner;
 use uuid::Uuid;
 
 use crate::support::{TestResult, run_with_database};

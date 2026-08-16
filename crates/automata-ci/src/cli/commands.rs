@@ -339,10 +339,12 @@ pub struct PreviewArgs {
 /// `PostgreSQL` transport policy selected at the product boundary.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum DatabaseTransport {
-    /// Require TLS certificate-chain and hostname verification.
+    /// Verify TLS through the compiled Web PKI roots.
     #[default]
-    VerifyFull,
-    /// Disable TLS only for a Unix socket or literal loopback address.
+    WebPkiVerifyFull,
+    /// Verify TLS through Web PKI plus one deployment-provided CA.
+    WebPkiPlusPrivateCaVerifyFull,
+    /// Disable TLS only for a literal loopback TCP address.
     LoopbackPlaintext,
 }
 
@@ -709,6 +711,17 @@ pub struct ServerArgs {
     /// Explicit database transport policy.
     #[arg(long, env = "AUTOMATA_DATABASE_TRANSPORT", value_enum, default_value_t)]
     pub database_transport: DatabaseTransport,
+
+    /// Additive private CA used only with `web-pki-plus-private-ca-verify-full`.
+    ///
+    /// `SQLx` retains its compiled Web PKI roots in this mode; the supplied
+    /// canonical CA certificate augments that root set and does not replace it.
+    #[arg(
+        long,
+        env = "AUTOMATA_DATABASE_PRIVATE_CA_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub database_private_ca_source: Option<SecretSource>,
 
     /// S3 endpoint, trust, deadline, and credential-source inputs.
     #[command(flatten)]

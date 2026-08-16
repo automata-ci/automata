@@ -1,7 +1,3 @@
-use automata_ci_postgres::provisioning::{
-    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner,
-    PostgresWorkspaceUsageExporter,
-};
 use automata_ci_provisioning::{
     ApplyWorkspaceEntitlementCommand, AuthorizedApplyWorkspaceEntitlement,
     AuthorizedListWorkspaceUsage, AuthorizedProvisionWorkspace, DelegatedActorIssuer, DisplayName,
@@ -9,6 +5,10 @@ use automata_ci_provisioning::{
     ProvisionWorkspaceCommand, ProvisioningAuthority, ProvisioningAuthorityId, ShardId,
     UsageExportCursor, UsageExportFailureKind, UsageExportPageSize, WorkspaceEntitlementApplier,
     WorkspaceExecutionEntitlement, WorkspaceId, WorkspaceProvisioner, WorkspaceUsageExporter,
+};
+use automata_ci_provisioning_postgres::{
+    PostgresWorkspaceEntitlementApplier, PostgresWorkspaceProvisioner,
+    PostgresWorkspaceUsageExporter,
 };
 use sqlx::PgPool;
 use uuid::Uuid;

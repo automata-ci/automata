@@ -64,6 +64,17 @@ structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and uses
   one closed security mode, and bucket creation is region-correct, idempotent,
   conflict-reverified, and bounded by one total deadline.
 
+### Changed
+
+- PostgreSQL product connections now accept one exact `postgresql://` TCP URL
+  with explicit host, port, user, non-empty password, and database. Query and
+  fragment options, socket paths, `.pgpass`, ambient `PG*` configuration, and
+  the `postgres://` alias are rejected. Transport is closed to Web PKI
+  verify-full, an explicitly additive private-CA verify-full union, or
+  literal-loopback plaintext. Domain adapters are imported from their owning
+  crates; the former `automata-ci-postgres` compatibility namespaces were
+  removed, and that crate now owns shared integration-test support only.
+
 ### Known limitations
 
 - This bootstrap release is not production-ready and has not passed the full
