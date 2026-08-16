@@ -478,7 +478,7 @@ struct RunnerEnrollmentRedeemApiState {
     issuer: Arc<RunnerCertificateIssuer>,
     capability_readiness: RunnerCapabilityReadiness,
     windows_admission_trust: Option<Arc<dyn WindowsRunnerAdmissionTrustStore>>,
-    enrollment_origin: String,
+    enrollment_origin: Option<String>,
     redemptions: Arc<tokio::sync::Semaphore>,
 }
 
@@ -497,7 +497,7 @@ pub(crate) fn runner_enrollment_redeem_router(
     issuer: Arc<RunnerCertificateIssuer>,
     capability_readiness: RunnerCapabilityReadiness,
     windows_admission_trust: Option<Arc<dyn WindowsRunnerAdmissionTrustStore>>,
-    enrollment_origin: String,
+    enrollment_origin: Option<String>,
 ) -> Router {
     Router::new()
         .route(RUNNER_ENROLLMENT_REDEEM_PATH, post(redeem_enrollment))
@@ -614,23 +614,31 @@ async fn redeem_enrollment(
         EnrollmentPreparation::Rejected => return ApiError::EnrollmentRejected.into_response(),
         EnrollmentPreparation::NotReady => return ApiError::InvalidRequest.into_response(),
     };
-    let runner_id = match validate_prepared_enrollment(&document, &prepared) {
+    let runner_id = match validate_prepared_enrollment(&document.capabilities, &prepared) {
         Ok(runner_id) => runner_id,
         Err(error) => return error.into_response(),
     };
+    let admission_request = RedeemRequestReceipt {
+        operation_id: document.operation_id,
+        runner_name: &document.runner_name,
+        capabilities: &document.capabilities,
+        csr_pem: &document.csr_pem,
+        windows_admission: document.windows_admission.as_ref(),
+    };
     let windows_admission = match windows_runner_admission(
         &state,
-        &document,
+        &admission_request,
         token.digest(),
         prepared.database_time_ms,
     ) {
         Ok(admission) => admission,
         Err(error) => return error.into_response(),
     };
-    let (issued, response) = match issue_redeem_response(&state, runner_id, &prepared, &document) {
-        Ok(result) => result,
-        Err(error) => return error.into_response(),
-    };
+    let (issued, response) =
+        match issue_redeem_response(&state, runner_id, &prepared, &document.csr_pem) {
+            Ok(result) => result,
+            Err(error) => return error.into_response(),
+        };
     let consume = ConsumeRunnerEnrollment {
         token_sha256: token.digest(),
         operation_id: document.operation_id,
@@ -664,11 +672,11 @@ fn issue_redeem_response(
     state: &RunnerEnrollmentRedeemApiState,
     runner_id: Uuid,
     prepared: &PreparedRunnerEnrollment,
-    document: &RedeemEnrollmentDocument,
+    csr_pem: &str,
 ) -> Result<(IssuedRunnerCertificate, Vec<u8>), ApiError> {
     let issued = state
         .issuer
-        .issue(runner_id, &document.csr_pem, prepared.database_time_ms)
+        .issue(runner_id, csr_pem, prepared.database_time_ms)
         .map_err(|_| ApiError::InvalidRequest)?;
     let response = RedeemEnrollmentResponse {
         runner_id,
@@ -686,15 +694,15 @@ fn issue_redeem_response(
 }
 
 fn validate_prepared_enrollment(
-    document: &RedeemEnrollmentDocument,
+    capabilities: &RunnerCapabilities,
     prepared: &PreparedRunnerEnrollment,
 ) -> Result<uuid::Uuid, ApiError> {
     let expected_group =
         RunnerGroup::new(&prepared.runner_group).map_err(|_| ApiError::Internal)?;
-    if document.capabilities.groups() != &std::collections::BTreeSet::from([expected_group]) {
+    if capabilities.groups() != &std::collections::BTreeSet::from([expected_group]) {
         return Err(ApiError::EnrollmentRejected);
     }
-    Ok(document.capabilities.runner_id().as_uuid())
+    Ok(capabilities.runner_id().as_uuid())
 }
 
 fn valid_redeem_document(document: &RedeemEnrollmentDocument) -> bool {
@@ -708,13 +716,13 @@ fn valid_redeem_document(document: &RedeemEnrollmentDocument) -> bool {
 
 fn windows_runner_admission(
     state: &RunnerEnrollmentRedeemApiState,
-    document: &RedeemEnrollmentDocument,
+    request: &RedeemRequestReceipt<'_>,
     token_sha256: [u8; 32],
     database_time_ms: i64,
 ) -> Result<Option<WindowsRunnerAdmissionRecord>, ApiError> {
     let is_windows =
-        document.capabilities.platform().operating_system() == &OperatingSystem::Windows;
-    let Some(envelope) = document.windows_admission.as_ref() else {
+        request.capabilities.platform().operating_system() == &OperatingSystem::Windows;
+    let Some(envelope) = request.windows_admission else {
         return if is_windows {
             Err(ApiError::EnrollmentRejected)
         } else {
@@ -728,22 +736,26 @@ fn windows_runner_admission(
         .windows_admission_trust
         .as_deref()
         .ok_or(ApiError::EnrollmentRejected)?;
+    let enrollment_origin = state
+        .enrollment_origin
+        .as_deref()
+        .ok_or(ApiError::EnrollmentRejected)?;
     let now = u64::try_from(database_time_ms).map_err(|_| ApiError::Internal)?;
     let verified = verify_windows_runner_admission(envelope, trust, now)
         .map_err(|_| ApiError::EnrollmentRejected)?;
-    if verified.capabilities() != &document.capabilities {
+    if verified.capabilities() != request.capabilities {
         return Err(ApiError::EnrollmentRejected);
     }
     let claims = verified.claims();
     let binding = claims.binding();
     let transaction = binding.transaction();
-    let runner_id = document.capabilities.runner_id();
-    let runner_name_sha256 = sha256(document.runner_name.as_bytes());
-    let csr_sha256 = sha256(document.csr_pem.as_bytes());
+    let runner_id = request.capabilities.runner_id();
+    let runner_name_sha256 = sha256(request.runner_name.as_bytes());
+    let csr_sha256 = sha256(request.csr_pem.as_bytes());
     if transaction.runner_id() != runner_id
-        || transaction.operation_id().as_uuid() != document.operation_id
+        || transaction.operation_id().as_uuid() != request.operation_id
         || transaction.control_origin() != state.issuer.control_endpoint()
-        || transaction.enrollment_origin() != state.enrollment_origin
+        || transaction.enrollment_origin() != enrollment_origin
         || transaction.runner_name_sha256() != runner_name_sha256
         || transaction.enrollment_token_sha256() != Sha256Digest::from_bytes(token_sha256)
         || transaction.csr_sha256() != csr_sha256
@@ -760,7 +772,7 @@ fn windows_runner_admission(
     Ok(Some(WindowsRunnerAdmissionRecord {
         schema_version: claims.schema_version(),
         runner_id: runner_id.as_uuid(),
-        operation_id: document.operation_id,
+        operation_id: request.operation_id,
         issuer_key_id: claims.issuer_key_id().to_owned(),
         nonce: claims.nonce(),
         envelope_sha256: verified.envelope_sha256(),

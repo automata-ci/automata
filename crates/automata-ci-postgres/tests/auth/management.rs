@@ -3247,17 +3247,32 @@ async fn grant_role_rechecks_active_target_after_the_option_snapshot() -> TestRe
     .await
 }
 
-fn windows_enrollment_request(
+struct WindowsEnrollmentRequestFixture<'a> {
     token_sha256: [u8; 32],
     operation_id: Uuid,
     request_sha256: [u8; 32],
     runner_id: RunnerId,
-    runner_name: &str,
+    runner_name: &'a str,
     group: RunnerGroup,
     issued_at_ms: i64,
     receipt_expires_at_ms: i64,
     nonce_byte: u8,
+}
+
+fn windows_enrollment_request(
+    fixture: WindowsEnrollmentRequestFixture<'_>,
 ) -> TestResult<ConsumeRunnerEnrollment> {
+    let WindowsEnrollmentRequestFixture {
+        token_sha256,
+        operation_id,
+        request_sha256,
+        runner_id,
+        runner_name,
+        group,
+        issued_at_ms,
+        receipt_expires_at_ms,
+        nonce_byte,
+    } = fixture;
     let profile = EnvironmentProfile::new(
         EnvironmentProfileId::new("automata.example/windows-server-2025")?,
         Sha256Digest::from_bytes([0x44; 32]),
@@ -4369,33 +4384,33 @@ async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_l
         let runner_id = RunnerId::new();
         let runner_name = "windows-hyperv-runner";
         let receipt_expires_at_ms = now_ms + 60_000;
-        let mut missing_admission = windows_enrollment_request(
+        let mut missing_admission = windows_enrollment_request(WindowsEnrollmentRequestFixture {
             token_sha256,
             operation_id,
             request_sha256,
             runner_id,
             runner_name,
-            group.clone(),
-            now_ms,
+            group: group.clone(),
+            issued_at_ms: now_ms,
             receipt_expires_at_ms,
-            0xa3,
-        )?;
+            nonce_byte: 0xa3,
+        })?;
         missing_admission.windows_admission = None;
         assert!(matches!(
             repository.consume_runner_enrollment(missing_admission).await,
             Err(ManagementRepositoryError::InvalidRequest)
         ));
-        let request = windows_enrollment_request(
+        let request = windows_enrollment_request(WindowsEnrollmentRequestFixture {
             token_sha256,
             operation_id,
             request_sha256,
             runner_id,
             runner_name,
-            group.clone(),
-            now_ms,
+            group: group.clone(),
+            issued_at_ms: now_ms,
             receipt_expires_at_ms,
-            0xa3,
-        )?;
+            nonce_byte: 0xa3,
+        })?;
         let expected_response = request.response.clone();
         let first_outcome = repository.consume_runner_enrollment(request).await?;
         if first_outcome != RunnerEnrollmentConsumeOutcome::Applied(expected_response.clone()) {
@@ -4464,15 +4479,17 @@ async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_l
         assert_eq!(
             repository
                 .consume_runner_enrollment(windows_enrollment_request(
-                    reused_token_sha256,
-                    Uuid::new_v4(),
-                    [0xa5; 32],
-                    RunnerId::new(),
-                    "windows-nonce-reuse",
-                    group.clone(),
-                    now_ms,
-                    receipt_expires_at_ms,
-                    0xa3,
+                    WindowsEnrollmentRequestFixture {
+                        token_sha256: reused_token_sha256,
+                        operation_id: Uuid::new_v4(),
+                        request_sha256: [0xa5; 32],
+                        runner_id: RunnerId::new(),
+                        runner_name: "windows-nonce-reuse",
+                        group: group.clone(),
+                        issued_at_ms: now_ms,
+                        receipt_expires_at_ms,
+                        nonce_byte: 0xa3,
+                    },
                 )?)
                 .await?,
             RunnerEnrollmentConsumeOutcome::Rejected
@@ -4507,17 +4524,17 @@ async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_l
         };
         let expiring_at_ms = now_ms + 10_000;
         let expiring_runner_id = RunnerId::new();
-        let expiring_request = windows_enrollment_request(
-            expiring_token_sha256,
-            Uuid::new_v4(),
-            [0xa7; 32],
-            expiring_runner_id,
-            "windows-expired-after-lock",
-            group.clone(),
-            now_ms,
-            expiring_at_ms,
-            0xa8,
-        )?;
+        let expiring_request = windows_enrollment_request(WindowsEnrollmentRequestFixture {
+            token_sha256: expiring_token_sha256,
+            operation_id: Uuid::new_v4(),
+            request_sha256: [0xa7; 32],
+            runner_id: expiring_runner_id,
+            runner_name: "windows-expired-after-lock",
+            group: group.clone(),
+            issued_at_ms: now_ms,
+            receipt_expires_at_ms: expiring_at_ms,
+            nonce_byte: 0xa8,
+        })?;
         let mut gate = pool.begin().await?;
         sqlx::query(
             "SELECT trust_bundle_id FROM windows_image_promotion_high_water FOR UPDATE",
@@ -4554,15 +4571,17 @@ async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_l
         assert_eq!(
             repository
                 .consume_runner_enrollment(windows_enrollment_request(
-                    token_sha256,
-                    operation_id,
-                    request_sha256,
-                    runner_id,
-                    runner_name,
-                    group,
-                    now_ms,
-                    receipt_expires_at_ms,
-                    0xa3,
+                    WindowsEnrollmentRequestFixture {
+                        token_sha256,
+                        operation_id,
+                        request_sha256,
+                        runner_id,
+                        runner_name,
+                        group,
+                        issued_at_ms: now_ms,
+                        receipt_expires_at_ms,
+                        nonce_byte: 0xa3,
+                    },
                 )?)
                 .await?,
             RunnerEnrollmentConsumeOutcome::Replayed(expected_response)
