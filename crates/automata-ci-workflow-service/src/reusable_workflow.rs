@@ -731,12 +731,39 @@ pub fn analyze_local_github_archive(
     .map_err(|error| local_reusable_failure(&error, diagnostics.clone()))?;
     let root_plan_digest = digest_plan(compilation.root_plan())
         .map_err(|error| local_reusable_failure(&error, diagnostics.clone()))?;
+    let mut workflow_analyses = BTreeMap::new();
+    let root_analysis =
+        analyze_local_workflow(&root_path, false, compilation.root_plan(), cancellation).map_err(
+            |kind| LocalGithubArchiveAnalysisFailure {
+                kind,
+                diagnostics: diagnostics.clone(),
+            },
+        )?;
+    workflow_analyses.insert(root_path.clone(), root_analysis);
+    for reusable in compilation.reusable_workflows() {
+        let entry = analyze_local_workflow(reusable.path(), true, reusable.plan(), cancellation)
+            .map_err(|kind| LocalGithubArchiveAnalysisFailure {
+                kind,
+                diagnostics: diagnostics.clone(),
+            })?;
+        if workflow_analyses
+            .insert(reusable.path().to_owned(), entry)
+            .is_some()
+        {
+            return Err(local_reusable_failure(
+                &ReusableWorkflowExpansionError::InvalidIdentity,
+                diagnostics,
+            ));
+        }
+    }
     let mut counts = TraversalCounts {
         limits: reusable_limits,
         invocation_count: 0,
         job_count: 0,
     };
-    let mut policy = SymbolicCredentialPolicy;
+    let mut policy = SymbolicCredentialPolicy {
+        analyses: &workflow_analyses,
+    };
     let mut active_paths = Vec::new();
     let requirements = traverse_reusable_invocation(
         &catalog,
@@ -756,26 +783,10 @@ pub fn analyze_local_github_archive(
     )
     .map_err(|error| local_reusable_failure(&error, diagnostics.clone()))?;
 
-    let mut workflows = Vec::with_capacity(compilation.reusable_workflows().len() + 1);
-    workflows.push(
-        analyze_local_workflow(&root_path, false, compilation.root_plan(), cancellation).map_err(
-            |kind| LocalGithubArchiveAnalysisFailure {
-                kind,
-                diagnostics: diagnostics.clone(),
-            },
-        )?,
-    );
-    for reusable in compilation.reusable_workflows() {
-        workflows.push(
-            analyze_local_workflow(reusable.path(), true, reusable.plan(), cancellation).map_err(
-                |kind| LocalGithubArchiveAnalysisFailure {
-                    kind,
-                    diagnostics: diagnostics.clone(),
-                },
-            )?,
-        );
-    }
-    workflows.sort_by(|left, right| left.path.cmp(&right.path));
+    let workflows = workflow_analyses
+        .into_values()
+        .map(|analysis| analysis.workflow)
+        .collect();
 
     Ok(LocalGithubArchiveAnalysis {
         snapshot_digest: compilation.snapshot_digest(),
@@ -787,19 +798,31 @@ pub fn analyze_local_github_archive(
     })
 }
 
+struct AnalyzedLocalWorkflow {
+    workflow: LocalGithubAnalyzedWorkflow,
+    requirements: SymbolicCredentialRequirements,
+}
+
 fn analyze_local_workflow(
     path: &str,
     reusable: bool,
     plan: &WorkflowPlan,
     cancellation: &dyn Fn() -> bool,
-) -> Result<LocalGithubAnalyzedWorkflow, LocalGithubArchiveAnalysisFailureKind> {
+) -> Result<AnalyzedLocalWorkflow, LocalGithubArchiveAnalysisFailureKind> {
     let mut jobs = Vec::with_capacity(plan.jobs().len());
+    let mut requirements = SymbolicCredentialRequirements::default();
     for job in plan.jobs() {
         if cancellation() {
             return Err(LocalGithubArchiveAnalysisFailureKind::Cancelled);
         }
         let credentials = discover_job_credentials(plan.logical(), job)
             .map_err(|_| LocalGithubArchiveAnalysisFailureKind::CredentialDiscovery)?;
+        requirements
+            .external
+            .extend(credentials.external().secret_names().iter().cloned());
+        requirements
+            .built_in
+            .extend(credentials.built_in().iter().copied());
         jobs.push(LocalGithubAnalyzedJob {
             key: job.key().value().to_string(),
             reusable: matches!(job.execution(), LogicalJobKind::ReusableWorkflow(_)),
@@ -808,10 +831,23 @@ fn analyze_local_workflow(
             built_in_credentials: credentials.built_in().to_vec(),
         });
     }
-    Ok(LocalGithubAnalyzedWorkflow {
-        path: path.to_owned(),
-        reusable,
-        jobs,
+    if let Some(contract) = plan.logical().invocation() {
+        for secret in contract.secrets().iter().filter(|secret| secret.required()) {
+            let name = secret.key().value().as_str();
+            if let Some(requirement) = built_in_secret_requirement(name) {
+                requirements.built_in.insert(requirement);
+            } else {
+                requirements.external.insert(name.to_ascii_uppercase());
+            }
+        }
+    }
+    Ok(AnalyzedLocalWorkflow {
+        workflow: LocalGithubAnalyzedWorkflow {
+            path: path.to_owned(),
+            reusable,
+            jobs,
+        },
+        requirements,
     })
 }
 
@@ -1530,6 +1566,15 @@ struct TraversalNode<'a> {
     root: bool,
 }
 
+struct TraversalEdge<'node, 'catalog> {
+    job: &'node LogicalJobTemplate,
+    call: &'node ReusableWorkflowInvocation,
+    callee: ResolvedCatalogEntry<'catalog>,
+    contract: &'catalog WorkflowInvocationContract,
+    inputs: Vec<ExpandedReusableInput>,
+    outputs: Vec<ExpandedReusableOutputMapping>,
+}
+
 trait CredentialTraversalPolicy {
     type Seed;
     type State;
@@ -1545,11 +1590,7 @@ trait CredentialTraversalPolicy {
     fn prepare_edge(
         &mut self,
         parent: &mut Self::State,
-        job: &LogicalJobTemplate,
-        call: &ReusableWorkflowInvocation,
-        callee: ResolvedCatalogEntry<'_>,
-        inputs: Vec<ExpandedReusableInput>,
-        outputs: Vec<ExpandedReusableOutputMapping>,
+        edge: TraversalEdge<'_, '_>,
     ) -> Result<(Self::Seed, Self::Edge), ReusableWorkflowExpansionError>;
 
     fn finish_edge(
@@ -1634,8 +1675,17 @@ where
             })?;
             let inputs = validate_inputs(call, contract)?;
             let outputs = validate_call_outputs(job.outputs(), contract)?;
-            let (child_seed, edge) =
-                policy.prepare_edge(&mut state, job, call, callee, inputs, outputs)?;
+            let (child_seed, edge) = policy.prepare_edge(
+                &mut state,
+                TraversalEdge {
+                    job,
+                    call,
+                    callee,
+                    contract,
+                    inputs,
+                    outputs,
+                },
+            )?;
             let child = traverse_reusable_invocation(
                 catalog,
                 policy,
@@ -1729,16 +1779,9 @@ impl CredentialTraversalPolicy for MaterializedCredentialPolicy<'_> {
     fn prepare_edge(
         &mut self,
         parent: &mut Self::State,
-        job: &LogicalJobTemplate,
-        call: &ReusableWorkflowInvocation,
-        callee: ResolvedCatalogEntry<'_>,
-        inputs: Vec<ExpandedReusableInput>,
-        caller_outputs: Vec<ExpandedReusableOutputMapping>,
+        edge: TraversalEdge<'_, '_>,
     ) -> Result<(Self::Seed, Self::Edge), ReusableWorkflowExpansionError> {
-        let contract = callee.plan.logical().invocation().ok_or_else(|| {
-            ReusableWorkflowExpansionError::MissingInvocationContract(callee.path.to_owned())
-        })?;
-        let secrets = validate_secrets(call, contract, &parent.available_secret_names)?;
+        let secrets = validate_secrets(edge.call, edge.contract, &parent.available_secret_names)?;
         let available_secret_names = secrets
             .iter()
             .map(|binding| binding.target.clone())
@@ -1746,34 +1789,34 @@ impl CredentialTraversalPolicy for MaterializedCredentialPolicy<'_> {
         let caller_job_id = self.context.invocations[parent.invocation_index]
             .jobs
             .iter()
-            .find(|expanded| expanded.key() == job.key().value())
+            .find(|expanded| expanded.key() == edge.job.key().value())
             .map(ExpandedReusableJob::id)
             .ok_or(ReusableWorkflowExpansionError::InvalidIdentity)?;
         let invocation_id = derived_invocation_id(
             self.context.run_id,
             parent.id,
             caller_job_id,
-            callee.path,
-            callee.source_digest,
+            edge.callee.path,
+            edge.callee.source_digest,
         )?;
         if !self.context.invocation_ids.insert(invocation_id.as_uuid()) {
             return Err(ReusableWorkflowExpansionError::IdentityCollision);
         }
         let permissions = parent
             .permissions
-            .reduce(job.permissions())
-            .reduce(callee.plan.logical().permissions());
+            .reduce(edge.job.permissions())
+            .reduce(edge.callee.plan.logical().permissions());
         Ok((
             MaterializedTraversalSeed {
                 id: invocation_id,
                 parent_id: Some(parent.id),
                 caller_job_id: Some(caller_job_id),
                 permissions,
-                inputs,
+                inputs: edge.inputs,
                 secrets,
                 available_secret_names,
-                outputs: contract_outputs(contract),
-                caller_outputs,
+                outputs: contract_outputs(edge.contract),
+                caller_outputs: edge.outputs,
             },
             (),
         ))
@@ -1806,15 +1849,17 @@ enum SymbolicSecretSource {
     BuiltIn(BuiltInCredentialRequirement),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SymbolicCredentialRequirements {
     external: BTreeSet<String>,
     built_in: BTreeSet<BuiltInCredentialRequirement>,
 }
 
-struct SymbolicCredentialPolicy;
+struct SymbolicCredentialPolicy<'a> {
+    analyses: &'a BTreeMap<String, AnalyzedLocalWorkflow>,
+}
 
-impl CredentialTraversalPolicy for SymbolicCredentialPolicy {
+impl CredentialTraversalPolicy for SymbolicCredentialPolicy<'_> {
     type Seed = ();
     type State = SymbolicCredentialRequirements;
     type Edge = SymbolicSecretEdge;
@@ -1825,43 +1870,18 @@ impl CredentialTraversalPolicy for SymbolicCredentialPolicy {
         node: &TraversalNode<'_>,
         (): Self::Seed,
     ) -> Result<Self::State, ReusableWorkflowExpansionError> {
-        let mut required = SymbolicCredentialRequirements::default();
-        for job in node.plan.jobs() {
-            let credentials = discover_job_credentials(node.plan.logical(), job)
-                .map_err(|_| ReusableWorkflowExpansionError::CredentialRequirements)?;
-            required
-                .external
-                .extend(credentials.external().secret_names().iter().cloned());
-            required
-                .built_in
-                .extend(credentials.built_in().iter().copied());
-        }
-        if let Some(contract) = node.plan.logical().invocation() {
-            for secret in contract.secrets().iter().filter(|secret| secret.required()) {
-                let name = secret.key().value().as_str();
-                if let Some(requirement) = built_in_secret_requirement(name) {
-                    required.built_in.insert(requirement);
-                } else {
-                    required.external.insert(name.to_ascii_uppercase());
-                }
-            }
-        }
-        Ok(required)
+        self.analyses
+            .get(node.workflow_path)
+            .map(|analysis| analysis.requirements.clone())
+            .ok_or(ReusableWorkflowExpansionError::InvalidIdentity)
     }
 
     fn prepare_edge(
         &mut self,
         _parent: &mut Self::State,
-        _job: &LogicalJobTemplate,
-        call: &ReusableWorkflowInvocation,
-        callee: ResolvedCatalogEntry<'_>,
-        _inputs: Vec<ExpandedReusableInput>,
-        _outputs: Vec<ExpandedReusableOutputMapping>,
+        edge: TraversalEdge<'_, '_>,
     ) -> Result<(Self::Seed, Self::Edge), ReusableWorkflowExpansionError> {
-        let contract = callee.plan.logical().invocation().ok_or_else(|| {
-            ReusableWorkflowExpansionError::MissingInvocationContract(callee.path.to_owned())
-        })?;
-        Ok(((), symbolic_secret_edge(call, contract)?))
+        Ok(((), symbolic_secret_edge(edge.call, edge.contract)?))
     }
 
     fn finish_edge(
