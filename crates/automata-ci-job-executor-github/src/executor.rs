@@ -301,7 +301,7 @@ impl SandboxExpressionFunctions {
         .ok()?;
         let output = self
             .endpoint
-            .exec(&command, &CancellationBridge(&self.cancellation))
+            .exec(&command, &ProviderCancellationBridge(&self.cancellation))
             .ok()?;
         if self.cancellation.is_cancelled()
             || output.was_truncated()
