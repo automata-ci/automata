@@ -1562,6 +1562,7 @@ async fn logical_admission_replay_rejects_forward_plan_and_orchestration_schemas
 
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(clippy::too_many_lines)] // One race proof covers replay and both conflict boundaries.
 async fn concurrent_replay_has_one_insert_and_changed_digest_conflicts() -> TestResult {
     run_with_database(|database| async move {
         seed_tenant(&database, "logical-replay").await?;
@@ -1588,6 +1589,46 @@ async fn concurrent_replay_has_one_insert_and_changed_digest_conflicts() -> Test
         assert_eq!(left.run_id(), right.run_id());
         assert_eq!(left.run_number(), right.run_number());
         assert_workflow_enable_state_history(&database, &command, &[(1, "enabled")]).await?;
+        let exact_counts: (i64, i64, i64, i64) = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*)
+                   FROM workflow_admission_receipts
+                  WHERE tenant_id = $1
+                    AND idempotency_kind = $2
+                    AND idempotency_key = $3
+                    AND repository_id = $4
+                    AND run_id = $5),
+                (SELECT count(*)
+                   FROM workflow_runs
+                  WHERE repository_id = $4 AND id = $5),
+                (SELECT count(*)
+                   FROM github_workflow_run_subject_evidence
+                  WHERE tenant_id = $1
+                    AND repository_id = $4
+                    AND run_id = $5
+                    AND provider_delivery_id = $6
+                    AND workflow_path = $7),
+                (SELECT count(*)
+                   FROM github_check_subjects
+                  WHERE tenant_id = $1
+                    AND repository_id = $4
+                    AND provider_delivery_id = $6
+                    AND subject_kind = 'workflow'
+                    AND subject_key = $7
+                    AND workflow_run_id = $5)
+            ",
+        )
+        .bind(command.tenant().as_str())
+        .bind(command.idempotency().kind())
+        .bind(command.idempotency().key())
+        .bind(command.repository().id().as_uuid())
+        .bind(command.run_id().as_uuid())
+        .bind(authenticated.claim().delivery_id().as_uuid())
+        .bind(command.workflow_path())
+        .fetch_one(database.pool())
+        .await?;
+        assert_eq!(exact_counts, (1, 1, 1, 1));
 
         let conflicting_trust_snapshot =
             crate::support::authenticated_github_trust_snapshot_for_actor(
