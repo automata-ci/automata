@@ -91,6 +91,18 @@ def main() -> None:
     for gate in ("rust_lint", "rust_docs", "dependency_audit"):
         assert f"- {gate}" in distribution, f"distribution no longer requires {gate}"
     assert "cargo-deny --version 0.20.2" in workflow
+    service_images = re.findall(r"(?m)^\s+image: (?P<image>\S+)$", workflow)
+    assert service_images, "CI must retain its service-container coverage"
+    for image in service_images:
+        if image.startswith("${{"):
+            continue
+        name, separator, digest = image.partition("@sha256:")
+        assert separator and re.fullmatch(r"[0-9a-f]{64}", digest), (
+            f"service image is not pinned by a canonical SHA-256 digest: {image}"
+        )
+        assert ":" not in name.rsplit("/", 1)[-1], (
+            f"service image must use canonical name@digest identity without a tag: {image}"
+        )
     dependency_audit = job_body(workflow, "dependency_audit")
     assert "check --hide-inclusion-graph advisories bans licenses sources" in dependency_audit, (
         "dependency audit output must remain inside the runner command-output bound"
