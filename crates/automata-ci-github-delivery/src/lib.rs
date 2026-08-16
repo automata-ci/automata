@@ -65,7 +65,6 @@ pub use schedule::{
     GithubScheduleServiceError, GithubScheduleServicePass, GithubScheduleSourceCredential,
     GithubScheduleSourceCredentialProvider, GithubScheduleSourceCredentialProviderError,
     GithubScheduleSourceCredentialRequest, GithubScheduleSourceCredentialValueError,
-    SystemGithubScheduleClock,
 };
 
 pub use worker::{

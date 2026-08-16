@@ -378,19 +378,6 @@ pub trait GithubRuntimeAuthorityCoordinatorClock: fmt::Debug + Send + Sync {
     fn now(&self) -> UnixMillis;
 }
 
-/// Operating-system clock used by a production coordinator.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemGithubRuntimeAuthorityCoordinatorClock;
-
-impl GithubRuntimeAuthorityCoordinatorClock for SystemGithubRuntimeAuthorityCoordinatorClock {
-    fn now(&self) -> UnixMillis {
-        let milliseconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_millis());
-        UnixMillis::new(i64::try_from(milliseconds).unwrap_or(i64::MAX))
-    }
-}
-
 /// An exact encrypted commit retained after an ambiguous repository result.
 ///
 /// The value owns no plaintext. It keeps the same timestamp, metadata,

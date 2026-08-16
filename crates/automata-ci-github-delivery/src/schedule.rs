@@ -6,12 +6,7 @@
 //! resulting archive inventory. Due work then has a second fire fence whose
 //! Check registration and workflow admission are independently atomic.
 
-use std::{
-    collections::BTreeMap,
-    fmt,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, fmt, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
@@ -84,21 +79,6 @@ pub trait GithubScheduleClock: fmt::Debug + Send + Sync {
     ///
     /// Returns a sanitized failure when no valid trusted instant is available.
     fn now(&self) -> Result<UnixMillis, GithubScheduleServiceError>;
-}
-
-/// Product clock backed by the host wall clock.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemGithubScheduleClock;
-
-impl GithubScheduleClock for SystemGithubScheduleClock {
-    fn now(&self) -> Result<UnixMillis, GithubScheduleServiceError> {
-        let elapsed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| GithubScheduleServiceError::InvalidTrustedTime)?;
-        let millis = i64::try_from(elapsed.as_millis())
-            .map_err(|_| GithubScheduleServiceError::InvalidTrustedTime)?;
-        Ok(UnixMillis::new(millis))
-    }
 }
 
 /// Bounded runtime policy for scheduled discovery and due-fire handling.
