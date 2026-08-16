@@ -580,6 +580,31 @@ async fn assert_logical_admission_shape(
     trust_snapshot: &TrustSnapshot,
     admitted_at: UnixMillis,
 ) -> TestResult {
+    Box::pin(assert_workflow_admission_evidence(
+        database,
+        snapshot_id,
+        run_id,
+        trust_snapshot,
+        admitted_at,
+    ))
+    .await?;
+    Box::pin(assert_logical_run_marker(
+        database,
+        run_id,
+        root_id,
+        base_context,
+    ))
+    .await?;
+    Box::pin(assert_logical_graph(database, run_id, root_id)).await
+}
+
+async fn assert_workflow_admission_evidence(
+    database: &TestDatabase,
+    snapshot_id: WorkflowSnapshotId,
+    run_id: RunId,
+    trust_snapshot: &TrustSnapshot,
+    admitted_at: UnixMillis,
+) -> TestResult {
     let run_shape: (i32, i32, String) = sqlx::query_as(
         "SELECT admission_epoch, plan_schema, status FROM workflow_runs WHERE id = $1",
     )
@@ -619,7 +644,15 @@ async fn assert_logical_admission_shape(
             .fetch_one(database.pool())
             .await?;
     assert_eq!(snapshot_epoch, 1);
+    Ok(())
+}
 
+async fn assert_logical_run_marker(
+    database: &TestDatabase,
+    run_id: RunId,
+    root_id: LogicalWorkflowInvocationId,
+    base_context: &AdmissionObject,
+) -> TestResult {
     let marker: (Uuid, i16, Vec<u8>, String, i64) = sqlx::query_as(
         r"
         SELECT root_invocation_id, orchestration_schema, admission_digest,
@@ -654,7 +687,14 @@ async fn assert_logical_admission_shape(
             i16::try_from(JOB_RUNTIME_CONTEXT_SCHEMA_VERSION)?,
         )
     );
+    Ok(())
+}
 
+async fn assert_logical_graph(
+    database: &TestDatabase,
+    run_id: RunId,
+    root_id: LogicalWorkflowInvocationId,
+) -> TestResult {
     let invocation: (i16, String, Vec<u8>) = sqlx::query_as(
         r"
         SELECT plan_schema, state, plan_digest
