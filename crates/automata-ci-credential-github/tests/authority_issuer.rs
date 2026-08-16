@@ -15,7 +15,9 @@ use automata_ci_core::{
     AttemptId, FencingToken, JobContentReference, JobExecutionContext, JobId, JobInstanceIdentity,
     JobIr, JobIrEnvelope, JobSource, Lease, LeaseId, RunId, RunValueTemplates, RunnerId,
     RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
-    StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    StepId, StepIr, TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind,
+    TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustSnapshot,
+    TrustTokenRecursion, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_credential_github::{
     GITHUB_REPOSITORY_AUTHORITY_NAMESPACE, GITHUB_REPOSITORY_RUNTIME_AUTHORITY,
@@ -293,7 +295,8 @@ impl Fixture {
                         ShellTemplate::default_shell(),
                     )),
                 )],
-            ),
+            )
+            .with_trust_snapshot(trusted_snapshot()),
         );
         let lease = Lease::new(
             LeaseId::new(),
@@ -836,12 +839,40 @@ impl GatedKeyProvider {
     }
 
     async fn wait_until_blocked(&self) {
-        self.blocked.notified().await;
+        tokio::time::timeout(Duration::from_secs(5), self.blocked.notified())
+            .await
+            .expect("key provider reached its blocking point");
     }
 
     fn release(&self) {
         self.release.notify_one();
     }
+}
+
+fn trusted_snapshot() -> TrustSnapshot {
+    TrustPolicy::current()
+        .evaluate(
+            TrustEvidence::new(TrustOriginKind::ProviderWebhook, TrustEventKind::Push)
+                .with_original_actor(
+                    TrustActorEvidence::new(
+                        "actor-1",
+                        TrustActorKind::User,
+                        TrustAutomationKind::None,
+                    )
+                    .expect("actor evidence"),
+                )
+                .with_repositories(
+                    TrustRepositoryEvidence::new("automata-ci/automata", "automata-ci")
+                        .expect("source repository"),
+                    TrustRepositoryEvidence::new("automata-ci/automata", "automata-ci")
+                        .expect("target repository"),
+                )
+                .with_refs("refs/heads/main", "refs/heads/main", "refs/heads/main")
+                .with_revisions("source-sha", "target-sha", "execution-sha")
+                .with_fork(false)
+                .with_token_recursion(TrustTokenRecursion::Suppressed),
+        )
+        .expect("trusted snapshot")
 }
 
 impl fmt::Debug for GatedKeyProvider {
