@@ -188,20 +188,6 @@ impl JobAttemptState {
         Ok(active.clone())
     }
 
-    /// Cancels or skips work that has not yet been leased.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AttemptStateError::Transition`] unless this is a valid queued
-    /// transition to `cancelled` or `skipped`.
-    pub fn resolve_queued(&mut self, terminal: JobLifecycle) -> Result<(), AttemptStateError> {
-        self.lifecycle
-            .validate_transition(terminal)
-            .map_err(AttemptStateError::Transition)?;
-        self.lifecycle = terminal;
-        Ok(())
-    }
-
     /// Validates invariants after reading this state from durable storage.
     ///
     /// # Errors

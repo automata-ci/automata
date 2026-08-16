@@ -306,11 +306,6 @@ impl CommandReplayPage {
         &self.commands
     }
 
-    #[must_use]
-    pub fn into_commands(self) -> Vec<DurableRunnerCommand> {
-        self.commands
-    }
-
     pub fn pop(&mut self) -> Option<DurableRunnerCommand> {
         self.commands.pop()
     }

@@ -461,12 +461,6 @@ impl GithubOidcAuthorityProposal {
         self.request_bearer_verification_skew_seconds
     }
 
-    /// Returns the deadline through which the request-bearer key must remain loaded.
-    #[must_use]
-    pub const fn request_bearer_key_not_after_seconds(&self) -> u64 {
-        self.expires_at_seconds + self.request_bearer_verification_skew_seconds
-    }
-
     /// Returns the inclusive request-bearer issuance second.
     #[must_use]
     pub const fn issued_at_seconds(&self) -> u64 {
