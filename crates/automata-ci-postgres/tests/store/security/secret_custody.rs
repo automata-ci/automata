@@ -188,6 +188,21 @@ async fn noncurrent_canary_schema_fails_closed() -> TestResult {
             VerifySecretCustodyOutcome::Verified(_)
         ));
 
+        // Model storage corruption below the schema boundary. Ordinary writes
+        // must retain both guards; this fixture needs to reach the repository's
+        // independent decoder check instead.
+        sqlx::query(
+            "ALTER TABLE secret_custody_key_canaries \
+             DISABLE TRIGGER secret_custody_key_canaries_update_forbidden",
+        )
+        .execute(database.pool())
+        .await?;
+        sqlx::query(
+            "ALTER TABLE secret_custody_key_canaries \
+             DROP CONSTRAINT secret_custody_key_canaries_canary_schema",
+        )
+        .execute(database.pool())
+        .await?;
         sqlx::query(
             "UPDATE secret_custody_key_canaries \
              SET canary_schema = 2 \
