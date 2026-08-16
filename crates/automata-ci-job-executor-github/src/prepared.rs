@@ -549,11 +549,7 @@ fn normalize_deprecation_message(value: &str) -> Result<String, PreparedActionEr
             normalized.push(character);
         }
     }
-    if normalized == value {
-        Ok(value)
-    } else {
-        Ok(normalized)
-    }
+    Ok(normalized)
 }
 
 /// Validated metadata-driven JavaScript execution plan.
