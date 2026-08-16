@@ -1,9 +1,8 @@
+mod fixture_support;
+
 use std::{
     collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
@@ -11,7 +10,7 @@ use automata_ci_blob::{
     BlobDescriptor, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
     PutBlobOutcome, VerifiedBlob,
 };
-use automata_ci_core::{AttemptId, FencingToken, JobId, RunId, Sha256Digest};
+use automata_ci_core::Sha256Digest;
 use automata_ci_results_github::{
     ArtifactBlock, ArtifactBlockReservation, ArtifactFinalizationClaim,
     ArtifactFinalizationReservation, ArtifactFinalizationWork, ArtifactId, ArtifactRepository,
@@ -20,39 +19,12 @@ use automata_ci_results_github::{
     CompleteArtifactFinalization, CreateArtifact, CreateArtifactOutcome, ExecutionAuthority,
     FinalizeArtifactOutcome, ListArtifacts, LoadArtifactFinalization, PublishedArtifactMetadata,
     RecordArtifactVerification, RenewArtifactFinalization, ReserveArtifactBlock,
-    ResolveArtifactDownload, ResultsClock, ResultsIdGenerator, ResultsLimits,
-    ResultsServiceErrorKind, UploadId, VerifiedArtifactFinalization,
+    ResolveArtifactDownload, ResultsLimits, ResultsServiceErrorKind, UploadId,
+    VerifiedArtifactFinalization,
 };
 use bytes::Bytes;
+use fixture_support::{FixedIds, MutableClock as TestClock, fresh_execution_authority};
 use uuid::Uuid;
-
-#[derive(Debug)]
-struct TestClock(AtomicU64);
-
-impl TestClock {
-    fn new(now: u64) -> Self {
-        Self(AtomicU64::new(now))
-    }
-
-    fn set(&self, now: u64) {
-        self.0.store(now, Ordering::SeqCst);
-    }
-}
-
-impl ResultsClock for TestClock {
-    fn now_seconds(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-#[derive(Debug)]
-struct FixedIds(UploadId);
-
-impl ResultsIdGenerator for FixedIds {
-    fn next_upload_id(&self) -> UploadId {
-        self.0
-    }
-}
 
 #[derive(Debug, Default)]
 struct ObservedBlobStore {
@@ -566,12 +538,7 @@ struct Fixture {
 }
 
 async fn fixture(limits: ResultsLimits) -> Fixture {
-    let authority = ExecutionAuthority::new(
-        RunId::new(),
-        JobId::new(),
-        AttemptId::new(),
-        FencingToken::new(7).expect("fencing token"),
-    );
+    let authority = fresh_execution_authority(7);
     let upload_id = UploadId::from_uuid(Uuid::new_v4());
     let repository = Arc::new(AdmissionRepository {
         artifact_id: ArtifactId::new(41).expect("artifact id"),

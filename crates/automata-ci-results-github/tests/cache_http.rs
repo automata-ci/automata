@@ -1,3 +1,4 @@
+mod fixture_support;
 mod http_support;
 
 use std::{
@@ -9,46 +10,29 @@ use std::{
 
 use async_trait::async_trait;
 use automata_ci_blob::MemoryBlobStore;
-use automata_ci_core::{AttemptId, FencingToken, JobId, RunId, Sha256Digest};
+use automata_ci_core::Sha256Digest;
 use automata_ci_results_github::{
-    CacheAccessScope, CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation,
-    CacheLimits, CachePermission, CacheProtocolEntryId, CacheRepository, CacheRepositoryError,
+    CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation, CacheLimits,
+    CachePermission, CacheProtocolEntryId, CacheRepository, CacheRepositoryError,
     CacheRepositoryErrorKind, CacheService, CommitCacheBlocks, CompleteCacheBlock,
     CompleteCacheFinalization, CreateCacheEntry, CreatedCacheEntry, ExecutionAuthority,
     FinalizedCacheEntry, GithubCacheApi, GithubCacheHttpLimits, HmacResultsAuthority,
     HmacResultsAuthorityConfig, LookupCacheEntry, NoopResultsObserver, PrepareCacheFinalization,
     PreparedCacheFinalization, ReserveCacheBlock, ResolveCacheDownload, ResultsClock,
-    ResultsHttpMethod, ResultsHttpRoute, ResultsHttpStatusClass, ResultsIdGenerator,
-    ResultsObserver, ResultsPublicEndpoint, RuntimeTokenIssuer as _, UploadId,
+    ResultsHttpMethod, ResultsHttpRoute, ResultsHttpStatusClass, ResultsObserver,
+    ResultsPublicEndpoint, RuntimeTokenIssuer as _, UploadId,
 };
 use axum::{
     body::Body,
     http::{Request, StatusCode, header},
 };
 use bytes::Bytes;
+use fixture_support::{FixedClock, FixedIds, cache_authority, fresh_execution_authority};
 use http_body_util::BodyExt as _;
 use http_support::{assert_private_rejection, isolated_node_command, path_and_query};
 use tower::ServiceExt as _;
 use url::Url;
 use uuid::Uuid;
-
-#[derive(Clone, Copy, Debug)]
-struct FixedClock(u64);
-
-impl ResultsClock for FixedClock {
-    fn now_seconds(&self) -> u64 {
-        self.0
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct FixedIds(UploadId);
-
-impl ResultsIdGenerator for FixedIds {
-    fn next_upload_id(&self) -> UploadId {
-        self.0
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HttpEvent {
@@ -455,13 +439,7 @@ fn issue_cache_token(
     repository: &str,
     scopes: &[(&str, CachePermission)],
 ) -> String {
-    let scopes = scopes
-        .iter()
-        .map(|(cache_ref, permission)| {
-            CacheAccessScope::new(*cache_ref, *permission).expect("cache scope")
-        })
-        .collect();
-    let cache = CacheAuthority::new(repository, scopes).expect("cache authority");
+    let cache = cache_authority(repository, scopes);
     authority
         .issue(execution, cache, 600)
         .expect("token")
@@ -513,12 +491,7 @@ fn fixture_with_url_observer_and_limits(
         )
         .expect("authority"),
     );
-    let execution = ExecutionAuthority::new(
-        RunId::new(),
-        JobId::new(),
-        AttemptId::new(),
-        FencingToken::new(9).expect("fence"),
-    );
+    let execution = fresh_execution_authority(9);
     let token = issue_cache_token(
         authority.as_ref(),
         execution,

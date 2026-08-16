@@ -1,7 +1,6 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+mod fixture_support;
+
+use std::sync::Arc;
 
 use automata_ci_control::runner_control::{
     RuntimeAuthorityIssueRequest, RuntimeAuthorityIssuer as _,
@@ -19,34 +18,16 @@ use automata_ci_protocol_protobuf::encode_job_ir;
 use automata_ci_results_github::{
     CacheAccessScope, CachePermission, CacheRepositoryMetadata, GITHUB_RESULTS_RUNTIME_AUTHORITY,
     GithubResultsRuntimeAuthorityIssuer, HmacResultsAuthority, HmacResultsAuthorityConfig,
-    ResultsClock, ResultsPublicEndpoint, RuntimeTokenVerifier as _, TokenError,
+    ResultsPublicEndpoint, RuntimeTokenVerifier as _, TokenError,
 };
 use automata_ci_store::{
     JobIrMetadata, ObjectKey, RunnerGeneration, RunnerSessionFence, SessionEpoch, StableRunnerSlot,
 };
+use fixture_support::MutableClock;
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
 const SIGNING_KEY: &[u8] = b"runtime-authority-test-signing-key-material-v1";
-
-#[derive(Debug)]
-struct MutableClock(AtomicU64);
-
-impl MutableClock {
-    fn new(now: u64) -> Self {
-        Self(AtomicU64::new(now))
-    }
-
-    fn set(&self, now: u64) {
-        self.0.store(now, Ordering::SeqCst);
-    }
-}
-
-impl ResultsClock for MutableClock {
-    fn now_seconds(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
 
 fn job() -> JobIrEnvelope {
     job_for("owner/repository", "refs/heads/feature", "push")
