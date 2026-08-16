@@ -1018,8 +1018,14 @@ async fn admission_is_atomic_exact_and_has_no_concrete_jobs() -> TestResult {
                 .store()
                 .record_event_subject_progress(cross_workflow_progress)
                 .await,
-            Err(EventSubjectStoreError::Operation(_))
+            Err(EventSubjectStoreError::Conflict)
         ));
+        let cross_workflow_progress_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM event_subject_progress WHERE subject_id = $1")
+                .bind(wrong_subject_id.as_uuid())
+                .fetch_one(database.pool())
+                .await?;
+        assert_eq!(cross_workflow_progress_count, 0);
         Ok(())
     })
     .await
