@@ -1712,6 +1712,65 @@ pub struct FailureIsolationExecutor {
     survivor_started: AtomicBool,
 }
 
+#[derive(Debug, Default)]
+pub struct EndpointRecoveryExecutor {
+    execute_calls: AtomicUsize,
+    cleanup_calls: AtomicUsize,
+}
+
+impl EndpointRecoveryExecutor {
+    pub fn execute_calls(&self) -> usize {
+        self.execute_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn cleanup_calls(&self) -> usize {
+        self.cleanup_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl JobExecutor for EndpointRecoveryExecutor {
+    fn admit(&self, _job: &JobIrEnvelope) -> Result<ExecutionAdmission, AdmissionRejection> {
+        Ok(ExecutionAdmission::new(sandbox_environment()))
+    }
+
+    fn execute(
+        &self,
+        request: ExecutionRequest,
+        events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> ExecutorFuture<'_> {
+        Box::pin(async move {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            events
+                .transition(JobLifecycle::Running)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            Ok(JobResult::new(
+                request.lease().attempt_id(),
+                JobConclusion::Failure,
+                JobSecretExposure::Secretless,
+                UnixMillis::new(10_001),
+            ))
+        })
+    }
+
+    fn cleanup(
+        &self,
+        _request: CleanupRequest,
+        events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> CleanupFuture<'_> {
+        Box::pin(async move {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            let destroy = events
+                .begin_provider_operation(ProviderOperationKind::DestroySandbox)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))?;
+            events
+                .provider_operation_completed(destroy)
+                .map_err(|_| ExecutorError::new(ExecutorErrorKind::Internal))
+        })
+    }
+}
+
 pub const FAILURE_ISOLATION_LOG_COUNT: usize = 64;
 
 impl FailureIsolationExecutor {

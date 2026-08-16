@@ -11,6 +11,8 @@ mod config;
 mod content;
 mod control;
 mod endpoint_replay;
+#[cfg(test)]
+mod endpoint_replay_tests;
 mod endpoint_result;
 mod error;
 mod events;
