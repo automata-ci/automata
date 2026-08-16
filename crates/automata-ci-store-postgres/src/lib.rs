@@ -77,6 +77,7 @@ mod server_cancellation_terminal;
 mod web;
 mod workflow_enable_state;
 mod workflow_rerun;
+mod workflow_run_trust_snapshot;
 mod workflow_runtime_policy;
 
 pub use github_oidc::{

@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 use automata_ci_core::{
     JOB_IR_SCHEMA_VERSION, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, JobAuthorityProfile, RunId,
-    RunIdAlias, Sha256Digest, TRUST_SNAPSHOT_SCHEMA_V1, TRUST_SNAPSHOT_V1_MEDIA_TYPE,
-    TrustSnapshot, UnixMillis, WorkflowId, WorkflowJobKey,
+    RunIdAlias, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey,
 };
 use sqlx::{Postgres, Row as _, Transaction, postgres::PgRow};
 use uuid::Uuid;
@@ -16,6 +15,7 @@ use super::{
     protected_environment::{
         job_event_trust_name, job_source_kind_name, reusable_secret_permission_name,
     },
+    workflow_run_trust_snapshot::decode_trust_snapshot,
 };
 use automata_ci_store::{
     ActivatedLogicalInstanceDescriptor, AdmissionObject, ClaimLogicalJobActivation,
@@ -1852,41 +1852,6 @@ fn decode_digest_bytes(
         .try_into()
         .map_err(|_| StoreError::corrupt_data(format!("{field} is not SHA-256")))?;
     Ok(Sha256Digest::from_bytes(bytes))
-}
-
-fn decode_trust_snapshot(row: &PgRow) -> Result<TrustSnapshot, LogicalActivationStoreError> {
-    let schema: i16 = row
-        .try_get("trust_snapshot_schema")
-        .map_err(operation_error)?;
-    if schema != i16::try_from(TRUST_SNAPSHOT_SCHEMA_V1).unwrap_or(i16::MAX) {
-        return Err(StoreError::corrupt_data("unsupported durable trust snapshot schema").into());
-    }
-    let policy_revision: i64 = row
-        .try_get("trust_policy_revision")
-        .map_err(operation_error)?;
-    let policy_digest = decode_digest(row, "trust_policy_digest")?;
-    let snapshot_digest = decode_digest(row, "trust_snapshot_digest")?;
-    let snapshot_bytes: Vec<u8> = row
-        .try_get("trust_snapshot_bytes")
-        .map_err(operation_error)?;
-    let media_type: String = row.try_get("trust_media_type").map_err(operation_error)?;
-    if media_type != TRUST_SNAPSHOT_V1_MEDIA_TYPE {
-        return Err(
-            StoreError::corrupt_data("unsupported durable trust snapshot media type").into(),
-        );
-    }
-    let snapshot = TrustSnapshot::from_canonical_bytes(&snapshot_bytes, snapshot_digest)
-        .map_err(|error| StoreError::corrupt_data(error.to_string()))?;
-    let exact_metadata = i64::try_from(snapshot.policy_revision().get()).ok()
-        == Some(policy_revision)
-        && snapshot.policy_digest() == policy_digest;
-    if !exact_metadata {
-        return Err(StoreError::corrupt_data(
-            "durable trust snapshot metadata disagrees with its canonical bytes",
-        )
-        .into());
-    }
-    Ok(snapshot)
 }
 
 fn parse_authority_profile(

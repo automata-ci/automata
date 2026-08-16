@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::{
     PostgresStore, durable_schema::current_durable_schemas,
     logical_graph::lock_active_logical_graph, pg_bigint,
+    workflow_run_trust_snapshot::decode_trust_snapshot,
     workflow_runtime_policy::load_pinned_runtime_policy_for_run,
 };
 use automata_ci_store::{
@@ -1178,6 +1179,7 @@ fn build_descriptor(
             .with_triggering_actor(triggering_actor)
             .map_err(corrupt_value)?;
     }
+    execution = execution.with_trust_snapshot(decode_trust_snapshot(row)?);
     let authority_profile =
         parse_authority_profile(&get_string(row, prefix, "authority_profile")?)?;
     let runner_policy =

@@ -160,6 +160,17 @@ async fn sealed_reusable_child_reaches_materialization_and_tampering_fails_close
             .ok_or("planned reusable call was not selected for autonomous publication")?;
         assert_eq!(ready_call.child_invocation_id(), child_invocation_id);
         assert_eq!(
+            ready_call.preparation().execution().trust_snapshot(),
+            fixture.command.trust_snapshot(),
+        );
+        assert!(
+            !ready_call
+                .preparation()
+                .execution()
+                .trust_snapshot()
+                .is_construction_placeholder()
+        );
+        assert_eq!(
             ready_call.permissions().digest(),
             publication.permission_digest()
         );

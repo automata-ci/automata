@@ -9,6 +9,12 @@ SELECT job.logical_key, job.source_order, job.created_at_ms,
        run.triggering_actor,
        run.public_run_id_alias AS run_id_alias,
        run.run_number, run.run_attempt,
+       trust.snapshot_schema AS trust_snapshot_schema,
+       trust.policy_revision AS trust_policy_revision,
+       trust.policy_digest AS trust_policy_digest,
+       trust.snapshot_digest AS trust_snapshot_digest,
+       trust.snapshot_bytes AS trust_snapshot_bytes,
+       trust.media_type AS trust_media_type,
        invocation.plan_digest, invocation.plan_object_key,
        invocation.plan_size_bytes, invocation.plan_media_type,
        run.event_digest, run.event_object_key, run.event_size_bytes,
@@ -89,6 +95,7 @@ LEFT JOIN logical_workflow_reusable_call_publications AS reusable_call
  AND reusable_call.child_invocation_id = invocation.id
  AND reusable_call.child_graph_sealed_at_ms IS NOT NULL
 JOIN workflow_runs AS run ON run.id = marker.run_id
+JOIN workflow_run_trust_snapshots AS trust ON trust.run_id = run.id
 JOIN repositories AS repository ON repository.id = run.repository_id
 JOIN github_workflow_run_manifest_origins AS origin
   ON origin.tenant_id = repository.tenant_id

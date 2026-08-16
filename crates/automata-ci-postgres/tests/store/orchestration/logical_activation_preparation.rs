@@ -32,13 +32,14 @@ use automata_ci_store::{
     LogicalJobOrchestrationSelectionOutcome, LogicalJobResultClaimOutcome,
     LogicalJobResultRepository as _, LogicalJobResultTarget, LogicalJobResultWorkerId,
     LogicalMaterializationRepository as _, LogicalMaterializationWorkerId, LogicalWorkSelectionId,
-    LogicalWorkSelectionRepository as _, LogicalWorkflowAdmissionRepository as _,
-    LogicalWorkflowAdmissionStoreError, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
-    LogicalWorkflowJobKind, ObjectKey, ProviderConnectionId, ProviderDeliveryClaimOwnerId,
-    ProviderDeliveryIdentity, ProviderDeliveryRepository as _, ProviderInstallationId,
-    ProviderRepositoryCoordinates, ProviderRepositoryId, ProviderRepositoryOwnerId,
-    ProviderRepositoryVisibility, PublishLogicalJobActivation, RenewLogicalActivationPreparation,
-    ReusableSecretPermission, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    LogicalWorkSelectionRepository as _, LogicalWorkSelectionStoreError,
+    LogicalWorkflowAdmissionRepository as _, LogicalWorkflowAdmissionStoreError,
+    LogicalWorkflowInvocationId, LogicalWorkflowJobId, LogicalWorkflowJobKind, ObjectKey,
+    ProviderConnectionId, ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity,
+    ProviderDeliveryRepository as _, ProviderInstallationId, ProviderRepositoryCoordinates,
+    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
+    PublishLogicalJobActivation, RenewLogicalActivationPreparation, ReusableSecretPermission,
+    StoreError, TenantScope, WorkflowAdmissionIdempotency, WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -365,6 +366,14 @@ async fn preparation_is_dependency_ready_fenced_replayable_and_workspace_bound()
         };
         assert!(replay.is_replay());
         assert_eq!(replay.claim(), winner.claim());
+        assert_eq!(replay.descriptor(), winner.descriptor());
+        assert!(
+            !replay
+                .descriptor()
+                .execution()
+                .trust_snapshot()
+                .is_construction_placeholder()
+        );
 
         let stale = BindLogicalActivationPreparation::new(
             winner.descriptor().clone(),
@@ -688,6 +697,102 @@ async fn github_shaped_admission_without_historical_provider_evidence_has_no_pro
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
+async fn missing_and_malformed_trust_snapshots_fail_closed_during_preparation() -> TestResult {
+    run_with_database(|database| async move {
+        let fixture = fixture(
+            &database,
+            "activation-preparation-malformed-trust",
+            134_000,
+            JobAuthorityProfile::Standard,
+        )
+        .await?;
+        let mut corruption = database.pool().begin().await?;
+        sqlx::query(
+            "ALTER TABLE workflow_run_trust_snapshots \
+             DISABLE TRIGGER workflow_run_trust_snapshots_reject_update_delete",
+        )
+        .execute(&mut *corruption)
+        .await?;
+        sqlx::query(
+            "UPDATE workflow_run_trust_snapshots \
+             SET snapshot_digest = $2 WHERE run_id = $1",
+        )
+        .bind(fixture.command.run_id().as_uuid())
+        .bind([0x44_u8; 32].as_slice())
+        .execute(&mut *corruption)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE workflow_run_trust_snapshots \
+             ENABLE TRIGGER workflow_run_trust_snapshots_reject_update_delete",
+        )
+        .execute(&mut *corruption)
+        .await?;
+        corruption.commit().await?;
+        assert!(matches!(
+            database
+                .store()
+                .claim_next_logical_job_orchestration(ClaimNextLogicalJobOrchestration::new(
+                    LogicalWorkSelectionId::from_uuid(Uuid::from_u128(234_000))?,
+                    worker(234_001),
+                    UnixMillis::new(database_now_ms(&database).await?),
+                    60_000,
+                )?)
+                .await,
+            Err(LogicalWorkSelectionStoreError::Store(StoreError::CorruptData(message)))
+                if message.contains("trust snapshot digest")
+        ));
+        assert_no_preparation_evidence(&database, fixture.command.run_id()).await?;
+        Ok(())
+    })
+    .await?;
+
+    run_with_database(|database| async move {
+        let fixture = fixture(
+            &database,
+            "activation-preparation-missing-trust",
+            135_000,
+            JobAuthorityProfile::Standard,
+        )
+        .await?;
+        let mut corruption = database.pool().begin().await?;
+        sqlx::query(
+            "ALTER TABLE workflow_run_trust_snapshots \
+             DISABLE TRIGGER workflow_run_trust_snapshots_reject_update_delete",
+        )
+        .execute(&mut *corruption)
+        .await?;
+        sqlx::query("DELETE FROM workflow_run_trust_snapshots WHERE run_id = $1")
+            .bind(fixture.command.run_id().as_uuid())
+            .execute(&mut *corruption)
+            .await?;
+        sqlx::query(
+            "ALTER TABLE workflow_run_trust_snapshots \
+             ENABLE TRIGGER workflow_run_trust_snapshots_reject_update_delete",
+        )
+        .execute(&mut *corruption)
+        .await?;
+        corruption.commit().await?;
+        assert!(matches!(
+            database
+                .store()
+                .claim_next_logical_job_orchestration(ClaimNextLogicalJobOrchestration::new(
+                    LogicalWorkSelectionId::from_uuid(Uuid::from_u128(235_000))?,
+                    worker(235_001),
+                    UnixMillis::new(database_now_ms(&database).await?),
+                    60_000,
+                )?)
+                .await,
+            Err(LogicalWorkSelectionStoreError::Store(StoreError::CorruptData(message)))
+                if message == "locked preparation authority was rejected"
+        ));
+        assert_no_preparation_evidence(&database, fixture.command.run_id()).await?;
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL 18 and AUTOMATA_TEST_DATABASE_URL"]
 async fn selector_quarantines_expired_max_generation_and_advances_to_newer_work() -> TestResult {
     run_with_database(|database| async move {
         let fixture = fixture(
@@ -989,11 +1094,45 @@ async fn select_orchestration_preparation(
         ))
         .await?;
     match consumed.authority() {
-        ConsumedLogicalJobOrchestrationAuthority::Preparation(claimed) => Ok(claimed.clone()),
+        ConsumedLogicalJobOrchestrationAuthority::Preparation(claimed) => {
+            assert_eq!(
+                claimed.descriptor().execution().trust_snapshot(),
+                fixture.command.trust_snapshot(),
+            );
+            assert!(
+                !claimed
+                    .descriptor()
+                    .execution()
+                    .trust_snapshot()
+                    .is_construction_placeholder()
+            );
+            Ok(claimed.clone())
+        }
         authority @ ConsumedLogicalJobOrchestrationAuthority::Activation(_) => {
             Err(format!("expected preparation authority, got {authority:?}").into())
         }
     }
+}
+
+async fn assert_no_preparation_evidence(database: &TestDatabase, run_id: RunId) -> TestResult {
+    let evidence_count: i64 = sqlx::query_scalar(
+        r"
+        SELECT (
+            SELECT count(*)
+            FROM logical_workflow_activation_preparation_claims
+            WHERE run_id = $1
+        ) + (
+            SELECT count(*)
+            FROM logical_workflow_activation_preparations
+            WHERE run_id = $1
+        )
+        ",
+    )
+    .bind(run_id.as_uuid())
+    .fetch_one(database.pool())
+    .await?;
+    assert_eq!(evidence_count, 0);
+    Ok(())
 }
 
 async fn bind_preparation(
@@ -1047,7 +1186,13 @@ async fn select_activation(
         ))
         .await?;
     match consumed.authority() {
-        ConsumedLogicalJobOrchestrationAuthority::Activation(claimed) => Ok(claimed.clone()),
+        ConsumedLogicalJobOrchestrationAuthority::Activation(claimed) => {
+            assert_eq!(
+                claimed.execution().trust_snapshot(),
+                fixture.command.trust_snapshot(),
+            );
+            Ok(claimed.clone())
+        }
         authority @ ConsumedLogicalJobOrchestrationAuthority::Preparation(_) => {
             Err(format!("expected activation authority, got {authority:?}").into())
         }
