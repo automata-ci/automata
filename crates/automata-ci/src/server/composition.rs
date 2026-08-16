@@ -422,7 +422,9 @@ impl ProductionComponents {
                 Arc::new(policy.clone());
             trust
         });
-        let enrollment_origin = config.external_url().as_str().to_owned();
+        let enrollment_origin = config
+            .human_auth()
+            .map(|human_auth| human_auth.external_url().as_str().to_owned());
         let (
             runner_enrollment_repository,
             runner_enrollment_redeem_api,
