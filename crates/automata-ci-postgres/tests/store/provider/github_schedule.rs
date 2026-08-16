@@ -2,7 +2,11 @@ use crate::github_manifest_fixture;
 
 use std::time::Duration;
 
-use automata_ci_core::{OperationId, RunId, Sha256Digest, UnixMillis, WorkflowId, WorkflowJobKey};
+use automata_ci_core::{
+    OperationId, RunId, Sha256Digest, TrustActorEvidence, TrustActorKind, TrustAutomationKind,
+    TrustEventKind, TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence,
+    TrustTokenRecursion, UnixMillis, WorkflowId, WorkflowJobKey,
+};
 use automata_ci_postgres::store::PostgresStore;
 use automata_ci_schedule::CronExpression;
 use automata_ci_store::{
@@ -45,12 +49,12 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
         let tenant = TenantScope::from_authenticated_tenant_id("neutral-schedule-test")?;
         let connection = ProviderConnectionId::from_uuid(Uuid::from_u128(0x5901))?;
         let manifest = fixture_private_github_manifest(tenant, connection);
+        let bootstrap = fixture_github_repository_bootstrap(manifest.clone(), UnixMillis::new(1));
         database
             .store()
-            .bootstrap_github_provider_repository(fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(1),
-            ))
+            .bootstrap_github_provider_repository(bootstrap.clone())
+            .await?;
+        crate::support::seed_fresh_github_workflow_permission_defaults(&database, &bootstrap)
             .await?;
         assert_schedule_repository_scoping(database.pool()).await?;
         let configured_at = database_now(database.pool()).await?;
@@ -140,6 +144,7 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             first_claim,
             manifest.clone(),
             source_authority.clone(),
+            2,
             "1111111111111111111111111111111111111111",
             [21; 32],
         )?;
@@ -161,6 +166,7 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             replay_claim,
             manifest.clone(),
             source_authority.clone(),
+            2,
             "1111111111111111111111111111111111111111",
             [21; 32],
         )?;
@@ -185,6 +191,7 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
                 completed_claim_replay,
                 manifest.clone(),
                 source_authority.clone(),
+                2,
                 "1111111111111111111111111111111111111111",
                 [21; 32],
             )?)
@@ -196,6 +203,7 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             first.discovery_claim(),
             manifest.clone(),
             source_authority.clone(),
+            2,
             "1111111111111111111111111111111111111111",
             [22; 32],
         )?;
@@ -207,7 +215,7 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             Err(GithubScheduleStoreError::Conflict)
         ));
 
-        make_due(database.pool(), created.registry_id()).await?;
+        make_entry_due(database.pool(), created.registry_id(), 0).await?;
         let worker = GithubScheduleWorkerId::from_uuid(Uuid::from_u128(0x5905))?;
         let claim_request = ClaimDueGithubScheduleFire::new(worker, 60_000)?;
         let claimed = database
@@ -425,30 +433,12 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             .admit_scheduled_github_workflow(command.clone(), second.claim())
             .await?;
         assert!(!admitted.is_replay());
-        let promoted_manifest = fixture_private_github_manifest_revision(
-            manifest.tenant().clone(),
-            connection,
-            manifest.github_repository_id().get(),
-            manifest.github_repository_name().as_str(),
-            manifest.github_repository_owner_id(),
-            2,
-            2,
-        );
-        database
+        make_entry_due(database.pool(), created.registry_id(), 1).await?;
+        let superseded_claim = database
             .store()
-            .bootstrap_github_provider_repository(fixture_github_repository_bootstrap(
-                promoted_manifest.clone(),
-                database_now(database.pool()).await?,
-            ))
-            .await?;
-        assert_eq!(
-            database
-                .store()
-                .admit_scheduled_github_workflow(command.clone(), second.claim())
-                .await?
-                .run_id(),
-            admitted.run_id()
-        );
+            .claim_due_github_schedule_fire(claim_request)
+            .await?
+            .expect("parallel due occurrence");
         let generalized: (String, Uuid, String, String, Uuid, Uuid) = sqlx::query_as(
             r"
             SELECT selection.origin_kind_name, selection.origin_id,
@@ -554,6 +544,53 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             )?)
             .await?;
 
+        let superseded_check = database
+            .store()
+            .register_github_scheduled_check_subject(RegisterGithubScheduledCheckSubject::new(
+                superseded_claim.claim(),
+            ))
+            .await?;
+        let promoted_manifest = fixture_private_github_manifest_revision(
+            manifest.tenant().clone(),
+            connection,
+            manifest.github_repository_id().get(),
+            manifest.github_repository_name().as_str(),
+            manifest.github_repository_owner_id(),
+            2,
+            2,
+        );
+        database
+            .store()
+            .bootstrap_github_provider_repository(fixture_github_repository_bootstrap(
+                promoted_manifest.clone(),
+                database_now(database.pool()).await?,
+            ))
+            .await?;
+        let promoted_source_identity = schedule_authority_identity(
+            &promoted_manifest,
+            Uuid::from_u128(0x5915),
+            GithubServerServiceScope::PrivateRepositorySourceRead,
+            [54; 32],
+        )?;
+        database
+            .store()
+            .ensure_github_server_service_authority(EnsureGithubServerServiceAuthority::new(
+                promoted_source_identity.clone(),
+                database_now(database.pool()).await?,
+            )?)
+            .await?;
+        let promoted_source_authority = GithubScheduleSourceAuthority::Private(
+            GithubServerServiceAuthoritySelector::from_identity(&promoted_source_identity),
+        );
+        assert_eq!(
+            database
+                .store()
+                .admit_scheduled_github_workflow(command.clone(), second.claim())
+                .await?
+                .run_id(),
+            admitted.run_id()
+        );
+
         // Admission and its Check link commit before the fire conclusion. A
         // registry refresh in this crash window must fail atomically so the
         // old runtime remains available to conclude the admitted fire.
@@ -561,14 +598,15 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
             database.store(),
             GithubScheduleRegistryId::from_uuid(Uuid::from_u128(0x5906))?,
             promoted_manifest.clone(),
-            source_authority.clone(),
+            promoted_source_authority.clone(),
             discovery_worker,
         )
         .await?;
         let successor_registry = registry(
             successor_claim,
             promoted_manifest,
-            source_authority.clone(),
+            promoted_source_authority,
+            2,
             "2222222222222222222222222222222222222222",
             [23; 32],
         )?;
@@ -649,18 +687,6 @@ async fn registry_replay_claim_retry_completion_and_supersession_are_fenced() ->
         .await?;
         assert_eq!(audit, vec![(1, "retry".into()), (2, "admitted".into())]);
 
-        make_due(database.pool(), created.registry_id()).await?;
-        let superseded_claim = database
-            .store()
-            .claim_due_github_schedule_fire(claim_request)
-            .await?
-            .expect("second due occurrence");
-        let superseded_check = database
-            .store()
-            .register_github_scheduled_check_subject(RegisterGithubScheduledCheckSubject::new(
-                superseded_claim.claim(),
-            ))
-            .await?;
         database
             .store()
             .register_github_schedule_registry(successor_registry)
@@ -947,6 +973,7 @@ async fn bootstrap_schedule_fixture(
             claim,
             manifest,
             source_authority,
+            1,
             SOURCE_REVISION,
             [73; 32],
         )?)
@@ -985,6 +1012,7 @@ fn registry(
     discovery_claim: GithubScheduleDiscoveryClaim,
     manifest: automata_ci_store::GithubProviderManifest,
     source_authority: GithubScheduleSourceAuthority,
+    schedule_count: u16,
     source_revision: &str,
     archive_digest: [u8; 32],
 ) -> Result<RegisterGithubScheduleRegistry, Box<dyn std::error::Error + Send + Sync>> {
@@ -998,22 +1026,27 @@ fn registry(
     let timezone = "UTC";
     let next_fire_at = CronExpression::parse(cron_expression)?
         .next_after(discovery_claim.claimed_at(), timezone)?;
-    let entry = GithubScheduleRegistryEntry::new(
-        0,
-        GithubCheckSubjectKey::new(".ci/workflows/neutral.yml")?,
-        Sha256Digest::from_bytes([41; 32]),
-        0,
-        cron_expression,
-        timezone,
-        next_fire_at,
-    )?;
+    let workflow_path = GithubCheckSubjectKey::new(".ci/workflows/neutral.yml")?;
+    let entries = (0..schedule_count)
+        .map(|ordinal| {
+            GithubScheduleRegistryEntry::new(
+                ordinal,
+                workflow_path.clone(),
+                Sha256Digest::from_bytes([41; 32]),
+                ordinal,
+                cron_expression,
+                timezone,
+                next_fire_at,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(RegisterGithubScheduleRegistry::new(
         discovery_claim,
         manifest,
         source_authority,
         source_revision,
         archive,
-        vec![entry],
+        entries,
     )?)
 }
 
@@ -1126,19 +1159,51 @@ fn scheduled_command(
         LogicalWorkflowJobKind::Steps,
         Vec::new(),
     )?;
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        manifest.github_repository_id().get().to_string(),
+        fire.repository_owner(),
+        fire.repository_name(),
+    )?;
+    let trust_repository = TrustRepositoryEvidence::new(
+        fire.provider_repository_id(),
+        manifest
+            .github_repository_owner_id()
+            .expect("fixture repository owner identity")
+            .get()
+            .to_string(),
+    )?;
+    let actor = TrustActorEvidence::new(
+        GITHUB_SCHEDULE_SERVICE_ACTOR,
+        TrustActorKind::System,
+        TrustAutomationKind::None,
+    )?;
+    let trust_snapshot = TrustPolicy::current().evaluate(
+        TrustEvidence::new(TrustOriginKind::Schedule, TrustEventKind::Schedule)
+            .with_original_actor(actor.clone())
+            .with_triggering_actor(actor)
+            .with_repositories(trust_repository.clone(), trust_repository)
+            .with_refs(
+                fire.default_branch_ref(),
+                fire.default_branch_ref(),
+                fire.default_branch_ref(),
+            )
+            .with_revisions(
+                fire.source_revision(),
+                fire.source_revision(),
+                fire.source_revision(),
+            )
+            .with_fork(false)
+            .with_token_recursion(TrustTokenRecursion::External),
+    )?;
     Ok(AdmitLogicalWorkflowRun::builder(
         manifest.tenant().clone(),
         WorkflowAdmissionIdempotency::operation(OperationId::from_uuid(
             fire.claim().fire_id().as_uuid(),
         )),
         Sha256Digest::from_bytes([61; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            manifest.github_repository_id().get().to_string(),
-            fire.repository_owner(),
-            fire.repository_name(),
-        )?,
+        repository,
         workflow_id,
         fire.entry().workflow_path(),
         "Neutral scheduled verification",
@@ -1172,6 +1237,7 @@ fn scheduled_command(
         64,
         "application/vnd.automata.job-runtime-context.protobuf",
     )?)
+    .trust_snapshot(trust_snapshot)
     .actor(GITHUB_SCHEDULE_SERVICE_ACTOR)
     .build()?)
 }
@@ -1194,6 +1260,25 @@ async fn make_due(pool: &sqlx::PgPool, registry_id: GithubScheduleRegistryId) ->
         ",
     )
     .bind(registry_id.as_uuid())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn make_entry_due(
+    pool: &sqlx::PgPool,
+    registry_id: GithubScheduleRegistryId,
+    entry_ordinal: i16,
+) -> TestResult {
+    sqlx::query(
+        r"
+        UPDATE github_schedule_runtime
+           SET next_fire_at_ms = floor(extract(epoch FROM clock_timestamp()) * 1000)::BIGINT - 1
+         WHERE registry_id = $1 AND entry_ordinal = $2
+        ",
+    )
+    .bind(registry_id.as_uuid())
+    .bind(entry_ordinal)
     .execute(pool)
     .await?;
     Ok(())
