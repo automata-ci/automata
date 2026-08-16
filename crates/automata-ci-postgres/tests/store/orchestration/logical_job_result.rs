@@ -1097,7 +1097,8 @@ async fn poison_zero_instance_publication(
     sqlx::query(
         r"
         UPDATE logical_workflow_activation_publications
-        SET condition_matched = TRUE, instance_count = 1
+        SET condition_matched = TRUE, instance_count = 1,
+            effective_max_parallel = 1
         WHERE run_id = $1 AND invocation_id = $2 AND logical_job_id = $3
         ",
     )
