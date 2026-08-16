@@ -1216,6 +1216,8 @@ fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) -> TestResult {
 
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(windows)]
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(path)?;
     Ok(())
 }
 
