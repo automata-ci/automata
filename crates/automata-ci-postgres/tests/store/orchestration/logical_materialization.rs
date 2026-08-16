@@ -2027,6 +2027,16 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
     )
 }
 
+fn lower_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
 async fn wait_until_database_after(database: &TestDatabase, target_ms: i64) -> TestResult {
     while database_now_ms(database).await? <= target_ms {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2074,23 +2084,27 @@ async fn fixture_with_concurrency(
         Vec::new(),
     )
     .expect("logical job");
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        github_repository_id.get().to_string(),
+        "example",
+        format!("project-{namespace}"),
+    )?;
+    let git_ref = "refs/heads/main";
+    let head_sha = vec![0x14; 20];
+    let trust_snapshot =
+        crate::support::authenticated_github_trust_snapshot(&repository, git_ref, &head_sha)?;
     let mut command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("materialize-{namespace}"))
             .expect("idempotency"),
         Sha256Digest::from_bytes([0x40; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            github_repository_id.get().to_string(),
-            "example",
-            format!("project-{namespace}"),
-        )
-        .expect("repository"),
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "CI",
-        "refs/heads/main",
+        git_ref,
         snapshot_id,
         admission_object(format!("materialization/{namespace}/source"), 0x11),
         admission_object_from_bytes(
@@ -2103,10 +2117,11 @@ async fn fixture_with_concurrency(
         invocation_id,
         "push",
         admission_object(format!("materialization/{namespace}/event"), 0x13),
-        vec![0x14; 20],
+        head_sha,
         vec![logical_job],
         UnixMillis::new(clock_origin_ms),
     )
+    .trust_snapshot(trust_snapshot)
     .base_context(runtime_context_object(
         format!("materialization/{namespace}/base-context.pb"),
         0x15,
@@ -2522,15 +2537,13 @@ async fn admit_authenticated_fixture(
     publish_publicly: bool,
 ) -> TestResult {
     let now = UnixMillis::new(database_now_ms(database).await?);
+    let bootstrap =
+        github_manifest_fixture::fixture_github_repository_bootstrap(fixture.manifest.clone(), now);
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                fixture.manifest.clone(),
-                now,
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
 
     let manifest = &fixture.manifest;
     database
@@ -2590,7 +2603,7 @@ async fn admit_authenticated_fixture(
                         manifest.repository_visibility(),
                         manifest.github_repository_name().as_str(),
                     )?,
-                    format!("materialization-{}", fixture.namespace),
+                    fixture.command.idempotency().key(),
                 )?,
                 fixture.command.request_digest(),
                 crate::support::authenticated_github_event_object(fixture.command.event())?,
@@ -2626,7 +2639,7 @@ async fn admit_authenticated_fixture(
                 claimed.claim(),
                 ProviderDeliveryWorkflowInventory::new(
                     fixture.manifest.digest(),
-                    "1414141414141414141414141414141414141414",
+                    lower_hex(fixture.command.head_sha()),
                     Sha256Digest::from_bytes([0x90; 32]),
                     vec![
                         ProviderDeliveryWorkflowInventoryEntry::new(
@@ -2704,6 +2717,7 @@ fn logical_command_at(
         builder = builder.base_context(base_context.clone());
     }
     builder = builder.concurrency(command.concurrency().cloned());
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 

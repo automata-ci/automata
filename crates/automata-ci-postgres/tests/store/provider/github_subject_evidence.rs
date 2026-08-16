@@ -5,14 +5,15 @@ use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun,
     AdmittedLogicalWorkflowJob, AuthenticatedGithubDeliveryClaim, BeginGithubCheckRunCreate,
-    BindGithubCheckRun, BindGithubCheckSuite, ClaimGithubCheckProjection, ClaimProviderDelivery,
-    ClaimedGithubCheckProjection, CompleteGithubCheckProjection, CompleteProviderDelivery,
-    EnsureGithubServerServiceAuthority, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
-    GithubCheckDesiredProjection, GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName,
-    GithubCheckProjectionAction, GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId,
-    GithubCheckRunBindingFence, GithubCheckRunId, GithubCheckSubjectId, GithubCheckSuiteId,
-    GithubCheckTerminalCause, GithubProviderManifest, GithubProviderManifestLimits,
-    GithubProviderManifestRepository as _, GithubProviderManifestRevision, GithubProviderOrigins,
+    BindGithubCheckRun, BindGithubCheckSuite, BootstrapGithubProviderRepository,
+    ClaimGithubCheckProjection, ClaimProviderDelivery, ClaimedGithubCheckProjection,
+    CompleteGithubCheckProjection, CompleteProviderDelivery, EnsureGithubServerServiceAuthority,
+    GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckDesiredProjection,
+    GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName, GithubCheckProjectionAction,
+    GithubCheckProjectionOutbox as _, GithubCheckProjectionWorkerId, GithubCheckRunBindingFence,
+    GithubCheckRunId, GithubCheckSubjectId, GithubCheckSuiteId, GithubCheckTerminalCause,
+    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRepository as _,
+    GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderWebhookVerifierFingerprint, GithubProviderWorkflowSelection,
     GithubRepositoryDispatchEvidenceRepository as _, GithubRepositoryDispatchResolution,
     GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
@@ -738,7 +739,7 @@ async fn all_direct_inventory_fans_out_with_durable_partial_progress() -> TestRe
 
         let command = logical_command_at_path(
             &fixture,
-            "logical-all-direct-build",
+            "delivery-all-direct",
             0x62,
             21,
             0x2_800,
@@ -1067,7 +1068,7 @@ async fn setup_create_before_admission(
     let delivery_claim = claim_delivery(database, accepted.delivery_id(), 0x28b, 60_000).await?;
     let inventory = ProviderDeliveryWorkflowInventory::new(
         fixture.manifest.digest(),
-        "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+        "0909090909090909090909090909090909090909",
         Sha256Digest::from_bytes([0x56; 32]),
         vec![ProviderDeliveryWorkflowInventoryEntry::new(
             CREATE_BEFORE_ADMISSION_WORKFLOW_PATH,
@@ -1158,7 +1159,7 @@ async fn admit_create_before_admission_workflow(
     let admitted_at = database_now(database.pool()).await?;
     let command = logical_command_at_path(
         &scenario.fixture,
-        "logical-create-before-link",
+        "delivery-create-before-link",
         0x66,
         25,
         0x2_8a0,
@@ -1526,6 +1527,7 @@ struct Fixture {
     tenant: TenantScope,
     connection: ProviderConnectionId,
     manifest: GithubProviderManifest,
+    bootstrap: BootstrapGithubProviderRepository,
     activated_at: UnixMillis,
     checks_authority: GithubServerServiceAuthorityIdentity,
     private_source_authority: Option<GithubServerServiceAuthorityIdentity>,
@@ -1559,6 +1561,8 @@ async fn bootstrap_all_direct(
         GithubProviderWorkflowSelection::all_direct(),
     )
     .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &fixture.bootstrap)
+        .await?;
     ensure_fixture_authorities(database, fixture, at).await
 }
 
@@ -1623,14 +1627,13 @@ async fn bootstrap_manifest_only_with_selection(
         [6; 32],
         selection,
     );
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(at),
+    );
     let bootstrapped = database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(at),
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
     let activated_at = bootstrapped
         .manifest()
@@ -1656,6 +1659,7 @@ async fn bootstrap_manifest_only_with_selection(
         tenant,
         connection,
         manifest,
+        bootstrap,
         activated_at,
         checks_authority,
         private_source_authority,
@@ -2251,18 +2255,20 @@ fn logical_command_at_path(
         "application/json",
     )
     .expect("event object");
+    let repository = AdmissionRepository::new(
+        fixture.manifest.repository_id(),
+        "github",
+        REPOSITORY_ID.to_string(),
+        "automata-ci",
+        "automata",
+    )
+    .expect("repository");
+    let head_sha = HEAD_SHA.to_vec();
     AdmitLogicalWorkflowRun::builder(
         fixture.tenant.clone(),
         WorkflowAdmissionIdempotency::provider_delivery(idempotency_key).expect("idempotency"),
         Sha256Digest::from_bytes([request_digest_byte; 32]),
-        AdmissionRepository::new(
-            fixture.manifest.repository_id(),
-            "github",
-            REPOSITORY_ID.to_string(),
-            "automata-ci",
-            "automata",
-        )
-        .expect("repository"),
+        repository.clone(),
         workflow_id,
         workflow_path,
         "Automata CI",
@@ -2275,9 +2281,17 @@ fn logical_command_at_path(
         root_invocation_id,
         "push",
         event,
-        HEAD_SHA.to_vec(),
+        head_sha.clone(),
         vec![job],
         admitted_at,
+    )
+    .trust_snapshot(
+        crate::support::authenticated_github_trust_snapshot(
+            &repository,
+            "refs/heads/main",
+            &head_sha,
+        )
+        .expect("authenticated GitHub trust snapshot"),
     )
     .actor("octocat")
     .build()

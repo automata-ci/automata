@@ -2126,21 +2126,26 @@ async fn fixture(
         LogicalWorkflowJobKind::Steps,
         Vec::new(),
     )?];
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        github_repository.get().to_string(),
+        "sample-owner",
+        format!("renewal-{namespace}"),
+    )?;
+    let git_ref = "refs/heads/main";
+    let head_sha = vec![9; 20];
+    let trust_snapshot =
+        crate::support::authenticated_github_trust_snapshot(&repository, git_ref, &head_sha)?;
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("renewal-{namespace}"))?,
         Sha256Digest::from_bytes([41; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            github_repository.get().to_string(),
-            "sample-owner",
-            format!("renewal-{namespace}"),
-        )?,
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "Renewal ACK",
-        "refs/heads/main",
+        git_ref,
         snapshot_id,
         admission_object(format!("renewal/{namespace}/source"), 1, "application/json"),
         admission_object(
@@ -2153,10 +2158,11 @@ async fn fixture(
         invocation_id,
         "push",
         admission_object(format!("renewal/{namespace}/event"), 3, "application/json"),
-        vec![9; 20],
+        head_sha,
         admitted_jobs,
         UnixMillis::new(database_now_ms(database).await?),
     )
+    .trust_snapshot(trust_snapshot)
     .base_context(admission_object(
         format!("renewal/{namespace}/base-context"),
         4,
@@ -2175,15 +2181,13 @@ async fn fixture(
 #[allow(clippy::too_many_lines)] // The fixture stages one complete authenticated delivery transaction.
 async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixture) -> TestResult {
     let now = UnixMillis::new(database_now_ms(database).await?);
+    let bootstrap =
+        github_manifest_fixture::fixture_github_repository_bootstrap(fixture.manifest.clone(), now);
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                fixture.manifest.clone(),
-                now,
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     let manifest = &fixture.manifest;
     database
         .store()
@@ -2305,6 +2309,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 

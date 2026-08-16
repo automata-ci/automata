@@ -366,21 +366,26 @@ async fn admit_authenticated_fixture(
     );
     let job = LogicalWorkflowJobId::from_uuid(Uuid::from_u128(namespace + 6))?;
     let now = UnixMillis::new(database_now_ms(database).await?);
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        github_repository.get().to_string(),
+        "sample-owner",
+        format!("admission-{namespace}"),
+    )?;
+    let git_ref = "refs/heads/main";
+    let head_sha = vec![9; 20];
+    let trust_snapshot =
+        crate::support::authenticated_github_trust_snapshot(&repository, git_ref, &head_sha)?;
     let command = AdmitLogicalWorkflowRun::builder(
         tenant,
         WorkflowAdmissionIdempotency::provider_delivery(format!("admission-{namespace}"))?,
         Sha256Digest::from_bytes([41; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            github_repository.get().to_string(),
-            "sample-owner",
-            format!("admission-{namespace}"),
-        )?,
+        repository,
         WorkflowId::from_uuid(Uuid::from_u128(namespace + 2)),
         ".ci/workflows/ci.yml",
         "Admission guard",
-        "refs/heads/main",
+        git_ref,
         WorkflowSnapshotId::from_uuid(Uuid::from_u128(namespace + 3)),
         admission_object(
             format!("admission/{namespace}/source"),
@@ -401,7 +406,7 @@ async fn admit_authenticated_fixture(
             3,
             "application/json",
         ),
-        vec![9; 20],
+        head_sha,
         vec![AdmittedLogicalWorkflowJob::new(
             job,
             WorkflowJobKey::new("build")?,
@@ -411,6 +416,7 @@ async fn admit_authenticated_fixture(
         )?],
         now,
     )
+    .trust_snapshot(trust_snapshot)
     .base_context(admission_object(
         format!("admission/{namespace}/base-context"),
         4,
@@ -433,15 +439,13 @@ async fn authenticate_fixture(
     fixture: &mut AuthenticatedFixture,
 ) -> TestResult {
     let now = UnixMillis::new(database_now_ms(database).await?);
+    let bootstrap =
+        github_manifest_fixture::fixture_github_repository_bootstrap(fixture.manifest.clone(), now);
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                fixture.manifest.clone(),
-                now,
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     let manifest = &fixture.manifest;
     database
         .store()
@@ -562,6 +566,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 

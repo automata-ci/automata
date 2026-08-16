@@ -45,13 +45,11 @@ use automata_ci_store::{
     LogicalWorkflowAdmissionRepository as _, LogicalWorkflowInvocationId, LogicalWorkflowJobId,
     LogicalWorkflowJobKind, ObjectKey, OpenRunnerSession, ProviderConnectionId,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryIdentity, ProviderDeliveryRepository as _,
-    ProviderDeliveryWorkflowInventory, ProviderDeliveryWorkflowInventoryEntry,
-    ProviderDeliveryWorkflowSourceState, ProviderInstallationId, ProviderRepositoryCoordinates,
-    ProviderRepositoryId, ProviderRepositoryOwnerId, ProviderRepositoryVisibility,
-    PublishLogicalJobActivation, QuarantineLogicalInstanceResult,
-    RegisterProviderDeliveryWorkflowInventory, ReusableSecretPermission, RoutingDocument,
-    RunnerGeneration, RunnerProtocolVersion, RunnerSessionFence, TenantScope,
-    WorkflowAdmissionIdempotency, WorkflowSnapshotId,
+    ProviderInstallationId, ProviderRepositoryCoordinates, ProviderRepositoryId,
+    ProviderRepositoryOwnerId, ProviderRepositoryVisibility, PublishLogicalJobActivation,
+    QuarantineLogicalInstanceResult, ReusableSecretPermission, RoutingDocument, RunnerGeneration,
+    RunnerProtocolVersion, RunnerSessionFence, TenantScope, WorkflowAdmissionIdempotency,
+    WorkflowSnapshotId,
 };
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -1198,6 +1196,7 @@ async fn database_now_ms(database: &TestDatabase) -> TestResult<i64> {
     )
 }
 
+#[allow(clippy::too_many_lines)] // Builds one complete authenticated logical fixture.
 fn fixture(tenant: &str, namespace: u128, authority_profile: JobAuthorityProfile) -> Fixture {
     let tenant_scope = TenantScope::from_authenticated_tenant_id(tenant).expect("tenant");
     let repository_visibility = match authority_profile {
@@ -1249,19 +1248,27 @@ fn fixture(tenant: &str, namespace: u128, authority_profile: JobAuthorityProfile
         Vec::new(),
     )
     .expect("logical job");
+    let repository = AdmissionRepository::new(
+        repository_id,
+        "github",
+        manifest.github_repository_id().get().to_string(),
+        "example",
+        format!("project-{namespace}"),
+    )
+    .expect("repository");
+    let head_sha = vec![0x14; 20];
+    let trust_snapshot = crate::support::authenticated_github_trust_snapshot(
+        &repository,
+        "refs/heads/main",
+        &head_sha,
+    )
+    .expect("trust snapshot");
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("result-{namespace}"))
             .expect("idempotency"),
         Sha256Digest::from_bytes([0x40; 32]),
-        AdmissionRepository::new(
-            repository_id,
-            "github",
-            manifest.github_repository_id().get().to_string(),
-            "example",
-            format!("project-{namespace}"),
-        )
-        .expect("repository"),
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "CI",
@@ -1278,7 +1285,7 @@ fn fixture(tenant: &str, namespace: u128, authority_profile: JobAuthorityProfile
         invocation_id,
         "push",
         admission_object(format!("instance-result/{namespace}/event"), 0x13),
-        vec![0x14; 20],
+        head_sha,
         vec![logical_job],
         UnixMillis::new(1_000),
     )
@@ -1287,6 +1294,7 @@ fn fixture(tenant: &str, namespace: u128, authority_profile: JobAuthorityProfile
         0x15,
         "application/vnd.automata.job-runtime-context.protobuf",
     ))
+    .trust_snapshot(trust_snapshot)
     .build()
     .expect("logical admission");
     Fixture {
@@ -1307,15 +1315,15 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
     let github_repository = manifest.github_repository_id();
     let repository_visibility = manifest.repository_visibility();
     let configured_at = database_now_ms(database).await?;
+    let bootstrap = github_manifest_fixture::fixture_github_repository_bootstrap(
+        manifest.clone(),
+        UnixMillis::new(configured_at),
+    );
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                manifest.clone(),
-                UnixMillis::new(configured_at),
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     ensure_instance_result_server_authorities(database, fixture, configured_at).await?;
     let delivery_observed_at = database_now_ms(database).await?;
     let accepted = database
@@ -1332,7 +1340,7 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
                         repository_visibility,
                         format!("example/project-{namespace}"),
                     )?,
-                    format!("instance-result-{namespace}"),
+                    fixture.command.idempotency().key(),
                 )?,
                 fixture.command.request_digest(),
                 crate::support::authenticated_github_event_object(fixture.command.event())?,
@@ -1361,26 +1369,14 @@ async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &Fixture)
         .await?
         .ok_or("accepted GitHub delivery was not claimable")?;
     assert_eq!(claimed.claim().delivery_id(), accepted.delivery_id());
-    database
-        .store()
-        .register_provider_delivery_workflow_inventory(
-            RegisterProviderDeliveryWorkflowInventory::new(
-                claimed.claim(),
-                ProviderDeliveryWorkflowInventory::new(
-                    fixture.manifest.digest(),
-                    "1414141414141414141414141414141414141414",
-                    Sha256Digest::from_bytes([0x90; 32]),
-                    vec![ProviderDeliveryWorkflowInventoryEntry::new(
-                        fixture.command.workflow_path(),
-                        ProviderDeliveryWorkflowSourceState::Ready(
-                            fixture.command.source().digest(),
-                        ),
-                    )?],
-                )?,
-                claimed.claimed_at(),
-            )?,
-        )
-        .await?;
+    crate::support::register_provider_delivery_workflow_inventory(
+        database,
+        &fixture.manifest,
+        &fixture.command,
+        claimed.claim(),
+        claimed.claimed_at(),
+    )
+    .await?;
     let authenticated = AuthenticatedGithubDeliveryClaim::new(
         claimed.claim(),
         claimed.attempt(),
@@ -1473,6 +1469,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 

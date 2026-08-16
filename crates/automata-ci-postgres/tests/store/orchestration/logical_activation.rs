@@ -83,6 +83,7 @@ fn admission_base_context(namespace: u128) -> AdmissionObject {
     runtime_context_object(format!("activation/{namespace}/base-context.pb"), 4)
 }
 
+#[allow(clippy::too_many_lines)] // Builds one complete authenticated logical fixture.
 async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> TestResult<Fixture> {
     let tenant_scope = TenantScope::from_authenticated_tenant_id(tenant)?;
     let connection = ProviderConnectionId::from_uuid(Uuid::from_u128(namespace + 20))?;
@@ -138,19 +139,26 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         vec![first_job],
     )
     .expect("second job");
+    let repository = AdmissionRepository::new(
+        manifest.repository_id(),
+        "github",
+        github_repository.get().to_string(),
+        "sample-owner",
+        format!("sample-{namespace}"),
+    )
+    .expect("repository");
+    let head_sha = vec![9; 20];
+    let trust_snapshot = crate::support::authenticated_github_trust_snapshot(
+        &repository,
+        "refs/heads/main",
+        &head_sha,
+    )?;
     let command = AdmitLogicalWorkflowRun::builder(
         tenant_scope,
         WorkflowAdmissionIdempotency::provider_delivery(format!("activation-{namespace}"))
             .expect("idempotency"),
         Sha256Digest::from_bytes([41; 32]),
-        AdmissionRepository::new(
-            manifest.repository_id(),
-            "github",
-            github_repository.get().to_string(),
-            "sample-owner",
-            format!("sample-{namespace}"),
-        )
-        .expect("repository"),
+        repository,
         workflow_id,
         ".ci/workflows/ci.yml",
         "Verify",
@@ -167,11 +175,12 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
         invocation_id,
         "push",
         admission_object(format!("activation/{namespace}/event"), 3),
-        vec![9; 20],
+        head_sha,
         vec![first, second],
         UnixMillis::new(database_now_ms(database).await?),
     )
     .base_context(admission_base_context(namespace))
+    .trust_snapshot(trust_snapshot)
     .build()
     .expect("logical workflow fixture");
     Ok(Fixture {
@@ -187,15 +196,13 @@ async fn fixture(database: &TestDatabase, tenant: &str, namespace: u128) -> Test
 #[allow(clippy::too_many_lines)] // The fixture stages one complete authenticated delivery transaction.
 async fn admit_authenticated_fixture(database: &TestDatabase, fixture: &mut Fixture) -> TestResult {
     let now = UnixMillis::new(database_now_ms(database).await?);
+    let bootstrap =
+        github_manifest_fixture::fixture_github_repository_bootstrap(fixture.manifest.clone(), now);
     database
         .store()
-        .bootstrap_github_provider_repository(
-            github_manifest_fixture::fixture_github_repository_bootstrap(
-                fixture.manifest.clone(),
-                now,
-            ),
-        )
+        .bootstrap_github_provider_repository(bootstrap.clone())
         .await?;
+    crate::support::seed_fresh_github_workflow_permission_defaults(database, &bootstrap).await?;
     let manifest = &fixture.manifest;
     database
         .store()
@@ -318,6 +325,7 @@ fn logical_command_at(
     if let Some(base_context) = command.base_context() {
         builder = builder.base_context(base_context.clone());
     }
+    builder = builder.trust_snapshot(command.trust_snapshot().clone());
     Ok(builder.build()?)
 }
 
