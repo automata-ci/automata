@@ -544,7 +544,7 @@ process-observed and the observer never changes journal correctness.
 
 Spool metrics are emitted inside the durable store, after the outcome is known;
 the decorator does not guess about deduplication, adoption, reclaim, protection
-authentication, or uncertain mutation. Runner-journal schema 7 persists the
+authentication, or uncertain mutation. Runner-journal schema 2 persists the
 bounded non-secret enqueue timestamps used by pending-delivery oldest-age
 objectives. Metric counters remain process-local and are never persisted.
 
