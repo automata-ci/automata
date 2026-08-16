@@ -20,10 +20,12 @@ use automata_ci_runner_journal::{
     SessionBinding,
 };
 use automata_ci_runner_runtime::{
-    ExecutionCancellationReason, MonotonicMillis, RetryPolicy, RunnerRuntimeControlClient,
-    RunnerRuntimeError, RunnerRuntimePorts, RunnerSessionSupervisor, RuntimeClock,
-    RuntimeControlError, RuntimeControlErrorKind, RuntimeControlFuture, RuntimeControlReply,
-    RuntimeControlRetry, SystemRuntimeIds,
+    AdmissionRejection, CleanupFuture, CleanupRequest, ExecutionAdmission, ExecutionCancellation,
+    ExecutionCancellationReason, ExecutionEvents, ExecutionRequest, ExecutorFuture, JobExecutor,
+    MonotonicMillis, RetryPolicy, RunnerRuntimeControlClient, RunnerRuntimeError,
+    RunnerRuntimePorts, RunnerSessionSupervisor, RuntimeClock, RuntimeControlError,
+    RuntimeControlErrorKind, RuntimeControlFuture, RuntimeControlReply, RuntimeControlRetry,
+    SystemRuntimeIds, TokioRuntimeSleeper,
 };
 use automata_ci_runner_spool::{DurableContentStore, FileSpool};
 use automata_ci_runner_transport::PreparedRequest;
@@ -245,6 +247,120 @@ impl RunnerRuntimeControlClient for WatchdogProbeClient {
             }
         })
     }
+}
+
+#[derive(Debug)]
+struct BlockingUntilHeartbeatExecutor {
+    client: Arc<WatchdogProbeClient>,
+    observed_heartbeat: AtomicBool,
+}
+
+impl BlockingUntilHeartbeatExecutor {
+    fn new(client: Arc<WatchdogProbeClient>) -> Self {
+        Self {
+            client,
+            observed_heartbeat: AtomicBool::new(false),
+        }
+    }
+
+    fn observed_heartbeat(&self) -> bool {
+        self.observed_heartbeat.load(Ordering::SeqCst)
+    }
+}
+
+impl JobExecutor for BlockingUntilHeartbeatExecutor {
+    fn admit(
+        &self,
+        job: &automata_ci_core::JobIrEnvelope,
+    ) -> Result<ExecutionAdmission, AdmissionRejection> {
+        support::AdmittingExecutor.admit(job)
+    }
+
+    fn execute(
+        &self,
+        _request: ExecutionRequest,
+        _events: Arc<dyn ExecutionEvents>,
+        cancellation: ExecutionCancellation,
+    ) -> ExecutorFuture<'_> {
+        Box::pin(async move {
+            let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+            while self.client.heartbeat_count.load(Ordering::SeqCst) == 0
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if self.client.heartbeat_count.load(Ordering::SeqCst) == 0 {
+                return Err(automata_ci_runner_runtime::ExecutorError::new(
+                    automata_ci_runner_runtime::ExecutorErrorKind::Internal,
+                ));
+            }
+            self.observed_heartbeat.store(true, Ordering::SeqCst);
+            while !cancellation.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(automata_ci_runner_runtime::ExecutorError::new(
+                automata_ci_runner_runtime::ExecutorErrorKind::Cancelled,
+            ))
+        })
+    }
+
+    fn cleanup(
+        &self,
+        _request: CleanupRequest,
+        _events: Arc<dyn ExecutionEvents>,
+        _cancellation: ExecutionCancellation,
+    ) -> CleanupFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn blocking_executor_cannot_starve_active_lease_heartbeats() {
+    let scratch = support::Scratch::new("blocking-executor-heartbeat-isolation");
+    let runner_id = RunnerId::new();
+    let (journal, spool) = support::durable_ports(&scratch, runner_id);
+    let fixture = support::seed_accepted_offer(journal.as_ref(), spool.as_ref(), runner_id);
+    let monotonic = Arc::new(support::ManualClock::new(10_000, 50));
+    let clock = Arc::new(RegressingWallClock::new(Arc::clone(&monotonic)));
+    let client = Arc::new(WatchdogProbeClient::new(
+        fixture.session_id,
+        Arc::clone(&clock),
+        0,
+        Some(UnixMillis::new(40_000)),
+    ));
+    let executor = Arc::new(BlockingUntilHeartbeatExecutor::new(Arc::clone(&client)));
+    let runtime = RunnerSessionSupervisor::new(
+        support::config(runner_id),
+        RunnerRuntimePorts::new(
+            client.clone(),
+            journal.clone(),
+            spool,
+            executor.clone(),
+            clock,
+            Arc::new(TokioRuntimeSleeper),
+            Arc::new(SystemRuntimeIds),
+        ),
+    );
+    let shutdown = CancellationToken::new();
+    let task_shutdown = shutdown.clone();
+    let task = tokio::spawn(async move { runtime.run(task_shutdown).await });
+
+    tokio::time::timeout(Duration::from_secs(2), client.wait_for_heartbeats(1))
+        .await
+        .expect("heartbeat progresses while the executor blocks its polling thread");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !executor.observed_heartbeat() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("blocking executor observes the concurrently committed heartbeat");
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("isolated blocking executor shuts down")
+        .expect("runtime task")
+        .expect("clean shutdown");
 }
 
 #[tokio::test]

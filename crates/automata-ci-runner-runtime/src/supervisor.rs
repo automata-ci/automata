@@ -1811,10 +1811,22 @@ impl RunnerSessionSupervisor {
                 RuntimeJobStartMode::Recovered
             },
         });
+        // A provider-neutral executor may cross synchronous OS, hypervisor, or container-engine
+        // boundaries. Mark the whole execution task as blocking so Tokio replaces its worker for
+        // async control traffic, while retaining an abortable task whose future is quiesced before
+        // sandbox cleanup. Current-thread runtimes are used only by deterministic unit harnesses,
+        // where Tokio does not support this scheduling boundary.
         let mut execution = tokio::spawn(async move {
-            executor
-                .execute(request, executor_events, executor_signal)
-                .await
+            let runtime = tokio::runtime::Handle::current();
+            if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                tokio::task::block_in_place(|| {
+                    runtime.block_on(executor.execute(request, executor_events, executor_signal))
+                })
+            } else {
+                executor
+                    .execute(request, executor_events, executor_signal)
+                    .await
+            }
         });
 
         let heartbeat_stop = CancellationToken::new();
