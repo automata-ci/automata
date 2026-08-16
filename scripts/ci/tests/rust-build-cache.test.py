@@ -18,6 +18,7 @@ CACHE_ACTION = (
 )
 SCRATCH_PREPARATION = 'run: install -d -m 0700 -- "$TMPDIR"'
 SHORT_ABSTRACT_SOCKET = "SCCACHE_SERVER_UDS: '\\x00automata-sccache'"
+SHORT_STARTUP = "run: env TMPDIR=/tmp sccache --start-server"
 RUST_JOBS = (
     "verify",
     "rust_lint",
@@ -44,6 +45,9 @@ def main() -> None:
     assert workflow.count(SHORT_ABSTRACT_SOCKET) == 1, (
         "sccache must use one short abstract socket independent of workspace depth"
     )
+    assert workflow.count('SCCACHE_IDLE_TIMEOUT: "0"') == 1, (
+        "the job-scoped sccache server must survive until post-job statistics"
+    )
     for job in RUST_JOBS:
         body = job_body(workflow, job)
         assert "RUSTC_WRAPPER: sccache" in body, f"{job} lost the rustc wrapper"
@@ -58,7 +62,16 @@ def main() -> None:
         assert body.index(SCRATCH_PREPARATION) < body.index(SCCACHE_ACTION), (
             f"{job} must prepare its scratch directory before sccache starts"
         )
+        assert body.count(SHORT_STARTUP) == 1, (
+            f"{job} must start sccache once with a path-length-safe notifier"
+        )
+        assert body.index(SCCACHE_ACTION) < body.index(SHORT_STARTUP), (
+            f"{job} must install sccache before starting it"
+        )
         assert CACHE_ACTION in body, f"{job} lost the pinned Cargo cache action"
+        assert body.index(SHORT_STARTUP) < body.index(CACHE_ACTION), (
+            f"{job} must start sccache before restoring build inputs"
+        )
         assert "~/.cargo/registry/cache" in body
         assert "~/.cargo/registry/index" in body
         assert "~/.cargo/registry/src" in body

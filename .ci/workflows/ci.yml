@@ -20,6 +20,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  SCCACHE_IDLE_TIMEOUT: "0"
   SCCACHE_SERVER_UDS: '\x00automata-sccache'
   TMPDIR: ${{ github.workspace }}/target/task-tmp/ci
 
@@ -48,6 +49,9 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
+
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
 
       - name: Restore Cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -143,6 +147,9 @@ jobs:
         with:
           version: v0.17.0
 
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
+
       - name: Restore Cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -186,6 +193,9 @@ jobs:
         with:
           version: v0.17.0
 
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
+
       - name: Restore Cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -226,6 +236,9 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
+
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
 
       - name: Restore Cargo registry and cargo-deny
         id: dependency-audit-cargo-cache
@@ -294,6 +307,9 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
+
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
 
       - name: Restore Cargo registry and coverage tool
         id: coverage-cargo-cache
@@ -519,6 +535,9 @@ jobs:
         with:
           version: v0.17.0
 
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
+
       - name: Restore Cargo registry
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -623,6 +642,9 @@ jobs:
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
+
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
 
       - name: Restore Cargo registry and SBOM tool
         id: distribution-cargo-cache
