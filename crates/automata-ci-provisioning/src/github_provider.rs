@@ -1213,13 +1213,14 @@ fn canonical_branch_name(branch: &str) -> bool {
 mod tests {
     use super::*;
     use crate::{DelegatedActorIssuer, ProvisioningAuthorityId};
+    use automata_ci_core::RunnerFeature;
 
     const RUNNER_POLICY: &[u8] = br#"{
       "workspace":{"derivation":1,"root":"/__w","schema":1},
-      "mappings":[{"container_features":["automata.core/job-containers@v1"],"architecture":"x86_64","operating_system":"linux","environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},"selector":"Ubuntu-24.04"}],
+      "mappings":[{"runner_features":{"schema":1,"supported":["automata.core/bash-shell@v1","automata.core/command-files@v1","automata.core/composite-actions@v1","automata.core/default-posix-shell@v1","automata.core/javascript-actions@v1","automata.core/job-summaries@v1","automata.core/local-actions@v1","automata.core/node24-actions@v1","automata.core/python-shell@v1","automata.core/repository-actions@v1","automata.core/sh-shell@v1","automata.core/shell-steps@v1"]},"container_features":["automata.core/job-containers@v1"],"architecture":"x86_64","operating_system":"linux","environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},"selector":"Ubuntu-24.04"}],
       "permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},
       "resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},
-      "schema":1
+      "schema":2
     }"#;
 
     fn authority() -> ProvisioningAuthority {
@@ -1314,6 +1315,15 @@ mod tests {
             GithubProviderSchedulePolicy::default(),
         )
         .unwrap();
+        let feature_policy = configuration.runner_policy().runtime_policy().mappings()[0]
+            .runner_feature_policy()
+            .expect("current provider policy carries a runner-feature ceiling");
+        assert_eq!(feature_policy.supported().len(), 12);
+        assert!(
+            feature_policy
+                .supported()
+                .contains(&RunnerFeature::NODE24_ACTIONS)
+        );
         let command = ApplyGithubProviderConfigurationCommand::new(
             OperationId::parse("11111111-1111-4111-8111-111111111111").unwrap(),
             ShardId::new("other").unwrap(),

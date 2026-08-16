@@ -88,6 +88,9 @@ jobs:
           ./scripts/ci/install-actionlint.sh target/ci-tools
           target/ci-tools/actionlint .ci/workflows/*.yml
 
+      - name: Verify Windows CI contract
+        run: python3 scripts/ci/tests/windows-rust-ci.test.py
+
   frontend:
     name: Critical frontend checks
     runs-on: ubuntu-24.04
@@ -114,3 +117,91 @@ jobs:
 
       - name: Test and build the frontend
         run: npm run check
+
+  windows:
+    name: Windows sandbox and runner boundary
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Restore Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+          key: cargo-windows-2025-msvc-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-windows-2025-msvc-rust-1.97.1-
+
+      - name: Show pinned Windows MSVC toolchain
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TMPDIR | Out-Null
+          rustc --version --verbose
+          cargo --version --verbose
+          $rustHostTriple = (
+            rustc --version --verbose |
+              Select-String -Pattern '^host: ' |
+              ForEach-Object { $_.Line.Substring(6) }
+          )
+          if ($rustHostTriple -ne 'x86_64-pc-windows-msvc') {
+            throw "expected x86_64-pc-windows-msvc, got $rustHostTriple"
+          }
+
+      - name: Compile Windows sandbox and runner boundary
+        run: >-
+          cargo check
+          --locked
+          -p automata-ci-sandbox-windows
+          -p automata-ci-runner
+          --all-targets
+          --all-features
+          --target x86_64-pc-windows-msvc
+
+      - name: Lint Windows sandbox and runner boundary
+        run: >-
+          cargo clippy
+          --locked
+          -p automata-ci-sandbox-windows
+          -p automata-ci-runner
+          --all-targets
+          --all-features
+          --target x86_64-pc-windows-msvc
+          --no-deps
+          --
+          -D warnings
+
+      - name: Test Windows sandbox boundary
+        run: >-
+          cargo test
+          --locked
+          -p automata-ci-sandbox-windows
+          --all-targets
+          --all-features
+          --target x86_64-pc-windows-msvc
+
+      - name: Test Windows runner boundary
+        run: |
+          cargo test --locked `
+            -p automata-ci-runner `
+            --lib `
+            --target x86_64-pc-windows-msvc `
+            windows_tests
+          cargo test --locked `
+            -p automata-ci-runner `
+            --test runner `
+            --target x86_64-pc-windows-msvc `
+            'runner_product_config_windows::'

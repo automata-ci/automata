@@ -36,10 +36,10 @@ const PRIVATE_KEY: &[u8] = b"test GitHub App private key material";
 const WEBHOOK_SECRET: &[u8] = b"test GitHub webhook secret";
 const RUNNER_POLICY: &[u8] = br#"{
   "workspace":{"derivation":1,"root":"/__w","schema":1},
-  "mappings":[{"container_features":["automata.core/job-containers@v1"],"architecture":"x86_64","operating_system":"linux","environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},"selector":"Ubuntu-24.04"}],
+  "mappings":[{"runner_features":{"schema":1,"supported":["automata.core/bash-shell@v1","automata.core/command-files@v1","automata.core/composite-actions@v1","automata.core/default-posix-shell@v1","automata.core/javascript-actions@v1","automata.core/job-summaries@v1","automata.core/local-actions@v1","automata.core/node24-actions@v1","automata.core/python-shell@v1","automata.core/repository-actions@v1","automata.core/sh-shell@v1","automata.core/shell-steps@v1"]},"container_features":["automata.core/job-containers@v1"],"architecture":"x86_64","operating_system":"linux","environment_profile":{"manifest_sha256":"1111111111111111111111111111111111111111111111111111111111111111","id":"automata.example/ubuntu-24-04"},"selector":"Ubuntu-24.04"}],
   "permissions":{"provider_default":{"contents":"read","packages":"read"},"read_all":{"actions":"read","artifact-metadata":"read","attestations":"read","checks":"read","code-quality":"read","contents":"read","deployments":"read","discussions":"read","issues":"read","models":"read","packages":"read","pages":"read","pull-requests":"read","security-events":"read","statuses":"read","vulnerability-alerts":"read"},"write_all":{"actions":"write","artifact-metadata":"write","attestations":"write","checks":"write","code-quality":"write","contents":"write","deployments":"write","discussions":"write","id-token":"write","issues":"write","models":"read","packages":"write","pages":"write","pull-requests":"write","security-events":"write","statuses":"write","vulnerability-alerts":"read"}},
   "resources":{"defaults":{"requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"limits":{"cpu_millis":1000,"memory_bytes":1073741824,"ephemeral_disk_bytes":0,"gpu_count":0}},"minimum_requests":{"cpu_millis":100,"memory_bytes":268435456,"ephemeral_disk_bytes":0,"gpu_count":0},"maximum_limits":{"cpu_millis":4000,"memory_bytes":8589934592,"ephemeral_disk_bytes":0,"gpu_count":0}},
-  "schema":1
+  "schema":2
 }"#;
 
 #[derive(sqlx::FromRow)]
@@ -84,6 +84,13 @@ fn provider_request(
     );
     AuthorizedApplyGithubProviderConfiguration::authorize(authority(AUTHORITY), command)
         .expect("authorized provider configuration")
+}
+
+fn assert_current_runner_feature_policy(configuration: &GithubProviderConfiguration) {
+    let feature_policy = configuration.runner_policy().runtime_policy().mappings()[0]
+        .runner_feature_policy()
+        .expect("current desired state carries a runner-feature ceiling");
+    assert_eq!(feature_policy.supported().len(), 12);
 }
 
 fn workspace_provisioning(workspace_id: Uuid) -> AuthorizedProvisionWorkspace {
@@ -205,6 +212,7 @@ async fn provider_credentials_are_encrypted_and_revisions_are_idempotent() -> Te
         assert_eq!(desired.configuration_revision().get(), 3);
         assert_eq!(desired.app_configuration_revision(), 2);
         assert_eq!(desired.webhook_verifier_revision(), 1);
+        assert_current_runner_feature_policy(desired.configuration());
         assert_eq!(
             desired.configuration().private_key().expose_secret(),
             b"rotated private key"
