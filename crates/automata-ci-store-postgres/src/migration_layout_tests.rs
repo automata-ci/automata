@@ -562,7 +562,7 @@ fn workflow_runtime_runner_feature_policy_is_relationally_exact() {
 
 #[test]
 fn structured_live_logs_are_a_current_only_destructive_cutover() {
-    let source = include_str!("../migrations/0048_structured_live_logs.sql");
+    let source = include_str!("../migrations/0050_structured_live_logs.sql");
 
     for required in [
         "DELETE FROM human_live_log_tickets",
