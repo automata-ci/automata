@@ -1130,6 +1130,7 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-execution",
  "automata-ci-sandbox-guest",
+ "automata-ci-windows-broker-protocol",
  "base64 0.23.1",
  "serde",
  "serde_json",
@@ -1266,6 +1267,39 @@ dependencies = [
  "thiserror",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "automata-ci-windows-broker"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-core",
+ "automata-ci-execution",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+]
+
+[[package]]
+name = "automata-ci-windows-broker-hcs"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-core",
+ "automata-ci-execution",
+ "automata-ci-windows-broker",
+ "bollard",
+ "futures",
+ "tar",
+ "tokio",
+]
+
+[[package]]
+name = "automata-ci-windows-broker-protocol"
+version = "0.1.0"
+dependencies = [
+ "automata-ci-execution",
 ]
 
 [[package]]

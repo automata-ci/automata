@@ -158,6 +158,19 @@ must place that authority behind a narrow broker, or prove an equivalently
 restricted engine service identity and API surface, before hostile jobs are
 admitted.
 
+The broker component is split across explicit trust boundaries. The
+runner-side `automata-ci-sandbox-windows` adapter links only the bounded
+`automata-ci-windows-broker-protocol` request/consumer contract. Privileged
+grant verification, lifecycle policy, reconciliation, watchdog supervision,
+and the abstract durable/host-compute ports live in
+`automata-ci-windows-broker`; its file-ledger implementation is a separate
+module. The fixed named-pipe HCS/container-engine implementation is isolated in
+`automata-ci-windows-broker-hcs`. The sandbox adapter does not link either
+privileged implementation crate, and neither raw engine endpoints nor HCS
+documents cross the runner boundary. Service IPC, identity/ACL composition,
+and product installation remain future gates, so this split is component code,
+not a claim that hostile Windows workloads can run.
+
 The current source tree now also has a provider-neutral lease-authority
 extension boundary. Before scheduling, protocol 3 carries a bounded canonical
 contribution bundle which registered control-side extensions validate and

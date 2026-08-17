@@ -1,0 +1,26 @@
+[package]
+name = "automata-ci-windows-broker-hcs"
+description = "Fixed HCS adapter for the privileged Automata Windows broker"
+publish.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+automata-ci-core.workspace = true
+automata-ci-execution.workspace = true
+automata-ci-windows-broker.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+bollard.workspace = true
+futures.workspace = true
+tar.workspace = true
+tokio.workspace = true
