@@ -36,5 +36,5 @@ futures.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tower.workspace = true
