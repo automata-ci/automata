@@ -234,6 +234,56 @@ pub trait BrokerProfileContractResolver: fmt::Debug + Send + Sync {
 }
 
 impl WindowsHyperVBrokerProfileAttestation {
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_wire(
+        host_id: Sha256Digest,
+        profile: EnvironmentProfile,
+        image_digest: Sha256Digest,
+        isolation: HostComputeObservedIsolation,
+        network_disabled: bool,
+        issued_at: UnixMillis,
+        valid_until: UnixMillis,
+        digest: Sha256Digest,
+    ) -> Result<Self, BrokerError> {
+        let valid_lifetime = valid_until
+            .get()
+            .checked_sub(issued_at.get())
+            .is_some_and(|lifetime| lifetime > 0 && lifetime <= 15 * 60 * 1_000);
+        let expected = domain_digest(
+            PROFILE_ATTESTATION_DOMAIN,
+            &[
+                host_id.as_bytes(),
+                profile.id().as_str().as_bytes(),
+                profile.digest().as_bytes(),
+                image_digest.as_bytes(),
+                &[HostComputeObservedIsolation::HyperV as u8],
+                &[1],
+                &issued_at.get().to_be_bytes(),
+                &valid_until.get().to_be_bytes(),
+            ],
+        );
+        if is_zero_digest(host_id)
+            || is_zero_digest(image_digest)
+            || !valid_lifetime
+            || isolation != HostComputeObservedIsolation::HyperV
+            || !network_disabled
+            || digest != expected
+        {
+            return Err(BrokerError::EffectiveStateMismatch);
+        }
+        Ok(Self {
+            host_id,
+            profile,
+            image_digest,
+            isolation,
+            network_disabled,
+            issued_at,
+            valid_until,
+            digest,
+        })
+    }
+
     /// Returns the exact broker host identity.
     #[must_use]
     pub const fn host_id(&self) -> Sha256Digest {

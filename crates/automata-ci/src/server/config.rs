@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     convert::Infallible,
     env, fmt, io,
     net::{IpAddr, SocketAddr},
@@ -26,6 +26,7 @@ use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, S3TlsTrust};
 use automata_ci_control::maintenance::{
     LeaseFailureLimit, MaintenanceBatchSize, StaleSessionTimeoutMillis,
 };
+use automata_ci_core::{RunnerId, Sha256Digest};
 use automata_ci_key_management::{
     KeyId, LocalAes256GcmKeyring, LocalKeyMaterial, SecretBytes as KeySecretBytes,
 };
@@ -54,6 +55,7 @@ const MAX_GITHUB_CLIENT_SECRET_BYTES: usize = 16 * 1024;
 const MAX_BOOTSTRAP_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_CONFORMANCE_EXPORT_TOKEN_BYTES: usize = 4 * 1024;
 const MAX_MANAGEMENT_CLIENT_CERTIFICATES: usize = 8;
+const MAX_WINDOWS_HYPERV_BROKER_HOSTS: usize = 10_000;
 const MAX_DELEGATED_ACTOR_JWKS_URL_BYTES: usize = 2_048;
 const SECRET_ENCRYPTION_KEY_BYTES: usize = 32;
 const SESSION_HASH_KEY_BYTES: usize = 32;
@@ -326,6 +328,7 @@ pub struct ServerConfig {
     pub(crate) control_plane_encryption: ControlPlaneEncryptionConfig,
     pub(crate) runner_listen: SocketAddr,
     pub(crate) runner_public_authority: Option<Authority>,
+    pub(crate) windows_hyperv_broker: Option<WindowsHyperVBrokerSigningConfig>,
     pub(crate) results_listen: SocketAddr,
     pub(crate) results_public_endpoint: ResultsPublicEndpoint,
     pub(crate) results_signing_key: SecretSource,
@@ -473,6 +476,23 @@ impl S3ConnectionConfig {
             .as_ref()
             .map(|source| source.load_scalar(MAX_S3_CREDENTIAL_BYTES))
             .transpose()
+    }
+}
+
+/// Server-only signing authority and exact runner-to-broker-host registry.
+#[derive(Clone, Debug)]
+pub(crate) struct WindowsHyperVBrokerSigningConfig {
+    signing_seed: SecretSource,
+    hosts: BTreeMap<RunnerId, Sha256Digest>,
+}
+
+impl WindowsHyperVBrokerSigningConfig {
+    pub(crate) const fn signing_seed(&self) -> &SecretSource {
+        &self.signing_seed
+    }
+
+    pub(crate) const fn hosts(&self) -> &BTreeMap<RunnerId, Sha256Digest> {
+        &self.hosts
     }
 }
 
@@ -801,6 +821,7 @@ impl ServerConfig {
         let conformance_export_token = conformance_export_configuration(args, human_auth.as_ref())?;
         let secret_encryption = secret_encryption_configuration(args)?;
         let runner_public_authority = runner_public_authority_configuration(args)?;
+        let windows_hyperv_broker = windows_hyperv_broker_configuration(args)?;
         if (secret_encryption.is_some() || human_auth.is_some())
             && runner_public_authority.is_none()
         {
@@ -817,6 +838,7 @@ impl ServerConfig {
             control_plane_encryption,
             runner_listen: args.runner_listen,
             runner_public_authority,
+            windows_hyperv_broker,
             results_listen: args.results_listen,
             results_public_endpoint,
             results_signing_key: args.results_signing_key_source.clone(),
@@ -1374,6 +1396,7 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
         args.management_client_ca_certificate_source.as_ref(),
         args.management_server_certificate_source.as_ref(),
         args.management_server_key_source.as_ref(),
+        args.windows_hyperv_broker_signing_seed_source.as_ref(),
     ];
     if required
         .into_iter()
@@ -1411,6 +1434,43 @@ fn database_transport_configuration(
             Err(ServerConfigError::InvalidDatabaseTransport)
         }
     }
+}
+
+fn windows_hyperv_broker_configuration(
+    args: &ServerArgs,
+) -> Result<Option<WindowsHyperVBrokerSigningConfig>, ServerConfigError> {
+    let Some(signing_seed) = args.windows_hyperv_broker_signing_seed_source.as_ref() else {
+        if args.windows_hyperv_broker_hosts.is_empty() {
+            return Ok(None);
+        }
+        return Err(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration);
+    };
+    if !signing_seed.is_valid_reference()
+        || args.windows_hyperv_broker_hosts.is_empty()
+        || args.windows_hyperv_broker_hosts.len() > MAX_WINDOWS_HYPERV_BROKER_HOSTS
+    {
+        return Err(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration);
+    }
+    let mut hosts = BTreeMap::new();
+    for mapping in &args.windows_hyperv_broker_hosts {
+        let (runner, host) = mapping
+            .split_once('=')
+            .ok_or(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration)?;
+        let runner = RunnerId::from_str(runner)
+            .map_err(|_| ServerConfigError::InvalidWindowsHyperVBrokerConfiguration)?;
+        let host = Sha256Digest::from_str(host)
+            .map_err(|_| ServerConfigError::InvalidWindowsHyperVBrokerConfiguration)?;
+        if runner.as_uuid().is_nil()
+            || host.as_bytes().iter().all(|byte| *byte == 0)
+            || hosts.insert(runner, host).is_some()
+        {
+            return Err(ServerConfigError::InvalidWindowsHyperVBrokerConfiguration);
+        }
+    }
+    Ok(Some(WindowsHyperVBrokerSigningConfig {
+        signing_seed: signing_seed.clone(),
+        hosts,
+    }))
 }
 
 fn validate_external_url(args: &ServerArgs, external_url: &Url) -> Result<(), ServerConfigError> {
@@ -1592,6 +1652,9 @@ pub enum ServerConfigError {
     /// The public runner-control endpoint is not an exact HTTPS origin.
     #[error("runner-control endpoint policy is invalid")]
     InvalidRunnerPublicEndpoint,
+    /// Windows broker grant signing is partial, malformed, or unbounded.
+    #[error("Windows Hyper-V broker grant signing configuration is invalid")]
+    InvalidWindowsHyperVBrokerConfiguration,
     /// Results endpoint/listener transport policy is invalid or inconsistent.
     #[error("Results endpoint policy is invalid")]
     InvalidResultsEndpoint,

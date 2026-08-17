@@ -1,0 +1,31 @@
+{
+  "schema": 2,
+  "host_id": "1111111111111111111111111111111111111111111111111111111111111111",
+  "broker_service_sid": "S-1-5-80-111111111-222222222-333333333-444444444-555555555",
+  "runner_service_sid": "S-1-5-80-666666666-777777777-888888888-999999999-101010101",
+  "state_root": "C:\\ProgramData\\Automata\\WindowsHyperVBroker",
+  "grant_verification_keys": [
+    {
+      "key_id": "ae216c2ef5247a3782c135efa279a3e4cdc61094270f5d2be58c6204b7a612c9",
+      "public_key_base64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+    }
+  ],
+  "admission_signing_key": {
+    "issuer_key_id": "windows-admission-key-v1",
+    "protected_pkcs8_base64": "REPLACE_WITH_CURRENT_USER_DPAPI_PROTECTED_PKCS8",
+    "public_key_sha256": "ae216c2ef5247a3782c135efa279a3e4cdc61094270f5d2be58c6204b7a612c9"
+  },
+  "promotion_trust_bundles": [
+    {
+      "trust_bundle_id": "windows-production-v1",
+      "trust_bundle_sha256": "0e415e161e5f93e8786985ee7ed66616ccf9927274f97efd65de813ec3c002b1",
+      "keys": [
+        {
+          "key_id": "promotion-key-v1",
+          "public_key_base64": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+        }
+      ]
+    }
+  ],
+  "watchdog_interval_millis": 5000
+}

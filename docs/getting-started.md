@@ -73,9 +73,27 @@ Windows has no current deployment configuration or supported
 `automata-runner run` path. The Hyper-V provider remains an internal component
 fixture until native atomic TLS renewal custody, a promoted immutable image,
 authenticated placement evidence, and the dedicated physical-host acceptance
-gate land together. Do not reconstruct a configuration from tests or pass
-private material through environment variables; no static-certificate or
-environment-backed fallback is supported. Follow the
+gate land together. The checked-in
+[`runner.windows.product.json`](../crates/automata-ci-runner/tests/fixtures/runner.windows.product.json)
+is a schema-7 component fixture only. It binds the digest-pinned restricted
+broker client and broker-host identity; the runner has no container-engine
+executable or pipe configuration.
+
+The production boundary is deliberately unavailable. Pipe authentication
+returns `false` unconditionally, durable current-admission, placement-renewal,
+and broker-grant authorization repositories are not composed, broker admission
+uses an unavailable synthetic probe, and Windows enrollment remains
+unavailable. The service therefore cannot authorize a production sandbox. CI
+exercises the native Windows broker, ACL, protocol, configuration, and injected
+lifecycle components, but it does not create a physical HCS/Hyper-V sandbox or
+provide release-acceptance evidence.
+
+The current Windows executor admits only workflow `run:` steps. JavaScript,
+composite, local, repository, and container `uses:` actions, job and service
+containers, egress, devices, administrator profiles, and reboot or interactive
+semantics fail closed or remain unaccepted. Do not reconstruct a configuration
+from tests or pass private material through environment variables; no static-
+certificate or environment-backed fallback is supported. Follow the
 [Windows isolation plan](platforms/windows.md) for the remaining qualification
 work.
 
@@ -195,7 +213,8 @@ automata admin --server-url http://127.0.0.1:8180 status
 On Linux, review the host requirements in the [runner bootstrap
 guide](../crates/automata-ci-runner/config/README.md) and rerun the active probe
 only after its kernel, cgroup, and rootless-networking prerequisites are in
-place. That Podman diagnostic does not apply to Windows. Windows startup
-instead performs create, inspect, guest-probe, shell-probe, and destroy
-admission through the Hyper-V-container provider. Do not deploy it until the
-physical Windows end-to-end gate is accepted.
+place. That Podman diagnostic does not apply to Windows. The required Windows
+startup gate instead performs create, inspect, guest-probe, shell-probe, and
+destroy admission through the Hyper-V-container provider, but production grant
+issuance and the synthetic probe are not composed yet. Do not deploy it until
+those paths and the physical Windows end-to-end gate are accepted.

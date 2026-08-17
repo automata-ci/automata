@@ -30,11 +30,12 @@ use automata_ci_control::runner_auth::{
     DurableRunnerMachineAuthenticator, RunnerMachineAuthLimits,
 };
 use automata_ci_control::runner_control::{
-    ControlIdGenerator, DurableRunnerControlHandler, ImmutableBlobJobIrReader, JobIrObjectReader,
-    LeaseOfferCommandPublisher, LeasePollAdapter, LeasePoller, ManagedSecretBindingIssuer,
-    RandomControlIdGenerator, RunnerControlConfig, RunnerControlPorts, RunnerDurabilityPorts,
-    RunnerIdentityPorts, RunnerLeasePorts, RunnerRegistrationAuthorizer,
-    RunnerSessionFenceResolver, StoreLeaseOfferCommandPublisher, StoreRunnerSessionFenceResolver,
+    ControlIdGenerator, DurableRunnerControlHandler, Ed25519WindowsHyperVBrokerGrantIssuer,
+    ImmutableBlobJobIrReader, JobIrObjectReader, LeaseOfferCommandPublisher, LeasePollAdapter,
+    LeasePoller, ManagedSecretBindingIssuer, RandomControlIdGenerator, RunnerControlConfig,
+    RunnerControlPorts, RunnerDurabilityPorts, RunnerIdentityPorts, RunnerLeasePorts,
+    RunnerRegistrationAuthorizer, RunnerSessionFenceResolver, StoreLeaseOfferCommandPublisher,
+    StoreRunnerSessionFenceResolver,
     capability_admission::{RunnerCapabilityAdmissionRepository as _, RunnerCapabilityReadiness},
     durable::{
         CurrentRunnerSessionRepository, RunnerControlTransactionRepository,
@@ -111,6 +112,7 @@ use rustls::{
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
+use zeroize::Zeroizing;
 
 use super::config::DatabaseTransportLoadError;
 use super::github_job_runtime_authority::unavailable_github_job_runtime_authority_issuer;
@@ -696,6 +698,21 @@ impl ProductionComponents {
             } else {
                 None
             };
+        let windows_hyperv_broker_grant_issuer = config
+            .windows_hyperv_broker
+            .as_ref()
+            .map(|broker| {
+                let seed = broker.signing_seed().load_bytes(32)?;
+                if seed.len() != 32 {
+                    return Err(ServerCompositionError::InvalidWindowsHyperVBrokerGrantSigning);
+                }
+                let mut signing_seed = Zeroizing::new([0_u8; 32]);
+                signing_seed.copy_from_slice(seed.as_slice());
+                Ed25519WindowsHyperVBrokerGrantIssuer::new(signing_seed, broker.hosts().clone())
+                    .map(Arc::new)
+                    .map_err(|_| ServerCompositionError::InvalidWindowsHyperVBrokerGrantSigning)
+            })
+            .transpose()?;
 
         let ports = RunnerControlPorts::new(
             RunnerIdentityPorts::new(authorizer, fence_resolver, sessions),
@@ -714,6 +731,11 @@ impl ProductionComponents {
         .with_runtime_authority_issuer(runtime_authority_issuer);
         let ports = if let Some(issuer) = managed_secret_binding_issuer {
             ports.with_managed_secret_binding_issuer(issuer)
+        } else {
+            ports
+        };
+        let ports = if let Some(issuer) = windows_hyperv_broker_grant_issuer {
+            ports.with_windows_hyperv_broker_grant_issuer(issuer)
         } else {
             ports
         };
@@ -2032,6 +2054,9 @@ pub enum ServerCompositionError {
     /// Runner enrollment CA material or public endpoint was invalid.
     #[error("runner enrollment configuration is invalid")]
     InvalidRunnerEnrollment,
+    /// Server-only Windows broker signing material or host mappings were invalid.
+    #[error("Windows Hyper-V broker grant signing configuration is invalid")]
+    InvalidWindowsHyperVBrokerGrantSigning,
     /// The configured built-in provider violates the encrypted secret contract.
     #[error("secret management configuration is invalid")]
     InvalidSecretManagement,

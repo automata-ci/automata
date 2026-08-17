@@ -31,5 +31,14 @@ zeroize.workspace = true
 [target.'cfg(windows)'.dependencies]
 bollard.workspace = true
 futures.workspace = true
+interprocess.workspace = true
+stellar-agent-windows-identity.workspace = true
 tar.workspace = true
 tokio.workspace = true
+widestring.workspace = true
+windows.workspace = true
+windows-acl.workspace = true
+windows-permissions.workspace = true
+windows-service.workspace = true
+windows-token.workspace = true
+winapi-util.workspace = true

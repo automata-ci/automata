@@ -19,10 +19,12 @@ extended only through a new migration. The baseline also contains a real
 Kubernetes product-composition path, three independent single-slot Linux runner
 processes, durable workflow reruns and protected environment lease authority,
 and immutable multi-workflow fanout. These are component or experimental
-foundations unless their package records product acceptance. Hosted Windows CI
-is currently disabled, so the Windows gate is an independent restoration task
-rather than a prerequisite for the repository's current Ubuntu-only CI
-workflow.
+foundations unless their package records product acceptance. The repository
+workflow now includes a native `windows-2025` component lane for compilation,
+strict Clippy, and focused broker and runner tests. That lane does not exercise
+the shipped production path or physical HCS/Hyper-V isolation, so `GATE-02`
+remains an independent product-acceptance task even though the component lane
+is a prerequisite of the repository's aggregate CI result.
 
 The runtime preserves exact sandbox cleanup custody when an uncertain create
 failure returns a recovery handle. Missing-custody state remains fenced rather
@@ -306,8 +308,8 @@ Exit criteria:
   in this wave. Integration wave 5 must run the full hostile/fault matrix,
   close `WIN-ISO-11`, then complete `WIN-03` → `GATE-02` → `WIN-ISO-12`.
 - [ ] Implement `DKR-02`, `BLD-01`, and `DCK-01`.
-- [ ] Run `GATE-06` after `GATE-01` and `DCK-01`; execute the independent
-  hosted-Windows restoration gate `GATE-02` when its Windows dependencies are
+- [ ] Run `GATE-06` after `GATE-01` and `DCK-01`; execute the independent hosted
+  Windows product-acceptance gate `GATE-02` when its Windows dependencies are
   ready.
 - [ ] Complete `PROV-03` production-cluster acceptance for the already
   composed Kubernetes provider before fleet packaging work.

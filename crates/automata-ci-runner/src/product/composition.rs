@@ -36,7 +36,7 @@ use automata_ci_sandbox_podman::{
     PodmanCommandExecutor, RootlessPodmanProvider, SystemCommandExecutor,
 };
 use automata_ci_sandbox_windows::{
-    WindowsHyperVContainerProvider, WindowsHyperVContainerProviderOptions,
+    WindowsHyperVBrokerProvider, WindowsHyperVBrokerProviderOptions,
 };
 use automata_ci_scm::ScmProvider;
 use automata_ci_workflow_github::GithubConditionCompiler;
@@ -1194,19 +1194,14 @@ fn build_windows_provider(
     let windows = config
         .windows_hyperv()
         .ok_or(RunnerProductError::ProviderConfiguration)?;
-    let state_root = config
-        .state()
-        .windows_hyperv()
-        .ok_or(RunnerProductError::ProviderConfiguration)?;
-    let options = WindowsHyperVContainerProviderOptions::new(
-        state_root.to_path_buf(),
-        windows.runtime_executable().to_path_buf(),
-        windows.runtime_sha256(),
-        windows.guest_agent_path().clone(),
+    let options = WindowsHyperVBrokerProviderOptions::new(
+        windows.broker_client_executable().to_path_buf(),
+        windows.broker_client_sha256(),
+        windows.broker_host_id(),
     )?
     .with_operation_timeout(windows.operation_timeout())?;
     let provider: Arc<dyn automata_ci_execution::SandboxProvider> =
-        Arc::new(WindowsHyperVContainerProvider::open(options)?);
+        Arc::new(WindowsHyperVBrokerProvider::open(&options)?);
     match metrics {
         Some(metrics) => Ok(metrics.instrument_sandbox_provider(provider)),
         None => Ok(provider),

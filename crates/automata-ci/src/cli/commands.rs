@@ -627,6 +627,25 @@ pub struct ServerArgs {
     #[arg(long, env = "AUTOMATA_RUNNER_PUBLIC_URL", value_name = "URL")]
     pub runner_public_url: Option<String>,
 
+    /// Optional Ed25519 seed reference for signed Windows Hyper-V broker grants.
+    ///
+    /// Enabling this requires at least one exact runner-to-host mapping below.
+    #[arg(
+        long,
+        env = "AUTOMATA_WINDOWS_HYPERV_BROKER_SIGNING_SEED_SOURCE",
+        value_name = "env:NAME|file:PATH"
+    )]
+    pub windows_hyperv_broker_signing_seed_source: Option<SecretSource>,
+
+    /// Exact runner UUID to restricted-host SHA-256 mapping.
+    #[arg(
+        long = "windows-hyperv-broker-host",
+        env = "AUTOMATA_WINDOWS_HYPERV_BROKER_HOSTS",
+        value_name = "RUNNER_UUID=HOST_SHA256",
+        value_delimiter = ','
+    )]
+    pub windows_hyperv_broker_hosts: Vec<String>,
+
     /// Dedicated GitHub Actions Results HTTP listen address.
     ///
     /// Production HTTPS is normally terminated by a trusted reverse proxy in

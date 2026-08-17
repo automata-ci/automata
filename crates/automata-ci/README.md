@@ -37,6 +37,29 @@ The runner listener must validate client certificates directly. Do not pass a
 runner identity through reverse-proxy headers. A proxy-terminated runner
 transport would require a separate adapter and trust contract.
 
+### Optional Windows broker grant signer
+
+The server can configure the signing half of the Windows Hyper-V broker-grant
+contract with one paired policy:
+
+- `--windows-hyperv-broker-signing-seed-source env:NAME|file:PATH` names
+  exactly 32 raw Ed25519 seed bytes; it is not a hexadecimal or Base64 value;
+- each `--windows-hyperv-broker-host RUNNER_UUID=HOST_SHA256` maps one
+  non-nil runner UUID to one nonzero 64-hexadecimal-character broker-host
+  identity. Comma-delimited environment input is also accepted.
+
+Both parts must be absent to disable signing, or the seed and between one and
+10,000 unique runner mappings must be present together. Partial, malformed,
+zero, duplicate-runner, or oversized registries fail configuration. Seed
+material is loaded only by server composition and is not exposed to runners.
+
+This option is not a production Windows enablement switch. The current server
+does not compose durable current-admission, placement-renewal, or broker-grant
+authorization repositories, so Windows authority issuance remains fail
+closed. Broker pipe authentication, the synthetic admission probe, broker-owned
+enrollment, and physical HCS/Hyper-V acceptance are also unavailable. See the
+[Windows isolation plan](https://github.com/automata-ci/automata/blob/main/docs/platforms/windows.md).
+
 The management listener is opt-in and is not needed by a standalone
 self-hosted installation. Enabling it requires one stable authority ID, shard
 ID, exact delegated-actor HTTPS issuer, dedicated client CA, server identity,

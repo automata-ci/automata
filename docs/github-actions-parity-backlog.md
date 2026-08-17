@@ -26,9 +26,11 @@ durable rerun and protected-environment authority,
 value-safe managed-secret delivery, and immutable multi-workflow fanout. The
 lineage is gap-free, checksum-verified, and extended only through a new
 migration. These are component or experimental foundations unless a later item
-records product acceptance. Hosted Windows CI was removed from `main`; the
-replacement Hyper-V-container component is source-tested but is not a release
-gate until the dedicated-host acceptance suite returns.
+records product acceptance. Hosted Windows CI was removed from the audited
+baseline. Repository CI now restores a native `windows-2025` component lane for
+compilation, strict Clippy, and focused broker and runner tests. It does not
+restore the real-runner release gate, which still requires dedicated-host
+acceptance.
 
 The final baseline retains exact cleanup custody when sandbox creation has an
 uncertain outcome and the provider returns a recovery handle. Missing custody
@@ -1177,12 +1179,14 @@ tools, filesystem conventions, and privileges. See
 
 ### Windows
 
-The Windows implementation is a source-only, unprovisionable trusted-host
-`run:` experiment for single-slot PowerShell, `cmd`, and optional Python. Every
-`uses:` action and all job/service containers are rejected; Job Objects bound
-process lifetime and resource use without changing the inherited account, host
-filesystem, or network. It has no enrollment path or hosted release gate on the
-current baseline.
+The Windows source now defines a schema-v7, shell-only path through a
+fixed-name, digest-pinned broker client, a restricted broker service component,
+and a typed Hyper-V-isolated container provider. Every `uses:` action and all
+job/service containers remain rejected. This is still unprovisionable and not a
+hostile-workload product boundary: pipe authentication is deliberately
+hard-false, production current-admission/renewal/grant repositories and
+enrollment are absent, the synthetic probe is unavailable, and no physical HCS
+release gate has passed.
 
 - [ ] Support all `uses:` actions.
 - [ ] Support Node 24 actions.
@@ -1192,14 +1196,18 @@ current baseline.
 - [ ] Support service and job containers if target scope requires them.
 - [ ] Support multiple parallel jobs safely.
 - [ ] Add Git Bash.
-- [ ] Add isolated Windows providers.
-- [ ] Add restricted-token launch or stronger VM isolation.
-- [ ] Add Hyper-V disposable runners for hostile jobs.
-- [ ] Add service installation and recovery.
+- [ ] Validate and promote the isolated Windows provider on physical hosts.
+- [ ] Prove restricted service identities and Hyper-V isolation end to end.
+- [ ] Ship Hyper-V disposable runners for hostile jobs.
+- [ ] Validate broker service installation, crash recovery, and quarantine.
 - [ ] Add a signed Windows distribution.
 - [ ] Publish a Windows tool and image manifest.
-- [ ] Preserve the trusted-host boundary until stronger isolation exists.
-- [ ] Restore a hosted `windows-2025` build and real-runner release gate.
+- [ ] Keep Windows scheduling and dispatch fail closed until the hostile-host
+  gates pass.
+- [x] Restore a native `windows-2025` component job for compilation, strict
+  Clippy, and focused broker and runner tests.
+- [ ] Add the shipped-product, real-runner Windows release gate on dedicated
+  Hyper-V hosts.
 
 ### macOS
 

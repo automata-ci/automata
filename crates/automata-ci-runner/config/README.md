@@ -17,14 +17,17 @@ follow the
 [profile publication guide](https://github.com/automata-ci/automata/blob/main/images/github-hosted-ubuntu-24.04-x64/README.md)
 before trusting a protected-main candidate.
 
-Product schema v6 accepts exactly one sandbox provider. Host runners use the
+Product schema v7 accepts exactly one sandbox provider. Host runners use the
 top-level `podman` object and require `state.podman`. Kubernetes and local
 Docker runners omit every provider-specific state root and use a top-level
 `kubernetes` or `local_docker` object. Windows and macOS runners use their
-matching provider name in both locations. All non-v6 schemas,
-`windows_native`, and the removed macOS native key are rejected, not migrated.
-The Kubernetes runner loads credentials through standard in-cluster or ambient
-kubeconfig discovery; the JSON remains secret-free.
+matching provider name in both locations. Schema v7 replaces the Windows
+runner's direct Docker executable fields with the digest-pinned restricted-
+broker client and exact broker host identity; the broker service exclusively
+owns its container backend. All non-v7 schemas, the removed direct-runtime
+fields, `windows_native`, and the removed macOS native key are rejected, not
+migrated. The Kubernetes runner loads credentials through standard in-cluster
+or ambient kubeconfig discovery; the JSON remains secret-free.
 
 `object_store.tls_trust` is mandatory and has exactly one of two current
 shapes: `{ "mode": "web_pki" }`, or `{ "mode": "private_ca",
@@ -177,11 +180,13 @@ then provision the runner host according to the requirements below.
 ## Windows Hyper-V-isolated component boundary
 
 The internal Windows product fixture is an unprovisionable source-build path for the implemented
-Hyper-V container provider. It requires one absolute SHA-256-pinned container
-runtime executable, one immutable Windows image reference, and the exact guest
-agent path baked into that image. Every job receives a fresh container with
-`--isolation hyperv`, no network, no host mounts, a writable disposable root,
-and `ContainerUser` identity. Configuration rejects every host-network,
+restricted-broker provider. It requires one absolute, literal,
+SHA-256-pinned broker client executable, the exact broker host identity named
+by placement grants, one immutable Windows image reference, and the exact
+guest-agent path baked into that image. The runner has no Docker executable or
+engine-pipe configuration. The broker contract gives every job a fresh
+Hyper-V-isolated container with no network, no host mounts, a writable
+disposable root, and `ContainerUser` identity. Configuration rejects every host-network,
 host-filesystem, administrator, native-process, process-isolated-container, or
 mutable-image alternative.
 
@@ -206,21 +211,26 @@ macOS VM provider, cannot match. Registered and live-observed capabilities are
 intersected before scheduler matching, and the match is repeated before a
 placement can become a lease.
 
-Without an external promotion envelope the verified candidate's durable
-inventory contains only
-PowerShell and `cmd.exe` shell steps plus command files, with optional support
-for one absolute standalone Python interpreter. A production image may enable
-JavaScript, composite, repository, and local-action capabilities only after a
-canonical Ed25519-signed promotion payload accepts all evidence digests and
-revocation generation. Startup exercises every configured shell, archive,
-hash, Node, and optional Python executable through a copied probe in one fresh
-container. The required Windows enrollment adapter must run the same exact
-profile/tool contract and retain a short-lived authenticated receipt under an
-opaque broker-custody handle. The request binds the shared probe-contract schema
-and digest, and the supplied helper executes the same lifecycle, argv, and
-output checks as startup. This component supplies that request/receipt port;
-the restricted-broker caller and credential-publication integration remain a
-separate deployment gate. Once composed, the enrollment request must use the
+The durable Windows inventory contains only PowerShell and `cmd.exe` shell
+steps plus command files, with optional support for one absolute standalone
+Python interpreter. Promotion verifies the image and tool evidence, but it
+does not authorize JavaScript, composite, repository, local-action, or Node
+capabilities. Those features remain unavailable until the broker independently
+reconstructs and seals the exact server-admitted action graph and archives.
+Before Windows registration can be enabled, startup must exercise every
+configured shell, archive, hash, Node, and optional Python executable through a
+copied probe in one fresh container. The required Windows enrollment adapter
+must run the same exact profile/tool contract and
+retain a short-lived authenticated receipt under an opaque broker-custody
+handle. The request derives its backend identity from `broker_host_id` and
+binds the shared probe-contract schema and digest; the component helper defines
+the same lifecycle, argv, and output checks required of startup. The runtime
+provider is composed through the restricted-broker client. Production enrollment,
+broker-backed key/receipt custody, and credential publication remain
+deliberately unavailable until the broker's dedicated admission operations are
+fully implemented. Server signing configuration alone is not a runnable
+Windows path: production current-admission, placement-renewal, and broker-grant
+authorization repositories are not composed. Any future enrollment composition must use the
 broker-attested ordered host-input set (configuration, executable, manifest,
 lock, evidence records, and promotion envelope), including protected DACL,
 owner, non-reparse, stable file/volume identity, and exact digest proof, and the
@@ -228,16 +238,16 @@ receipt's exact capability set and a staged retry must resolve the identical
 receipt digest and binding. Missing, stale, expired, or tampered custody fails
 closed. The
 `capabilities` command remains a passive shell-only diagnostic and cannot mint
-action authority. Startup independently repeats the probes before opening a
-runtime session, and action/Node features remain schedulable only when the
-registered and live-observed sets agree. There is no `PATH` or Node-generation
-fallback. Docker actions, job
+action authority. Any future operable startup must independently repeat the
+probes before opening a runtime session. There is no `PATH`, action, or
+Node-generation fallback.
+Docker actions, job
 containers, service containers, and active Podman doctor checks remain
 unsupported. The host state root contains provider ownership and recovery
 metadata only; no runner state or credential path is mounted into a job
 container.
 
-The checked-in runtime digest and the files under
+The checked-in broker-client digest and the files under
 [`images/windows-server-2025-hyperv-candidate`](../../../images/windows-server-2025-hyperv-candidate/README.md)
 are explicit candidate fixtures, not promoted artifacts. They exercise the
 contract and verifier interfaces but do not claim that an image was built,
@@ -252,8 +262,13 @@ broker acceptance requirement.
 The internal
 [`runner.windows.product.json`](../tests/fixtures/runner.windows.product.json)
 exists only for schema and component testing. It is not a deployment example
-and must not be copied into production. Follow the
-[Windows isolation plan](../../../docs/platforms/windows.md); no supported
+and must not be copied into production. Do not start it: production pipe authentication,
+broker-owned enrollment, the synthetic admission probe, and durable
+current-admission/renewal/grant repositories are unavailable. Once those gates
+exist, create an ignored host-specific configuration, replace every placeholder
+with externally produced image, broker-client, and broker-host evidence, add
+the external promotion envelope/key configuration, and follow the
+[Windows isolation plan](../../../docs/platforms/windows.md). No supported
 `automata-runner run` Windows path is published yet.
 
 ## macOS virtual-machine example

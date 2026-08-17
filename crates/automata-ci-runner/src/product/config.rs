@@ -40,7 +40,7 @@ use super::windows_image::{
 };
 
 /// Current on-disk runner product configuration schema.
-pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 6;
+pub const RUNNER_PRODUCT_CONFIG_SCHEMA_VERSION: u16 = 7;
 /// Hard ceiling applied before parsing a runner configuration document.
 pub const MAX_RUNNER_CONFIG_BYTES: usize = 256 * 1024;
 const PODMAN_RUNTIME_ROOT_NAME: &str = "automata-ci-podman";
@@ -450,11 +450,12 @@ impl KubernetesProductConfig {
     }
 }
 
-/// Pinned Hyper-V Windows container runtime and guest-agent configuration.
+/// Pinned Hyper-V Windows broker client and guest-agent configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsHyperVProductConfig {
-    runtime_executable: PathBuf,
-    runtime_sha256: Sha256Digest,
+    broker_client_executable: PathBuf,
+    broker_client_sha256: Sha256Digest,
+    broker_host_id: Sha256Digest,
     guest_agent_path: TargetPath,
     operation_timeout: Duration,
     image_contract: WindowsImageContractConfig,
@@ -462,16 +463,22 @@ pub struct WindowsHyperVProductConfig {
 }
 
 impl WindowsHyperVProductConfig {
-    /// Returns the exact pinned Windows container CLI executable.
+    /// Returns the exact pinned restricted-broker client executable.
     #[must_use]
-    pub fn runtime_executable(&self) -> &Path {
-        &self.runtime_executable
+    pub fn broker_client_executable(&self) -> &Path {
+        &self.broker_client_executable
     }
 
-    /// Returns the expected runtime executable digest.
+    /// Returns the expected restricted-broker client digest.
     #[must_use]
-    pub const fn runtime_sha256(&self) -> Sha256Digest {
-        self.runtime_sha256
+    pub const fn broker_client_sha256(&self) -> Sha256Digest {
+        self.broker_client_sha256
+    }
+
+    /// Returns the exact host identity named by placement grants.
+    #[must_use]
+    pub const fn broker_host_id(&self) -> Sha256Digest {
+        self.broker_host_id
     }
 
     /// Returns the exact in-image guest-agent executable path.
@@ -1932,23 +1939,11 @@ fn executor_runtime_features(
 pub(super) fn windows_broker_admission_feature_ceiling(
     toolchain: &ToolchainConfig,
 ) -> BTreeSet<RunnerFeature> {
-    let mut features = executor_runtime_features(toolchain, ProviderKind::WindowsHyperV);
-    features.extend([
-        RunnerFeature::COMPOSITE_ACTIONS,
-        RunnerFeature::REPOSITORY_ACTIONS,
-    ]);
-    for (available, feature) in [
-        (toolchain.node12().is_some(), RunnerFeature::NODE12_ACTIONS),
-        (toolchain.node16().is_some(), RunnerFeature::NODE16_ACTIONS),
-        (toolchain.node20().is_some(), RunnerFeature::NODE20_ACTIONS),
-        (toolchain.node24().is_some(), RunnerFeature::NODE24_ACTIONS),
-    ] {
-        if available {
-            features.insert(feature);
-            features.insert(RunnerFeature::JAVASCRIPT_ACTIONS);
-        }
-    }
-    features
+    // Action materialization is a broker authorization boundary. Until the
+    // broker independently reconstructs the exact server-admitted action
+    // graph and seals every archive, Windows admission is shell-only even if
+    // Node runtimes are present in the candidate image.
+    executor_runtime_features(toolchain, ProviderKind::WindowsHyperV)
 }
 
 #[cfg(test)]
@@ -2326,8 +2321,9 @@ struct RawPodmanProductConfig {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawWindowsHyperVProductConfig {
-    runtime_executable: PathBuf,
-    runtime_sha256: String,
+    broker_client_executable: PathBuf,
+    broker_client_sha256: String,
+    broker_host_id: String,
     guest_agent_path: String,
     operation_timeout_seconds: u64,
     image_contract: RawWindowsImageContractConfig,
@@ -2338,19 +2334,28 @@ impl RawWindowsHyperVProductConfig {
         if std::env::consts::OS != "windows" {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
-        if validate_absolute_path(&self.runtime_executable).is_err()
-            || self.runtime_executable.to_str().is_none_or(|path| {
+        if validate_absolute_path(&self.broker_client_executable).is_err()
+            || self.broker_client_executable.to_str().is_none_or(|path| {
                 !valid_literal_windows_path(path, true)
-                    || path
-                        .rsplit('\\')
-                        .next()
-                        .is_none_or(|name| !name.eq_ignore_ascii_case("docker.exe"))
+                    || path.rsplit('\\').next().is_none_or(|name| {
+                        !name.eq_ignore_ascii_case(
+                            automata_ci_sandbox_windows::WINDOWS_HYPERV_BROKER_CLIENT_BASENAME,
+                        )
+                    })
             })
         {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
-        let runtime_sha256 = Sha256Digest::from_str(&self.runtime_sha256)
+        let broker_client_sha256 = Sha256Digest::from_str(&self.broker_client_sha256)
             .map_err(|_| RunnerProductConfigError::InvalidProvider)?;
+        let broker_host_id = Sha256Digest::from_str(&self.broker_host_id)
+            .map_err(|_| RunnerProductConfigError::InvalidProvider)?;
+        if [broker_client_sha256, broker_host_id]
+            .iter()
+            .any(|digest| digest.as_bytes().iter().all(|byte| *byte == 0))
+        {
+            return Err(RunnerProductConfigError::InvalidProvider);
+        }
         if !valid_literal_windows_path(&self.guest_agent_path, true) {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
@@ -2361,8 +2366,9 @@ impl RawWindowsHyperVProductConfig {
             return Err(RunnerProductConfigError::InvalidProvider);
         }
         Ok(WindowsHyperVProductConfig {
-            runtime_executable: self.runtime_executable,
-            runtime_sha256,
+            broker_client_executable: self.broker_client_executable,
+            broker_client_sha256,
+            broker_host_id,
             guest_agent_path,
             operation_timeout,
             image_contract: self

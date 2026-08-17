@@ -76,14 +76,14 @@ Tasks:
   - [x] Windows runner product loading separately verifies a digest-bound
     Server 2025 manifest/lock, typed digest/media references for provenance,
     SPDX SBOM, patch and revocation artifacts, and an external Ed25519 promotion
-    envelope. Runner composition adds composite,
-    repository, local-action, JavaScript, and exact Node-generation features
-    only after promotion and successful fresh-sandbox tool probes. An
-    authenticated, short-lived broker-custody receipt contract can carry that
-    exact set into Windows enrollment; the restricted-broker caller remains an
-    integration gate. That caller must make startup independently re-probe
-    before live advertisement. Missing, stale, or mismatched
-    receipt/image/tool/runtime evidence fails closed.
+    envelope. Promotion verifies image and tool evidence but intentionally keeps
+    composite, repository, local-action, JavaScript, and Node-generation
+    features unavailable until the broker can reconstruct and seal the exact
+    server-admitted graph and archives. The runtime provider uses only the
+    restricted-broker client, while production enrollment, the synthetic
+    admission probe, and current-admission/renewal/grant repositories remain
+    fail-closed gaps. Missing, stale, or mismatched receipt/image/tool/broker
+    evidence fails closed.
   - [x] Keep temporary placement absence distinct from terminal semantic
     admission. A job that passed its immutable profile ceiling but has no
     currently eligible runner remains durable `NoWork`; admission never derives
