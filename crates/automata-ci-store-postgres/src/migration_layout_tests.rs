@@ -185,6 +185,10 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "0045_runner_certificate_renewal.sql",
         "ee79d5ee0481d72ba62d527da49817cf97b8340203ec8fa8be2cc0abcf615fade1f5854bf155487535666cd956e1181a",
     ),
+    (
+        "0046_github_actions_cache_garbage.sql",
+        "be9b180b7b989138962eb7e9f945611ecc2a6da1d7c89a2addf79c3651075f0e73f2e63c4492395788ce1a699df9b4ad",
+    ),
 ];
 
 const BASELINE_MIGRATION_COUNT: u32 = 26;
@@ -472,6 +476,32 @@ fn runner_certificate_renewal_is_bounded_exact_and_immutable_while_replayable() 
         assert!(
             !source.contains(forbidden),
             "runner-certificate renewal migration retained compatibility surface: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn github_actions_cache_garbage_is_exact_bounded_and_durable() {
+    let source = include_str!("../migrations/0046_github_actions_cache_garbage.sql");
+
+    for required in [
+        "CREATE TABLE github_actions_cache_garbage",
+        "object_key text PRIMARY KEY",
+        "octet_length(digest) = 32",
+        "size_bytes BETWEEN 0 AND 134217728",
+        "queued_at_seconds >= 0",
+        "CREATE INDEX gha_cache_garbage_order",
+        "(queued_at_seconds, object_key)",
+    ] {
+        assert!(
+            source.contains(required),
+            "cache-garbage migration lost required contract: {required}"
+        );
+    }
+    for forbidden in ["IF NOT EXISTS", "ON DELETE", "DEFAULT"] {
+        assert!(
+            !source.contains(forbidden),
+            "cache-garbage migration retained compatibility surface: {forbidden}"
         );
     }
 }

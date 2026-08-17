@@ -92,8 +92,11 @@ repository or unlisted-ref mismatches do not authorize a read.
 PostgreSQL owns fencing, block-list commits, last access, seven-day inactivity
 retention, and a 10 GiB per-repository quota with LRU eviction. Signed downloads
 support `HEAD`, full `GET`, and one byte range with `206` and `416` behavior.
-Eviction currently leaves unreferenced immutable objects for a future bounded
-collector. There is no cache management or delete API.
+Eviction atomically moves every unreachable block descriptor into a durable
+garbage outbox. Cache requests drain that outbox through idempotent exact-object
+deletion before accepting more cache work, so a process or S3 failure can only
+delay reclamation and cannot lose it. There is no cache management or delete
+API.
 
 The bounded Buildx/BuildKit session and provenance surface is implemented, but
 cache interoperability is not yet production-proven. Live CacheService v2

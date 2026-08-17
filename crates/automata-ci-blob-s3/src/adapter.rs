@@ -3,7 +3,7 @@ use std::{fmt, time::Duration};
 use async_trait::async_trait;
 use automata_ci_blob::{
     BlobDescriptor, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    PutBlobOutcome, VerifiedBlob,
+    PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
 };
 use aws_sdk_s3::{
     Client,
@@ -321,6 +321,22 @@ impl ImmutableBlobStore for S3BlobStore {
     }
 }
 
+#[async_trait]
+impl ReclaimableBlobStore for S3BlobStore {
+    async fn delete_if_present(&self, descriptor: &BlobDescriptor) -> Result<(), BlobStoreError> {
+        let request = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(self.object_key(descriptor));
+        match timeout_at(Instant::now() + self.operation_timeout, request.send()).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(map_delete_error(&error)),
+            Err(_) => Err(BlobStoreError::new(BlobStoreErrorKind::Unavailable)),
+        }
+    }
+}
+
 fn existing_object_error(error: BlobStoreError) -> BlobStoreError {
     match error.kind() {
         BlobStoreErrorKind::Integrity | BlobStoreErrorKind::NotFound => {
@@ -347,6 +363,15 @@ fn map_put_error(
 
 fn map_get_error(
     error: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>,
+) -> BlobStoreError {
+    map_sdk_error(
+        response_status(error),
+        error.as_service_error().and_then(|value| value.code()),
+    )
+}
+
+fn map_delete_error(
+    error: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::delete_object::DeleteObjectError>,
 ) -> BlobStoreError {
     map_sdk_error(
         response_status(error),

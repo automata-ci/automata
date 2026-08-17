@@ -9,7 +9,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_blob::MemoryBlobStore;
+use automata_ci_blob::{
+    BlobDescriptor, BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
+    MemoryBlobStore,
+};
 use automata_ci_core::Sha256Digest;
 use automata_ci_results_github::{
     CacheAuthority, CacheBlock, CacheEntryId, CacheFinalizationPreparation, CacheLimits,
@@ -86,6 +89,7 @@ impl ResultsObserver for RecordingObserver {
 #[derive(Debug, Default)]
 struct MemoryCacheRepository {
     state: Mutex<Option<MemoryEntry>>,
+    garbage: Mutex<Vec<BlobDescriptor>>,
 }
 
 #[derive(Debug)]
@@ -139,6 +143,31 @@ impl MemoryEntry {
 
 #[async_trait]
 impl CacheRepository for MemoryCacheRepository {
+    async fn list_garbage(
+        &self,
+        maximum: usize,
+    ) -> Result<Vec<BlobDescriptor>, CacheRepositoryError> {
+        Ok(self
+            .garbage
+            .lock()
+            .expect("memory garbage")
+            .iter()
+            .take(maximum)
+            .cloned()
+            .collect())
+    }
+
+    async fn complete_garbage(
+        &self,
+        descriptors: Vec<BlobDescriptor>,
+    ) -> Result<(), CacheRepositoryError> {
+        self.garbage
+            .lock()
+            .expect("memory garbage")
+            .retain(|candidate| !descriptors.contains(candidate));
+        Ok(())
+    }
+
     async fn create(
         &self,
         request: CreateCacheEntry,
@@ -445,6 +474,58 @@ fn issue_cache_token(
         .expect("token")
         .expose_secret()
         .to_owned()
+}
+
+#[tokio::test]
+async fn cache_service_reclaims_durable_garbage_before_accepting_new_work() {
+    let objects = Arc::new(MemoryBlobStore::default());
+    let payload = BlobPayload::from_bytes(
+        BlobKey::new("cache-staging/unreachable").expect("garbage key"),
+        MediaType::new("application/octet-stream").expect("media type"),
+        Bytes::from_static(b"unreachable cache block"),
+    );
+    let descriptor = payload.descriptor().clone();
+    objects
+        .put_if_absent(payload)
+        .await
+        .expect("garbage fixture");
+    let repository = Arc::new(MemoryCacheRepository {
+        state: Mutex::new(None),
+        garbage: Mutex::new(vec![descriptor.clone()]),
+    });
+    let service = CacheService::new(
+        repository.clone(),
+        objects.clone(),
+        Arc::new(FixedClock(10_000)),
+        Arc::new(FixedIds(UploadId::from_uuid(Uuid::from_u128(0x9abc)))),
+        CacheLimits::default(),
+    );
+
+    service
+        .create(
+            fresh_execution_authority(1),
+            cache_authority(
+                "automata/results-test",
+                &[("refs/heads/main", CachePermission::ReadWrite)],
+            ),
+            "fresh-cache".to_owned(),
+            "version-1".to_owned(),
+        )
+        .await
+        .expect("create after garbage collection");
+
+    assert!(
+        repository
+            .garbage
+            .lock()
+            .expect("memory garbage")
+            .is_empty()
+    );
+    let error = objects
+        .get_verified(&descriptor, descriptor.size())
+        .await
+        .expect_err("garbage object must be deleted");
+    assert_eq!(error.kind(), BlobStoreErrorKind::NotFound);
 }
 
 fn fixture_with_url_observer_and_limits(

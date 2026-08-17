@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    MediaType, MemoryBlobStore, PutBlobOutcome, VerifiedBlob,
+    MediaType, MemoryBlobStore, PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
 };
 use automata_ci_results_github::{
     ObservedResultsBlobStore, ResultsBlobOperation, ResultsBlobOperationOutcome,
@@ -24,7 +24,7 @@ fn payload(key: &str, bytes: &'static [u8]) -> BlobPayload {
 #[tokio::test]
 async fn successful_put_and_get_record_only_closed_labels_and_actual_bytes() {
     let recorder = RecordingObserver::default();
-    let inner: Arc<dyn ImmutableBlobStore> = Arc::new(MemoryBlobStore::default());
+    let inner: Arc<dyn ReclaimableBlobStore> = Arc::new(MemoryBlobStore::default());
     let store = ObservedResultsBlobStore::new(inner, Arc::new(recorder.clone()));
     let private_key = "private/tenant-91/artifact-secret-digest";
     let payload = payload(private_key, b"immutable payload");
@@ -85,10 +85,17 @@ impl ImmutableBlobStore for FailingBlobStore {
     }
 }
 
+#[async_trait]
+impl ReclaimableBlobStore for FailingBlobStore {
+    async fn delete_if_present(&self, _descriptor: &BlobDescriptor) -> Result<(), BlobStoreError> {
+        Err(BlobStoreError::new(BlobStoreErrorKind::Unavailable))
+    }
+}
+
 #[tokio::test]
 async fn provider_errors_are_sanitized_and_never_emit_bytes() {
     let recorder = RecordingObserver::default();
-    let inner: Arc<dyn ImmutableBlobStore> = Arc::new(FailingBlobStore);
+    let inner: Arc<dyn ReclaimableBlobStore> = Arc::new(FailingBlobStore);
     let store = ObservedResultsBlobStore::new(inner, Arc::new(recorder.clone()));
     let payload = payload("private/error-key", b"not accepted");
     let descriptor = payload.descriptor().clone();
@@ -154,11 +161,18 @@ impl ImmutableBlobStore for PendingBlobStore {
     }
 }
 
+#[async_trait]
+impl ReclaimableBlobStore for PendingBlobStore {
+    async fn delete_if_present(&self, _descriptor: &BlobDescriptor) -> Result<(), BlobStoreError> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn dropped_provider_future_records_one_cancellation_without_bytes() {
     let recorder = RecordingObserver::default();
     let entered = Arc::new(Notify::new());
-    let inner: Arc<dyn ImmutableBlobStore> = Arc::new(PendingBlobStore {
+    let inner: Arc<dyn ReclaimableBlobStore> = Arc::new(PendingBlobStore {
         entered: Arc::clone(&entered),
         release: Arc::new(Notify::new()),
     });

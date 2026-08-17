@@ -15,4 +15,4 @@ pub use model::{
     BlobDescriptor, BlobKey, BlobKeyError, BlobPayload, BlobPayloadError, MediaType,
     MediaTypeError, PutBlobOutcome, VerifiedBlob,
 };
-pub use port::{BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore};
+pub use port::{BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore, ReclaimableBlobStore};

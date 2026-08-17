@@ -1,11 +1,12 @@
 use std::{fmt, sync::Arc};
 
 use automata_ci_blob::{
-    BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    MediaType,
+    BlobDescriptor, BlobKey, BlobPayload, BlobStoreError, BlobStoreErrorKind, MediaType,
+    ReclaimableBlobStore,
 };
 use automata_ci_core::Sha256Digest;
 use bytes::Bytes;
+use futures::{StreamExt as _, TryStreamExt as _, stream};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
@@ -25,6 +26,7 @@ const MAXIMUM_DURABLE_CACHE_BLOCK_BYTES: u64 = 134_217_728;
 const MAXIMUM_DURABLE_CACHE_BLOCKS: usize = 50_000;
 const MAXIMUM_DURABLE_CACHE_BYTES: u64 = 10_737_418_240;
 const MAXIMUM_CACHE_KEYS: usize = 10;
+const CACHE_GARBAGE_BATCH: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CacheServiceLimitRejection {
@@ -243,7 +245,7 @@ pub struct PreparedCacheDownload {
 /// Application service for the current GitHub Actions cache-v2 protocol.
 pub struct CacheService {
     repository: CacheRepositoryPort,
-    objects: Arc<dyn ImmutableBlobStore>,
+    objects: Arc<dyn ReclaimableBlobStore>,
     clock: Arc<dyn ResultsClock>,
     ids: Arc<dyn ResultsIdGenerator>,
     limits: CacheLimits,
@@ -254,7 +256,7 @@ impl CacheService {
     #[must_use]
     pub fn new(
         repository: CacheRepositoryPort,
-        objects: Arc<dyn ImmutableBlobStore>,
+        objects: Arc<dyn ReclaimableBlobStore>,
         clock: Arc<dyn ResultsClock>,
         ids: Arc<dyn ResultsIdGenerator>,
         limits: CacheLimits,
@@ -287,6 +289,7 @@ impl CacheService {
         key: String,
         version: String,
     ) -> Result<CreatedCacheEntry, CacheServiceError> {
+        self.collect_garbage().await?;
         let key = CacheKey::new(key).map_err(|_| invalid())?;
         let version = CacheVersion::new(version).map_err(|_| invalid())?;
         if cache.writable_scope().is_none() {
@@ -296,7 +299,8 @@ impl CacheService {
         }
         let entry_id = CacheEntryId::new(self.ids.next_upload_id().as_uuid())
             .map_err(|_| CacheServiceError::new(CacheServiceErrorKind::Internal))?;
-        self.repository
+        let created = self
+            .repository
             .create(CreateCacheEntry {
                 execution,
                 cache,
@@ -306,7 +310,9 @@ impl CacheService {
                 observed_at_seconds: self.clock.now_seconds(),
             })
             .await
-            .map_err(map_repository_error)
+            .map_err(map_repository_error)?;
+        self.collect_garbage().await?;
+        Ok(created)
     }
 
     /// Stages one immutable Azure block.
@@ -398,6 +404,7 @@ impl CacheService {
         version: String,
         claimed_size: u64,
     ) -> Result<FinalizedCacheEntry, CacheServiceError> {
+        self.collect_garbage().await?;
         let key = CacheKey::new(key).map_err(|_| invalid())?;
         let version = CacheVersion::new(version).map_err(|_| invalid())?;
         if cache.writable_scope().is_none() || claimed_size > self.limits.maximum_entry_bytes {
@@ -422,6 +429,7 @@ impl CacheService {
             let CacheFinalizationPreparation::Finalized(finalized) = prepared else {
                 unreachable!("closed finalization preparation")
             };
+            self.collect_garbage().await?;
             return Ok(finalized);
         };
         if prepared.size != claimed_size {
@@ -444,7 +452,8 @@ impl CacheService {
             return Err(CacheServiceError::new(CacheServiceErrorKind::Conflict));
         }
         let digest = Sha256Digest::from_bytes(hasher.finalize().into());
-        self.repository
+        let finalized = self
+            .repository
             .complete_finalization(CompleteCacheFinalization {
                 execution,
                 cache,
@@ -458,7 +467,44 @@ impl CacheService {
                 inactivity_seconds: self.limits.inactivity_seconds,
             })
             .await
-            .map_err(map_repository_error)
+            .map_err(map_repository_error)?;
+        self.collect_garbage().await?;
+        Ok(finalized)
+    }
+
+    async fn collect_garbage(&self) -> Result<(), CacheServiceError> {
+        loop {
+            let descriptors = self
+                .repository
+                .list_garbage(CACHE_GARBAGE_BATCH)
+                .await
+                .map_err(map_repository_error)?;
+            if descriptors.is_empty() {
+                return Ok(());
+            }
+            let objects = Arc::clone(&self.objects);
+            stream::iter(descriptors.iter().cloned())
+                .map(move |descriptor| {
+                    let objects = Arc::clone(&objects);
+                    async move {
+                        objects
+                            .delete_if_present(&descriptor)
+                            .await
+                            .map_err(map_blob_error)
+                    }
+                })
+                .buffer_unordered(16)
+                .try_collect::<Vec<_>>()
+                .await?;
+            let complete = descriptors.len() < CACHE_GARBAGE_BATCH;
+            self.repository
+                .complete_garbage(descriptors)
+                .await
+                .map_err(map_repository_error)?;
+            if complete {
+                return Ok(());
+            }
+        }
     }
 
     /// Resolves a cache using ordered scope, exact, and prefix precedence.

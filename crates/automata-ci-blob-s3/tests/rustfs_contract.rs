@@ -2,6 +2,7 @@ use std::{env, time::Duration};
 
 use automata_ci_blob::{
     BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType, PutBlobOutcome,
+    ReclaimableBlobStore,
 };
 use automata_ci_blob_s3::{S3AtRestEncryption, S3BlobStoreConfig, StaticS3Credentials};
 use bytes::Bytes;
@@ -73,4 +74,18 @@ async fn rustfs_conditional_put_and_verified_read_contract() {
         .await
         .expect_err("immutable overwrite");
     assert_eq!(error.kind(), BlobStoreErrorKind::Conflict);
+
+    store
+        .delete_if_present(payload.descriptor())
+        .await
+        .expect("delete unreachable object");
+    store
+        .delete_if_present(payload.descriptor())
+        .await
+        .expect("idempotent delete replay");
+    let error = store
+        .get_verified(payload.descriptor(), payload.descriptor().size())
+        .await
+        .expect_err("deleted object must be absent");
+    assert_eq!(error.kind(), BlobStoreErrorKind::NotFound);
 }

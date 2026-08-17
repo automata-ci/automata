@@ -16,8 +16,8 @@ use automata_ci_auth_postgres::{
     PostgresDelegatedActorResolver, PostgresHumanRbacManagementRepository,
     PostgresRunnerEnrollmentRepository,
 };
-use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
-use automata_ci_blob_s3::S3BlobStoreConfigError;
+use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType, ReclaimableBlobStore};
+use automata_ci_blob_s3::{S3BlobStore, S3BlobStoreConfigError};
 use automata_ci_control::lease::{
     LeaseClock, LeaseIdGenerator, RandomLeaseIdGenerator, RunnableScanLimit, SystemLeaseClock,
     repository::RunnerLeaseRequestRepository,
@@ -270,7 +270,8 @@ impl ProductionComponents {
         metrics: &ControlPlaneMetrics,
     ) -> Result<Self, ServerCompositionError> {
         let tls = load_server_tls(config)?;
-        let blob_store = build_blob_store(config)?;
+        let reclaimable_blob_store = build_blob_store(config)?;
+        let blob_store: Arc<dyn ImmutableBlobStore> = reclaimable_blob_store.clone();
         let DatabaseBuild {
             store,
             control_plane_key_provider,
@@ -570,7 +571,7 @@ impl ProductionComponents {
         let (results_api, results_runtime_authority_issuer) = build_results(
             config,
             store.as_ref(),
-            blob_store.clone(),
+            reclaimable_blob_store,
             cache_repositories,
             metrics,
         )?;
@@ -910,7 +911,7 @@ async fn build_github_provider_runtime(
 fn build_results(
     config: &ServerConfig,
     store: &PostgresStore,
-    blob_store: Arc<dyn ImmutableBlobStore>,
+    blob_store: Arc<dyn ReclaimableBlobStore>,
     cache_repositories: Vec<CacheRepositoryMetadata>,
     metrics: &ControlPlaneMetrics,
 ) -> Result<
@@ -954,23 +955,31 @@ fn build_results(
         repository,
         Arc::clone(&observer),
     ));
-    let blob_store: Arc<dyn ImmutableBlobStore> = Arc::new(ObservedResultsBlobStore::new(
+    let blob_store = Arc::new(ObservedResultsBlobStore::new(
         blob_store,
         Arc::clone(&observer),
     ));
+    let cache_objects: Arc<dyn ReclaimableBlobStore> = blob_store.clone();
+    let artifact_objects: Arc<dyn ImmutableBlobStore> = blob_store;
     let ids: Arc<dyn ResultsIdGenerator> = Arc::new(SystemResultsIdGenerator);
     let cache_repository: Arc<dyn CacheRepository> =
         Arc::new(PostgresCacheRepository::new(store.postgres_pool().clone()));
     let cache_service = Arc::new(CacheService::new(
         cache_repository,
-        Arc::clone(&blob_store),
+        cache_objects,
         Arc::clone(&clock),
         Arc::clone(&ids),
         CacheLimits::default(),
     ));
     let service = Arc::new(
-        ArtifactService::new(repository, blob_store, clock, ids, ResultsLimits::default())
-            .with_observer(Arc::clone(&observer)),
+        ArtifactService::new(
+            repository,
+            artifact_objects,
+            clock,
+            ids,
+            ResultsLimits::default(),
+        )
+        .with_observer(Arc::clone(&observer)),
     );
     let runtime_tokens = authority.clone();
     let upload_capabilities = authority.clone();
@@ -1849,9 +1858,7 @@ impl ReadinessProbe for ImmutableBlobReadinessProbe {
     }
 }
 
-fn build_blob_store(
-    config: &ServerConfig,
-) -> Result<Arc<dyn ImmutableBlobStore>, ServerCompositionError> {
+fn build_blob_store(config: &ServerConfig) -> Result<Arc<S3BlobStore>, ServerCompositionError> {
     let store = crate::object_store::connect(&config.s3).map_err(|error| match error {
         crate::object_store::ObjectStoreConnectionError::Secret(error) => {
             ServerCompositionError::Secret(error)

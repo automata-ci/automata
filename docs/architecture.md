@@ -120,6 +120,12 @@ transactions and fencing rather than process-local locks.
 
 S3-compatible storage owns immutable workflow and action bundles, log segments,
 artifacts, cache objects, and final manifests. It is not used for coordination.
+Cache quota and retention eviction first records unreachable object descriptors
+in a PostgreSQL outbox in the same transaction that removes their readable
+metadata. Either control-plane replica may then perform idempotent deletion and
+acknowledge the exact descriptor. A crash between those steps leaves durable
+work for the next cache request instead of leaking storage or exposing a missing
+object through live metadata.
 
 Scheduled GitHub workflows use a separate durable path from webhooks. A
 manifest-pinned discovery claim binds an owner-bound provider revision, exact

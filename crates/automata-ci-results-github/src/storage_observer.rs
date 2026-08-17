@@ -3,7 +3,7 @@ use std::{fmt, future::Future, sync::Arc, time::Instant};
 use async_trait::async_trait;
 use automata_ci_blob::{
     BlobDescriptor, BlobPayload, BlobStoreError, BlobStoreErrorKind, ImmutableBlobStore,
-    PutBlobOutcome, VerifiedBlob,
+    PutBlobOutcome, ReclaimableBlobStore, VerifiedBlob,
 };
 
 use crate::{
@@ -23,15 +23,22 @@ use crate::{
 /// Identifier-free metrics decorator for the provider-neutral immutable-blob port.
 #[derive(Clone)]
 pub struct ObservedResultsBlobStore {
-    inner: Arc<dyn ImmutableBlobStore>,
+    inner: Arc<dyn ReclaimableBlobStore>,
     observer: Arc<dyn ResultsObserver>,
 }
 
 impl ObservedResultsBlobStore {
     /// Wraps one immutable-blob provider without changing its behavior.
     #[must_use]
-    pub fn new(inner: Arc<dyn ImmutableBlobStore>, observer: Arc<dyn ResultsObserver>) -> Self {
+    pub fn new(inner: Arc<dyn ReclaimableBlobStore>, observer: Arc<dyn ResultsObserver>) -> Self {
         Self { inner, observer }
+    }
+}
+
+#[async_trait]
+impl ReclaimableBlobStore for ObservedResultsBlobStore {
+    async fn delete_if_present(&self, descriptor: &BlobDescriptor) -> Result<(), BlobStoreError> {
+        self.inner.delete_if_present(descriptor).await
     }
 }
 

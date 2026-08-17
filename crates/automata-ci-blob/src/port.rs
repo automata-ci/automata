@@ -61,3 +61,16 @@ pub trait ImmutableBlobStore: std::fmt::Debug + Send + Sync {
         maximum_bytes: u64,
     ) -> Result<VerifiedBlob, BlobStoreError>;
 }
+
+/// Explicit reclamation capability for immutable objects whose durable
+/// references have been retired.
+///
+/// Publication remains immutable: implementations must never overwrite an
+/// object. Deletion is idempotent and is permitted only after the coordination
+/// store has durably made the descriptor unreachable.
+#[async_trait]
+pub trait ReclaimableBlobStore: ImmutableBlobStore {
+    /// Deletes one exact unreachable object, succeeding when it is already
+    /// absent.
+    async fn delete_if_present(&self, descriptor: &BlobDescriptor) -> Result<(), BlobStoreError>;
+}
