@@ -7,6 +7,8 @@
 
 mod clock;
 mod database;
+#[cfg(feature = "test-support")]
+mod github_workflow_permissions;
 mod timing;
 
 #[cfg(test)]
@@ -20,6 +22,8 @@ use std::{future::Future, sync::Arc};
 pub use clock::TestClock;
 #[cfg(feature = "test-support")]
 use database::{PostgresTestHarness, PreparedTemplate, TestDatabase};
+#[cfg(feature = "test-support")]
+pub use github_workflow_permissions::activate_github_workflow_permission_defaults;
 #[cfg(feature = "test-support")]
 use sqlx::PgPool;
 #[cfg(feature = "test-support")]

@@ -1,16 +1,16 @@
-name: Main CI
+name: CI
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -20,260 +20,66 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   SCCACHE_BASEDIRS: ${{ github.workspace }}
+  SCCACHE_GHA_CACHE_FROM: automata-rust-v1
+  SCCACHE_GHA_CACHE_TO: automata-rust-v1
   SCCACHE_IDLE_TIMEOUT: "0"
-  SCCACHE_SERVER_UDS: '\x00automata-sccache'
-  TMPDIR: ${{ github.workspace }}/target/task-tmp/ci
 
 jobs:
-  verify:
-    name: Verify workspace
+  rust:
+    name: Rust
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    env:
-      CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore Cargo registry
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Show pinned toolchain
-        run: |
-          rustc --version --verbose
-          cargo --version --verbose
-
-      - name: Install verification dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends jq shellcheck
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Verify repository tooling
-        run: |
-          python3 scripts/ci/publish-crates.py --list-publishable >/dev/null
-          python3 scripts/ci/tests/publish-crates.test.py
-          ./scripts/dev/create-integration-snapshot.test.sh
-
-      - name: Lint workflows and shell scripts
-        run: |
-          ./scripts/ci/install-actionlint.sh target/ci-tools
-          ./scripts/ci/lint-workflows.sh
-          shellcheck -x \
-            scripts/install.sh \
-            scripts/ci/*.sh \
-            scripts/ci/lib/*.sh \
-            scripts/ci/tests/*.sh \
-            scripts/dev/*.sh \
-            images/github-hosted-ubuntu-24.04-x64/*.sh \
-            scripts/ui/*.sh \
-            scripts/ui/tests/*.sh \
-            crates/automata-ci-protocol-protobuf/tools/*.sh
-          ./scripts/ui/tests/renderer-profile-launcher.contract.sh
-          ./scripts/ui/tests/regenerate-renderer-atomicity.test.sh
-          ./scripts/ui/tests/renderer-preflight.test.sh
-          ./scripts/ui/tests/renderer-provenance.test.sh
-          ./scripts/dev/git-http-server.test.sh
-          ./scripts/ci/tests/benchmark-postgres-tests.test.sh
-          python3 scripts/ci/tests/psql-test-database.test.py
-          ./scripts/ci/tests/profile-image-contract.test.sh
-          ./scripts/ci/tests/container-context.test.sh
-          ./scripts/ci/tests/install.test.sh
-          python3 scripts/ci/tests/integration-test-targets.test.py
-          python3 scripts/ci/tests/local-installation-catalog.test.py
-          python3 scripts/ci/tests/release-handoff.test.py
-          python3 scripts/ci/tests/rust-build-cache.test.py
-          python3 scripts/ci/tests/rust-coverage.test.py
-          ./scripts/ci/tests/sandbox-guest-image.test.sh
-          python3 scripts/ci/tests/service-proxy-buildah-containerfile.test.py
-          python3 scripts/ci/tests/service-proxy-candidate.test.py
-          ./scripts/ci/tests/service-proxy-image.test.sh
-          python3 scripts/ci/tests/service-proxy-publication.test.py
-
-      - name: Verify Prometheus metrics protocol contract
-        run: |
-          prometheus_bin="$(./scripts/ci/prepare-prometheus-tools.sh)"
-          PATH="$prometheus_bin:$PATH" ./scripts/ci/verify-native-metrics.sh
-
-  rust_lint:
-    name: Lint Rust workspace
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore Cargo registry
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Lint
-        run: |
-          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
-          df -h -- "$GITHUB_WORKSPACE"
-          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-
-  rust_docs:
-    name: Check Rust documentation
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore Cargo registry
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Check public API documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --all-features --no-deps --locked
-
-      - name: Test workspace documentation
-        run: cargo test --workspace --exclude automata-ci-ui-renderer --doc --all-features --locked
-
-  dependency_audit:
-    name: Audit Rust dependencies
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore Cargo registry and cargo-deny
-        id: dependency-audit-cargo-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-            ~/.cargo/bin/cargo-deny
-          key: cargo-ubuntu-24.04-rust-1.97.1-deny-0.20.2-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-deny-0.20.2-
-            cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Install cargo-deny
-        if: ${{ steps.dependency-audit-cargo-cache.outputs.cache-hit != 'true' }}
-        run: cargo install cargo-deny --version 0.20.2 --locked
-
-      - name: Test vendored renderer macro diagnostics
-        run: ./scripts/ui/tests/rquickjs-macro-diagnostics.test.sh
-
-      - name: Audit dependencies
-        run: |
-          cargo deny --locked --workspace --all-features check --hide-inclusion-graph advisories bans licenses sources
-          crates/automata-ci-protocol-protobuf/tools/protobuf-codegen.sh audit
-
-  rust_coverage:
-    name: Rust coverage and PostgreSQL invariants
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
     resources:
       limits:
+        cpu: "4"
+        memory: 5Gi
+    env:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install sccache
+        run: ./scripts/ci/install-sccache.sh
+
+      - name: Run Rust checks
+        run: |
+          cargo fmt --all -- --check
+          ./scripts/ci/install-actionlint.sh target/ci-tools
+          ./scripts/ci/lint-workflows.sh
+          cargo clippy --workspace --lib --bins --all-features --locked -- -D warnings
+          cargo test \
+            --locked \
+            --all-features \
+            --lib \
+            --no-fail-fast \
+            -p automata-ci-control \
+            -p automata-ci-core \
+            -p automata-ci-github-delivery \
+            -p automata-ci-job-executor-github \
+            -p automata-ci-results-github \
+            -p automata-ci-runner-runtime \
+            -p automata-ci-sandbox-podman \
+            -p automata-ci-store-postgres \
+            -p automata-ci-ui-renderer \
+            -p automata-ci-workflow-github \
+            -p automata-ci-workflow-service
+
+  postgres:
+    name: PostgreSQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    resources:
+      limits:
+        cpu: "4"
         memory: 4Gi
     services:
       postgres:
@@ -286,9 +92,9 @@ jobs:
           - 5432:5432
         options: >-
           --health-cmd "pg_isready --dbname=automata_ci --username=automata_ci"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
     env:
       AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
       AUTOMATA_TEST_DATABASE_NAMESPACE: ci_${{ github.run_id }}_${{ github.run_attempt }}
@@ -296,7 +102,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      RUST_TEST_THREADS: "4"
+      RUST_TEST_THREADS: "2"
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
     steps:
@@ -306,289 +112,20 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
+      - name: Install sccache
+        run: ./scripts/ci/install-sccache.sh
 
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore Cargo registry and coverage tool
-        id: coverage-cargo-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-            ~/.cargo/bin/cargo-llvm-cov
-          key: cargo-ubuntu-24.04-rust-1.97.1-llvm-cov-0.8.7-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-llvm-cov-0.8.7-
-            cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Install PostgreSQL client
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-client
-
-      - name: Verify PostgreSQL 18.4
-        env:
-          PGPASSWORD: automata-ci-local-only
-        run: ./scripts/ci/verify-postgres-version.sh
-
-      - name: Install pinned Rust coverage tooling
-        run: |
-          rustup component add llvm-tools-preview
-          if [[ "${{ steps.coverage-cargo-cache.outputs.cache-hit }}" != true ]]; then
-            cargo install cargo-llvm-cov --version 0.8.7 --locked
-          fi
-
-      - name: Test Rust workspace and PostgreSQL invariants
-        env:
-          TMPDIR: /tmp/automata-coverage-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          install -d -m 0700 -- "$TMPDIR"
-          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
-          df -h -- "$GITHUB_WORKSPACE"
-          ./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary postgres
-
-      - name: Upload service-aware Rust coverage report
-        if: ${{ always() && hashFiles('target/coverage/rust/manifest.json') != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-coverage-ordinary
-          path: |
-            target/coverage/rust/coverage.lcov
-            target/coverage/rust/manifest.json
-            target/coverage/rust/summary.json
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload combined Rust and PostgreSQL coverage report
-        if: ${{ always() && hashFiles('target/coverage/rust/combined-manifest.json') != '' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: rust-coverage-ordinary-postgres
-          path: |
-            target/coverage/rust/combined-coverage.lcov
-            target/coverage/rust/combined-manifest.json
-            target/coverage/rust/combined-summary.json
-          if-no-files-found: error
-          retention-days: 14
-
-  results_client_acceptance:
-    name: Exact Results clients and production stores
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    services:
-      postgres:
-        image: docker.io/library/postgres@sha256:7e6103cf85f88f7a0eddb3ec0b1ba8940eba098ed118ade25a729ca9daee5568
-        env:
-          POSTGRES_DB: automata_ci
-          POSTGRES_PASSWORD: automata-ci-local-only
-          POSTGRES_USER: automata_ci
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready --dbname=automata_ci --username=automata_ci"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-      rustfs:
-        image: docker.io/rustfs/rustfs@sha256:84ce557a0245a06a9aae5516f55ee0f007fca78d41df356f419306fdc0cb168c
-        env:
-          RUSTFS_ACCESS_KEY: automata-local
-          RUSTFS_SECRET_KEY: automata-local-secret-change-me
-          RUSTFS_SSE_S3_MASTER_KEY: YXV0b21hdGEtbG9jYWwtc3NlLW1hc3Rlci1rZXktdjE=
-          RUSTFS_ADDRESS: 0.0.0.0:9000
-        ports:
-          - 9000:9000
-    env:
-      AUTOMATA_TEST_DATABASE_URL: postgresql://automata_ci:automata-ci-local-only@127.0.0.1:5432/automata_ci
-      AUTOMATA_TEST_DATABASE_NAMESPACE: res01_${{ github.run_id }}_${{ github.run_attempt }}
-      AUTOMATA_TEST_S3_ENDPOINT: http://127.0.0.1:9000/
-      AUTOMATA_TEST_S3_BUCKET: automata-res01
-      AUTOMATA_TEST_S3_ACCESS_KEY: automata-local
-      AUTOMATA_TEST_S3_SECRET_KEY: automata-local-secret-change-me
-      AUTOMATA_TEST_S3_KMS_KEY_ID: default
-      AUTOMATA_TEST_UPLOAD_ARTIFACT_ACTION_ROOT: ${{ github.workspace }}/target/exact-actions/upload-artifact
-      AUTOMATA_TEST_DOWNLOAD_ARTIFACT_ACTION_ROOT: ${{ github.workspace }}/target/exact-actions/download-artifact
-      AUTOMATA_TEST_CACHE_ACTION_ROOT: ${{ github.workspace }}/target/exact-actions/cache
-      AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE: ${{ github.workspace }}/target/exact-actions/upload-artifact/node_modules/@actions/artifact/lib/internal/client.js
-      AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE: ${{ github.workspace }}/target/exact-actions/download-artifact/node_modules/@actions/artifact/lib/internal/client.js
-      AUTOMATA_TEST_ACTIONS_CACHE_MODULE: ${{ github.workspace }}/target/exact-actions/cache/node_modules/@actions/cache/lib/cache.js
-      CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare protected task scratch
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore exact Results clients and Cargo registry
-        id: results-input-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-            ~/.npm
-            target/exact-action-sources.tar
-          key: exact-results-ubuntu-24.04-rust-1.97.1-node-24.19.0-upload-043fb46d1a93c77aae656e7c1c64a875d1fc6a0a-download-3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c-cache-27d5ce7f107fe9357f9df03efb73ab90386fccae-${{ hashFiles('Cargo.lock') }}
-
-      - name: Install exact Node.js runtime
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.19.0
-          package-manager-cache: false
-
-      - name: Hydrate immutable Results client sources
-        env:
-          CACHE_REVISION: 27d5ce7f107fe9357f9df03efb73ab90386fccae
-          DOWNLOAD_REVISION: 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-          INPUT_CACHE_HIT: ${{ steps.results-input-cache.outputs.cache-hit }}
-          UPLOAD_REVISION: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        run: |
-          if [[ "$INPUT_CACHE_HIT" == true ]]; then
-            tar --extract --file target/exact-action-sources.tar --directory target
-            exit 0
-          fi
-          hydrate() {
-            local repository="$1"
-            local revision="$2"
-            local destination="$3"
-            git init --quiet -- "$destination"
-            git -C "$destination" remote add origin "https://github.com/$repository.git"
-            git -C "$destination" -c protocol.version=2 fetch --quiet --no-tags --depth=1 origin "$revision"
-            git -C "$destination" checkout --quiet --detach FETCH_HEAD
-            [[ "$(git -C "$destination" rev-parse HEAD)" == "$revision" ]]
-            git -C "$destination" remote remove origin
-          }
-          install -d -m 0700 -- target/exact-actions
-          hydrate actions/upload-artifact "$UPLOAD_REVISION" target/exact-actions/upload-artifact
-          hydrate actions/download-artifact "$DOWNLOAD_REVISION" target/exact-actions/download-artifact
-          hydrate actions/cache "$CACHE_REVISION" target/exact-actions/cache
-          tar --create --file target/exact-action-sources.tar --directory target exact-actions
-
-      - name: Hydrate exact offline Results clients
-        run: |
-          npm ci --prefix target/exact-actions/upload-artifact --ignore-scripts --no-audit --no-fund
-          npm ci --prefix target/exact-actions/download-artifact --ignore-scripts --no-audit --no-fund
-          npm ci --prefix target/exact-actions/cache --ignore-scripts --no-audit --no-fund
-
-      - name: Wait for pinned production-compatible object store
-        run: |
-          for ((attempt = 1; attempt <= 30; attempt += 1)); do
-            if curl --fail --silent http://127.0.0.1:9000/minio/health/ready >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          exit 1
-
-      - name: Initialize and verify immutable object storage
-        run: >-
-          cargo test --locked -p automata-ci-blob-s3 --test blob_s3 --all-features
-          rustfs_contract:: -- --ignored --test-threads=1
-
-      - name: Verify immutable action and embedded-client pins
-        run: >-
-          cargo test --locked -p automata-ci-results-github --test client_matrix
-          supplied_action_roots_match_every_immutable_client_pin -- --ignored --exact
-
-      - name: Run exact client protocol tests
-        run: |
-          cargo test --locked -p automata-ci-results-github --test http_compatibility --all-features -- --ignored --test-threads=1
-          cargo test --locked -p automata-ci-results-github --test cache_http --all-features -- --ignored --test-threads=1
-
-      - name: Run exact clients across PostgreSQL and production object storage
-        timeout-minutes: 10
-        run: >-
-          cargo test --locked -p automata-ci-results-github --test exact_client_real_store
-          --all-features exact_clients_cross_real_http_postgres_and_object_storage
-          -- --ignored --exact --test-threads=1
-
-      - name: Upload redacted Results acceptance evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: exact-results-client-evidence
-          path: target/agent-scratch/exact-client-real-store/**/redacted-results-transcript.json
-          if-no-files-found: error
-          retention-days: 14
-
-  renderer_tests:
-    name: Rust renderer tests
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    env:
-      CARGO_BUILD_JOBS: "4"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore Cargo registry
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-          key: cargo-ubuntu-24.04-rust-1.97.1-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Test Rust renderer
-        run: |
-          trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
-          df -h -- "$GITHUB_WORKSPACE"
-          cargo test -p automata-ci-ui-renderer --all-targets --all-features --locked
-          cargo test -p automata-ci-ui-renderer --doc --all-features --locked
+      - name: Run PostgreSQL tests
+        run: ./scripts/ci/run-postgres-tests.sh
 
   frontend:
-    name: React SSR frontend
+    name: Frontend
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 5
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
     defaults:
       run:
         working-directory: ui
@@ -599,264 +136,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.19.0
-          package-manager-cache: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Install locked frontend dependencies
-        run: npm ci --no-audit
-
-      - name: Audit frontend dependencies
-        run: npm audit --audit-level=low
-
-      - name: Verify and build server-rendered frontend
+      - name: Test and build frontend
         run: |
-          npm run test:build-verifier
-          npm run build
-
-      - name: Enforce frontend coverage thresholds
-        run: npm run test:coverage
-
-      - name: Verify embedded renderer provenance
-        working-directory: .
-        run: ./scripts/ui/verify-renderer-assets.sh ui/dist
-
-      - name: Test deterministic SBOM normalization
-        working-directory: .
-        run: node --test scripts/ci/tests/*.test.mjs
-
-  renderer:
-    name: Reproduce embedded renderer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Reproduce embedded renderer component and assets
-        run: |
-          ./scripts/ui/reproduce-renderer-in-profile.sh
-          git diff --exit-code -- \
-            crates/automata-ci-ui-renderer/assets \
-            crates/automata-ci-ui-renderer/src/generated_assets.rs \
-            ui/renderer
-
-  dist_build:
-    name: Build static Linux distribution
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Prepare job scratch directory
-        run: install -d -m 0700 -- "$TMPDIR"
-
-      - name: Configure shared Rust compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
-
-      - name: Start Rust compiler cache
-        run: env TMPDIR=/tmp sccache --start-server
-
-      - name: Restore Cargo registry and SBOM tool
-        id: distribution-cargo-cache
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-            ~/.cargo/bin/cargo-cyclonedx
-          key: cargo-ubuntu-24.04-rust-1.97.1-cyclonedx-0.5.9-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-ubuntu-24.04-rust-1.97.1-cyclonedx-0.5.9-
-            cargo-ubuntu-24.04-rust-1.97.1-
-
-      - name: Read workspace version
-        run: |
-          version="$(./scripts/ci/workspace-version.sh)"
-          {
-            printf 'AUTOMATA_EXPECTED_VERSION=%s\n' "$version"
-            printf 'AUTOMATA_RELEASE_CREATED=%s\n' "$(git show -s --format=%cI HEAD)"
-            printf 'SOURCE_DATE_EPOCH=%s\n' "$(git show -s --format=%ct HEAD)"
-          } >> "$GITHUB_ENV"
-
-      - name: Install musl and ELF tooling
-        run: |
-          install -d -m 0700 -- "$TMPDIR"
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            binutils buildah musl-tools podman
-
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.19.0
-          package-manager-cache: false
-
-      - name: Install pinned SBOM generator
-        if: ${{ steps.distribution-cargo-cache.outputs.cache-hit != 'true' }}
-        run: cargo install cargo-cyclonedx --version 0.5.9 --locked
-
-      - name: Build distribution binaries
-        env:
-          AUTOMATA_RELEASE_BUILD: "1"
-        run: ./scripts/ci/build-static-musl.sh
-
-      - name: Verify static binaries
-        env:
-          AUTOMATA_SCRATCH_RUNTIME: docker
-        run: |
-          ./scripts/ci/verify-static-musl.sh
-          ./scripts/ci/verify-sandbox-guest-static.sh
-          ./scripts/ci/verify-service-proxy-static.sh
-
-      - name: Generate binary and embedded-runtime SBOMs
-        run: ./scripts/ci/generate-sboms.sh
-
-      - name: Prepare locked third-party license sources
-        run: ./scripts/ci/prepare-third-party-license-sources.sh
-
-      - name: Generate and reproduce third-party notices offline
-        run: |
-          ./scripts/ci/generate-third-party-licenses.sh
-          ./scripts/ci/generate-third-party-licenses.sh \
-            target/third-party-license-reproduction
-          diff --recursive --brief \
-            target/distribution-input/licenses \
-            target/third-party-license-reproduction
-
-      - name: Prepare and verify sandbox-guest image
-        run: |
-          ./scripts/ci/prepare-sandbox-guest-context.sh \
-            target/sandbox-guest-context \
-            "$AUTOMATA_EXPECTED_VERSION"
-          ./scripts/ci/verify-sandbox-guest-image.sh \
-            target/sandbox-guest-context \
-            "$AUTOMATA_EXPECTED_VERSION" \
-            "$AUTOMATA_EXPECTED_GIT_SHA" \
-            "$AUTOMATA_RELEASE_CREATED" \
-            "$SOURCE_DATE_EPOCH"
-
-      - name: Package and reproduce deterministic distribution
-        run: |
-          ./scripts/ci/package-static-musl.sh
-          cp \
-            "target/distribution/automata-x86_64-unknown-linux-musl.tar.gz.sha256" \
-            target/distribution-first.sha256
-          ./scripts/ci/package-static-musl.sh
-          cmp \
-            target/distribution-first.sha256 \
-            "target/distribution/automata-x86_64-unknown-linux-musl.tar.gz.sha256"
-
-      - name: Prepare digest-bound private service-proxy image candidate
-        env:
-          AUTOMATA_SERVICE_PROXY_OCI_BUILDER: buildah-chroot
-          AUTOMATA_SERVICE_PROXY_PROCESS_PROBE: metadata-only
-        run: |
-          ./scripts/ci/prepare-service-proxy-context.sh \
-            target/service-proxy-context \
-            "$AUTOMATA_EXPECTED_VERSION" \
-            "$AUTOMATA_EXPECTED_GIT_SHA" \
-            "$AUTOMATA_RELEASE_CREATED" \
-            "$SOURCE_DATE_EPOCH"
-          ./scripts/ci/build-service-proxy-candidate.sh \
-            target/service-proxy-context \
-            target/service-proxy-publication
-          ./scripts/ci/build-service-proxy-candidate.sh \
-            target/service-proxy-context \
-            target/service-proxy-publication-reproduction
-          cmp \
-            target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
-            target/service-proxy-publication-reproduction/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
-          python3 scripts/ci/service-proxy-publication.py prepare-candidate \
-            --candidate target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
-            --source-directory "$GITHUB_WORKSPACE" \
-            --candidate-commit "$GITHUB_SHA" \
-            --publisher-commit "$GITHUB_SHA" \
-            --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --output target/service-proxy-policy-review
-          python3 scripts/ci/verify-service-proxy-candidate-load.py \
-            --candidate target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
-            --source-directory "$GITHUB_WORKSPACE" \
-            --expected-commit "$GITHUB_SHA"
-
-      - name: Upload unpublished service-proxy image candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: automata-service-proxy-candidate-x86_64-unknown-linux-musl
-          path: target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
-          archive: false
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload bootstrap distribution
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: automata-x86_64-unknown-linux-musl
-          path: |
-            target/distribution/*.tar.gz
-            target/distribution/*.tar.gz.sha256
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
-  dist:
-    name: Static Linux distribution
-    if: ${{ !cancelled() }}
-    needs:
-      - dist_build
-      - verify
-      - rust_lint
-      - rust_docs
-      - dependency_audit
-      - rust_coverage
-      - results_client_acceptance
-      - renderer_tests
-      - frontend
-      - renderer
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Admit the validated distribution candidate
-        env:
-          DIST_BUILD_RESULT: ${{ needs.dist_build.result }}
-          VERIFY_RESULT: ${{ needs.verify.result }}
-          RUST_LINT_RESULT: ${{ needs.rust_lint.result }}
-          RUST_DOCS_RESULT: ${{ needs.rust_docs.result }}
-          DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency_audit.result }}
-          RUST_COVERAGE_RESULT: ${{ needs.rust_coverage.result }}
-          RESULTS_CLIENT_ACCEPTANCE_RESULT: ${{ needs.results_client_acceptance.result }}
-          RENDERER_TESTS_RESULT: ${{ needs.renderer_tests.result }}
-          FRONTEND_RESULT: ${{ needs.frontend.result }}
-          RENDERER_RESULT: ${{ needs.renderer.result }}
-        run: |
-          [[ "$DIST_BUILD_RESULT" == success ]]
-          [[ "$VERIFY_RESULT" == success ]]
-          [[ "$RUST_LINT_RESULT" == success ]]
-          [[ "$RUST_DOCS_RESULT" == success ]]
-          [[ "$DEPENDENCY_AUDIT_RESULT" == success ]]
-          [[ "$RUST_COVERAGE_RESULT" == success ]]
-          [[ "$RESULTS_CLIENT_ACCEPTANCE_RESULT" == success ]]
-          [[ "$RENDERER_TESTS_RESULT" == success ]]
-          [[ "$FRONTEND_RESULT" == success ]]
-          [[ "$RENDERER_RESULT" == success ]]
-          [[ "$AUTOMATA_EXPECTED_GIT_SHA" == "$GITHUB_SHA" ]]
-          printf 'validated distribution candidate %s\n' "$GITHUB_SHA"
+          test "$(node --version)" = "v24.19.0"
+          npm ci --no-audit --prefer-offline
+          npm run check

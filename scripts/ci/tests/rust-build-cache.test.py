@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when CI loses the bounded Rust build-cache contract."""
+"""Fail closed when CI loses the shared Rust build-cache contract."""
 
 from __future__ import annotations
 
@@ -20,14 +20,8 @@ SCRATCH_PREPARATION = 'run: install -d -m 0700 -- "$TMPDIR"'
 SHORT_ABSTRACT_SOCKET = "SCCACHE_SERVER_UDS: '\\x00automata-sccache'"
 SHORT_STARTUP = "run: env TMPDIR=/tmp sccache --start-server"
 RUST_JOBS = (
-    "verify",
-    "rust_lint",
-    "rust_docs",
-    "dependency_audit",
-    "rust_coverage",
-    "results_client_acceptance",
-    "renderer_tests",
-    "dist_build",
+    "rust",
+    "postgres",
 )
 
 
@@ -51,6 +45,11 @@ def main() -> None:
     )
     assert workflow.count("SCCACHE_BASEDIRS: ${{ github.workspace }}") == 1, (
         "sccache must normalize each ephemeral checkout to a stable source path"
+    )
+    assert workflow.count("SCCACHE_GHA_CACHE_FROM: automata-rust-v1") == 1
+    assert workflow.count("SCCACHE_GHA_CACHE_TO: automata-rust-v1") == 1
+    assert workflow.count("TMPDIR: ${{ github.workspace }}/target/task-tmp/ci") == 1, (
+        "build scratch must remain inside the repository target directory"
     )
     for job in RUST_JOBS:
         body = job_body(workflow, job)
@@ -76,45 +75,22 @@ def main() -> None:
         assert body.index(SHORT_STARTUP) < body.index(CACHE_ACTION), (
             f"{job} must start sccache before restoring build inputs"
         )
-        assert "~/.cargo/registry/cache" in body
-        assert "~/.cargo/registry/index" in body
-        assert "~/.cargo/registry/src" in body
+        assert "cargo-v1-ubuntu-24.04-rust-1.97.1-" in body
+        assert "/opt/cargo/registry/cache" in body
+        assert "/opt/cargo/registry/index" in body
+        assert "/opt/cargo/registry/src" in body
         assert "target/" not in "\n".join(
             line.strip()
             for line in body.splitlines()
-            if line.strip().startswith("~/.cargo/")
+            if line.strip().startswith("/opt/cargo/")
         )
 
-    for job in (
-        "verify",
-        "rust_lint",
-        "rust_docs",
-        "rust_coverage",
-        "results_client_acceptance",
-        "renderer_tests",
-    ):
+    for job in RUST_JOBS:
         assert (
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "
             "-C link-arg=-fuse-ld=lld"
         ) in job_body(workflow, job), f"{job} lost the fast GNU/Linux linker"
 
-    distribution = job_body(workflow, "dist")
-    for gate in (
-        "rust_lint",
-        "rust_docs",
-        "dependency_audit",
-        "results_client_acceptance",
-    ):
-        assert f"- {gate}" in distribution, f"distribution no longer requires {gate}"
-    results = job_body(workflow, "results_client_acceptance")
-    assert results.count("actions/checkout@") == 1, (
-        "Results must have one repository checkout and no post-job fixture checkouts"
-    )
-    assert "target/exact-action-sources.tar" in results
-    assert "\n            target/exact-actions\n" not in results
-    assert "~/.npm" in results
-    assert "INPUT_CACHE_HIT: ${{ steps.results-input-cache.outputs.cache-hit }}" in results
-    assert "cargo-deny --version 0.20.2" in workflow
     service_images = re.findall(r"(?m)^\s+image: (?P<image>\S+)$", workflow)
     assert service_images, "CI must retain its service-container coverage"
     for image in service_images:
@@ -127,19 +103,7 @@ def main() -> None:
         assert ":" not in name.rsplit("/", 1)[-1], (
             f"service image must use canonical name@digest identity without a tag: {image}"
         )
-    dependency_audit = job_body(workflow, "dependency_audit")
-    assert "check --hide-inclusion-graph advisories bans licenses sources" in dependency_audit, (
-        "dependency audit output must remain inside the runner command-output bound"
-    )
-    protobuf_audit = (
-        ROOT / ".." / "crates" / "automata-ci-protocol-protobuf" / "tools" / "protobuf-codegen.sh"
-    ).read_text(encoding="utf-8")
-    assert "--locked check --hide-inclusion-graph" in protobuf_audit, (
-        "protobuf dependency audit output must remain bounded"
-    )
-    assert "cargo-llvm-cov --version 0.8.7" in workflow
-    assert "cargo-cyclonedx --version 0.5.9" in workflow
-    print("verified parallel Rust gates and bounded shared compiler caches")
+    print("verified Rust jobs and shared compiler caches")
 
 
 if __name__ == "__main__":

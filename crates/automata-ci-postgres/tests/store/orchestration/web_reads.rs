@@ -8,13 +8,13 @@ use automata_ci_core::{
     AttemptId, JobId, LogSequence, LogStreamId, RunId, RunnerRequirements, WorkflowId,
 };
 use automata_ci_store::{
-    HumanArtifactId, HumanArtifactScope, HumanAuthorizationTarget, HumanGitRef, HumanJobScope,
-    HumanLiveLogBrowserOrigin, HumanLiveLogScope, HumanLiveLogTicketRepository as _,
-    HumanLogSegmentPageSize, HumanLogSegmentQuery, HumanPageSize, HumanRepositoryListQuery,
-    HumanRunListQuery, HumanRunPageDirection, HumanRunScope, HumanRunStatusFilter,
-    HumanWorkflowListQuery, HumanWorkflowReadRepository as _, IssueHumanLiveLogTicket,
-    IssueHumanLiveLogTicketOutcome, RedeemHumanLiveLogTicket, RepositoryCoordinate, RepositoryId,
-    StoreError, TenantScope,
+    HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA, HumanArtifactId, HumanArtifactScope,
+    HumanAuthorizationTarget, HumanGitRef, HumanJobScope, HumanLiveLogBrowserOrigin,
+    HumanLiveLogScope, HumanLiveLogTicketRepository as _, HumanLogSegmentPageSize,
+    HumanLogSegmentQuery, HumanPageSize, HumanRepositoryListQuery, HumanRunListQuery,
+    HumanRunPageDirection, HumanRunScope, HumanRunStatusFilter, HumanWorkflowListQuery,
+    HumanWorkflowReadRepository as _, IssueHumanLiveLogTicket, IssueHumanLiveLogTicketOutcome,
+    RedeemHumanLiveLogTicket, RepositoryCoordinate, RepositoryId, StoreError, TenantScope,
 };
 use std::time::Duration;
 use uuid::Uuid;
@@ -1318,7 +1318,7 @@ async fn seed_public_completed_run(
             'application/vnd.automata.workflow-plan.protobuf', 1, $5,
             'completed', 10, 21, 'CI', 'refs/heads/main', 'octocat',
             'Typed dashboard reads', 'Preserve immutable descriptors',
-            2, 'public', 'public', 'public', 'public', 'repository_policy', 1, 1
+            2, 'public', 'public', 'public', 'public', 'repository_policy', $6, 1
         )
         ",
     )
@@ -1327,6 +1327,7 @@ async fn seed_public_completed_run(
     .bind(seed.workflow_id)
     .bind(snapshot_id)
     .bind(vec![3_u8; 20])
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
 
@@ -1366,7 +1367,7 @@ async fn seed_public_completed_run(
         ) VALUES (
             $1, $2, 1, 'leased', 1, $3, $4, 13, 100,
             $5, $6, $7, 1, 12, 13,
-            'secretless', 'persist', 'public', 'public', 'repository_policy', 1, 12
+            'secretless', 'persist', 'public', 'public', 'repository_policy', $8, 12
         )
         ",
     )
@@ -1377,6 +1378,7 @@ async fn seed_public_completed_run(
     .bind(fence.session_id().as_uuid())
     .bind(i64::try_from(fence.session_epoch().get())?)
     .bind(i64::try_from(fence.runner_generation().get())?)
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
     sqlx::query(
@@ -1430,7 +1432,7 @@ async fn seed_public_completed_run(
             output_safety_reason, output_safety_schema
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 1, 15, 21,
-            'secretless', 'persist', 'public', 'public', 'repository_policy', 1
+            'secretless', 'persist', 'public', 'public', 'repository_policy', $9
         )
         ",
     )
@@ -1442,6 +1444,7 @@ async fn seed_public_completed_run(
     .bind(i64::try_from(fence.session_epoch().get())?)
     .bind(i64::try_from(fence.runner_generation().get())?)
     .bind(lease_id)
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
     sqlx::query(
@@ -1478,7 +1481,7 @@ async fn seed_public_completed_run(
             'application/octet-stream', 1000, 'finalized', $7, 3,
             'web/artifacts/manifest', $8, 1, 'application/json', 1, 2,
             'ready', 1, 1, 3, $7, 2, $9,
-            'secretless', 'public', 'public', 'repository_policy', 1
+            'secretless', 'public', 'public', 'repository_policy', $10
         ) RETURNING id
         ",
     )
@@ -1491,6 +1494,7 @@ async fn seed_public_completed_run(
     .bind(vec![7_u8; 32])
     .bind(vec![8_u8; 32])
     .bind(vec![b'{'])
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .fetch_one(database.pool())
     .await?;
     sqlx::query(
@@ -1653,7 +1657,7 @@ async fn insert_duplicate_stream(
             output_safety_reason, output_safety_schema
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, 1, $8, 1, 1, 22,
-            'secretless', 'persist', 'public', 'public', 'repository_policy', 1
+            'secretless', 'persist', 'public', 'public', 'repository_policy', $9
         )
         ",
     )
@@ -1665,6 +1669,7 @@ async fn insert_duplicate_stream(
     .bind(i64::try_from(fence.session_epoch().get())?)
     .bind(i64::try_from(fence.runner_generation().get())?)
     .bind(Uuid::new_v4())
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
     Ok(())
@@ -1695,7 +1700,7 @@ async fn insert_duplicate_authoritative_stream(
                terminal.runner_generation, terminal.runner_slot,
                terminal.lease_id, terminal.fencing_token, 1, 22,
                'secretless', 'persist', 'public', 'public',
-               'repository_policy', 1
+               'repository_policy', $4
         FROM attempt_terminal_results AS terminal
         WHERE terminal.attempt_id = $3
         ",
@@ -1703,6 +1708,7 @@ async fn insert_duplicate_authoritative_stream(
     .bind(Uuid::new_v4())
     .bind(Uuid::new_v4())
     .bind(attempt_id)
+    .bind(HUMAN_OUTPUT_PUBLICATION_SAFETY_SCHEMA)
     .execute(database.pool())
     .await?;
     Ok(())
