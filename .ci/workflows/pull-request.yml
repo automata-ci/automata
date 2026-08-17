@@ -86,7 +86,7 @@ jobs:
       - name: Validate workflow syntax
         run: |
           ./scripts/ci/install-actionlint.sh target/ci-tools
-          target/ci-tools/actionlint .ci/workflows/*.yml
+          ./scripts/ci/lint-workflows.sh
 
   frontend:
     name: Critical frontend checks

@@ -234,6 +234,15 @@ def fingerprint(repository: Path) -> tuple[str, str, str, str]:
 
 
 def main() -> None:
+    workflow = (ROOT.parent / ".ci" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    coverage_job = workflow.split("  rust_coverage:\n", 1)[1].split(
+        "\n  results_client_acceptance:", 1
+    )[0]
+    assert "    resources:\n      limits:\n        memory: 4Gi\n" in coverage_job
+    assert '      RUST_TEST_THREADS: "4"\n' in coverage_job
+
     scratch_root = ROOT.parent / "target" / "task-tmp"
     scratch_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="rust-coverage-contract-", dir=scratch_root) as raw:
