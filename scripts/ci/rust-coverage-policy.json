@@ -4,7 +4,7 @@
   "llvm_coverage_export_version": "3.1.0",
   "report_scope": {
     "description": "Compiled production source in the ordinary Rust workspace set",
-    "ignore_filename_regex": "(/automata-ci-ui-renderer/|/generated/|generated_assets\\.rs$|generated_contract\\.rs$)",
+    "ignore_filename_regex": "(/target/|/automata-ci-ui-renderer/|/generated/|generated_assets\\.rs$|generated_contract\\.rs$)",
     "exclusions": [
       {
         "name": "cargo-default-nonproduction-source",
@@ -17,6 +17,10 @@
       {
         "name": "generated-rust",
         "description": "Generated protobuf, contract, and embedded-asset Rust"
+      },
+      {
+        "name": "cargo-build-output",
+        "description": "Generated Rust emitted beneath Cargo's isolated target directory"
       }
     ]
   },

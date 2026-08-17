@@ -603,6 +603,16 @@ elif arguments and arguments[0] == "test":
 elif arguments and arguments[0] == "run":
     pass
 elif arguments[:2] == ["llvm-cov", "report"]:
+    ignore_argument = next(
+        (
+            argument
+            for argument in arguments
+            if argument.startswith("--ignore-filename-regex=")
+        ),
+        None,
+    )
+    if ignore_argument is None or "/target/" not in ignore_argument:
+        raise SystemExit(98)
     output = Path(arguments[arguments.index("--output-path") + 1])
     fixture = (
         os.environ["AUTOMATA_COVERAGE_JSON_FIXTURE"]
