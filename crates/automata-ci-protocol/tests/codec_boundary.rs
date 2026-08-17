@@ -1,16 +1,16 @@
 use std::collections::BTreeMap;
 
 use automata_ci_core::{
-    Architecture, AttemptId, FencingToken, IsolationLevel, JobAuthorityProfile, JobConclusion,
-    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion, JobIrVersionRange,
-    JobLifecycle, JobPermissionGrant, JobPermissionRequest, JobResult, JobSecretExposure,
-    JobSource, Lease, LeaseGuard, LeaseId, LogAck, LogChannel, LogFrame, LogSequence, LogStreamId,
-    OperatingSystem, OperationId, PermissionLevel, RunId, RunValueTemplates, RunnerCapabilities,
-    RunnerId, RunnerPlatform, RunnerRequirements, RunnerSessionId, RuntimeBoolean,
-    SandboxCapabilities, Sha256Digest, ShellTemplate, StepId, StepIr, StepResult,
-    TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind, TrustEvidence,
-    TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion, UnixMillis,
-    ValueTemplate, WorkflowId,
+    Architecture, AttemptId, FencingToken, GitObjectId, IsolationLevel, JobAuthorityProfile,
+    JobConclusion, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobIrVersion,
+    JobIrVersionRange, JobLifecycle, JobPermissionGrant, JobPermissionRequest, JobResult,
+    JobSecretExposure, JobSource, Lease, LeaseGuard, LeaseId, LogAck, LogChannel, LogFrame,
+    LogSequence, LogStreamId, OperatingSystem, OperationId, PermissionLevel, RunId,
+    RunValueTemplates, RunnerCapabilities, RunnerId, RunnerPlatform, RunnerRequirements,
+    RunnerSessionId, RuntimeBoolean, SandboxCapabilities, Sha256Digest, ShellTemplate, StepId,
+    StepIr, StepResult, TrustActorEvidence, TrustActorKind, TrustAutomationKind, TrustEventKind,
+    TrustEvidence, TrustOriginKind, TrustPolicy, TrustRepositoryEvidence, TrustTokenRecursion,
+    UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CancelJob, CommandAck, CommandCursor, CommandSequence, ErrorMessage, HandshakeErrorCode,
@@ -138,7 +138,8 @@ fn job_envelope_with_profile(
         JobSource::new(
             "github",
             "owner/repository",
-            "0123456789abcdef",
+            GitObjectId::from_provider_hex("0123456789abcdef0123456789abcdef01234567")
+                .expect("revision"),
             ".ci/workflows/ci.yml",
             "push",
         ),

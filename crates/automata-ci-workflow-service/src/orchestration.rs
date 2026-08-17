@@ -1305,7 +1305,7 @@ pub(crate) fn github_activation_context(
             "run_number".to_owned(),
             exact_github_integer(execution.run_number())?,
         ),
-        ("sha".to_owned(), GithubValue::string(revision.as_str())),
+        ("sha".to_owned(), GithubValue::string(revision.to_string())),
         (
             "workflow".to_owned(),
             GithubValue::string(execution.workflow_name()),
@@ -1316,7 +1316,7 @@ pub(crate) fn github_activation_context(
         ),
         (
             "workflow_sha".to_owned(),
-            GithubValue::string(revision.as_str()),
+            GithubValue::string(revision.to_string()),
         ),
     ];
     if let Some(actor) = execution.actor() {

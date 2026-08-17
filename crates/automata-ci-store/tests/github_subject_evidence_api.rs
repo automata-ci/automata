@@ -1,19 +1,19 @@
 use crate::github_manifest_fixture;
 
-use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId};
+use automata_ci_core::{GitObjectId, RunId, Sha256Digest, UnixMillis, WorkflowId};
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AuthenticatedGithubDeliveryClaim, GithubAuthenticatedEvent, GithubAuthenticatedEventKind,
-    GithubCheckHeadSha, GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey,
-    GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
-    GithubProviderOrigins, GithubProviderWebhookVerifierFingerprint,
-    GithubRepositoryDispatchEvidenceRepository, GithubRepositoryDispatchResolution,
-    GithubRepositoryDispatchResolutionAuthority, GithubRepositoryName,
-    GithubServerServiceAppClientId, GithubServerServiceAppId, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceJwtIssuer,
-    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
-    GithubSubjectEvidenceValueError, GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
+    GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
+    GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
+    GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
+    GithubRepositoryDispatchResolution, GithubRepositoryDispatchResolutionAuthority,
+    GithubRepositoryName, GithubServerServiceAppClientId, GithubServerServiceAppId,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceJwtIssuer, GithubServerServiceRevision, GithubSubjectEvidenceRepository,
+    GithubSubjectEvidenceStoreError, GithubSubjectEvidenceValueError,
+    GithubWorkflowRunSubjectEvidence, LogicalWorkflowInvocationId,
     ManifestPinnedGithubDeliveryEvidence, ManifestPinnedGithubDeliveryReceipt, ObjectKey,
     PendingGithubRepositoryDispatchEvidence, ProviderDeliveryClaimFence,
     ProviderDeliveryClaimOwnerId, ProviderDeliveryEventEnvelope, ProviderDeliveryId,
@@ -79,7 +79,7 @@ fn pull_request_event() -> GithubAuthenticatedEvent {
 fn github_acceptance_compares_signed_and_configured_owner_outside_generic_identity() {
     let owner = ProviderRepositoryOwnerId::new(404).expect("owner");
     let other_owner = ProviderRepositoryOwnerId::new(405).expect("other owner");
-    let head = GithubCheckHeadSha::new([9; 20]).expect("head SHA");
+    let head = GitObjectId::from_durable_bytes(&[9; 20]).expect("head SHA");
     let verifier =
         GithubProviderWebhookVerifierFingerprint::from_sha256(Sha256Digest::from_bytes([6; 32]))
             .expect("verifier fingerprint");
@@ -156,7 +156,7 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
         delivery_id,
         "provider-delivery:api-run",
         admission_claim(delivery_id, 400, 600),
-        GithubCheckHeadSha::new([9; 20]).expect("head"),
+        GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
         GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("path"),
         Sha256Digest::from_bytes([1; 32]),
         "push",
@@ -192,7 +192,7 @@ fn run_receipt_request_binds_every_epoch_four_admission_coordinate() {
             delivery_id,
             "provider-delivery:api-run",
             admission_claim(delivery_id, 400, 600),
-            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             GithubCheckSubjectKey::new(".ci/workflows/ci.yml").expect("path"),
             Sha256Digest::from_bytes([1; 32]),
             "push",
@@ -248,7 +248,7 @@ fn repository_dispatch_resolution_is_visibility_bound_and_redacted() {
         UnixMillis::new(100),
     )
     .expect("pending dispatch");
-    let head = GithubCheckHeadSha::new([9; 20]).expect("head");
+    let head = GitObjectId::from_durable_bytes(&[9; 20]).expect("head");
     let resolution = GithubRepositoryDispatchResolution::new(
         head,
         GithubRepositoryDispatchResolutionAuthority::PrivateSourceAuthority,
@@ -298,7 +298,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
         checks.clone(),
         Some(private.clone()),
         subject_id,
-        GithubCheckHeadSha::new([9; 20]).expect("head"),
+        GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
         push_event(),
         UnixMillis::new(100),
     )
@@ -338,7 +338,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             checks.clone(),
             Some(private),
             subject_id,
-            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             push_event(),
             UnixMillis::new(100),
         ),
@@ -355,7 +355,7 @@ fn public_checked_rehydration_retains_manifest_authorities_check_and_run_evidenc
             checks,
             None,
             subject_id,
-            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             push_event(),
             UnixMillis::new(100),
         ),
@@ -383,7 +383,7 @@ fn private_pull_request_evidence_requires_a_distinct_exact_pr_files_selector() {
             Some(source.clone()),
             Some(pull_request_files.clone()),
             subject_id,
-            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             pull_request_event(),
             UnixMillis::new(100),
         )
@@ -403,7 +403,7 @@ fn private_pull_request_evidence_requires_a_distinct_exact_pr_files_selector() {
             checks.clone(),
             Some(source.clone()),
             subject_id,
-            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             pull_request_event(),
             UnixMillis::new(100),
         ),
@@ -420,7 +420,7 @@ fn private_pull_request_evidence_requires_a_distinct_exact_pr_files_selector() {
             Some(source.clone()),
             Some(source),
             subject_id,
-            GithubCheckHeadSha::new([9; 20]).expect("head"),
+            GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
             pull_request_event(),
             UnixMillis::new(100),
         ),
@@ -485,7 +485,7 @@ fn run_request(
         delivery_id,
         "provider-delivery:external-adapter",
         admission_claim(delivery_id, 100, 300),
-        GithubCheckHeadSha::new([9; 20]).expect("head"),
+        GitObjectId::from_durable_bytes(&[9; 20]).expect("head"),
         GithubCheckSubjectKey::new(manifest.workflow_path()).expect("path"),
         Sha256Digest::from_bytes([1; 32]),
         manifest.event_name(),

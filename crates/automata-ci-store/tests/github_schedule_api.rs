@@ -1,6 +1,6 @@
 use crate::github_manifest_fixture;
 
-use automata_ci_core::{RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectAlgorithm, GitObjectId, RunId, Sha256Digest, UnixMillis};
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_schedule::CronExpression;
 use automata_ci_store::{
@@ -28,8 +28,11 @@ use uuid::Uuid;
 
 use github_manifest_fixture::fixture_github_runtime_policy;
 
-const SOURCE_REVISION: &str = "1111111111111111111111111111111111111111";
 const MAX_ARCHIVE_BYTES: u64 = 256 * 1_024 * 1_024;
+
+fn source_revision() -> GitObjectId {
+    GitObjectId::from_bytes(GitObjectAlgorithm::Sha1, &[0x11; 20]).expect("source revision")
+}
 
 #[test]
 fn durable_identities_fences_and_archives_reject_invalid_sentinels() {
@@ -398,7 +401,7 @@ fn registry_preserves_canonical_inventory_evidence() {
         claim,
         provider_manifest.clone(),
         authority.clone(),
-        SOURCE_REVISION,
+        source_revision(),
         archive(3, "github/schedules/three.tar.gz", 300),
         entries.clone(),
     )
@@ -408,39 +411,9 @@ fn registry_preserves_canonical_inventory_evidence() {
     assert_eq!(registry.manifest(), &provider_manifest);
     assert_eq!(registry.repository_owner_id().get(), 404);
     assert_eq!(registry.source_authority(), &authority);
-    assert_eq!(registry.source_revision(), SOURCE_REVISION);
+    assert_eq!(registry.source_revision(), source_revision());
     assert_eq!(registry.archive().digest(), digest(3));
     assert_eq!(registry.entries(), entries);
-}
-
-#[test]
-fn registry_rejects_invalid_source_revisions() {
-    let provider_manifest = manifest(
-        "registry-validation",
-        ProviderRepositoryVisibility::Private,
-        1,
-    );
-    let authority = GithubScheduleSourceAuthority::Private(source_selector(&provider_manifest, 50));
-    let claim = discovery_claim(51, 52, 1_000, 2_000);
-    let entries = canonical_registry_entries(claim);
-    for revision in [
-        "111111111111111111111111111111111111111",
-        "11111111111111111111111111111111111111111",
-        "111111111111111111111111111111111111111g",
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    ] {
-        assert!(matches!(
-            RegisterGithubScheduleRegistry::new(
-                claim,
-                provider_manifest.clone(),
-                authority.clone(),
-                revision,
-                archive(3, "github/schedules/three.tar.gz", 300),
-                entries.clone(),
-            ),
-            Err(GithubScheduleValueError::InvalidRegistry)
-        ));
-    }
 }
 
 #[test]
@@ -529,7 +502,7 @@ fn registry_rejects_noncanonical_inventory_shapes() {
                 claim,
                 provider_manifest.clone(),
                 authority.clone(),
-                SOURCE_REVISION,
+                source_revision(),
                 archive(3, "github/schedules/three.tar.gz", 300),
                 invalid_entries,
             ),
@@ -551,7 +524,7 @@ fn registry_rejects_authority_incompatible_with_the_manifest() {
             claim,
             provider_manifest,
             GithubScheduleSourceAuthority::PublicAnonymous,
-            SOURCE_REVISION,
+            source_revision(),
             archive(3, "github/schedules/three.tar.gz", 300),
             canonical_registry_entries(claim),
         ),
@@ -582,7 +555,7 @@ fn registry_rejects_only_a_tampered_first_fire_cursor() {
             claim,
             provider_manifest,
             authority,
-            SOURCE_REVISION,
+            source_revision(),
             archive(3, "github/schedules/non-occurrence.tar.gz", 300),
             tampered_occurrence,
         ),
@@ -609,7 +582,7 @@ fn registry_accepts_an_exact_maximum_inventory() {
         maximum_claim,
         manifest("registry-maximum", ProviderRepositoryVisibility::Public, 1),
         GithubScheduleSourceAuthority::PublicAnonymous,
-        SOURCE_REVISION,
+        source_revision(),
         archive(4, "github/schedules/maximum.tar.gz", 400),
         maximum.clone(),
     )
@@ -625,7 +598,7 @@ fn inventory_digest_excludes_separately_bound_registry_evidence() {
         baseline_claim,
         provider_manifest.clone(),
         GithubScheduleSourceAuthority::PublicAnonymous,
-        SOURCE_REVISION,
+        source_revision(),
         archive(6, "github/schedules/baseline.tar.gz", 600),
         baseline_entries.clone(),
     )
@@ -645,7 +618,8 @@ fn inventory_digest_excludes_separately_bound_registry_evidence() {
             2,
         ),
         GithubScheduleSourceAuthority::PublicAnonymous,
-        "2222222222222222222222222222222222222222",
+        GitObjectId::from_bytes(GitObjectAlgorithm::Sha1, &[0x22; 20])
+            .expect("separate source revision"),
         archive(7, "github/schedules/other.tar.gz", 700),
         same_definitions,
     )
@@ -666,7 +640,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
         baseline_claim,
         provider_manifest.clone(),
         GithubScheduleSourceAuthority::PublicAnonymous,
-        SOURCE_REVISION,
+        source_revision(),
         archive(6, "github/schedules/baseline.tar.gz", 600),
         baseline_entries.clone(),
     )
@@ -737,7 +711,7 @@ fn inventory_digest_changes_for_each_source_definition_mutation() {
             discovery_claim(70 + index, 80 + index, 1_000, 2_000),
             provider_manifest.clone(),
             GithubScheduleSourceAuthority::PublicAnonymous,
-            SOURCE_REVISION,
+            source_revision(),
             archive(6, "github/schedules/baseline.tar.gz", 600),
             entries,
         )
@@ -944,7 +918,7 @@ fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
         registry_id(112),
         manifest.revision(),
         manifest.digest(),
-        SOURCE_REVISION.into(),
+        source_revision(),
         "refs/heads/main".into(),
         archive.clone(),
         entry.clone(),
@@ -960,7 +934,7 @@ fn claimed_fire_and_receipts_preserve_complete_noncredential_evidence() {
     assert_eq!(fire.registry_id(), registry_id(112));
     assert_eq!(fire.manifest_revision(), manifest.revision());
     assert_eq!(fire.manifest_digest(), manifest.digest());
-    assert_eq!(fire.source_revision(), SOURCE_REVISION);
+    assert_eq!(fire.source_revision(), source_revision());
     assert_eq!(fire.default_branch_ref(), "refs/heads/main");
     assert_eq!(fire.archive(), &archive);
     assert_eq!(fire.entry(), &entry);

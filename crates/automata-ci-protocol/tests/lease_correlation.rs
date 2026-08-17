@@ -1,8 +1,8 @@
 use automata_ci_core::{
-    AttemptId, FencingToken, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobLifecycle,
-    JobSource, Lease, LeaseGuard, LeaseId, OperationId, RunId, RunValueTemplates, RunnerId,
-    RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate,
-    StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
+    AttemptId, FencingToken, GitObjectId, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope,
+    JobLifecycle, JobSource, Lease, LeaseGuard, LeaseId, OperationId, RunId, RunValueTemplates,
+    RunnerId, RunnerRequirements, RunnerSessionId, RuntimeBoolean, SemanticStep, Sha256Digest,
+    ShellTemplate, StepId, StepIr, UnixMillis, ValueTemplate, WorkflowId,
 };
 use automata_ci_protocol::{
     CommandSequence, LeaseDisposition, LeaseHeartbeat, LeaseOffer, LeaseRenewal, LeaseResponse,
@@ -29,7 +29,8 @@ fn job() -> JobIrEnvelope {
         JobSource::new(
             "github",
             "owner/repository",
-            "0123456789abcdef",
+            GitObjectId::from_provider_hex("0123456789abcdef0123456789abcdef01234567")
+                .expect("revision"),
             ".ci/workflows/ci.yml",
             "workflow_dispatch",
         ),

@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 
-use automata_ci_core::{JobRuntimeContext, TrustSnapshot, WorkflowPlan, WorkflowPlanVersion};
+use automata_ci_core::{
+    GitObjectId, JobRuntimeContext, TrustSnapshot, WorkflowPlan, WorkflowPlanVersion,
+};
 use automata_ci_store::{
     LogicalWorkflowAdmissionReceipt, MAX_ADMISSION_EVENT_BYTES, MAX_ADMISSION_OBJECT_BYTES,
     TenantScope, WorkflowAdmissionIdempotency,
@@ -136,7 +138,7 @@ pub struct WorkflowAdmissionRequest {
     base_context: JobRuntimeContext,
     trust_snapshot: TrustSnapshot,
     idempotency: WorkflowAdmissionIdempotency,
-    commit_sha: String,
+    commit_sha: GitObjectId,
     git_ref: String,
     workflow_name: String,
     actor: Option<String>,
@@ -165,6 +167,7 @@ impl WorkflowAdmissionRequest {
         plan: WorkflowPlan,
         base_context: JobRuntimeContext,
         idempotency: WorkflowAdmissionIdempotency,
+        commit_sha: GitObjectId,
     ) -> WorkflowAdmissionRequestBuilder {
         WorkflowAdmissionRequestBuilder {
             request: Self {
@@ -178,7 +181,7 @@ impl WorkflowAdmissionRequest {
                 base_context,
                 trust_snapshot: TrustSnapshot::deny_all_unclassified(),
                 idempotency,
-                commit_sha: String::new(),
+                commit_sha,
                 git_ref: String::new(),
                 workflow_name: String::new(),
                 actor: None,
@@ -254,8 +257,8 @@ impl WorkflowAdmissionRequest {
 
     #[must_use]
     /// Returns the canonical source commit identifier.
-    pub fn commit_sha(&self) -> &str {
-        &self.commit_sha
+    pub const fn commit_sha(&self) -> GitObjectId {
+        self.commit_sha
     }
 
     #[must_use]
@@ -326,13 +329,6 @@ impl WorkflowAdmissionRequestBuilder {
         self
     }
 
-    /// Sets the canonical source commit identifier.
-    #[must_use]
-    pub fn commit_sha(mut self, commit_sha: impl Into<String>) -> Self {
-        self.request.commit_sha = commit_sha.into();
-        self
-    }
-
     /// Sets the canonical full provider ref.
     #[must_use]
     pub fn git_ref(mut self, git_ref: impl Into<String>) -> Self {
@@ -383,7 +379,6 @@ impl WorkflowAdmissionRequestBuilder {
     pub fn build(self) -> Result<WorkflowAdmissionRequest, WorkflowAdmissionRequestError> {
         let request = self.request;
         validate_text(&request.workflow_path, "workflow path")?;
-        validate_text(&request.commit_sha, "commit SHA")?;
         validate_text(&request.git_ref, "Git ref")?;
         validate_text(&request.workflow_name, "workflow name")?;
         validate_text(&request.event_media_type, "event media type")?;
@@ -419,7 +414,6 @@ impl WorkflowAdmissionRequestBuilder {
             .validate()
             .map_err(|_| WorkflowAdmissionRequestError::InvalidPlan)?;
         validate_base_context(&request.base_context)?;
-        validate_commit_sha(&request.commit_sha)?;
         if request
             .git_ref
             .strip_prefix("refs/")
@@ -473,9 +467,6 @@ pub enum WorkflowAdmissionRequestError {
     /// The supplied base context was not a canonical root-level snapshot.
     #[error("base runtime context must contain only inputs, variables, and opaque secret bindings")]
     InvalidBaseContext,
-    /// The source commit is not a supported canonical hexadecimal identifier.
-    #[error("commit SHA must be 40 or 64 lowercase hexadecimal characters")]
-    InvalidCommitSha,
     /// The source ref is not a canonical full `refs/...` name.
     #[error("Git ref must be a canonical full refs/... name")]
     InvalidGitRef,
@@ -532,7 +523,7 @@ fn validate_plan_provenance(
     if plan.source().provider() != request.repository.provider()
         || plan.event().provider() != request.repository.provider()
         || repository != &expected_repository
-        || revision != request.commit_sha()
+        || *revision != request.commit_sha()
         || path != request.workflow_path()
         || plan.source().source_id() != request.workflow_path()
         || plan
@@ -578,17 +569,6 @@ fn validate_base_context(context: &JobRuntimeContext) -> Result<(), WorkflowAdmi
         && strategy.max_parallel() == 1;
     if !base_shape {
         return Err(WorkflowAdmissionRequestError::InvalidBaseContext);
-    }
-    Ok(())
-}
-
-fn validate_commit_sha(value: &str) -> Result<(), WorkflowAdmissionRequestError> {
-    if !matches!(value.len(), 40 | 64)
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
-        return Err(WorkflowAdmissionRequestError::InvalidCommitSha);
     }
     Ok(())
 }

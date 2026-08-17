@@ -663,7 +663,7 @@ fn repository_step(id: &str, repository: &str, inputs: BTreeMap<String, ValueSou
         SemanticStep::action(
             ActionReference::Repository {
                 repository: repository.to_owned(),
-                revision: REVISION.to_owned(),
+                selector: REVISION.to_owned(),
                 subpath: None,
             },
             inputs,

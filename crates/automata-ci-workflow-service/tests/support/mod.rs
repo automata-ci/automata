@@ -92,7 +92,7 @@ pub fn compile_ci_at_path(
         SourceId::new(workflow_path),
         SourceOrigin::Repository {
             repository: Arc::from(REPOSITORY),
-            revision: Arc::from(REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
             path: Arc::from(workflow_path),
         },
     );
@@ -103,7 +103,9 @@ pub fn compile_ci_at_path(
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", event_name)
             .with_delivery_id(DELIVERY)
-            .with_commit_sha(REVISION)
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
+            )
             .with_git_ref(GIT_REF),
     );
     let request = match metadata {
@@ -137,8 +139,8 @@ fn request_from_compilation(
         plan,
         JobRuntimeContext::empty_base(),
         idempotency,
+        automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
     )
-    .commit_sha(REVISION)
     .git_ref(GIT_REF)
     .workflow_name("CI")
     .actor("local-bootstrap")
@@ -164,8 +166,8 @@ pub fn changed_event_request(original: &WorkflowAdmissionRequest) -> WorkflowAdm
         original.plan().clone(),
         original.base_context().clone(),
         original.idempotency().clone(),
+        original.commit_sha(),
     )
-    .commit_sha(original.commit_sha())
     .git_ref(original.git_ref())
     .workflow_name(original.workflow_name())
     .actor(original.actor().expect("fixture actor"))

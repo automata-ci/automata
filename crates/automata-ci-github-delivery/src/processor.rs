@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::BlobStoreErrorKind;
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{
     ContextValue, JobRuntimeContext, Sha256Digest, TrustPolicy, TrustSnapshot, UnixMillis,
     WorkflowEventProvenance,
@@ -834,9 +835,9 @@ impl GithubDeliveryWorkflowAdmissionProcessor {
             plan,
             base_context,
             idempotency,
+            *request.repository_source().revision(),
         )
         .trust_snapshot(trust_snapshot)
-        .commit_sha(request.repository_source().revision().as_str())
         .git_ref(event_coordinates.git_ref())
         .workflow_name(workflow_name)
         .run_attempt(1)
@@ -920,7 +921,7 @@ fn event_trust_snapshot(
         automata_ci_github::VerifiedGithubWebhook::RepositoryDispatch(_)
     ) {
         derivation = derivation
-            .with_repository_dispatch_revision(request.repository_source().revision().as_str());
+            .with_repository_dispatch_revision(request.repository_source().revision().to_string());
     }
     derive_github_trust_snapshot(
         request.event_envelope(),
@@ -1260,7 +1261,7 @@ fn authenticated_event_source_provenance(
         SourceId::new(request.workflow_path()),
         SourceOrigin::Repository {
             repository: Arc::from(request.repository_source().repository().as_str()),
-            revision: Arc::from(request.repository_source().revision().as_str()),
+            revision: *request.repository_source().revision(),
             path: Arc::from(request.workflow_path()),
         },
     )
@@ -1275,7 +1276,7 @@ fn authenticated_event_provenance(
         .git_ref();
     let provenance = WorkflowEventProvenance::new(GITHUB_PROVIDER, request.event().event_name())
         .with_delivery_id(request.event().delivery_id())
-        .with_commit_sha(request.repository_source().revision().as_str());
+        .with_commit_sha(*request.repository_source().revision());
     provenance.with_git_ref(git_ref)
 }
 
@@ -1441,26 +1442,25 @@ fn authenticated_event_source_matches(
             .repository_dispatch_resolution()
             .is_some_and(|resolution| {
                 resolution.source_revision() == evidence.check_head_sha()
-                    && crate::check_head_sha_from_revision(source.revision().as_str())
-                        .is_ok_and(|revision| revision == resolution.source_revision())
+                    && source.revision() == &resolution.source_revision()
             }),
         _ => authenticated_event_source_revision(event)
-            .is_some_and(|revision| revision == source.revision().as_str()),
+            .is_some_and(|revision| revision == *source.revision()),
     }
 }
 
 fn authenticated_event_source_revision(
     event: &automata_ci_github::VerifiedGithubWebhook,
-) -> Option<&str> {
+) -> Option<GitObjectId> {
     match event {
         automata_ci_github::VerifiedGithubWebhook::Push(push) if !push.deleted() => {
-            Some(push.after_commit_sha())
+            GitObjectId::from_provider_hex(push.after_commit_sha()).ok()
         }
         automata_ci_github::VerifiedGithubWebhook::PullRequest(pull_request) => {
-            Some(pull_request.head_revision().as_str())
+            Some(*pull_request.head_revision())
         }
         automata_ci_github::VerifiedGithubWebhook::MergeGroup(merge_group) => {
-            Some(merge_group.head_revision().as_str())
+            Some(*merge_group.head_revision())
         }
         _ => None,
     }
@@ -1564,8 +1564,8 @@ mod renewal_tests {
     };
     use automata_ci_provider::ProviderConnectionId;
     use automata_ci_scm::{
-        ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
-        RepositorySourcePort, RepositorySourceRequest, ScmError, ScmProviderId,
+        ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort,
+        RepositorySourceRequest, ScmError, ScmProviderId,
     };
     use automata_ci_store::{
         AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
@@ -2204,7 +2204,7 @@ mod renewal_tests {
         let source = RepositorySource::from_bytes(
             ScmProviderId::new("github").expect("provider"),
             ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-            ExactRevision::new(AFTER).expect("revision"),
+            automata_ci_core::GitObjectId::from_provider_hex(AFTER).expect("revision"),
             ArchiveFormat::TarGzip,
             workflow_archive(),
         );

@@ -21,7 +21,7 @@ use automata_ci_github::{
     GithubCheckTimestamp, GithubChecksError, GithubHttpEndpoint, GithubObservedCheckConclusion,
 };
 use automata_ci_provider::ProviderConnectionId;
-use automata_ci_scm::{ExactRevision, RepositoryId as ScmRepositoryId};
+use automata_ci_scm::RepositoryId as ScmRepositoryId;
 use automata_ci_store::{
     AdvanceGithubCheckAnnotations, BeginGithubCheckAnnotationBatch, BeginGithubCheckRunCreate,
     BindGithubCheckRun, BindGithubCheckSuite, BlockGithubCheckAnnotationMismatch,
@@ -54,7 +54,6 @@ const DEFAULT_VISIBILITY_MARGIN_MILLIS: i64 = 30 * 1_000;
 const MAX_VISIBILITY_MARGIN_MILLIS: i64 = 2 * 60 * 1_000;
 const DEFAULT_RETRY_BASE_MILLIS: i64 = 30 * 1_000;
 const MAX_ANNOTATIONS_PER_PATCH: usize = 50;
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// Bounded claim, reconciliation, and retry policy for one Checks publisher.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -749,7 +748,7 @@ impl GithubChecksPublisher {
         horizon: GithubChecksClaimHorizon,
         credential: &GithubChecksServerServiceCredential,
     ) -> Result<GithubChecksPublisherOutcome, GithubChecksPublisherError> {
-        let revision = exact_revision(claimed.identity())?;
+        let revision = claimed.identity().head_sha();
         let app_id = http_app_id(claimed.identity().app_id())?;
         let outcome = self
             .endpoint
@@ -1626,18 +1625,6 @@ impl fmt::Debug for GithubChecksPublisher {
     }
 }
 
-fn exact_revision(
-    identity: &GithubCheckSubjectIdentity,
-) -> Result<ExactRevision, GithubChecksPublisherError> {
-    let bytes = identity.head_sha().as_bytes();
-    let mut encoded = String::with_capacity(40);
-    for byte in bytes {
-        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    ExactRevision::new(encoded).map_err(|_| GithubChecksPublisherError::InvariantViolation)
-}
-
 fn run_identity(
     claimed: &ClaimedGithubCheckProjection,
     dashboard_origin: &Url,
@@ -1648,7 +1635,7 @@ fn run_identity(
     Ok(GithubCheckRunIdentity::new(
         http_app_id(claimed.identity().app_id())?,
         http_suite_id(suite_id)?,
-        exact_revision(claimed.identity())?,
+        claimed.identity().head_sha(),
         HttpCheckName::new(claimed.identity().name().as_str().to_owned())
             .map_err(|_| GithubChecksPublisherError::InvariantViolation)?,
         GithubCheckExternalId::new(claimed.external_id().to_owned())

@@ -51,7 +51,12 @@ fn id_token_write_and_none_survive_current_logical_compilation() {
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("synthetic-permissions")
-            .with_commit_sha("0123456789abcdef0123456789abcdef01234567")
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(
+                    "0123456789abcdef0123456789abcdef01234567",
+                )
+                .expect("revision"),
+            )
             .with_git_ref("refs/heads/main"),
         None,
     );

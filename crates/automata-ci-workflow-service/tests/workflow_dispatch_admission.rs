@@ -13,7 +13,7 @@ use automata_ci_auth::{
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobPayload, ImmutableBlobStore as _, MediaType, MemoryBlobStore,
 };
-use automata_ci_core::{OperationId, WorkflowId};
+use automata_ci_core::{GitObjectId, OperationId, WorkflowId};
 use automata_ci_protocol::ProtocolLimits;
 use automata_ci_store::{
     AdmissionObject, AdmissionRepository, AdmitLogicalWorkflowRun,
@@ -38,6 +38,10 @@ const PRINCIPAL: &str = "550e8400-e29b-41d4-a716-446655440010";
 const SESSION: &str = "550e8400-e29b-41d4-a716-446655440011";
 const WORKFLOW_PATH: &str = ".ci/workflows/manual.yml";
 const COMMIT_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn commit_sha() -> GitObjectId {
+    GitObjectId::from_provider_hex(COMMIT_SHA).expect("revision")
+}
 const GIT_REF: &str = "refs/heads/release";
 const REPOSITORY_OWNER_ID: &str = "424242";
 const SOURCE: &str = r"name: Synthetic manual dispatch
@@ -100,7 +104,7 @@ async fn dispatch_request_debug_omits_private_source_and_subject_data() {
         harness.repository_id,
         harness.workflow_id,
         GIT_REF,
-        COMMIT_SHA,
+        commit_sha(),
     )
     .expect("exact source lookup");
     let lookup_debug = format!("{lookup:?}");
@@ -118,7 +122,7 @@ async fn dispatch_request_debug_omits_private_source_and_subject_data() {
     let durable = DurableGithubWorkflowDispatchRequest::new(
         authorization,
         GIT_REF,
-        COMMIT_SHA,
+        commit_sha(),
         inputs,
         operation_id,
     );
@@ -282,7 +286,7 @@ async fn product_dispatch_loads_only_an_exact_signed_durable_source() {
         WorkflowDispatchAuthorization::new(actor(), harness.repository_id, harness.workflow_id)
             .expect("exact authority"),
         GIT_REF,
-        COMMIT_SHA,
+        commit_sha(),
         inputs.clone(),
         OperationId::from_uuid(Uuid::from_u128(0x102)),
     );
@@ -299,7 +303,8 @@ async fn product_dispatch_loads_only_an_exact_signed_durable_source() {
         WorkflowDispatchAuthorization::new(actor(), harness.repository_id, harness.workflow_id)
             .expect("exact authority"),
         GIT_REF,
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        GitObjectId::from_provider_hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .expect("revision"),
         inputs,
         OperationId::from_uuid(Uuid::from_u128(0x103)),
     );
@@ -330,7 +335,7 @@ async fn malformed_or_non_branch_tag_refs_fail_before_source_lookup() {
             WorkflowDispatchAuthorization::new(actor(), harness.repository_id, harness.workflow_id)
                 .expect("exact authority"),
             git_ref,
-            COMMIT_SHA,
+            commit_sha(),
             GithubWorkflowDispatchInputs::try_new(
                 Vec::<(String, GithubWorkflowDispatchInputValue)>::new(),
             )
@@ -446,7 +451,7 @@ impl Harness {
             self.workflow_id,
             WORKFLOW_PATH,
             GIT_REF,
-            COMMIT_SHA,
+            commit_sha(),
             source,
         )
         .expect("signed source fixture");
@@ -504,7 +509,7 @@ fn dispatch_request(
         REPOSITORY_OWNER_ID,
         WORKFLOW_PATH,
         Bytes::from_static(SOURCE.as_bytes()),
-        COMMIT_SHA,
+        commit_sha(),
         GIT_REF,
         inputs,
         operation_id,

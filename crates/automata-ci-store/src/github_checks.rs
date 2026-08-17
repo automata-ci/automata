@@ -2,7 +2,7 @@ use std::num::{NonZeroU16, NonZeroU64};
 
 use async_trait::async_trait;
 use automata_ci_blob::BlobDescriptor;
-use automata_ci_core::{JobId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, JobId, RunId, Sha256Digest, UnixMillis};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -96,50 +96,6 @@ positive_github_id!(/// Positive GitHub Check Suite identifier.
     GithubCheckSuiteId, "GitHub Check Suite ID");
 positive_github_id!(/// Positive GitHub Check Run identifier.
     GithubCheckRunId, "GitHub Check Run ID");
-
-/// Exact 20-byte Git commit object identity used by GitHub Checks.
-#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct GithubCheckHeadSha([u8; 20]);
-
-impl GithubCheckHeadSha {
-    /// Constructs an exact Git commit identity.
-    ///
-    /// # Errors
-    ///
-    /// Rejects the all-zero sentinel.
-    pub fn new(value: [u8; 20]) -> Result<Self, GithubCheckValueError> {
-        if value == [0; 20] {
-            return Err(GithubCheckValueError::InvalidHeadSha);
-        }
-        Ok(Self(value))
-    }
-
-    /// Rehydrates an exact Git commit identity from durable bytes.
-    ///
-    /// # Errors
-    ///
-    /// Rejects values that are not exactly 20 bytes or are the all-zero sentinel.
-    pub fn try_from_slice(value: &[u8]) -> Result<Self, GithubCheckValueError> {
-        let bytes =
-            <[u8; 20]>::try_from(value).map_err(|_| GithubCheckValueError::InvalidHeadSha)?;
-        if bytes == [0; 20] {
-            return Err(GithubCheckValueError::InvalidHeadSha);
-        }
-        Ok(Self(bytes))
-    }
-
-    /// Returns the exact raw Git object identity.
-    #[must_use]
-    pub const fn as_bytes(self) -> [u8; 20] {
-        self.0
-    }
-}
-
-impl std::fmt::Debug for GithubCheckHeadSha {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("GithubCheckHeadSha([REDACTED])")
-    }
-}
 
 /// Bounded printable GitHub Check Run name.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -260,7 +216,7 @@ pub struct GithubCheckSubjectIdentity {
     github_repository_id: ProviderRepositoryId,
     github_repository_name: GithubRepositoryName,
     app_id: GithubCheckAppId,
-    head_sha: GithubCheckHeadSha,
+    head_sha: GitObjectId,
     name: GithubCheckName,
 }
 
@@ -281,7 +237,7 @@ impl GithubCheckSubjectIdentity {
         github_repository_id: ProviderRepositoryId,
         github_repository_name: GithubRepositoryName,
         app_id: GithubCheckAppId,
-        head_sha: GithubCheckHeadSha,
+        head_sha: GitObjectId,
         name: GithubCheckName,
     ) -> Result<Self, GithubCheckValueError> {
         if repository_id.as_uuid().is_nil() {
@@ -318,7 +274,7 @@ impl GithubCheckSubjectIdentity {
         github_repository_id: ProviderRepositoryId,
         github_repository_name: GithubRepositoryName,
         app_id: GithubCheckAppId,
-        head_sha: GithubCheckHeadSha,
+        head_sha: GitObjectId,
         name: GithubCheckName,
     ) -> Result<Self, GithubCheckValueError> {
         if repository_id.as_uuid().is_nil() {
@@ -355,7 +311,7 @@ impl GithubCheckSubjectIdentity {
         github_repository_id: ProviderRepositoryId,
         github_repository_name: GithubRepositoryName,
         app_id: GithubCheckAppId,
-        head_sha: GithubCheckHeadSha,
+        head_sha: GitObjectId,
         name: GithubCheckName,
     ) -> Result<Self, GithubCheckValueError> {
         if repository_id.as_uuid().is_nil() {
@@ -453,7 +409,7 @@ impl GithubCheckSubjectIdentity {
     }
     /// Returns the exact Git commit identity.
     #[must_use]
-    pub const fn head_sha(&self) -> GithubCheckHeadSha {
+    pub const fn head_sha(&self) -> GitObjectId {
         self.head_sha
     }
     /// Returns the provider-facing Check Run name.
@@ -2022,9 +1978,6 @@ pub enum GithubCheckValueError {
     /// A numeric GitHub identity is zero or outside the signed 64-bit storage boundary.
     #[error("{0} must be a positive identifier representable by BIGINT")]
     InvalidNumericId(&'static str),
-    /// The Git commit identity is not an exact nonzero SHA-1 object ID.
-    #[error("the GitHub Check head SHA is invalid")]
-    InvalidHeadSha,
     /// The provider-facing Check name is invalid.
     #[error("the GitHub Check name is invalid")]
     InvalidCheckName,

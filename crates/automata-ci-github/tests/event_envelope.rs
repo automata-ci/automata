@@ -91,13 +91,13 @@ fn pull_request_envelope_binds_execution_to_the_checked_head_revision() {
     assert!(facts.is_fork());
     assert_eq!(facts.source_ref(), "feature/topic");
     assert_eq!(facts.target_ref(), "main");
-    assert_eq!(facts.source_revision().as_str(), HEAD_SHA);
-    assert_eq!(facts.target_revision().as_str(), BASE_SHA);
+    assert_eq!(facts.source_revision().to_string(), HEAD_SHA);
+    assert_eq!(facts.target_revision().to_string(), BASE_SHA);
     assert_ne!(
         HEAD_SHA, MERGE_SHA,
         "fixture must carry a stale merge revision"
     );
-    assert_eq!(facts.execution_revision().as_str(), HEAD_SHA);
+    assert_eq!(facts.execution_revision().to_string(), HEAD_SHA);
 
     let trust_facts =
         GithubEventRegistryV1::entry(GithubWorkflowEventKind::PullRequest).trust_facts();

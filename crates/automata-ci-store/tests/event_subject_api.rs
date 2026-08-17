@@ -1,4 +1,6 @@
-use automata_ci_core::{OperationId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{
+    GitObjectAlgorithm, GitObjectId, OperationId, RunId, Sha256Digest, UnixMillis,
+};
 use automata_ci_store::{
     EVENT_CONTROL_SUBJECT_SCHEMA, EVENT_SUBJECT_ORIGIN_REGISTRY_VERSION,
     EVENT_SUBJECT_PROGRESS_SCHEMA, EVENT_SUBJECT_SELECTION_SCHEMA, EventControlSubject,
@@ -6,9 +8,8 @@ use automata_ci_store::{
     EventSubjectOriginRegistration, EventSubjectOriginRegistry, EventSubjectProgress,
     EventSubjectSelection, EventSubjectTerminalKind, EventSubjectTerminalOutcome,
     EventSubjectValueError, GithubScheduleFireId, MAX_EVENT_SUBJECT_EVENT_NAME_BYTES,
-    MAX_EVENT_SUBJECT_REASON_BYTES, MAX_EVENT_SUBJECT_SOURCE_REVISION_BYTES,
-    MAX_EVENT_SUBJECT_WORKFLOW_PATH_BYTES, ProviderDeliveryId, RegisterEventSubject, RepositoryId,
-    TenantScope,
+    MAX_EVENT_SUBJECT_REASON_BYTES, MAX_EVENT_SUBJECT_WORKFLOW_PATH_BYTES, ProviderDeliveryId,
+    RegisterEventSubject, RepositoryId, TenantScope,
 };
 use uuid::Uuid;
 
@@ -22,11 +23,15 @@ fn provider_origin(value: u128) -> EventSubjectOrigin {
     )
 }
 
+fn git_id(byte: u8) -> GitObjectId {
+    GitObjectId::from_bytes(GitObjectAlgorithm::Sha1, &[byte; 20]).expect("Git object ID")
+}
+
 fn selection_with(
     origin: EventSubjectOrigin,
     event_name: &str,
     workflow_path: &str,
-    source_revision: &str,
+    source_revision: GitObjectId,
     selected_at: i64,
 ) -> EventSubjectSelection {
     let repository_id = RepositoryId::from_uuid(Uuid::from_u128(100));
@@ -53,7 +58,7 @@ fn selection(id: u128) -> EventSubjectSelection {
         provider_origin(200 + id),
         "workflow_dispatch",
         ".ci/workflows/private-workflow-marker.yml",
-        "private-source-revision-marker",
+        git_id(0x11),
         1_000,
     )
 }
@@ -203,7 +208,7 @@ fn subject_id_derivation_reuses_selection_validation() {
             origin,
             "push",
             ".ci/workflows/build.yml",
-            "0123456789abcdef",
+            git_id(0x12),
             Sha256Digest::from_bytes([0x42; 32]),
             Sha256Digest::from_bytes([0x24; 32]),
             UnixMillis::new(1_000),
@@ -236,7 +241,7 @@ fn all_origin_leaves_bind_their_kind_and_uuid_into_selection() {
             origin,
             "push",
             ".ci/workflows/build.yml",
-            "0123456789abcdef",
+            git_id(0x13),
             1_000,
         );
         assert_eq!(selected.origin(), origin);
@@ -294,7 +299,7 @@ fn selection_rejects_nil_identity_and_unbounded_or_unsafe_text() {
         Err(EventSubjectValueError::NilUuid("event control subject ID"))
     );
 
-    let build = |event: &str, path: &str, revision: &str| {
+    let build = |event: &str, path: &str| {
         EventSubjectSelection::new(
             EventSubjectId::from_uuid(Uuid::from_u128(1)).expect("subject"),
             tenant(),
@@ -302,7 +307,7 @@ fn selection_rejects_nil_identity_and_unbounded_or_unsafe_text() {
             provider_origin(3),
             event,
             path,
-            revision,
+            git_id(0x14),
             Sha256Digest::from_bytes([1; 32]),
             Sha256Digest::from_bytes([2; 32]),
             UnixMillis::new(1),
@@ -316,7 +321,7 @@ fn selection_rejects_nil_identity_and_unbounded_or_unsafe_text() {
         &"x".repeat(MAX_EVENT_SUBJECT_EVENT_NAME_BYTES + 1),
     ] {
         assert_eq!(
-            build(event, "a.yml", "abc"),
+            build(event, "a.yml"),
             Err(EventSubjectValueError::InvalidEventName)
         );
     }
@@ -329,22 +334,10 @@ fn selection_rejects_nil_identity_and_unbounded_or_unsafe_text() {
         &"x".repeat(MAX_EVENT_SUBJECT_WORKFLOW_PATH_BYTES + 1),
     ] {
         assert_eq!(
-            build("push", path, "abc"),
+            build("push", path),
             Err(EventSubjectValueError::InvalidWorkflowPath)
         );
     }
-    for revision in [
-        "",
-        " leading",
-        "line\nbreak",
-        &"x".repeat(MAX_EVENT_SUBJECT_SOURCE_REVISION_BYTES + 1),
-    ] {
-        assert_eq!(
-            build("push", "a.yml", revision),
-            Err(EventSubjectValueError::InvalidSourceRevision)
-        );
-    }
-
     assert_eq!(
         EventSubjectSelection::new(
             EventSubjectId::from_uuid(Uuid::from_u128(1)).expect("subject"),
@@ -353,7 +346,7 @@ fn selection_rejects_nil_identity_and_unbounded_or_unsafe_text() {
             provider_origin(3),
             "push",
             "a.yml",
-            "abc",
+            git_id(0x15),
             Sha256Digest::from_bytes([1; 32]),
             Sha256Digest::from_bytes([2; 32]),
             UnixMillis::new(1),
@@ -378,7 +371,7 @@ fn selection_with_result(
         origin,
         "push",
         "a.yml",
-        "abc",
+        git_id(0x16),
         Sha256Digest::from_bytes([1; 32]),
         Sha256Digest::from_bytes([2; 32]),
         UnixMillis::new(1),
@@ -535,7 +528,6 @@ fn debug_output_redacts_event_workflow_revision_reason_and_digests() {
         "tenant-private-marker",
         "workflow_dispatch",
         "private-workflow-marker",
-        "private-source-revision-marker",
     ] {
         assert!(!selected_debug.contains(secret));
     }

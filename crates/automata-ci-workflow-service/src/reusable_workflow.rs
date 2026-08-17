@@ -15,10 +15,11 @@ use std::{
 
 use automata_ci_core::{
     CompiledValueTemplate, ExpressionInstruction, ExpressionLiteral, ExpressionSegment,
-    InvocationInputDefault, InvocationInputType, LogicalJobKind, LogicalJobOutputSource,
-    LogicalJobTemplate, OutputSensitivity, PermissionLevel, PermissionSnapshotRequest,
-    PlanSourceOrigin, ReusableSecretForwarding, ReusableWorkflowInvocation, RunId, Sha256Digest,
-    WorkflowInvocationContract, WorkflowJobKey, WorkflowPermissions, WorkflowPlan,
+    GitObjectId, InvocationInputDefault, InvocationInputType, LogicalJobKind,
+    LogicalJobOutputSource, LogicalJobTemplate, OutputSensitivity, PermissionLevel,
+    PermissionSnapshotRequest, PlanSourceOrigin, ReusableSecretForwarding,
+    ReusableWorkflowInvocation, RunId, Sha256Digest, WorkflowInvocationContract, WorkflowJobKey,
+    WorkflowPermissions, WorkflowPlan,
 };
 use automata_ci_store::{LogicalWorkflowInvocationId, LogicalWorkflowJobId};
 use automata_ci_workflow_github::{
@@ -383,7 +384,7 @@ impl CatalogedReusableWorkflow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubReusableWorkflowCatalog {
     repository: String,
-    revision: String,
+    revision: GitObjectId,
     entries: BTreeMap<String, CatalogedReusableWorkflow>,
 }
 
@@ -399,14 +400,12 @@ impl GithubReusableWorkflowCatalog {
     /// Returns a fail-closed expansion error for any invalid reachable edge.
     pub fn compile_reachable(
         repository: impl Into<String>,
-        revision: impl Into<String>,
+        revision: GitObjectId,
         root_plan: &WorkflowPlan,
         sources: impl IntoIterator<Item = RepositoryWorkflowSource>,
     ) -> Result<Self, ReusableWorkflowExpansionError> {
         let repository = repository.into();
-        let revision = revision.into();
         validate_coordinate(&repository)?;
-        validate_exact_revision(&revision)?;
         let PlanSourceOrigin::Repository {
             path: root_path, ..
         } = root_plan.source().origin()
@@ -417,8 +416,10 @@ impl GithubReusableWorkflowCatalog {
         validate_plan_origin(
             root_plan,
             CatalogSourceAuthority::GithubDelivery,
-            &repository,
-            &revision,
+            CatalogSourceIdentity::Git {
+                repository: &repository,
+                revision,
+            },
             &root_path,
         )?;
 
@@ -460,7 +461,7 @@ impl GithubReusableWorkflowCatalog {
             let source = available
                 .get(&path)
                 .ok_or_else(|| ReusableWorkflowExpansionError::MissingCatalogPath(path.clone()))?;
-            let plan = compile_reusable_source(&repository, &revision, &path, source)?;
+            let plan = compile_reusable_source(&repository, revision, &path, source)?;
             if plan.logical().invocation().is_none() {
                 return Err(ReusableWorkflowExpansionError::MissingInvocationContract(
                     path,
@@ -499,13 +500,11 @@ impl GithubReusableWorkflowCatalog {
     /// contract.
     pub fn compile(
         repository: impl Into<String>,
-        revision: impl Into<String>,
+        revision: GitObjectId,
         sources: impl IntoIterator<Item = RepositoryWorkflowSource>,
     ) -> Result<Self, ReusableWorkflowExpansionError> {
         let repository = repository.into();
-        let revision = revision.into();
         validate_coordinate(&repository)?;
-        validate_exact_revision(&revision)?;
         let sources = sources.into_iter().collect::<Vec<_>>();
         validate_reusable_catalog_entry_count(sources.len())?;
         let mut entries = BTreeMap::new();
@@ -519,7 +518,7 @@ impl GithubReusableWorkflowCatalog {
             if entries.contains_key(&path) {
                 return Err(ReusableWorkflowExpansionError::DuplicateCatalogPath(path));
             }
-            let plan = compile_reusable_source(&repository, &revision, &path, source.source())?;
+            let plan = compile_reusable_source(&repository, revision, &path, source.source())?;
             if plan.logical().invocation().is_none() {
                 return Err(ReusableWorkflowExpansionError::MissingInvocationContract(
                     path,
@@ -553,8 +552,8 @@ impl GithubReusableWorkflowCatalog {
 
     /// Returns the immutable repository revision shared by all entries.
     #[must_use]
-    pub fn revision(&self) -> &str {
-        &self.revision
+    pub const fn revision(&self) -> GitObjectId {
+        self.revision
     }
 
     /// Returns entries ordered by canonical repository-relative path.
@@ -572,10 +571,20 @@ struct ResolvedCatalogEntry<'a> {
     plan: &'a WorkflowPlan,
 }
 
+#[derive(Clone, Copy)]
+enum CatalogSourceIdentity<'a> {
+    Git {
+        repository: &'a str,
+        revision: GitObjectId,
+    },
+    Archive {
+        snapshot_digest: Sha256Digest,
+    },
+}
+
 trait ReusableWorkflowCatalogResolver {
     fn authority(&self) -> CatalogSourceAuthority;
-    fn repository(&self) -> &str;
-    fn revision(&self) -> &str;
+    fn source_identity(&self) -> CatalogSourceIdentity<'_>;
     fn resolve(
         &self,
         reference: &str,
@@ -587,12 +596,11 @@ impl ReusableWorkflowCatalogResolver for GithubReusableWorkflowCatalog {
         CatalogSourceAuthority::GithubDelivery
     }
 
-    fn repository(&self) -> &str {
-        &self.repository
-    }
-
-    fn revision(&self) -> &str {
-        &self.revision
+    fn source_identity(&self) -> CatalogSourceIdentity<'_> {
+        CatalogSourceIdentity::Git {
+            repository: &self.repository,
+            revision: self.revision,
+        }
     }
 
     fn resolve(
@@ -615,8 +623,6 @@ impl ReusableWorkflowCatalogResolver for GithubReusableWorkflowCatalog {
 
 struct LocalReusableWorkflowCatalog<'a> {
     compilation: &'a LocalGithubArchiveCompilation,
-    repository: &'static str,
-    revision: String,
     plan_digests: BTreeMap<String, Sha256Digest>,
 }
 
@@ -631,8 +637,6 @@ impl<'a> LocalReusableWorkflowCatalog<'a> {
             .collect::<Result<_, ReusableWorkflowExpansionError>>()?;
         Ok(Self {
             compilation,
-            repository: "local",
-            revision: compilation.snapshot_digest().to_string(),
             plan_digests,
         })
     }
@@ -643,12 +647,10 @@ impl ReusableWorkflowCatalogResolver for LocalReusableWorkflowCatalog<'_> {
         CatalogSourceAuthority::LocalGithubArchive
     }
 
-    fn repository(&self) -> &str {
-        self.repository
-    }
-
-    fn revision(&self) -> &str {
-        &self.revision
+    fn source_identity(&self) -> CatalogSourceIdentity<'_> {
+        CatalogSourceIdentity::Archive {
+            snapshot_digest: self.compilation.snapshot_digest(),
+        }
     }
 
     fn resolve(
@@ -724,8 +726,7 @@ pub fn analyze_local_github_archive(
     validate_plan_origin(
         compilation.root_plan(),
         catalog.authority(),
-        catalog.repository(),
-        catalog.revision(),
+        catalog.source_identity(),
         &root_path,
     )
     .map_err(|error| local_reusable_failure(&error, diagnostics.clone()))?;
@@ -1666,8 +1667,7 @@ where
             validate_plan_origin(
                 callee.plan,
                 catalog.authority(),
-                catalog.repository(),
-                catalog.revision(),
+                catalog.source_identity(),
                 callee.path,
             )?;
             let contract = callee.plan.logical().invocation().ok_or_else(|| {
@@ -1977,8 +1977,7 @@ fn expand_reusable_workflow(
     validate_plan_origin(
         request.root_plan,
         CatalogSourceAuthority::GithubDelivery,
-        request.catalog.repository(),
-        request.catalog.revision(),
+        request.catalog.source_identity(),
         &root_path,
     )?;
     let recompiled_root = recompile_root_source(
@@ -2360,7 +2359,7 @@ const fn minimum_permission(left: PermissionLevel, right: PermissionLevel) -> Pe
 
 fn compile_reusable_source(
     repository: &str,
-    revision: &str,
+    revision: GitObjectId,
     path: &str,
     source: &[u8],
 ) -> Result<WorkflowPlan, ReusableWorkflowExpansionError> {
@@ -2375,7 +2374,7 @@ fn compile_reusable_source(
 
 fn recompile_root_source(
     repository: &str,
-    revision: &str,
+    revision: GitObjectId,
     path: &str,
     source: &[u8],
     event: automata_ci_core::WorkflowEventProvenance,
@@ -2396,7 +2395,7 @@ enum ReusableCompilationSelection {
 
 fn compile_source(
     repository: &str,
-    revision: &str,
+    revision: GitObjectId,
     path: &str,
     source: &[u8],
     selection: ReusableCompilationSelection,
@@ -2407,7 +2406,7 @@ fn compile_source(
         SourceId::new(path),
         SourceOrigin::Repository {
             repository: Arc::from(repository),
-            revision: Arc::from(revision),
+            revision,
             path: Arc::from(path),
         },
     );
@@ -2446,23 +2445,33 @@ fn compile_source(
 fn validate_plan_origin(
     plan: &WorkflowPlan,
     authority: CatalogSourceAuthority,
-    repository: &str,
-    revision: &str,
+    identity: CatalogSourceIdentity<'_>,
     path: &str,
 ) -> Result<(), ReusableWorkflowExpansionError> {
-    let PlanSourceOrigin::Repository {
-        repository: plan_repository,
-        revision: plan_revision,
-        path: plan_path,
-    } = plan.source().origin()
-    else {
-        return Err(ReusableWorkflowExpansionError::RootPlanMismatch);
+    let origin_matches = match (identity, plan.source().origin()) {
+        (
+            CatalogSourceIdentity::Git {
+                repository,
+                revision,
+            },
+            PlanSourceOrigin::Repository {
+                repository: plan_repository,
+                revision: plan_revision,
+                path: plan_path,
+            },
+        ) => plan_repository == repository && *plan_revision == revision && plan_path == path,
+        (
+            CatalogSourceIdentity::Archive { snapshot_digest },
+            PlanSourceOrigin::Archive {
+                snapshot_digest: plan_digest,
+                path: plan_path,
+            },
+        ) => *plan_digest == snapshot_digest && plan_path == path,
+        _ => false,
     };
     if plan.source().provider() != authority.provider()
         || plan.source().source_id() != path
-        || plan_repository != repository
-        || plan_revision != revision
-        || plan_path != path
+        || !origin_matches
     {
         return Err(ReusableWorkflowExpansionError::RootPlanMismatch);
     }
@@ -2524,17 +2533,6 @@ fn resolve_local_reference(
 fn validate_coordinate(value: &str) -> Result<(), ReusableWorkflowExpansionError> {
     validate_reusable_repository_coordinate_bytes(value.len())?;
     if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
-        return Err(ReusableWorkflowExpansionError::InvalidRepositoryCoordinate);
-    }
-    Ok(())
-}
-
-fn validate_exact_revision(value: &str) -> Result<(), ReusableWorkflowExpansionError> {
-    if !matches!(value.len(), 40 | 64)
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-    {
         return Err(ReusableWorkflowExpansionError::InvalidRepositoryCoordinate);
     }
     Ok(())

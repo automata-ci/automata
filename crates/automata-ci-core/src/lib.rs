@@ -9,6 +9,7 @@
 pub mod capability;
 pub mod digest;
 pub mod execution;
+pub mod git;
 pub mod id;
 pub mod job;
 pub mod log;
@@ -22,6 +23,7 @@ mod test_support;
 pub use capability::*;
 pub use digest::*;
 pub use execution::*;
+pub use git::*;
 pub use id::*;
 pub use job::*;
 pub use log::*;

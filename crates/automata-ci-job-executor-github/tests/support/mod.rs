@@ -988,7 +988,10 @@ fn envelope_with_all_settings_and_environment_profile(
         JobSource::new(
             "github",
             "automata-ci/automata",
-            "0123456789abcdef0123456789abcdef01234567",
+            automata_ci_core::GitObjectId::from_provider_hex(
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("revision"),
             ".ci/workflows/ci.yml",
             "push",
         ),
@@ -1018,7 +1021,7 @@ pub fn action_step_named(id: &str, name: &str, repository: &str) -> StepIr {
         SemanticStep::action(
             ActionReference::Repository {
                 repository: repository.to_owned(),
-                revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                selector: "0123456789abcdef0123456789abcdef01234567".to_owned(),
                 subpath: None,
             },
             BTreeMap::from([
@@ -2175,7 +2178,7 @@ impl FakeContexts {
             ),
             (
                 "sha".to_owned(),
-                GithubValue::string(request.job().source().revision()),
+                GithubValue::string(request.job().source().revision().to_string()),
             ),
             (
                 "token".to_owned(),

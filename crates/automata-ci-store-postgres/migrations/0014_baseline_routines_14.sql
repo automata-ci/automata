@@ -196,7 +196,7 @@ BEGIN
           AND marker.admission_graph_sealed_at_ms IS NOT NULL
           AND catalog.workflow_path = workflow.path
           AND catalog.source_digest = snapshot.source_digest
-          AND catalog.source_revision = encode(run.head_sha, 'hex')
+          AND catalog.source_revision = run.head_sha
           AND catalog.source_object_key = snapshot.source_object_key
           AND catalog.source_size_bytes = snapshot.source_size_bytes
           AND catalog.source_media_type = snapshot.source_media_type
@@ -240,7 +240,7 @@ BEGIN
         WHERE invocation.run_id = NEW.run_id
           AND (
               invocation.workflow_path <> catalog.workflow_path
-              OR catalog.source_revision <> encode(run.head_sha, 'hex')
+              OR catalog.source_revision <> run.head_sha
               OR (
                   invocation.depth > 0
                   AND catalog.invocation_contract_digest IS NULL

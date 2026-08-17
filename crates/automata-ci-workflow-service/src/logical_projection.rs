@@ -617,7 +617,7 @@ fn validate_plan_execution(
         return Err(LogicalJobProjectionError::NonRepositorySource);
     };
     if let Some(commit_sha) = plan.event().commit_sha()
-        && commit_sha != revision
+        && commit_sha != *revision
     {
         return Err(LogicalJobProjectionError::ExecutionProvenanceMismatch);
     }
@@ -638,7 +638,7 @@ fn github_job_source(
     Ok(JobSource::new(
         "github",
         repository,
-        revision,
+        *revision,
         path,
         plan.event().name(),
     ))
@@ -1178,7 +1178,7 @@ fn action_reference(source: &str) -> Result<ActionReference, LogicalJobProjectio
     }
     Ok(ActionReference::Repository {
         repository: format!("{}/{}", components[0], components[1]),
-        revision: revision.to_owned(),
+        selector: revision.to_owned(),
         subpath: (components.len() > 2).then(|| components[2..].join("/")),
     })
 }

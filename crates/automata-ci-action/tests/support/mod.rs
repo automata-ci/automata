@@ -2,8 +2,10 @@
 
 use std::io::Cursor;
 
+use automata_ci_core::GitObjectId;
+
 use automata_ci_scm::{
-    ArchiveFormat, RepositoryId, RepositorySnapshot, ResolvedRevision, RevisionSpec, ScmProviderId,
+    ArchiveFormat, RepositoryId, RepositorySnapshot, RevisionSpec, ScmProviderId,
 };
 use bytes::Bytes;
 use flate2::{Compression, write::GzEncoder};
@@ -28,7 +30,7 @@ pub fn snapshot_from_bytes(bytes: Bytes) -> RepositorySnapshot {
         ScmProviderId::new("github").unwrap(),
         RepositoryId::new("actions/example").unwrap(),
         RevisionSpec::new("v1").unwrap(),
-        ResolvedRevision::new(SHA).unwrap(),
+        GitObjectId::from_provider_hex(SHA).unwrap(),
         ArchiveFormat::TarGzip,
         bytes,
     )

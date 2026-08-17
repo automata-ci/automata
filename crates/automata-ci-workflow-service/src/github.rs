@@ -117,7 +117,7 @@ fn source_provenance(
         SourceId::new(admission.workflow_path()),
         SourceOrigin::Repository {
             repository: Arc::from(repository.as_str()),
-            revision: Arc::from(revision.as_str()),
+            revision: *revision,
             path: Arc::from(path.as_str()),
         },
     ))

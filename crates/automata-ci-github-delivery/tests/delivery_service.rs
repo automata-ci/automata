@@ -10,6 +10,7 @@ use std::{
 use async_trait::async_trait;
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github_delivery::{
     GITHUB_AUTHENTICATED_EVENT_MEDIA_TYPE, GithubChangedFileSelection,
@@ -26,17 +27,16 @@ use automata_ci_github_delivery::{
 };
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_scm::{
-    ArchiveFormat, ExactRevision, RepositoryId as ScmRepositoryId, RepositorySource,
-    RepositorySourcePort, RepositorySourceRequest, ScmError, ScmProviderId,
+    ArchiveFormat, RepositoryId as ScmRepositoryId, RepositorySource, RepositorySourcePort,
+    RepositorySourceRequest, ScmError, ScmProviderId,
 };
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptProviderDelivery, AdmissionObject,
     AdmitLogicalWorkflowRun, AuthenticatedGithubDeliveryClaim, ClaimProviderDelivery,
-    ClaimedProviderDelivery, CompleteProviderDelivery, GithubCheckHeadSha,
-    GithubServerServiceAction, GithubServerServiceAuthorityId,
-    GithubServerServiceAuthoritySelector, GithubServerServiceClaimFence,
-    GithubServerServiceConsumerClaim, GithubServerServiceHandoffId, GithubServerServiceRevision,
-    GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
+    ClaimedProviderDelivery, CompleteProviderDelivery, GithubServerServiceAction,
+    GithubServerServiceAuthorityId, GithubServerServiceAuthoritySelector,
+    GithubServerServiceClaimFence, GithubServerServiceConsumerClaim, GithubServerServiceHandoffId,
+    GithubServerServiceRevision, GithubSubjectEvidenceRepository, GithubSubjectEvidenceStoreError,
     GithubWorkflowRunSubjectEvidence, LogicalWorkflowAdmissionReceipt,
     LogicalWorkflowAdmissionRepository, LogicalWorkflowAdmissionStoreError,
     MAX_GITHUB_SERVICE_CONSUMER_REQUEST_MILLIS, MAX_PROVIDER_DELIVERY_CLAIM_MILLIS,
@@ -888,7 +888,7 @@ struct DeliveryTemplate {
     request_digest: Sha256Digest,
     raw_event: AdmissionObject,
     event_envelope: ProviderDeliveryEventEnvelope,
-    check_head_sha: GithubCheckHeadSha,
+    check_head_sha: GitObjectId,
 }
 
 #[derive(Debug)]
@@ -1442,7 +1442,7 @@ fn snapshot_processor_harness_with_config(
     let source = RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-        ExactRevision::new(AFTER).expect("revision"),
+        GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
             ".ci/workflows/ci.yml",
@@ -1519,7 +1519,7 @@ fn changed_files_renewal_harness(
     let source = RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-        ExactRevision::new(AFTER).expect("revision"),
+        GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
             ".ci/workflows/ci.yml",
@@ -1720,7 +1720,7 @@ fn repository_source() -> RepositorySource {
     RepositorySource::from_bytes(
         ScmProviderId::new("github").expect("provider"),
         ScmRepositoryId::new(format!("{OWNER}/{REPOSITORY}")).expect("repository"),
-        ExactRevision::new(AFTER).expect("revision"),
+        GitObjectId::from_provider_hex(AFTER).expect("revision"),
         ArchiveFormat::TarGzip,
         archive(BTreeMap::from([(
             ".ci/workflows/ci.yml",

@@ -11,8 +11,8 @@ use automata_ci_auth::authorization::{
 };
 use automata_ci_blob::BlobDescriptor;
 use automata_ci_core::{
-    AttemptId, AttemptNumber, JobConclusion, JobId, JobLifecycle, LogSequence, LogStreamId, RunId,
-    RunnerId, Sha256Digest, UnixMillis, WorkflowId,
+    AttemptId, AttemptNumber, GitObjectId, JobConclusion, JobId, JobLifecycle, LogSequence,
+    LogStreamId, RunId, RunnerId, Sha256Digest, UnixMillis, WorkflowId,
 };
 use thiserror::Error;
 use tokio::sync::watch;
@@ -393,37 +393,6 @@ pub struct HumanRunPublication {
     pub safety_schema: u16,
 }
 
-/// Git commit identity retained as its exact 20-byte SHA-1 or 32-byte SHA-256 value.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HumanGitCommitId(Vec<u8>);
-
-impl HumanGitCommitId {
-    /// Builds an exact SHA-1 or SHA-256 commit identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error unless `bytes` contains exactly 20 or 32 bytes.
-    pub fn new(bytes: Vec<u8>) -> Result<Self, StoreError> {
-        Self::from_durable_bytes(bytes)
-    }
-
-    pub(crate) fn from_durable_bytes(bytes: Vec<u8>) -> Result<Self, StoreError> {
-        if matches!(bytes.len(), 20 | 32) {
-            Ok(Self(bytes))
-        } else {
-            Err(StoreError::corrupt_data(
-                "workflow run head digest has an invalid length",
-            ))
-        }
-    }
-
-    /// Returns the exact raw commit identity bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
 /// Human-readable workflow run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HumanRun {
@@ -440,7 +409,7 @@ pub struct HumanRun {
     /// Canonical trigger event name.
     pub event_name: String,
     /// Exact source commit identity admitted for execution.
-    pub head_commit: HumanGitCommitId,
+    pub head_commit: GitObjectId,
     /// Current durable run lifecycle.
     pub status: crate::WorkflowRunStatus,
     /// Stable aggregate conclusion once derivable from latest attempts.
@@ -1233,18 +1202,18 @@ mod tests {
         assert!(HumanGitRef::new("refs/heads/main").is_ok());
         assert!(HumanGitRef::new("main").is_err());
         assert_eq!(
-            HumanGitCommitId::new(vec![0x11; 20])
+            GitObjectId::from_durable_bytes(&[0x11; 20])
                 .expect("SHA-1 identity")
                 .as_bytes(),
             &[0x11; 20]
         );
         assert_eq!(
-            HumanGitCommitId::new(vec![0x22; 32])
+            GitObjectId::from_durable_bytes(&[0x22; 32])
                 .expect("SHA-256 identity")
                 .as_bytes(),
             &[0x22; 32]
         );
-        assert!(HumanGitCommitId::new(vec![0; 31]).is_err());
+        assert!(GitObjectId::from_durable_bytes(&[0; 31]).is_err());
         assert!(HumanPageSize::new(1).is_ok());
         assert!(HumanPageSize::new(MAX_HUMAN_PAGE_SIZE).is_ok());
         assert!(HumanPageSize::new(0).is_err());

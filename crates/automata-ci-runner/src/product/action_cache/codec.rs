@@ -8,8 +8,8 @@ use automata_ci_action::{
     ImmutableActionReference, IndexedActionBundle,
 };
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
-use automata_ci_core::Sha256Digest;
-use automata_ci_scm::{RepositoryId, ResolvedRevision, RevisionSpec, ScmProviderId};
+use automata_ci_core::{GitObjectId, Sha256Digest};
+use automata_ci_scm::{RepositoryId, ScmProviderId};
 use serde::{Deserialize, Serialize};
 
 use super::ACTION_REFERENCE_INDEX_SCHEMA_VERSION;
@@ -146,9 +146,9 @@ struct StoredEntry {
     sequence: u64,
     provider: String,
     repository: String,
-    revision: String,
+    revision: GitObjectId,
     subpath: String,
-    resolved_revision: String,
+    resolved_revision: GitObjectId,
     archive: StoredBlobDescriptor,
 }
 
@@ -160,9 +160,9 @@ impl StoredEntry {
             sequence: entry.sequence,
             provider: reference.provider().as_str().to_owned(),
             repository: reference.repository().as_str().to_owned(),
-            revision: reference.revision().as_str().to_owned(),
+            revision: *reference.revision(),
             subpath: reference.subpath().as_str().to_owned(),
-            resolved_revision: entry.bundle.resolved_revision().as_str().to_owned(),
+            resolved_revision: entry.bundle.resolved_revision(),
             archive: StoredBlobDescriptor {
                 key: archive.key().as_str().to_owned(),
                 digest: archive.digest().to_string(),
@@ -175,16 +175,13 @@ impl StoredEntry {
     fn try_into_bundle(&self) -> Result<IndexedActionBundle, ActionReferenceIndexError> {
         let provider = ScmProviderId::new(self.provider.clone()).map_err(|_| corrupt())?;
         let repository = RepositoryId::new(self.repository.clone()).map_err(|_| corrupt())?;
-        let revision = RevisionSpec::new(self.revision.clone()).map_err(|_| corrupt())?;
         let subpath = if self.subpath.is_empty() {
             ActionSubpath::root()
         } else {
             ActionSubpath::new(self.subpath.clone()).map_err(|_| corrupt())?
         };
-        let reference = ImmutableActionReference::new(provider, repository, revision, subpath)
-            .map_err(|_| corrupt())?;
-        let resolved_revision =
-            ResolvedRevision::new(self.resolved_revision.clone()).map_err(|_| corrupt())?;
+        let reference = ImmutableActionReference::new(provider, repository, self.revision, subpath);
+        let resolved_revision = self.resolved_revision;
         let archive = BlobDescriptor::new(
             BlobKey::new(self.archive.key.clone()).map_err(|_| corrupt())?,
             Sha256Digest::from_str(&self.archive.digest).map_err(|_| corrupt())?,

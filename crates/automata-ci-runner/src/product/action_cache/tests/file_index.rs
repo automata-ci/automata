@@ -15,7 +15,8 @@ use automata_ci_action::{
     IndexedActionBundle, PutActionReferenceOutcome,
 };
 use automata_ci_blob::{BlobKey, BlobPayload, MediaType};
-use automata_ci_scm::{RepositoryId, ResolvedRevision, RevisionSpec, ScmProviderId};
+use automata_ci_core::GitObjectId;
+use automata_ci_scm::{RepositoryId, ScmProviderId};
 use bytes::Bytes;
 
 static NEXT_SCRATCH: AtomicU64 = AtomicU64::new(1);
@@ -83,7 +84,7 @@ async fn conflicting_fill_is_rejected_without_overwriting_authority() {
     let mut conflict = bundle(12, b"different bytes");
     conflict = IndexedActionBundle::new(
         first.reference().clone(),
-        first.resolved_revision().clone(),
+        first.resolved_revision(),
         conflict.archive().clone(),
     )
     .unwrap();
@@ -176,10 +177,9 @@ fn bundle(sequence: u64, bytes: &[u8]) -> IndexedActionBundle {
     let reference = ImmutableActionReference::new(
         ScmProviderId::new("github").unwrap(),
         RepositoryId::new(format!("actions/example-{sequence}")).unwrap(),
-        RevisionSpec::new(revision.clone()).unwrap(),
+        GitObjectId::from_provider_hex(&revision).unwrap(),
         ActionSubpath::new("packages/action").unwrap(),
-    )
-    .unwrap();
+    );
     let payload = BlobPayload::from_bytes(
         BlobKey::new("actions/v1/sha256/placeholder.tar.gz").unwrap(),
         MediaType::new("application/gzip").unwrap(),
@@ -195,7 +195,12 @@ fn bundle(sequence: u64, bytes: &[u8]) -> IndexedActionBundle {
         payload.descriptor().size(),
         payload.descriptor().media_type().clone(),
     );
-    IndexedActionBundle::new(reference, ResolvedRevision::new(revision).unwrap(), archive).unwrap()
+    IndexedActionBundle::new(
+        reference,
+        GitObjectId::from_provider_hex(revision).unwrap(),
+        archive,
+    )
+    .unwrap()
 }
 
 struct Scratch {

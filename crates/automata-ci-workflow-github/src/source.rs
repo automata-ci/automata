@@ -1,5 +1,7 @@
 use std::{error::Error, fmt, sync::Arc};
 
+use automata_ci_core::{GitObjectId, Sha256Digest};
+
 /// Stable identity of one source file within a source-level plan.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SourceId(Arc<str>);
@@ -31,8 +33,15 @@ pub enum SourceOrigin {
         /// Stable repository identity supplied by the source adapter.
         repository: Arc<str>,
         /// Immutable source revision; callers should use an exact commit identifier.
-        revision: Arc<str>,
+        revision: GitObjectId,
         /// Repository-relative path of the workflow file.
+        path: Arc<str>,
+    },
+    /// Source captured from a content-addressed local archive rather than an SCM object.
+    Archive {
+        /// Digest of the complete admitted archive snapshot.
+        snapshot_digest: Sha256Digest,
+        /// Archive-relative path of the workflow file.
         path: Arc<str>,
     },
     /// Source read from a local path outside provider admission.

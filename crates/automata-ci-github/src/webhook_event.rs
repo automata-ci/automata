@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, fmt, num::NonZeroU64};
 
-use automata_ci_scm::ExactRevision;
+use automata_ci_core::GitObjectId;
 use bytes::Bytes;
 use serde::{
     Deserialize, Serialize,
@@ -307,7 +307,7 @@ pub struct VerifiedGithubCheckRun {
     app_id: NonZeroU64,
     run_id: NonZeroU64,
     suite_id: NonZeroU64,
-    head_revision: ExactRevision,
+    head_revision: GitObjectId,
     external_id: Box<str>,
     action: GithubCheckRunAction,
 }
@@ -365,7 +365,7 @@ impl VerifiedGithubCheckRun {
     }
     /// Returns the exact checked commit.
     #[must_use]
-    pub const fn head_revision(&self) -> &ExactRevision {
+    pub const fn head_revision(&self) -> &GitObjectId {
         &self.head_revision
     }
     /// Returns Automata's bounded external Check identity.
@@ -409,7 +409,7 @@ pub struct VerifiedGithubCheckSuite {
     sender_id: NonZeroU64,
     app_id: NonZeroU64,
     suite_id: NonZeroU64,
-    head_revision: ExactRevision,
+    head_revision: GitObjectId,
 }
 
 impl VerifiedGithubCheckSuite {
@@ -460,7 +460,7 @@ impl VerifiedGithubCheckSuite {
     }
     /// Returns the exact checked commit.
     #[must_use]
-    pub const fn head_revision(&self) -> &ExactRevision {
+    pub const fn head_revision(&self) -> &GitObjectId {
         &self.head_revision
     }
 }
@@ -598,9 +598,9 @@ pub struct VerifiedGithubPullRequest {
     number: NonZeroU64,
     action: GithubPullRequestAction,
     merged: bool,
-    head_revision: ExactRevision,
-    base_revision: ExactRevision,
-    merge_revision: ExactRevision,
+    head_revision: GitObjectId,
+    base_revision: GitObjectId,
+    merge_revision: GitObjectId,
     head_ref: Box<str>,
     base_ref: Box<str>,
     git_ref: Box<str>,
@@ -682,13 +682,13 @@ impl VerifiedGithubPullRequest {
 
     /// Returns the canonical pull-request head commit.
     #[must_use]
-    pub const fn head_revision(&self) -> &ExactRevision {
+    pub const fn head_revision(&self) -> &GitObjectId {
         &self.head_revision
     }
 
     /// Returns the canonical base-branch commit observed by the payload.
     #[must_use]
-    pub const fn base_revision(&self) -> &ExactRevision {
+    pub const fn base_revision(&self) -> &GitObjectId {
         &self.base_revision
     }
 
@@ -698,7 +698,7 @@ impl VerifiedGithubPullRequest {
     /// commit. In that case an unmerged event uses the exact head revision as
     /// the deterministic execution fallback.
     #[must_use]
-    pub const fn merge_revision(&self) -> &ExactRevision {
+    pub const fn merge_revision(&self) -> &GitObjectId {
         &self.merge_revision
     }
 
@@ -756,8 +756,8 @@ pub struct VerifiedGithubMergeGroup {
     actor: Option<GithubEventActor>,
     repository: GithubWebhookRepository,
     action: GithubMergeGroupAction,
-    head_revision: ExactRevision,
-    base_revision: ExactRevision,
+    head_revision: GitObjectId,
+    base_revision: GitObjectId,
     head_ref: GithubWebhookRef,
     base_ref: GithubWebhookRef,
 }
@@ -813,13 +813,13 @@ impl VerifiedGithubMergeGroup {
 
     /// Returns the canonical merge-group head commit to check.
     #[must_use]
-    pub const fn head_revision(&self) -> &ExactRevision {
+    pub const fn head_revision(&self) -> &GitObjectId {
         &self.head_revision
     }
 
     /// Returns the canonical parent commit of the merge group.
     #[must_use]
-    pub const fn base_revision(&self) -> &ExactRevision {
+    pub const fn base_revision(&self) -> &GitObjectId {
         &self.base_revision
     }
 
@@ -1138,9 +1138,7 @@ pub(crate) fn normalize_pull_request(
     let base_revision = exact_revision(payload.pull_request.base.sha)?;
     let merge_revision = match payload.pull_request.merge_commit_sha {
         PullRequestMergeCommitShaPayload::Revision(revision) => exact_revision(revision)?,
-        PullRequestMergeCommitShaPayload::Null(()) if !payload.pull_request.merged => {
-            head_revision.clone()
-        }
+        PullRequestMergeCommitShaPayload::Null(()) if !payload.pull_request.merged => head_revision,
         PullRequestMergeCommitShaPayload::Null(()) | PullRequestMergeCommitShaPayload::Missing => {
             return Err(GithubWebhookError::InvalidPayload);
         }
@@ -1309,11 +1307,11 @@ fn normalize_merge_group_action(
     }
 }
 
-fn exact_revision(value: String) -> Result<ExactRevision, GithubWebhookError> {
+fn exact_revision(value: String) -> Result<GitObjectId, GithubWebhookError> {
     if value == ZERO_COMMIT_SHA {
         return Err(GithubWebhookError::InvalidPayload);
     }
-    ExactRevision::new(value).map_err(|_| GithubWebhookError::InvalidPayload)
+    GitObjectId::from_provider_hex(value).map_err(|_| GithubWebhookError::InvalidPayload)
 }
 
 fn full_branch_ref(value: String) -> Result<GithubWebhookRef, GithubWebhookError> {

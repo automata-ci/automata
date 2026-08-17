@@ -3,7 +3,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use automata_ci_core::{OperationId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, OperationId, RunId, Sha256Digest, UnixMillis};
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -25,8 +25,6 @@ pub const EVENT_CONTROL_SUBJECT_SCHEMA: u16 = 1;
 pub const MAX_EVENT_SUBJECT_EVENT_NAME_BYTES: usize = 128;
 /// Maximum workflow path length in UTF-8 bytes.
 pub const MAX_EVENT_SUBJECT_WORKFLOW_PATH_BYTES: usize = 1_024;
-/// Maximum immutable source-revision length in UTF-8 bytes.
-pub const MAX_EVENT_SUBJECT_SOURCE_REVISION_BYTES: usize = 1_024;
 /// Maximum terminal progress reason length in UTF-8 bytes.
 pub const MAX_EVENT_SUBJECT_REASON_BYTES: usize = 128;
 
@@ -354,7 +352,7 @@ pub struct EventSubjectSelection {
     origin: EventSubjectOrigin,
     event_name: String,
     workflow_path: String,
-    source_revision: String,
+    source_revision: GitObjectId,
     source_digest: Sha256Digest,
     authority_digest: Sha256Digest,
     selected_at: UnixMillis,
@@ -366,8 +364,8 @@ impl EventSubjectSelection {
     ///
     /// # Errors
     ///
-    /// Rejects nil identities, invalid event/path/revision text, and a time
-    /// before the Unix epoch.
+    /// Rejects nil identities, invalid event/path text, and a time before the
+    /// Unix epoch.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: EventSubjectId,
@@ -376,7 +374,7 @@ impl EventSubjectSelection {
         origin: EventSubjectOrigin,
         event_name: impl Into<String>,
         workflow_path: impl Into<String>,
-        source_revision: impl Into<String>,
+        source_revision: GitObjectId,
         source_digest: Sha256Digest,
         authority_digest: Sha256Digest,
         selected_at: UnixMillis,
@@ -391,12 +389,6 @@ impl EventSubjectSelection {
         }
         let workflow_path = workflow_path.into();
         validate_workflow_path(&workflow_path)?;
-        let source_revision = source_revision.into();
-        validate_bounded_text(
-            &source_revision,
-            MAX_EVENT_SUBJECT_SOURCE_REVISION_BYTES,
-            EventSubjectValueError::InvalidSourceRevision,
-        )?;
         validate_timestamp(selected_at)?;
         if id != EventSubjectId::derive(&tenant, repository_id, origin, &workflow_path)? {
             return Err(EventSubjectValueError::SubjectIdDerivationMismatch);
@@ -409,7 +401,7 @@ impl EventSubjectSelection {
             origin,
             &event_name,
             &workflow_path,
-            &source_revision,
+            source_revision,
             source_digest,
             authority_digest,
             selected_at,
@@ -443,7 +435,7 @@ impl EventSubjectSelection {
         origin: EventSubjectOrigin,
         event_name: impl Into<String>,
         workflow_path: impl Into<String>,
-        source_revision: impl Into<String>,
+        source_revision: GitObjectId,
         source_digest: Sha256Digest,
         authority_digest: Sha256Digest,
         selected_at: UnixMillis,
@@ -502,8 +494,8 @@ impl EventSubjectSelection {
         &self.workflow_path
     }
     #[must_use]
-    pub fn source_revision(&self) -> &str {
-        &self.source_revision
+    pub const fn source_revision(&self) -> GitObjectId {
+        self.source_revision
     }
     #[must_use]
     pub const fn source_digest(&self) -> Sha256Digest {
@@ -969,8 +961,6 @@ pub enum EventSubjectValueError {
     InvalidEventName,
     #[error("event subject workflow path is invalid")]
     InvalidWorkflowPath,
-    #[error("event subject source revision is invalid")]
-    InvalidSourceRevision,
     #[error("event subject terminal reason is invalid")]
     InvalidProgressReason,
     #[error("event subject timestamp is before the Unix epoch")]
@@ -1052,21 +1042,6 @@ fn validate_workflow_path(value: &str) -> Result<(), EventSubjectValueError> {
     Ok(())
 }
 
-fn validate_bounded_text(
-    value: &str,
-    maximum: usize,
-    error: EventSubjectValueError,
-) -> Result<(), EventSubjectValueError> {
-    if value.is_empty()
-        || value.len() > maximum
-        || value.trim() != value
-        || value.chars().any(char::is_control)
-    {
-        return Err(error);
-    }
-    Ok(())
-}
-
 fn is_machine_identifier(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum
@@ -1100,7 +1075,7 @@ fn selection_digest(
     origin: EventSubjectOrigin,
     event_name: &str,
     workflow_path: &str,
-    source_revision: &str,
+    source_revision: GitObjectId,
     source_digest: Sha256Digest,
     authority_digest: Sha256Digest,
     selected_at: UnixMillis,

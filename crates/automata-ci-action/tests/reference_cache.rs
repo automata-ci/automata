@@ -13,9 +13,10 @@ use automata_ci_action::{
 };
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{ImmutableBlobStore, ImmutableRecordStore, MemoryBlobStore};
+use automata_ci_core::GitObjectId;
 use automata_ci_scm::{
-    ArchiveFormat, RepositoryId, RepositorySnapshot, ResolvedRevision, RevisionSpec, ScmError,
-    ScmProvider, ScmProviderId, SnapshotRequest,
+    ArchiveFormat, RepositoryId, RepositorySnapshot, RevisionSpec, ScmError, ScmProvider,
+    ScmProviderId, SnapshotRequest,
 };
 use bytes::Bytes;
 use support::{SHA, TestEntry, build_archive};
@@ -46,8 +47,8 @@ impl ScmProvider for CountingScm {
             self.provider.clone(),
             request.repository().clone(),
             request.revision().clone(),
-            ResolvedRevision::new(request.revision().as_str()).unwrap_or_else(|_| {
-                ResolvedRevision::new(SHA).expect("fixture commit is an exact revision")
+            GitObjectId::from_provider_hex(request.revision().as_str()).unwrap_or_else(|_| {
+                GitObjectId::from_provider_hex(SHA).expect("fixture commit is an exact revision")
             }),
             ArchiveFormat::TarGzip,
             self.archive.clone(),

@@ -2,10 +2,8 @@ use std::fmt;
 
 use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::BlobDescriptor;
-use automata_ci_core::Sha256Digest;
-use automata_ci_scm::{
-    ArchiveLimits, RepositoryId, ResolvedRevision, RevisionSpec, ScmProviderId, SnapshotRequest,
-};
+use automata_ci_core::{GitObjectId, Sha256Digest};
+use automata_ci_scm::{ArchiveLimits, RepositoryId, RevisionSpec, ScmProviderId, SnapshotRequest};
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -542,7 +540,7 @@ pub struct ResolvedActionBundle {
     provider: ScmProviderId,
     repository: RepositoryId,
     requested_revision: RevisionSpec,
-    resolved_revision: ResolvedRevision,
+    resolved_revision: GitObjectId,
     subpath: ActionSubpath,
     archive: BlobDescriptor,
     archive_bytes: Bytes,
@@ -554,7 +552,7 @@ pub(crate) struct ResolvedActionIdentity {
     provider: ScmProviderId,
     repository: RepositoryId,
     requested_revision: RevisionSpec,
-    resolved_revision: ResolvedRevision,
+    resolved_revision: GitObjectId,
     subpath: ActionSubpath,
 }
 
@@ -563,7 +561,7 @@ impl ResolvedActionIdentity {
         provider: ScmProviderId,
         repository: RepositoryId,
         requested_revision: RevisionSpec,
-        resolved_revision: ResolvedRevision,
+        resolved_revision: GitObjectId,
         subpath: ActionSubpath,
     ) -> Self {
         Self {
@@ -622,8 +620,8 @@ impl ResolvedActionBundle {
 
     /// Returns the immutable revision confirmed by the SCM provider.
     #[must_use]
-    pub const fn resolved_revision(&self) -> &ResolvedRevision {
-        &self.resolved_revision
+    pub const fn resolved_revision(&self) -> GitObjectId {
+        self.resolved_revision
     }
 
     /// Returns the canonical repository-relative action directory.

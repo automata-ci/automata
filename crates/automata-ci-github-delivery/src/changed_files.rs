@@ -1,6 +1,7 @@
 use std::{fmt, time::Instant};
 
 use async_trait::async_trait;
+use automata_ci_core::GitObjectId;
 use automata_ci_core::Sha256Digest;
 use automata_ci_github::{
     GithubHttpEndpoint, GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome,
@@ -8,7 +9,7 @@ use automata_ci_github::{
     GithubPushDiffRange, GithubPushDiffRequest, GithubPushRefKind, GithubRepositoryVisibility,
     VerifiedGithubPullRequest, VerifiedGithubPush,
 };
-use automata_ci_scm::{ExactRevision, RepositoryId};
+use automata_ci_scm::RepositoryId;
 use automata_ci_store::ProviderRepositoryVisibility;
 
 use crate::{
@@ -230,8 +231,8 @@ fn push_range(push: &VerifiedGithubPush) -> Result<GithubPushDiffRange, ()> {
     if push.forced() {
         return Ok(GithubPushDiffRange::Forced);
     }
-    let before = ExactRevision::new(push.before_commit_sha()).map_err(|_| ())?;
-    let after = ExactRevision::new(push.after_commit_sha()).map_err(|_| ())?;
+    let before = GitObjectId::from_provider_hex(push.before_commit_sha()).map_err(|_| ())?;
+    let after = GitObjectId::from_provider_hex(push.after_commit_sha()).map_err(|_| ())?;
     let pushed_commits = push.complete_pushed_commit_revisions().ok_or(())?;
     Ok(GithubPushDiffRange::Existing {
         before,
@@ -334,9 +335,12 @@ mod tests {
         else {
             panic!("expected existing range");
         };
-        assert_eq!(before.as_str(), BEFORE);
-        assert_eq!(after.as_str(), AFTER);
-        assert_eq!(pushed_commits, [ExactRevision::new(AFTER).unwrap()]);
+        assert_eq!(before.to_string(), BEFORE);
+        assert_eq!(after.to_string(), AFTER);
+        assert_eq!(
+            pushed_commits,
+            [GitObjectId::from_provider_hex(AFTER).unwrap()]
+        );
 
         let created = push("refs/heads/new", ZERO, AFTER, true, false, false);
         assert!(matches!(

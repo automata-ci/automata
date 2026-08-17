@@ -6,6 +6,7 @@ use std::{
 };
 
 use automata_ci_auth::secret::SecretString;
+use automata_ci_core::GitObjectId;
 use automata_ci_github::{
     GithubChangedFilesEvidenceDigest, GithubHttpEndpoint, GithubHttpLimits,
     GithubPullRequestDiffAuthority, GithubPullRequestDiffOutcome, GithubPullRequestDiffRequest,
@@ -13,7 +14,7 @@ use automata_ci_github::{
     GithubPushDiffRange, GithubPushDiffRequest, MAX_GITHUB_COMPARE_PATH_FILTER_FILES,
     MAX_GITHUB_PULL_REQUEST_PATH_FILTER_FILES,
 };
-use automata_ci_scm::{ExactRevision, RepositoryId};
+use automata_ci_scm::RepositoryId;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use support::{FixtureServer, ResponseSpec};
@@ -24,8 +25,8 @@ const BEFORE: &str = "1111111111111111111111111111111111111111";
 const AFTER: &str = "2222222222222222222222222222222222222222";
 const OTHER: &str = "3333333333333333333333333333333333333333";
 
-fn revision(value: &str) -> ExactRevision {
-    ExactRevision::new(value).expect("exact fixture revision")
+fn revision(value: &str) -> GitObjectId {
+    GitObjectId::from_provider_hex(value).expect("exact fixture revision")
 }
 
 fn repository() -> RepositoryId {
@@ -96,17 +97,17 @@ fn pull_request_file(path: &str, status: &str) -> Value {
 async fn existing_diff<'a>(
     endpoint: &'a GithubHttpEndpoint,
     repository: &'a RepositoryId,
-    before: &'a ExactRevision,
-    after: &'a ExactRevision,
-    pushed_commits: &'a [ExactRevision],
+    before: &'a GitObjectId,
+    after: &'a GitObjectId,
+    pushed_commits: &'a [GitObjectId],
     authority: GithubPushDiffAuthority<'a>,
 ) -> GithubPushDiffOutcome {
     endpoint
         .push_changed_files(GithubPushDiffRequest::new(
             repository,
             GithubPushDiffRange::Existing {
-                before: before.clone(),
-                after: after.clone(),
+                before: *before,
+                after: *after,
                 pushed_commits: pushed_commits.to_vec(),
             },
             authority,
@@ -118,8 +119,8 @@ async fn existing_diff<'a>(
 async fn pull_request_diff<'a>(
     endpoint: &'a GithubHttpEndpoint,
     repository: &'a RepositoryId,
-    base: &'a ExactRevision,
-    head: &'a ExactRevision,
+    base: &'a GitObjectId,
+    head: &'a GitObjectId,
 ) -> GithubPullRequestDiffOutcome {
     pull_request_diff_with(
         endpoint,
@@ -136,8 +137,8 @@ async fn pull_request_diff_with<'a>(
     endpoint: &'a GithubHttpEndpoint,
     repository: &'a RepositoryId,
     head_repository: &'a RepositoryId,
-    base: &'a ExactRevision,
-    head: &'a ExactRevision,
+    base: &'a GitObjectId,
+    head: &'a GitObjectId,
     authority: GithubPullRequestDiffAuthority<'a>,
 ) -> GithubPullRequestDiffOutcome {
     endpoint
@@ -656,7 +657,7 @@ async fn public_comparison_is_anonymous_exact_and_canonical() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
-    let commits = [after.clone()];
+    let commits = [after];
 
     let outcome = existing_diff(
         &fixture.endpoint(),
@@ -703,7 +704,7 @@ async fn private_comparison_sends_only_the_exact_bearer_to_the_api_origin() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
-    let commits = [after.clone()];
+    let commits = [after];
     let token = SecretString::new("ghs_exact_private_changed_files").unwrap();
 
     let outcome = existing_diff(
@@ -774,7 +775,7 @@ async fn compare_selection_has_exact_299_300_301_boundaries() {
         let repository = repository();
         let before = revision(BEFORE);
         let after = revision(AFTER);
-        let commits = [after.clone()];
+        let commits = [after];
 
         let outcome = existing_diff(
             &fixture.endpoint(),
@@ -806,12 +807,12 @@ async fn pagination_must_equal_the_complete_signed_commit_set_and_end_at_after()
     let commits = (10..=110)
         .map(|value| revision(&format!("{value:040x}")))
         .collect::<Vec<_>>();
-    let after = commits.last().expect("last commit").clone();
+    let after = *commits.last().expect("last commit");
     let mut first_page = commits[..100]
         .iter()
-        .map(|commit| commit.as_str().to_owned())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
-    let second_page = vec![after.as_str().to_owned()];
+    let second_page = vec![after.to_string()];
     fixture.enqueue(ResponseSpec::json(
         StatusCode::OK,
         compare_page(
@@ -876,7 +877,7 @@ async fn divergence_is_invalid_and_push_renames_include_both_paths() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
-    let commits = [after.clone()];
+    let commits = [after];
 
     let diverged = FixtureServer::spawn().await;
     diverged.enqueue(ResponseSpec::json(
@@ -964,7 +965,7 @@ async fn duplicate_or_malformed_paths_fail_closed() {
         let repository = repository();
         let before = revision(BEFORE);
         let after = revision(AFTER);
-        let commits = [after.clone()];
+        let commits = [after];
         let outcome = existing_diff(
             &fixture.endpoint(),
             &repository,
@@ -986,7 +987,7 @@ async fn redirects_and_oversized_responses_fail_closed_without_following() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
-    let commits = [after.clone()];
+    let commits = [after];
     let redirect = FixtureServer::spawn().await;
     redirect.enqueue(
         ResponseSpec::status(StatusCode::FOUND).header("location", redirect.url("sink").as_str()),
@@ -1053,7 +1054,7 @@ async fn only_exact_ok_is_accepted_and_credential_rejection_is_typed() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
-    let commits = [after.clone()];
+    let commits = [after];
     let unexpected_success = FixtureServer::spawn().await;
     unexpected_success.enqueue(ResponseSpec::json(
         StatusCode::CREATED,
@@ -1109,7 +1110,7 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
     let repository = repository();
     let before = revision(BEFORE);
     let after = revision(AFTER);
-    let commits = [after.clone()];
+    let commits = [after];
     let limited = FixtureServer::spawn().await;
     limited.enqueue(ResponseSpec::status(StatusCode::TOO_MANY_REQUESTS).header("retry-after", "3"));
     let outcome = existing_diff(
@@ -1129,8 +1130,8 @@ async fn rate_limits_and_the_overall_deadline_are_unavailable() {
         .push_changed_files(GithubPushDiffRequest::new(
             &repository,
             GithubPushDiffRange::Existing {
-                before: before.clone(),
-                after: after.clone(),
+                before,
+                after,
                 pushed_commits: commits.to_vec(),
             },
             GithubPushDiffAuthority::PublicAnonymous,

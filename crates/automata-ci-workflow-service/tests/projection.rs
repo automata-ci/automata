@@ -173,8 +173,8 @@ async fn human_projection_is_bound_into_the_logical_admission() {
         original.plan().clone(),
         original.base_context().clone(),
         original.idempotency().clone(),
+        original.commit_sha(),
     )
-    .commit_sha(original.commit_sha())
     .git_ref(original.git_ref())
     .workflow_name(original.workflow_name())
     .actor("octocat")
@@ -512,7 +512,8 @@ jobs:
         SourceId::new(".ci/workflows/queue.yml"),
         SourceOrigin::Repository {
             repository: Arc::from(support::REPOSITORY),
-            revision: Arc::from(support::REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(support::REVISION)
+                .expect("revision"),
             path: Arc::from(".ci/workflows/queue.yml"),
         },
     );
@@ -524,7 +525,10 @@ jobs:
             parsed.plan().expect("parsed plan"),
             WorkflowEventProvenance::new("github", "push")
                 .with_delivery_id(support::DELIVERY)
-                .with_commit_sha(support::REVISION)
+                .with_commit_sha(
+                    automata_ci_core::GitObjectId::from_provider_hex(support::REVISION)
+                        .expect("revision"),
+                )
                 .with_git_ref(support::GIT_REF),
         )
         .with_event_metadata(GithubEventMetadata::push(false)),
@@ -551,8 +555,8 @@ jobs:
         compiled.into_parts().0.expect("compiled plan"),
         base_context,
         WorkflowAdmissionIdempotency::operation(automata_ci_core::OperationId::new()),
+        automata_ci_core::GitObjectId::from_provider_hex(support::REVISION).expect("revision"),
     )
-    .commit_sha(support::REVISION)
     .git_ref(support::GIT_REF)
     .workflow_name("Queue contract")
     .actor("synthetic-actor")
@@ -576,7 +580,8 @@ fn run_name_request(
         SourceId::new(".ci/workflows/run-name.yml"),
         SourceOrigin::Repository {
             repository: Arc::from(support::REPOSITORY),
-            revision: Arc::from(support::REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(support::REVISION)
+                .expect("revision"),
             path: Arc::from(".ci/workflows/run-name.yml"),
         },
     );
@@ -588,7 +593,10 @@ fn run_name_request(
             parsed.plan().expect("parsed plan"),
             WorkflowEventProvenance::new("github", "push")
                 .with_delivery_id(support::DELIVERY)
-                .with_commit_sha(support::REVISION)
+                .with_commit_sha(
+                    automata_ci_core::GitObjectId::from_provider_hex(support::REVISION)
+                        .expect("revision"),
+                )
                 .with_git_ref(support::GIT_REF),
         )
         .with_event_metadata(GithubEventMetadata::push(false)),
@@ -615,8 +623,8 @@ fn run_name_request(
         compiled.into_parts().0.expect("compiled plan"),
         base_context,
         WorkflowAdmissionIdempotency::operation(automata_ci_core::OperationId::new()),
+        automata_ci_core::GitObjectId::from_provider_hex(support::REVISION).expect("revision"),
     )
-    .commit_sha(support::REVISION)
     .git_ref(support::GIT_REF)
     .workflow_name("Run-name contract")
     .actor("synthetic-actor")
@@ -660,8 +668,8 @@ fn try_rebuild_with_base(
         original.plan().clone(),
         base_context,
         original.idempotency().clone(),
+        original.commit_sha(),
     )
-    .commit_sha(original.commit_sha())
     .git_ref(original.git_ref())
     .workflow_name(original.workflow_name())
     .actor(original.actor().expect("fixture actor"))

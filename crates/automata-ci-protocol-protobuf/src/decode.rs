@@ -1325,20 +1325,36 @@ fn job_ir_envelope(
     )?;
     Ok(core::JobIrEnvelope::new(
         core::WorkflowId::from_uuid(uuid(value.workflow_id, "job_ir_envelope.workflow_id")?),
-        job_source(required(value.source, "job_ir_envelope.source")?),
+        job_source(required(value.source, "job_ir_envelope.source")?)?,
         job_execution_context(required(value.execution, "job_ir_envelope.execution")?)?,
         job_ir(required(value.job, "job_ir_envelope.job")?, limits)?,
     ))
 }
 
-fn job_source(value: wire::JobSource) -> core::JobSource {
-    core::JobSource::new(
+fn job_source(value: wire::JobSource) -> Result<core::JobSource, DecodeError> {
+    Ok(core::JobSource::new(
         value.provider,
         value.repository,
-        value.revision,
+        git_object_id(&required(value.revision, "job_source.revision")?)?,
         value.workflow_path,
         value.event_name,
-    )
+    ))
+}
+
+fn git_object_id(value: &wire::GitObjectId) -> Result<core::GitObjectId, DecodeError> {
+    let algorithm = match wire::GitObjectAlgorithm::try_from(value.algorithm) {
+        Ok(wire::GitObjectAlgorithm::Sha1) => core::GitObjectAlgorithm::Sha1,
+        Ok(wire::GitObjectAlgorithm::Sha256) => core::GitObjectAlgorithm::Sha256,
+        Ok(wire::GitObjectAlgorithm::Unspecified) | Err(_) => {
+            return Err(DecodeError::UnknownEnum {
+                field: "git_object_id.algorithm",
+                value: value.algorithm,
+            });
+        }
+    };
+    core::GitObjectId::from_bytes(algorithm, &value.digest).map_err(|_| DecodeError::InvalidValue {
+        field: "git_object_id.digest",
+    })
 }
 
 fn job_execution_context(
@@ -2211,7 +2227,7 @@ fn action_reference(value: wire::ActionReference) -> Result<core::ActionReferenc
     match required_variant(value.value, "action_reference.value")? {
         Value::Repository(item) => Ok(core::ActionReference::Repository {
             repository: item.repository,
-            revision: item.revision,
+            selector: item.selector,
             subpath: item.subpath,
         }),
         Value::LocalPath(path) => Ok(core::ActionReference::Local { path }),

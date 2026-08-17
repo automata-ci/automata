@@ -192,7 +192,7 @@ impl OperationalWorkflowDispatchBackend {
         {
             return Err(WorkflowDispatchApiBackendError::Invariant);
         }
-        let commit_sha = snapshot.resolved_revision().as_str().to_owned();
+        let commit_sha = snapshot.resolved_revision();
         let workflows =
             discover_github_delivery_workflows(snapshot.bytes(), discovery_limits(manifest)?)
                 .map_err(|_| WorkflowDispatchApiBackendError::InvalidRequest)?;

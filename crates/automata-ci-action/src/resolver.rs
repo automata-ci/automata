@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use automata_ci_blob::{BlobKey, BlobPayload, ImmutableBlobStore, MediaType};
-use automata_ci_scm::ScmProvider;
+use automata_ci_core::GitObjectId;
+use automata_ci_scm::{RevisionSpec, ScmProvider};
 
 use crate::{
     ActionReferenceIndex, ActionResolveError, ActionResolveErrorKind, ImmutableActionReference,
@@ -78,13 +79,16 @@ impl ActionResolver for ImmutableActionResolver {
         // canonical exact commit. Credentialed/private and mutable requests
         // always cross the SCM authority boundary.
         let immutable_reference = if request.is_public() {
-            ImmutableActionReference::new(
-                self.scm.provider_id().clone(),
-                request.repository().clone(),
-                request.revision().clone(),
-                request.subpath().clone(),
-            )
-            .ok()
+            GitObjectId::from_provider_hex(request.revision().as_str())
+                .ok()
+                .map(|revision| {
+                    ImmutableActionReference::new(
+                        self.scm.provider_id().clone(),
+                        request.repository().clone(),
+                        revision,
+                        request.subpath().clone(),
+                    )
+                })
         } else {
             None
         };
@@ -111,8 +115,9 @@ impl ActionResolver for ImmutableActionResolver {
                 ResolvedActionIdentity::new(
                     reference.provider().clone(),
                     reference.repository().clone(),
-                    reference.revision().clone(),
-                    indexed.resolved_revision().clone(),
+                    RevisionSpec::new(reference.revision().to_string())
+                        .map_err(|_| ActionResolveError::new(ActionResolveErrorKind::Internal))?,
+                    indexed.resolved_revision(),
                     reference.subpath().clone(),
                 ),
                 indexed.archive().clone(),
@@ -155,12 +160,9 @@ impl ActionResolver for ImmutableActionResolver {
 
         if let (Some(references), Some(reference)) = (self.references.as_ref(), immutable_reference)
         {
-            let indexed = IndexedActionBundle::new(
-                reference,
-                snapshot.resolved_revision().clone(),
-                archive.clone(),
-            )
-            .map_err(|_| ActionResolveError::new(ActionResolveErrorKind::Internal))?;
+            let indexed =
+                IndexedActionBundle::new(reference, snapshot.resolved_revision(), archive.clone())
+                    .map_err(|_| ActionResolveError::new(ActionResolveErrorKind::Internal))?;
             references
                 .put_if_absent(indexed)
                 .await
@@ -172,7 +174,7 @@ impl ActionResolver for ImmutableActionResolver {
                 snapshot.provider().clone(),
                 snapshot.repository().clone(),
                 snapshot.requested_revision().clone(),
-                snapshot.resolved_revision().clone(),
+                snapshot.resolved_revision(),
                 request.subpath().clone(),
             ),
             archive,

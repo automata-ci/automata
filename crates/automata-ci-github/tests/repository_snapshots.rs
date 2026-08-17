@@ -1,10 +1,11 @@
 use crate::support;
 
 use automata_ci_auth::secret::SecretString;
+use automata_ci_core::GitObjectId;
 use automata_ci_github::GithubTrustedOrigins;
 use automata_ci_scm::{
-    ArchiveLimits, ExactRevision, RepositoryId, RepositorySourcePort, RepositorySourceRequest,
-    RevisionSpec, ScmErrorKind, ScmProvider, SnapshotRequest,
+    ArchiveLimits, RepositoryId, RepositorySourcePort, RepositorySourceRequest, RevisionSpec,
+    ScmErrorKind, ScmProvider, SnapshotRequest,
 };
 use axum::http::StatusCode;
 use support::{FixtureServer, ResponseSpec};
@@ -35,7 +36,7 @@ async fn exact_source_proves_the_requested_commit_before_downloading() {
     ));
     let endpoint = fixture.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
-    let revision = ExactRevision::new(SHA).unwrap();
+    let revision = GitObjectId::from_provider_hex(SHA).unwrap();
     let token = token();
 
     let source = endpoint
@@ -98,7 +99,7 @@ async fn exact_source_rejects_malformed_or_mismatched_commit_evidence_without_fa
         ));
         let endpoint = fixture.endpoint();
         let repository = RepositoryId::new("automata-ci/automata").unwrap();
-        let revision = ExactRevision::new(SHA).unwrap();
+        let revision = GitObjectId::from_provider_hex(SHA).unwrap();
         let token = token();
 
         let error = endpoint
@@ -132,7 +133,7 @@ async fn exact_source_rejects_untrusted_redirects_and_invalid_archive_media() {
     );
     let endpoint = untrusted.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
-    let revision = ExactRevision::new(SHA).unwrap();
+    let revision = GitObjectId::from_provider_hex(SHA).unwrap();
     let token = token();
     let error = endpoint
         .fetch_repository_source(RepositorySourceRequest::authenticated(
@@ -193,7 +194,7 @@ async fn exact_source_enforces_the_incremental_archive_byte_ceiling() {
     ));
     let endpoint = fixture.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
-    let revision = ExactRevision::new(SHA).unwrap();
+    let revision = GitObjectId::from_provider_hex(SHA).unwrap();
     let token = token();
 
     let error = endpoint
@@ -236,7 +237,7 @@ async fn public_exact_revision_uses_the_immutable_archive_origin_without_api_req
         .await
         .unwrap();
 
-    assert_eq!(snapshot.resolved_revision().as_str(), SHA);
+    assert_eq!(snapshot.resolved_revision().to_string(), SHA);
     assert_eq!(snapshot.size(), 8);
     let requests = fixture.requests();
     assert_eq!(requests.len(), 1);
@@ -257,7 +258,7 @@ async fn public_exact_source_uses_the_immutable_archive_origin_without_api_reque
     ));
     let endpoint = fixture.endpoint();
     let repository = RepositoryId::new("automata-ci/automata").unwrap();
-    let revision = ExactRevision::new(SHA).unwrap();
+    let revision = GitObjectId::from_provider_hex(SHA).unwrap();
 
     let source = endpoint
         .fetch_repository_source(RepositorySourceRequest::public(
@@ -311,7 +312,7 @@ async fn resolves_then_downloads_without_forwarding_the_credential() {
     assert_eq!(snapshot.provider().as_str(), "github");
     assert_eq!(snapshot.repository(), &repository);
     assert_eq!(snapshot.requested_revision(), &revision);
-    assert_eq!(snapshot.resolved_revision().as_str(), SHA);
+    assert_eq!(snapshot.resolved_revision().to_string(), SHA);
     assert_eq!(snapshot.size(), 8);
 
     let requests = fixture.requests();

@@ -10,12 +10,12 @@
 use std::{fmt, num::NonZeroU16};
 
 use async_trait::async_trait;
-use automata_ci_core::{RunId, Sha256Digest, UnixMillis, WorkflowId};
+use automata_ci_core::{GitObjectId, RunId, Sha256Digest, UnixMillis, WorkflowId};
 use thiserror::Error;
 
 use crate::{
-    AcceptProviderDelivery, AdmitLogicalWorkflowRun, GithubCheckHeadSha, GithubCheckSubjectId,
-    GithubCheckSubjectKey, GithubProviderManifest, GithubProviderManifestRevision,
+    AcceptProviderDelivery, AdmitLogicalWorkflowRun, GithubCheckSubjectId, GithubCheckSubjectKey,
+    GithubProviderManifest, GithubProviderManifestRevision,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryName,
     GithubServerServiceAuthoritySelector, GithubServerServiceRevision, LogicalWorkflowInvocationId,
     MAX_PROVIDER_DELIVERY_ATTEMPTS, MAX_PROVIDER_DELIVERY_TOTAL_CLAIM_MILLIS,
@@ -131,7 +131,7 @@ impl GithubRepositoryDispatchResolutionAuthority {
 /// Immutable source-resolution evidence for one custom repository dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GithubRepositoryDispatchResolution {
-    source_revision: GithubCheckHeadSha,
+    source_revision: GitObjectId,
     authority: GithubRepositoryDispatchResolutionAuthority,
 }
 
@@ -139,7 +139,7 @@ impl GithubRepositoryDispatchResolution {
     /// Binds the exact default-branch commit to its least-authority mode.
     #[must_use]
     pub const fn new(
-        source_revision: GithubCheckHeadSha,
+        source_revision: GitObjectId,
         authority: GithubRepositoryDispatchResolutionAuthority,
     ) -> Self {
         Self {
@@ -150,7 +150,7 @@ impl GithubRepositoryDispatchResolution {
 
     /// Returns the exact immutable default-branch commit.
     #[must_use]
-    pub const fn source_revision(self) -> GithubCheckHeadSha {
+    pub const fn source_revision(self) -> GitObjectId {
         self.source_revision
     }
 
@@ -167,7 +167,7 @@ impl GithubRepositoryDispatchResolution {
 pub struct AcceptManifestPinnedGithubDelivery {
     delivery: AcceptProviderDelivery,
     repository_owner_id: ProviderRepositoryOwnerId,
-    head_sha: GithubCheckHeadSha,
+    head_sha: GitObjectId,
     authenticated_event: GithubAuthenticatedEvent,
     authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
     authenticated_webhook_verifier_revision: GithubServerServiceRevision,
@@ -189,7 +189,7 @@ impl AcceptManifestPinnedGithubDelivery {
         signed_repository_owner_id: ProviderRepositoryOwnerId,
         configured_repository_owner_id: ProviderRepositoryOwnerId,
         authenticated_event: GithubAuthenticatedEvent,
-        head_sha: GithubCheckHeadSha,
+        head_sha: GitObjectId,
         authenticated_webhook_verifier_fingerprint: GithubProviderWebhookVerifierFingerprint,
         authenticated_webhook_verifier_revision: GithubServerServiceRevision,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
@@ -223,7 +223,7 @@ impl AcceptManifestPinnedGithubDelivery {
 
     /// Returns the exact signed push head committed to the queued Check.
     #[must_use]
-    pub const fn head_sha(&self) -> GithubCheckHeadSha {
+    pub const fn head_sha(&self) -> GitObjectId {
         self.head_sha
     }
 
@@ -268,7 +268,7 @@ pub struct ManifestPinnedGithubDeliveryEvidence {
     private_source_authority: Option<GithubServerServiceAuthoritySelector>,
     private_pull_request_files_authority: Option<GithubServerServiceAuthoritySelector>,
     check_subject_id: GithubCheckSubjectId,
-    check_head_sha: GithubCheckHeadSha,
+    check_head_sha: GitObjectId,
     authenticated_event: GithubAuthenticatedEvent,
     repository_dispatch_resolution: Option<GithubRepositoryDispatchResolution>,
     accepted_at: UnixMillis,
@@ -296,7 +296,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         checks_authority: GithubServerServiceAuthoritySelector,
         private_source_authority: Option<GithubServerServiceAuthoritySelector>,
         check_subject_id: GithubCheckSubjectId,
-        check_head_sha: GithubCheckHeadSha,
+        check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
@@ -334,7 +334,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         private_source_authority: Option<GithubServerServiceAuthoritySelector>,
         private_pull_request_files_authority: Option<GithubServerServiceAuthoritySelector>,
         check_subject_id: GithubCheckSubjectId,
-        check_head_sha: GithubCheckHeadSha,
+        check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
         accepted_at: UnixMillis,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
@@ -414,7 +414,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
         checks_authority: GithubServerServiceAuthoritySelector,
         private_source_authority: Option<GithubServerServiceAuthoritySelector>,
         check_subject_id: GithubCheckSubjectId,
-        check_head_sha: GithubCheckHeadSha,
+        check_head_sha: GitObjectId,
         authenticated_event: GithubAuthenticatedEvent,
         resolution: GithubRepositoryDispatchResolution,
         accepted_at: UnixMillis,
@@ -568,7 +568,7 @@ impl ManifestPinnedGithubDeliveryEvidence {
 
     /// Returns the signed head retained by the exact queued Check.
     #[must_use]
-    pub const fn check_head_sha(&self) -> GithubCheckHeadSha {
+    pub const fn check_head_sha(&self) -> GitObjectId {
         self.check_head_sha
     }
 
@@ -758,7 +758,7 @@ pub struct RecordGithubWorkflowRunSubjectEvidence {
     delivery_id: ProviderDeliveryId,
     provider_delivery_idempotency_key: String,
     admission_claim: AuthenticatedGithubDeliveryClaim,
-    head_sha: GithubCheckHeadSha,
+    head_sha: GitObjectId,
     workflow_path: GithubCheckSubjectKey,
     source_digest: Sha256Digest,
     event_name: String,
@@ -791,7 +791,7 @@ impl RecordGithubWorkflowRunSubjectEvidence {
         delivery_id: ProviderDeliveryId,
         provider_delivery_idempotency_key: impl Into<String>,
         admission_claim: AuthenticatedGithubDeliveryClaim,
-        head_sha: GithubCheckHeadSha,
+        head_sha: GitObjectId,
         workflow_path: GithubCheckSubjectKey,
         source_digest: Sha256Digest,
         event_name: impl Into<String>,
@@ -856,15 +856,14 @@ impl RecordGithubWorkflowRunSubjectEvidence {
     ///
     /// # Errors
     ///
-    /// Rejects a generic 32-byte head because GitHub Check evidence is an exact
-    /// nonzero 20-byte SHA-1 value, plus all errors documented by [`Self::new`].
+    /// Rejects invalid admission authority plus all errors documented by
+    /// [`Self::new`].
     pub fn from_logical_admission(
         admission_claim: AuthenticatedGithubDeliveryClaim,
         command: &AdmitLogicalWorkflowRun,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
         validate_github_logical_admission(command)?;
-        let head_sha = GithubCheckHeadSha::try_from_slice(command.head_sha())
-            .map_err(|_| GithubSubjectEvidenceValueError::InvalidHeadSha)?;
+        let head_sha = command.head_sha();
         let workflow_path = GithubCheckSubjectKey::new(command.workflow_path())
             .map_err(|_| GithubSubjectEvidenceValueError::InvalidEvidenceText)?;
         Self::new(
@@ -936,7 +935,7 @@ impl RecordGithubWorkflowRunSubjectEvidence {
     }
     /// Returns the exact GitHub source revision and Check head.
     #[must_use]
-    pub const fn head_sha(&self) -> GithubCheckHeadSha {
+    pub const fn head_sha(&self) -> GitObjectId {
         self.head_sha
     }
     /// Returns the exact admitted workflow path.
@@ -1000,7 +999,7 @@ impl RecordGithubWorkflowRunSubjectEvidence {
             && self.root_invocation_id == command.root_invocation_id()
             && self.delivery_id == delivery_id
             && self.provider_delivery_idempotency_key == command.idempotency().key()
-            && self.head_sha.as_bytes().as_slice() == command.head_sha()
+            && self.head_sha == command.head_sha()
             && self.workflow_path.as_str() == command.workflow_path()
             && self.source_digest == command.source().digest()
             && self.event_name == command.event_name()
@@ -1045,8 +1044,6 @@ impl ValidateGithubWorkflowRunSubjectEvidenceReplay {
         command: &AdmitLogicalWorkflowRun,
     ) -> Result<Self, GithubSubjectEvidenceValueError> {
         validate_github_logical_admission(command)?;
-        GithubCheckHeadSha::try_from_slice(command.head_sha())
-            .map_err(|_| GithubSubjectEvidenceValueError::InvalidHeadSha)?;
         GithubCheckSubjectKey::new(command.workflow_path())
             .map_err(|_| GithubSubjectEvidenceValueError::InvalidEvidenceText)?;
         validate_timestamp(observed_at)?;
@@ -1193,9 +1190,6 @@ pub enum GithubSubjectEvidenceValueError {
     /// The authenticated HMAC key evidence differs from the pinned manifest.
     #[error("authenticated GitHub webhook verifier does not match the provider manifest")]
     WebhookVerifierPinMismatch,
-    /// Generic admission used a non-GitHub head shape.
-    #[error("GitHub subject evidence requires an exact nonzero 20-byte head SHA")]
-    InvalidHeadSha,
     /// Provider-only admission was invoked with local/manual authority.
     #[error("GitHub subject evidence requires provider-delivery admission authority")]
     InvalidAdmissionAuthority,

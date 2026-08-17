@@ -1,7 +1,6 @@
+use automata_ci_core::GitObjectId;
 use automata_ci_github::GithubHttpEndpoint;
-use automata_ci_scm::{
-    ArchiveLimits, ExactRevision, RepositoryId, RepositorySourcePort, RepositorySourceRequest,
-};
+use automata_ci_scm::{ArchiveLimits, RepositoryId, RepositorySourcePort, RepositorySourceRequest};
 
 const CHECKOUT_COMMIT: &str = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
 
@@ -11,7 +10,7 @@ const CHECKOUT_COMMIT: &str = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
 async fn downloads_the_pinned_checkout_action_without_credentials() {
     let endpoint = GithubHttpEndpoint::github_dot_com("automata-live-test/0.1.0").unwrap();
     let repository = RepositoryId::new("actions/checkout").unwrap();
-    let revision = ExactRevision::new(CHECKOUT_COMMIT).unwrap();
+    let revision = GitObjectId::from_provider_hex(CHECKOUT_COMMIT).unwrap();
     let source = endpoint
         .fetch_repository_source(RepositorySourceRequest::public(
             &repository,
@@ -21,7 +20,7 @@ async fn downloads_the_pinned_checkout_action_without_credentials() {
         .await
         .unwrap();
 
-    assert_eq!(source.revision().as_str(), CHECKOUT_COMMIT);
+    assert_eq!(source.revision().to_string(), CHECKOUT_COMMIT);
     assert!(source.size() > 1_024);
     assert_eq!(&source.bytes()[..3], &[0x1f, 0x8b, 0x08]);
 }

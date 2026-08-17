@@ -44,16 +44,14 @@ fn sealed_archive_derives_local_source_and_event_authority() {
     assert_eq!(report.root_plan().event().name(), "workflow_dispatch");
     assert!(report.root_plan().event().delivery_id().is_none());
     assert!(report.root_plan().event().commit_sha().is_none());
-    let PlanSourceOrigin::Repository {
-        repository,
-        revision,
+    let PlanSourceOrigin::Archive {
+        snapshot_digest,
         path,
     } = report.root_plan().source().origin()
     else {
-        panic!("repository-shaped local provenance")
+        panic!("archive-shaped local provenance")
     };
-    assert_eq!(repository, "local");
-    assert_eq!(revision, &expected_digest.to_string());
+    assert_eq!(*snapshot_digest, expected_digest);
     assert_eq!(path, ROOT_PATH);
 }
 

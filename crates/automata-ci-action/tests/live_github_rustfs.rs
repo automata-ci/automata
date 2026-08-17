@@ -55,7 +55,7 @@ async fn resolves_pinned_checkout_from_github_into_rustfs() {
         .await
         .expect("resolve and publish checkout action");
 
-    assert_eq!(bundle.resolved_revision().as_str(), CHECKOUT_COMMIT);
+    assert_eq!(bundle.resolved_revision().to_string(), CHECKOUT_COMMIT);
     assert_eq!(
         bundle.definition().kind(),
         ActionDefinitionKind::MetadataYaml

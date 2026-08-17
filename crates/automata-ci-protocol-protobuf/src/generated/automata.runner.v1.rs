@@ -526,13 +526,20 @@ pub struct CancelJob {
     pub requested_at_unix_millis: i64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GitObjectId {
+    #[prost(enumeration = "GitObjectAlgorithm", tag = "1")]
+    pub algorithm: i32,
+    #[prost(bytes = "vec", tag = "2")]
+    pub digest: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct JobSource {
     #[prost(string, tag = "1")]
     pub provider: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub repository: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub revision: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "3")]
+    pub revision: ::core::option::Option<GitObjectId>,
     #[prost(string, tag = "4")]
     pub workflow_path: ::prost::alloc::string::String,
     #[prost(string, tag = "5")]
@@ -774,7 +781,7 @@ pub struct RepositoryAction {
     #[prost(string, tag = "1")]
     pub repository: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub revision: ::prost::alloc::string::String,
+    pub selector: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "3")]
     pub subpath: ::core::option::Option<::prost::alloc::string::String>,
 }
@@ -1615,6 +1622,35 @@ impl JobLifecycle {
             "JOB_LIFECYCLE_TIMED_OUT" => Some(Self::TimedOut),
             "JOB_LIFECYCLE_SKIPPED" => Some(Self::Skipped),
             "JOB_LIFECYCLE_LOST" => Some(Self::Lost),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum GitObjectAlgorithm {
+    Unspecified = 0,
+    Sha1 = 1,
+    Sha256 = 2,
+}
+impl GitObjectAlgorithm {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "GIT_OBJECT_ALGORITHM_UNSPECIFIED",
+            Self::Sha1 => "GIT_OBJECT_ALGORITHM_SHA1",
+            Self::Sha256 => "GIT_OBJECT_ALGORITHM_SHA256",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "GIT_OBJECT_ALGORITHM_UNSPECIFIED" => Some(Self::Unspecified),
+            "GIT_OBJECT_ALGORITHM_SHA1" => Some(Self::Sha1),
+            "GIT_OBJECT_ALGORITHM_SHA256" => Some(Self::Sha256),
             _ => None,
         }
     }

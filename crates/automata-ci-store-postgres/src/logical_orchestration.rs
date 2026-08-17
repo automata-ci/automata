@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use automata_ci_auth::delegated_actor::RepositoryMutationActor;
 use automata_ci_core::{
-    JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, OperationId, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId,
-    TRUST_SNAPSHOT_V1_MEDIA_TYPE, UnixMillis, WorkflowId,
+    GitObjectId, JOB_RUNTIME_CONTEXT_SCHEMA_VERSION, OperationId,
+    RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, TRUST_SNAPSHOT_V1_MEDIA_TYPE, UnixMillis,
+    WorkflowId,
 };
 use sha2::{Digest as _, Sha256};
 use sqlx::{AssertSqlSafe, Postgres, Row as _, Transaction, postgres::PgRow};
@@ -111,27 +112,6 @@ const fn job_environment_requirement_name(requirement: JobEnvironmentRequirement
         JobEnvironmentRequirement::None => "none",
         JobEnvironmentRequirement::Environment(_) => "environment",
     }
-}
-
-fn decode_commit_sha_bytes(value: &str) -> Result<Vec<u8>, LogicalWorkflowAdmissionStoreError> {
-    if !matches!(value.len(), 40 | 64) {
-        return Err(StoreError::corrupt_data("validated commit SHA has an invalid length").into());
-    }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let digit = |byte| match byte {
-                b'0'..=b'9' => Some(byte - b'0'),
-                b'a'..=b'f' => Some(byte - b'a' + 10),
-                _ => None,
-            };
-            let high = digit(pair[0]);
-            let low = digit(pair[1]);
-            high.zip(low).map(|(high, low)| (high << 4) | low)
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| StoreError::corrupt_data("validated commit SHA is not canonical").into())
 }
 
 const DISPATCH_SOURCE_RESOLUTION_COLUMNS: &str = r"
@@ -459,7 +439,7 @@ async fn complete_dispatch_source_resolution(
            AND current_manifest.manifest_digest = resolution.provider_manifest_digest \
          RETURNING {DISPATCH_SOURCE_RESOLUTION_RETURNING_COLUMNS}"
     );
-    let commit_sha = decode_source_commit_sha_bytes(request.commit_sha())?;
+    let commit_sha = request.commit_sha();
     let size = i64::try_from(request.source().encoded_size())
         .map_err(|_| WorkflowDispatchSourceResolutionStoreError::Conflict)?;
     let private_authority = claim.private_source_authority();
@@ -497,7 +477,7 @@ async fn complete_dispatch_source_resolution(
         )
         .bind(claim.claimed_at().get())
         .bind(claim.expires_at().get())
-        .bind(commit_sha)
+        .bind(commit_sha.as_bytes())
         .bind(request.source().digest().as_bytes().as_slice())
         .bind(request.source().object_key().as_str())
         .bind(size)
@@ -811,7 +791,8 @@ fn resolved_dispatch_source_from_row(
             .map_err(source_operation_error)?,
         row.try_get::<String, _>("git_ref")
             .map_err(source_operation_error)?,
-        lower_hex(&commit),
+        GitObjectId::from_durable_bytes(&commit)
+            .map_err(|_| source_corrupt("resolved source commit is invalid"))?,
         object,
     )
     .map_err(|_| source_corrupt("resolved dispatch source is invalid"))
@@ -845,29 +826,6 @@ fn source_positive_u64(
                 .filter(|value| *value > 0)
                 .ok_or_else(|| source_corrupt("source-resolution positive integer is invalid"))
         })
-}
-
-fn decode_source_commit_sha_bytes(
-    value: &str,
-) -> Result<Vec<u8>, WorkflowDispatchSourceResolutionStoreError> {
-    if !matches!(value.len(), 40 | 64) {
-        return Err(WorkflowDispatchSourceResolutionStoreError::Conflict);
-    }
-    value
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let digit = |byte| match byte {
-                b'0'..=b'9' => Some(byte - b'0'),
-                b'a'..=b'f' => Some(byte - b'a' + 10),
-                _ => None,
-            };
-            digit(pair[0])
-                .zip(digit(pair[1]))
-                .map(|(high, low)| (high << 4) | low)
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or(WorkflowDispatchSourceResolutionStoreError::Conflict)
 }
 
 async fn dispatch_source_database_now(
@@ -1030,7 +988,7 @@ async fn resolve_authenticated_dispatch_source(
     .bind(request.repository_id().as_uuid())
     .bind(request.workflow_id().as_uuid())
     .bind(request.git_ref())
-    .bind(decode_commit_sha_bytes(request.commit_sha())?)
+    .bind(request.commit_sha().as_bytes())
     .bind(i32::from(WORKFLOW_ADMISSION_EPOCH))
     .fetch_all(&mut *transaction)
     .await
@@ -1521,7 +1479,7 @@ async fn record_event_subject_terminal(
                 origin,
                 command.event_name(),
                 command.workflow_path(),
-                lower_hex(command.head_sha()),
+                command.head_sha(),
                 command.source().digest(),
                 command.request_digest(),
                 recorded_at,
@@ -1606,19 +1564,9 @@ fn event_selection_matches_command(
         && selection.origin() == origin
         && selection.event_name() == command.event_name()
         && selection.workflow_path() == command.workflow_path()
-        && selection.source_revision() == lower_hex(command.head_sha())
+        && selection.source_revision() == command.head_sha()
         && selection.source_digest() == command.source().digest()
         && selection.authority_digest() == command.request_digest()
-}
-
-fn lower_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 fn event_subject_value_error(
@@ -1679,7 +1627,7 @@ fn validate_subject_evidence_boundary(
                 || claim.workflow_id() != command.workflow_id()
                 || claim.workflow_path() != command.workflow_path()
                 || claim.git_ref() != command.git_ref()
-                || claim.commit_sha() != lower_hex(command.head_sha())
+                || claim.commit_sha() != command.head_sha()
                 || claim.source() != command.source()
                 || command.actor() != Some(claim.actor().principal_id().as_str())
                 || claim.event_digest() != command.event().digest()
@@ -1799,7 +1747,7 @@ async fn validate_manual_dispatch_source_authority(
     .bind(claim.workflow_id().as_uuid())
     .bind(claim.workflow_path())
     .bind(claim.git_ref())
-    .bind(decode_commit_sha_bytes(claim.commit_sha())?)
+    .bind(claim.commit_sha().as_bytes())
     .bind(claim.source().digest().as_bytes().as_slice())
     .bind(claim.source().object_key().as_str())
     .bind(source_size)
@@ -1849,7 +1797,7 @@ async fn resolved_manual_dispatch_source_authorized(
     .bind(claim.workflow_id().as_uuid())
     .bind(claim.workflow_path())
     .bind(claim.git_ref())
-    .bind(decode_commit_sha_bytes(claim.commit_sha())?)
+    .bind(claim.commit_sha().as_bytes())
     .bind(claim.source().digest().as_bytes().as_slice())
     .bind(claim.source().object_key().as_str())
     .bind(source_size)
@@ -3023,7 +2971,7 @@ async fn insert_run(
     .bind(run_attempt)
     .bind(command.event_name())
     .bind(event.object_key().as_str())
-    .bind(command.head_sha())
+    .bind(command.head_sha().as_bytes())
     .bind(command.workflow_name())
     .bind(command.git_ref())
     .bind(command.actor())

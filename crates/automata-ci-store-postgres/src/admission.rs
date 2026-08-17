@@ -669,7 +669,7 @@ async fn insert_run(
     .bind(run_attempt)
     .bind(command.event_name())
     .bind(event.object_key().as_str())
-    .bind(command.head_sha())
+    .bind(command.head_sha().as_bytes())
     .bind(command.workflow_name())
     .bind(command.git_ref())
     .bind(command.actor())

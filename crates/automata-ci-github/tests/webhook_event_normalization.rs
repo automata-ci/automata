@@ -29,7 +29,7 @@ fn check_run_controls_retain_exact_signed_identity() {
     assert_eq!(event.app_id().get(), 17);
     assert_eq!(event.run_id().get(), 41);
     assert_eq!(event.suite_id().get(), 23);
-    assert_eq!(event.head_revision().as_str(), HEAD_SHA);
+    assert_eq!(event.head_revision().to_string(), HEAD_SHA);
     assert_eq!(
         event.external_id(),
         "automata-check:00000000-0000-4000-8000-000000000001"
@@ -79,7 +79,7 @@ fn check_suite_rerequest_retains_suite_app_sender_and_revision() {
     assert_eq!(event.sender_id().get(), 301);
     assert_eq!(event.app_id().get(), 17);
     assert_eq!(event.suite_id().get(), 23);
-    assert_eq!(event.head_revision().as_str(), HEAD_SHA);
+    assert_eq!(event.head_revision().to_string(), HEAD_SHA);
 }
 
 #[test]
@@ -115,9 +115,9 @@ fn pull_request_normalization_retains_exact_dispatch_evidence() {
         event.head_repository().full_name(),
         "contributor/head-repository"
     );
-    assert_eq!(event.head_revision().as_str(), HEAD_SHA);
-    assert_eq!(event.base_revision().as_str(), BASE_SHA);
-    assert_eq!(event.merge_revision().as_str(), MERGE_SHA);
+    assert_eq!(event.head_revision().to_string(), HEAD_SHA);
+    assert_eq!(event.base_revision().to_string(), BASE_SHA);
+    assert_eq!(event.merge_revision().to_string(), MERGE_SHA);
     assert_eq!(event.head_ref(), "feature/topic");
     assert_eq!(event.base_ref(), "main");
     assert_eq!(event.git_ref(), "refs/pull/7/merge");
@@ -152,8 +152,8 @@ fn unmerged_pull_request_without_materialized_merge_revision_uses_head_revision(
         panic!("expected pull-request evidence");
     };
     assert!(!event.merged());
-    assert_eq!(event.head_revision().as_str(), HEAD_SHA);
-    assert_eq!(event.merge_revision().as_str(), HEAD_SHA);
+    assert_eq!(event.head_revision().to_string(), HEAD_SHA);
+    assert_eq!(event.merge_revision().to_string(), HEAD_SHA);
     assert_eq!(event.git_ref(), "refs/pull/7/merge");
 
     payload["action"] = json!("closed");
@@ -175,8 +175,8 @@ fn merge_group_normalization_retains_exact_dispatch_evidence() {
     };
     assert_eq!(event.action(), GithubMergeGroupAction::ChecksRequested);
     assert_eq!(event.action().as_str(), "checks_requested");
-    assert_eq!(event.head_revision().as_str(), GROUP_SHA);
-    assert_eq!(event.base_revision().as_str(), BASE_SHA);
+    assert_eq!(event.head_revision().to_string(), GROUP_SHA);
+    assert_eq!(event.base_revision().to_string(), BASE_SHA);
     assert_eq!(
         event.head_ref().full(),
         "refs/heads/merge-queue/main/group-9"

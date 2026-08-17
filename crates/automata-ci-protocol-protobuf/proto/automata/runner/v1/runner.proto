@@ -383,10 +383,21 @@ message CancelJob {
   sint64 requested_at_unix_millis = 5;
 }
 
+enum GitObjectAlgorithm {
+  GIT_OBJECT_ALGORITHM_UNSPECIFIED = 0;
+  GIT_OBJECT_ALGORITHM_SHA1 = 1;
+  GIT_OBJECT_ALGORITHM_SHA256 = 2;
+}
+
+message GitObjectId {
+  GitObjectAlgorithm algorithm = 1;
+  bytes digest = 2;
+}
+
 message JobSource {
   string provider = 1;
   string repository = 2;
-  string revision = 3;
+  GitObjectId revision = 3;
   string workflow_path = 4;
   string event_name = 5;
 }
@@ -551,7 +562,7 @@ message ContainerEntry {
 
 message RepositoryAction {
   string repository = 1;
-  string revision = 2;
+  string selector = 2;
   optional string subpath = 3;
 }
 

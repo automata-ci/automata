@@ -161,13 +161,10 @@ impl WorkflowPlan {
         }
         match self.source.origin() {
             PlanSourceOrigin::Repository {
-                repository,
-                revision,
-                path,
+                repository, path, ..
             } => {
                 for (field, value) in [
                     ("source repository", repository.as_str()),
-                    ("source revision", revision.as_str()),
                     ("source workflow path", path.as_str()),
                 ] {
                     if value.trim().is_empty() {
@@ -178,10 +175,15 @@ impl WorkflowPlan {
             PlanSourceOrigin::LocalPath { path } if path.trim().is_empty() => {
                 return Err(WorkflowPlanError::EmptyField("source local path"));
             }
+            PlanSourceOrigin::Archive { path, .. } if path.trim().is_empty() => {
+                return Err(WorkflowPlanError::EmptyField("source archive path"));
+            }
             PlanSourceOrigin::Memory { name } if name.trim().is_empty() => {
                 return Err(WorkflowPlanError::EmptyField("source memory name"));
             }
-            PlanSourceOrigin::LocalPath { .. } | PlanSourceOrigin::Memory { .. } => {}
+            PlanSourceOrigin::Archive { .. }
+            | PlanSourceOrigin::LocalPath { .. }
+            | PlanSourceOrigin::Memory { .. } => {}
         }
         if self.event.provider().trim().is_empty() {
             return Err(WorkflowPlanError::EmptyField("event provider"));
@@ -222,13 +224,10 @@ impl WorkflowPlan {
         }
         match self.source.origin() {
             PlanSourceOrigin::Repository {
-                repository,
-                revision,
-                path,
+                repository, path, ..
             } => {
                 for (field, value) in [
                     ("source repository", repository.as_str()),
-                    ("source revision", revision.as_str()),
                     ("source workflow path", path.as_str()),
                 ] {
                     validate_logical_plan_text(field, value)?;
@@ -237,13 +236,15 @@ impl WorkflowPlan {
             PlanSourceOrigin::LocalPath { path } => {
                 validate_logical_plan_text("source local path", path)?;
             }
+            PlanSourceOrigin::Archive { path, .. } => {
+                validate_logical_plan_text("source archive path", path)?;
+            }
             PlanSourceOrigin::Memory { name } => {
                 validate_logical_plan_text("source memory name", name)?;
             }
         }
         for (field, value) in [
             ("event delivery id", self.event.delivery_id()),
-            ("event commit sha", self.event.commit_sha()),
             ("event git ref", self.event.git_ref()),
         ] {
             if let Some(value) = value {

@@ -12,6 +12,7 @@ use automata_ci_auth::secret::SecretString;
 use automata_ci_blob::{
     BlobDescriptor, BlobKey, BlobStoreErrorKind, ImmutableBlobStore, MediaType,
 };
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 use automata_ci_github::{
     GITHUB_EVENT_ENVELOPE_SCHEMA_V1, GITHUB_EVENT_ENVELOPE_V1_MEDIA_TYPE,
@@ -20,9 +21,8 @@ use automata_ci_github::{
     VerifiedGithubPush, VerifiedGithubWebhook, rehydrate_stored_authenticated_github_webhook,
 };
 use automata_ci_scm::{
-    ArchiveFormat, ArchiveLimits, ExactRevision, RepositoryId, RepositorySource,
-    RepositorySourcePort, RepositorySourceRequest, RevisionSpec, ScmError, ScmErrorKind,
-    ScmProvider, SnapshotRequest,
+    ArchiveFormat, ArchiveLimits, RepositoryId, RepositorySource, RepositorySourcePort,
+    RepositorySourceRequest, RevisionSpec, ScmError, ScmErrorKind, ScmProvider, SnapshotRequest,
 };
 use automata_ci_store::{
     AdmissionObject, AuthenticatedGithubDeliveryClaim, ClaimedProviderDelivery,
@@ -61,7 +61,6 @@ use crate::{GithubDeliveryClock, GithubDeliverySourceCredentialProvider};
 
 const GITHUB_PROVIDER: &str = "github";
 const DEFAULT_RETRY_BACKOFF_MILLIS: i64 = 30_000;
-const LOWER_HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
 /// Deterministic limits and retry policy for one delivery worker.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1125,8 +1124,7 @@ impl GithubDeliveryWorker {
         let pending = prepared
             .pending_repository_dispatch()
             .ok_or(GithubDeliveryWorkerError::InvariantViolation)?;
-        let source_revision = crate::check_head_sha_from_revision(source.revision().as_str())
-            .map_err(|_| GithubDeliveryWorkerError::InvariantViolation)?;
+        let source_revision = *source.revision();
         let authority = match (
             pending.manifest().repository_visibility(),
             pending.private_source_authority(),
@@ -1245,24 +1243,17 @@ impl GithubDeliveryWorker {
                 "github.delivery.invalid_repository",
             ));
         };
-        let revision_value = match prepared.event() {
+        let revision = match prepared.event() {
             VerifiedGithubWebhook::RepositoryDispatch(_) => prepared
                 .resolved_evidence()
                 .and_then(ManifestPinnedGithubDeliveryEvidence::repository_dispatch_resolution)
-                .map(|resolution| lowercase_hex(&resolution.source_revision().as_bytes()))
+                .map(GithubRepositoryDispatchResolution::source_revision)
                 .ok_or_else(|| {
                     ProcessingFailure::reject("github.repository_dispatch.unresolved_source")
                 })?,
-            _ => source_revision(prepared.event())
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    ProcessingFailure::reject("github.delivery.unsupported_source_repository")
-                })?,
-        };
-        let Ok(revision) = ExactRevision::new(revision_value) else {
-            return Err(ProcessingFailure::reject(
-                "github.delivery.invalid_source_revision",
-            ));
+            _ => source_revision(prepared.event()).ok_or_else(|| {
+                ProcessingFailure::reject("github.delivery.unsupported_source_repository")
+            })?,
         };
         let request = match (claimed.identity().repository_visibility(), authority) {
             (
@@ -1387,10 +1378,7 @@ impl GithubDeliveryWorker {
                 "github.repository_dispatch.resolution_mismatch",
             ));
         }
-        let exact_revision =
-            ExactRevision::new(snapshot.resolved_revision().as_str()).map_err(|_| {
-                ProcessingFailure::reject("github.repository_dispatch.ambiguous_revision")
-            })?;
+        let exact_revision = snapshot.resolved_revision();
         let provider = snapshot.provider().clone();
         let resolved_repository = snapshot.repository().clone();
         let format = snapshot.format();
@@ -2189,31 +2177,20 @@ fn verify_rehydrated_event_envelope(
     Ok(())
 }
 
-fn source_revision(event: &VerifiedGithubWebhook) -> Option<&str> {
+fn source_revision(event: &VerifiedGithubWebhook) -> Option<GitObjectId> {
     match event {
-        VerifiedGithubWebhook::Push(push) if !push.deleted() => Some(push.after_commit_sha()),
+        VerifiedGithubWebhook::Push(push) if !push.deleted() => {
+            GitObjectId::from_provider_hex(push.after_commit_sha()).ok()
+        }
         // A synchronize webhook can carry the previous merge-ref SHA while
         // GitHub is still rematerializing refs/pull/<n>/merge. The signed head
         // SHA is the immutable revision to which Checks are published, so use
         // that same revision for source ingestion instead of compiling stale
         // merge-ref contents under the new head's check.
-        VerifiedGithubWebhook::PullRequest(pull_request) => {
-            Some(pull_request.head_revision().as_str())
-        }
-        VerifiedGithubWebhook::MergeGroup(merge_group) => {
-            Some(merge_group.head_revision().as_str())
-        }
+        VerifiedGithubWebhook::PullRequest(pull_request) => Some(*pull_request.head_revision()),
+        VerifiedGithubWebhook::MergeGroup(merge_group) => Some(*merge_group.head_revision()),
         _ => None,
     }
-}
-
-fn lowercase_hex(bytes: &[u8]) -> String {
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(LOWER_HEX_DIGITS[usize::from(byte >> 4)]));
-        encoded.push(char::from(LOWER_HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    encoded
 }
 
 fn archive_limits(manifest: &GithubProviderManifest) -> Result<ArchiveLimits, ProcessingFailure> {
@@ -2495,7 +2472,7 @@ fn retry_after_millis(error: ScmError, default_delay_millis: i64) -> i64 {
 fn valid_source_response(
     source: &RepositorySource,
     repository: &RepositoryId,
-    revision: &ExactRevision,
+    revision: &GitObjectId,
     limits: ArchiveLimits,
 ) -> bool {
     source.provider().as_str() == GITHUB_PROVIDER
@@ -2593,7 +2570,7 @@ fn prepare_all_direct_inventory(
     }
     let inventory = ProviderDeliveryWorkflowInventory::new(
         manifest_digest,
-        source.revision().as_str(),
+        *source.revision(),
         source.digest(),
         entries,
     )

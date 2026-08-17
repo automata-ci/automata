@@ -2,10 +2,11 @@
 //!
 //! [`RevisionSpec`] represents the caller's potentially mutable selector, such
 //! as a branch or tag. Provider adapters resolve that selector to a
-//! [`ResolvedRevision`] that identifies immutable provider state before they
+//! [`GitObjectId`](automata_ci_core::GitObjectId) that identifies immutable provider state before they
 //! download an archive. The resulting [`RepositorySnapshot`] retains both
 //! values, the exact archive bytes, and a locally computed SHA-256 digest.
-//! Separately, [`RepositorySourcePort`] accepts only an [`ExactRevision`] and
+//! Separately, [`RepositorySourcePort`] accepts only a
+//! [`GitObjectId`](automata_ci_core::GitObjectId) and
 //! returns [`RepositorySource`] after proving the provider resolved that exact
 //! commit; it has no authority to fall back to mutable selector resolution.
 //!
@@ -25,9 +26,8 @@ mod model;
 mod port;
 
 pub use model::{
-    ArchiveFormat, ArchiveLimits, ArchiveLimitsError, ExactRevision, ExactRevisionError,
-    RepositoryId, RepositoryIdError, RepositorySnapshot, RepositorySource, RepositorySourceRequest,
-    ResolvedRevision, RevisionError, RevisionSpec, ScmProviderId, ScmProviderIdError,
-    SnapshotRequest,
+    ArchiveFormat, ArchiveLimits, ArchiveLimitsError, RepositoryId, RepositoryIdError,
+    RepositorySnapshot, RepositorySource, RepositorySourceRequest, RevisionError, RevisionSpec,
+    ScmProviderId, ScmProviderIdError, SnapshotRequest,
 };
 pub use port::{RepositorySourcePort, ScmError, ScmErrorKind, ScmProvider};

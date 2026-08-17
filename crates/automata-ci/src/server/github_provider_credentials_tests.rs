@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{
     Architecture, EnvironmentProfile, EnvironmentProfileId, JobResourceAllocation,
     JobResourcePolicy, OperatingSystem, ResourceCapacity, RunnerLabel,
@@ -20,7 +21,7 @@ use automata_ci_store::{
     BootstrapGithubProviderRepository, ClaimNextGithubServerServiceMaintenance,
     FinishGithubServerServiceMint, FinishGithubServerServiceRevocation,
     GITHUB_PROVIDER_RUNNER_POLICY_MEDIA_TYPE, GITHUB_SERVICE_SAFE_ERASE_SKEW_MILLIS,
-    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckAppId, GithubCheckHeadSha, GithubCheckName,
+    GITHUB_SERVICE_TOKEN_LIFETIME_MILLIS, GithubCheckAppId, GithubCheckName,
     GithubCheckSubjectIdentity, GithubCheckSubjectKey, GithubProviderGitRef,
     GithubProviderManifest, GithubProviderManifestLimits, GithubProviderManifestRevision,
     GithubProviderOrigins, GithubProviderRunnerPolicyObject,
@@ -796,7 +797,7 @@ fn checks_identity(drift: ChecksIdentityDrift) -> GithubCheckSubjectIdentity {
             17
         })
         .expect("App ID"),
-        GithubCheckHeadSha::new([0x11; 20]).expect("head SHA"),
+        GitObjectId::from_durable_bytes(&[0x11; 20]).expect("head SHA"),
         GithubCheckName::new("Automata CI").expect("Check name"),
     )
     .expect("Checks identity")

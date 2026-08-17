@@ -339,7 +339,10 @@ fn process_job() -> (JobIrEnvelope, S3Object, S3Object) {
         JobSource::new(
             "github",
             "automata-ci/automata",
-            "0123456789abcdef0123456789abcdef01234567",
+            automata_ci_core::GitObjectId::from_provider_hex(
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .expect("revision"),
             ".ci/workflows/macos-vm-process-e2e.yml",
             "workflow_dispatch",
         ),

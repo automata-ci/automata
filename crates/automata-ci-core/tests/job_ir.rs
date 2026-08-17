@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use automata_ci_core::{
-    ActionReference, ExpressionDialect, ExpressionInstruction, ExpressionProgram,
+    ActionReference, ExpressionDialect, ExpressionInstruction, ExpressionProgram, GitObjectId,
     JobAuthorityProfile, JobContentReference, JobExecutionContext, JobId, JobInstanceIdentity,
     JobIr, JobIrEnvelope, JobOutputDefinition, JobPermissionGrant, JobPermissionRequest, JobSource,
     JobValidationError, OutputSensitivity, PermissionLevel, RunId, RunValueTemplates,
@@ -27,7 +27,8 @@ fn source() -> JobSource {
     JobSource::new(
         "github",
         "example/project",
-        "0123456789abcdef",
+        GitObjectId::from_provider_hex("0123456789abcdef0123456789abcdef01234567")
+            .expect("revision"),
         ".ci/workflows/ci.yml",
         "push",
     )
@@ -491,7 +492,7 @@ fn credential_free_profile_is_explicit_deny_all_and_rejects_secret_or_results_pa
             SemanticStep::action(
                 ActionReference::Repository {
                     repository: repository.to_owned(),
-                    revision: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                    selector: "0123456789abcdef0123456789abcdef01234567".to_owned(),
                     subpath: None,
                 },
                 BTreeMap::new(),

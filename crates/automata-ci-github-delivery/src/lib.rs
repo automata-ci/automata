@@ -83,6 +83,7 @@ use std::{
 };
 
 use automata_ci_blob::{BlobKey, BlobPayload, BlobStoreErrorKind, ImmutableBlobStore, MediaType};
+use automata_ci_core::GitObjectId;
 use automata_ci_core::{Sha256Digest, UnixMillis};
 #[cfg(test)]
 use automata_ci_github::VerifiedGithubPush;
@@ -96,7 +97,7 @@ use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AcceptProviderDelivery, AdmissionObject, GithubAuthenticatedEvent,
-    GithubAuthenticatedEventKind, GithubCheckAppId, GithubCheckHeadSha, GithubCheckRerunAction,
+    GithubAuthenticatedEventKind, GithubCheckAppId, GithubCheckRerunAction,
     GithubCheckRerunRepository, GithubCheckRerunRequest, GithubCheckRerunStoreError,
     GithubCheckRerunTarget, GithubCheckRunId, GithubCheckSuiteId,
     GithubProviderWebhookVerifierFingerprint, GithubRepositoryDispatchEvidenceRepository,
@@ -730,7 +731,7 @@ impl GithubDeliveryIngress {
             connection.repository_id.get(),
             GithubCheckAppId::new(app_id)
                 .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?,
-            github_check_head_sha(head_revision.as_str())?,
+            *head_revision,
             sender_id,
             selected.event.delivery_id(),
             Sha256Digest::from_bytes(*selected.event.body_sha256().as_bytes()),
@@ -974,25 +975,9 @@ impl GithubDeliveryIngressError {
     }
 }
 
-fn github_check_head_sha(value: &str) -> Result<GithubCheckHeadSha, GithubDeliveryIngressError> {
-    if value.len() != 40 {
-        return Err(GithubDeliveryIngressError::InvariantViolation);
-    }
-    let mut bytes = [0_u8; 20];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_nibble(pair[0]).ok_or(GithubDeliveryIngressError::InvariantViolation)?;
-        let low = hex_nibble(pair[1]).ok_or(GithubDeliveryIngressError::InvariantViolation)?;
-        bytes[index] = (high << 4) | low;
-    }
-    GithubCheckHeadSha::new(bytes).map_err(|_| GithubDeliveryIngressError::InvariantViolation)
-}
-
-const fn hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        _ => None,
-    }
+fn github_check_head_sha(value: &str) -> Result<GitObjectId, GithubDeliveryIngressError> {
+    GitObjectId::from_provider_hex(value)
+        .map_err(|_| GithubDeliveryIngressError::InvariantViolation)
 }
 
 fn canonical_event_request_digest(
@@ -1096,7 +1081,7 @@ fn canonical_request_digest_with_domain(
 
 struct AuthenticatedEventCoordinates {
     event: GithubAuthenticatedEvent,
-    head_sha: GithubCheckHeadSha,
+    head_sha: GitObjectId,
 }
 
 fn authenticated_event_coordinates(
@@ -1112,18 +1097,18 @@ fn authenticated_event_coordinates(
             (
                 GithubAuthenticatedEventKind::Push,
                 push.git_ref().full().to_owned(),
-                revision,
+                github_check_head_sha(revision)?,
             )
         }
         VerifiedGithubWebhook::PullRequest(pull_request) => (
             GithubAuthenticatedEventKind::PullRequest,
             pull_request.git_ref().to_owned(),
-            pull_request.head_revision().as_str(),
+            *pull_request.head_revision(),
         ),
         VerifiedGithubWebhook::MergeGroup(merge_group) => (
             GithubAuthenticatedEventKind::MergeGroup,
             merge_group.head_ref().full().to_owned(),
-            merge_group.head_revision().as_str(),
+            *merge_group.head_revision(),
         ),
         _ => return Err(GithubDeliveryIngressError::InvariantViolation),
     };
@@ -1131,44 +1116,18 @@ fn authenticated_event_coordinates(
         .map_err(|_| GithubDeliveryIngressError::InvariantViolation)?;
     Ok(AuthenticatedEventCoordinates {
         event,
-        head_sha: check_head_sha_from_revision(revision)?,
+        head_sha: revision,
     })
 }
 
 #[cfg(test)]
-fn check_head_sha(
-    push: &VerifiedGithubPush,
-) -> Result<GithubCheckHeadSha, GithubDeliveryIngressError> {
+fn check_head_sha(push: &VerifiedGithubPush) -> Result<GitObjectId, GithubDeliveryIngressError> {
     let value = if push.deleted() {
         push.before_commit_sha()
     } else {
         push.after_commit_sha()
     };
-    check_head_sha_from_revision(value)
-}
-
-fn check_head_sha_from_revision(
-    value: &str,
-) -> Result<GithubCheckHeadSha, GithubDeliveryIngressError> {
-    let bytes = value.as_bytes();
-    if bytes.len() != 40 {
-        return Err(GithubDeliveryIngressError::InvariantViolation);
-    }
-    let mut decoded = [0_u8; 20];
-    for (index, pair) in bytes.chunks_exact(2).enumerate() {
-        let high = decode_hex_nibble(pair[0])?;
-        let low = decode_hex_nibble(pair[1])?;
-        decoded[index] = (high << 4) | low;
-    }
-    GithubCheckHeadSha::new(decoded).map_err(|_| GithubDeliveryIngressError::InvariantViolation)
-}
-
-const fn decode_hex_nibble(value: u8) -> Result<u8, GithubDeliveryIngressError> {
-    match value {
-        b'0'..=b'9' => Ok(value - b'0'),
-        b'a'..=b'f' => Ok(value - b'a' + 10),
-        _ => Err(GithubDeliveryIngressError::InvariantViolation),
-    }
+    github_check_head_sha(value)
 }
 
 const fn provider_visibility(

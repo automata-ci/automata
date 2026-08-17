@@ -3,6 +3,7 @@ use crate::support;
 use std::time::Duration;
 
 use automata_ci_auth::secret::SecretString;
+use automata_ci_core::GitObjectId;
 use automata_ci_github::{
     GithubCheckAnnotation, GithubCheckAnnotationLevel, GithubCheckAppId, GithubCheckCompletion,
     GithubCheckConclusion, GithubCheckCreateIndeterminateKind, GithubCheckDetailsUrl,
@@ -12,7 +13,7 @@ use automata_ci_github::{
     GithubCheckSuiteCreateOutcome, GithubCheckSuiteId, GithubCheckTimestamp, GithubChecksError,
     GithubHttpEndpoint, GithubHttpLimits, GithubObservedCheckConclusion,
 };
-use automata_ci_scm::{ExactRevision, RepositoryId};
+use automata_ci_scm::RepositoryId;
 use serde_json::{Value, json};
 use support::{FixtureServer, ResponseSpec};
 use tokio::{
@@ -33,8 +34,8 @@ fn repository() -> RepositoryId {
     RepositoryId::new("acme/widget").expect("repository")
 }
 
-fn revision() -> ExactRevision {
-    ExactRevision::new(SHA).expect("revision")
+fn revision() -> GitObjectId {
+    GitObjectId::from_provider_hex(SHA).expect("revision")
 }
 
 fn token() -> SecretString {

@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use automata_ci_core::{
-    ContainerPort, ContainerSpec, JOB_IR_SCHEMA_VERSION, JobContentReference, JobExecutionContext,
-    JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobSource, JobValidationError,
-    RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, RunValueTemplates, RunnerRequirements,
-    RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr, TransportProtocol,
-    ValueTemplate, WorkflowId,
+    ContainerPort, ContainerSpec, GitObjectId, JOB_IR_SCHEMA_VERSION, JobContentReference,
+    JobExecutionContext, JobId, JobInstanceIdentity, JobIr, JobIrEnvelope, JobSource,
+    JobValidationError, RUNNER_REQUIREMENTS_SCHEMA_VERSION, RunId, RunValueTemplates,
+    RunnerRequirements, RuntimeBoolean, SemanticStep, Sha256Digest, ShellTemplate, StepId, StepIr,
+    TransportProtocol, ValueTemplate, WorkflowId,
 };
 
 use crate::support::trusted_push_snapshot;
@@ -48,7 +48,8 @@ fn envelope_with_job(job: JobIr) -> JobIrEnvelope {
         JobSource::new(
             "github",
             "owner/repository",
-            "0123456789abcdef",
+            GitObjectId::from_provider_hex("0123456789abcdef0123456789abcdef01234567")
+                .expect("revision"),
             ".ci/workflows/ci.yml",
             "push",
         ),

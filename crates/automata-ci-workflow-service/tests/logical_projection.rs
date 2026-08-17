@@ -156,7 +156,7 @@ fn compile(source: &str) -> automata_ci_workflow_github::CompilationReport {
         SourceId::new(WORKFLOW_PATH),
         SourceOrigin::Repository {
             repository: Arc::from(REPOSITORY),
-            revision: Arc::from(REVISION),
+            revision: automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
             path: Arc::from(WORKFLOW_PATH),
         },
     );
@@ -167,7 +167,9 @@ fn compile(source: &str) -> automata_ci_workflow_github::CompilationReport {
         parsed.plan().expect("source plan"),
         WorkflowEventProvenance::new("github", "workflow_dispatch")
             .with_delivery_id("synthetic-projection")
-            .with_commit_sha(REVISION)
+            .with_commit_sha(
+                automata_ci_core::GitObjectId::from_provider_hex(REVISION).expect("revision"),
+            )
             .with_git_ref(GIT_REF),
     ))
 }
@@ -1054,7 +1056,7 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
         automata_ci_core::JOB_IR_SCHEMA_VERSION
     );
     assert_eq!(envelope.source().repository(), REPOSITORY);
-    assert_eq!(envelope.source().revision(), REVISION);
+    assert_eq!(envelope.source().revision().to_string(), REVISION);
     assert_eq!(envelope.source().workflow_path(), WORKFLOW_PATH);
     assert_eq!(
         envelope.execution().runtime_context().media_type(),
@@ -1151,7 +1153,7 @@ fn activated_logical_job_projects_exactly_into_current_job_ir_and_runtime_contex
         SemanticStep::Action {
             reference: automata_ci_core::ActionReference::Repository {
                 repository,
-                revision,
+                selector: revision,
                 subpath: Some(subpath),
             },
             inputs,

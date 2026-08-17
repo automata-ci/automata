@@ -68,7 +68,7 @@ async fn resolution_validates_then_publishes_one_content_addressed_archive() {
     let replay = resolver.resolve(request()).await.unwrap();
     assert_eq!(first, replay);
     assert_eq!(first.provider().as_str(), "github");
-    assert_eq!(first.resolved_revision().as_str(), support::SHA);
+    assert_eq!(first.resolved_revision().to_string(), support::SHA);
     assert_eq!(first.definition().path(), "action.yml");
     assert_eq!(
         first.archive().key().as_str(),
@@ -90,7 +90,7 @@ async fn a_provider_cannot_substitute_another_repository() {
         substituted.provider().clone(),
         RepositoryId::new("attacker/wrong").unwrap(),
         substituted.requested_revision().clone(),
-        substituted.resolved_revision().clone(),
+        substituted.resolved_revision(),
         substituted.format(),
         substituted.into_bytes(),
     );

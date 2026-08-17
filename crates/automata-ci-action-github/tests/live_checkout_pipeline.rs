@@ -64,7 +64,7 @@ async fn resolves_and_decodes_the_exact_checkout_action() {
         .decode(bundle.definition())
         .expect("decode checkout metadata generically");
 
-    assert_eq!(bundle.resolved_revision().as_str(), CHECKOUT_COMMIT);
+    assert_eq!(bundle.resolved_revision().to_string(), CHECKOUT_COMMIT);
     assert_eq!(metadata.inputs().len(), 20);
     let ActionExecution::Javascript(javascript) = metadata.execution() else {
         panic!("checkout must remain a JavaScript action");

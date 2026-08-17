@@ -1,11 +1,11 @@
 use automata_ci_blob::{BlobDescriptor, BlobKey, MediaType};
-use automata_ci_core::{JobId, RunId, Sha256Digest, UnixMillis};
+use automata_ci_core::{GitObjectId, JobId, RunId, Sha256Digest, UnixMillis};
 use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     BeginGithubCheckRunCreate, BlockGithubCheckProjectionForCredentialRejection,
     ClaimGithubCheckProjection, ClaimedGithubCheckProjection, GithubCheckAnnotationProgress,
     GithubCheckAppId, GithubCheckConclusion, GithubCheckCreateReconciliation,
-    GithubCheckDesiredProjection, GithubCheckDetailsTarget, GithubCheckHeadSha, GithubCheckName,
+    GithubCheckDesiredProjection, GithubCheckDetailsTarget, GithubCheckName,
     GithubCheckProjectionAction, GithubCheckProjectionClaimFence, GithubCheckProjectionWorkerId,
     GithubCheckRunId, GithubCheckSubjectId, GithubCheckSubjectIdentity, GithubCheckSubjectKey,
     GithubCheckSubjectReceipt, GithubCheckSuiteId, GithubCheckTerminalCause, GithubCheckValueError,
@@ -61,10 +61,7 @@ fn provider_facing_values_are_bounded_and_redacted() {
         GithubCheckSubjectKey::new("../ci.yml"),
         Err(GithubCheckValueError::InvalidSubjectKey)
     );
-    assert_eq!(
-        GithubCheckHeadSha::new([0; 20]),
-        Err(GithubCheckValueError::InvalidHeadSha)
-    );
+    assert!(GitObjectId::from_durable_bytes(&[0; 20]).is_err());
 }
 
 #[test]
@@ -110,7 +107,7 @@ fn rerun_subject_identity_has_one_closed_physical_origin() {
         ProviderRepositoryId::new(13).expect("provider repository"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         GithubCheckAppId::new(17).expect("App"),
-        GithubCheckHeadSha::new([1; 20]).expect("head SHA"),
+        GitObjectId::from_durable_bytes(&[1; 20]).expect("head SHA"),
         GithubCheckName::new("Automata / CI").expect("name"),
     )
     .expect("rerun identity");
@@ -237,7 +234,7 @@ fn prepare_projection(
         ProviderRepositoryId::new(13).expect("provider repository"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         GithubCheckAppId::new(17).expect("App"),
-        GithubCheckHeadSha::new([1; 20]).expect("head SHA"),
+        GitObjectId::from_durable_bytes(&[1; 20]).expect("head SHA"),
         GithubCheckName::new("Automata / CI").expect("name"),
     )
     .expect("identity");
@@ -327,7 +324,7 @@ fn claimed_projection_rehydrates_only_complete_current_state() {
         ProviderRepositoryId::new(13).expect("provider repository"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         GithubCheckAppId::new(17).expect("App"),
-        GithubCheckHeadSha::new([1; 20]).expect("head SHA"),
+        GitObjectId::from_durable_bytes(&[1; 20]).expect("head SHA"),
         GithubCheckName::new("Automata / CI").expect("name"),
     )
     .expect("identity");
@@ -433,7 +430,7 @@ fn terminal_result_evidence_requires_a_terminal_job_target() {
         ProviderRepositoryId::new(13).expect("provider repository"),
         GithubRepositoryName::new("automata-ci/automata").expect("repository name"),
         GithubCheckAppId::new(17).expect("App"),
-        GithubCheckHeadSha::new([1; 20]).expect("head SHA"),
+        GitObjectId::from_durable_bytes(&[1; 20]).expect("head SHA"),
         GithubCheckName::new("Automata / CI").expect("name"),
     )
     .expect("identity");

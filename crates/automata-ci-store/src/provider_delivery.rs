@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use automata_ci_core::{RunId, UnixMillis};
+use automata_ci_core::{GitObjectId, RunId, UnixMillis};
 use automata_ci_provider::ProviderConnectionId;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -1128,7 +1128,7 @@ impl ProviderDeliveryWorkflowInventoryEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderDeliveryWorkflowInventory {
     manifest_digest: Sha256Digest,
-    source_revision: String,
+    source_revision: GitObjectId,
     repository_source_digest: Sha256Digest,
     entries: Vec<ProviderDeliveryWorkflowInventoryEntry>,
     digest: Sha256Digest,
@@ -1139,20 +1139,14 @@ impl ProviderDeliveryWorkflowInventory {
     ///
     /// # Errors
     ///
-    /// Rejects invalid revision text, duplicate paths, or more entries than one
-    /// provider-delivery completion can retain.
+    /// Rejects duplicate paths or more entries than one provider-delivery
+    /// completion can retain.
     pub fn new(
         manifest_digest: Sha256Digest,
-        source_revision: impl Into<String>,
+        source_revision: GitObjectId,
         repository_source_digest: Sha256Digest,
         mut entries: Vec<ProviderDeliveryWorkflowInventoryEntry>,
     ) -> Result<Self, ProviderDeliveryValueError> {
-        let source_revision = source_revision.into();
-        validate_text(
-            &source_revision,
-            MAX_REPOSITORY_IDENTITY_BYTES,
-            "provider delivery source revision",
-        )?;
         if entries.len() > MAX_PROVIDER_DELIVERY_WORKFLOW_OUTCOMES {
             return Err(ProviderDeliveryValueError::TooManyWorkflowOutcomes);
         }
@@ -1165,7 +1159,7 @@ impl ProviderDeliveryWorkflowInventory {
         }
         let digest = workflow_inventory_digest(
             manifest_digest,
-            &source_revision,
+            source_revision,
             repository_source_digest,
             &entries,
         );
@@ -1186,8 +1180,8 @@ impl ProviderDeliveryWorkflowInventory {
 
     /// Returns the exact immutable provider source revision.
     #[must_use]
-    pub fn source_revision(&self) -> &str {
-        &self.source_revision
+    pub const fn source_revision(&self) -> GitObjectId {
+        self.source_revision
     }
 
     /// Returns the digest of the complete fetched repository archive.
@@ -1774,7 +1768,7 @@ fn completion_digest(outcomes: &[ProviderDeliveryWorkflowOutcome]) -> Sha256Dige
 
 fn workflow_inventory_digest(
     manifest_digest: Sha256Digest,
-    source_revision: &str,
+    source_revision: GitObjectId,
     repository_source_digest: Sha256Digest,
     entries: &[ProviderDeliveryWorkflowInventoryEntry],
 ) -> Sha256Digest {

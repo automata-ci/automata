@@ -1398,7 +1398,7 @@ CREATE TABLE logical_workflow_reusable_workflow_catalog (
     run_id uuid NOT NULL,
     catalog_entry_id uuid CONSTRAINT logical_workflow_reusable_workflow_ca_catalog_entry_id_not_null NOT NULL,
     workflow_path text CONSTRAINT logical_workflow_reusable_workflow_catal_workflow_path_not_null NOT NULL COLLATE pg_catalog."C",
-    source_revision text CONSTRAINT logical_workflow_reusable_workflow_cat_source_revision_not_null NOT NULL COLLATE pg_catalog."C",
+    source_revision bytea CONSTRAINT logical_workflow_reusable_workflow_cat_source_revision_not_null NOT NULL,
     source_digest bytea CONSTRAINT logical_workflow_reusable_workflow_catal_source_digest_not_null NOT NULL,
     source_object_key text CONSTRAINT logical_workflow_reusable_workflow_c_source_object_key_not_null NOT NULL COLLATE pg_catalog."C",
     source_size_bytes bigint CONSTRAINT logical_workflow_reusable_workflow_c_source_size_bytes_not_null NOT NULL,
@@ -1418,7 +1418,7 @@ CREATE TABLE logical_workflow_reusable_workflow_catalog (
     CONSTRAINT logical_workflow_reusable_catalog_job_bounds CHECK ((((logical_job_count >= 1) AND (logical_job_count <= 1024)) AND ((reusable_call_count >= 0) AND (reusable_call_count <= logical_job_count)))),
     CONSTRAINT logical_workflow_reusable_catalog_path_canonical CHECK ((((octet_length(workflow_path) >= 19) AND (octet_length(workflow_path) <= 1024)) AND (workflow_path ~ '^\.ci/workflows/[^/]+\.ya?ml$'::text) AND (workflow_path !~ '[[:cntrl:]]'::text) AND (POSITION(('\'::text) IN (workflow_path)) = 0))),
     CONSTRAINT logical_workflow_reusable_catalog_plan_object CHECK ((((octet_length(plan_object_key) >= 1) AND (octet_length(plan_object_key) <= 1024)) AND (plan_object_key !~ '[[:cntrl:]]'::text) AND ("left"(plan_object_key, 1) <> '/'::text) AND (plan_object_key !~ '(^|/)\.\.(/|$)'::text) AND ((plan_size_bytes >= 1) AND (plan_size_bytes <= 16777216)) AND (plan_media_type = 'application/vnd.automata.workflow-plan+json'::text) AND (plan_schema = 1))),
-    CONSTRAINT logical_workflow_reusable_catalog_revision_shape CHECK ((source_revision ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'::text)),
+    CONSTRAINT logical_workflow_reusable_catalog_revision_shape CHECK (((octet_length(source_revision) = ANY (ARRAY[20, 32])) AND (source_revision <> decode(repeat('00'::text, octet_length(source_revision)), 'hex'::text)))),
     CONSTRAINT logical_workflow_reusable_catalog_source_object CHECK ((((octet_length(source_object_key) >= 1) AND (octet_length(source_object_key) <= 1024)) AND (source_object_key !~ '[[:cntrl:]]'::text) AND ("left"(source_object_key, 1) <> '/'::text) AND (source_object_key !~ '(^|/)\.\.(/|$)'::text) AND ((source_size_bytes >= 1) AND (source_size_bytes <= 16777216)) AND ((octet_length(source_media_type) >= 3) AND (octet_length(source_media_type) <= 128)) AND (source_media_type ~~ '%/%'::text) AND (source_media_type !~ '[[:space:][:cntrl:];]'::text))),
     CONSTRAINT logical_workflow_reusable_catalog_time CHECK ((created_at_ms >= 0))
 );

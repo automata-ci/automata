@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use automata_ci_core::{JobAuthorityProfile, RunId, Sha256Digest, UnixMillis, WorkflowId};
+use automata_ci_core::{
+    GitObjectId, JobAuthorityProfile, RunId, Sha256Digest, UnixMillis, WorkflowId,
+};
 use sqlx::{AssertSqlSafe, Postgres, Row as _, Transaction, ValueRef as _, postgres::PgRow};
 use uuid::Uuid;
 
@@ -7,8 +9,8 @@ use automata_ci_provider::ProviderConnectionId;
 use automata_ci_store::{
     AcceptManifestPinnedGithubDelivery, AcceptManifestPinnedGithubRepositoryDispatch,
     AdmissionObject, AuthenticatedGithubDeliveryClaim, EventControlSubjectId, EventSubjectId,
-    EventSubjectOrigin, GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckHeadSha,
-    GithubCheckName, GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
+    EventSubjectOrigin, GithubAuthenticatedEvent, GithubAuthenticatedEventKind, GithubCheckName,
+    GithubCheckSubjectId, GithubCheckSubjectKey, GithubProviderManifest,
     GithubProviderManifestLimits, GithubProviderManifestRevision, GithubProviderOrigins,
     GithubProviderRunnerPolicyObject, GithubProviderWebhookVerifierFingerprint,
     GithubProviderWorkflowSelection, GithubRepositoryDispatchEvidenceRepository,
@@ -325,7 +327,7 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
            AND repository.owner = split_part(evidence.github_repository_name, '/', 1)
            AND repository.name = split_part(evidence.github_repository_name, '/', 2)
            AND manifest.workflow_selection_kind = 'all_direct'
-           AND inventory.source_revision = encode(evidence.github_check_head_sha, 'hex')
+           AND inventory.source_revision = evidence.github_check_head_sha
            AND entry.workflow_path = $4
            AND entry.source_state = 'ready'
            AND entry.source_digest = $5
@@ -378,7 +380,7 @@ pub(crate) async fn validate_github_workflow_selection_in_transaction(
     .bind(request.delivery_id().as_uuid())
     .bind(request.workflow_path().as_str())
     .bind(request.source_digest().as_bytes().as_slice())
-    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes())
     .bind(request.event_name())
     .bind(request.event_digest().as_bytes().as_slice())
     .bind(request.git_ref())
@@ -641,7 +643,7 @@ pub(crate) async fn record_github_workflow_run_subject_evidence_in_transaction(
     .bind(request.root_invocation_id().as_uuid())
     .bind(request.delivery_id().as_uuid())
     .bind(subject_id.as_uuid())
-    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes())
     .bind(request.workflow_path().as_str())
     .bind(request.source_digest().as_bytes().as_slice())
     .bind(request.event_name())
@@ -917,7 +919,7 @@ async fn insert_all_direct_workflow_check_subject(
     .bind(request.delivery_id().as_uuid())
     .bind(request.workflow_path().as_str())
     .bind(request.source_digest().as_bytes().as_slice())
-    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes())
     .bind(request.admission_claim().claim().owner().as_uuid())
     .bind(i16::try_from(request.admission_claim().attempt()).expect("attempt fits SMALLINT"))
     .bind(pg_bigint(request.admission_claim().claim().fence()))
@@ -1000,7 +1002,7 @@ async fn load_queued_workflow_check_subject(
     .bind(request.repository_id().as_uuid())
     .bind(request.delivery_id().as_uuid())
     .bind(request.workflow_path().as_str())
-    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes())
     .bind(request.source_digest().as_bytes().as_slice())
     .bind(request.admission_claim().claim().owner().as_uuid())
     .bind(i16::try_from(request.admission_claim().attempt()).expect("attempt fits SMALLINT"))
@@ -1147,7 +1149,7 @@ async fn link_exact_check_to_run(
     .bind(request.run_id().as_uuid())
     .bind(request.admitted_at().get())
     .bind(request.delivery_id().as_uuid())
-    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes())
     .bind(request.workflow_id().as_uuid())
     .bind(request.snapshot_id().as_uuid())
     .bind(request.event_name())
@@ -1568,7 +1570,7 @@ async fn insert_resolved_repository_dispatch_evidence(
         pending.authenticated_webhook_verifier_revision().get(),
     ))
     .bind(pending.event().git_ref())
-    .bind(request.resolution().source_revision().as_bytes().as_slice())
+    .bind(request.resolution().source_revision().as_bytes())
     .bind(request.resolution().authority().as_str())
     .bind(checks_authority.authority_id().as_uuid())
     .bind(checks_authority.identity_digest().as_bytes().as_slice())
@@ -1620,7 +1622,7 @@ async fn insert_resolved_repository_dispatch_check(
     .bind(pg_bigint(manifest.installation_id().get()))
     .bind(pg_bigint(manifest.github_repository_id().get()))
     .bind(pg_bigint(manifest.github_app_id().get()))
-    .bind(request.resolution().source_revision().as_bytes().as_slice())
+    .bind(request.resolution().source_revision().as_bytes())
     .bind(manifest.check_name().as_str())
     .bind(external_id)
     .bind(pending.accepted_at().get())
@@ -1747,7 +1749,7 @@ async fn insert_delivery_evidence(
     .bind(private_pull_request_files_app_revision)
     .bind(private_pull_request_files_policy_revision)
     .bind(subject_id)
-    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes())
     .execute(&mut **transaction)
     .await
     .map_err(operation_error)?;
@@ -1801,7 +1803,7 @@ async fn insert_queued_check(
     .bind(pg_bigint(identity.installation_id().get()))
     .bind(pg_bigint(identity.repository_id().get()))
     .bind(pg_bigint(manifest.github_app_id().get()))
-    .bind(request.head_sha().as_bytes().as_slice())
+    .bind(request.head_sha().as_bytes())
     .bind(manifest.check_name().as_str())
     .bind(external_id)
     .bind(request.delivery().accepted_at().get())
@@ -2239,7 +2241,7 @@ fn decode_delivery_evidence(
     let subject_id: Uuid = row
         .try_get("github_check_subject_id")
         .map_err(operation_error)?;
-    let head_sha = GithubCheckHeadSha::try_from_slice(
+    let head_sha = GitObjectId::from_durable_bytes(
         &row.try_get::<Vec<u8>, _>("github_check_head_sha")
             .map_err(operation_error)?,
     )
@@ -2279,7 +2281,7 @@ struct DecodedDeliveryEvidenceParts {
     private_source_authority: Option<GithubServerServiceAuthoritySelector>,
     private_pull_request_files_authority: Option<GithubServerServiceAuthoritySelector>,
     subject_id: GithubCheckSubjectId,
-    head_sha: GithubCheckHeadSha,
+    head_sha: GitObjectId,
     accepted_at: UnixMillis,
 }
 
@@ -2371,7 +2373,7 @@ fn decode_delivery_event_evidence(
                 .ok_or(GithubSubjectEvidenceStoreError::CorruptData)?;
             let event = GithubAuthenticatedEvent::new(kind, git_ref)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
-            let revision = GithubCheckHeadSha::try_from_slice(&source_revision)
+            let revision = GitObjectId::from_durable_bytes(&source_revision)
                 .map_err(|_| GithubSubjectEvidenceStoreError::CorruptData)?;
             let authority =
                 decode_github_repository_dispatch_resolution_authority(&source_authority)
@@ -2497,7 +2499,7 @@ fn decode_run_evidence(
         row.try_get::<String, _>("provider_delivery_idempotency_key")
             .map_err(operation_error)?,
         admission_claim,
-        GithubCheckHeadSha::try_from_slice(
+        GitObjectId::from_durable_bytes(
             &row.try_get::<Vec<u8>, _>("github_check_head_sha")
                 .map_err(operation_error)?,
         )
