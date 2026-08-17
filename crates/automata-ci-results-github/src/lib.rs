@@ -72,5 +72,6 @@ pub use service::{
 };
 pub use storage_observer::{ObservedResultsArtifactRepository, ObservedResultsBlobStore};
 pub use token::{
-    HmacResultsAuthority, HmacResultsAuthorityConfig, ResultsPublicEndpoint, RuntimeToken,
+    HmacResultsAuthority, HmacResultsAuthorityConfig, PrivateNetworkResultsEndpoint,
+    ResultsPublicEndpoint, RuntimeToken,
 };

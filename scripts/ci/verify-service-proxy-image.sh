@@ -92,7 +92,7 @@ expected = {
     "org.opencontainers.image.revision": revision,
     "org.opencontainers.image.source": "https://github.com/automata-ci/automata",
     "org.opencontainers.image.version": version,
-    "io.automata.service-proxy.protocol-version": "1",
+    "io.automata.service-proxy.protocol-version": "2",
 }
 if not isinstance(labels, dict) or any(labels.get(k) != v for k, v in expected.items()):
     raise SystemExit("service-proxy-image: candidate labels differ")
@@ -112,6 +112,14 @@ if config.get("Entrypoint") != ["/usr/libexec/automata-ci-service-proxy"]:
     raise SystemExit("service-proxy-image: candidate entrypoint differs")
 if config.get("User") != "65532:65532":
     raise SystemExit("service-proxy-image: candidate user differs")
+if config.get("Env") != [
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+]:
+    raise SystemExit("service-proxy-image: candidate environment differs")
+if config.get("Cmd") is not None or config.get("Volumes") is not None:
+    raise SystemExit("service-proxy-image: candidate declares a command or volume")
+if config.get("WorkingDir") != "/":
+    raise SystemExit("service-proxy-image: candidate working directory differs")
 PY
 
 if [[ "$process_probe" == metadata-only ]]; then
@@ -129,5 +137,17 @@ set -e
 cmp -s "$scratch_directory/stderr" <(
   printf 'automata-ci-service-proxy: usage-invalid\n'
 ) || die "candidate process diagnostic differs"
+
+set +e
+"$runtime" run --rm --network none --read-only "$image" serve-results-v1 \
+  >"$scratch_directory/results-stdout" 2>"$scratch_directory/results-stderr"
+status=$?
+set -e
+(( status != 0 )) || die "candidate accepted an incomplete Results command"
+[[ ! -s "$scratch_directory/results-stdout" ]] \
+  || die "incomplete Results command wrote to stdout"
+cmp -s "$scratch_directory/results-stderr" <(
+  printf 'automata-ci-service-proxy: configuration-invalid\n'
+) || die "candidate does not implement the protocol 2 Results capability"
 
 printf 'Service-proxy image process and metadata verified\n'

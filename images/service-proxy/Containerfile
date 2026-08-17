@@ -8,13 +8,13 @@ ARG AUTOMATA_SERVICE_PROXY_SOURCE_SHA256
 ARG AUTOMATA_VERSION
 
 LABEL org.opencontainers.image.title="Automata CI service proxy" \
-      org.opencontainers.image.description="Namespace-local bounded TCP and UDP proxy for job service containers" \
+      org.opencontainers.image.description="Closed bounded service and Results proxy for Automata job sandboxes" \
       org.opencontainers.image.source="https://github.com/automata-ci/automata" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.created="${AUTOMATA_CREATED}" \
       org.opencontainers.image.revision="${AUTOMATA_REVISION}" \
       org.opencontainers.image.version="${AUTOMATA_VERSION}" \
-      io.automata.service-proxy.protocol-version="1" \
+      io.automata.service-proxy.protocol-version="2" \
       io.automata.service-proxy.binary.sha256="${AUTOMATA_SERVICE_PROXY_BINARY_SHA256}" \
       io.automata.service-proxy.sbom.sha256="${AUTOMATA_SERVICE_PROXY_SBOM_SHA256}" \
       io.automata.service-proxy.source.sha256="${AUTOMATA_SERVICE_PROXY_SOURCE_SHA256}"

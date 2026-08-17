@@ -53,7 +53,7 @@ const MAX_SERVICE_PROCESS_ENVIRONMENT_BYTES: usize = 48 * 1024;
 const MAX_SERVICE_PROXY_PORTS: usize = 128;
 const SERVICE_PROXY_IMAGE_FORMAT: &str =
     "{{.Digest}}\n{{ index .Labels \"io.automata.service-proxy.protocol-version\" }}";
-const SERVICE_PROXY_IMAGE_VERSION: &str = "1";
+const SERVICE_PROXY_IMAGE_PROTOCOL_VERSION: &str = "2";
 const BUILDKIT_IMAGE_FORMAT: &str = "{{.Digest}}";
 const BUILDKIT_PROBE_OUTPUT_PREFIX: &str = "buildkitd github.com/moby/buildkit ";
 const BUILDKIT_ARCHIVE_NAME: &str = "automata-buildkit-image.oci";
@@ -3476,7 +3476,7 @@ impl PodmanInner {
             ProviderStage::Validate,
             None,
         )?;
-        let expected = format!("{expected_digest}\n{SERVICE_PROXY_IMAGE_VERSION}");
+        let expected = format!("{expected_digest}\n{SERVICE_PROXY_IMAGE_PROTOCOL_VERSION}");
         let actual = std::str::from_utf8(output.stdout())
             .ok()
             .map(str::trim_end)

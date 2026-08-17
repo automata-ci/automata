@@ -113,10 +113,22 @@ runner protects the bundle before acknowledging custody and injects it into
 that job only; there is no runner- or fleet-wide Results credential.
 
 Production uses an HTTPS public Results endpoint. Development may use literal
-loopback HTTP or one exact trusted private bind and host mapping, such as a
-Podman bridge gateway with `host.containers.internal`. Wildcard and public
-plaintext binds are rejected. The Results router stays on its dedicated
+loopback HTTP. `PrivateNetworkResultsEndpoint` represents the narrower closed
+container-network case: one exact private IPv4 listener on port 8081 paired
+with the asserted job-visible HTTP origin. Wildcard, loopback, public, IPv6,
+and other-port private binds are rejected. A LocalDocker installation will use
+`http://results.automata.invalid:8081/`, with the listener bound only to the
+Results-transit interface; there is no host publish, control-network listener,
+or TLS/CA exception inside that internal isolated topology. Production HTTPS
+and Web PKI policy are unchanged. The Results router stays on its dedicated
 listener.
+
+That listener/transport type is only a composition prerequisite. The current
+`GithubResultsRuntimeAuthorityIssuer` still requires accepted GitHub repository
+authority and has not been broadened for a local snapshot. Until the separately
+reviewed `LocalSnapshot` admission supplies real repository/cache authority,
+local composition must not inject `ACTIONS_RESULTS_URL`, cache URLs, or a
+runtime token and must not claim artifact or cache availability.
 
 ## Evidence
 

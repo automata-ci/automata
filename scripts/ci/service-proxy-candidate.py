@@ -203,7 +203,7 @@ def load_oci(archive_bytes: bytes, source: dict, source_sha256: str) -> tuple[st
         "org.opencontainers.image.created": release["created"],
         "org.opencontainers.image.revision": release["revision"],
         "org.opencontainers.image.version": release["version"],
-        "io.automata.service-proxy.protocol-version": "1",
+        "io.automata.service-proxy.protocol-version": "2",
         "io.automata.service-proxy.binary.sha256": artifacts["binary_sha256"],
         "io.automata.service-proxy.sbom.sha256": artifacts["sbom_sha256"],
         "io.automata.service-proxy.source.sha256": source_sha256,

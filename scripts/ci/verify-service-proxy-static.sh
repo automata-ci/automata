@@ -45,6 +45,18 @@ cmp -s "$scratch_directory/stderr" <(
   printf 'automata-ci-service-proxy: usage-invalid\n'
 ) || die "failed helper diagnostic was not the closed static category"
 
+set +e
+"$binary" serve-results-v1 \
+  >"$scratch_directory/results-stdout" 2>"$scratch_directory/results-stderr"
+status=$?
+set -e
+(( status != 0 )) || die "helper accepted an incomplete Results command"
+[[ ! -s "$scratch_directory/results-stdout" ]] \
+  || die "incomplete Results command wrote to stdout"
+cmp -s "$scratch_directory/results-stderr" <(
+  printf 'automata-ci-service-proxy: configuration-invalid\n'
+) || die "helper does not implement the protocol 2 Results capability"
+
 marker='sensitive-helper-image-marker'
 set +e
 "$binary" serve-v1 "tcp|${marker}|80|0" \

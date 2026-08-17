@@ -1,4 +1,9 @@
-use std::{fmt, net::SocketAddr, str::FromStr as _, sync::Arc};
+use std::{
+    fmt,
+    net::{SocketAddr, SocketAddrV4},
+    str::FromStr as _,
+    sync::Arc,
+};
 
 use automata_ci_core::{AttemptId, FencingToken, JobId, RunId, Sha256Digest};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -41,6 +46,61 @@ pub struct ResultsPublicEndpoint {
     development_listener_bind: Option<SocketAddr>,
 }
 
+/// Exact plaintext Results origin bound only to one private local IPv4 interface.
+///
+/// This deployment type is intended for a closed container-network interface;
+/// it cannot represent wildcard, loopback, public, IPv6, or dynamic-port binds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrivateNetworkResultsEndpoint {
+    public_endpoint: ResultsPublicEndpoint,
+    listener: SocketAddrV4,
+}
+
+impl PrivateNetworkResultsEndpoint {
+    /// Validates one trusted private-development origin and its exact IPv4 bind.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any bind outside private IPv4 space, any port other than 8081,
+    /// and any URL host or port that differs from the explicit assertion.
+    pub fn new(
+        url: Url,
+        listener: SocketAddrV4,
+        trusted_public_host: &str,
+    ) -> Result<Self, TokenError> {
+        if listener.port() != 8081 || !listener.ip().is_private() {
+            return Err(TokenError::Policy);
+        }
+        let public_endpoint = trusted_private_development_endpoint(
+            url,
+            SocketAddr::V4(listener),
+            trusted_public_host,
+        )?;
+        Ok(Self {
+            public_endpoint,
+            listener,
+        })
+    }
+
+    /// Returns the exact private interface to bind.
+    #[must_use]
+    pub const fn listener(&self) -> SocketAddrV4 {
+        self.listener
+    }
+
+    /// Returns the validated job-visible Results origin.
+    #[must_use]
+    pub const fn public_endpoint(&self) -> &ResultsPublicEndpoint {
+        &self.public_endpoint
+    }
+
+    /// Consumes the paired policy into the public endpoint used by authority composition.
+    #[must_use]
+    pub fn into_public_endpoint(self) -> ResultsPublicEndpoint {
+        self.public_endpoint
+    }
+}
+
 impl ResultsPublicEndpoint {
     /// Creates a production endpoint protected by TLS.
     ///
@@ -75,44 +135,6 @@ impl ResultsPublicEndpoint {
         })
     }
 
-    /// Creates an explicit plaintext private-link development endpoint.
-    ///
-    /// `trusted_public_host` is the exact DNS name or private IP that the
-    /// operator maps to `listener_bind` (for example `host.containers.internal`
-    /// and the Podman bridge gateway). This assertion is deliberately required
-    /// because DNS resolution is outside deterministic configuration parsing.
-    ///
-    /// # Errors
-    ///
-    /// Rejects wildcard, loopback, or public-interface binds, a host assertion
-    /// that differs from the URL, and a mismatched listener port.
-    pub fn trusted_private_development(
-        url: Url,
-        listener_bind: SocketAddr,
-        trusted_public_host: &str,
-    ) -> Result<Self, TokenError> {
-        validate_development_listener(&url, listener_bind, false)?;
-        let actual_host = url.host_str().ok_or(TokenError::Policy)?;
-        if trusted_public_host.is_empty()
-            || trusted_public_host.len() > 255
-            || !trusted_public_host.is_ascii()
-            || trusted_public_host
-                .bytes()
-                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-            || trusted_public_host.contains('*')
-            || !actual_host.eq_ignore_ascii_case(trusted_public_host)
-        {
-            return Err(TokenError::Policy);
-        }
-        let runtime_endpoint = RuntimeAuthorityEndpoint::trusted_private_development(url.as_str())
-            .map_err(|_| TokenError::Policy)?;
-        Ok(Self {
-            url,
-            runtime_endpoint,
-            development_listener_bind: Some(listener_bind),
-        })
-    }
-
     /// Returns the normalized public origin injected into the job.
     #[must_use]
     pub const fn url(&self) -> &Url {
@@ -130,6 +152,33 @@ impl ResultsPublicEndpoint {
     pub const fn development_listener_bind(&self) -> Option<SocketAddr> {
         self.development_listener_bind
     }
+}
+
+fn trusted_private_development_endpoint(
+    url: Url,
+    listener_bind: SocketAddr,
+    trusted_public_host: &str,
+) -> Result<ResultsPublicEndpoint, TokenError> {
+    validate_development_listener(&url, listener_bind, false)?;
+    let actual_host = url.host_str().ok_or(TokenError::Policy)?;
+    if trusted_public_host.is_empty()
+        || trusted_public_host.len() > 255
+        || !trusted_public_host.is_ascii()
+        || trusted_public_host
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || trusted_public_host.contains('*')
+        || !actual_host.eq_ignore_ascii_case(trusted_public_host)
+    {
+        return Err(TokenError::Policy);
+    }
+    let runtime_endpoint = RuntimeAuthorityEndpoint::trusted_private_development(url.as_str())
+        .map_err(|_| TokenError::Policy)?;
+    Ok(ResultsPublicEndpoint {
+        url,
+        runtime_endpoint,
+        development_listener_bind: Some(listener_bind),
+    })
 }
 
 fn validate_public_url(url: &Url) -> Result<(), TokenError> {

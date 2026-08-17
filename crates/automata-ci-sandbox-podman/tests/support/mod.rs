@@ -114,6 +114,7 @@ struct FakeState {
     cancel_once: Option<Vec<String>>,
     buildkit_image_missing: bool,
     buildkit_digest_override: Option<String>,
+    service_proxy_protocol_override: Option<String>,
     buildkit_probe_output: Option<CommandOutput>,
     exec_output: Option<CommandOutput>,
     copied_to: Option<Vec<u8>>,
@@ -184,6 +185,13 @@ impl FakePodman {
             .lock()
             .expect("fake lock")
             .buildkit_digest_override = Some(digest.to_owned());
+    }
+
+    pub(crate) fn override_service_proxy_protocol(&self, version: &str) {
+        self.state
+            .lock()
+            .expect("fake lock")
+            .service_proxy_protocol_override = Some(version.to_owned());
     }
 
     pub(crate) fn set_buildkit_probe_output(&self, output: CommandOutput) {
@@ -773,8 +781,12 @@ fn execute_fake_inspection(state: &FakeState, command: &[String]) -> Option<Comm
                     == "{{.Digest}}\n{{ index .Labels \"io.automata.service-proxy.protocol-version\" }}" =>
         {
             let digest = reference.rsplit_once('@').map(|(_, value)| value).unwrap_or_default();
+            let protocol = state
+                .service_proxy_protocol_override
+                .as_deref()
+                .unwrap_or("2");
             Some(CommandOutput::success(
-                format!("{digest}\n1\n").into_bytes(),
+                format!("{digest}\n{protocol}\n").into_bytes(),
             ))
         }
         [image, inspect, format, template, reference]

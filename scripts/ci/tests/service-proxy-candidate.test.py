@@ -86,7 +86,7 @@ class CandidateContract(unittest.TestCase):
             "org.opencontainers.image.created": self.release["created"],
             "org.opencontainers.image.revision": revision or self.release["revision"],
             "org.opencontainers.image.version": self.release["version"],
-            "io.automata.service-proxy.protocol-version": "1",
+            "io.automata.service-proxy.protocol-version": "2",
             "io.automata.service-proxy.binary.sha256": self.source["artifacts"]["binary_sha256"],
             "io.automata.service-proxy.sbom.sha256": self.source["artifacts"]["sbom_sha256"],
             "io.automata.service-proxy.source.sha256": source_sha,

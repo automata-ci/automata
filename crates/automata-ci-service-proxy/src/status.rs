@@ -1,6 +1,8 @@
 use std::fmt::Write as _;
 
 pub(crate) const SERVICE_PROXY_STATUS_SCHEMA_VERSION: u64 = 1;
+pub(crate) const RESULTS_READY_STATUS: &str =
+    "{\"version\":1,\"mode\":\"results-v1\",\"port\":8081}\n";
 
 pub(crate) fn encode_startup_status(ports: &[u16]) -> String {
     let mut status = String::with_capacity(32 + ports.len() * 6);

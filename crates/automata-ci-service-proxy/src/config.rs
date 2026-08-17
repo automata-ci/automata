@@ -5,7 +5,72 @@ use crate::error::ProxyError;
 
 pub(crate) const MAX_LISTENERS: usize = 128;
 pub(crate) const SERVICE_PROXY_SERVE_COMMAND: &str = "serve-v1";
+pub(crate) const RESULTS_PROXY_SERVE_COMMAND: &str = "serve-results-v1";
 const MAX_MAPPING_BYTES: usize = 64;
+const RESULTS_FRONT_NETWORK_PREFIX: u8 = 29;
+const RESULTS_TRANSIT_MAXIMUM_PREFIX: u8 = 23;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProxyCommand {
+    Services(Vec<Mapping>),
+    Results(ResultsConfiguration),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Ipv4Network {
+    network: Ipv4Addr,
+    prefix: u8,
+}
+
+impl Ipv4Network {
+    fn contains(self, address: Ipv4Addr) -> bool {
+        let mask = u32::MAX << (32 - self.prefix);
+        u32::from(address) & mask == u32::from(self.network)
+    }
+
+    fn broadcast(self) -> Ipv4Addr {
+        let mask = u32::MAX << (32 - self.prefix);
+        Ipv4Addr::from(u32::from(self.network) | !mask)
+    }
+
+    fn contains_usable(self, address: Ipv4Addr) -> bool {
+        self.contains(address) && address != self.network && address != self.broadcast()
+    }
+
+    fn usable_host(self, offset: u32) -> Option<Ipv4Addr> {
+        u32::from(self.network)
+            .checked_add(offset)
+            .map(Ipv4Addr::from)
+            .filter(|address| self.contains_usable(*address))
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.contains(other.network) || other.contains(self.network)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResultsConfiguration {
+    front_address: Ipv4Addr,
+    front_network: Ipv4Network,
+    job_address: Ipv4Addr,
+    transit_network: Ipv4Network,
+    target_address: Ipv4Addr,
+}
+
+impl ResultsConfiguration {
+    pub(crate) const fn front_address(self) -> Ipv4Addr {
+        self.front_address
+    }
+
+    pub(crate) const fn job_address(self) -> Ipv4Addr {
+        self.job_address
+    }
+
+    pub(crate) const fn target_address(self) -> Ipv4Addr {
+        self.target_address
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Transport {
@@ -44,14 +109,16 @@ impl Mapping {
 
 pub(crate) fn parse_command_line(
     arguments: impl IntoIterator<Item = OsString>,
-) -> Result<Vec<Mapping>, ProxyError> {
+) -> Result<ProxyCommand, ProxyError> {
     let mut arguments = arguments.into_iter();
-    if arguments
+    let command = arguments
         .next()
         .and_then(|value| value.into_string().ok())
-        .as_deref()
-        != Some(SERVICE_PROXY_SERVE_COMMAND)
-    {
+        .ok_or(ProxyError::Usage)?;
+    if command == RESULTS_PROXY_SERVE_COMMAND {
+        return parse_results(arguments).map(ProxyCommand::Results);
+    }
+    if command != SERVICE_PROXY_SERVE_COMMAND {
         return Err(ProxyError::Usage);
     }
 
@@ -69,7 +136,93 @@ pub(crate) fn parse_command_line(
     if mappings.is_empty() {
         return Err(ProxyError::Configuration);
     }
-    Ok(mappings)
+    Ok(ProxyCommand::Services(mappings))
+}
+
+fn parse_results(
+    mut arguments: impl Iterator<Item = OsString>,
+) -> Result<ResultsConfiguration, ProxyError> {
+    let front_address = parse_canonical_private_ipv4(&next_argument(&mut arguments)?)?;
+    let front_network = parse_canonical_private_network(&next_argument(&mut arguments)?)?;
+    let job_address = parse_canonical_private_ipv4(&next_argument(&mut arguments)?)?;
+    let transit_network = parse_canonical_private_network(&next_argument(&mut arguments)?)?;
+    let target_address = parse_canonical_private_ipv4(&next_argument(&mut arguments)?)?;
+    if arguments.next().is_some()
+        || front_network.prefix != RESULTS_FRONT_NETWORK_PREFIX
+        || front_network.usable_host(2) != Some(front_address)
+        || front_network.usable_host(3) != Some(job_address)
+        || transit_network.prefix > RESULTS_TRANSIT_MAXIMUM_PREFIX
+        || !transit_network.contains_usable(target_address)
+        || transit_network.usable_host(1) == Some(target_address)
+        || front_network.overlaps(transit_network)
+    {
+        return Err(ProxyError::Configuration);
+    }
+    Ok(ResultsConfiguration {
+        front_address,
+        front_network,
+        job_address,
+        transit_network,
+        target_address,
+    })
+}
+
+fn next_argument(arguments: &mut impl Iterator<Item = OsString>) -> Result<String, ProxyError> {
+    arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or(ProxyError::Configuration)
+}
+
+fn parse_canonical_ipv4(value: &str) -> Result<Ipv4Addr, ProxyError> {
+    if value.is_empty() || value.len() > 15 || !value.is_ascii() {
+        return Err(ProxyError::Configuration);
+    }
+    let address = value
+        .parse::<Ipv4Addr>()
+        .map_err(|_| ProxyError::Configuration)?;
+    if address.to_string() != value || !is_valid_service_ip(address) {
+        return Err(ProxyError::Configuration);
+    }
+    Ok(address)
+}
+
+fn parse_canonical_private_ipv4(value: &str) -> Result<Ipv4Addr, ProxyError> {
+    parse_canonical_ipv4(value).and_then(|address| {
+        address
+            .is_private()
+            .then_some(address)
+            .ok_or(ProxyError::Configuration)
+    })
+}
+
+fn parse_canonical_private_network(value: &str) -> Result<Ipv4Network, ProxyError> {
+    let (address, prefix) = value.split_once('/').ok_or(ProxyError::Configuration)?;
+    let address = parse_canonical_private_ipv4(address)?;
+    if prefix.is_empty()
+        || prefix.len() > 2
+        || !prefix.bytes().all(|byte| byte.is_ascii_digit())
+        || (prefix.len() > 1 && prefix.starts_with('0'))
+    {
+        return Err(ProxyError::Configuration);
+    }
+    let prefix = prefix
+        .parse::<u8>()
+        .ok()
+        .filter(|prefix| (8..=30).contains(prefix))
+        .ok_or(ProxyError::Configuration)?;
+    let mask = u32::MAX << (32 - prefix);
+    if u32::from(address) & mask != u32::from(address) {
+        return Err(ProxyError::Configuration);
+    }
+    let network = Ipv4Network {
+        network: address,
+        prefix,
+    };
+    if !network.broadcast().is_private() {
+        return Err(ProxyError::Configuration);
+    }
+    Ok(network)
 }
 
 fn parse_mapping(value: &str) -> Result<Mapping, ProxyError> {
@@ -133,7 +286,10 @@ mod tests {
     use super::*;
 
     fn parse(values: &[&str]) -> Result<Vec<Mapping>, ProxyError> {
-        parse_command_line(values.iter().map(OsString::from))
+        match parse_command_line(values.iter().map(OsString::from))? {
+            ProxyCommand::Services(mappings) => Ok(mappings),
+            ProxyCommand::Results(_) => Err(ProxyError::Configuration),
+        }
     }
 
     #[test]
@@ -202,5 +358,189 @@ mod tests {
         values.extend((0..=MAX_LISTENERS).map(|_| "tcp|10.0.0.2|80|0".to_owned()));
         let result = parse_command_line(values.into_iter().map(OsString::from));
         assert_eq!(result, Err(ProxyError::Configuration));
+    }
+
+    #[test]
+    fn accepts_only_the_closed_results_contract() {
+        let command = parse_command_line(
+            [
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.0.2",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        )
+        .expect("closed Results transport");
+        assert_eq!(
+            command,
+            ProxyCommand::Results(ResultsConfiguration {
+                front_address: Ipv4Addr::new(172, 31, 8, 2),
+                front_network: Ipv4Network {
+                    network: Ipv4Addr::new(172, 31, 8, 0),
+                    prefix: 29,
+                },
+                job_address: Ipv4Addr::new(172, 31, 8, 3),
+                transit_network: Ipv4Network {
+                    network: Ipv4Addr::new(10, 91, 0, 0),
+                    prefix: 23,
+                },
+                target_address: Ipv4Addr::new(10, 91, 0, 2),
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_each_current_results_transit_capacity() {
+        for (network, target) in [
+            ("10.0.0.0/8", "10.91.0.2"),
+            ("10.91.0.0/16", "10.91.0.2"),
+            ("10.91.0.0/22", "10.91.0.2"),
+            ("10.91.0.0/23", "10.91.1.254"),
+        ] {
+            parse_command_line(
+                [
+                    RESULTS_PROXY_SERVE_COMMAND,
+                    "172.31.8.2",
+                    "172.31.8.0/29",
+                    "172.31.8.3",
+                    network,
+                    target,
+                ]
+                .into_iter()
+                .map(OsString::from),
+            )
+            .expect("current transit capacity");
+        }
+    }
+
+    fn assert_results_rejected(cases: impl IntoIterator<Item = Vec<&'static str>>) {
+        for values in cases {
+            assert!(
+                parse_command_line(values.into_iter().map(OsString::from)).is_err(),
+                "accepted invalid Results arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_results_noncurrent_front_topology_or_arity() {
+        assert_results_rejected([
+            vec![RESULTS_PROXY_SERVE_COMMAND],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.2",
+                "10.91.0.0/23",
+                "10.91.0.2",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.1/29",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.0.2",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.0.2",
+                "extra",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/24",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.0.2",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.4",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.0.2",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.4",
+                "10.91.0.0/23",
+                "10.91.0.2",
+            ],
+        ]);
+    }
+
+    #[test]
+    fn rejects_results_invalid_transit_or_target() {
+        assert_results_rejected([
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "172.31.8.0/23",
+                "172.31.8.8",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "192.0.0.0/23",
+                "192.0.0.2",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "10.91.0.0/24",
+                "10.91.0.2",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.0.1",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.0.0",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "10.91.0.0/23",
+                "10.91.1.255",
+            ],
+            vec![
+                RESULTS_PROXY_SERVE_COMMAND,
+                "172.31.8.2",
+                "172.31.8.0/29",
+                "172.31.8.3",
+                "192.168.0.0/15",
+                "192.168.0.2",
+            ],
+        ]);
     }
 }

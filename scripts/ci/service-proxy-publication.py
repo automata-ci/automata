@@ -575,12 +575,12 @@ def expected_labels(source: dict) -> dict[str, str]:
     release = source["release"]
     return {
         "io.automata.service-proxy.binary.sha256": artifacts["binary_sha256"],
-        "io.automata.service-proxy.protocol-version": "1",
+        "io.automata.service-proxy.protocol-version": "2",
         "io.automata.service-proxy.sbom.sha256": artifacts["sbom_sha256"],
         "io.automata.service-proxy.source.sha256": sha256(canonical_json(source)),
         "org.opencontainers.image.created": release["created"],
         "org.opencontainers.image.description": (
-            "Namespace-local bounded TCP and UDP proxy for job service containers"
+            "Closed bounded service and Results proxy for Automata job sandboxes"
         ),
         "org.opencontainers.image.licenses": "MIT",
         "org.opencontainers.image.revision": release["revision"],
@@ -708,7 +708,7 @@ def prepare_candidate(arguments: argparse.Namespace) -> None:
         "release": source["release"],
         "runtime": {
             "entrypoint": ["/usr/libexec/automata-ci-service-proxy"],
-            "protocol_version": "1",
+            "protocol_version": "2",
             "user": "65532:65532",
         },
         "schema_version": 1,
@@ -795,7 +795,7 @@ def validate_source_identity(value: object, lock: dict | None = None) -> dict:
     )
     if runtime != {
         "entrypoint": ["/usr/libexec/automata-ci-service-proxy"],
-        "protocol_version": "1",
+        "protocol_version": "2",
         "user": "65532:65532",
     }:
         fail("source runtime contract differs")

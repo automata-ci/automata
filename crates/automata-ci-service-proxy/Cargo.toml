@@ -1,6 +1,6 @@
 [package]
 name = "automata-ci-service-proxy"
-description = "Bounded namespace-local service port proxy for Automata job sandboxes"
+description = "Closed bounded service and Results proxy for Automata job sandboxes"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -18,7 +18,7 @@ name = "automata-ci-service-proxy"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { workspace = true, features = ["event"] }
+rustix = { workspace = true, features = ["event", "net"] }
 
 [lints]
 workspace = true

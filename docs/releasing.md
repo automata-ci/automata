@@ -231,6 +231,10 @@ contract. Buildah still inspects the image metadata, and
 configuration, source bindings, and candidate provenance before the subsequent
 `prepare-candidate` policy gate accepts it.
 
+Every image and publication validator requires the sole current
+`io.automata.service-proxy.protocol-version=2` capability. Protocol 1 images
+predate the Results mode and cannot be admitted or promoted by this path.
+
 Reproducibility comparisons are backend-local: CI compares two Buildah outputs,
 while the manual and release paths compare Podman outputs. Both backends produce
 OCI candidates accepted by the same validators, but their output bytes are not
