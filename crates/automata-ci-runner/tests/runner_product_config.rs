@@ -1221,14 +1221,20 @@ fn local_docker_configuration() -> serde_json::Value {
         .as_object_mut()
         .expect("state object")
         .remove("podman");
-    value["executor"]["network"] = serde_json::json!("disabled");
+    value["executor"]["network"] = serde_json::json!("private_egress");
     value["local_docker"] = serde_json::json!({
         "installation_name": "evaluation",
         "installation_id": "6e561f8b-9098-418d-b573-d82f5c73006e",
         "guest_image": format!(
             "registry.example/automata/guest@sha256:{}",
             "ab".repeat(32)
-        )
+        ),
+        "results_transport": {
+            "proxy_image": SERVICE_PROXY_IMAGE,
+            "transit_network_id": "cd".repeat(32),
+            "results_container_id": "ef".repeat(32),
+            "results_address": "10.91.0.2"
+        }
     });
     value
 }
@@ -1248,6 +1254,25 @@ fn local_docker_configuration_is_closed_current_only_and_mutually_exclusive() {
     );
     assert!(local.guest_image().reference().ends_with(&"ab".repeat(32)));
     assert!(configured.inventory().containers().features().is_empty());
+
+    let mut three_workers = value.clone();
+    three_workers["inventory"]["max_parallel_jobs"] = serde_json::json!(3);
+    assert_eq!(
+        parse_value(&three_workers)
+            .expect("the current LocalDocker topology supports three workers")
+            .inventory()
+            .max_parallel_jobs(),
+        3
+    );
+
+    let mut above_local_slot_ceiling = value.clone();
+    above_local_slot_ceiling["inventory"]["max_parallel_jobs"] =
+        serde_json::json!(automata_ci_local::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS + 1);
+    assert_eq!(
+        parse_value(&above_local_slot_ceiling)
+            .expect_err("LocalDocker slot ordinals must fit the deterministic address pool"),
+        RunnerProductConfigError::InvalidInventory
+    );
     assert_eq!(
         configured.executor().privilege(),
         SandboxPrivilegePolicy::Administrator
@@ -1277,10 +1302,10 @@ fn local_docker_configuration_is_closed_current_only_and_mutually_exclusive() {
         RunnerProductConfigError::InvalidLocalDocker
     );
 
-    let mut egress = value.clone();
-    egress["executor"]["network"] = serde_json::json!("private_egress");
+    let mut disabled = value.clone();
+    disabled["executor"]["network"] = serde_json::json!("disabled");
     assert_eq!(
-        parse_value(&egress).expect_err("local Docker is network-disabled only"),
+        parse_value(&disabled).expect_err("local Docker requires its closed private Results route"),
         RunnerProductConfigError::InvalidExecutor
     );
 
@@ -1324,6 +1349,63 @@ fn local_docker_configuration_is_closed_current_only_and_mutually_exclusive() {
         parse_value(&ambiguous).expect_err("providers are mutually exclusive"),
         RunnerProductConfigError::InvalidProvider
     );
+}
+
+#[test]
+fn local_docker_results_transport_is_mandatory_exact_and_nonconfigurable() {
+    let value = local_docker_configuration();
+    let configured = parse_value(&value).expect("local Docker configuration");
+    let results = configured
+        .local_docker()
+        .expect("local Docker policy")
+        .results_transport();
+    assert_eq!(results.proxy_image().reference(), SERVICE_PROXY_IMAGE);
+    assert_eq!(results.transit_network_id(), "cd".repeat(32));
+    assert_eq!(results.results_container_id(), "ef".repeat(32));
+    assert_eq!(results.results_address().to_string(), "10.91.0.2");
+    let results_debug = format!("{results:?}");
+    assert!(results_debug.contains("[REDACTED]"));
+    assert!(!results_debug.contains(&"cd".repeat(32)));
+    assert!(!results_debug.contains(&"ef".repeat(32)));
+
+    let mut missing_results = value.clone();
+    missing_results["local_docker"]
+        .as_object_mut()
+        .expect("local Docker object")
+        .remove("results_transport");
+    assert_eq!(
+        parse_value(&missing_results).expect_err("Results transport is mandatory"),
+        RunnerProductConfigError::InvalidDocument
+    );
+
+    let mut dynamic_port = value.clone();
+    dynamic_port["local_docker"]["results_transport"]["port"] = serde_json::json!(8081);
+    assert_eq!(
+        parse_value(&dynamic_port).expect_err("the fixed Results port is not configurable"),
+        RunnerProductConfigError::InvalidDocument
+    );
+
+    for (field, invalid) in [
+        (
+            "proxy_image",
+            serde_json::json!("registry.example/automata/proxy:latest"),
+        ),
+        ("transit_network_id", serde_json::json!("cd".repeat(31))),
+        ("results_container_id", serde_json::json!("EF".repeat(32))),
+        ("results_address", serde_json::json!("203.0.113.2")),
+        (
+            "results_address",
+            serde_json::json!("results.automata.invalid"),
+        ),
+        ("results_address", serde_json::json!("10.91.0.2:8081")),
+    ] {
+        let mut invalid_transport = value.clone();
+        invalid_transport["local_docker"]["results_transport"][field] = invalid;
+        assert_eq!(
+            parse_value(&invalid_transport).expect_err("Results transport must stay exact"),
+            RunnerProductConfigError::InvalidLocalDocker
+        );
+    }
 }
 
 #[test]
@@ -1385,7 +1467,7 @@ fn only_the_current_product_schema_is_accepted() {
     let current: serde_json::Value =
         serde_json::from_str(&valid_configuration()).expect("configuration JSON");
     assert!(parse_value(&current).is_ok());
-    for unsupported in [0, 1, 2, 3, 4, u16::MAX] {
+    for unsupported in [0, 1, 2, 3, 4, 5, u16::MAX] {
         let mut document = current.clone();
         document["schema_version"] = serde_json::json!(unsupported);
         assert_eq!(

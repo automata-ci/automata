@@ -202,6 +202,8 @@ async fn run_local_docker(
     let provider = automata_ci_local::connect_local_docker_provider(
         local.installation_binding().clone(),
         local.guest_image().clone(),
+        local.results_transport().clone(),
+        config.runner_id(),
         config.inventory().platform().architecture(),
     )
     .await?;

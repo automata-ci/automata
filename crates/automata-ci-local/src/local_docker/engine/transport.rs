@@ -679,6 +679,11 @@ impl<T, const LIMIT: usize> BoundedVec<T, LIMIT> {
     pub(super) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    #[cfg(unix)]
+    pub(super) fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 impl<'de, T, const LIMIT: usize> Deserialize<'de> for BoundedVec<T, LIMIT>
@@ -734,6 +739,11 @@ impl<K: Ord, V, const LIMIT: usize> BoundedMap<K, V, LIMIT> {
     #[cfg(unix)]
     pub(super) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    #[cfg(unix)]
+    pub(super) fn len(&self) -> usize {
+        self.0.len()
     }
 }
 

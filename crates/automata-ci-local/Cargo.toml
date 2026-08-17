@@ -26,6 +26,7 @@ bytes.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 flate2.workspace = true
+futures.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

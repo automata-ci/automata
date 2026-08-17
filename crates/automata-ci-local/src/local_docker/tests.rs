@@ -1,5 +1,6 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashSet},
+    net::Ipv4Addr,
     num::NonZeroU16,
     str::FromStr as _,
     sync::{
@@ -27,8 +28,8 @@ use super::*;
 use crate::{
     EngineArchitecture, InstallationName,
     local_docker::engine::{
-        AnchorEngineApi, EngineApi, EngineExecOutput, EngineFacts, InspectedVolume,
-        PreparedEngineExec,
+        AnchorEngineApi, CreateNetwork, EngineApi, EngineExecOutput, EngineFacts, InspectedNetwork,
+        InspectedVolume, Ipv4Network, NetworkEndpoint, PreparedEngineExec,
     },
 };
 
@@ -39,10 +40,19 @@ const JOB_IMAGE_ID: &str =
     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const GUEST_IMAGE_ID: &str =
     "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const PROXY_DIGEST: &str = "9999999999999999999999999999999999999999999999999999999999999999";
+const PROXY_IMAGE_ID: &str =
+    "sha256:8888888888888888888888888888888888888888888888888888888888888888";
+const TRANSIT_NETWORK_ID: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const RESULTS_CONTAINER_ID: &str =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const FAKE_GUEST: &[u8] = b"fake-automata-ci-sandbox-guest";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 enum Call {
+    CreateNetwork(String),
+    RemoveNetwork(String),
     CreateContainer(ContainerDefinition),
     StartContainer(String),
     RemoveContainer(String),
@@ -58,6 +68,7 @@ struct FakeState {
     images: BTreeMap<String, InspectedImage>,
     volumes: BTreeMap<String, InspectedVolume>,
     containers: BTreeMap<String, InspectedContainer>,
+    networks: BTreeMap<String, InspectedNetwork>,
     guest_binaries: BTreeMap<String, Vec<u8>>,
     files: BTreeMap<String, Vec<u8>>,
     prepared: BTreeMap<String, (String, Vec<String>, String)>,
@@ -65,6 +76,15 @@ struct FakeState {
     reject_bootstrap: bool,
     bootstrap_ready: bool,
     invalid_guest_source_archive: bool,
+    results_target_running: bool,
+    results_readiness_empty_reads: usize,
+    results_readiness_bytes: Option<Vec<u8>>,
+    replace_proxy_after_empty_readiness: bool,
+    results_log_reads: usize,
+    next_results_transit_inspect_error: Option<EngineApiError>,
+    next_results_target_error: Option<EngineApiError>,
+    readiness_followup_transit_inspect_error: Option<EngineApiError>,
+    readiness_followup_target_error: Option<EngineApiError>,
     replace_after_upload: bool,
     replace_after_start: bool,
     replace_after_probe: bool,
@@ -75,8 +95,11 @@ struct FakeState {
     first_removed_for_recreation: Option<InspectedContainer>,
     inject_daemon_default_ulimit_on_next_create: bool,
     rename_removed_container_instead: bool,
+    rename_instead_of_next_remove: bool,
+    mutate_container_after_inspecting_name: Option<(String, String)>,
     block_next_guest_exec: bool,
-    boundary_permit: bool,
+    boundary_permits: HashSet<std::thread::ThreadId>,
+    lose_next_network_create_response: bool,
     calls: Vec<Call>,
     next_id: u64,
 }
@@ -105,6 +128,7 @@ impl FakeState {
             images: BTreeMap::new(),
             volumes: BTreeMap::new(),
             containers: BTreeMap::new(),
+            networks: BTreeMap::new(),
             guest_binaries: BTreeMap::new(),
             files: BTreeMap::new(),
             prepared: BTreeMap::new(),
@@ -112,6 +136,15 @@ impl FakeState {
             reject_bootstrap: false,
             bootstrap_ready: false,
             invalid_guest_source_archive: false,
+            results_target_running: true,
+            results_readiness_empty_reads: 0,
+            results_readiness_bytes: None,
+            replace_proxy_after_empty_readiness: false,
+            results_log_reads: 0,
+            next_results_transit_inspect_error: None,
+            next_results_target_error: None,
+            readiness_followup_transit_inspect_error: None,
+            readiness_followup_target_error: None,
             replace_after_upload: false,
             replace_after_start: false,
             replace_after_probe: false,
@@ -122,8 +155,11 @@ impl FakeState {
             first_removed_for_recreation: None,
             inject_daemon_default_ulimit_on_next_create: false,
             rename_removed_container_instead: false,
+            rename_instead_of_next_remove: false,
+            mutate_container_after_inspecting_name: None,
             block_next_guest_exec: false,
-            boundary_permit: false,
+            boundary_permits: HashSet::new(),
+            lose_next_network_create_response: false,
             calls: Vec::new(),
             next_id: 1,
         }
@@ -136,7 +172,7 @@ impl FakeState {
     }
 
     fn consume_boundary(&mut self) -> Result<(), EngineApiError> {
-        if !std::mem::take(&mut self.boundary_permit) {
+        if !self.boundary_permits.remove(&std::thread::current().id()) {
             return Err(EngineApiError::InvalidResponse);
         }
         Ok(())
@@ -149,14 +185,27 @@ struct FakeEngine {
     guest_exec_blocked: AtomicBool,
     release_guest_exec: AtomicBool,
     fail_released_guest_exec: AtomicBool,
+    peer_inspection_delay_millis: AtomicUsize,
+    peer_inspections_in_flight: AtomicUsize,
+    maximum_peer_inspections_in_flight: AtomicUsize,
     accesses: AtomicUsize,
 }
 
+struct InFlightPeerInspection<'a>(&'a AtomicUsize);
+
+impl Drop for InFlightPeerInspection<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl FakeEngine {
+    #[allow(clippy::too_many_lines)]
     fn new(installation: &Installation) -> Self {
         let mut state = FakeState::new();
         let job = job_image();
         let guest = guest_image();
+        let proxy = proxy_image();
         state.images.insert(
             job.reference().to_owned(),
             inspected_image(&job, JOB_IMAGE_ID),
@@ -165,6 +214,19 @@ impl FakeEngine {
             guest.reference().to_owned(),
             inspected_image(&guest, GUEST_IMAGE_ID),
         );
+        let mut inspected_proxy = inspected_image(&proxy, PROXY_IMAGE_ID);
+        inspected_proxy.environment_names = vec!["PATH".to_owned()];
+        inspected_proxy.default_path_only = true;
+        inspected_proxy.user = RESULTS_PROXY_USER.to_owned();
+        inspected_proxy.entrypoint = vec![RESULTS_PROXY_ENTRYPOINT.to_owned()];
+        inspected_proxy.working_directory = "/".to_owned();
+        inspected_proxy.labels.insert(
+            RESULTS_PROXY_IMAGE_PROTOCOL_LABEL.to_owned(),
+            RESULTS_PROXY_IMAGE_PROTOCOL_VERSION.to_owned(),
+        );
+        state
+            .images
+            .insert(proxy.reference().to_owned(), inspected_proxy);
         let anchor_name = installation.anchor_volume_name().to_owned();
         state.volumes.insert(
             anchor_name.clone(),
@@ -198,12 +260,56 @@ impl FakeEngine {
                 ]),
             },
         );
+        let transit_name = results_transit_name(installation);
+        state.networks.insert(
+            transit_name.clone(),
+            InspectedNetwork {
+                id: TRANSIT_NETWORK_ID.to_owned(),
+                name: transit_name,
+                driver: "bridge".to_owned(),
+                scope: "local".to_owned(),
+                enable_ipv4: true,
+                enable_ipv6: false,
+                internal: true,
+                attachable: false,
+                ingress: false,
+                config_only: false,
+                config_from: String::new(),
+                ipam_driver: "default".to_owned(),
+                ipam_options: BTreeMap::new(),
+                ipv4_network: Ipv4Network {
+                    network: Ipv4Addr::new(10, 91, 0, 0),
+                    prefix: 16,
+                },
+                ipv4_gateway: Ipv4Addr::new(10, 91, 0, 1),
+                options: BTreeMap::from([(
+                    "com.docker.network.bridge.gateway_mode_ipv4".to_owned(),
+                    "isolated".to_owned(),
+                )]),
+                labels: results_transit_labels(installation),
+                containers: BTreeMap::from([(
+                    RESULTS_CONTAINER_ID.to_owned(),
+                    NetworkEndpoint {
+                        name: "automata-results-service".to_owned(),
+                        endpoint_id:
+                            "abababababababababababababababababababababababababababababababab"
+                                .to_owned(),
+                        mac_address: "02:42:0a:5b:00:01".to_owned(),
+                        ipv4_address: Ipv4Addr::new(10, 91, 0, 2),
+                        ipv4_prefix: 16,
+                    },
+                )]),
+            },
+        );
         Self {
             anchor_name,
             state: Mutex::new(state),
             guest_exec_blocked: AtomicBool::new(false),
             release_guest_exec: AtomicBool::new(false),
             fail_released_guest_exec: AtomicBool::new(false),
+            peer_inspection_delay_millis: AtomicUsize::new(0),
+            peer_inspections_in_flight: AtomicUsize::new(0),
+            maximum_peer_inspections_in_flight: AtomicUsize::new(0),
             accesses: AtomicUsize::new(0),
         }
     }
@@ -309,7 +415,7 @@ impl AnchorEngineApi for FakeEngine {
         if name != self.anchor_name || !state.volumes.contains_key(name) {
             return Err(EngineApiError::InvalidResponse);
         }
-        state.boundary_permit = true;
+        state.boundary_permits.insert(std::thread::current().id());
         if let Some((remaining, cancelled)) = state.cancel_after_boundaries.take() {
             if remaining == 1 {
                 cancelled.store(true, Ordering::SeqCst);
@@ -354,9 +460,23 @@ impl SandboxEngineApi for FakeEngine {
         &self,
         name_or_id: &str,
     ) -> Result<Option<InspectedContainer>, EngineApiError> {
+        let delay_millis = self.peer_inspection_delay_millis.load(Ordering::SeqCst);
+        if delay_millis > 0 && name_or_id.ends_with("-results-proxy") {
+            let in_flight = self
+                .peer_inspections_in_flight
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            let _in_flight = InFlightPeerInspection(&self.peer_inspections_in_flight);
+            self.maximum_peer_inspections_in_flight
+                .fetch_max(in_flight, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(
+                u64::try_from(delay_millis).expect("test delay fits u64"),
+            ))
+            .await;
+        }
         self.accesses.fetch_add(1, Ordering::SeqCst);
-        let state = self.state.lock().expect("fake state");
-        Ok(state
+        let mut state = self.state.lock().expect("fake state");
+        let inspected = state
             .containers
             .get(name_or_id)
             .or_else(|| {
@@ -365,7 +485,32 @@ impl SandboxEngineApi for FakeEngine {
                     .values()
                     .find(|container| container.id == name_or_id)
             })
-            .cloned())
+            .cloned();
+        if state
+            .mutate_container_after_inspecting_name
+            .as_ref()
+            .is_some_and(|(trigger, _)| trigger == name_or_id)
+        {
+            let (_, target) = state
+                .mutate_container_after_inspecting_name
+                .take()
+                .expect("guarded inspection mutation");
+            state
+                .containers
+                .get_mut(&target)
+                .ok_or(EngineApiError::InvalidResponse)?
+                .isolated = false;
+        }
+        Ok(inspected)
+    }
+
+    async fn results_target_running(&self, id: &str) -> Result<bool, EngineApiError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        let mut state = self.state.lock().expect("fake state");
+        if let Some(error) = state.next_results_target_error.take() {
+            return Err(error);
+        }
+        Ok(id == RESULTS_CONTAINER_ID && state.results_target_running)
     }
 
     async fn create_container(
@@ -387,12 +532,18 @@ impl SandboxEngineApi for FakeEngine {
             .clone();
         let id = state.object_id();
         let isolated = !std::mem::take(&mut state.inject_daemon_default_ulimit_on_next_create);
+        let mut realized = definition;
+        for attachment in realized.networks.values_mut() {
+            // Engine API v1.48 reports the requested endpoint IP and aliases
+            // for a created container, but leaves NetworkID empty until start.
+            attachment.network_id.clear();
+        }
         state.containers.insert(
-            definition.name.clone(),
+            realized.name.clone(),
             InspectedContainer {
                 id,
                 image_id,
-                definition,
+                definition: realized,
                 state: EngineContainerState::Created,
                 // `false` represents Docker merging a daemon default ulimit
                 // into an otherwise exact create request after mutation.
@@ -407,7 +558,35 @@ impl SandboxEngineApi for FakeEngine {
         let mut state = self.state.lock().expect("fake state");
         state.consume_boundary()?;
         state.calls.push(Call::StartContainer(id.to_owned()));
-        find_container_mut(&mut state, id)?.state = EngineContainerState::Running;
+        let name = state
+            .containers
+            .iter()
+            .find_map(|(name, container)| (container.id == id).then(|| name.clone()))
+            .ok_or(EngineApiError::InvalidResponse)?;
+        let mut container = state
+            .containers
+            .remove(&name)
+            .ok_or(EngineApiError::InvalidResponse)?;
+        container.state = EngineContainerState::Running;
+        for (network_name, attachment) in &mut container.definition.networks {
+            let endpoint_id = state.object_id();
+            let network = state
+                .networks
+                .get_mut(network_name)
+                .ok_or(EngineApiError::InvalidResponse)?;
+            attachment.network_id.clone_from(&network.id);
+            network.containers.insert(
+                container.id.clone(),
+                NetworkEndpoint {
+                    name: container.definition.name.clone(),
+                    endpoint_id,
+                    mac_address: "02:42:ac:1f:00:02".to_owned(),
+                    ipv4_address: attachment.ipv4_address,
+                    ipv4_prefix: network.ipv4_network.prefix,
+                },
+            );
+        }
+        state.containers.insert(name, container);
         if std::mem::take(&mut state.replace_after_start) {
             replace_container(&mut state, id)?;
         }
@@ -423,7 +602,7 @@ impl SandboxEngineApi for FakeEngine {
             .containers
             .iter()
             .find_map(|(name, container)| (container.id == id).then(|| name.clone()));
-        let removed = name.and_then(|name| state.containers.remove(&name));
+        let mut removed = name.and_then(|name| state.containers.remove(&name));
         if state.rename_removed_container_instead {
             if let Some(container) = removed {
                 state
@@ -431,6 +610,23 @@ impl SandboxEngineApi for FakeEngine {
                     .insert(format!("renamed-{}", container.id), container);
             }
             return Ok(());
+        }
+        if state.rename_instead_of_next_remove {
+            let mut retained = removed.take().ok_or(EngineApiError::InvalidResponse)?;
+            let renamed = format!("{}-renamed", retained.definition.name);
+            retained.definition.name.clone_from(&renamed);
+            for network in state.networks.values_mut() {
+                if let Some(endpoint) = network.containers.get_mut(&retained.id) {
+                    endpoint.name.clone_from(&renamed);
+                }
+            }
+            state.containers.insert(renamed, retained);
+            state.rename_instead_of_next_remove = false;
+        }
+        if let Some(removed) = removed.as_ref() {
+            for network in state.networks.values_mut() {
+                network.containers.remove(&removed.id);
+            }
         }
         if state.recreate_first_removed_after_following_remove {
             if let Some(mut first) = state.first_removed_for_recreation.take() {
@@ -453,7 +649,123 @@ impl SandboxEngineApi for FakeEngine {
         state.consume_boundary()?;
         state.calls.push(Call::KillContainer(id.to_owned()));
         find_container_mut(&mut state, id)?.state = EngineContainerState::Exited(137);
+        for network in state.networks.values_mut() {
+            network.containers.remove(id);
+        }
         Ok(())
+    }
+
+    async fn inspect_network(
+        &self,
+        id_or_name: &str,
+    ) -> Result<Option<InspectedNetwork>, EngineApiError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        let mut state = self.state.lock().expect("fake state");
+        let is_results_transit = state.networks.values().any(|network| {
+            network.id == TRANSIT_NETWORK_ID
+                && (network.id == id_or_name || network.name == id_or_name)
+        });
+        if is_results_transit && let Some(error) = state.next_results_transit_inspect_error.take() {
+            return Err(error);
+        }
+        Ok(state
+            .networks
+            .values()
+            .find(|network| network.name == id_or_name || network.id == id_or_name)
+            .cloned())
+    }
+
+    async fn create_network(&self, request: CreateNetwork) -> Result<String, EngineApiError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        let mut state = self.state.lock().expect("fake state");
+        state.consume_boundary()?;
+        state.calls.push(Call::CreateNetwork(request.name.clone()));
+        if state.networks.contains_key(&request.name) {
+            return Err(EngineApiError::RequestFailed);
+        }
+        let id = state.object_id();
+        state.networks.insert(
+            request.name.clone(),
+            InspectedNetwork {
+                id: id.clone(),
+                name: request.name,
+                driver: "bridge".to_owned(),
+                scope: "local".to_owned(),
+                enable_ipv4: true,
+                enable_ipv6: false,
+                internal: true,
+                attachable: false,
+                ingress: false,
+                config_only: false,
+                config_from: String::new(),
+                ipam_driver: "default".to_owned(),
+                ipam_options: BTreeMap::new(),
+                ipv4_network: request.ipv4_network,
+                ipv4_gateway: request.ipv4_gateway,
+                options: BTreeMap::from([(
+                    "com.docker.network.bridge.gateway_mode_ipv4".to_owned(),
+                    "isolated".to_owned(),
+                )]),
+                labels: request.labels,
+                containers: BTreeMap::new(),
+            },
+        );
+        if std::mem::take(&mut state.lose_next_network_create_response) {
+            Err(EngineApiError::RequestFailed)
+        } else {
+            Ok(id)
+        }
+    }
+
+    async fn remove_network(&self, id: &str) -> Result<(), EngineApiError> {
+        self.accesses.fetch_add(1, Ordering::SeqCst);
+        let mut state = self.state.lock().expect("fake state");
+        state.consume_boundary()?;
+        state.calls.push(Call::RemoveNetwork(id.to_owned()));
+        let name = state
+            .networks
+            .iter()
+            .find_map(|(name, network)| (network.id == id).then(|| name.clone()))
+            .ok_or(EngineApiError::InvalidResponse)?;
+        if !state
+            .networks
+            .get(&name)
+            .is_some_and(|network| network.containers.is_empty())
+        {
+            return Err(EngineApiError::RequestFailed);
+        }
+        state.networks.remove(&name);
+        Ok(())
+    }
+
+    async fn container_logs(
+        &self,
+        id: &str,
+        _byte_limit: usize,
+    ) -> Result<Vec<u8>, EngineApiError> {
+        let mut state = self.state.lock().expect("fake state");
+        let is_proxy = state.containers.values().any(|container| {
+            container.id == id && container.definition.name.ends_with("-results-proxy")
+        });
+        if !is_proxy {
+            return Ok(Vec::new());
+        }
+        state.results_log_reads += 1;
+        if state.results_readiness_empty_reads > 0 {
+            state.results_readiness_empty_reads -= 1;
+            if std::mem::take(&mut state.replace_proxy_after_empty_readiness) {
+                replace_container(&mut state, id)?;
+            }
+            return Ok(Vec::new());
+        }
+        let readiness = state
+            .results_readiness_bytes
+            .clone()
+            .unwrap_or_else(|| RESULTS_READY_STATUS.to_vec());
+        state.next_results_transit_inspect_error =
+            state.readiness_followup_transit_inspect_error.take();
+        state.next_results_target_error = state.readiness_followup_target_error.take();
+        Ok(readiness)
     }
 
     async fn download_guest_image_binary(
@@ -659,6 +971,26 @@ fn replace_container(state: &mut FakeState, id: &str) -> Result<(), EngineApiErr
         .ok_or(EngineApiError::InvalidResponse)?;
     let replacement_id = state.object_id();
     replacement.id = replacement_id.clone();
+    let attached_networks = state
+        .networks
+        .iter()
+        .filter(|(_, network)| network.containers.contains_key(id))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    for network_name in attached_networks {
+        let mut endpoint = state
+            .networks
+            .get_mut(&network_name)
+            .and_then(|network| network.containers.remove(id))
+            .ok_or(EngineApiError::InvalidResponse)?;
+        endpoint.endpoint_id = state.object_id();
+        state
+            .networks
+            .get_mut(&network_name)
+            .ok_or(EngineApiError::InvalidResponse)?
+            .containers
+            .insert(replacement_id.clone(), endpoint);
+    }
     state.containers.insert(name, replacement);
     if let Some(guest) = state.guest_binaries.remove(id) {
         state.guest_binaries.insert(replacement_id, guest);
@@ -740,6 +1072,8 @@ impl Fixture {
             installation.clone(),
             guest_image(),
             GUEST_IMAGE_ID.to_owned(),
+            verified_results_transport(&installation),
+            RunnerId::from_uuid(Uuid::from_u128(2)),
         );
         Self {
             provider,
@@ -755,6 +1089,8 @@ impl Fixture {
             self.installation.clone(),
             guest_image(),
             GUEST_IMAGE_ID.to_owned(),
+            verified_results_transport(&self.installation),
+            RunnerId::from_uuid(Uuid::from_u128(2)),
         )
     }
 }
@@ -770,6 +1106,11 @@ fn inspected_image(image: &ImmutableImage, id: &str) -> InspectedImage {
         has_healthcheck: false,
         labels: BTreeMap::new(),
         environment_names: Vec::new(),
+        default_path_only: false,
+        user: String::new(),
+        entrypoint: Vec::new(),
+        command: Vec::new(),
+        working_directory: String::new(),
     }
 }
 
@@ -783,6 +1124,36 @@ fn guest_image() -> ImmutableImage {
         "registry.example/automata/guest@sha256:{GUEST_DIGEST}"
     ))
     .expect("guest image")
+}
+
+fn proxy_image() -> ImmutableImage {
+    ImmutableImage::new(format!(
+        "registry.example/automata/service-proxy@sha256:{PROXY_DIGEST}"
+    ))
+    .expect("proxy image")
+}
+
+fn verified_results_transport(installation: &Installation) -> VerifiedResultsTransport {
+    VerifiedResultsTransport {
+        requested: LocalDockerResultsTransport::new(
+            proxy_image(),
+            TRANSIT_NETWORK_ID,
+            RESULTS_CONTAINER_ID,
+            Ipv4Addr::new(10, 91, 0, 2),
+        )
+        .expect("transport"),
+        transit_name: results_transit_name(installation),
+        transit_network: Ipv4Network {
+            network: Ipv4Addr::new(10, 91, 0, 0),
+            prefix: 16,
+        },
+        transit_gateway: Ipv4Addr::new(10, 91, 0, 1),
+        proxy_image_id: PROXY_IMAGE_ID.to_owned(),
+        proxy_image_labels: BTreeMap::from([(
+            RESULTS_PROXY_IMAGE_PROTOCOL_LABEL.to_owned(),
+            RESULTS_PROXY_IMAGE_PROTOCOL_VERSION.to_owned(),
+        )]),
+    }
 }
 
 fn sandbox_spec() -> SandboxSpec {
@@ -799,7 +1170,28 @@ fn sandbox_spec_with_resources(resources: ResourceLimits) -> SandboxSpec {
     )
 }
 
+fn sandbox_spec_for_job_slot(operation: u128, slot: u16) -> SandboxSpec {
+    sandbox_spec_with_identity_and_resources(
+        operation,
+        7,
+        SandboxCustody::Job {
+            runner_id: RunnerId::from_uuid(Uuid::from_u128(2)),
+            slot_ordinal: NonZeroU16::new(slot).expect("slot"),
+        },
+        ResourceLimits::new(256 * 1024 * 1024, 2_000, 128).expect("limits"),
+    )
+}
+
 fn sandbox_spec_with_custody_and_resources(
+    custody: SandboxCustody,
+    resources: ResourceLimits,
+) -> SandboxSpec {
+    sandbox_spec_with_identity_and_resources(1, 7, custody, resources)
+}
+
+fn sandbox_spec_with_identity_and_resources(
+    operation: u128,
+    generation: u64,
     custody: SandboxCustody,
     resources: ResourceLimits,
 ) -> SandboxSpec {
@@ -820,16 +1212,31 @@ fn sandbox_spec_with_custody_and_resources(
     )
     .expect("environment");
     SandboxSpec::new(
-        OperationId::from_uuid(Uuid::from_u128(1)),
-        SandboxGeneration::new(7).expect("generation"),
+        OperationId::from_uuid(Uuid::from_u128(operation)),
+        SandboxGeneration::new(generation).expect("generation"),
         custody,
         environment,
         TargetPath::posix("/workspace/repository").expect("workspace"),
-        NetworkPolicy::Disabled,
+        NetworkPolicy::PrivateEgress,
         RootFilesystemPolicy::Writable,
         resources,
     )
     .with_privilege(SandboxPrivilegePolicy::Administrator)
+}
+
+fn sandbox_spec_with_workspace(workspace: TargetPath) -> SandboxSpec {
+    let spec = sandbox_spec();
+    SandboxSpec::new(
+        spec.operation_id(),
+        spec.generation(),
+        spec.custody(),
+        spec.profile().clone(),
+        workspace,
+        spec.network(),
+        spec.root_filesystem(),
+        spec.resources(),
+    )
+    .with_privilege(spec.privilege())
 }
 
 fn true_command(spec: &SandboxSpec, operation: u128) -> ExecutionCommand {
@@ -881,6 +1288,60 @@ fn wait_for_test(mut predicate: impl FnMut() -> bool, message: &str) {
         assert!(Instant::now() < deadline, "{message}");
         std::thread::yield_now();
     }
+}
+
+const fn engine_failure_categories() -> [(EngineApiError, ProviderErrorKind); 3] {
+    [
+        (
+            EngineApiError::RequestFailed,
+            ProviderErrorKind::AdapterUnavailable,
+        ),
+        (
+            EngineApiError::InvalidResponse,
+            ProviderErrorKind::BackendRejected,
+        ),
+        (
+            EngineApiError::OutputLimit,
+            ProviderErrorKind::OutputLimitExceeded,
+        ),
+    ]
+}
+
+fn assert_exact_create_recovery(
+    fixture: &Fixture,
+    spec: &SandboxSpec,
+    error: &ProviderError,
+) -> SandboxHandle {
+    let names = ResourceNames::for_spec(&fixture.installation, spec).expect("resource names");
+    let expected = names
+        .handle(&fixture.provider.inner.provider_id)
+        .expect("recovery handle");
+    assert_eq!(error.outcome(), OperationOutcome::Uncertain);
+    assert_eq!(error.recovery_handle(), Some(&expected));
+    expected
+}
+
+fn destroy_create_recovery(fixture: &Fixture, spec: &SandboxSpec, error: &ProviderError) {
+    let handle = assert_exact_create_recovery(fixture, spec, error);
+    let request = DestroySandbox::new(
+        OperationId::from_uuid(Uuid::from_u128(0xffff)),
+        handle,
+        spec.generation(),
+        spec.custody(),
+    );
+    assert_eq!(
+        fixture
+            .provider
+            .destroy(&request, &NeverCancelled)
+            .expect("exact recovery cleanup"),
+        DestroyDisposition::Destroyed
+    );
+    let names = ResourceNames::for_spec(&fixture.installation, spec).expect("resource names");
+    let state = fixture.engine.state.lock().expect("fake state");
+    assert!(!state.networks.contains_key(&names.results_front));
+    assert!(!state.containers.contains_key(&names.helper));
+    assert!(!state.containers.contains_key(&names.job));
+    assert!(!state.containers.contains_key(&names.results_proxy));
 }
 
 #[test]
@@ -978,6 +1439,42 @@ fn lifecycle_uses_zero_volumes_and_exact_replay_cleanup() {
     assert_eq!(record.state(), SandboxState::Running);
     let names = ResourceNames::for_spec(&fixture.installation, &spec).expect("names");
     let job = fixture.engine.container(&names.job).expect("job container");
+    let proxy = fixture
+        .engine
+        .container(&names.results_proxy)
+        .expect("Results proxy container");
+    let state = fixture.engine.state.lock().expect("state");
+    let front = state
+        .networks
+        .get(&names.results_front)
+        .expect("per-sandbox Results front");
+    assert!(front.internal);
+    assert_eq!(
+        front
+            .options
+            .get("com.docker.network.bridge.gateway_mode_ipv4"),
+        Some(&"isolated".to_owned())
+    );
+    assert_eq!(job.definition.networks.len(), 1);
+    assert_eq!(proxy.definition.networks.len(), 2);
+    assert_eq!(
+        proxy
+            .definition
+            .networks
+            .get(&names.results_front)
+            .expect("proxy front")
+            .aliases,
+        [RESULTS_ALIAS]
+    );
+    assert_eq!(front.containers.len(), 2);
+    let transit = state
+        .networks
+        .values()
+        .find(|network| network.id == TRANSIT_NETWORK_ID)
+        .expect("shared transit");
+    assert_eq!(transit.containers.len(), 2);
+    assert!(transit.containers.contains_key(RESULTS_CONTAINER_ID));
+    drop(state);
     assert_eq!(
         job.definition.tmpfs,
         BTreeMap::from([
@@ -1023,11 +1520,9 @@ fn lifecycle_uses_zero_volumes_and_exact_replay_cleanup() {
             if command == &[LOCAL_DOCKER_SANDBOX_GUEST_BINARY, "bootstrap-local-client"]
                 && user == &guest_seal_user()
     )));
-    assert!(
-        calls
-            .iter()
-            .all(|call| { !matches!(call, Call::StartContainer(id) if id != &job.id) })
-    );
+    assert!(calls.iter().all(|call| {
+        !matches!(call, Call::StartContainer(id) if id != &job.id && id != &proxy.id)
+    }));
     assert!(calls.iter().any(|call| matches!(
         call,
         Call::CreateExec(command, user)
@@ -1125,6 +1620,17 @@ fn lifecycle_uses_zero_volumes_and_exact_replay_cleanup() {
             .containers
             .is_empty()
     );
+    let state = fixture.engine.state.lock().expect("state");
+    assert!(!state.networks.contains_key(&names.results_front));
+    let transit = state
+        .networks
+        .values()
+        .find(|network| network.id == TRANSIT_NETWORK_ID)
+        .expect("shared transit remains lifecycle-owned");
+    assert_eq!(
+        transit.containers.keys().cloned().collect::<Vec<_>>(),
+        [RESULTS_CONTAINER_ID.to_owned()]
+    );
 }
 
 #[test]
@@ -1191,6 +1697,7 @@ fn ambiguous_bootstrap_response_stops_and_removes_the_unproven_container() {
         .create(&spec, &NeverCancelled)
         .expect_err("ambiguous bootstrap is never accepted");
     assert_eq!(error.kind(), ProviderErrorKind::AdapterUnavailable);
+    assert_exact_create_recovery(&fixture, &spec, &error);
     assert!(fixture.engine.container(&names.job).is_none());
     let calls = fixture.engine.calls();
     assert_eq!(
@@ -1205,6 +1712,7 @@ fn ambiguous_bootstrap_response_stops_and_removes_the_unproven_container() {
             .count(),
         1
     );
+    destroy_create_recovery(&fixture, &spec, &error);
 }
 
 #[test]
@@ -1330,6 +1838,7 @@ fn unready_bootstrap_is_destroyed_and_never_adopted_or_retried() {
         .create(&spec, &NeverCancelled)
         .expect_err("unready broker fails closed");
     assert_eq!(error.kind(), ProviderErrorKind::BackendRejected);
+    assert_exact_create_recovery(&fixture, &spec, &error);
     assert!(fixture.engine.container(&names.job).is_none());
     let calls = fixture.engine.calls();
     assert_eq!(
@@ -1354,6 +1863,7 @@ fn unready_bootstrap_is_destroyed_and_never_adopted_or_retried() {
             .iter()
             .any(|call| matches!(call, Call::RemoveContainer(_)))
     );
+    destroy_create_recovery(&fixture, &spec, &error);
 }
 
 #[test]
@@ -1368,6 +1878,9 @@ fn exited_job_is_never_restarted() {
     let job_id = fixture.engine.container(&names.job).expect("job").id;
     fixture.engine.mutate(|state| {
         find_container_mut(state, &job_id).expect("job").state = EngineContainerState::Exited(0);
+        for network in state.networks.values_mut() {
+            network.containers.remove(&job_id);
+        }
     });
     let starts_before = fixture
         .engine
@@ -1903,6 +2416,7 @@ fn daemon_default_ulimit_normalization_fails_closed_and_custody_cleanup_removes_
         .create(&spec, &NeverCancelled)
         .expect_err("daemon-normalized ulimit must fail exact inspection");
     assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+    assert_exact_create_recovery(&fixture, &spec, &error);
     let helper = fixture
         .engine
         .container(&names.helper)
@@ -2074,6 +2588,9 @@ fn foreign_name_collision_fails_closed_without_mutation() {
                     memory_bytes: 1,
                     nano_cpus: 1,
                     pids_limit: 1,
+                    primary_network: None,
+                    networks: BTreeMap::new(),
+                    capture_logs: false,
                 },
                 state: EngineContainerState::Created,
                 isolated: false,
@@ -2084,24 +2601,170 @@ fn foreign_name_collision_fails_closed_without_mutation() {
         .provider
         .create(&spec, &NeverCancelled)
         .expect_err("foreign collision");
-    assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
     assert_eq!(fixture.engine.mutation_count(), 0);
+}
+
+#[test]
+fn long_valid_workspace_fails_before_front_network_mutation() {
+    let fixture = Fixture::new();
+    let long_workspace = TargetPath::posix(format!("/workspace/{}", "a".repeat(128)))
+        .expect("long workspace remains a valid target path");
+    let spec = sandbox_spec_with_workspace(long_workspace);
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("workspace outside the deterministic tar layout ceiling");
+    assert_eq!(error.kind(), ProviderErrorKind::InvalidConfiguration);
+    assert_eq!(error.outcome(), OperationOutcome::KnownNoEffect);
+    assert!(error.recovery_handle().is_none());
+    assert_eq!(fixture.engine.mutation_count(), 0);
+    let names = ResourceNames::for_spec(&fixture.installation, &spec).expect("names");
+    assert!(
+        !fixture
+            .engine
+            .state
+            .lock()
+            .expect("state")
+            .networks
+            .contains_key(&names.results_front)
+    );
+}
+
+#[test]
+fn merged_label_overflow_fails_before_front_network_mutation() {
+    let fixture = Fixture::new();
+    fixture.engine.mutate(|state| {
+        let labels = &mut state
+            .images
+            .get_mut(job_image().reference())
+            .expect("job image")
+            .labels;
+        for index in 0..MAX_RESOURCE_LABELS {
+            labels.insert(format!("example.test.label-{index}"), "value".to_owned());
+        }
+    });
+    let spec = sandbox_spec();
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("merged job labels exceed the exact Engine ceiling");
+    assert_eq!(error.kind(), ProviderErrorKind::InvalidConfiguration);
+    assert_eq!(error.outcome(), OperationOutcome::KnownNoEffect);
+    assert!(error.recovery_handle().is_none());
+    assert_eq!(fixture.engine.mutation_count(), 0);
+    let names = ResourceNames::for_spec(&fixture.installation, &spec).expect("names");
+    assert!(
+        !fixture
+            .engine
+            .state
+            .lock()
+            .expect("state")
+            .networks
+            .contains_key(&names.results_front)
+    );
+}
+
+#[test]
+fn cancellation_at_post_front_prepare_job_and_proxy_boundaries_is_recoverable() {
+    for boundary in [3, 6, 8] {
+        let fixture = Fixture::new();
+        let spec = sandbox_spec();
+        let cancellation = ToggleCancellation::active();
+        fixture.engine.mutate(|state| {
+            state.cancel_after_boundaries = Some((boundary, Arc::clone(&cancellation.cancelled)));
+        });
+
+        let error = fixture
+            .provider
+            .create(&spec, &cancellation)
+            .expect_err("post-front boundary cancellation");
+
+        assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
+        let calls = fixture.engine.calls();
+        let created = calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::CreateContainer(definition) => Some(definition.name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        match boundary {
+            3 => assert!(
+                created.is_empty(),
+                "prepare boundary must precede helper mutation"
+            ),
+            6 => assert!(
+                created.iter().all(|name| name.ends_with("-guest-source")),
+                "job boundary must precede job mutation"
+            ),
+            8 => {
+                assert!(created.iter().any(|name| name.ends_with("-job")));
+                assert!(
+                    created.iter().all(|name| !name.ends_with("-results-proxy")),
+                    "proxy boundary must precede proxy mutation"
+                );
+            }
+            _ => unreachable!(),
+        }
+        destroy_create_recovery(&fixture, &spec, &error);
+    }
 }
 
 #[test]
 fn adversarial_guest_source_archive_fails_before_job_creation() {
     let fixture = Fixture::new();
+    let spec = sandbox_spec();
     fixture
         .engine
         .mutate(|state| state.invalid_guest_source_archive = true);
     let error = fixture
         .provider
-        .create(&sandbox_spec(), &NeverCancelled)
+        .create(&spec, &NeverCancelled)
         .expect_err("multi-entry guest source archive");
     assert_eq!(error.kind(), ProviderErrorKind::BackendRejected);
     assert!(!fixture.engine.calls().iter().any(|call| {
         matches!(call, Call::CreateContainer(definition) if definition.name.ends_with("-job"))
     }));
+    destroy_create_recovery(&fixture, &spec, &error);
+}
+
+#[test]
+fn helper_rename_instead_of_removal_is_detected_by_exact_id() {
+    let fixture = Fixture::new();
+    fixture
+        .engine
+        .mutate(|state| state.rename_instead_of_next_remove = true);
+    let error = fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect_err("renamed exact helper must not count as removed");
+    assert_eq!(error.kind(), ProviderErrorKind::AdapterUnavailable);
+
+    let state = fixture.engine.state.lock().expect("fake state");
+    let retained = state
+        .containers
+        .values()
+        .find(|container| container.definition.name.ends_with("-guest-source-renamed"))
+        .expect("renamed exact helper remains present");
+    let removed_id = state
+        .calls
+        .iter()
+        .find_map(|call| match call {
+            Call::RemoveContainer(id) => Some(id),
+            _ => None,
+        })
+        .expect("attempted exact helper removal");
+    assert_eq!(&retained.id, removed_id);
+    assert!(
+        !state.containers.contains_key(
+            retained
+                .definition
+                .name
+                .strip_suffix("-renamed")
+                .expect("renamed suffix")
+        )
+    );
 }
 
 #[test]
@@ -2117,6 +2780,7 @@ fn name_replacement_after_archive_upload_is_never_adopted_or_started() {
         .create(&spec, &NeverCancelled)
         .expect_err("post-upload name replacement");
     assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+    assert_exact_create_recovery(&fixture, &spec, &error);
     let replacement = fixture.engine.container(&names.job).expect("replacement");
     let calls = fixture.engine.calls();
     let uploaded_id = calls
@@ -2147,6 +2811,7 @@ fn name_replacement_after_start_is_never_adopted_or_bootstrapped() {
         .create(&spec, &NeverCancelled)
         .expect_err("post-start name replacement");
     assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+    assert_exact_create_recovery(&fixture, &spec, &error);
     let replacement = fixture.engine.container(&names.job).expect("replacement");
     let calls = fixture.engine.calls();
     let started_id = calls
@@ -2162,6 +2827,140 @@ fn name_replacement_after_start_is_never_adopted_or_bootstrapped() {
             .iter()
             .any(|call| matches!(call, Call::CreateExec(_, _)))
     );
+}
+
+#[test]
+fn delayed_results_proxy_readiness_is_polled_to_one_exact_line() {
+    let fixture = Fixture::new();
+    fixture
+        .engine
+        .mutate(|state| state.results_readiness_empty_reads = 2);
+    fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect("bounded delayed readiness");
+    assert_eq!(
+        fixture
+            .engine
+            .state
+            .lock()
+            .expect("state")
+            .results_log_reads,
+        3
+    );
+}
+
+#[test]
+fn nonempty_nonexact_results_proxy_readiness_is_rejected_immediately() {
+    let fixture = Fixture::new();
+    let spec = sandbox_spec();
+    fixture.engine.mutate(|state| {
+        state.results_readiness_bytes = Some(b"{\"version\":1}\n".to_vec());
+    });
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("nonexact readiness must fail");
+    assert_eq!(error.kind(), ProviderErrorKind::BackendRejected);
+    assert_eq!(
+        fixture
+            .engine
+            .state
+            .lock()
+            .expect("state")
+            .results_log_reads,
+        1
+    );
+    destroy_create_recovery(&fixture, &spec, &error);
+}
+
+#[test]
+fn results_proxy_replacement_during_readiness_poll_is_detected() {
+    let fixture = Fixture::new();
+    let spec = sandbox_spec();
+    fixture.engine.mutate(|state| {
+        state.results_readiness_empty_reads = 1;
+        state.replace_proxy_after_empty_readiness = true;
+    });
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("replacement during readiness must fail");
+    assert_eq!(error.kind(), ProviderErrorKind::Conflict);
+    assert_exact_create_recovery(&fixture, &spec, &error);
+}
+
+#[test]
+fn cancellation_interrupts_results_proxy_readiness_poll() {
+    let fixture = Fixture::new();
+    let spec = sandbox_spec();
+    fixture
+        .engine
+        .mutate(|state| state.results_readiness_empty_reads = usize::MAX);
+    let cancellation = ToggleCancellation::active();
+    let error = std::thread::scope(|scope| {
+        let call = scope.spawn(|| fixture.provider.create(&spec, &cancellation));
+        wait_for_test(
+            || {
+                fixture
+                    .engine
+                    .state
+                    .lock()
+                    .expect("state")
+                    .results_log_reads
+                    > 0
+            },
+            "readiness polling did not begin",
+        );
+        cancellation.cancel();
+        wait_for_test(
+            || call.is_finished(),
+            "cancelled readiness poll did not return within the test bound",
+        );
+        call.join()
+            .expect("create thread")
+            .expect_err("cancelled readiness")
+    });
+    assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
+    destroy_create_recovery(&fixture, &spec, &error);
+}
+
+#[test]
+fn readiness_preserves_transit_and_target_engine_failure_categories() {
+    for target_failure in [false, true] {
+        for (engine_error, expected_kind) in engine_failure_categories() {
+            let fixture = Fixture::new();
+            let record = fixture
+                .provider
+                .create(&sandbox_spec(), &NeverCancelled)
+                .expect("create Results topology");
+            let mutations = fixture.engine.mutation_count();
+            fixture.engine.mutate(|state| {
+                if target_failure {
+                    state.readiness_followup_target_error = Some(engine_error);
+                } else {
+                    state.readiness_followup_transit_inspect_error = Some(engine_error);
+                }
+            });
+
+            let error = fixture
+                .provider
+                .inspect(record.handle(), &NeverCancelled)
+                .expect_err("injected readiness Engine failure");
+
+            assert_eq!(error.kind(), expected_kind);
+            assert_ne!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+            assert_eq!(fixture.engine.mutation_count(), mutations);
+            assert_eq!(
+                fixture
+                    .provider
+                    .inspect(record.handle(), &NeverCancelled)
+                    .expect("transient readiness failure must retain custody")
+                    .state(),
+                SandboxState::Running
+            );
+        }
+    }
 }
 
 #[test]
@@ -2284,6 +3083,47 @@ fn destroy_rejects_a_helper_recreated_while_the_job_is_removed() {
 }
 
 #[test]
+fn destroy_rejects_a_job_renamed_instead_of_exact_id_removal() {
+    let fixture = Fixture::new();
+    let spec = sandbox_spec();
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create");
+    fixture
+        .engine
+        .mutate(|state| state.rename_instead_of_next_remove = true);
+    let request = DestroySandbox::new(
+        OperationId::from_uuid(Uuid::from_u128(201)),
+        record.handle().clone(),
+        record.generation(),
+        spec.custody(),
+    );
+
+    let error = fixture
+        .provider
+        .destroy(&request, &NeverCancelled)
+        .expect_err("renamed exact job ID must prevent removal success");
+
+    assert_eq!(error.kind(), ProviderErrorKind::AdapterUnavailable);
+    let names = ResourceNames::for_spec(&fixture.installation, &spec).expect("names");
+    assert!(fixture.engine.container(&names.job).is_none());
+    assert!(
+        fixture
+            .engine
+            .state
+            .lock()
+            .expect("state")
+            .containers
+            .values()
+            .any(|container| {
+                container.definition.name == format!("{}-renamed", names.job)
+                    && container.state == EngineContainerState::Exited(137)
+            })
+    );
+}
+
+#[test]
 fn exact_realized_configuration_is_rechecked_on_attach() {
     let fixture = Fixture::new();
     let spec = sandbox_spec();
@@ -2300,6 +3140,835 @@ fn exact_realized_configuration_is_rechecked_on_attach() {
         .attach(record.handle(), &NeverCancelled)
         .expect_err("tampered isolation");
     assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+}
+
+#[test]
+fn provider_advertises_only_its_current_network_contract() {
+    let fixture = Fixture::new();
+    assert!(
+        fixture
+            .provider
+            .capabilities()
+            .supports(SandboxCapability::PrivateEgress)
+    );
+    assert!(
+        !fixture
+            .provider
+            .capabilities()
+            .supports(SandboxCapability::NetworkDisabled)
+    );
+}
+
+#[test]
+fn results_transport_rejects_generic_or_public_targets() {
+    for (network_id, container_id, address) in [
+        ("short", RESULTS_CONTAINER_ID, Ipv4Addr::new(10, 91, 0, 2)),
+        (TRANSIT_NETWORK_ID, "short", Ipv4Addr::new(10, 91, 0, 2)),
+        (
+            TRANSIT_NETWORK_ID,
+            RESULTS_CONTAINER_ID,
+            Ipv4Addr::new(203, 0, 113, 2),
+        ),
+    ] {
+        assert_eq!(
+            LocalDockerResultsTransport::new(proxy_image(), network_id, container_id, address)
+                .expect_err("invalid closed transport")
+                .code(),
+            LocalDockerErrorCode::ResultsTransportMismatch
+        );
+    }
+}
+
+#[test]
+fn stale_results_proxy_image_protocol_is_rejected_before_mutation() {
+    let fixture = Fixture::new();
+    fixture.engine.mutate(|state| {
+        state
+            .images
+            .get_mut(proxy_image().reference())
+            .expect("Results proxy image")
+            .labels
+            .insert(
+                RESULTS_PROXY_IMAGE_PROTOCOL_LABEL.to_owned(),
+                "1".to_owned(),
+            );
+    });
+    let mut results = verified_results_transport(&fixture.installation);
+    results.proxy_image_labels.insert(
+        RESULTS_PROXY_IMAGE_PROTOCOL_LABEL.to_owned(),
+        "1".to_owned(),
+    );
+    let provider = LocalDockerProvider::with_test_engine(
+        PinnedDockerEngine::for_test(EngineArchitecture::Amd64, fixture.engine.clone()),
+        fixture.engine.clone(),
+        fixture.installation.clone(),
+        guest_image(),
+        GUEST_IMAGE_ID.to_owned(),
+        results,
+        RunnerId::from_uuid(Uuid::from_u128(2)),
+    );
+    let mutations = fixture.engine.mutation_count();
+
+    let error = provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect_err("the pre-Results image protocol must fail closed");
+
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), mutations);
+}
+
+#[test]
+fn deterministic_results_addresses_cover_every_current_runner_custody() {
+    let fixture = Fixture::new();
+    let runner_id = RunnerId::from_uuid(Uuid::from_u128(2));
+    let transport = verified_results_transport(&fixture.installation);
+    let pool = results_front_pool(&fixture.installation);
+    let mut front_networks = BTreeSet::new();
+    let mut transit_addresses = BTreeSet::new();
+    let custodies = std::iter::once(SandboxCustody::ProfileAdmission { runner_id }).chain(
+        (1..=crate::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS).map(|slot| SandboxCustody::Job {
+            runner_id,
+            slot_ordinal: NonZeroU16::new(slot).expect("nonzero slot"),
+        }),
+    );
+
+    for custody in custodies {
+        let front = results_front_network(&fixture.installation, custody).expect("front subnet");
+        assert_eq!(front.prefix, RESULTS_FRONT_NETWORK_PREFIX);
+        assert!(pool.contains(front.network));
+        assert!(pool.contains(front.broadcast()));
+        assert!(front_networks.insert(front.network));
+        assert_eq!(
+            network_host_address(&front, 1).expect("front gateway"),
+            Ipv4Addr::from(u32::from(front.network) + 1)
+        );
+        assert_eq!(
+            network_host_address(&front, 2).expect("proxy address"),
+            Ipv4Addr::from(u32::from(front.network) + 2)
+        );
+        assert_eq!(
+            network_host_address(&front, 3).expect("job address"),
+            Ipv4Addr::from(u32::from(front.network) + 3)
+        );
+
+        let transit = transit_proxy_address(
+            &transport.transit_network,
+            transport.transit_gateway,
+            transport.requested.results_address,
+            custody,
+        )
+        .expect("transit proxy address");
+        assert!(transport.transit_network.usable(transit));
+        assert_ne!(transit, transport.transit_gateway);
+        assert_ne!(transit, transport.requested.results_address);
+        assert!(transit_addresses.insert(transit));
+    }
+
+    assert_eq!(front_networks.len(), 257);
+    assert_eq!(transit_addresses.len(), 257);
+}
+
+#[test]
+fn minimum_transit_prefix_has_capacity_for_every_target_hole_position() {
+    let transit = Ipv4Network {
+        network: Ipv4Addr::new(10, 91, 0, 0),
+        prefix: 23,
+    };
+    let gateway = network_host_address(&transit, 1).expect("gateway");
+    let runner_id = RunnerId::from_uuid(Uuid::from_u128(2));
+    for target_offset in [2, 250, 510] {
+        let target = network_host_address(&transit, target_offset).expect("target");
+        let addresses = std::iter::once(SandboxCustody::ProfileAdmission { runner_id })
+            .chain(
+                (1..=crate::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS).map(|slot| SandboxCustody::Job {
+                    runner_id,
+                    slot_ordinal: NonZeroU16::new(slot).expect("slot"),
+                }),
+            )
+            .map(|custody| {
+                transit_proxy_address(&transit, gateway, target, custody)
+                    .expect("minimum transit capacity")
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(addresses.len(), 257);
+        assert!(!addresses.contains(&gateway));
+        assert!(!addresses.contains(&target));
+        assert!(addresses.iter().all(|address| transit.usable(*address)));
+    }
+}
+
+#[test]
+fn default_installation_front_address_plan_is_a_stable_golden_vector() {
+    let installation = Installation::verified(
+        InstallationName::default(),
+        InstallationId::from_str("00000000-0000-4000-8000-000000000001").expect("installation ID"),
+    );
+    let runner_id = RunnerId::from_uuid(Uuid::from_u128(2));
+    assert_eq!(
+        results_front_pool(&installation),
+        Ipv4Network {
+            network: Ipv4Addr::new(10, 223, 0, 0),
+            prefix: 20,
+        }
+    );
+    for (custody, expected) in [
+        (
+            SandboxCustody::ProfileAdmission { runner_id },
+            Ipv4Addr::new(10, 223, 0, 0),
+        ),
+        (
+            SandboxCustody::Job {
+                runner_id,
+                slot_ordinal: NonZeroU16::new(1).expect("slot"),
+            },
+            Ipv4Addr::new(10, 223, 0, 8),
+        ),
+        (
+            SandboxCustody::Job {
+                runner_id,
+                slot_ordinal: NonZeroU16::new(256).expect("slot"),
+            },
+            Ipv4Addr::new(10, 223, 8, 0),
+        ),
+    ] {
+        assert_eq!(
+            results_front_network(&installation, custody)
+                .expect("front network")
+                .network,
+            expected
+        );
+    }
+}
+
+#[test]
+fn one_runner_three_worker_slots_realize_disjoint_closed_topologies() {
+    let fixture = Fixture::new();
+    let resources = ResourceLimits::new(256 * 1024 * 1024, 2_000, 128).expect("limits");
+    let specs = (1_u16..=3)
+        .map(|slot| {
+            sandbox_spec_with_identity_and_resources(
+                100 + u128::from(slot),
+                7,
+                SandboxCustody::Job {
+                    runner_id: RunnerId::from_uuid(Uuid::from_u128(2)),
+                    slot_ordinal: NonZeroU16::new(slot).expect("slot"),
+                },
+                resources,
+            )
+        })
+        .collect::<Vec<_>>();
+    let records = specs
+        .iter()
+        .map(|spec| {
+            fixture
+                .provider
+                .create(spec, &NeverCancelled)
+                .expect("three-worker topology")
+        })
+        .collect::<Vec<_>>();
+
+    let state = fixture.engine.state.lock().expect("state");
+    let transit = state
+        .networks
+        .values()
+        .find(|network| network.id == TRANSIT_NETWORK_ID)
+        .expect("transit");
+    assert_eq!(transit.containers.len(), 4);
+    let mut proxy_transit_addresses = BTreeSet::new();
+    let mut front_networks = BTreeSet::new();
+    for spec in &specs {
+        let names = ResourceNames::for_spec(&fixture.installation, spec).expect("names");
+        let front = state
+            .networks
+            .get(&names.results_front)
+            .expect("slot front network");
+        assert_eq!(
+            front.ipv4_network,
+            results_front_network(&fixture.installation, spec.custody()).expect("front mapping")
+        );
+        assert!(front_networks.insert(front.ipv4_network.network));
+        let proxy = state
+            .containers
+            .get(&names.results_proxy)
+            .expect("slot proxy");
+        let transit_attachment = proxy
+            .definition
+            .networks
+            .get(&transit.name)
+            .expect("proxy transit attachment");
+        assert_eq!(
+            transit_attachment.ipv4_address,
+            transit_proxy_address(
+                &transit.ipv4_network,
+                transit.ipv4_gateway,
+                Ipv4Addr::new(10, 91, 0, 2),
+                spec.custody(),
+            )
+            .expect("transit mapping")
+        );
+        assert!(proxy_transit_addresses.insert(transit_attachment.ipv4_address));
+    }
+    drop(state);
+    assert_eq!(front_networks.len(), 3);
+    assert_eq!(proxy_transit_addresses.len(), 3);
+
+    for (record, spec) in records.into_iter().zip(specs).rev() {
+        let destroy = DestroySandbox::new(
+            OperationId::from_uuid(Uuid::new_v4()),
+            record.handle().clone(),
+            record.generation(),
+            spec.custody(),
+        );
+        assert_eq!(
+            fixture
+                .provider
+                .destroy(&destroy, &NeverCancelled)
+                .expect("destroy worker topology"),
+            DestroyDisposition::Destroyed
+        );
+    }
+    let state = fixture.engine.state.lock().expect("state");
+    assert_eq!(state.networks.len(), 1);
+    assert_eq!(
+        state
+            .networks
+            .values()
+            .next()
+            .expect("shared transit")
+            .containers
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        [RESULTS_CONTAINER_ID.to_owned()]
+    );
+}
+
+#[test]
+fn distinct_worker_slots_create_concurrently_without_transit_allocation_races() {
+    let fixture = Fixture::new();
+    let resources = ResourceLimits::new(256 * 1024 * 1024, 2_000, 128).expect("limits");
+    let specs = (1_u16..=3)
+        .map(|slot| {
+            sandbox_spec_with_identity_and_resources(
+                200 + u128::from(slot),
+                7,
+                SandboxCustody::Job {
+                    runner_id: RunnerId::from_uuid(Uuid::from_u128(2)),
+                    slot_ordinal: NonZeroU16::new(slot).expect("slot"),
+                },
+                resources,
+            )
+        })
+        .collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        let calls = specs
+            .iter()
+            .map(|spec| {
+                scope.spawn(|| {
+                    fixture
+                        .provider
+                        .create(spec, &NeverCancelled)
+                        .expect("concurrent slot creation")
+                })
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_eq!(
+                call.join().expect("create thread").state(),
+                SandboxState::Running
+            );
+        }
+    });
+
+    let state = fixture.engine.state.lock().expect("state");
+    let transit = state
+        .networks
+        .values()
+        .find(|network| network.id == TRANSIT_NETWORK_ID)
+        .expect("transit");
+    assert_eq!(transit.containers.len(), 4);
+    assert_eq!(
+        transit
+            .containers
+            .values()
+            .map(|endpoint| endpoint.ipv4_address)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        4
+    );
+}
+
+#[test]
+fn cancellation_interrupts_shared_transit_peer_attestation() {
+    let fixture = Fixture::new();
+    let record = fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect("create peer for cancellation test");
+    fixture
+        .engine
+        .peer_inspection_delay_millis
+        .store(5_000, Ordering::SeqCst);
+    let cancellation = ToggleCancellation::active();
+
+    let error = std::thread::scope(|scope| {
+        let call = scope.spawn(|| fixture.provider.inspect(record.handle(), &cancellation));
+        wait_for_test(
+            || {
+                fixture
+                    .engine
+                    .maximum_peer_inspections_in_flight
+                    .load(Ordering::SeqCst)
+                    > 0
+            },
+            "shared-transit peer attestation did not begin",
+        );
+        cancellation.cancel();
+        wait_for_test(
+            || call.is_finished(),
+            "cancelled shared-transit attestation did not return within the test bound",
+        );
+        call.join()
+            .expect("inspect thread")
+            .expect_err("cancelled peer attestation")
+    });
+
+    assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
+}
+
+#[test]
+fn shared_transit_peer_attestation_obeys_one_absolute_deadline() {
+    let fixture = Fixture::new();
+    fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect("create peer for deadline test");
+    fixture
+        .engine
+        .peer_inspection_delay_millis
+        .store(5_000, Ordering::SeqCst);
+    let started = Instant::now();
+    let error = run_provider(ProviderStage::Inspect, async {
+        fixture
+            .provider
+            .inner
+            .verify_boundary_kind(
+                &NeverCancelled,
+                ResultsTransportBudget {
+                    deadline: tokio::time::Instant::now() + Duration::from_millis(50),
+                },
+            )
+            .await
+            .map_err(|kind| known(kind, ProviderStage::Inspect))
+    })
+    .expect_err("the absolute attestation deadline must fail closed");
+
+    assert_eq!(error.kind(), ProviderErrorKind::AdapterUnavailable);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the operation-wide deadline was not enforced"
+    );
+}
+
+#[test]
+fn shared_results_attestation_preserves_engine_failure_categories_and_custody() {
+    for (engine_error, expected_kind) in engine_failure_categories() {
+        let fixture = Fixture::new();
+        let record = fixture
+            .provider
+            .create(&sandbox_spec(), &NeverCancelled)
+            .expect("create Results topology");
+        let mutations = fixture.engine.mutation_count();
+        fixture.engine.mutate(|state| {
+            state.next_results_transit_inspect_error = Some(engine_error);
+        });
+
+        let error = fixture
+            .provider
+            .inspect(record.handle(), &NeverCancelled)
+            .expect_err("injected shared-attestation Engine failure");
+
+        assert_eq!(error.kind(), expected_kind);
+        assert_ne!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+        assert_eq!(error.outcome(), OperationOutcome::KnownNoEffect);
+        assert!(error.recovery_handle().is_none());
+        assert_eq!(fixture.engine.mutation_count(), mutations);
+        assert_eq!(
+            fixture
+                .provider
+                .inspect(record.handle(), &NeverCancelled)
+                .expect("transient shared-attestation failure must retain custody")
+                .state(),
+            SandboxState::Running
+        );
+    }
+}
+
+#[test]
+fn shared_transit_peer_attestation_is_concurrent_and_bounded() {
+    let fixture = Fixture::new();
+    let records = (1_u16..=33)
+        .map(|slot| {
+            fixture
+                .provider
+                .create(
+                    &sandbox_spec_for_job_slot(400 + u128::from(slot), slot),
+                    &NeverCancelled,
+                )
+                .expect("create attested transit peer")
+        })
+        .collect::<Vec<_>>();
+    fixture
+        .engine
+        .maximum_peer_inspections_in_flight
+        .store(0, Ordering::SeqCst);
+    fixture
+        .engine
+        .peer_inspection_delay_millis
+        .store(5, Ordering::SeqCst);
+
+    fixture
+        .provider
+        .inspect(records[0].handle(), &NeverCancelled)
+        .expect("bounded concurrent transit attestation");
+
+    let maximum = fixture
+        .engine
+        .maximum_peer_inspections_in_flight
+        .load(Ordering::SeqCst);
+    assert_eq!(
+        maximum, MAX_RESULTS_TRANSIT_ATTESTATION_CONCURRENCY,
+        "peer attestation must saturate, but never exceed, its exact concurrency ceiling"
+    );
+}
+
+#[test]
+fn runner_and_slot_custody_bounds_fail_before_engine_access() {
+    for custody in [
+        SandboxCustody::Job {
+            runner_id: RunnerId::new(),
+            slot_ordinal: NonZeroU16::new(1).expect("slot"),
+        },
+        SandboxCustody::Job {
+            runner_id: RunnerId::from_uuid(Uuid::from_u128(2)),
+            slot_ordinal: NonZeroU16::new(crate::MAXIMUM_LOCAL_DOCKER_JOB_SLOTS + 1)
+                .expect("out-of-range slot"),
+        },
+    ] {
+        let fixture = Fixture::new();
+        let spec = sandbox_spec_with_custody_and_resources(
+            custody,
+            ResourceLimits::new(256 * 1024 * 1024, 2_000, 128).expect("limits"),
+        );
+        let error = fixture
+            .provider
+            .create(&spec, &NeverCancelled)
+            .expect_err("custody outside the provider contract");
+        assert_eq!(error.kind(), ProviderErrorKind::UnsupportedCapability);
+        assert_eq!(fixture.engine.access_count(), 0);
+        assert_eq!(fixture.engine.mutation_count(), 0);
+    }
+}
+
+#[test]
+fn transit_capacity_duplicate_and_front_pool_overlap_fail_closed() {
+    let fixture = Fixture::new();
+    let transport = verified_results_transport(&fixture.installation);
+    let state = fixture.engine.state.lock().expect("state");
+    let base = state
+        .networks
+        .values()
+        .find(|network| network.id == TRANSIT_NETWORK_ID)
+        .expect("transit")
+        .clone();
+    drop(state);
+
+    let mut undersized = base.clone();
+    undersized.ipv4_network.prefix = 24;
+    undersized
+        .containers
+        .get_mut(RESULTS_CONTAINER_ID)
+        .expect("Results endpoint")
+        .ipv4_prefix = 24;
+    assert!(!exact_results_transit(
+        &undersized,
+        &fixture.installation,
+        &transport.requested,
+    ));
+
+    let mut duplicate = base.clone();
+    duplicate.containers.insert(
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+        NetworkEndpoint {
+            name: "duplicate".to_owned(),
+            endpoint_id: "edededededededededededededededededededededededededededededededed"
+                .to_owned(),
+            mac_address: "02:42:0a:5b:00:02".to_owned(),
+            ipv4_address: transport.requested.results_address,
+            ipv4_prefix: base.ipv4_network.prefix,
+        },
+    );
+    assert!(!exact_results_transit(
+        &duplicate,
+        &fixture.installation,
+        &transport.requested,
+    ));
+
+    let pool = results_front_pool(&fixture.installation);
+    let mut overlapping = base;
+    overlapping.ipv4_network = pool.clone();
+    overlapping.ipv4_gateway = network_host_address(&pool, 1).expect("gateway");
+    let results_address = network_host_address(&pool, 2).expect("Results address");
+    overlapping
+        .containers
+        .get_mut(RESULTS_CONTAINER_ID)
+        .expect("Results endpoint")
+        .ipv4_address = results_address;
+    overlapping
+        .containers
+        .get_mut(RESULTS_CONTAINER_ID)
+        .expect("Results endpoint")
+        .ipv4_prefix = pool.prefix;
+    let mut requested = transport.requested;
+    requested.results_address = results_address;
+    assert!(!exact_results_transit(
+        &overlapping,
+        &fixture.installation,
+        &requested,
+    ));
+}
+
+#[test]
+fn transit_drift_fails_before_any_sandbox_mutation() {
+    let fixture = Fixture::new();
+    fixture.engine.mutate(|state| {
+        state
+            .networks
+            .values_mut()
+            .find(|network| network.id == TRANSIT_NETWORK_ID)
+            .expect("transit")
+            .options
+            .insert(
+                "com.docker.network.bridge.gateway_mode_ipv4".to_owned(),
+                "nat".to_owned(),
+            );
+    });
+    let error = fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect_err("transit normalization drift");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), 0);
+}
+
+#[test]
+fn duplicate_transit_endpoint_address_fails_before_any_sandbox_mutation() {
+    let fixture = Fixture::new();
+    fixture.engine.mutate(|state| {
+        state
+            .networks
+            .values_mut()
+            .find(|network| network.id == TRANSIT_NETWORK_ID)
+            .expect("transit")
+            .containers
+            .insert(
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(),
+                NetworkEndpoint {
+                    name: "duplicate".to_owned(),
+                    endpoint_id: "edededededededededededededededededededededededededededededededed"
+                        .to_owned(),
+                    mac_address: "02:42:0a:5b:00:02".to_owned(),
+                    ipv4_address: Ipv4Addr::new(10, 91, 0, 2),
+                    ipv4_prefix: 16,
+                },
+            );
+    });
+    let error = fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect_err("duplicate transit endpoint address");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), 0);
+}
+
+#[test]
+fn unavailable_results_target_fails_before_any_sandbox_mutation() {
+    let fixture = Fixture::new();
+    fixture
+        .engine
+        .mutate(|state| state.results_target_running = false);
+    let error = fixture
+        .provider
+        .create(&sandbox_spec(), &NeverCancelled)
+        .expect_err("the pinned Results target must be running");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), 0);
+}
+
+#[test]
+fn transit_peer_requires_the_full_closed_proxy_shape_except_for_custody_cleanup() {
+    let fixture = Fixture::new();
+    let spec = sandbox_spec();
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("create sandbox");
+    let names = ResourceNames::for_spec(&fixture.installation, &spec).expect("names");
+    fixture.engine.mutate(|state| {
+        state
+            .containers
+            .get_mut(&names.results_proxy)
+            .expect("Results proxy")
+            .definition
+            .networks
+            .insert(
+                "automata-control".to_owned(),
+                ContainerNetworkAttachment {
+                    network_id: "1212121212121212121212121212121212121212121212121212121212121212"
+                        .to_owned(),
+                    ipv4_address: Ipv4Addr::new(10, 99, 0, 2),
+                    aliases: Vec::new(),
+                },
+            );
+    });
+    let mutations_before = fixture.engine.mutation_count();
+    let error = fixture
+        .provider
+        .inspect(record.handle(), &NeverCancelled)
+        .expect_err("a proxy attached to any third network is not trusted");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), mutations_before);
+
+    let destroy = DestroySandbox::new(
+        OperationId::from_uuid(Uuid::from_u128(14)),
+        record.handle().clone(),
+        record.generation(),
+        spec.custody(),
+    );
+    assert_eq!(
+        fixture
+            .provider
+            .destroy(&destroy, &NeverCancelled)
+            .expect("topology drift must not strand resources with exact custody"),
+        DestroyDisposition::Destroyed
+    );
+}
+
+#[test]
+fn transit_peer_job_requires_full_container_identity_before_other_slot_mutation() {
+    let fixture = Fixture::new();
+    let first = sandbox_spec_for_job_slot(301, 1);
+    fixture
+        .provider
+        .create(&first, &NeverCancelled)
+        .expect("first slot");
+    let first_names = ResourceNames::for_spec(&fixture.installation, &first).expect("first names");
+    fixture.engine.mutate(|state| {
+        let original_id = state
+            .containers
+            .get(&first_names.job)
+            .expect("first job")
+            .id
+            .clone();
+        replace_container(state, &original_id).expect("replace first job");
+        let replacement = state
+            .containers
+            .get_mut(&first_names.job)
+            .expect("replacement job");
+        replacement.isolated = false;
+        replacement
+            .definition
+            .environment
+            .push("FOREIGN=true".to_owned());
+    });
+    let mutations_before = fixture.engine.mutation_count();
+    let error = fixture
+        .provider
+        .create(&sandbox_spec_for_job_slot(302, 2), &NeverCancelled)
+        .expect_err("foreign peer job identity");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), mutations_before);
+}
+
+#[test]
+fn cached_peer_shape_is_reverified_after_later_peer_attestation() {
+    let fixture = Fixture::new();
+    let first = sandbox_spec_for_job_slot(311, 1);
+    let second = sandbox_spec_for_job_slot(312, 2);
+    fixture
+        .provider
+        .create(&first, &NeverCancelled)
+        .expect("first slot");
+    fixture
+        .provider
+        .create(&second, &NeverCancelled)
+        .expect("second slot");
+    let first_names = ResourceNames::for_spec(&fixture.installation, &first).expect("first names");
+    let second_names =
+        ResourceNames::for_spec(&fixture.installation, &second).expect("second names");
+    fixture.engine.mutate(|state| {
+        state.mutate_container_after_inspecting_name =
+            Some((second_names.results_proxy.clone(), first_names.job.clone()));
+    });
+    let mutations_before = fixture.engine.mutation_count();
+    let error = fixture
+        .provider
+        .create(&sandbox_spec_for_job_slot(313, 3), &NeverCancelled)
+        .expect_err("cached first peer must be re-attested");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), mutations_before);
+    assert!(
+        !fixture
+            .engine
+            .container(&first_names.job)
+            .expect("mutated first job")
+            .isolated
+    );
+}
+
+#[test]
+fn foreign_front_network_collision_is_not_adopted_or_mutated() {
+    let fixture = Fixture::new();
+    let spec = sandbox_spec();
+    let names = ResourceNames::for_spec(&fixture.installation, &spec).expect("names");
+    fixture.engine.mutate(|state| {
+        let mut foreign = state
+            .networks
+            .values()
+            .find(|network| network.id == TRANSIT_NETWORK_ID)
+            .expect("transit")
+            .clone();
+        foreign.id = "edededededededededededededededededededededededededededededededed".to_owned();
+        foreign.name = names.results_front.clone();
+        foreign.labels.clear();
+        foreign.containers.clear();
+        state.networks.insert(names.results_front.clone(), foreign);
+    });
+    let error = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect_err("foreign front collision");
+    assert_eq!(error.kind(), ProviderErrorKind::OwnershipMismatch);
+    assert_eq!(fixture.engine.mutation_count(), 0);
+}
+
+#[test]
+fn matching_front_network_create_race_is_reinspected_and_replayed() {
+    let fixture = Fixture::new();
+    fixture
+        .engine
+        .mutate(|state| state.lose_next_network_create_response = true);
+    let spec = sandbox_spec();
+    let record = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("post-inspected matching race winner");
+    assert_eq!(record.state(), SandboxState::Running);
+    let replay = fixture
+        .provider
+        .create(&spec, &NeverCancelled)
+        .expect("exact topology replay");
+    assert_eq!(replay, record);
 }
 
 #[test]
@@ -2383,8 +4052,10 @@ fn unsupported_spec_shape_is_rejected_before_engine_access() {
 
 #[test]
 fn archive_builder_is_deterministic_and_contains_only_owned_paths() {
-    let first = sandbox_archive("/workspace/repository", FAKE_GUEST).expect("archive");
-    let second = sandbox_archive("/workspace/repository", FAKE_GUEST).expect("archive");
+    let definition =
+        sandbox_archive_definition("/workspace/repository").expect("archive definition");
+    let first = sandbox_archive(&definition, FAKE_GUEST).expect("archive");
+    let second = sandbox_archive(&definition, FAKE_GUEST).expect("archive");
     assert_eq!(first, second);
     assert_eq!(extract_uploaded_guest(&first).expect("guest"), FAKE_GUEST);
 }
@@ -2413,6 +4084,22 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
             .expect("set a present digest-pinned sandbox-guest image"),
     )
     .expect("guest image");
+    let results_transport = LocalDockerResultsTransport::new(
+        ImmutableImage::new(
+            std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_PROXY_IMAGE")
+                .expect("set the digest-pinned Results proxy image"),
+        )
+        .expect("Results proxy image"),
+        std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_TRANSIT_NETWORK_ID")
+            .expect("set the exact Results transit network ID"),
+        std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_CONTAINER_ID")
+            .expect("set the exact Results service container ID"),
+        std::env::var("AUTOMATA_LOCAL_DOCKER_RESULTS_ADDRESS")
+            .expect("set the exact private Results address")
+            .parse()
+            .expect("private Results IPv4 address"),
+    )
+    .expect("Results transport");
     assert!(
         std::path::Path::new(super::engine::LOCAL_DOCKER_RELAY_SOCKET).exists(),
         "install the explicit fixed Engine relay fixture"
@@ -2424,9 +4111,16 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
         EngineArchitecture::Amd64 => automata_ci_core::Architecture::X86_64,
         EngineArchitecture::Arm64 => automata_ci_core::Architecture::Aarch64,
     };
-    let provider = LocalDockerProvider::connect(installation, guest_image, &runner_architecture)
-        .await
-        .expect("local Docker provider");
+    let runner_id = RunnerId::new();
+    let provider = LocalDockerProvider::connect(
+        installation,
+        guest_image,
+        results_transport,
+        runner_id,
+        &runner_architecture,
+    )
+    .await
+    .expect("local Docker provider");
     let profile = EnvironmentProfile::new(
         EnvironmentProfileId::new("automata.local/live-linux").expect("profile id"),
         Sha256Digest::from_str(PROFILE_DIGEST).expect("profile digest"),
@@ -2448,12 +4142,12 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
         OperationId::new(),
         generation,
         SandboxCustody::Job {
-            runner_id: RunnerId::new(),
+            runner_id,
             slot_ordinal: NonZeroU16::new(1).expect("slot"),
         },
         environment,
         TargetPath::posix("/workspace/repository").expect("workspace"),
-        NetworkPolicy::Disabled,
+        NetworkPolicy::PrivateEgress,
         RootFilesystemPolicy::Writable,
         ResourceLimits::new(512 * 1024 * 1024, 1_000, 128).expect("resources"),
     )
@@ -2595,6 +4289,39 @@ async fn fixed_relay_live_shell_and_javascript_conformance() {
                 ExecutionTermination::Exited(0),
                 "capless root must not receive a broker response"
             );
+
+            let network_gate = ExecutionCommand::new(
+            OperationId::new(),
+            ExecutionArgv::new(
+                TargetPath::posix("/usr/bin/node")?,
+                vec![
+                    "-e".to_owned(),
+                    concat!(
+                        "const dns=require('dns');const net=require('net');",
+                        "const fail=(m)=>{console.error(m);process.exit(1)};",
+                        "const timeout=(p)=>Promise.race([p,new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),2000))]);",
+                        "const connect=(host,port,request)=>timeout(new Promise((resolve,reject)=>{",
+                        "const s=net.createConnection({host,port});let n=0;",
+                        "s.on('connect',()=>{if(request)s.write('GET / HTTP/1.0\\r\\nHost: results.automata.invalid\\r\\n\\r\\n')});",
+                        "s.on('data',b=>{n+=b.length;s.destroy()});s.on('close',()=>n?resolve():reject(new Error('empty')));",
+                        "s.on('error',reject)}));",
+                        "(async()=>{await connect('results.automata.invalid',8081,true);",
+                        "let externalDns=false;try{await timeout(dns.promises.resolve4('example.com'));externalDns=true}catch{}",
+                        "if(externalDns)fail('external DNS escaped');",
+                        "let internet=false;try{await connect('1.1.1.1',80,false);internet=true}catch{}",
+                        "if(internet)fail('public egress escaped');process.stdout.write('closed-results-live')})().catch(e=>fail(e.message));"
+                    )
+                    .to_owned(),
+                ],
+            )?,
+            spec.workspace().clone(),
+            ExecutionEnvironment::empty(),
+            Duration::from_secs(10),
+            64 * 1024,
+        )?;
+            let output = endpoint.exec(&network_gate, &NeverCancelled)?;
+            assert_eq!(output.termination(), ExecutionTermination::Exited(0));
+            assert_eq!(output.stdout(), b"closed-results-live");
 
             let forbidden_bootstrap = ExecutionCommand::new(
                 OperationId::new(),
