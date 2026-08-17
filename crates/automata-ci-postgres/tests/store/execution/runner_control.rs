@@ -37,8 +37,8 @@ use automata_ci_control::{
     },
 };
 use automata_ci_core::{
-    AttemptId, AttemptNumber, FencingToken, JobConclusion, JobLifecycle, Lease, LeaseGuard,
-    LeaseId, LogSequence, LogStreamId, OperationId, Sha256Digest, UnixMillis,
+    AttemptId, AttemptNumber, FencingToken, JobConclusion, JobLifecycle, LOG_SCHEMA_VERSION, Lease,
+    LeaseGuard, LeaseId, LogSequence, LogStreamId, OperationId, Sha256Digest, UnixMillis,
 };
 use automata_ci_protocol::{
     CommandSequence as ProtocolCommandSequence, INITIAL_RUNTIME_AUTHORITY_GENERATION,
@@ -2308,7 +2308,7 @@ async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipt
                 lease.attempt_id(),
                 lease.guard(),
                 stream_id,
-                DocumentSchema::new(1)?,
+                DocumentSchema::new(LOG_SCHEMA_VERSION)?,
                 LogSequence::new(0),
                 LogSequence::new(0),
                 database_now(&database).await?,
@@ -2442,7 +2442,7 @@ async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipt
                 lease.attempt_id(),
                 lease.guard(),
                 stream_id,
-                DocumentSchema::new(1)?,
+                DocumentSchema::new(LOG_SCHEMA_VERSION)?,
                 LogSequence::new(1),
                 LogSequence::new(1),
                 database_now(&database).await?,
@@ -2486,7 +2486,7 @@ async fn log_and_terminal_ingress_commit_contiguously_and_roll_back_with_receipt
                 lease.attempt_id(),
                 lease.guard(),
                 stream_id,
-                DocumentSchema::new(1)?,
+                DocumentSchema::new(LOG_SCHEMA_VERSION)?,
                 LogSequence::new(1),
                 LogSequence::new(1),
                 database_now(&database).await?,
