@@ -190,8 +190,8 @@ const FROZEN_MIGRATIONS: &[(&str, &str)] = &[
         "be9b180b7b989138962eb7e9f945611ecc2a6da1d7c89a2addf79c3651075f0e73f2e63c4492395788ce1a699df9b4ad",
     ),
     (
-        "0046_workflow_runtime_runner_feature_policy.sql",
-        "acf53752f455bf3da8efc646935f33602e97cde1232c4d0bd1a5f28506b272cf5770ad8182dd5195fe07855b94533ebb",
+        "0047_workflow_runtime_runner_feature_policy.sql",
+        "20d15f4f2c8280a1dd5c87be8fd4d0fedd50a9c77f97eee1ef7f3bec845996aede57145e2ef294bff0b35c449f103b38",
     ),
 ];
 
@@ -512,7 +512,7 @@ fn github_actions_cache_garbage_is_exact_bounded_and_durable() {
 
 #[test]
 fn workflow_runtime_runner_feature_policy_is_relationally_exact() {
-    let source = include_str!("../migrations/0046_workflow_runtime_runner_feature_policy.sql");
+    let source = include_str!("../migrations/0047_workflow_runtime_runner_feature_policy.sql");
 
     for required in [
         "ADD COLUMN runner_feature_schema smallint",
