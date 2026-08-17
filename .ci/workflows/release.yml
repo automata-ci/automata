@@ -200,11 +200,11 @@ jobs:
       service_proxy_image_digest: ${{ steps.selected-service-proxy-candidate.outputs.image_digest }}
       service_proxy_provenance_sha256: ${{ steps.selected-service-proxy-candidate.outputs.provenance_sha256 }}
     permissions:
-      artifact-metadata: write
-      attestations: write
-      contents: write
-      id-token: write
-      packages: write
+      artifact-metadata: write # Bind release handoff artifacts to service digests.
+      attestations: write # Publish provenance for release artifacts and images.
+      contents: write # Create the draft release and upload its immutable assets.
+      id-token: write # Mint the OIDC identity used to sign attestations.
+      packages: write # Push digest-addressed release images to GHCR.
     env:
       ATTESTATION_HOME: ${{ github.workspace }}/target/task-tmp/release/attestation-home
       CARGO_INCREMENTAL: "0"
@@ -590,16 +590,18 @@ jobs:
           RELEASE_TAG: ${{ needs.gate.outputs.tag }}
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+          CATALOG_PRESENT: ${{ steps.draft.outputs.catalog_present }}
+          MANIFEST_PRESENT: ${{ steps.draft.outputs.manifest_present }}
         run: |
           recovery_directory="$(mktemp -d "${TMPDIR%/}/release-binding.XXXXXXXX")"
           trap 'env -u GH_TOKEN -u GITHUB_TOKEN rm -rf -- "$recovery_directory"' EXIT
           patterns=(
             --pattern automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar
           )
-          if [[ "${{ steps.draft.outputs.catalog_present }}" == true ]]; then
+          if [[ "${CATALOG_PRESENT}" == true ]]; then
             patterns+=(--pattern automata-local-installation-catalog.json)
           fi
-          if [[ "${{ steps.draft.outputs.manifest_present }}" == true ]]; then
+          if [[ "${MANIFEST_PRESENT}" == true ]]; then
             patterns+=(--pattern automata-release-manifest.json)
           fi
           gh release download "$RELEASE_TAG" \
@@ -608,7 +610,7 @@ jobs:
           cmp -- \
             target/service-proxy-publication/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar \
             "$recovery_directory/automata-service-proxy-candidate-x86_64-unknown-linux-musl.tar"
-          if [[ "${{ steps.draft.outputs.catalog_present }}" == true ]]; then
+          if [[ "${CATALOG_PRESENT}" == true ]]; then
             gh attestation verify \
               "$recovery_directory/automata-local-installation-catalog.json" \
               --repo "$GITHUB_REPOSITORY" \
@@ -632,7 +634,7 @@ jobs:
                 --created "$RELEASE_CREATED" \
                 --github-output "$GITHUB_OUTPUT"
           fi
-          if [[ "${{ steps.draft.outputs.manifest_present }}" == true ]]; then
+          if [[ "${MANIFEST_PRESENT}" == true ]]; then
             install -m 0444 -- \
               "$recovery_directory/automata-release-manifest.json" \
               target/distribution/automata-release-manifest.json
@@ -1330,6 +1332,9 @@ jobs:
           RELEASE_TAG: ${{ needs.gate.outputs.tag }}
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+          EXPECTED_AUTOMATA_DIGEST: ${{ needs.stage_release.outputs.automata_digest }}
+          EXPECTED_RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          EXPECTED_SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           artifact_digest="${ARTIFACT_DIGEST#sha256:}"
           [[ "$artifact_digest" == "$HANDOFF_SHA256" ]] || {
@@ -1354,9 +1359,9 @@ jobs:
           python3 scripts/ci/release-handoff.py verify-handoff \
             --handoff "$handoff" \
             --handoff-sha256 "$HANDOFF_SHA256" \
-            --automata-digest "${{ needs.stage_release.outputs.automata_digest }}" \
-            --runner-digest "${{ needs.stage_release.outputs.runner_digest }}" \
-            --sandbox-guest-digest "${{ needs.stage_release.outputs.sandbox_guest_digest }}" \
+            --automata-digest "${EXPECTED_AUTOMATA_DIGEST}" \
+            --runner-digest "${EXPECTED_RUNNER_DIGEST}" \
+            --sandbox-guest-digest "${EXPECTED_SANDBOX_GUEST_DIGEST}" \
             --extract-root . \
             --tag "$RELEASE_TAG" \
             --tag-object "$RELEASE_TAG_OBJECT" \
@@ -1626,7 +1631,7 @@ jobs:
     environment: crates-io
     permissions:
       contents: read
-      id-token: write
+      id-token: write # Exchange OIDC identity for a short-lived crates.io token.
     steps:
       - name: Download same-run raw handoff by artifact ID
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1970,8 +1975,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
-      contents: write
-      packages: write
+      contents: write # Publish the verified draft release and its final notes.
+      packages: write # Bind stable GHCR tags to verified release digests.
     env:
       DOCKER_CONFIG: ${{ github.workspace }}/target/task-tmp/release-finalize/docker-config
       TMPDIR: ${{ github.workspace }}/target/task-tmp/release-finalize
@@ -2004,6 +2009,9 @@ jobs:
           RELEASE_TAG: ${{ needs.gate.outputs.tag }}
           RELEASE_TAG_OBJECT: ${{ needs.gate.outputs.tag_object }}
           RELEASE_VERSION: ${{ needs.gate.outputs.version }}
+          EXPECTED_AUTOMATA_DIGEST: ${{ needs.stage_release.outputs.automata_digest }}
+          EXPECTED_RUNNER_DIGEST: ${{ needs.stage_release.outputs.runner_digest }}
+          EXPECTED_SANDBOX_GUEST_DIGEST: ${{ needs.stage_release.outputs.sandbox_guest_digest }}
         run: |
           install -d -m 0700 -- "$TMPDIR" "$DOCKER_CONFIG"
           artifact_digest="${ARTIFACT_DIGEST#sha256:}"
@@ -2029,9 +2037,9 @@ jobs:
           python3 scripts/ci/release-handoff.py verify-handoff \
             --handoff "$handoff" \
             --handoff-sha256 "$HANDOFF_SHA256" \
-            --automata-digest "${{ needs.stage_release.outputs.automata_digest }}" \
-            --runner-digest "${{ needs.stage_release.outputs.runner_digest }}" \
-            --sandbox-guest-digest "${{ needs.stage_release.outputs.sandbox_guest_digest }}" \
+            --automata-digest "${EXPECTED_AUTOMATA_DIGEST}" \
+            --runner-digest "${EXPECTED_RUNNER_DIGEST}" \
+            --sandbox-guest-digest "${EXPECTED_SANDBOX_GUEST_DIGEST}" \
             --extract-root . \
             --tag "$RELEASE_TAG" \
             --tag-object "$RELEASE_TAG_OBJECT" \

@@ -50,11 +50,15 @@ jobs:
       - name: Install sccache
         run: ./scripts/ci/install-sccache.sh
 
-      - name: Run Rust checks
+      - name: Run Rust and CI checks
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cargo fmt --all -- --check
           ./scripts/ci/install-actionlint.sh target/ci-tools
+          ./scripts/ci/install-zizmor.sh target/ci-tools
           ./scripts/ci/lint-workflows.sh
+          ./scripts/ci/lint-ci-security.sh
           cargo clippy --workspace --lib --bins --all-features --locked -- -D warnings
           cargo test \
             --locked \
