@@ -11,6 +11,11 @@ use std::{
 #[cfg(unix)]
 use std::{fs::File, io::Read as _, path::Component};
 
+#[cfg(windows)]
+use automata_ci_windows_file_security::{
+    AttestedFileError, ReadAccess, ReadOptions, read_attested_file,
+};
+
 use http::{Uri, uri::Authority};
 use thiserror::Error;
 use url::Url;
@@ -32,7 +37,9 @@ use automata_ci_store_postgres::{MAX_POSTGRES_PRIVATE_CA_PEM_BYTES, PostgresTran
 
 use crate::cli::{DatabaseTransport, S3ConnectionArgs, S3TlsTrustMode, ServerArgs};
 
-use super::github_oidc::GithubOidcConfig;
+use super::{
+    github_oidc::GithubOidcConfig, windows_runner_admission::WindowsRunnerAdmissionPolicy,
+};
 
 const MAX_SOURCE_REFERENCE_BYTES: usize = 4_096;
 const MAX_ENVIRONMENT_NAME_BYTES: usize = 255;
@@ -324,6 +331,7 @@ pub struct ServerConfig {
     pub(crate) results_signing_key: SecretSource,
     pub(crate) results_key_id: String,
     pub(crate) github_oidc: Option<GithubOidcConfig>,
+    pub(crate) windows_runner_admission: Option<WindowsRunnerAdmissionPolicy>,
     pub(crate) database_url: SecretSource,
     pub(crate) database_max_connections: u32,
     pub(crate) database_transport: DatabaseTransportConfig,
@@ -788,10 +796,14 @@ impl ServerConfig {
             .map(|source| GithubOidcConfig::load(source, &results_public_endpoint))
             .transpose()
             .map_err(|_| ServerConfigError::InvalidGithubOidcConfiguration)?;
+        let windows_runner_admission = windows_runner_admission_configuration(args)?;
         let human_auth = human_auth_configuration(args)?;
         let conformance_export_token = conformance_export_configuration(args, human_auth.as_ref())?;
         let secret_encryption = secret_encryption_configuration(args)?;
         let runner_public_authority = runner_public_authority_configuration(args)?;
+        if windows_runner_admission.is_some() && human_auth.is_none() {
+            return Err(ServerConfigError::MissingWindowsRunnerAdmissionOrigin);
+        }
         if (secret_encryption.is_some() || human_auth.is_some())
             && runner_public_authority.is_none()
         {
@@ -813,6 +825,7 @@ impl ServerConfig {
             results_signing_key: args.results_signing_key_source.clone(),
             results_key_id,
             github_oidc,
+            windows_runner_admission,
             database_url: args.database_url_source.clone(),
             database_max_connections: args.database_max_connections,
             database_transport,
@@ -878,6 +891,11 @@ impl ServerConfig {
     /// Returns the complete OIDC configuration only when its strict manifest is enabled.
     pub const fn github_oidc(&self) -> Option<&GithubOidcConfig> {
         self.github_oidc.as_ref()
+    }
+
+    /// Returns the independently configured Windows admission trust registry.
+    pub const fn windows_runner_admission(&self) -> Option<&WindowsRunnerAdmissionPolicy> {
+        self.windows_runner_admission.as_ref()
     }
 
     pub(crate) fn load_database_url(&self) -> Result<Zeroizing<String>, SecretLoadError> {
@@ -1354,6 +1372,7 @@ fn validate_server_secret_sources(args: &ServerArgs) -> Result<(), ServerConfigE
     let optional = [
         args.github_oidc_config_source.as_ref(),
         args.database_private_ca_source.as_ref(),
+        args.windows_runner_admission_config_source.as_ref(),
         args.conformance_export_token_source.as_ref(),
         args.management_client_ca_certificate_source.as_ref(),
         args.management_server_certificate_source.as_ref(),
@@ -1424,6 +1443,16 @@ fn validate_external_url(args: &ServerArgs, external_url: &Url) -> Result<(), Se
         }
         _ => Err(ServerConfigError::InvalidExternalUrl),
     }
+}
+
+fn windows_runner_admission_configuration(
+    args: &ServerArgs,
+) -> Result<Option<WindowsRunnerAdmissionPolicy>, ServerConfigError> {
+    args.windows_runner_admission_config_source
+        .as_ref()
+        .map(WindowsRunnerAdmissionPolicy::load)
+        .transpose()
+        .map_err(|_| ServerConfigError::InvalidWindowsRunnerAdmissionConfiguration)
 }
 
 fn results_configuration(
@@ -1575,6 +1604,12 @@ pub enum ServerConfigError {
     /// The optional OIDC manifest is incomplete, malformed, excessive, or requires plaintext.
     #[error("GitHub-compatible OIDC configuration is invalid")]
     InvalidGithubOidcConfiguration,
+    /// The optional Windows runner admission trust registry is malformed or incoherent.
+    #[error("Windows runner admission trust configuration is invalid")]
+    InvalidWindowsRunnerAdmissionConfiguration,
+    /// Windows admission is enabled without one canonical public enrollment origin.
+    #[error("Windows runner admission requires a public enrollment origin")]
+    MissingWindowsRunnerAdmissionOrigin,
     /// The opt-in mTLS management listener is partial, malformed, or unbounded.
     #[error("management listener configuration is invalid")]
     InvalidManagementConfiguration,
@@ -1679,7 +1714,25 @@ fn read_bounded_file(
     Ok(bytes)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn read_bounded_file(
+    path: &Path,
+    maximum_bytes: usize,
+) -> Result<Zeroizing<Vec<u8>>, SecretLoadError> {
+    let options = ReadOptions::new(maximum_bytes, true, ReadAccess::Private);
+    read_attested_file(path, &options).map_err(|error| match error {
+        AttestedFileError::InvalidLimit => SecretLoadError::InvalidLimit,
+        AttestedFileError::InvalidSize => SecretLoadError::TooLarge {
+            maximum: maximum_bytes,
+        },
+        AttestedFileError::InvalidPath
+        | AttestedFileError::PathSecurity
+        | AttestedFileError::AccessSecurity
+        | AttestedFileError::Unstable => SecretLoadError::FileSecurity,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
 fn read_bounded_file(
     _path: &Path,
     _maximum_bytes: usize,

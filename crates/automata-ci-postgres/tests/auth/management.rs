@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -34,16 +34,30 @@ use automata_ci_auth_postgres::{
         MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS, MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS,
         PrepareRunnerEnrollment, RenewRunnerCertificate, RunnerCertificateRenewalOutcome,
         RunnerCertificateRenewalSigningError, RunnerEnrollmentConsumeOutcome,
-        RunnerEnrollmentPrepareOutcome,
+        RunnerEnrollmentPrepareOutcome, WindowsRunnerAdmissionRecord,
     },
 };
 use automata_ci_control::runner_auth::RunnerMachineDirectory as _;
 use automata_ci_core::{
-    Architecture, MAX_REGISTERED_RUNNERS, OperatingSystem, RunnerCapabilities, RunnerGroup,
-    RunnerId, RunnerLabel, RunnerPlatform, Sha256Digest,
+    Architecture, EnvironmentProfile, EnvironmentProfileId, IsolationLevel, MAX_REGISTERED_RUNNERS,
+    OperatingSystem, OperationId, RunnerCapabilities, RunnerFeature, RunnerGroup, RunnerId,
+    RunnerLabel, RunnerPlatform, SandboxCapabilities, SandboxFeature, Sha256Digest,
 };
 use automata_ci_postgres::test_support::TestClock;
+use automata_ci_protocol::{
+    WINDOWS_RUNNER_ADMISSION_PROVIDER_ID, WindowsAdmissionImage, WindowsAdmissionValidity,
+    WindowsAuthorityAdmissionEvidence, WindowsBrokerAdmissionEvidence, WindowsBrokerProfileBinding,
+    WindowsEnrollmentTransactionBinding, WindowsImagePromotionBinding, WindowsPromotionValidity,
+    WindowsRunnerAdmissionBinding, WindowsRunnerAdmissionClaims, WindowsRunnerAdmissionEnvelope,
+    WindowsRunnerAdmissionEvidence, WindowsRunnerAdmissionTrustAnchor,
+    WindowsRunnerAdmissionTrustStore, verify_windows_runner_admission,
+};
 use automata_ci_runner_auth_postgres::PostgresRunnerMachineDirectory;
+use ring::{
+    rand::SystemRandom,
+    signature::{Ed25519KeyPair, KeyPair as _},
+};
+use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -3245,6 +3259,327 @@ async fn grant_role_rechecks_active_target_after_the_option_snapshot() -> TestRe
     .await
 }
 
+struct WindowsEnrollmentRequestFixture<'a> {
+    token_sha256: [u8; 32],
+    operation_id: Uuid,
+    request_sha256: [u8; 32],
+    runner_id: RunnerId,
+    runner_name: &'a str,
+    group: RunnerGroup,
+    issued_at_ms: i64,
+    receipt_expires_at_ms: i64,
+    nonce_byte: u8,
+}
+
+#[derive(Clone, Copy)]
+struct WindowsPromotionFixture {
+    payload_sha256: Sha256Digest,
+    envelope_sha256: Sha256Digest,
+    image_sha256: Sha256Digest,
+    promotion_serial: u64,
+    revocation_generation: u64,
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+struct WindowsEnrollmentEnvelopeFixture {
+    request: ConsumeRunnerEnrollment,
+    envelope_sha256: Sha256Digest,
+    signed_payload: Vec<u8>,
+    authenticator: Vec<u8>,
+}
+
+#[derive(Debug, Eq, PartialEq, sqlx::FromRow)]
+struct PersistedWindowsAdmission {
+    nonce_count: i64,
+    high_water_count: i64,
+    admission_count: i64,
+    capabilities_match: bool,
+    sandbox_provider_id: String,
+    network_disabled: bool,
+    envelope_sha256: Vec<u8>,
+    signed_payload: Vec<u8>,
+    authenticator: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, sqlx::FromRow)]
+struct WindowsPromotionHighWaterRow {
+    promotion_payload_sha256: Vec<u8>,
+    promotion_envelope_sha256: Vec<u8>,
+    image_reference: String,
+    image_sha256: Vec<u8>,
+    promotion_serial: i64,
+    revocation_generation: i64,
+    promotion_issued_at_ms: i64,
+    promotion_expires_at_ms: i64,
+}
+
+struct VerifiedWindowsAdmissionFixture {
+    record: WindowsRunnerAdmissionRecord,
+    envelope_sha256: Sha256Digest,
+    signed_payload: Vec<u8>,
+    authenticator: Vec<u8>,
+}
+
+impl WindowsPromotionFixture {
+    fn current(issued_at_ms: i64) -> TestResult<Self> {
+        let issued_at_ms = u64::try_from(issued_at_ms)?;
+        Ok(Self {
+            payload_sha256: Sha256Digest::from_bytes([0x49; 32]),
+            envelope_sha256: Sha256Digest::from_bytes([0x4a; 32]),
+            image_sha256: Sha256Digest::from_bytes([0x45; 32]),
+            promotion_serial: 41,
+            revocation_generation: 19,
+            issued_at_ms: issued_at_ms
+                .checked_sub(1_000)
+                .ok_or("promotion issue underflow")?,
+            expires_at_ms: issued_at_ms
+                .checked_add(3_600_000)
+                .ok_or("promotion expiry overflow")?,
+        })
+    }
+}
+
+const WINDOWS_ADMISSION_ISSUER: &str = "windows-admission-key-v1";
+
+struct WindowsAdmissionTrust(WindowsRunnerAdmissionTrustAnchor);
+
+impl WindowsRunnerAdmissionTrustStore for WindowsAdmissionTrust {
+    fn admission_trust_anchor(
+        &self,
+        issuer_key_id: &str,
+    ) -> Option<WindowsRunnerAdmissionTrustAnchor> {
+        (issuer_key_id == WINDOWS_ADMISSION_ISSUER).then(|| self.0.clone())
+    }
+}
+
+fn windows_admission_key_pair() -> Ed25519KeyPair {
+    static DOCUMENT: OnceLock<Vec<u8>> = OnceLock::new();
+    let document = DOCUMENT.get_or_init(|| {
+        Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+            .expect("generate Windows admission key")
+            .as_ref()
+            .to_vec()
+    });
+    Ed25519KeyPair::from_pkcs8(document).expect("parse Windows admission key")
+}
+
+fn windows_admission_capabilities(
+    runner_id: RunnerId,
+    group: RunnerGroup,
+    profile: EnvironmentProfile,
+) -> RunnerCapabilities {
+    RunnerCapabilities::new(
+        runner_id,
+        RunnerPlatform::new(OperatingSystem::Windows, Architecture::X86_64),
+    )
+    .with_groups([group])
+    .with_sandbox(SandboxCapabilities::new(
+        IsolationLevel::VirtualMachine,
+        [SandboxFeature::WINDOWS_HYPERV_CONTAINER],
+    ))
+    .with_features([
+        RunnerFeature::SHELL_STEPS,
+        RunnerFeature::DEFAULT_WINDOWS_SHELL,
+        RunnerFeature::COMMAND_FILES,
+    ])
+    .with_environment_profiles([profile])
+}
+
+fn windows_admission_evidence() -> TestResult<WindowsRunnerAdmissionEvidence> {
+    let broker = WindowsBrokerAdmissionEvidence::new(
+        Sha256Digest::from_bytes([0x50; 32]),
+        Sha256Digest::from_bytes([0x51; 32]),
+        Sha256Digest::from_bytes([0x52; 32]),
+        Sha256Digest::from_bytes([0x53; 32]),
+        Sha256Digest::from_bytes([0x54; 32]),
+    )?;
+    let authority = WindowsAuthorityAdmissionEvidence::new(
+        Sha256Digest::from_bytes([0x55; 32]),
+        Sha256Digest::from_bytes([0x56; 32]),
+        Sha256Digest::from_bytes([0x57; 32]),
+        Sha256Digest::from_bytes([0x58; 32]),
+    )?;
+    Ok(WindowsRunnerAdmissionEvidence::new(broker, authority))
+}
+
+fn verified_windows_admission_fixture(
+    claims: &WindowsRunnerAdmissionClaims,
+    profile: EnvironmentProfile,
+    issued_at_ms: u64,
+) -> TestResult<VerifiedWindowsAdmissionFixture> {
+    let key_pair = windows_admission_key_pair();
+    let signed_payload = claims.canonical_bytes()?;
+    let envelope = WindowsRunnerAdmissionEnvelope::new(
+        WINDOWS_ADMISSION_ISSUER,
+        signed_payload.clone(),
+        key_pair.sign(&signed_payload).as_ref().to_vec(),
+    )?;
+    let public_key = key_pair
+        .public_key()
+        .as_ref()
+        .try_into()
+        .map_err(|_| "Windows admission public key length")?;
+    let trust = WindowsAdmissionTrust(WindowsRunnerAdmissionTrustAnchor::new(
+        public_key,
+        "a".repeat(64),
+        profile,
+        "production.windows.v1",
+    )?);
+    let verified = verify_windows_runner_admission(&envelope, &trust, issued_at_ms)?;
+    Ok(VerifiedWindowsAdmissionFixture {
+        envelope_sha256: verified.envelope_sha256(),
+        signed_payload: verified.envelope().signed_payload().to_vec(),
+        authenticator: verified.envelope().authenticator().to_vec(),
+        record: WindowsRunnerAdmissionRecord::from_verified(verified),
+    })
+}
+
+fn windows_enrollment_request(
+    fixture: WindowsEnrollmentRequestFixture<'_>,
+) -> TestResult<ConsumeRunnerEnrollment> {
+    let promotion = WindowsPromotionFixture::current(fixture.issued_at_ms)?;
+    windows_enrollment_request_with_promotion(fixture, promotion)
+}
+
+fn windows_enrollment_request_with_promotion(
+    fixture: WindowsEnrollmentRequestFixture<'_>,
+    promotion_fixture: WindowsPromotionFixture,
+) -> TestResult<ConsumeRunnerEnrollment> {
+    Ok(windows_enrollment_request_with_promotion_envelope(fixture, promotion_fixture)?.request)
+}
+
+fn windows_enrollment_request_with_promotion_envelope(
+    fixture: WindowsEnrollmentRequestFixture<'_>,
+    promotion_fixture: WindowsPromotionFixture,
+) -> TestResult<WindowsEnrollmentEnvelopeFixture> {
+    let WindowsEnrollmentRequestFixture {
+        token_sha256,
+        operation_id,
+        request_sha256,
+        runner_id,
+        runner_name,
+        group,
+        issued_at_ms,
+        receipt_expires_at_ms,
+        nonce_byte,
+    } = fixture;
+    let profile = EnvironmentProfile::new(
+        EnvironmentProfileId::new("automata.example/windows-server-2025")?,
+        Sha256Digest::from_bytes([0x44; 32]),
+    );
+    let capabilities = windows_admission_capabilities(runner_id, group, profile.clone());
+    let runner_name_sha256 =
+        Sha256Digest::from_bytes(Sha256::digest(runner_name.as_bytes()).into());
+    let issued_at = u64::try_from(issued_at_ms)?;
+    let receipt_expires_at = u64::try_from(receipt_expires_at_ms)?;
+    let transaction = WindowsEnrollmentTransactionBinding::new(
+        runner_id,
+        OperationId::from_uuid(operation_id),
+        "https://control.example.test/",
+        "https://enroll.example.test/",
+        runner_name_sha256,
+        Sha256Digest::from_bytes(token_sha256),
+        Sha256Digest::from_bytes([0x46; 32]),
+    )?;
+    let image = WindowsAdmissionImage::new(
+        format!(
+            "registry.example.test/automata/windows@sha256:{}",
+            promotion_fixture.image_sha256
+        ),
+        promotion_fixture.image_sha256,
+    )?;
+    let broker_profile = WindowsBrokerProfileBinding::new(
+        "a".repeat(64),
+        WINDOWS_RUNNER_ADMISSION_PROVIDER_ID,
+        Sha256Digest::from_bytes([0x47; 32]),
+        profile.clone(),
+        image,
+        Sha256Digest::from_bytes([0x48; 32]),
+        true,
+        false,
+    )?;
+    let promotion = WindowsImagePromotionBinding::new(
+        "production.windows.v1",
+        "promotion-key-v1",
+        promotion_fixture.payload_sha256,
+        promotion_fixture.envelope_sha256,
+        promotion_fixture.promotion_serial,
+        promotion_fixture.revocation_generation,
+        WindowsPromotionValidity::new(
+            promotion_fixture.issued_at_ms,
+            promotion_fixture.expires_at_ms,
+        )?,
+    )?;
+    let binding = WindowsRunnerAdmissionBinding::new(
+        transaction,
+        broker_profile,
+        promotion,
+        capabilities.clone(),
+    )?;
+    let claims = WindowsRunnerAdmissionClaims::new(
+        WINDOWS_ADMISSION_ISSUER,
+        Sha256Digest::from_bytes([nonce_byte; 32]),
+        Sha256Digest::from_bytes([0x4b; 32]),
+        Sha256Digest::from_bytes([0x4c; 32]),
+        binding,
+        windows_admission_evidence()?,
+        WindowsAdmissionValidity::new(issued_at, receipt_expires_at)?,
+    )?;
+    let verified = verified_windows_admission_fixture(&claims, profile, issued_at)?;
+    let certificate_issued_at_seconds = issued_at_ms.div_euclid(1_000);
+    Ok(WindowsEnrollmentEnvelopeFixture {
+        request: ConsumeRunnerEnrollment {
+            token_sha256,
+            operation_id,
+            request_sha256,
+            runner_id: runner_id.as_uuid(),
+            runner_name: runner_name.to_owned(),
+            capabilities,
+            certificate_leaf_sha256: [nonce_byte.wrapping_add(3); 32],
+            certificate_issued_at_seconds,
+            certificate_expires_at_seconds: certificate_issued_at_seconds
+                + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
+            response: format!(r#"{{"runner":"{runner_name}"}}"#).into_bytes(),
+            windows_admission: Some(verified.record),
+        },
+        envelope_sha256: verified.envelope_sha256,
+        signed_payload: verified.signed_payload,
+        authenticator: verified.authenticator,
+    })
+}
+
+async fn issue_windows_enrollment_token(
+    repository: &PostgresRunnerEnrollmentRepository,
+    manager: Uuid,
+    session_id: Uuid,
+    authority_revision: i64,
+    request_id: &str,
+    token_sha256: [u8; 32],
+    group: &RunnerGroup,
+) -> TestResult<Uuid> {
+    let enrollment_id = Uuid::new_v4();
+    let outcome = repository
+        .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+            actor: actor(
+                "windows-runner-enrollment",
+                manager,
+                session_id,
+                authority_revision,
+                request_id,
+            ),
+            enrollment_id,
+            token_sha256,
+            runner_group: group.as_str().to_owned(),
+            lifetime_ms: 120_000,
+        })
+        .await?;
+    if !matches!(outcome, ManagementMutationOutcome::Applied(_)) {
+        return Err(format!("Windows enrollment token was not issued: {outcome:?}").into());
+    }
+    Ok(enrollment_id)
+}
+
 #[tokio::test]
 #[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
 #[allow(
@@ -3450,6 +3785,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                 certificate_expires_at_seconds: certificate_issued_at_seconds
                     + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
                 response: response.to_vec(),
+                windows_admission: None,
             }
         };
         let extra_group_runner = RunnerId::new();
@@ -3474,6 +3810,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                     certificate_expires_at_seconds: certificate_issued_at_seconds
                         + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
                     response: br#"{"runner":"extra-group"}"#.to_vec(),
+                    windows_admission: None,
                 })
                 .await?,
             RunnerEnrollmentConsumeOutcome::Rejected
@@ -3617,6 +3954,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                         + MIN_RUNNER_CERTIFICATE_REMAINING_LIFETIME_SECONDS
                         - 1,
                     response: br#"{"runner":"short-lived"}"#.to_vec(),
+                    windows_admission: None,
                 })
                 .await,
             Err(ManagementRepositoryError::InvalidRequest)
@@ -3713,6 +4051,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                 certificate_expires_at_seconds: certificate_issued_at_seconds
                     + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
                 response: format!(r#"{{"runner":"capacity-racer-{index}"}}"#).into_bytes(),
+                windows_admission: None,
             }
         };
         let (left, right) = tokio::join!(
@@ -3826,6 +4165,7 @@ async fn runner_enrollment_is_authorized_scoped_atomic_and_one_use() -> TestResu
                     certificate_expires_at_seconds: certificate_issued_at_seconds
                         + MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS,
                     response: br#"{"runner":"expired"}"#.to_vec(),
+                    windows_admission: None,
                 })
                 .await
         });
@@ -4183,6 +4523,612 @@ async fn runner_certificate_renewal_is_exact_serialized_and_bounded() -> TestRes
         .fetch_one(pool)
         .await?;
         assert_eq!(racing_counts, (2, 1, 1));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires AUTOMATA_TEST_DATABASE_URL and creates a temporary schema"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the Windows enrollment regression keeps atomic admission, rollback, replay, and lock timing visible"
+)]
+async fn windows_runner_enrollment_is_signed_one_use_monotonic_and_fresh_after_locks() -> TestResult
+{
+    run_with_database(|database| async move {
+        let pool = database.pool();
+        let clock = TestClock::freeze_at_database_now(pool).await?;
+        let now_ms = clock.now().await?;
+        seed_tenant(pool, "windows-runner-enrollment").await?;
+        let manager = Uuid::new_v4();
+        seed_member(
+            pool,
+            "windows-runner-enrollment",
+            manager,
+            "windows-runner-manager",
+            "windows-runner-manager",
+        )
+        .await?;
+        let role_id = Uuid::new_v4();
+        seed_role(
+            pool,
+            "windows-runner-enrollment",
+            role_id,
+            "windows-runner-enroller",
+            false,
+            &["runners:enroll"],
+        )
+        .await?;
+        seed_binding(
+            pool,
+            "windows-runner-enrollment",
+            Uuid::new_v4(),
+            manager,
+            role_id,
+        )
+        .await?;
+        let session_id = Uuid::new_v4();
+        let authority_revision = seed_session(
+            pool,
+            "windows-runner-enrollment",
+            manager,
+            session_id,
+        )
+        .await?;
+        let repository = PostgresRunnerEnrollmentRepository::new(pool.clone());
+        let group = RunnerGroup::new("trusted-windows")?;
+
+        let token_sha256 = [0xa1; 32];
+        let enrollment_id = Uuid::new_v4();
+        let ManagementMutationOutcome::Applied(_) = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "windows-runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "issue-windows-runner-token",
+                ),
+                enrollment_id,
+                token_sha256,
+                runner_group: group.as_str().to_owned(),
+                lifetime_ms: 120_000,
+            })
+            .await?
+        else {
+            return Err("Windows enrollment token was not issued".into());
+        };
+        let operation_id = Uuid::new_v4();
+        let request_sha256 = [0xa2; 32];
+        let runner_id = RunnerId::new();
+        let runner_name = "windows-hyperv-runner";
+        let receipt_expires_at_ms = now_ms + 60_000;
+        let mut missing_admission = windows_enrollment_request(WindowsEnrollmentRequestFixture {
+            token_sha256,
+            operation_id,
+            request_sha256,
+            runner_id,
+            runner_name,
+            group: group.clone(),
+            issued_at_ms: now_ms,
+            receipt_expires_at_ms,
+            nonce_byte: 0xa3,
+        })?;
+        missing_admission.windows_admission = None;
+        assert!(matches!(
+            repository.consume_runner_enrollment(missing_admission).await,
+            Err(ManagementRepositoryError::InvalidRequest)
+        ));
+        let mut mismatched_admission =
+            windows_enrollment_request(WindowsEnrollmentRequestFixture {
+                token_sha256,
+                operation_id,
+                request_sha256,
+                runner_id,
+                runner_name,
+                group: group.clone(),
+                issued_at_ms: now_ms,
+                receipt_expires_at_ms,
+                nonce_byte: 0xa3,
+            })?;
+        mismatched_admission.runner_name.push_str("-substitution");
+        assert!(matches!(
+            repository
+                .consume_runner_enrollment(mismatched_admission)
+                .await,
+            Err(ManagementRepositoryError::InvalidRequest)
+        ));
+        let expected_promotion = WindowsPromotionFixture::current(now_ms)?;
+        let request = windows_enrollment_request_with_promotion_envelope(
+            WindowsEnrollmentRequestFixture {
+                token_sha256,
+                operation_id,
+                request_sha256,
+                runner_id,
+                runner_name,
+                group: group.clone(),
+                issued_at_ms: now_ms,
+                receipt_expires_at_ms,
+                nonce_byte: 0xa3,
+            },
+            expected_promotion,
+        )?;
+        let expected_response = request.request.response.clone();
+        let expected_envelope_sha256 = request.envelope_sha256;
+        let expected_signed_payload = request.signed_payload;
+        let expected_authenticator = request.authenticator;
+        let first_outcome = repository
+            .consume_runner_enrollment(request.request)
+            .await?;
+        if first_outcome != RunnerEnrollmentConsumeOutcome::Applied(expected_response.clone()) {
+            let state: (i64, i64, i64, i64, bool) = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM windows_runner_admission_nonces),(SELECT count(*) FROM windows_image_promotion_high_water),(SELECT count(*) FROM windows_runner_admissions),(SELECT count(*) FROM runners),consumed_at_ms IS NULL FROM runner_enrollment_tokens WHERE id=$1",
+            )
+            .bind(enrollment_id)
+            .fetch_one(pool)
+            .await?;
+            return Err(format!("Windows enrollment was {first_outcome:?}; state={state:?}").into());
+        }
+        let persisted: PersistedWindowsAdmission = sqlx::query_as(
+            r"
+            SELECT
+                (SELECT count(*) FROM windows_runner_admission_nonces) AS nonce_count,
+                (SELECT count(*) FROM windows_image_promotion_high_water) AS high_water_count,
+                (SELECT count(*) FROM windows_runner_admissions) AS admission_count,
+                admission.capabilities = runner.capabilities AS capabilities_match,
+                admission.sandbox_provider_id,
+                admission.network_disabled,
+                admission.envelope_sha256,
+                admission.signed_payload,
+                admission.authenticator
+            FROM windows_runner_admissions AS admission
+            JOIN runners AS runner ON runner.id=admission.runner_id
+            WHERE admission.runner_id=$1
+            ",
+        )
+        .bind(runner_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(persisted.nonce_count, 1);
+        assert_eq!(persisted.high_water_count, 1);
+        assert_eq!(persisted.admission_count, 1);
+        assert!(persisted.capabilities_match);
+        assert_eq!(persisted.sandbox_provider_id, "windows-hyperv");
+        assert!(persisted.network_disabled);
+        assert_eq!(
+            persisted.envelope_sha256,
+            expected_envelope_sha256.as_bytes().to_vec()
+        );
+        assert_eq!(persisted.signed_payload, expected_signed_payload);
+        assert_eq!(persisted.authenticator, expected_authenticator);
+        let admission_before_renewal: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(admission) FROM windows_runner_admissions AS admission WHERE runner_id=$1",
+        )
+        .bind(runner_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+
+        for statement in [
+            "UPDATE windows_image_promotion_high_water SET promotion_serial=promotion_serial-1",
+            "UPDATE windows_image_promotion_high_water SET promotion_payload_sha256=decode(repeat('ab',32),'hex')",
+            "DELETE FROM windows_image_promotion_high_water",
+            "TRUNCATE windows_image_promotion_high_water",
+            "UPDATE windows_runner_admissions SET admitted_at_ms=admitted_at_ms+1",
+            "DELETE FROM windows_runner_admissions",
+            "TRUNCATE windows_runner_admissions",
+            "TRUNCATE windows_runner_admission_nonces",
+        ] {
+            assert!(
+                sqlx::query(statement).execute(pool).await.is_err(),
+                "security state mutation unexpectedly succeeded: {statement}"
+            );
+        }
+
+        let expected_high_water: WindowsPromotionHighWaterRow =
+            sqlx::query_as(
+                r"
+                SELECT promotion_payload_sha256,promotion_envelope_sha256,
+                       image_reference,image_sha256,promotion_serial,
+                       revocation_generation,promotion_issued_at_ms,
+                       promotion_expires_at_ms
+                FROM windows_image_promotion_high_water
+                WHERE trust_bundle_id='production.windows.v1'
+                  AND promotion_key_id='promotion-key-v1'
+                ",
+            )
+            .fetch_one(pool)
+            .await?;
+        assert_eq!(
+            expected_high_water,
+            WindowsPromotionHighWaterRow {
+                promotion_payload_sha256: expected_promotion.payload_sha256.as_bytes().to_vec(),
+                promotion_envelope_sha256: expected_promotion
+                    .envelope_sha256
+                    .as_bytes()
+                    .to_vec(),
+                image_reference: format!(
+                    "registry.example.test/automata/windows@sha256:{}",
+                    expected_promotion.image_sha256
+                ),
+                image_sha256: expected_promotion.image_sha256.as_bytes().to_vec(),
+                promotion_serial: i64::try_from(expected_promotion.promotion_serial)?,
+                revocation_generation: i64::try_from(expected_promotion.revocation_generation)?,
+                promotion_issued_at_ms: i64::try_from(expected_promotion.issued_at_ms)?,
+                promotion_expires_at_ms: i64::try_from(expected_promotion.expires_at_ms)?,
+            }
+        );
+
+        let exact_token_sha256 = [0xb0; 32];
+        issue_windows_enrollment_token(
+            &repository,
+            manager,
+            session_id,
+            authority_revision,
+            "issue-exact-promotion-replay-token",
+            exact_token_sha256,
+            &group,
+        )
+        .await?;
+        assert!(matches!(
+            repository
+                .consume_runner_enrollment(windows_enrollment_request_with_promotion(
+                    WindowsEnrollmentRequestFixture {
+                        token_sha256: exact_token_sha256,
+                        operation_id: Uuid::new_v4(),
+                        request_sha256: [0xb1; 32],
+                        runner_id: RunnerId::new(),
+                        runner_name: "windows-exact-promotion-replay",
+                        group: group.clone(),
+                        issued_at_ms: now_ms,
+                        receipt_expires_at_ms,
+                        nonce_byte: 0xb2,
+                    },
+                    expected_promotion,
+                )?)
+                .await?,
+            RunnerEnrollmentConsumeOutcome::Applied(_)
+        ));
+
+        let mut payload_conflict = expected_promotion;
+        payload_conflict.payload_sha256 = Sha256Digest::from_bytes([0x61; 32]);
+        let mut envelope_conflict = expected_promotion;
+        envelope_conflict.envelope_sha256 = Sha256Digest::from_bytes([0x62; 32]);
+        let mut image_conflict = expected_promotion;
+        image_conflict.image_sha256 = Sha256Digest::from_bytes([0x63; 32]);
+        let mut validity_conflict = expected_promotion;
+        validity_conflict.issued_at_ms = validity_conflict
+            .issued_at_ms
+            .checked_sub(1)
+            .ok_or("promotion validity underflow")?;
+        for (index, (label, promotion)) in [
+            ("payload", payload_conflict),
+            ("envelope", envelope_conflict),
+            ("image", image_conflict),
+            ("validity", validity_conflict),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let index = u8::try_from(index)?;
+            let token_sha256 = [0xc0 + index; 32];
+            let enrollment_id = issue_windows_enrollment_token(
+                &repository,
+                manager,
+                session_id,
+                authority_revision,
+                &format!("issue-{label}-equivocation-token"),
+                token_sha256,
+                &group,
+            )
+            .await?;
+            let runner_id = RunnerId::new();
+            assert_eq!(
+                repository
+                    .consume_runner_enrollment(windows_enrollment_request_with_promotion(
+                        WindowsEnrollmentRequestFixture {
+                            token_sha256,
+                            operation_id: Uuid::new_v4(),
+                            request_sha256: [0xd0 + index; 32],
+                            runner_id,
+                            runner_name: &format!("windows-{label}-equivocation"),
+                            group: group.clone(),
+                            issued_at_ms: now_ms,
+                            receipt_expires_at_ms,
+                            nonce_byte: 0xe0 + index,
+                        },
+                        promotion,
+                    )?)
+                    .await?,
+                RunnerEnrollmentConsumeOutcome::Rejected,
+                "equal-coordinate {label} substitution must fail closed"
+            );
+            let rolled_back: (bool, i64, i64, i64) = sqlx::query_as(
+                r"
+                SELECT token.consumed_at_ms IS NULL,
+                       (SELECT count(*) FROM windows_runner_admission_nonces
+                        WHERE enrollment_id=token.id),
+                       (SELECT count(*) FROM runners WHERE id=$2),
+                       (SELECT count(*) FROM windows_runner_admissions WHERE runner_id=$2)
+                FROM runner_enrollment_tokens AS token
+                WHERE token.id=$1
+                ",
+            )
+            .bind(enrollment_id)
+            .bind(runner_id.as_uuid())
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(rolled_back, (true, 0, 0, 0));
+            let high_water: WindowsPromotionHighWaterRow =
+                sqlx::query_as(
+                    r"
+                    SELECT promotion_payload_sha256,promotion_envelope_sha256,
+                           image_reference,image_sha256,promotion_serial,
+                           revocation_generation,promotion_issued_at_ms,
+                           promotion_expires_at_ms
+                    FROM windows_image_promotion_high_water
+                    WHERE trust_bundle_id='production.windows.v1'
+                      AND promotion_key_id='promotion-key-v1'
+                    ",
+                )
+                .fetch_one(pool)
+                .await?;
+            assert_eq!(high_water, expected_high_water);
+        }
+
+        let reused_token_sha256 = [0xa4; 32];
+        let reused_enrollment_id = Uuid::new_v4();
+        let ManagementMutationOutcome::Applied(_) = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "windows-runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "issue-reused-windows-admission-token",
+                ),
+                enrollment_id: reused_enrollment_id,
+                token_sha256: reused_token_sha256,
+                runner_group: group.as_str().to_owned(),
+                lifetime_ms: 120_000,
+            })
+            .await?
+        else {
+            return Err("nonce-reuse token was not issued".into());
+        };
+        assert_eq!(
+            repository
+                .consume_runner_enrollment(windows_enrollment_request(
+                    WindowsEnrollmentRequestFixture {
+                        token_sha256: reused_token_sha256,
+                        operation_id: Uuid::new_v4(),
+                        request_sha256: [0xa5; 32],
+                        runner_id: RunnerId::new(),
+                        runner_name: "windows-nonce-reuse",
+                        group: group.clone(),
+                        issued_at_ms: now_ms,
+                        receipt_expires_at_ms,
+                        nonce_byte: 0xa3,
+                    },
+                )?)
+                .await?,
+            RunnerEnrollmentConsumeOutcome::Rejected
+        );
+        let reused_unconsumed: bool = sqlx::query_scalar(
+            "SELECT consumed_at_ms IS NULL FROM runner_enrollment_tokens WHERE id=$1",
+        )
+        .bind(reused_enrollment_id)
+        .fetch_one(pool)
+        .await?;
+        assert!(reused_unconsumed);
+
+        let expiring_token_sha256 = [0xa6; 32];
+        let expiring_enrollment_id = Uuid::new_v4();
+        let ManagementMutationOutcome::Applied(_) = repository
+            .create_runner_enrollment_token(CreateRunnerEnrollmentToken {
+                actor: actor(
+                    "windows-runner-enrollment",
+                    manager,
+                    session_id,
+                    authority_revision,
+                    "issue-expiring-windows-admission-token",
+                ),
+                enrollment_id: expiring_enrollment_id,
+                token_sha256: expiring_token_sha256,
+                runner_group: group.as_str().to_owned(),
+                lifetime_ms: 120_000,
+            })
+            .await?
+        else {
+            return Err("expiring admission token was not issued".into());
+        };
+        let expiring_at_ms = now_ms + 10_000;
+        let expiring_runner_id = RunnerId::new();
+        let expiring_request = windows_enrollment_request(WindowsEnrollmentRequestFixture {
+            token_sha256: expiring_token_sha256,
+            operation_id: Uuid::new_v4(),
+            request_sha256: [0xa7; 32],
+            runner_id: expiring_runner_id,
+            runner_name: "windows-expired-after-lock",
+            group: group.clone(),
+            issued_at_ms: now_ms,
+            receipt_expires_at_ms: expiring_at_ms,
+            nonce_byte: 0xa8,
+        })?;
+        let mut gate = pool.begin().await?;
+        sqlx::query(
+            "SELECT trust_bundle_id FROM windows_image_promotion_high_water FOR UPDATE",
+        )
+        .execute(&mut *gate)
+        .await?;
+        let repository_for_waiter = repository.clone();
+        let waiter = tokio::spawn(async move {
+            repository_for_waiter
+                .consume_runner_enrollment(expiring_request)
+                .await
+        });
+        if !wait_for_blocked_transaction(pool).await? {
+            gate.rollback().await?;
+            return Err(format!(
+                "Windows enrollment did not wait on promotion high-water: {:?}",
+                waiter.await?
+            )
+            .into());
+        }
+        clock.set(expiring_at_ms).await?;
+        gate.commit().await?;
+        assert_eq!(waiter.await??, RunnerEnrollmentConsumeOutcome::Rejected);
+        let expired_state: (i64, i64, bool) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM runners WHERE id=$2),(SELECT count(*) FROM windows_runner_admission_nonces WHERE enrollment_id=$1),consumed_at_ms IS NULL FROM runner_enrollment_tokens WHERE id=$1",
+        )
+        .bind(expiring_enrollment_id)
+        .bind(expiring_runner_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(expired_state, (0, 0, true));
+
+        let mut revocation_advance = expected_promotion;
+        revocation_advance.revocation_generation = revocation_advance
+            .revocation_generation
+            .checked_add(1)
+            .ok_or("revocation generation overflow")?;
+        revocation_advance.payload_sha256 = Sha256Digest::from_bytes([0xf3; 32]);
+        revocation_advance.envelope_sha256 = Sha256Digest::from_bytes([0xf4; 32]);
+        let revocation_token_sha256 = [0xf0; 32];
+        issue_windows_enrollment_token(
+            &repository,
+            manager,
+            session_id,
+            authority_revision,
+            "issue-revocation-generation-advance-token",
+            revocation_token_sha256,
+            &group,
+        )
+        .await?;
+        assert!(matches!(
+            repository
+                .consume_runner_enrollment(windows_enrollment_request_with_promotion(
+                    WindowsEnrollmentRequestFixture {
+                        token_sha256: revocation_token_sha256,
+                        operation_id: Uuid::new_v4(),
+                        request_sha256: [0xf1; 32],
+                        runner_id: RunnerId::new(),
+                        runner_name: "windows-revocation-generation-advance",
+                        group: group.clone(),
+                        issued_at_ms: now_ms,
+                        receipt_expires_at_ms,
+                        nonce_byte: 0xf2,
+                    },
+                    revocation_advance,
+                )?)
+                .await?,
+            RunnerEnrollmentConsumeOutcome::Applied(_)
+        ));
+        let advanced_head: (i64, Vec<u8>, Vec<u8>) = sqlx::query_as(
+            r"
+            SELECT revocation_generation,promotion_payload_sha256,
+                   promotion_envelope_sha256
+            FROM windows_image_promotion_high_water
+            WHERE trust_bundle_id='production.windows.v1'
+              AND promotion_key_id='promotion-key-v1'
+            ",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            advanced_head,
+            (
+                i64::try_from(revocation_advance.revocation_generation)?,
+                revocation_advance.payload_sha256.as_bytes().to_vec(),
+                revocation_advance.envelope_sha256.as_bytes().to_vec(),
+            )
+        );
+
+        clock.set(receipt_expires_at_ms).await?;
+        assert_eq!(
+            repository
+                .consume_runner_enrollment(windows_enrollment_request(
+                    WindowsEnrollmentRequestFixture {
+                        token_sha256,
+                        operation_id,
+                        request_sha256,
+                        runner_id,
+                        runner_name,
+                        group,
+                        issued_at_ms: now_ms,
+                        receipt_expires_at_ms,
+                        nonce_byte: 0xa3,
+                    },
+                )?)
+                .await?,
+            RunnerEnrollmentConsumeOutcome::Replayed(expected_response)
+        );
+
+        let certificate_issued_at_seconds = now_ms.div_euclid(1_000);
+        let presented_expires_at_seconds = certificate_issued_at_seconds
+            .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+            .ok_or("Windows certificate expiry overflow")?;
+        let renewal_now_seconds = presented_expires_at_seconds
+            .checked_sub(RUNNER_CERTIFICATE_RENEWAL_WINDOW_SECONDS)
+            .ok_or("Windows certificate renewal time underflow")?;
+        clock
+            .set(
+                renewal_now_seconds
+                    .checked_mul(1_000)
+                    .ok_or("Windows certificate renewal milliseconds overflow")?,
+            )
+            .await?;
+        let renewed_expires_at_seconds = renewal_now_seconds
+            .checked_add(MAX_RUNNER_CERTIFICATE_LIFETIME_SECONDS)
+            .ok_or("renewed Windows certificate expiry overflow")?;
+        let renewal_response = br#"{"runner":"windows-hyperv-runner","renewed":true}"#.to_vec();
+        let renewal = repository
+            .renew_runner_certificate(
+                RenewRunnerCertificate::new(
+                    authenticated_runner(
+                        runner_id,
+                        [0xa6; 32],
+                        renewal_now_seconds,
+                        presented_expires_at_seconds,
+                    )?,
+                    Uuid::new_v4(),
+                    [0xb1; 32],
+                )?,
+                |signed_runner_id, database_time_ms| {
+                    assert_eq!(signed_runner_id, runner_id.as_uuid());
+                    assert_eq!(database_time_ms.div_euclid(1_000), renewal_now_seconds);
+                    Ok(IssuedRunnerCertificateRenewal::new(
+                        [0xb2; 32],
+                        renewal_now_seconds,
+                        renewed_expires_at_seconds,
+                        renewal_response.clone(),
+                    ))
+                },
+            )
+            .await?;
+        assert_eq!(
+            renewal,
+            RunnerCertificateRenewalOutcome::Applied(renewal_response)
+        );
+        let (admission_after_renewal, certificate_count, renewal_receipt_count): (
+            serde_json::Value,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            r"
+            SELECT
+                to_jsonb(admission),
+                (SELECT count(*) FROM runner_machine_certificates WHERE runner_id=$1),
+                (SELECT count(*) FROM runner_certificate_renewal_receipts WHERE runner_id=$1)
+            FROM windows_runner_admissions AS admission
+            WHERE admission.runner_id=$1
+            ",
+        )
+        .bind(runner_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(admission_after_renewal, admission_before_renewal);
+        assert_eq!((certificate_count, renewal_receipt_count), (2, 1));
         Ok(())
     })
     .await

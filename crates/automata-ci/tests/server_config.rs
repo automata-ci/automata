@@ -25,6 +25,9 @@ fn write_secret_file(path: &PathBuf, contents: impl AsRef<[u8]>) {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .expect("secret fixture permissions must be owner-only");
     }
+    #[cfg(windows)]
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(path)
+        .expect("secret fixture DACL must be owner-only");
 }
 
 fn configured_human_auth_args() -> automata_ci::cli::ServerArgs {
@@ -116,6 +119,24 @@ fn oidc_manifest(mode: &str) -> Vec<u8> {
     .expect("OIDC manifest fixture")
 }
 
+fn windows_admission_manifest() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "schema": 1,
+        "issuers": [{
+            "issuer_key_id": "broker-primary",
+            "ed25519_public_key_base64":
+                "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+            "broker_host_id": "11".repeat(32),
+            "environment_profile": {
+                "id": "automata/windows-server-2025",
+                "digest": "22".repeat(32),
+            },
+            "promotion_trust_bundle_id": "windows-images-production",
+        }],
+    }))
+    .expect("Windows admission manifest fixture")
+}
+
 #[test]
 fn source_debug_output_redacts_environment_names_and_paths() {
     let marker = "AUTOMATA_SENSITIVE_REFERENCE_MARKER";
@@ -199,6 +220,49 @@ fn secret_file_loading_rejects_unsafe_paths_and_permissions() {
         SecretSource::File(PathBuf::from("relative-secret.txt")).load_bytes(64),
         Err(SecretLoadError::FileSecurity)
     ));
+}
+
+#[cfg(windows)]
+#[test]
+fn secret_file_loading_uses_the_attested_windows_custody_seam() {
+    let insecure_path = test_file(&format!(
+        "windows-inherited-secret-marker-{}.txt",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&insecure_path);
+    fs::write(&insecure_path, b"must-not-load").expect("fixture must be writable");
+    let error = SecretSource::File(insecure_path.clone())
+        .load_bytes(64)
+        .expect_err("an inherited, unprotected DACL must fail closed");
+    assert!(matches!(error, SecretLoadError::FileSecurity));
+    assert!(!format!("{error:?}").contains("windows-inherited-secret-marker"));
+
+    automata_ci_windows_file_security::restrict_file_to_current_user_for_test(&insecure_path)
+        .expect("fixture DACL must become protected and owner-only");
+    assert_eq!(
+        SecretSource::File(insecure_path.clone())
+            .load_bytes(64)
+            .expect("attested file must load")
+            .as_slice(),
+        b"must-not-load"
+    );
+
+    let hardlink_path = test_file(&format!(
+        "windows-hardlink-secret-{}.txt",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&hardlink_path);
+    fs::hard_link(&insecure_path, &hardlink_path).expect("fixture hardlink must be creatable");
+    assert!(matches!(
+        SecretSource::File(insecure_path.clone()).load_bytes(64),
+        Err(SecretLoadError::FileSecurity)
+    ));
+    assert!(matches!(
+        SecretSource::File(PathBuf::from("relative-secret.txt")).load_bytes(64),
+        Err(SecretLoadError::FileSecurity)
+    ));
+    fs::remove_file(hardlink_path).expect("remove fixture hardlink");
+    fs::remove_file(insecure_path).expect("remove fixture target");
 }
 
 #[test]
@@ -435,6 +499,36 @@ fn human_auth_configuration_is_atomic_and_derives_a_fixed_callback() {
         ServerConfig::from_args(&partial),
         Err(ServerConfigError::IncompleteHumanAuth)
     ));
+}
+
+#[test]
+fn windows_admission_requires_one_canonical_public_enrollment_origin() {
+    let manifest_path = test_file("windows-admission-origin.json");
+    write_secret_file(&manifest_path, windows_admission_manifest());
+    let manifest_source = format!("file:{}", manifest_path.display());
+    let cli = Cli::try_parse_from([
+        "automata",
+        "server",
+        "--results-public-url",
+        "https://results.example.test/",
+        "--runner-public-url",
+        "https://runner.example.test/",
+        "--windows-runner-admission-config-source",
+        manifest_source.as_str(),
+    ])
+    .expect("independent Windows admission syntax must parse");
+    let Command::Server(args) = cli.command else {
+        panic!("server command expected");
+    };
+    assert!(matches!(
+        ServerConfig::from_args(&args),
+        Err(ServerConfigError::MissingWindowsRunnerAdmissionOrigin)
+    ));
+
+    let mut args = configured_human_auth_args();
+    args.windows_runner_admission_config_source = Some(SecretSource::File(manifest_path));
+    ServerConfig::from_args(&args)
+        .expect("admission trust and the human origin form one coherent configuration");
 }
 
 #[test]

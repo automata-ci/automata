@@ -79,6 +79,9 @@ zeroize.workspace = true
 libc.workspace = true
 rustix.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+automata-ci-windows-file-security.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework.workspace = true
 
@@ -93,6 +96,9 @@ rcgen.workspace = true
 static_assertions.workspace = true
 tar.workspace = true
 time.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+automata-ci-windows-file-security = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

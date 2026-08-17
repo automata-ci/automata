@@ -417,6 +417,14 @@ impl ProductionComponents {
             RunnerCapabilityReadiness::unavailable()
         };
         verify_runner_capability_readiness(store.as_ref(), capability_readiness).await?;
+        let windows_admission_trust = config.windows_runner_admission().map(|policy| {
+            let trust: Arc<dyn automata_ci_protocol::WindowsRunnerAdmissionTrustStore> =
+                Arc::new(policy.clone());
+            trust
+        });
+        let enrollment_origin = config
+            .human_auth()
+            .map(|human_auth| human_auth.external_url().as_str().to_owned());
         let (
             runner_enrollment_repository,
             runner_enrollment_redeem_api,
@@ -444,6 +452,8 @@ impl ProductionComponents {
                     Arc::clone(&repository),
                     Arc::clone(&issuer),
                     capability_readiness,
+                    windows_admission_trust,
+                    enrollment_origin,
                 );
                 let renewal = Arc::new(OperationalRunnerCertificateRenewalHandler::new(
                     Arc::clone(&repository),

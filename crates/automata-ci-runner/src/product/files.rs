@@ -77,9 +77,7 @@ impl SecretSource {
             return Err(SecureInputError::InvalidLimit);
         }
         match self {
-            Self::File { path } => {
-                read_file(path, maximum_bytes, FileTrust::OwnerOnly).map(Zeroizing::new)
-            }
+            Self::File { path } => read_file(path, maximum_bytes, FileTrust::OwnerOnly),
             Self::Environment { name } => {
                 validate_environment_name(name)?;
                 let value = std::env::var_os(name).ok_or(SecureInputError::Unavailable)?;
@@ -235,7 +233,7 @@ pub(crate) fn read_configuration_file(
     path: &Path,
     maximum_bytes: usize,
 ) -> Result<Vec<u8>, SecureInputError> {
-    read_file(path, maximum_bytes, FileTrust::Configuration)
+    read_file(path, maximum_bytes, FileTrust::Configuration).map(|bytes| bytes.as_slice().to_vec())
 }
 
 pub(crate) fn read_public_material(
@@ -246,9 +244,7 @@ pub(crate) fn read_public_material(
         SecretSource::Environment { .. } | SecretSource::MacosKeychain { .. } => {
             source.read(maximum_bytes)
         }
-        SecretSource::File { path } => {
-            read_file(path, maximum_bytes, FileTrust::PublicMaterial).map(Zeroizing::new)
-        }
+        SecretSource::File { path } => read_file(path, maximum_bytes, FileTrust::PublicMaterial),
     }
 }
 
@@ -395,7 +391,7 @@ fn read_file(
     path: &Path,
     maximum_bytes: usize,
     trust: FileTrust,
-) -> Result<Vec<u8>, SecureInputError> {
+) -> Result<Zeroizing<Vec<u8>>, SecureInputError> {
     use std::{fs::File, io::Read as _};
 
     use rustix::{
@@ -452,7 +448,7 @@ fn read_file(
     if received == 0 || received > u64::try_from(maximum_bytes).unwrap_or(u64::MAX) {
         return Err(SecureInputError::InvalidSize);
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(received).unwrap_or(0));
+    let mut bytes = Zeroizing::new(Vec::with_capacity(usize::try_from(received).unwrap_or(0)));
     File::from(file)
         .take(
             u64::try_from(maximum_bytes)
@@ -487,88 +483,25 @@ fn read_file(
     path: &Path,
     maximum_bytes: usize,
     trust: FileTrust,
-) -> Result<Vec<u8>, SecureInputError> {
-    use std::{
-        fs::{File, OpenOptions},
-        io::Read as _,
-        os::windows::fs::{MetadataExt as _, OpenOptionsExt as _},
+) -> Result<Zeroizing<Vec<u8>>, SecureInputError> {
+    use automata_ci_windows_file_security::{
+        AttestedFileError, ReadAccess, ReadOptions, read_attested_file,
     };
 
-    const FILE_SHARE_READ: u32 = 0x0000_0001;
-    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-
-    fn open_directory(path: &Path) -> Result<File, SecureInputError> {
-        let mut options = OpenOptions::new();
-        options
-            .read(true)
-            // Omit delete sharing so each live handle stabilizes its component.
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-        let directory = options
-            .open(path)
-            .map_err(|_| SecureInputError::PathSecurity)?;
-        let metadata = directory
-            .metadata()
-            .map_err(|_| SecureInputError::Unavailable)?;
-        if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-            Ok(directory)
-        } else {
-            Err(SecureInputError::PathSecurity)
+    let access = match trust {
+        FileTrust::OwnerOnly | FileTrust::Configuration => ReadAccess::Private,
+        FileTrust::PublicMaterial => ReadAccess::PublicRead,
+    };
+    read_attested_file(path, &ReadOptions::new(maximum_bytes, false, access)).map_err(|error| {
+        match error {
+            AttestedFileError::InvalidLimit => SecureInputError::InvalidLimit,
+            AttestedFileError::InvalidPath => SecureInputError::InvalidPath,
+            AttestedFileError::InvalidSize => SecureInputError::InvalidSize,
+            AttestedFileError::PathSecurity
+            | AttestedFileError::AccessSecurity
+            | AttestedFileError::Unstable => SecureInputError::PathSecurity,
         }
-    }
-
-    validate_absolute_path(path)?;
-    if maximum_bytes == 0 {
-        return Err(SecureInputError::InvalidLimit);
-    }
-    // Safe std APIs cannot prove the effective Windows principal owns a file
-    // and that its DACL grants no other principal access. Secret-bearing file
-    // sources therefore remain closed until an ACL-attesting adapter exists.
-    if trust == FileTrust::OwnerOnly {
-        return Err(SecureInputError::UnsupportedPlatform);
-    }
-
-    let parent = path.parent().ok_or(SecureInputError::InvalidPath)?;
-    let mut paths = parent.ancestors().collect::<Vec<_>>();
-    paths.reverse();
-    let mut directory_handles = Vec::with_capacity(paths.len());
-    for directory_path in paths {
-        directory_handles.push(open_directory(directory_path)?);
-    }
-
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
-    let mut file = options
-        .open(path)
-        .map_err(|_| SecureInputError::Unavailable)?;
-    let metadata = file.metadata().map_err(|_| SecureInputError::Unavailable)?;
-    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(SecureInputError::PathSecurity);
-    }
-    let received = metadata.len();
-    if received == 0 || received > u64::try_from(maximum_bytes).unwrap_or(u64::MAX) {
-        return Err(SecureInputError::InvalidSize);
-    }
-    let mut bytes = Vec::with_capacity(usize::try_from(received).unwrap_or(0));
-    std::io::Read::by_ref(&mut file)
-        .take(
-            u64::try_from(maximum_bytes)
-                .unwrap_or(u64::MAX)
-                .saturating_add(1),
-        )
-        .read_to_end(&mut bytes)
-        .map_err(|_| SecureInputError::Unavailable)?;
-    if bytes.is_empty() || bytes.len() > maximum_bytes {
-        return Err(SecureInputError::InvalidSize);
-    }
-    drop(directory_handles);
-    Ok(bytes)
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -576,7 +509,7 @@ fn read_file(
     _path: &Path,
     _maximum_bytes: usize,
     _trust: FileTrust,
-) -> Result<Vec<u8>, SecureInputError> {
+) -> Result<Zeroizing<Vec<u8>>, SecureInputError> {
     Err(SecureInputError::UnsupportedPlatform)
 }
 
@@ -770,9 +703,13 @@ mod windows_tests {
         fs::create_dir(&root).expect("create test root");
         let path = root.join("input.pem");
         fs::write(&path, b"public-material").expect("write test input");
+        automata_ci_windows_file_security::restrict_file_to_current_user_for_test(&path)
+            .expect("restrict test input");
 
         assert_eq!(
-            read_file(&path, 32, FileTrust::Configuration).expect("read configuration"),
+            read_file(&path, 32, FileTrust::Configuration)
+                .expect("read configuration")
+                .as_slice(),
             b"public-material"
         );
         assert_eq!(
@@ -784,7 +721,7 @@ mod windows_tests {
     }
 
     #[test]
-    fn owner_only_files_fail_closed_without_acl_attestation() {
+    fn owner_only_files_require_and_accept_exact_acl_attestation() {
         let root = test_root("owner-only");
         fs::create_dir(&root).expect("create test root");
         let path = root.join("secret");
@@ -792,7 +729,15 @@ mod windows_tests {
 
         assert_eq!(
             read_file(&path, 32, FileTrust::OwnerOnly),
-            Err(SecureInputError::UnsupportedPlatform)
+            Err(SecureInputError::PathSecurity)
+        );
+        automata_ci_windows_file_security::restrict_file_to_current_user_for_test(&path)
+            .expect("restrict test input");
+        assert_eq!(
+            read_file(&path, 32, FileTrust::OwnerOnly)
+                .expect("read owner-only input")
+                .as_slice(),
+            b"secret"
         );
 
         fs::remove_dir_all(root).expect("remove test root");

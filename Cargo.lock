@@ -249,6 +249,7 @@ dependencies = [
  "automata-ci-store",
  "automata-ci-store-postgres",
  "automata-ci-ui-renderer",
+ "automata-ci-windows-file-security",
  "automata-ci-workflow-github",
  "automata-ci-workflow-service",
  "axum",
@@ -350,8 +351,10 @@ dependencies = [
  "automata-ci-auth",
  "automata-ci-core",
  "automata-ci-key-management",
+ "automata-ci-protocol",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "static_assertions",
  "tokio",
@@ -701,6 +704,7 @@ dependencies = [
  "automata-ci-store",
  "automata-ci-store-postgres",
  "automata-ci-workflow-service",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -721,6 +725,7 @@ version = "0.1.0"
 dependencies = [
  "automata-ci-auth",
  "automata-ci-core",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -865,6 +870,7 @@ dependencies = [
  "automata-ci-sandbox-podman",
  "automata-ci-sandbox-windows",
  "automata-ci-scm",
+ "automata-ci-windows-file-security",
  "automata-ci-workflow-github",
  "axum",
  "base64 0.23.1",
@@ -1193,6 +1199,17 @@ dependencies = [
  "thiserror",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "automata-ci-windows-file-security"
+version = "0.1.0"
+dependencies = [
+ "stellar-agent-windows-identity",
+ "thiserror",
+ "winapi-util",
+ "windows-permissions",
+ "zeroize",
 ]
 
 [[package]]
@@ -4947,6 +4964,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stellar-agent-windows-identity"
+version = "0.1.0-alpha.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "229e3f1b7dbf81dbf5a321f8e1f9abb1aff1947d8b2d89eeda28d1d501d7ffbe"
+dependencies = [
+ "thiserror",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "stringprep"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6044,6 +6071,16 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-permissions"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e2ccdc3c6bf4d4a094e031b63fadd08d8e42abd259940eb8aa5fdc09d4bf9be"
+dependencies = [
+ "bitflags 1.3.2",
+ "winapi",
+]
 
 [[package]]
 name = "windows-sys"
