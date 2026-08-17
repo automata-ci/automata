@@ -343,7 +343,10 @@ jobs:
           fi
 
       - name: Test Rust workspace and PostgreSQL invariants
+        env:
+          TMPDIR: /tmp/automata-coverage-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          install -d -m 0700 -- "$TMPDIR"
           trap 'df -h -- "$GITHUB_WORKSPACE"; du -sh -- target 2>/dev/null || true' EXIT
           df -h -- "$GITHUB_WORKSPACE"
           ./scripts/ci/run-rust-coverage.sh target/coverage/rust ordinary postgres
@@ -413,9 +416,12 @@ jobs:
       AUTOMATA_TEST_ACTIONS_ARTIFACT_MODULE: ${{ github.workspace }}/target/exact-actions/upload-artifact/node_modules/@actions/artifact/lib/internal/client.js
       AUTOMATA_TEST_ACTIONS_DOWNLOAD_ARTIFACT_MODULE: ${{ github.workspace }}/target/exact-actions/download-artifact/node_modules/@actions/artifact/lib/internal/client.js
       AUTOMATA_TEST_ACTIONS_CACHE_MODULE: ${{ github.workspace }}/target/exact-actions/cache/node_modules/@actions/cache/lib/cache.js
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-fuse-ld=lld
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -426,32 +432,25 @@ jobs:
       - name: Prepare protected task scratch
         run: install -d -m 0700 -- "$TMPDIR"
 
-      - name: Check out exact upload-artifact fixture
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
-          repository: actions/upload-artifact
-          ref: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-          path: target/exact-actions/upload-artifact
-          fetch-depth: 1
-          persist-credentials: false
+          version: v0.17.0
 
-      - name: Check out exact download-artifact fixture
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: actions/download-artifact
-          ref: 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-          path: target/exact-actions/download-artifact
-          fetch-depth: 1
-          persist-credentials: false
+      - name: Start Rust compiler cache
+        run: env TMPDIR=/tmp sccache --start-server
 
-      - name: Check out exact cache fixture
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Restore exact Results clients and Cargo registry
+        id: results-input-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
-          repository: actions/cache
-          ref: 27d5ce7f107fe9357f9df03efb73ab90386fccae
-          path: target/exact-actions/cache
-          fetch-depth: 1
-          persist-credentials: false
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.npm
+            target/exact-action-sources.tar
+          key: exact-results-ubuntu-24.04-rust-1.97.1-node-24.19.0-upload-043fb46d1a93c77aae656e7c1c64a875d1fc6a0a-download-3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c-cache-27d5ce7f107fe9357f9df03efb73ab90386fccae-${{ hashFiles('Cargo.lock') }}
 
       - name: Install exact Node.js runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -459,7 +458,35 @@ jobs:
           node-version: 24.19.0
           package-manager-cache: false
 
-      - name: Hydrate exact offline clients
+      - name: Hydrate immutable Results client sources
+        env:
+          CACHE_REVISION: 27d5ce7f107fe9357f9df03efb73ab90386fccae
+          DOWNLOAD_REVISION: 3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+          INPUT_CACHE_HIT: ${{ steps.results-input-cache.outputs.cache-hit }}
+          UPLOAD_REVISION: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        run: |
+          if [[ "$INPUT_CACHE_HIT" == true ]]; then
+            tar --extract --file target/exact-action-sources.tar --directory target
+            exit 0
+          fi
+          hydrate() {
+            local repository="$1"
+            local revision="$2"
+            local destination="$3"
+            git init --quiet -- "$destination"
+            git -C "$destination" remote add origin "https://github.com/$repository.git"
+            git -C "$destination" -c protocol.version=2 fetch --quiet --no-tags --depth=1 origin "$revision"
+            git -C "$destination" checkout --quiet --detach FETCH_HEAD
+            [[ "$(git -C "$destination" rev-parse HEAD)" == "$revision" ]]
+            git -C "$destination" remote remove origin
+          }
+          install -d -m 0700 -- target/exact-actions
+          hydrate actions/upload-artifact "$UPLOAD_REVISION" target/exact-actions/upload-artifact
+          hydrate actions/download-artifact "$DOWNLOAD_REVISION" target/exact-actions/download-artifact
+          hydrate actions/cache "$CACHE_REVISION" target/exact-actions/cache
+          tar --create --file target/exact-action-sources.tar --directory target exact-actions
+
+      - name: Hydrate exact offline Results clients
         run: |
           npm ci --prefix target/exact-actions/upload-artifact --ignore-scripts --no-audit --no-fund
           npm ci --prefix target/exact-actions/download-artifact --ignore-scripts --no-audit --no-fund
@@ -778,6 +805,7 @@ jobs:
       - rust_docs
       - dependency_audit
       - rust_coverage
+      - results_client_acceptance
       - renderer_tests
       - frontend
       - renderer
@@ -792,6 +820,7 @@ jobs:
           RUST_DOCS_RESULT: ${{ needs.rust_docs.result }}
           DEPENDENCY_AUDIT_RESULT: ${{ needs.dependency_audit.result }}
           RUST_COVERAGE_RESULT: ${{ needs.rust_coverage.result }}
+          RESULTS_CLIENT_ACCEPTANCE_RESULT: ${{ needs.results_client_acceptance.result }}
           RENDERER_TESTS_RESULT: ${{ needs.renderer_tests.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           RENDERER_RESULT: ${{ needs.renderer.result }}
@@ -802,6 +831,7 @@ jobs:
           [[ "$RUST_DOCS_RESULT" == success ]]
           [[ "$DEPENDENCY_AUDIT_RESULT" == success ]]
           [[ "$RUST_COVERAGE_RESULT" == success ]]
+          [[ "$RESULTS_CLIENT_ACCEPTANCE_RESULT" == success ]]
           [[ "$RENDERER_TESTS_RESULT" == success ]]
           [[ "$FRONTEND_RESULT" == success ]]
           [[ "$RENDERER_RESULT" == success ]]

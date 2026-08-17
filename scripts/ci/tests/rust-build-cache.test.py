@@ -25,6 +25,7 @@ RUST_JOBS = (
     "rust_docs",
     "dependency_audit",
     "rust_coverage",
+    "results_client_acceptance",
     "renderer_tests",
     "dist_build",
 )
@@ -84,15 +85,35 @@ def main() -> None:
             if line.strip().startswith("~/.cargo/")
         )
 
-    for job in ("verify", "rust_lint", "rust_docs", "rust_coverage", "renderer_tests"):
+    for job in (
+        "verify",
+        "rust_lint",
+        "rust_docs",
+        "rust_coverage",
+        "results_client_acceptance",
+        "renderer_tests",
+    ):
         assert (
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "
             "-C link-arg=-fuse-ld=lld"
         ) in job_body(workflow, job), f"{job} lost the fast GNU/Linux linker"
 
     distribution = job_body(workflow, "dist")
-    for gate in ("rust_lint", "rust_docs", "dependency_audit"):
+    for gate in (
+        "rust_lint",
+        "rust_docs",
+        "dependency_audit",
+        "results_client_acceptance",
+    ):
         assert f"- {gate}" in distribution, f"distribution no longer requires {gate}"
+    results = job_body(workflow, "results_client_acceptance")
+    assert results.count("actions/checkout@") == 1, (
+        "Results must have one repository checkout and no post-job fixture checkouts"
+    )
+    assert "target/exact-action-sources.tar" in results
+    assert "\n            target/exact-actions\n" not in results
+    assert "~/.npm" in results
+    assert "INPUT_CACHE_HIT: ${{ steps.results-input-cache.outputs.cache-hit }}" in results
     assert "cargo-deny --version 0.20.2" in workflow
     service_images = re.findall(r"(?m)^\s+image: (?P<image>\S+)$", workflow)
     assert service_images, "CI must retain its service-container coverage"
