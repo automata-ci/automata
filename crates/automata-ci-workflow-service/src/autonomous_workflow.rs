@@ -435,46 +435,8 @@ enum OrchestrationCustody {
         expected_successor: Option<ExpectedRenewalSuccessor>,
         submitted: bool,
     },
-    Active {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        deadline: AutonomousWorkflowDeadline,
-    },
-    ReadyPreparationFinal {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<ReadyLogicalActivationPreparation>,
-    },
-    PendingPreparationFinal {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<ReadyLogicalActivationPreparation>,
-    },
-    ReadyActivationFinal {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<ReadyLogicalJobActivation>,
-    },
-    PendingActivationFinal {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<ReadyLogicalJobActivation>,
-    },
-    PendingPreparationRenew {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<RenewLogicalActivationPreparation>,
-        submitted: bool,
-    },
-    PendingActivationRenew {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<RenewLogicalJobActivation>,
-        submitted: bool,
-    },
-    SettledFinalEvidence {
-        consumed: Box<ConsumedSelectedLogicalJobOrchestration>,
-        kind: LogicalWorkQuarantineKind,
-    },
+    Preparation(Box<PhaseCustodySnapshot<PreparationPhase>>),
+    Activation(Box<PhaseCustodySnapshot<ActivationPhase>>),
     Quarantine {
         request: Box<QuarantineLogicalJobOrchestration>,
         submitted: bool,
@@ -500,20 +462,68 @@ impl fmt::Debug for OrchestrationCustody {
                     "ReadyConsume([REDACTED])"
                 }
             }
-            Self::Active { .. } => "Active([REDACTED])",
-            Self::ReadyPreparationFinal { .. } => "ReadyPreparationFinal([REDACTED])",
-            Self::PendingPreparationFinal { .. } => "PendingPreparationFinal([REDACTED])",
-            Self::ReadyActivationFinal { .. } => "ReadyActivationFinal([REDACTED])",
-            Self::PendingActivationFinal { .. } => "PendingActivationFinal([REDACTED])",
-            Self::PendingPreparationRenew { submitted, .. }
-            | Self::PendingActivationRenew { submitted, .. } => {
-                if *submitted {
-                    "PendingRenew([REDACTED])"
-                } else {
-                    "ReadyRenew([REDACTED])"
+            Self::Preparation(state) => match state.as_ref() {
+                PhaseCustodySnapshot::Idle => "Idle",
+                PhaseCustodySnapshot::Selected { .. } => "Selected([REDACTED])",
+                PhaseCustodySnapshot::PendingConsume { submitted, .. } => {
+                    if *submitted {
+                        "PendingConsume([REDACTED])"
+                    } else {
+                        "ReadyConsume([REDACTED])"
+                    }
                 }
-            }
-            Self::SettledFinalEvidence { .. } => "SettledFinalEvidence([REDACTED])",
+                PhaseCustodySnapshot::Active { .. } => "Active([REDACTED])",
+                PhaseCustodySnapshot::ReadyFinal { .. } => "ReadyPreparationFinal([REDACTED])",
+                PhaseCustodySnapshot::PendingFinal { .. } => "PendingPreparationFinal([REDACTED])",
+                PhaseCustodySnapshot::PendingRenew { submitted, .. } => {
+                    if *submitted {
+                        "PendingRenew([REDACTED])"
+                    } else {
+                        "ReadyRenew([REDACTED])"
+                    }
+                }
+                PhaseCustodySnapshot::SettledFinalEvidence { .. } => {
+                    "SettledFinalEvidence([REDACTED])"
+                }
+                PhaseCustodySnapshot::Quarantine { submitted, .. } => {
+                    if *submitted {
+                        "PendingQuarantine([REDACTED])"
+                    } else {
+                        "ReadyQuarantine([REDACTED])"
+                    }
+                }
+            },
+            Self::Activation(state) => match state.as_ref() {
+                PhaseCustodySnapshot::Idle => "Idle",
+                PhaseCustodySnapshot::Selected { .. } => "Selected([REDACTED])",
+                PhaseCustodySnapshot::PendingConsume { submitted, .. } => {
+                    if *submitted {
+                        "PendingConsume([REDACTED])"
+                    } else {
+                        "ReadyConsume([REDACTED])"
+                    }
+                }
+                PhaseCustodySnapshot::Active { .. } => "Active([REDACTED])",
+                PhaseCustodySnapshot::ReadyFinal { .. } => "ReadyActivationFinal([REDACTED])",
+                PhaseCustodySnapshot::PendingFinal { .. } => "PendingActivationFinal([REDACTED])",
+                PhaseCustodySnapshot::PendingRenew { submitted, .. } => {
+                    if *submitted {
+                        "PendingRenew([REDACTED])"
+                    } else {
+                        "ReadyRenew([REDACTED])"
+                    }
+                }
+                PhaseCustodySnapshot::SettledFinalEvidence { .. } => {
+                    "SettledFinalEvidence([REDACTED])"
+                }
+                PhaseCustodySnapshot::Quarantine { submitted, .. } => {
+                    if *submitted {
+                        "PendingQuarantine([REDACTED])"
+                    } else {
+                        "ReadyQuarantine([REDACTED])"
+                    }
+                }
+            },
             Self::Quarantine { submitted, .. } => {
                 if *submitted {
                     "PendingQuarantine([REDACTED])"
@@ -545,30 +555,7 @@ enum MaterializationCustody {
         expected_successor: Option<ExpectedRenewalSuccessor>,
         submitted: bool,
     },
-    Active {
-        consumed: Box<ConsumedSelectedLogicalInstanceMaterialization>,
-        deadline: AutonomousWorkflowDeadline,
-    },
-    ReadyFinal {
-        consumed: Box<ConsumedSelectedLogicalInstanceMaterialization>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<ReadyLogicalInstanceMaterialization>,
-    },
-    PendingFinal {
-        consumed: Box<ConsumedSelectedLogicalInstanceMaterialization>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<ReadyLogicalInstanceMaterialization>,
-    },
-    PendingRenew {
-        consumed: Box<ConsumedSelectedLogicalInstanceMaterialization>,
-        deadline: AutonomousWorkflowDeadline,
-        request: Box<RenewLogicalInstanceMaterialization>,
-        submitted: bool,
-    },
-    SettledFinalEvidence {
-        consumed: Box<ConsumedSelectedLogicalInstanceMaterialization>,
-        kind: LogicalWorkQuarantineKind,
-    },
+    Phase(Box<PhaseCustodySnapshot<MaterializationPhase>>),
     Quarantine {
         request: Box<QuarantineLogicalInstanceMaterialization>,
         submitted: bool,
@@ -594,17 +581,37 @@ impl fmt::Debug for MaterializationCustody {
                     "ReadyConsume([REDACTED])"
                 }
             }
-            Self::Active { .. } => "Active([REDACTED])",
-            Self::ReadyFinal { .. } => "ReadyFinal([REDACTED])",
-            Self::PendingFinal { .. } => "PendingFinal([REDACTED])",
-            Self::PendingRenew { submitted, .. } => {
-                if *submitted {
-                    "PendingRenew([REDACTED])"
-                } else {
-                    "ReadyRenew([REDACTED])"
+            Self::Phase(state) => match state.as_ref() {
+                PhaseCustodySnapshot::Idle => "Idle",
+                PhaseCustodySnapshot::Selected { .. } => "Selected([REDACTED])",
+                PhaseCustodySnapshot::PendingConsume { submitted, .. } => {
+                    if *submitted {
+                        "PendingConsume([REDACTED])"
+                    } else {
+                        "ReadyConsume([REDACTED])"
+                    }
                 }
-            }
-            Self::SettledFinalEvidence { .. } => "SettledFinalEvidence([REDACTED])",
+                PhaseCustodySnapshot::Active { .. } => "Active([REDACTED])",
+                PhaseCustodySnapshot::ReadyFinal { .. } => "ReadyFinal([REDACTED])",
+                PhaseCustodySnapshot::PendingFinal { .. } => "PendingFinal([REDACTED])",
+                PhaseCustodySnapshot::PendingRenew { submitted, .. } => {
+                    if *submitted {
+                        "PendingRenew([REDACTED])"
+                    } else {
+                        "ReadyRenew([REDACTED])"
+                    }
+                }
+                PhaseCustodySnapshot::SettledFinalEvidence { .. } => {
+                    "SettledFinalEvidence([REDACTED])"
+                }
+                PhaseCustodySnapshot::Quarantine { submitted, .. } => {
+                    if *submitted {
+                        "PendingQuarantine([REDACTED])"
+                    } else {
+                        "ReadyQuarantine([REDACTED])"
+                    }
+                }
+            },
             Self::Quarantine { submitted, .. } => {
                 if *submitted {
                     "PendingQuarantine([REDACTED])"
@@ -667,43 +674,6 @@ impl AutonomousWorkflowCustody {
             .materialization
             .lock()
             .expect("custody lock is not poisoned") = state;
-    }
-
-    fn orchestration_is_active(&self, expected: &ConsumedSelectedLogicalJobOrchestration) -> bool {
-        matches!(
-            self.orchestration(),
-            OrchestrationCustody::Active { consumed, .. } if consumed.as_ref() == expected
-        )
-    }
-
-    fn materialization_is_active(
-        &self,
-        expected: &ConsumedSelectedLogicalInstanceMaterialization,
-    ) -> bool {
-        matches!(
-            self.materialization(),
-            MaterializationCustody::Active { consumed, .. } if consumed.as_ref() == expected
-        )
-    }
-
-    fn clear_orchestration_if_active(&self) {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if matches!(*state, OrchestrationCustody::Active { .. }) {
-            *state = OrchestrationCustody::Idle;
-        }
-    }
-
-    fn clear_materialization_if_active(&self) {
-        let mut state = self
-            .materialization
-            .lock()
-            .expect("custody lock is not poisoned");
-        if matches!(*state, MaterializationCustody::Active { .. }) {
-            *state = MaterializationCustody::Idle;
-        }
     }
 
     fn begin_orchestration_selection(
@@ -834,56 +804,6 @@ impl AutonomousWorkflowCustody {
         Ok(())
     }
 
-    fn begin_orchestration_revalidation(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: ConsumeSelectedLogicalJobOrchestration,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            OrchestrationCustody::Active { consumed: active, .. }
-                if active.as_ref() == consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = OrchestrationCustody::Selected {
-            request: Box::new(request),
-            deadline: Some(deadline),
-            expected_successor: None,
-        };
-        Ok(())
-    }
-
-    fn begin_materialization_revalidation(
-        &self,
-        consumed: &ConsumedSelectedLogicalInstanceMaterialization,
-        deadline: AutonomousWorkflowDeadline,
-        request: ConsumeSelectedLogicalInstanceMaterialization,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .materialization
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            MaterializationCustody::Active { consumed: active, .. }
-                if active.as_ref() == consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = MaterializationCustody::Selected {
-            request: Box::new(request),
-            deadline: Some(deadline),
-            expected_successor: None,
-        };
-        Ok(())
-    }
-
     fn mark_orchestration_consume_submitted(
         &self,
         expected: &ConsumeSelectedLogicalJobOrchestration,
@@ -932,225 +852,6 @@ impl AutonomousWorkflowCustody {
         }
     }
 
-    fn begin_preparation_renewal(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: RenewLogicalActivationPreparation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            OrchestrationCustody::Active { consumed: active, .. } if active.as_ref() == &consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = OrchestrationCustody::PendingPreparationRenew {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-            submitted: false,
-        };
-        Ok(())
-    }
-
-    fn begin_activation_renewal(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: RenewLogicalJobActivation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            OrchestrationCustody::Active { consumed: active, .. } if active.as_ref() == &consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = OrchestrationCustody::PendingActivationRenew {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-            submitted: false,
-        };
-        Ok(())
-    }
-
-    fn begin_materialization_renewal(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        deadline: AutonomousWorkflowDeadline,
-        request: RenewLogicalInstanceMaterialization,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .materialization
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            MaterializationCustody::Active { consumed: active, .. } if active.as_ref() == &consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = MaterializationCustody::PendingRenew {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-            submitted: false,
-        };
-        Ok(())
-    }
-
-    fn mark_preparation_renewal_submitted(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-        expected: &RenewLogicalActivationPreparation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        match &mut *state {
-            OrchestrationCustody::PendingPreparationRenew {
-                consumed: active,
-                request,
-                submitted,
-                ..
-            } if active.as_ref() == consumed && request.as_ref() == expected && !*submitted => {
-                *submitted = true;
-                Ok(())
-            }
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
-    fn mark_activation_renewal_submitted(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-        expected: &RenewLogicalJobActivation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        match &mut *state {
-            OrchestrationCustody::PendingActivationRenew {
-                consumed: active,
-                request,
-                submitted,
-                ..
-            } if active.as_ref() == consumed && request.as_ref() == expected && !*submitted => {
-                *submitted = true;
-                Ok(())
-            }
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
-    fn mark_materialization_renewal_submitted(
-        &self,
-        consumed: &ConsumedSelectedLogicalInstanceMaterialization,
-        expected: &RenewLogicalInstanceMaterialization,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .materialization
-            .lock()
-            .expect("custody lock is not poisoned");
-        match &mut *state {
-            MaterializationCustody::PendingRenew {
-                consumed: active,
-                request,
-                submitted,
-                ..
-            } if active.as_ref() == consumed && request.as_ref() == expected && !*submitted => {
-                *submitted = true;
-                Ok(())
-            }
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
-    fn clear_expired_unsubmitted_preparation_renewal(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-        expected: &RenewLogicalActivationPreparation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        match &*state {
-            OrchestrationCustody::PendingPreparationRenew {
-                consumed: active,
-                request,
-                submitted,
-                ..
-            } if active.as_ref() == consumed && request.as_ref() == expected => {
-                if !submitted {
-                    *state = OrchestrationCustody::Idle;
-                }
-                Ok(())
-            }
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
-    fn clear_expired_unsubmitted_activation_renewal(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-        expected: &RenewLogicalJobActivation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        match &*state {
-            OrchestrationCustody::PendingActivationRenew {
-                consumed: active,
-                request,
-                submitted,
-                ..
-            } if active.as_ref() == consumed && request.as_ref() == expected => {
-                if !submitted {
-                    *state = OrchestrationCustody::Idle;
-                }
-                Ok(())
-            }
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
-    fn clear_expired_unsubmitted_materialization_renewal(
-        &self,
-        consumed: &ConsumedSelectedLogicalInstanceMaterialization,
-        expected: &RenewLogicalInstanceMaterialization,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .materialization
-            .lock()
-            .expect("custody lock is not poisoned");
-        match &*state {
-            MaterializationCustody::PendingRenew {
-                consumed: active,
-                request,
-                submitted,
-                ..
-            } if active.as_ref() == consumed && request.as_ref() == expected => {
-                if !submitted {
-                    *state = MaterializationCustody::Idle;
-                }
-                Ok(())
-            }
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
     fn mark_orchestration_quarantine_submitted(
         &self,
         expected: &QuarantineLogicalJobOrchestration,
@@ -1189,295 +890,56 @@ impl AutonomousWorkflowCustody {
         }
     }
 
-    fn retain_ready_preparation_final(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalActivationPreparation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            OrchestrationCustody::Active { consumed: active, .. } if active.as_ref() == &consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = OrchestrationCustody::ReadyPreparationFinal {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-        };
-        Ok(())
-    }
-
-    fn retain_ready_activation_final(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalJobActivation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            OrchestrationCustody::Active { consumed: active, .. } if active.as_ref() == &consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = OrchestrationCustody::ReadyActivationFinal {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-        };
-        Ok(())
-    }
-
-    fn retain_ready_materialization_final(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalInstanceMaterialization,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .materialization
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            MaterializationCustody::Active { consumed: active, .. } if active.as_ref() == &consumed
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = MaterializationCustody::ReadyFinal {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-        };
-        Ok(())
-    }
-
-    fn ready_preparation_final(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-    ) -> Option<(
-        AutonomousWorkflowDeadline,
-        ReadyLogicalActivationPreparation,
-    )> {
-        match self.orchestration() {
-            OrchestrationCustody::ReadyPreparationFinal {
-                consumed: active,
-                deadline,
-                request,
-            } if active.as_ref() == consumed => Some((deadline, *request)),
-            _ => None,
-        }
-    }
-
-    fn ready_activation_final(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-    ) -> Option<(AutonomousWorkflowDeadline, ReadyLogicalJobActivation)> {
-        match self.orchestration() {
-            OrchestrationCustody::ReadyActivationFinal {
-                consumed: active,
-                deadline,
-                request,
-            } if active.as_ref() == consumed => Some((deadline, *request)),
-            _ => None,
-        }
-    }
-
-    fn ready_materialization_final(
-        &self,
-        consumed: &ConsumedSelectedLogicalInstanceMaterialization,
-    ) -> Option<(
-        AutonomousWorkflowDeadline,
-        ReadyLogicalInstanceMaterialization,
-    )> {
-        match self.materialization() {
-            MaterializationCustody::ReadyFinal {
-                consumed: active,
-                deadline,
-                request,
-            } if active.as_ref() == consumed => Some((deadline, *request)),
-            _ => None,
-        }
-    }
-
-    fn begin_preparation_final_submission(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalActivationPreparation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            OrchestrationCustody::ReadyPreparationFinal {
-                consumed: active,
-                request: ready,
-                ..
-            } if active.as_ref() == &consumed && ready.as_ref() == &request
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = OrchestrationCustody::PendingPreparationFinal {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-        };
-        Ok(())
-    }
-
-    fn begin_activation_final_submission(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalJobActivation,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .orchestration
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            OrchestrationCustody::ReadyActivationFinal {
-                consumed: active,
-                request: ready,
-                ..
-            } if active.as_ref() == &consumed && ready.as_ref() == &request
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = OrchestrationCustody::PendingActivationFinal {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-        };
-        Ok(())
-    }
-
-    fn begin_materialization_final_submission(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalInstanceMaterialization,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let mut state = self
-            .materialization
-            .lock()
-            .expect("custody lock is not poisoned");
-        if !matches!(
-            &*state,
-            MaterializationCustody::ReadyFinal {
-                consumed: active,
-                request: ready,
-                ..
-            } if active.as_ref() == &consumed && ready.as_ref() == &request
-        ) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        *state = MaterializationCustody::PendingFinal {
-            consumed: Box::new(consumed),
-            deadline,
-            request: Box::new(request),
-        };
-        Ok(())
-    }
-
-    fn pending_preparation_final(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-    ) -> Result<ReadyLogicalActivationPreparation, AutonomousWorkflowLeaseError> {
-        match self.orchestration() {
-            OrchestrationCustody::PendingPreparationFinal {
-                consumed: active,
-                request,
-                ..
-            } if active.as_ref() == consumed => Ok(*request),
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
-    fn pending_activation_final(
-        &self,
-        consumed: &ConsumedSelectedLogicalJobOrchestration,
-    ) -> Result<ReadyLogicalJobActivation, AutonomousWorkflowLeaseError> {
-        match self.orchestration() {
-            OrchestrationCustody::PendingActivationFinal {
-                consumed: active,
-                request,
-                ..
-            } if active.as_ref() == consumed => Ok(*request),
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
-    fn pending_materialization_final(
-        &self,
-        consumed: &ConsumedSelectedLogicalInstanceMaterialization,
-    ) -> Result<ReadyLogicalInstanceMaterialization, AutonomousWorkflowLeaseError> {
-        match self.materialization() {
-            MaterializationCustody::PendingFinal {
-                consumed: active,
-                request,
-                ..
-            } if active.as_ref() == consumed => Ok(*request),
-            _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
-        }
-    }
-
     fn has_pending_queue(&self, queue: AutonomousWorkflowQueue) -> bool {
         match queue {
-            AutonomousWorkflowQueue::Orchestration => matches!(
-                self.orchestration(),
+            AutonomousWorkflowQueue::Orchestration => match self.orchestration() {
                 OrchestrationCustody::Select {
-                    submitted: true,
-                    ..
-                } | OrchestrationCustody::PendingConsume {
-                    submitted: true,
-                    ..
-                } | OrchestrationCustody::PendingPreparationFinal { .. }
-                    | OrchestrationCustody::PendingActivationFinal { .. }
-                    | OrchestrationCustody::PendingPreparationRenew {
-                        submitted: true,
-                        ..
-                    }
-                    | OrchestrationCustody::PendingActivationRenew {
-                        submitted: true,
-                        ..
-                    }
-                    | OrchestrationCustody::Quarantine {
-                        submitted: true,
-                        ..
-                    }
-            ),
-            AutonomousWorkflowQueue::Materialization => matches!(
-                self.materialization(),
+                    submitted: true, ..
+                }
+                | OrchestrationCustody::PendingConsume {
+                    submitted: true, ..
+                }
+                | OrchestrationCustody::Quarantine {
+                    submitted: true, ..
+                } => true,
+                OrchestrationCustody::Preparation(state) => matches!(
+                    state.as_ref(),
+                    PhaseCustodySnapshot::PendingFinal { .. }
+                        | PhaseCustodySnapshot::PendingRenew {
+                            submitted: true,
+                            ..
+                        }
+                ),
+                OrchestrationCustody::Activation(state) => matches!(
+                    state.as_ref(),
+                    PhaseCustodySnapshot::PendingFinal { .. }
+                        | PhaseCustodySnapshot::PendingRenew {
+                            submitted: true,
+                            ..
+                        }
+                ),
+                _ => false,
+            },
+            AutonomousWorkflowQueue::Materialization => match self.materialization() {
                 MaterializationCustody::Select {
-                    submitted: true,
-                    ..
-                } | MaterializationCustody::PendingConsume {
-                    submitted: true,
-                    ..
-                } | MaterializationCustody::PendingFinal { .. }
-                    | MaterializationCustody::PendingRenew {
-                        submitted: true,
-                        ..
-                    }
-                    | MaterializationCustody::Quarantine {
-                        submitted: true,
-                        ..
-                    }
-            ),
+                    submitted: true, ..
+                }
+                | MaterializationCustody::PendingConsume {
+                    submitted: true, ..
+                }
+                | MaterializationCustody::Quarantine {
+                    submitted: true, ..
+                } => true,
+                MaterializationCustody::Phase(state) => matches!(
+                    state.as_ref(),
+                    PhaseCustodySnapshot::PendingFinal { .. }
+                        | PhaseCustodySnapshot::PendingRenew {
+                            submitted: true,
+                            ..
+                        }
+                ),
+                _ => false,
+            },
         }
     }
 
@@ -1487,13 +949,847 @@ impl AutonomousWorkflowCustody {
     }
 }
 
-/// Worker-owned capability for one consumed preparation claim.
-pub struct AutonomousPreparationLease {
+type PhaseFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+type PhaseExecutionDisposition = Result<
+    Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError>,
+    AutonomousWorkflowLeaseError,
+>;
+
+#[derive(Clone, Copy)]
+struct PreparationPhase;
+
+#[derive(Clone, Copy)]
+struct ActivationPhase;
+
+#[derive(Clone, Copy)]
+struct MaterializationPhase;
+
+#[derive(Clone, Copy)]
+enum RenewalSubmission {
+    Acknowledged(ExpectedRenewalSuccessor),
+    Operation,
+}
+
+enum PhaseCustodyTransition<P: AutonomousPhaseAdapter> {
+    BeginRevalidation {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        request: P::Consume,
+    },
+    RetainReadyConsume {
+        request: P::Consume,
+        deadline: AutonomousWorkflowDeadline,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+    },
+    MarkConsumeSubmitted {
+        request: P::Consume,
+    },
+    ReplaceActive {
+        request: P::Consume,
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+    },
+    BeginRenewal {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        request: P::Renewal,
+    },
+    MarkRenewalSubmitted {
+        consumed: P::Consumed,
+        request: P::Renewal,
+    },
+    ClearExpiredUnsubmittedRenewal {
+        consumed: P::Consumed,
+        request: P::Renewal,
+    },
+    SelectAfterRenewal {
+        consumed: P::Consumed,
+        renewal: P::Renewal,
+        request: P::Consume,
+        deadline: AutonomousWorkflowDeadline,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+    },
+    RetainReadyFinal {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        request: P::ReadyFinal,
+    },
+    BeginFinalSubmission {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        request: P::ReadyFinal,
+    },
+    BeginFinalQuarantine {
+        consumed: P::Consumed,
+        request: P::ReadyFinal,
+        quarantine: P::Quarantine,
+    },
+    BeginActiveQuarantine {
+        consumed: P::Consumed,
+        quarantine: P::Quarantine,
+    },
+    ResumeSettledFinalQuarantine {
+        consumed: P::Consumed,
+        quarantine: P::Quarantine,
+    },
+    SettleFinalEvidence {
+        consumed: P::Consumed,
+        request: P::ReadyFinal,
+        kind: LogicalWorkQuarantineKind,
+    },
+    ClearSelected {
+        request: P::Consume,
+    },
+    ClearConsume {
+        request: P::Consume,
+    },
+    ClearRenewal {
+        consumed: P::Consumed,
+        request: P::Renewal,
+    },
+    ClearActive {
+        consumed: P::Consumed,
+    },
+    ClearReadyFinal {
+        consumed: P::Consumed,
+        request: P::ReadyFinal,
+    },
+    ClearFinal {
+        consumed: P::Consumed,
+        request: P::ReadyFinal,
+    },
+}
+
+enum PhaseCustodyTransitionOutcome {
+    Applied,
+    ConsumeSubmitted(Instant),
+}
+
+#[derive(Clone)]
+enum PhaseCustodySnapshot<P: AutonomousPhaseAdapter> {
+    Idle,
+    Selected {
+        request: P::Consume,
+        deadline: Option<AutonomousWorkflowDeadline>,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+    },
+    PendingConsume {
+        request: P::Consume,
+        operation_started: Option<Instant>,
+        deadline: Option<AutonomousWorkflowDeadline>,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+        submitted: bool,
+    },
+    Active {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+    },
+    ReadyFinal {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        request: P::ReadyFinal,
+    },
+    PendingFinal {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        request: P::ReadyFinal,
+    },
+    PendingRenew {
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        request: P::Renewal,
+        submitted: bool,
+    },
+    SettledFinalEvidence {
+        consumed: P::Consumed,
+        kind: LogicalWorkQuarantineKind,
+    },
+    Quarantine {
+        request: P::Quarantine,
+        submitted: bool,
+    },
+}
+
+#[allow(clippy::too_many_lines)] // The typed state machine keeps every exact custody edge visible.
+fn transition_phase_custody<P: AutonomousPhaseAdapter>(
+    state: PhaseCustodySnapshot<P>,
+    transition: PhaseCustodyTransition<P>,
+) -> Result<(PhaseCustodySnapshot<P>, PhaseCustodyTransitionOutcome), AutonomousWorkflowLeaseError>
+{
+    let applied = PhaseCustodyTransitionOutcome::Applied;
+    match (state, transition) {
+        (
+            PhaseCustodySnapshot::Active {
+                consumed: active, ..
+            },
+            PhaseCustodyTransition::BeginRevalidation {
+                consumed,
+                deadline,
+                request,
+            },
+        ) if active == consumed && P::authority(&consumed).is_some() => Ok((
+            PhaseCustodySnapshot::Selected {
+                request,
+                deadline: Some(deadline),
+                expected_successor: None,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::Selected {
+                request: selected, ..
+            },
+            PhaseCustodyTransition::RetainReadyConsume {
+                request,
+                deadline,
+                expected_successor,
+            },
+        ) if selected == request => Ok((
+            PhaseCustodySnapshot::PendingConsume {
+                request,
+                operation_started: None,
+                deadline: Some(deadline),
+                expected_successor,
+                submitted: false,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::PendingConsume {
+                request: pending,
+                operation_started: _,
+                deadline,
+                expected_successor,
+                submitted: false,
+            },
+            PhaseCustodyTransition::MarkConsumeSubmitted { request },
+        ) if pending == request => {
+            let operation_started = Instant::now();
+            Ok((
+                PhaseCustodySnapshot::PendingConsume {
+                    request,
+                    operation_started: Some(operation_started),
+                    deadline,
+                    expected_successor,
+                    submitted: true,
+                },
+                PhaseCustodyTransitionOutcome::ConsumeSubmitted(operation_started),
+            ))
+        }
+        (
+            PhaseCustodySnapshot::PendingConsume {
+                request: pending,
+                submitted: true,
+                ..
+            },
+            PhaseCustodyTransition::ReplaceActive {
+                request,
+                consumed,
+                deadline,
+            },
+        ) if pending == request && P::authority(&consumed).is_some() => {
+            Ok((PhaseCustodySnapshot::Active { consumed, deadline }, applied))
+        }
+        (
+            PhaseCustodySnapshot::Active {
+                consumed: active, ..
+            },
+            PhaseCustodyTransition::BeginRenewal {
+                consumed,
+                deadline,
+                request,
+            },
+        ) if active == consumed && P::authority(&consumed).is_some() => Ok((
+            PhaseCustodySnapshot::PendingRenew {
+                consumed,
+                deadline,
+                request,
+                submitted: false,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::PendingRenew {
+                consumed: active,
+                deadline,
+                request: pending,
+                submitted: false,
+            },
+            PhaseCustodyTransition::MarkRenewalSubmitted { consumed, request },
+        ) if active == consumed && pending == request => Ok((
+            PhaseCustodySnapshot::PendingRenew {
+                consumed,
+                deadline,
+                request,
+                submitted: true,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::PendingRenew {
+                consumed: active,
+                deadline,
+                request: pending,
+                submitted,
+            },
+            PhaseCustodyTransition::ClearExpiredUnsubmittedRenewal { consumed, request },
+        ) if active == consumed && pending == request => {
+            let state = if submitted {
+                PhaseCustodySnapshot::PendingRenew {
+                    consumed,
+                    deadline,
+                    request,
+                    submitted,
+                }
+            } else {
+                PhaseCustodySnapshot::Idle
+            };
+            Ok((state, applied))
+        }
+        (
+            PhaseCustodySnapshot::PendingRenew {
+                consumed: active,
+                request: pending,
+                submitted: true,
+                ..
+            },
+            PhaseCustodyTransition::SelectAfterRenewal {
+                consumed,
+                renewal,
+                request,
+                deadline,
+                expected_successor,
+            },
+        ) if active == consumed && pending == renewal => Ok((
+            PhaseCustodySnapshot::Selected {
+                request,
+                deadline: Some(deadline),
+                expected_successor,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::Active {
+                consumed: active, ..
+            },
+            PhaseCustodyTransition::RetainReadyFinal {
+                consumed,
+                deadline,
+                request,
+            },
+        ) if active == consumed
+            && P::authority(&consumed)
+                .is_some_and(|authority| P::ready_matches_authority(&request, authority)) =>
+        {
+            Ok((
+                PhaseCustodySnapshot::ReadyFinal {
+                    consumed,
+                    deadline,
+                    request,
+                },
+                applied,
+            ))
+        }
+        (
+            PhaseCustodySnapshot::ReadyFinal {
+                consumed: active,
+                request: ready,
+                ..
+            },
+            PhaseCustodyTransition::BeginFinalSubmission {
+                consumed,
+                deadline,
+                request,
+            },
+        ) if active == consumed && ready == request => Ok((
+            PhaseCustodySnapshot::PendingFinal {
+                consumed,
+                deadline,
+                request,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::PendingFinal {
+                consumed: active,
+                request: pending,
+                ..
+            },
+            PhaseCustodyTransition::BeginFinalQuarantine {
+                consumed,
+                request,
+                quarantine,
+            },
+        ) if active == consumed && pending == request => Ok((
+            PhaseCustodySnapshot::Quarantine {
+                request: quarantine,
+                submitted: false,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::Active {
+                consumed: active, ..
+            },
+            PhaseCustodyTransition::BeginActiveQuarantine {
+                consumed,
+                quarantine,
+            },
+        ) if active == consumed => Ok((
+            PhaseCustodySnapshot::Quarantine {
+                request: quarantine,
+                submitted: false,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::SettledFinalEvidence {
+                consumed: settled, ..
+            },
+            PhaseCustodyTransition::ResumeSettledFinalQuarantine {
+                consumed,
+                quarantine,
+            },
+        ) if settled == consumed => Ok((
+            PhaseCustodySnapshot::Quarantine {
+                request: quarantine,
+                submitted: false,
+            },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::PendingFinal {
+                consumed: active,
+                request: pending,
+                ..
+            },
+            PhaseCustodyTransition::SettleFinalEvidence {
+                consumed,
+                request,
+                kind,
+            },
+        ) if active == consumed && pending == request => Ok((
+            PhaseCustodySnapshot::SettledFinalEvidence { consumed, kind },
+            applied,
+        )),
+        (
+            PhaseCustodySnapshot::Selected {
+                request: selected, ..
+            },
+            PhaseCustodyTransition::ClearSelected { request },
+        ) if selected == request => Ok((PhaseCustodySnapshot::Idle, applied)),
+        (
+            PhaseCustodySnapshot::PendingConsume {
+                request: pending, ..
+            },
+            PhaseCustodyTransition::ClearConsume { request },
+        ) if pending == request => Ok((PhaseCustodySnapshot::Idle, applied)),
+        (
+            PhaseCustodySnapshot::PendingRenew {
+                consumed: active,
+                request: pending,
+                ..
+            },
+            PhaseCustodyTransition::ClearRenewal { consumed, request },
+        ) if active == consumed && pending == request => Ok((PhaseCustodySnapshot::Idle, applied)),
+        (
+            PhaseCustodySnapshot::Active {
+                consumed: active, ..
+            },
+            PhaseCustodyTransition::ClearActive { consumed },
+        ) if active == consumed => Ok((PhaseCustodySnapshot::Idle, applied)),
+        (
+            PhaseCustodySnapshot::ReadyFinal {
+                consumed: active,
+                request: ready,
+                ..
+            },
+            PhaseCustodyTransition::ClearReadyFinal { consumed, request },
+        ) if active == consumed && ready == request => Ok((PhaseCustodySnapshot::Idle, applied)),
+        (
+            PhaseCustodySnapshot::PendingFinal {
+                consumed: active,
+                request: pending,
+                ..
+            },
+            PhaseCustodyTransition::ClearFinal { consumed, request },
+        ) if active == consumed && pending == request => Ok((PhaseCustodySnapshot::Idle, applied)),
+        _ => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
+    }
+}
+
+trait AutonomousPhaseAdapter: Clone + Copy + Send + Sync + 'static {
+    type Consumed: Clone + Eq + Send + 'static;
+    type Authority: Sync;
+    type Consume: Clone + Eq + Send + 'static;
+    type Renewal: Clone + Eq + Send + 'static;
+    type ReadyFinal: Clone + Eq + Send + 'static;
+    type Quarantine: Clone + Eq + Send + 'static;
+    type Repository: ?Sized + fmt::Debug + Send + Sync + 'static;
+    type Lease: Send;
+
+    const PHASE: AutonomousWorkflowPhase;
+    const QUEUE: AutonomousWorkflowQueue;
+    const MAX_RENEWAL_MILLIS: i64;
+
+    fn authority(consumed: &Self::Consumed) -> Option<&Self::Authority>;
+    fn claim_interval(authority: &Self::Authority) -> (UnixMillis, UnixMillis);
+    fn validated_interval(consumed: &Self::Consumed) -> (UnixMillis, UnixMillis);
+    fn consume_request(consumed: &Self::Consumed) -> Self::Consume;
+    fn consumed_matches(
+        consumed: &Self::Consumed,
+        request: &Self::Consume,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+    ) -> bool;
+    fn make_renewal(
+        authority: &Self::Authority,
+        duration_ms: i64,
+    ) -> Result<Self::Renewal, AutonomousWorkflowLeaseError>;
+    fn submit_renewal(
+        repository: &Self::Repository,
+        request: Self::Renewal,
+    ) -> PhaseFuture<'_, Result<RenewalSubmission, AutonomousWorkflowLeaseError>>;
+    fn consume_selected(
+        selections: &dyn LogicalWorkSelectionRepository,
+        request: Self::Consume,
+    ) -> PhaseFuture<'_, Result<Self::Consumed, automata_ci_store::LogicalWorkSelectionStoreError>>;
+    fn ready_matches_authority(request: &Self::ReadyFinal, authority: &Self::Authority) -> bool;
+    fn quarantine_request(
+        consumed: Self::Consumed,
+        kind: LogicalWorkQuarantineKind,
+    ) -> Self::Quarantine;
+
+    fn transition(
+        custody: &AutonomousWorkflowCustody,
+        transition: PhaseCustodyTransition<Self>,
+    ) -> Result<PhaseCustodyTransitionOutcome, AutonomousWorkflowLeaseError>;
+    fn snapshot(custody: &AutonomousWorkflowCustody) -> Option<PhaseCustodySnapshot<Self>>;
+
+    fn repository(service: &AutonomousWorkflowService) -> Arc<Self::Repository>;
+    fn continue_consume<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Consume,
+        deadline: AutonomousWorkflowDeadline,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>>;
+    fn submit_quarantine<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Quarantine,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>>;
+
+    fn lease_from_core(core: PhaseLeaseCore<Self>) -> Self::Lease;
+    fn into_core(lease: Self::Lease) -> PhaseLeaseCore<Self>;
+    fn execute<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a mut Self::Lease,
+        shutdown: CancellationToken,
+        deadline: AutonomousWorkflowDeadline,
+    ) -> AutonomousWorkflowExecutionFuture<'a>;
+    fn submit_final<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a Self::Lease,
+    ) -> AutonomousWorkflowExecutionFuture<'a>;
+}
+
+fn expect_applied(
+    outcome: &PhaseCustodyTransitionOutcome,
+) -> Result<(), AutonomousWorkflowLeaseError> {
+    match outcome {
+        PhaseCustodyTransitionOutcome::Applied => Ok(()),
+        PhaseCustodyTransitionOutcome::ConsumeSubmitted(_) => {
+            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
+        }
+    }
+}
+
+fn apply_service_transition<P: AutonomousPhaseAdapter>(
+    custody: &AutonomousWorkflowCustody,
+    transition: PhaseCustodyTransition<P>,
+) -> Result<(), AutonomousWorkflowError> {
+    let outcome = P::transition(custody, transition)
+        .map_err(|_| AutonomousWorkflowError::AuthorityRejected)?;
+    expect_applied(&outcome).map_err(|_| AutonomousWorkflowError::AuthorityRejected)
+}
+
+struct PhaseLeaseCore<P: AutonomousPhaseAdapter> {
     selections: Arc<dyn LogicalWorkSelectionRepository>,
-    preparations: Arc<dyn LogicalActivationPreparationStore>,
-    consumed: ConsumedSelectedLogicalJobOrchestration,
+    repository: Arc<P::Repository>,
+    consumed: P::Consumed,
     deadline: AutonomousWorkflowDeadline,
     custody: Arc<AutonomousWorkflowCustody>,
+}
+
+impl<P: AutonomousPhaseAdapter> PhaseLeaseCore<P> {
+    fn new(
+        selections: Arc<dyn LogicalWorkSelectionRepository>,
+        repository: Arc<P::Repository>,
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        custody: Arc<AutonomousWorkflowCustody>,
+    ) -> Self {
+        Self {
+            selections,
+            repository,
+            consumed,
+            deadline,
+            custody,
+        }
+    }
+
+    fn authority(&self) -> &P::Authority {
+        P::authority(&self.consumed)
+            .unwrap_or_else(|| unreachable!("lease construction fixes the authority phase"))
+    }
+
+    const fn deadline(&self) -> &AutonomousWorkflowDeadline {
+        &self.deadline
+    }
+
+    fn before_io(&self, shutdown: &CancellationToken) -> Result<(), AutonomousWorkflowLeaseError> {
+        self.deadline.checkpoint(shutdown)
+    }
+
+    fn retain_ready_final(
+        &self,
+        request: P::ReadyFinal,
+    ) -> Result<(), AutonomousWorkflowLeaseError> {
+        if !P::ready_matches_authority(&request, self.authority()) {
+            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
+        }
+        expect_applied(&P::transition(
+            &self.custody,
+            PhaseCustodyTransition::RetainReadyFinal {
+                consumed: self.consumed.clone(),
+                deadline: self.deadline.clone(),
+                request,
+            },
+        )?)
+    }
+
+    fn pending_final_request(&self) -> Result<P::ReadyFinal, AutonomousWorkflowLeaseError> {
+        let Some(PhaseCustodySnapshot::PendingFinal {
+            consumed, request, ..
+        }) = P::snapshot(&self.custody)
+        else {
+            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
+        };
+        if consumed == self.consumed && P::ready_matches_authority(&request, self.authority()) {
+            Ok(request)
+        } else {
+            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
+        }
+    }
+
+    async fn renew(
+        &mut self,
+        shutdown: &CancellationToken,
+    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
+        self.before_io(shutdown)?;
+        let (claimed_at, expires_at) = P::claim_interval(self.authority());
+        let Some(duration_ms) = extending_renewal_duration(
+            &self.deadline,
+            P::MAX_RENEWAL_MILLIS,
+            claimed_at,
+            expires_at,
+        )?
+        else {
+            return self.revalidate(shutdown).await;
+        };
+        let request = P::make_renewal(self.authority(), duration_ms)?;
+        expect_applied(&P::transition(
+            &self.custody,
+            PhaseCustodyTransition::BeginRenewal {
+                consumed: self.consumed.clone(),
+                deadline: self.deadline.clone(),
+                request: request.clone(),
+            },
+        )?)?;
+        let submission = async {
+            expect_applied(&P::transition(
+                &self.custody,
+                PhaseCustodyTransition::MarkRenewalSubmitted {
+                    consumed: self.consumed.clone(),
+                    request: request.clone(),
+                },
+            )?)?;
+            Ok::<_, AutonomousWorkflowLeaseError>(
+                P::submit_renewal(self.repository.as_ref(), request.clone()).await,
+            )
+        };
+        let result = match await_bounded(shutdown, &self.deadline, submission).await {
+            Ok(Ok(result)) => match result {
+                Ok(result) => result,
+                Err(error) => {
+                    expect_applied(&P::transition(
+                        &self.custody,
+                        PhaseCustodyTransition::ClearRenewal {
+                            consumed: self.consumed.clone(),
+                            request,
+                        },
+                    )?)?;
+                    return Err(error);
+                }
+            },
+            Ok(Err(error)) | Err(error) => return Err(error),
+        };
+        let (outcome, expected_successor) = match result {
+            RenewalSubmission::Acknowledged(successor) => {
+                (AutonomousWorkflowRenewalOutcome::Renewed, Some(successor))
+            }
+            RenewalSubmission::Operation => (AutonomousWorkflowRenewalOutcome::Reconciled, None),
+        };
+        let reconcile = P::consume_request(&self.consumed);
+        expect_applied(&P::transition(
+            &self.custody,
+            PhaseCustodyTransition::SelectAfterRenewal {
+                consumed: self.consumed.clone(),
+                renewal: request,
+                request: reconcile.clone(),
+                deadline: self.deadline.clone(),
+                expected_successor,
+            },
+        )?)?;
+        self.reconcile(reconcile, expected_successor, shutdown)
+            .await?;
+        Ok(outcome)
+    }
+
+    async fn revalidate(
+        &mut self,
+        shutdown: &CancellationToken,
+    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
+        let request = P::consume_request(&self.consumed);
+        expect_applied(&P::transition(
+            &self.custody,
+            PhaseCustodyTransition::BeginRevalidation {
+                consumed: self.consumed.clone(),
+                deadline: self.deadline.clone(),
+                request: request.clone(),
+            },
+        )?)?;
+        self.reconcile(request, None, shutdown).await?;
+        Ok(AutonomousWorkflowRenewalOutcome::Revalidated)
+    }
+
+    async fn reconcile(
+        &mut self,
+        request: P::Consume,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+        shutdown: &CancellationToken,
+    ) -> Result<(), AutonomousWorkflowLeaseError> {
+        if let Err(error) = self.deadline.checkpoint(shutdown) {
+            if error != AutonomousWorkflowLeaseError::Shutdown {
+                expect_applied(&P::transition(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearSelected {
+                        request: request.clone(),
+                    },
+                )?)?;
+            }
+            return Err(error);
+        }
+        expect_applied(&P::transition(
+            &self.custody,
+            PhaseCustodyTransition::RetainReadyConsume {
+                request: request.clone(),
+                deadline: self.deadline.clone(),
+                expected_successor,
+            },
+        )?)?;
+        let submitted_request = request.clone();
+        let submission = async {
+            let operation_started = match P::transition(
+                &self.custody,
+                PhaseCustodyTransition::MarkConsumeSubmitted {
+                    request: submitted_request.clone(),
+                },
+            )? {
+                PhaseCustodyTransitionOutcome::ConsumeSubmitted(started) => started,
+                PhaseCustodyTransitionOutcome::Applied => {
+                    return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
+                }
+            };
+            let result = P::consume_selected(self.selections.as_ref(), submitted_request).await;
+            Ok::<_, AutonomousWorkflowLeaseError>((operation_started, result))
+        };
+        let (operation_started, consumed) =
+            await_bounded(shutdown, &self.deadline, submission).await??;
+        let consumed = match consumed {
+            Ok(consumed) => consumed,
+            Err(error) if is_repository_unavailable(&error) => {
+                return Err(AutonomousWorkflowLeaseError::Unavailable);
+            }
+            Err(error) => {
+                expect_applied(&P::transition(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearConsume {
+                        request: request.clone(),
+                    },
+                )?)?;
+                return Err(map_reconcile_error(&error));
+            }
+        };
+        if !P::consumed_matches(&consumed, &request, expected_successor) {
+            expect_applied(&P::transition(
+                &self.custody,
+                PhaseCustodyTransition::ClearConsume {
+                    request: request.clone(),
+                },
+            )?)?;
+            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
+        }
+        self.replace(request, consumed, operation_started)
+    }
+
+    fn replace(
+        &mut self,
+        request: P::Consume,
+        consumed: P::Consumed,
+        operation_started: Instant,
+    ) -> Result<(), AutonomousWorkflowLeaseError> {
+        let (validated_at, expires_at) = P::validated_interval(&consumed);
+        if let Err(error) = self
+            .deadline
+            .tighten(operation_started, validated_at, expires_at)
+        {
+            expect_applied(&P::transition(
+                &self.custody,
+                PhaseCustodyTransition::ClearConsume { request },
+            )?)?;
+            return Err(error);
+        }
+        expect_applied(&P::transition(
+            &self.custody,
+            PhaseCustodyTransition::ReplaceActive {
+                request,
+                consumed: consumed.clone(),
+                deadline: self.deadline.clone(),
+            },
+        )?)?;
+        self.consumed = consumed;
+        Ok(())
+    }
+}
+
+fn ready_phase_final<P: AutonomousPhaseAdapter>(
+    custody: &AutonomousWorkflowCustody,
+    consumed: &P::Consumed,
+) -> Option<(AutonomousWorkflowDeadline, P::ReadyFinal)> {
+    match P::snapshot(custody) {
+        Some(PhaseCustodySnapshot::ReadyFinal {
+            consumed: active,
+            deadline,
+            request,
+        }) if &active == consumed => Some((deadline, request)),
+        _ => None,
+    }
+}
+
+/// Worker-owned capability for one consumed preparation claim.
+pub struct AutonomousPreparationLease {
+    core: PhaseLeaseCore<PreparationPhase>,
 }
 
 impl fmt::Debug for AutonomousPreparationLease {
@@ -1506,43 +1802,26 @@ impl AutonomousPreparationLease {
     /// Returns the current exact rich preparation authority.
     #[must_use]
     pub fn authority(&self) -> &ClaimedLogicalActivationPreparation {
-        let ConsumedLogicalJobOrchestrationAuthority::Preparation(authority) =
-            self.consumed.authority()
-        else {
-            unreachable!("lease construction fixes the authority phase")
-        };
-        authority
+        self.core.authority()
     }
 
     pub(crate) fn retain_ready_final(
         &self,
         request: ReadyLogicalActivationPreparation,
     ) -> Result<(), AutonomousWorkflowLeaseError> {
-        if !request.matches_authority(self.authority()) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        self.custody.retain_ready_preparation_final(
-            self.consumed.clone(),
-            self.deadline.clone(),
-            request,
-        )
+        self.core.retain_ready_final(request)
     }
 
     pub(crate) fn pending_final_request(
         &self,
     ) -> Result<ReadyLogicalActivationPreparation, AutonomousWorkflowLeaseError> {
-        let request = self.custody.pending_preparation_final(&self.consumed)?;
-        if request.matches_authority(self.authority()) {
-            Ok(request)
-        } else {
-            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
-        }
+        self.core.pending_final_request()
     }
 
     /// Returns the cumulative monotonic phase deadline.
     #[must_use]
     pub const fn deadline(&self) -> &AutonomousWorkflowDeadline {
-        &self.deadline
+        self.core.deadline()
     }
 
     /// Must be called immediately before each blob/provider I/O or mutation.
@@ -1554,7 +1833,7 @@ impl AutonomousPreparationLease {
         &self,
         shutdown: &CancellationToken,
     ) -> Result<(), AutonomousWorkflowLeaseError> {
-        self.deadline.checkpoint(shutdown)
+        self.core.before_io(shutdown)
     }
 
     /// Renews exact preparation authority when it extends custody, otherwise revalidates it.
@@ -1567,165 +1846,13 @@ impl AutonomousPreparationLease {
         &mut self,
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
-        self.before_io(shutdown)?;
-        let Some(duration_ms) = extending_renewal_duration(
-            &self.deadline,
-            MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS,
-            self.authority().claim().claimed_at(),
-            self.authority().claim().expires_at(),
-        )?
-        else {
-            return self.revalidate(shutdown).await;
-        };
-        let request =
-            RenewLogicalActivationPreparation::new(self.authority().claim().clone(), duration_ms)
-                .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
-        self.custody.begin_preparation_renewal(
-            self.consumed.clone(),
-            self.deadline.clone(),
-            request.clone(),
-        )?;
-        let submission = async {
-            self.custody
-                .mark_preparation_renewal_submitted(&self.consumed, &request)?;
-            Ok::<_, AutonomousWorkflowLeaseError>(
-                self.preparations
-                    .renew_logical_activation_preparation(request.clone())
-                    .await,
-            )
-        };
-        let result = await_bounded(shutdown, &self.deadline, submission).await??;
-        let (outcome, expected_successor) = match result {
-            Ok(acknowledgement) if acknowledgement.request() == &request => (
-                AutonomousWorkflowRenewalOutcome::Renewed,
-                Some(ExpectedRenewalSuccessor::new(
-                    AutonomousWorkflowPhase::Preparation,
-                    acknowledgement.successor_generation().get(),
-                    acknowledgement.successor_claimed_at(),
-                    acknowledgement.successor_expires_at(),
-                )),
-            ),
-            Err(LogicalActivationPreparationStoreError::Store(StoreError::Operation(_))) => {
-                (AutonomousWorkflowRenewalOutcome::Reconciled, None)
-            }
-            Ok(_) | Err(_) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-            }
-        };
-        let reconcile =
-            ConsumeSelectedLogicalJobOrchestration::new(self.consumed.selected().clone());
-        self.custody
-            .set_orchestration(OrchestrationCustody::Selected {
-                request: Box::new(reconcile.clone()),
-                deadline: Some(self.deadline.clone()),
-                expected_successor,
-            });
-        self.reconcile(reconcile, expected_successor, shutdown)
-            .await?;
-        Ok(outcome)
-    }
-
-    async fn revalidate(
-        &mut self,
-        shutdown: &CancellationToken,
-    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
-        let request = ConsumeSelectedLogicalJobOrchestration::new(self.consumed.selected().clone());
-        self.custody.begin_orchestration_revalidation(
-            &self.consumed,
-            self.deadline.clone(),
-            request.clone(),
-        )?;
-        self.reconcile(request, None, shutdown).await?;
-        Ok(AutonomousWorkflowRenewalOutcome::Revalidated)
-    }
-
-    async fn reconcile(
-        &mut self,
-        request: ConsumeSelectedLogicalJobOrchestration,
-        expected_successor: Option<ExpectedRenewalSuccessor>,
-        shutdown: &CancellationToken,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let expected_selected = request.selected().clone();
-        if let Err(error) = self.deadline.checkpoint(shutdown) {
-            if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-            }
-            return Err(error);
-        }
-        self.custody.retain_ready_orchestration_consume(
-            request.clone(),
-            Some(self.deadline.clone()),
-            expected_successor,
-        )?;
-        let submission = async {
-            let operation_started = self
-                .custody
-                .mark_orchestration_consume_submitted(&request)?;
-            let result = self
-                .selections
-                .consume_selected_logical_job_orchestration(request)
-                .await;
-            Ok::<_, AutonomousWorkflowLeaseError>((operation_started, result))
-        };
-        let (operation_started, consumed) =
-            await_bounded(shutdown, &self.deadline, submission).await??;
-        let consumed = match consumed {
-            Ok(consumed) => consumed,
-            Err(error) if is_repository_unavailable(&error) => {
-                return Err(AutonomousWorkflowLeaseError::Unavailable);
-            }
-            Err(error) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return Err(map_reconcile_error(&error));
-            }
-        };
-        if consumed.selected() != &expected_selected {
-            self.custody.set_orchestration(OrchestrationCustody::Idle);
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        if !matches!(
-            consumed.authority(),
-            ConsumedLogicalJobOrchestrationAuthority::Preparation(_)
-        ) || expected_successor
-            .is_some_and(|expected| !expected.matches_orchestration(&consumed))
-        {
-            self.custody.set_orchestration(OrchestrationCustody::Idle);
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        self.replace(consumed, operation_started)
-    }
-
-    fn replace(
-        &mut self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        operation_started: Instant,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let (validated_at, expires_at) = orchestration_interval(&consumed);
-        if let Err(error) = self
-            .deadline
-            .tighten(operation_started, validated_at, expires_at)
-        {
-            self.custody.set_orchestration(OrchestrationCustody::Idle);
-            return Err(error);
-        }
-        self.consumed = consumed.clone();
-        self.custody
-            .set_orchestration(OrchestrationCustody::Active {
-                consumed: Box::new(consumed),
-                deadline: self.deadline.clone(),
-            });
-        Ok(())
+        self.core.renew(shutdown).await
     }
 }
 
 /// Worker-owned capability for one consumed activation claim.
 pub struct AutonomousActivationLease {
-    selections: Arc<dyn LogicalWorkSelectionRepository>,
-    activations: Arc<dyn LogicalActivationRepository>,
-    consumed: ConsumedSelectedLogicalJobOrchestration,
-    deadline: AutonomousWorkflowDeadline,
-    custody: Arc<AutonomousWorkflowCustody>,
+    core: PhaseLeaseCore<ActivationPhase>,
 }
 
 impl fmt::Debug for AutonomousActivationLease {
@@ -1738,43 +1865,26 @@ impl AutonomousActivationLease {
     /// Returns the current exact rich activation authority.
     #[must_use]
     pub fn authority(&self) -> &ClaimedLogicalJobActivation {
-        let ConsumedLogicalJobOrchestrationAuthority::Activation(authority) =
-            self.consumed.authority()
-        else {
-            unreachable!("lease construction fixes the authority phase")
-        };
-        authority
+        self.core.authority()
     }
 
     pub(crate) fn retain_ready_final(
         &self,
         request: ReadyLogicalJobActivation,
     ) -> Result<(), AutonomousWorkflowLeaseError> {
-        if !request.matches_authority(self.authority()) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        self.custody.retain_ready_activation_final(
-            self.consumed.clone(),
-            self.deadline.clone(),
-            request,
-        )
+        self.core.retain_ready_final(request)
     }
 
     pub(crate) fn pending_final_request(
         &self,
     ) -> Result<ReadyLogicalJobActivation, AutonomousWorkflowLeaseError> {
-        let request = self.custody.pending_activation_final(&self.consumed)?;
-        if request.matches_authority(self.authority()) {
-            Ok(request)
-        } else {
-            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
-        }
+        self.core.pending_final_request()
     }
 
     /// Returns the cumulative monotonic phase deadline.
     #[must_use]
     pub const fn deadline(&self) -> &AutonomousWorkflowDeadline {
-        &self.deadline
+        self.core.deadline()
     }
 
     /// Must be called immediately before each blob/provider I/O or mutation.
@@ -1786,7 +1896,7 @@ impl AutonomousActivationLease {
         &self,
         shutdown: &CancellationToken,
     ) -> Result<(), AutonomousWorkflowLeaseError> {
-        self.deadline.checkpoint(shutdown)
+        self.core.before_io(shutdown)
     }
 
     /// Renews exact activation authority when it extends custody, otherwise revalidates it.
@@ -1799,164 +1909,13 @@ impl AutonomousActivationLease {
         &mut self,
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
-        self.before_io(shutdown)?;
-        let Some(duration_ms) = extending_renewal_duration(
-            &self.deadline,
-            MAX_LOGICAL_ACTIVATION_CLAIM_MILLIS,
-            self.authority().claim().claimed_at(),
-            self.authority().claim().expires_at(),
-        )?
-        else {
-            return self.revalidate(shutdown).await;
-        };
-        let request = RenewLogicalJobActivation::new(self.authority().claim().clone(), duration_ms)
-            .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
-        self.custody.begin_activation_renewal(
-            self.consumed.clone(),
-            self.deadline.clone(),
-            request.clone(),
-        )?;
-        let submission = async {
-            self.custody
-                .mark_activation_renewal_submitted(&self.consumed, &request)?;
-            Ok::<_, AutonomousWorkflowLeaseError>(
-                self.activations
-                    .renew_logical_job_activation(request.clone())
-                    .await,
-            )
-        };
-        let result = await_bounded(shutdown, &self.deadline, submission).await??;
-        let (outcome, expected_successor) = match result {
-            Ok(acknowledgement) if acknowledgement.request() == &request => (
-                AutonomousWorkflowRenewalOutcome::Renewed,
-                Some(ExpectedRenewalSuccessor::new(
-                    AutonomousWorkflowPhase::Activation,
-                    acknowledgement.successor_generation().get(),
-                    acknowledgement.successor_claimed_at(),
-                    acknowledgement.successor_expires_at(),
-                )),
-            ),
-            Err(LogicalActivationStoreError::Store(StoreError::Operation(_))) => {
-                (AutonomousWorkflowRenewalOutcome::Reconciled, None)
-            }
-            Ok(_) | Err(_) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-            }
-        };
-        let reconcile =
-            ConsumeSelectedLogicalJobOrchestration::new(self.consumed.selected().clone());
-        self.custody
-            .set_orchestration(OrchestrationCustody::Selected {
-                request: Box::new(reconcile.clone()),
-                deadline: Some(self.deadline.clone()),
-                expected_successor,
-            });
-        self.reconcile(reconcile, expected_successor, shutdown)
-            .await?;
-        Ok(outcome)
-    }
-
-    async fn revalidate(
-        &mut self,
-        shutdown: &CancellationToken,
-    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
-        let request = ConsumeSelectedLogicalJobOrchestration::new(self.consumed.selected().clone());
-        self.custody.begin_orchestration_revalidation(
-            &self.consumed,
-            self.deadline.clone(),
-            request.clone(),
-        )?;
-        self.reconcile(request, None, shutdown).await?;
-        Ok(AutonomousWorkflowRenewalOutcome::Revalidated)
-    }
-
-    async fn reconcile(
-        &mut self,
-        request: ConsumeSelectedLogicalJobOrchestration,
-        expected_successor: Option<ExpectedRenewalSuccessor>,
-        shutdown: &CancellationToken,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let expected_selected = request.selected().clone();
-        if let Err(error) = self.deadline.checkpoint(shutdown) {
-            if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-            }
-            return Err(error);
-        }
-        self.custody.retain_ready_orchestration_consume(
-            request.clone(),
-            Some(self.deadline.clone()),
-            expected_successor,
-        )?;
-        let submission = async {
-            let operation_started = self
-                .custody
-                .mark_orchestration_consume_submitted(&request)?;
-            let result = self
-                .selections
-                .consume_selected_logical_job_orchestration(request)
-                .await;
-            Ok::<_, AutonomousWorkflowLeaseError>((operation_started, result))
-        };
-        let (operation_started, consumed) =
-            await_bounded(shutdown, &self.deadline, submission).await??;
-        let consumed = match consumed {
-            Ok(consumed) => consumed,
-            Err(error) if is_repository_unavailable(&error) => {
-                return Err(AutonomousWorkflowLeaseError::Unavailable);
-            }
-            Err(error) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return Err(map_reconcile_error(&error));
-            }
-        };
-        if consumed.selected() != &expected_selected {
-            self.custody.set_orchestration(OrchestrationCustody::Idle);
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        if !matches!(
-            consumed.authority(),
-            ConsumedLogicalJobOrchestrationAuthority::Activation(_)
-        ) || expected_successor
-            .is_some_and(|expected| !expected.matches_orchestration(&consumed))
-        {
-            self.custody.set_orchestration(OrchestrationCustody::Idle);
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        self.replace(consumed, operation_started)
-    }
-
-    fn replace(
-        &mut self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        operation_started: Instant,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let (validated_at, expires_at) = orchestration_interval(&consumed);
-        if let Err(error) = self
-            .deadline
-            .tighten(operation_started, validated_at, expires_at)
-        {
-            self.custody.set_orchestration(OrchestrationCustody::Idle);
-            return Err(error);
-        }
-        self.consumed = consumed.clone();
-        self.custody
-            .set_orchestration(OrchestrationCustody::Active {
-                consumed: Box::new(consumed),
-                deadline: self.deadline.clone(),
-            });
-        Ok(())
+        self.core.renew(shutdown).await
     }
 }
 
 /// Worker-owned capability for one consumed materialization claim.
 pub struct AutonomousMaterializationLease {
-    selections: Arc<dyn LogicalWorkSelectionRepository>,
-    materializations: Arc<dyn LogicalMaterializationRepository>,
-    consumed: ConsumedSelectedLogicalInstanceMaterialization,
-    deadline: AutonomousWorkflowDeadline,
-    custody: Arc<AutonomousWorkflowCustody>,
+    core: PhaseLeaseCore<MaterializationPhase>,
 }
 
 impl fmt::Debug for AutonomousMaterializationLease {
@@ -1969,38 +1928,26 @@ impl AutonomousMaterializationLease {
     /// Returns the current exact rich materialization authority.
     #[must_use]
     pub const fn authority(&self) -> &ClaimedLogicalInstanceMaterialization {
-        self.consumed.authority()
+        self.core.consumed.authority()
     }
 
     pub(crate) fn retain_ready_final(
         &self,
         request: ReadyLogicalInstanceMaterialization,
     ) -> Result<(), AutonomousWorkflowLeaseError> {
-        if !request.matches_authority(self.authority()) {
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-        }
-        self.custody.retain_ready_materialization_final(
-            self.consumed.clone(),
-            self.deadline.clone(),
-            request,
-        )
+        self.core.retain_ready_final(request)
     }
 
     pub(crate) fn pending_final_request(
         &self,
     ) -> Result<ReadyLogicalInstanceMaterialization, AutonomousWorkflowLeaseError> {
-        let request = self.custody.pending_materialization_final(&self.consumed)?;
-        if request.matches_authority(self.authority()) {
-            Ok(request)
-        } else {
-            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
-        }
+        self.core.pending_final_request()
     }
 
     /// Returns the cumulative monotonic phase deadline.
     #[must_use]
     pub const fn deadline(&self) -> &AutonomousWorkflowDeadline {
-        &self.deadline
+        self.core.deadline()
     }
 
     /// Must be called immediately before each blob/provider I/O or mutation.
@@ -2012,7 +1959,7 @@ impl AutonomousMaterializationLease {
         &self,
         shutdown: &CancellationToken,
     ) -> Result<(), AutonomousWorkflowLeaseError> {
-        self.deadline.checkpoint(shutdown)
+        self.core.before_io(shutdown)
     }
 
     /// Renews exact materialization authority when it extends custody, otherwise revalidates it.
@@ -2025,156 +1972,720 @@ impl AutonomousMaterializationLease {
         &mut self,
         shutdown: &CancellationToken,
     ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
-        self.before_io(shutdown)?;
-        let Some(duration_ms) = extending_renewal_duration(
-            &self.deadline,
-            MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS,
-            self.authority().claim().claimed_at(),
-            self.authority().claim().expires_at(),
-        )?
-        else {
-            return self.revalidate(shutdown).await;
-        };
-        let request =
-            RenewLogicalInstanceMaterialization::new(self.authority().claim().clone(), duration_ms)
-                .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)?;
-        self.custody.begin_materialization_renewal(
-            self.consumed.clone(),
-            self.deadline.clone(),
-            request.clone(),
-        )?;
-        let submission = async {
-            self.custody
-                .mark_materialization_renewal_submitted(&self.consumed, &request)?;
-            Ok::<_, AutonomousWorkflowLeaseError>(
-                self.materializations
-                    .renew_logical_instance_materialization(request.clone())
-                    .await,
-            )
-        };
-        let result = await_bounded(shutdown, &self.deadline, submission).await??;
-        let (outcome, expected_successor) = match result {
-            Ok(acknowledgement) if acknowledgement.request() == &request => (
-                AutonomousWorkflowRenewalOutcome::Renewed,
-                Some(ExpectedRenewalSuccessor::new(
-                    AutonomousWorkflowPhase::Materialization,
-                    acknowledgement.successor_generation().get(),
-                    acknowledgement.successor_claimed_at(),
-                    acknowledgement.successor_expires_at(),
-                )),
-            ),
-            Err(LogicalMaterializationStoreError::Store(StoreError::Operation(_))) => {
-                (AutonomousWorkflowRenewalOutcome::Reconciled, None)
-            }
-            Ok(_) | Err(_) => {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-                return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
-            }
-        };
-        let reconcile =
-            ConsumeSelectedLogicalInstanceMaterialization::new(self.consumed.selected().clone());
-        self.custody
-            .set_materialization(MaterializationCustody::Selected {
-                request: Box::new(reconcile.clone()),
-                deadline: Some(self.deadline.clone()),
-                expected_successor,
-            });
-        self.reconcile(reconcile, expected_successor, shutdown)
-            .await?;
-        Ok(outcome)
+        self.core.renew(shutdown).await
     }
+}
 
-    async fn revalidate(
-        &mut self,
-        shutdown: &CancellationToken,
-    ) -> Result<AutonomousWorkflowRenewalOutcome, AutonomousWorkflowLeaseError> {
-        let request =
-            ConsumeSelectedLogicalInstanceMaterialization::new(self.consumed.selected().clone());
-        self.custody.begin_materialization_revalidation(
-            &self.consumed,
-            self.deadline.clone(),
-            request.clone(),
-        )?;
-        self.reconcile(request, None, shutdown).await?;
-        Ok(AutonomousWorkflowRenewalOutcome::Revalidated)
-    }
+trait OrchestrationPhaseAdapter:
+    AutonomousPhaseAdapter<
+        Consumed = ConsumedSelectedLogicalJobOrchestration,
+        Consume = ConsumeSelectedLogicalJobOrchestration,
+        Quarantine = QuarantineLogicalJobOrchestration,
+    >
+{
+    fn decode_specific(state: OrchestrationCustody) -> Option<PhaseCustodySnapshot<Self>>;
+    fn encode_specific(state: PhaseCustodySnapshot<Self>) -> OrchestrationCustody;
+}
 
-    async fn reconcile(
-        &mut self,
-        request: ConsumeSelectedLogicalInstanceMaterialization,
-        expected_successor: Option<ExpectedRenewalSuccessor>,
-        shutdown: &CancellationToken,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let expected_selected = request.selected().clone();
-        if let Err(error) = self.deadline.checkpoint(shutdown) {
-            if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-            }
-            return Err(error);
-        }
-        self.custody.retain_ready_materialization_consume(
-            request.clone(),
-            Some(self.deadline.clone()),
+fn decode_orchestration_phase<P: OrchestrationPhaseAdapter>(
+    state: OrchestrationCustody,
+) -> Option<PhaseCustodySnapshot<P>> {
+    match state {
+        OrchestrationCustody::Idle => Some(PhaseCustodySnapshot::Idle),
+        OrchestrationCustody::Selected {
+            request,
+            deadline,
             expected_successor,
-        )?;
-        let submission = async {
-            let operation_started = self
-                .custody
-                .mark_materialization_consume_submitted(&request)?;
-            let result = self
-                .selections
-                .consume_selected_logical_instance_materialization(request)
-                .await;
-            Ok::<_, AutonomousWorkflowLeaseError>((operation_started, result))
-        };
-        let (operation_started, consumed) =
-            await_bounded(shutdown, &self.deadline, submission).await??;
-        let consumed = match consumed {
-            Ok(consumed) => consumed,
-            Err(error) if is_repository_unavailable(&error) => {
-                return Err(AutonomousWorkflowLeaseError::Unavailable);
-            }
-            Err(error) => {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-                return Err(map_reconcile_error(&error));
-            }
-        };
-        if consumed.selected() != &expected_selected
-            || expected_successor
-                .is_some_and(|expected| !expected.matches_materialization(&consumed))
-        {
-            self.custody
-                .set_materialization(MaterializationCustody::Idle);
-            return Err(AutonomousWorkflowLeaseError::AuthorityRejected);
+        } => Some(PhaseCustodySnapshot::Selected {
+            request: *request,
+            deadline,
+            expected_successor,
+        }),
+        OrchestrationCustody::PendingConsume {
+            request,
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        } => Some(PhaseCustodySnapshot::PendingConsume {
+            request: *request,
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        }),
+        OrchestrationCustody::Quarantine { request, submitted } => {
+            Some(PhaseCustodySnapshot::Quarantine {
+                request: *request,
+                submitted,
+            })
         }
-        self.replace(consumed, operation_started)
+        specific => P::decode_specific(specific),
+    }
+}
+
+fn encode_orchestration_phase<P: OrchestrationPhaseAdapter>(
+    state: PhaseCustodySnapshot<P>,
+) -> OrchestrationCustody {
+    match state {
+        PhaseCustodySnapshot::Idle => OrchestrationCustody::Idle,
+        PhaseCustodySnapshot::Selected {
+            request,
+            deadline,
+            expected_successor,
+        } => OrchestrationCustody::Selected {
+            request: Box::new(request),
+            deadline,
+            expected_successor,
+        },
+        PhaseCustodySnapshot::PendingConsume {
+            request,
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        } => OrchestrationCustody::PendingConsume {
+            request: Box::new(request),
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        },
+        PhaseCustodySnapshot::Quarantine { request, submitted } => {
+            OrchestrationCustody::Quarantine {
+                request: Box::new(request),
+                submitted,
+            }
+        }
+        specific => P::encode_specific(specific),
+    }
+}
+
+fn transition_orchestration_phase<P: OrchestrationPhaseAdapter>(
+    custody: &AutonomousWorkflowCustody,
+    transition: PhaseCustodyTransition<P>,
+) -> Result<PhaseCustodyTransitionOutcome, AutonomousWorkflowLeaseError> {
+    let mut state = custody
+        .orchestration
+        .lock()
+        .expect("custody lock is not poisoned");
+    let current = decode_orchestration_phase::<P>(state.clone())
+        .ok_or(AutonomousWorkflowLeaseError::AuthorityRejected)?;
+    let (next, outcome) = transition_phase_custody(current, transition)?;
+    *state = encode_orchestration_phase::<P>(next);
+    Ok(outcome)
+}
+
+impl OrchestrationPhaseAdapter for PreparationPhase {
+    fn decode_specific(state: OrchestrationCustody) -> Option<PhaseCustodySnapshot<Self>> {
+        match state {
+            OrchestrationCustody::Preparation(state) => Some(*state),
+            _ => None,
+        }
     }
 
-    fn replace(
-        &mut self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        operation_started: Instant,
-    ) -> Result<(), AutonomousWorkflowLeaseError> {
-        let validated_at = consumed.validated_at();
-        let expires_at = consumed.authority().claim().expires_at();
-        if let Err(error) = self
-            .deadline
-            .tighten(operation_started, validated_at, expires_at)
-        {
-            self.custody
-                .set_materialization(MaterializationCustody::Idle);
-            return Err(error);
+    fn encode_specific(state: PhaseCustodySnapshot<Self>) -> OrchestrationCustody {
+        OrchestrationCustody::Preparation(Box::new(state))
+    }
+}
+impl OrchestrationPhaseAdapter for ActivationPhase {
+    fn decode_specific(state: OrchestrationCustody) -> Option<PhaseCustodySnapshot<Self>> {
+        match state {
+            OrchestrationCustody::Activation(state) => Some(*state),
+            _ => None,
         }
-        self.consumed = consumed.clone();
-        self.custody
-            .set_materialization(MaterializationCustody::Active {
-                consumed: Box::new(consumed),
-                deadline: self.deadline.clone(),
-            });
-        Ok(())
+    }
+
+    fn encode_specific(state: PhaseCustodySnapshot<Self>) -> OrchestrationCustody {
+        OrchestrationCustody::Activation(Box::new(state))
+    }
+}
+fn decode_materialization_phase(
+    state: MaterializationCustody,
+) -> Option<PhaseCustodySnapshot<MaterializationPhase>> {
+    match state {
+        MaterializationCustody::Idle => Some(PhaseCustodySnapshot::Idle),
+        MaterializationCustody::Selected {
+            request,
+            deadline,
+            expected_successor,
+        } => Some(PhaseCustodySnapshot::Selected {
+            request: *request,
+            deadline,
+            expected_successor,
+        }),
+        MaterializationCustody::PendingConsume {
+            request,
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        } => Some(PhaseCustodySnapshot::PendingConsume {
+            request: *request,
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        }),
+        MaterializationCustody::Phase(state) => Some(*state),
+        MaterializationCustody::Quarantine { request, submitted } => {
+            Some(PhaseCustodySnapshot::Quarantine {
+                request: *request,
+                submitted,
+            })
+        }
+        MaterializationCustody::Select { .. } => None,
+    }
+}
+
+fn encode_materialization_phase(
+    state: PhaseCustodySnapshot<MaterializationPhase>,
+) -> MaterializationCustody {
+    match state {
+        PhaseCustodySnapshot::Idle => MaterializationCustody::Idle,
+        PhaseCustodySnapshot::Selected {
+            request,
+            deadline,
+            expected_successor,
+        } => MaterializationCustody::Selected {
+            request: Box::new(request),
+            deadline,
+            expected_successor,
+        },
+        PhaseCustodySnapshot::PendingConsume {
+            request,
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        } => MaterializationCustody::PendingConsume {
+            request: Box::new(request),
+            operation_started,
+            deadline,
+            expected_successor,
+            submitted,
+        },
+        PhaseCustodySnapshot::Quarantine { request, submitted } => {
+            MaterializationCustody::Quarantine {
+                request: Box::new(request),
+                submitted,
+            }
+        }
+        phase => MaterializationCustody::Phase(Box::new(phase)),
+    }
+}
+fn transition_materialization_phase(
+    custody: &AutonomousWorkflowCustody,
+    transition: PhaseCustodyTransition<MaterializationPhase>,
+) -> Result<PhaseCustodyTransitionOutcome, AutonomousWorkflowLeaseError> {
+    let mut state = custody
+        .materialization
+        .lock()
+        .expect("custody lock is not poisoned");
+    let current = decode_materialization_phase(state.clone())
+        .ok_or(AutonomousWorkflowLeaseError::AuthorityRejected)?;
+    let (next, outcome) = transition_phase_custody(current, transition)?;
+    *state = encode_materialization_phase(next);
+    Ok(outcome)
+}
+
+impl AutonomousPhaseAdapter for PreparationPhase {
+    type Consumed = ConsumedSelectedLogicalJobOrchestration;
+    type Authority = ClaimedLogicalActivationPreparation;
+    type Consume = ConsumeSelectedLogicalJobOrchestration;
+    type Renewal = RenewLogicalActivationPreparation;
+    type ReadyFinal = ReadyLogicalActivationPreparation;
+    type Quarantine = QuarantineLogicalJobOrchestration;
+    type Repository = dyn LogicalActivationPreparationStore;
+    type Lease = AutonomousPreparationLease;
+
+    const PHASE: AutonomousWorkflowPhase = AutonomousWorkflowPhase::Preparation;
+    const QUEUE: AutonomousWorkflowQueue = AutonomousWorkflowQueue::Orchestration;
+    const MAX_RENEWAL_MILLIS: i64 = MAX_LOGICAL_ACTIVATION_PREPARATION_CLAIM_MILLIS;
+
+    fn authority(consumed: &Self::Consumed) -> Option<&Self::Authority> {
+        match consumed.authority() {
+            ConsumedLogicalJobOrchestrationAuthority::Preparation(authority) => Some(authority),
+            ConsumedLogicalJobOrchestrationAuthority::Activation(_) => None,
+        }
+    }
+
+    fn claim_interval(authority: &Self::Authority) -> (UnixMillis, UnixMillis) {
+        (
+            authority.claim().claimed_at(),
+            authority.claim().expires_at(),
+        )
+    }
+
+    fn validated_interval(consumed: &Self::Consumed) -> (UnixMillis, UnixMillis) {
+        orchestration_interval(consumed)
+    }
+
+    fn consume_request(consumed: &Self::Consumed) -> Self::Consume {
+        ConsumeSelectedLogicalJobOrchestration::new(consumed.selected().clone())
+    }
+
+    fn consumed_matches(
+        consumed: &Self::Consumed,
+        request: &Self::Consume,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+    ) -> bool {
+        consumed.selected() == request.selected()
+            && matches!(
+                consumed.authority(),
+                ConsumedLogicalJobOrchestrationAuthority::Preparation(_)
+            )
+            && expected_successor.is_none_or(|expected| expected.matches_orchestration(consumed))
+    }
+
+    fn make_renewal(
+        authority: &Self::Authority,
+        duration_ms: i64,
+    ) -> Result<Self::Renewal, AutonomousWorkflowLeaseError> {
+        RenewLogicalActivationPreparation::new(authority.claim().clone(), duration_ms)
+            .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)
+    }
+
+    fn submit_renewal(
+        repository: &Self::Repository,
+        request: Self::Renewal,
+    ) -> PhaseFuture<'_, Result<RenewalSubmission, AutonomousWorkflowLeaseError>> {
+        Box::pin(async move {
+            match repository
+                .renew_logical_activation_preparation(request.clone())
+                .await
+            {
+                Ok(acknowledgement) if acknowledgement.request() == &request => Ok(
+                    RenewalSubmission::Acknowledged(ExpectedRenewalSuccessor::new(
+                        Self::PHASE,
+                        acknowledgement.successor_generation().get(),
+                        acknowledgement.successor_claimed_at(),
+                        acknowledgement.successor_expires_at(),
+                    )),
+                ),
+                Err(LogicalActivationPreparationStoreError::Store(StoreError::Operation(_))) => {
+                    Ok(RenewalSubmission::Operation)
+                }
+                Ok(_) | Err(_) => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
+            }
+        })
+    }
+
+    fn consume_selected(
+        selections: &dyn LogicalWorkSelectionRepository,
+        request: Self::Consume,
+    ) -> PhaseFuture<'_, Result<Self::Consumed, automata_ci_store::LogicalWorkSelectionStoreError>>
+    {
+        Box::pin(async move {
+            selections
+                .consume_selected_logical_job_orchestration(request)
+                .await
+        })
+    }
+
+    fn ready_matches_authority(request: &Self::ReadyFinal, authority: &Self::Authority) -> bool {
+        request.matches_authority(authority)
+    }
+
+    fn quarantine_request(
+        consumed: Self::Consumed,
+        kind: LogicalWorkQuarantineKind,
+    ) -> Self::Quarantine {
+        QuarantineLogicalJobOrchestration::new(consumed, kind)
+    }
+
+    fn transition(
+        custody: &AutonomousWorkflowCustody,
+        transition: PhaseCustodyTransition<Self>,
+    ) -> Result<PhaseCustodyTransitionOutcome, AutonomousWorkflowLeaseError> {
+        transition_orchestration_phase::<Self>(custody, transition)
+    }
+
+    fn snapshot(custody: &AutonomousWorkflowCustody) -> Option<PhaseCustodySnapshot<Self>> {
+        decode_orchestration_phase::<Self>(custody.orchestration())
+    }
+    fn repository(service: &AutonomousWorkflowService) -> Arc<Self::Repository> {
+        Arc::clone(&service.preparations)
+    }
+
+    fn continue_consume<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Consume,
+        deadline: AutonomousWorkflowDeadline,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>> {
+        Box::pin(service.start_orchestration_consume(
+            request,
+            Some(deadline),
+            expected_successor,
+            shutdown,
+            true,
+        ))
+    }
+
+    fn submit_quarantine<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Quarantine,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>> {
+        Box::pin(service.submit_orchestration_quarantine(request, shutdown, false))
+    }
+
+    fn lease_from_core(core: PhaseLeaseCore<Self>) -> Self::Lease {
+        AutonomousPreparationLease { core }
+    }
+
+    fn into_core(lease: Self::Lease) -> PhaseLeaseCore<Self> {
+        lease.core
+    }
+
+    fn execute<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a mut Self::Lease,
+        shutdown: CancellationToken,
+        deadline: AutonomousWorkflowDeadline,
+    ) -> AutonomousWorkflowExecutionFuture<'a> {
+        executor.execute_preparation(lease, shutdown, deadline)
+    }
+
+    fn submit_final<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a Self::Lease,
+    ) -> AutonomousWorkflowExecutionFuture<'a> {
+        executor.submit_preparation_final(lease)
+    }
+}
+
+impl AutonomousPhaseAdapter for ActivationPhase {
+    type Consumed = ConsumedSelectedLogicalJobOrchestration;
+    type Authority = ClaimedLogicalJobActivation;
+    type Consume = ConsumeSelectedLogicalJobOrchestration;
+    type Renewal = RenewLogicalJobActivation;
+    type ReadyFinal = ReadyLogicalJobActivation;
+    type Quarantine = QuarantineLogicalJobOrchestration;
+    type Repository = dyn LogicalActivationRepository;
+    type Lease = AutonomousActivationLease;
+
+    const PHASE: AutonomousWorkflowPhase = AutonomousWorkflowPhase::Activation;
+    const QUEUE: AutonomousWorkflowQueue = AutonomousWorkflowQueue::Orchestration;
+    const MAX_RENEWAL_MILLIS: i64 = MAX_LOGICAL_ACTIVATION_CLAIM_MILLIS;
+
+    fn authority(consumed: &Self::Consumed) -> Option<&Self::Authority> {
+        match consumed.authority() {
+            ConsumedLogicalJobOrchestrationAuthority::Preparation(_) => None,
+            ConsumedLogicalJobOrchestrationAuthority::Activation(authority) => Some(authority),
+        }
+    }
+
+    fn claim_interval(authority: &Self::Authority) -> (UnixMillis, UnixMillis) {
+        (
+            authority.claim().claimed_at(),
+            authority.claim().expires_at(),
+        )
+    }
+
+    fn validated_interval(consumed: &Self::Consumed) -> (UnixMillis, UnixMillis) {
+        orchestration_interval(consumed)
+    }
+
+    fn consume_request(consumed: &Self::Consumed) -> Self::Consume {
+        ConsumeSelectedLogicalJobOrchestration::new(consumed.selected().clone())
+    }
+
+    fn consumed_matches(
+        consumed: &Self::Consumed,
+        request: &Self::Consume,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+    ) -> bool {
+        consumed.selected() == request.selected()
+            && matches!(
+                consumed.authority(),
+                ConsumedLogicalJobOrchestrationAuthority::Activation(_)
+            )
+            && expected_successor.is_none_or(|expected| expected.matches_orchestration(consumed))
+    }
+
+    fn make_renewal(
+        authority: &Self::Authority,
+        duration_ms: i64,
+    ) -> Result<Self::Renewal, AutonomousWorkflowLeaseError> {
+        RenewLogicalJobActivation::new(authority.claim().clone(), duration_ms)
+            .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)
+    }
+
+    fn submit_renewal(
+        repository: &Self::Repository,
+        request: Self::Renewal,
+    ) -> PhaseFuture<'_, Result<RenewalSubmission, AutonomousWorkflowLeaseError>> {
+        Box::pin(async move {
+            match repository
+                .renew_logical_job_activation(request.clone())
+                .await
+            {
+                Ok(acknowledgement) if acknowledgement.request() == &request => Ok(
+                    RenewalSubmission::Acknowledged(ExpectedRenewalSuccessor::new(
+                        Self::PHASE,
+                        acknowledgement.successor_generation().get(),
+                        acknowledgement.successor_claimed_at(),
+                        acknowledgement.successor_expires_at(),
+                    )),
+                ),
+                Err(LogicalActivationStoreError::Store(StoreError::Operation(_))) => {
+                    Ok(RenewalSubmission::Operation)
+                }
+                Ok(_) | Err(_) => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
+            }
+        })
+    }
+
+    fn consume_selected(
+        selections: &dyn LogicalWorkSelectionRepository,
+        request: Self::Consume,
+    ) -> PhaseFuture<'_, Result<Self::Consumed, automata_ci_store::LogicalWorkSelectionStoreError>>
+    {
+        Box::pin(async move {
+            selections
+                .consume_selected_logical_job_orchestration(request)
+                .await
+        })
+    }
+
+    fn ready_matches_authority(request: &Self::ReadyFinal, authority: &Self::Authority) -> bool {
+        request.matches_authority(authority)
+    }
+
+    fn quarantine_request(
+        consumed: Self::Consumed,
+        kind: LogicalWorkQuarantineKind,
+    ) -> Self::Quarantine {
+        QuarantineLogicalJobOrchestration::new(consumed, kind)
+    }
+
+    fn transition(
+        custody: &AutonomousWorkflowCustody,
+        transition: PhaseCustodyTransition<Self>,
+    ) -> Result<PhaseCustodyTransitionOutcome, AutonomousWorkflowLeaseError> {
+        transition_orchestration_phase::<Self>(custody, transition)
+    }
+
+    fn snapshot(custody: &AutonomousWorkflowCustody) -> Option<PhaseCustodySnapshot<Self>> {
+        decode_orchestration_phase::<Self>(custody.orchestration())
+    }
+    fn repository(service: &AutonomousWorkflowService) -> Arc<Self::Repository> {
+        Arc::clone(&service.activations)
+    }
+
+    fn continue_consume<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Consume,
+        deadline: AutonomousWorkflowDeadline,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>> {
+        Box::pin(service.start_orchestration_consume(
+            request,
+            Some(deadline),
+            expected_successor,
+            shutdown,
+            true,
+        ))
+    }
+
+    fn submit_quarantine<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Quarantine,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>> {
+        Box::pin(service.submit_orchestration_quarantine(request, shutdown, false))
+    }
+
+    fn lease_from_core(core: PhaseLeaseCore<Self>) -> Self::Lease {
+        AutonomousActivationLease { core }
+    }
+
+    fn into_core(lease: Self::Lease) -> PhaseLeaseCore<Self> {
+        lease.core
+    }
+
+    fn execute<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a mut Self::Lease,
+        shutdown: CancellationToken,
+        deadline: AutonomousWorkflowDeadline,
+    ) -> AutonomousWorkflowExecutionFuture<'a> {
+        executor.execute_activation(lease, shutdown, deadline)
+    }
+
+    fn submit_final<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a Self::Lease,
+    ) -> AutonomousWorkflowExecutionFuture<'a> {
+        executor.submit_activation_final(lease)
+    }
+}
+
+impl AutonomousPhaseAdapter for MaterializationPhase {
+    type Consumed = ConsumedSelectedLogicalInstanceMaterialization;
+    type Authority = ClaimedLogicalInstanceMaterialization;
+    type Consume = ConsumeSelectedLogicalInstanceMaterialization;
+    type Renewal = RenewLogicalInstanceMaterialization;
+    type ReadyFinal = ReadyLogicalInstanceMaterialization;
+    type Quarantine = QuarantineLogicalInstanceMaterialization;
+    type Repository = dyn LogicalMaterializationRepository;
+    type Lease = AutonomousMaterializationLease;
+
+    const PHASE: AutonomousWorkflowPhase = AutonomousWorkflowPhase::Materialization;
+    const QUEUE: AutonomousWorkflowQueue = AutonomousWorkflowQueue::Materialization;
+    const MAX_RENEWAL_MILLIS: i64 = MAX_LOGICAL_MATERIALIZATION_CLAIM_MILLIS;
+
+    fn authority(consumed: &Self::Consumed) -> Option<&Self::Authority> {
+        Some(consumed.authority())
+    }
+
+    fn claim_interval(authority: &Self::Authority) -> (UnixMillis, UnixMillis) {
+        (
+            authority.claim().claimed_at(),
+            authority.claim().expires_at(),
+        )
+    }
+
+    fn validated_interval(consumed: &Self::Consumed) -> (UnixMillis, UnixMillis) {
+        (
+            consumed.validated_at(),
+            consumed.authority().claim().expires_at(),
+        )
+    }
+
+    fn consume_request(consumed: &Self::Consumed) -> Self::Consume {
+        ConsumeSelectedLogicalInstanceMaterialization::new(consumed.selected().clone())
+    }
+
+    fn consumed_matches(
+        consumed: &Self::Consumed,
+        request: &Self::Consume,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+    ) -> bool {
+        consumed.selected() == request.selected()
+            && expected_successor.is_none_or(|expected| expected.matches_materialization(consumed))
+    }
+
+    fn make_renewal(
+        authority: &Self::Authority,
+        duration_ms: i64,
+    ) -> Result<Self::Renewal, AutonomousWorkflowLeaseError> {
+        RenewLogicalInstanceMaterialization::new(authority.claim().clone(), duration_ms)
+            .map_err(|_| AutonomousWorkflowLeaseError::Unavailable)
+    }
+
+    fn submit_renewal(
+        repository: &Self::Repository,
+        request: Self::Renewal,
+    ) -> PhaseFuture<'_, Result<RenewalSubmission, AutonomousWorkflowLeaseError>> {
+        Box::pin(async move {
+            match repository
+                .renew_logical_instance_materialization(request.clone())
+                .await
+            {
+                Ok(acknowledgement) if acknowledgement.request() == &request => Ok(
+                    RenewalSubmission::Acknowledged(ExpectedRenewalSuccessor::new(
+                        Self::PHASE,
+                        acknowledgement.successor_generation().get(),
+                        acknowledgement.successor_claimed_at(),
+                        acknowledgement.successor_expires_at(),
+                    )),
+                ),
+                Err(LogicalMaterializationStoreError::Store(StoreError::Operation(_))) => {
+                    Ok(RenewalSubmission::Operation)
+                }
+                Ok(_) | Err(_) => Err(AutonomousWorkflowLeaseError::AuthorityRejected),
+            }
+        })
+    }
+
+    fn consume_selected(
+        selections: &dyn LogicalWorkSelectionRepository,
+        request: Self::Consume,
+    ) -> PhaseFuture<'_, Result<Self::Consumed, automata_ci_store::LogicalWorkSelectionStoreError>>
+    {
+        Box::pin(async move {
+            selections
+                .consume_selected_logical_instance_materialization(request)
+                .await
+        })
+    }
+
+    fn ready_matches_authority(request: &Self::ReadyFinal, authority: &Self::Authority) -> bool {
+        request.matches_authority(authority)
+    }
+
+    fn quarantine_request(
+        consumed: Self::Consumed,
+        kind: LogicalWorkQuarantineKind,
+    ) -> Self::Quarantine {
+        QuarantineLogicalInstanceMaterialization::new(consumed, kind)
+    }
+
+    fn transition(
+        custody: &AutonomousWorkflowCustody,
+        transition: PhaseCustodyTransition<Self>,
+    ) -> Result<PhaseCustodyTransitionOutcome, AutonomousWorkflowLeaseError> {
+        transition_materialization_phase(custody, transition)
+    }
+
+    fn snapshot(custody: &AutonomousWorkflowCustody) -> Option<PhaseCustodySnapshot<Self>> {
+        decode_materialization_phase(custody.materialization())
+    }
+    fn repository(service: &AutonomousWorkflowService) -> Arc<Self::Repository> {
+        Arc::clone(&service.materializations)
+    }
+
+    fn continue_consume<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Consume,
+        deadline: AutonomousWorkflowDeadline,
+        expected_successor: Option<ExpectedRenewalSuccessor>,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>> {
+        Box::pin(service.start_materialization_consume(
+            request,
+            Some(deadline),
+            expected_successor,
+            shutdown,
+            true,
+        ))
+    }
+
+    fn submit_quarantine<'a>(
+        service: &'a AutonomousWorkflowService,
+        request: Self::Quarantine,
+        shutdown: &'a CancellationToken,
+    ) -> PhaseFuture<'a, Result<QueuePoll, AutonomousWorkflowError>> {
+        Box::pin(service.submit_materialization_quarantine(request, shutdown, false))
+    }
+
+    fn lease_from_core(core: PhaseLeaseCore<Self>) -> Self::Lease {
+        AutonomousMaterializationLease { core }
+    }
+
+    fn into_core(lease: Self::Lease) -> PhaseLeaseCore<Self> {
+        lease.core
+    }
+
+    fn execute<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a mut Self::Lease,
+        shutdown: CancellationToken,
+        deadline: AutonomousWorkflowDeadline,
+    ) -> AutonomousWorkflowExecutionFuture<'a> {
+        executor.execute_materialization(lease, shutdown, deadline)
+    }
+
+    fn submit_final<'a>(
+        executor: &'a dyn AutonomousWorkflowPhaseExecutor,
+        lease: &'a Self::Lease,
+    ) -> AutonomousWorkflowExecutionFuture<'a> {
+        executor.submit_materialization_final(lease)
     }
 }
 
@@ -2390,141 +2901,17 @@ impl AutonomousWorkflowService {
                         )
                     }
                 }
-                OrchestrationCustody::Active { consumed, deadline } => {
-                    if drain_only {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(
-                                self.execute_orchestration_active(*consumed, deadline, shutdown),
-                            )
-                            .await?,
-                        )
-                    }
+                OrchestrationCustody::Preparation(state) => {
+                    Box::pin(
+                        self.resume_phase_custody::<PreparationPhase>(*state, shutdown, drain_only),
+                    )
+                    .await?
                 }
-                OrchestrationCustody::ReadyPreparationFinal {
-                    consumed,
-                    deadline,
-                    request,
-                } => {
-                    if drain_only {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.start_preparation_final_submission(
-                                *consumed, deadline, *request, shutdown,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                OrchestrationCustody::PendingPreparationFinal {
-                    consumed,
-                    deadline,
-                    request,
-                } => Some(
-                    Box::pin(self.resolve_preparation_final_submission(
-                        *consumed,
-                        deadline,
-                        *request,
-                        shutdown,
-                        false,
-                        !drain_only,
-                    ))
-                    .await?,
-                ),
-                OrchestrationCustody::ReadyActivationFinal {
-                    consumed,
-                    deadline,
-                    request,
-                } => {
-                    if drain_only {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.start_activation_final_submission(
-                                *consumed, deadline, *request, shutdown,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                OrchestrationCustody::PendingActivationFinal {
-                    consumed,
-                    deadline,
-                    request,
-                } => Some(
-                    Box::pin(self.resolve_activation_final_submission(
-                        *consumed,
-                        deadline,
-                        *request,
-                        shutdown,
-                        false,
-                        !drain_only,
-                    ))
-                    .await?,
-                ),
-                OrchestrationCustody::PendingPreparationRenew {
-                    consumed,
-                    deadline,
-                    request,
-                    submitted,
-                } => {
-                    if drain_only && !submitted {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.resume_preparation_renewal(
-                                *consumed,
-                                deadline,
-                                *request,
-                                shutdown,
-                                !drain_only,
-                                submitted,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                OrchestrationCustody::PendingActivationRenew {
-                    consumed,
-                    deadline,
-                    request,
-                    submitted,
-                } => {
-                    if drain_only && !submitted {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.resume_activation_renewal(
-                                *consumed,
-                                deadline,
-                                *request,
-                                shutdown,
-                                !drain_only,
-                                submitted,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                OrchestrationCustody::SettledFinalEvidence { consumed, kind } => {
-                    if drain_only {
-                        None
-                    } else {
-                        let request = QuarantineLogicalJobOrchestration::new(*consumed, kind);
-                        self.custody
-                            .set_orchestration(OrchestrationCustody::Quarantine {
-                                request: Box::new(request.clone()),
-                                submitted: false,
-                            });
-                        Some(
-                            Box::pin(
-                                self.submit_orchestration_quarantine(request, shutdown, false),
-                            )
-                            .await?,
-                        )
-                    }
+                OrchestrationCustody::Activation(state) => {
+                    Box::pin(
+                        self.resume_phase_custody::<ActivationPhase>(*state, shutdown, drain_only),
+                    )
+                    .await?
                 }
                 OrchestrationCustody::Quarantine { request, submitted } => {
                     if drain_only && !submitted {
@@ -2544,594 +2931,322 @@ impl AutonomousWorkflowService {
             return Ok(orchestration);
         }
 
-        let materialization = if queue == Some(AutonomousWorkflowQueue::Orchestration) {
-            None
-        } else {
-            match self.custody.materialization() {
-                MaterializationCustody::Idle => None,
-                MaterializationCustody::Select { request, submitted } => {
-                    if drain_only && !submitted {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.submit_materialization_selection(
-                                *request,
-                                shutdown,
-                                !drain_only,
-                                submitted,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                MaterializationCustody::Selected {
-                    request,
-                    deadline,
-                    expected_successor,
-                } => {
-                    if drain_only {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.start_materialization_consume(
-                                *request,
-                                deadline,
-                                expected_successor,
-                                shutdown,
-                                true,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                MaterializationCustody::PendingConsume {
-                    request,
-                    operation_started,
-                    deadline,
-                    expected_successor,
-                    submitted,
-                } => {
-                    if drain_only && !submitted {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.resolve_materialization_consume(
-                                *request,
-                                operation_started,
-                                deadline,
-                                expected_successor,
-                                shutdown,
-                                !drain_only,
-                                submitted,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                MaterializationCustody::Active { consumed, deadline } => {
-                    if drain_only {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(
-                                self.execute_materialization_active(*consumed, deadline, shutdown),
+        let materialization =
+            if queue == Some(AutonomousWorkflowQueue::Orchestration) {
+                None
+            } else {
+                match self.custody.materialization() {
+                    MaterializationCustody::Idle => None,
+                    MaterializationCustody::Select { request, submitted } => {
+                        if drain_only && !submitted {
+                            None
+                        } else {
+                            Some(
+                                Box::pin(self.submit_materialization_selection(
+                                    *request,
+                                    shutdown,
+                                    !drain_only,
+                                    submitted,
+                                ))
+                                .await?,
                             )
-                            .await?,
-                        )
+                        }
                     }
-                }
-                MaterializationCustody::ReadyFinal {
-                    consumed,
-                    deadline,
-                    request,
-                } => {
-                    if drain_only {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.start_materialization_final_submission(
-                                *consumed, deadline, *request, shutdown,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                MaterializationCustody::PendingFinal {
-                    consumed,
-                    deadline,
-                    request,
-                } => Some(
-                    Box::pin(self.resolve_materialization_final_submission(
-                        *consumed,
+                    MaterializationCustody::Selected {
+                        request,
                         deadline,
-                        *request,
-                        shutdown,
-                        false,
-                        !drain_only,
-                    ))
-                    .await?,
-                ),
-                MaterializationCustody::PendingRenew {
-                    consumed,
-                    deadline,
-                    request,
-                    submitted,
-                } => {
-                    if drain_only && !submitted {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(self.resume_materialization_renewal(
-                                *consumed,
-                                deadline,
-                                *request,
-                                shutdown,
-                                !drain_only,
-                                submitted,
-                            ))
-                            .await?,
-                        )
-                    }
-                }
-                MaterializationCustody::SettledFinalEvidence { consumed, kind } => {
-                    if drain_only {
-                        None
-                    } else {
-                        let request =
-                            QuarantineLogicalInstanceMaterialization::new(*consumed, kind);
-                        self.custody
-                            .set_materialization(MaterializationCustody::Quarantine {
-                                request: Box::new(request.clone()),
-                                submitted: false,
-                            });
-                        Some(
-                            Box::pin(
-                                self.submit_materialization_quarantine(request, shutdown, false),
+                        expected_successor,
+                    } => {
+                        if drain_only {
+                            None
+                        } else {
+                            Some(
+                                Box::pin(self.start_materialization_consume(
+                                    *request,
+                                    deadline,
+                                    expected_successor,
+                                    shutdown,
+                                    true,
+                                ))
+                                .await?,
                             )
-                            .await?,
-                        )
+                        }
                     }
-                }
-                MaterializationCustody::Quarantine { request, submitted } => {
-                    if drain_only && !submitted {
-                        None
-                    } else {
-                        Some(
-                            Box::pin(
-                                self.submit_materialization_quarantine(
+                    MaterializationCustody::PendingConsume {
+                        request,
+                        operation_started,
+                        deadline,
+                        expected_successor,
+                        submitted,
+                    } => {
+                        if drain_only && !submitted {
+                            None
+                        } else {
+                            Some(
+                                Box::pin(self.resolve_materialization_consume(
+                                    *request,
+                                    operation_started,
+                                    deadline,
+                                    expected_successor,
+                                    shutdown,
+                                    !drain_only,
+                                    submitted,
+                                ))
+                                .await?,
+                            )
+                        }
+                    }
+                    MaterializationCustody::Phase(state) => {
+                        Box::pin(self.resume_phase_custody::<MaterializationPhase>(
+                            *state, shutdown, drain_only,
+                        ))
+                        .await?
+                    }
+                    MaterializationCustody::Quarantine { request, submitted } => {
+                        if drain_only && !submitted {
+                            None
+                        } else {
+                            Some(
+                                Box::pin(self.submit_materialization_quarantine(
                                     *request, shutdown, submitted,
-                                ),
+                                ))
+                                .await?,
                             )
-                            .await?,
-                        )
+                        }
                     }
                 }
-            }
-        };
+            };
         Ok(materialization)
     }
 
-    async fn resume_preparation_renewal(
+    async fn resume_phase_custody<P: AutonomousPhaseAdapter>(
         &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: RenewLogicalActivationPreparation,
+        state: PhaseCustodySnapshot<P>,
         shutdown: &CancellationToken,
-        continue_after: bool,
-        submitted: bool,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        let submission = async {
-            if !submitted {
-                self.custody
-                    .mark_preparation_renewal_submitted(&consumed, &request)?;
-            }
-            Ok::<_, AutonomousWorkflowLeaseError>(
-                self.preparations
-                    .renew_logical_activation_preparation(request.clone())
-                    .await,
-            )
-        };
-        let result =
-            match await_renewal_submission(submitted, shutdown, &deadline, submission).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
-                Err(error) => {
-                    if !submitted
-                        && error == AutonomousWorkflowLeaseError::DeadlineElapsed
-                        && self
-                            .custody
-                            .clear_expired_unsubmitted_preparation_renewal(&consumed, &request)
-                            .is_err()
-                    {
-                        return Err(AutonomousWorkflowError::AuthorityRejected);
-                    }
-                    return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
+        drain_only: bool,
+    ) -> Result<Option<QueuePoll>, AutonomousWorkflowError> {
+        match state {
+            PhaseCustodySnapshot::Active { consumed, deadline } => {
+                if drain_only {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        Box::pin(self.execute_phase_active::<P>(consumed, deadline, shutdown))
+                            .await?,
+                    ))
                 }
-            };
-        let expected_successor = match result {
-            Ok(acknowledgement) if acknowledgement.request() == &request => {
-                Some(ExpectedRenewalSuccessor::new(
-                    AutonomousWorkflowPhase::Preparation,
-                    acknowledgement.successor_generation().get(),
-                    acknowledgement.successor_claimed_at(),
-                    acknowledgement.successor_expires_at(),
+            }
+            PhaseCustodySnapshot::ReadyFinal {
+                consumed,
+                deadline,
+                request,
+            } => {
+                if drain_only {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        Box::pin(self.start_phase_final_submission::<P>(
+                            consumed, deadline, request, shutdown,
+                        ))
+                        .await?,
+                    ))
+                }
+            }
+            PhaseCustodySnapshot::PendingFinal {
+                consumed,
+                deadline,
+                request,
+            } => Ok(Some(
+                Box::pin(self.resolve_phase_final_submission::<P>(
+                    consumed,
+                    deadline,
+                    request,
+                    shutdown,
+                    false,
+                    !drain_only,
+                ))
+                .await?,
+            )),
+            PhaseCustodySnapshot::PendingRenew {
+                consumed,
+                deadline,
+                request,
+                submitted,
+            } => {
+                if drain_only && !submitted {
+                    Ok(None)
+                } else {
+                    Ok(Some(
+                        Box::pin(self.resume_phase_renewal::<P>(
+                            consumed,
+                            deadline,
+                            request,
+                            shutdown,
+                            !drain_only,
+                            submitted,
+                        ))
+                        .await?,
+                    ))
+                }
+            }
+            PhaseCustodySnapshot::SettledFinalEvidence { consumed, kind } => {
+                if drain_only {
+                    return Ok(None);
+                }
+                let request = P::quarantine_request(consumed.clone(), kind);
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ResumeSettledFinalQuarantine {
+                        consumed,
+                        quarantine: request.clone(),
+                    },
+                )?;
+                Ok(Some(
+                    Box::pin(P::submit_quarantine(self, request, shutdown)).await?,
                 ))
             }
-            Err(LogicalActivationPreparationStoreError::Store(StoreError::Operation(_))) => {
-                let reconcile =
-                    ConsumeSelectedLogicalJobOrchestration::new(consumed.selected().clone());
-                self.custody
-                    .set_orchestration(OrchestrationCustody::Selected {
-                        request: Box::new(reconcile),
-                        deadline: Some(deadline),
-                        expected_successor: None,
-                    });
-                return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
+            PhaseCustodySnapshot::Idle
+            | PhaseCustodySnapshot::Selected { .. }
+            | PhaseCustodySnapshot::PendingConsume { .. }
+            | PhaseCustodySnapshot::Quarantine { .. } => {
+                Err(AutonomousWorkflowError::AuthorityRejected)
             }
-            Ok(_) | Err(_) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return Err(AutonomousWorkflowError::AuthorityRejected);
-            }
-        };
-        let reconcile = ConsumeSelectedLogicalJobOrchestration::new(consumed.selected().clone());
-        self.custody
-            .set_orchestration(OrchestrationCustody::Selected {
-                request: Box::new(reconcile.clone()),
-                deadline: Some(deadline.clone()),
-                expected_successor,
-            });
-        if continue_after {
-            Box::pin(self.start_orchestration_consume(
-                reconcile,
-                Some(deadline),
-                expected_successor,
-                shutdown,
-                true,
-            ))
-            .await
-        } else {
-            Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration))
         }
     }
 
-    async fn resume_activation_renewal(
+    async fn resume_phase_renewal<P: AutonomousPhaseAdapter>(
         &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
+        consumed: P::Consumed,
         deadline: AutonomousWorkflowDeadline,
-        request: RenewLogicalJobActivation,
+        request: P::Renewal,
         shutdown: &CancellationToken,
         continue_after: bool,
         submitted: bool,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
+        let repository = P::repository(self);
         let submission = async {
             if !submitted {
-                self.custody
-                    .mark_activation_renewal_submitted(&consumed, &request)?;
+                expect_applied(&P::transition(
+                    &self.custody,
+                    PhaseCustodyTransition::MarkRenewalSubmitted {
+                        consumed: consumed.clone(),
+                        request: request.clone(),
+                    },
+                )?)?;
             }
             Ok::<_, AutonomousWorkflowLeaseError>(
-                self.activations
-                    .renew_logical_job_activation(request.clone())
-                    .await,
-            )
-        };
-        let result =
-            match await_renewal_submission(submitted, shutdown, &deadline, submission).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
-                Err(error) => {
-                    if !submitted
-                        && error == AutonomousWorkflowLeaseError::DeadlineElapsed
-                        && self
-                            .custody
-                            .clear_expired_unsubmitted_activation_renewal(&consumed, &request)
-                            .is_err()
-                    {
-                        return Err(AutonomousWorkflowError::AuthorityRejected);
-                    }
-                    return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
-                }
-            };
-        let expected_successor = match result {
-            Ok(acknowledgement) if acknowledgement.request() == &request => {
-                Some(ExpectedRenewalSuccessor::new(
-                    AutonomousWorkflowPhase::Activation,
-                    acknowledgement.successor_generation().get(),
-                    acknowledgement.successor_claimed_at(),
-                    acknowledgement.successor_expires_at(),
-                ))
-            }
-            Err(LogicalActivationStoreError::Store(StoreError::Operation(_))) => {
-                let reconcile =
-                    ConsumeSelectedLogicalJobOrchestration::new(consumed.selected().clone());
-                self.custody
-                    .set_orchestration(OrchestrationCustody::Selected {
-                        request: Box::new(reconcile),
-                        deadline: Some(deadline),
-                        expected_successor: None,
-                    });
-                return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
-            }
-            Ok(_) | Err(_) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                return Err(AutonomousWorkflowError::AuthorityRejected);
-            }
-        };
-        let reconcile = ConsumeSelectedLogicalJobOrchestration::new(consumed.selected().clone());
-        self.custody
-            .set_orchestration(OrchestrationCustody::Selected {
-                request: Box::new(reconcile.clone()),
-                deadline: Some(deadline.clone()),
-                expected_successor,
-            });
-        if continue_after {
-            Box::pin(self.start_orchestration_consume(
-                reconcile,
-                Some(deadline),
-                expected_successor,
-                shutdown,
-                true,
-            ))
-            .await
-        } else {
-            Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration))
-        }
-    }
-
-    async fn resume_materialization_renewal(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        deadline: AutonomousWorkflowDeadline,
-        request: RenewLogicalInstanceMaterialization,
-        shutdown: &CancellationToken,
-        continue_after: bool,
-        submitted: bool,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        let submission = async {
-            if !submitted {
-                self.custody
-                    .mark_materialization_renewal_submitted(&consumed, &request)?;
-            }
-            Ok::<_, AutonomousWorkflowLeaseError>(
-                self.materializations
-                    .renew_logical_instance_materialization(request.clone())
-                    .await,
+                P::submit_renewal(repository.as_ref(), request.clone()).await,
             )
         };
         let result = match await_renewal_submission(submitted, shutdown, &deadline, submission)
             .await
         {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => match result {
+                Ok(result) => result,
+                Err(error) => {
+                    apply_service_transition::<P>(
+                        &self.custody,
+                        PhaseCustodyTransition::ClearRenewal { consumed, request },
+                    )?;
+                    return Err(match error {
+                        AutonomousWorkflowLeaseError::Shutdown => AutonomousWorkflowError::Shutdown,
+                        AutonomousWorkflowLeaseError::DeadlineElapsed
+                        | AutonomousWorkflowLeaseError::Unavailable
+                        | AutonomousWorkflowLeaseError::AuthorityRejected => {
+                            AutonomousWorkflowError::AuthorityRejected
+                        }
+                    });
+                }
+            },
             Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
             Err(error) => {
-                if !submitted
-                    && error == AutonomousWorkflowLeaseError::DeadlineElapsed
-                    && self
-                        .custody
-                        .clear_expired_unsubmitted_materialization_renewal(&consumed, &request)
-                        .is_err()
-                {
-                    return Err(AutonomousWorkflowError::AuthorityRejected);
+                if !submitted && error == AutonomousWorkflowLeaseError::DeadlineElapsed {
+                    apply_service_transition::<P>(
+                        &self.custody,
+                        PhaseCustodyTransition::ClearExpiredUnsubmittedRenewal {
+                            consumed,
+                            request,
+                        },
+                    )?;
                 }
-                return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Materialization);
+                return unavailable_or_shutdown(error, P::QUEUE);
             }
         };
-        let expected_successor = match result {
-            Ok(acknowledgement) if acknowledgement.request() == &request => {
-                Some(ExpectedRenewalSuccessor::new(
-                    AutonomousWorkflowPhase::Materialization,
-                    acknowledgement.successor_generation().get(),
-                    acknowledgement.successor_claimed_at(),
-                    acknowledgement.successor_expires_at(),
-                ))
-            }
-            Err(LogicalMaterializationStoreError::Store(StoreError::Operation(_))) => {
-                let reconcile =
-                    ConsumeSelectedLogicalInstanceMaterialization::new(consumed.selected().clone());
-                self.custody
-                    .set_materialization(MaterializationCustody::Selected {
-                        request: Box::new(reconcile),
-                        deadline: Some(deadline),
-                        expected_successor: None,
-                    });
-                return Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization));
-            }
-            Ok(_) | Err(_) => {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-                return Err(AutonomousWorkflowError::AuthorityRejected);
-            }
+        let (expected_successor, operation) = match result {
+            RenewalSubmission::Acknowledged(successor) => (Some(successor), false),
+            RenewalSubmission::Operation => (None, true),
         };
-        let reconcile =
-            ConsumeSelectedLogicalInstanceMaterialization::new(consumed.selected().clone());
-        self.custody
-            .set_materialization(MaterializationCustody::Selected {
-                request: Box::new(reconcile.clone()),
-                deadline: Some(deadline.clone()),
+        let reconcile = P::consume_request(&consumed);
+        apply_service_transition::<P>(
+            &self.custody,
+            PhaseCustodyTransition::SelectAfterRenewal {
+                consumed,
+                renewal: request,
+                request: reconcile.clone(),
+                deadline: deadline.clone(),
                 expected_successor,
-            });
-        if continue_after {
-            Box::pin(self.start_materialization_consume(
-                reconcile,
-                Some(deadline),
-                expected_successor,
-                shutdown,
-                true,
-            ))
-            .await
-        } else {
-            Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization))
+            },
+        )?;
+        if operation || !continue_after {
+            return Ok(unavailable_poll(P::QUEUE));
         }
+        P::continue_consume(self, reconcile, deadline, expected_successor, shutdown).await
     }
 
-    async fn start_preparation_final_submission(
+    async fn start_phase_final_submission<P: AutonomousPhaseAdapter>(
         &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
+        consumed: P::Consumed,
         deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalActivationPreparation,
+        request: P::ReadyFinal,
         shutdown: &CancellationToken,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
         if let Err(error) = deadline.checkpoint(shutdown) {
             if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-            }
-            return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
-        }
-        Box::pin(self.resolve_preparation_final_submission(
-            consumed, deadline, request, shutdown, true, true,
-        ))
-        .await
-    }
-
-    async fn resolve_preparation_final_submission(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalActivationPreparation,
-        shutdown: &CancellationToken,
-        first_submission: bool,
-        continue_after: bool,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        let submission_deadline = deadline.clone();
-        let lease = AutonomousPreparationLease {
-            selections: Arc::clone(&self.selections),
-            preparations: Arc::clone(&self.preparations),
-            consumed: consumed.clone(),
-            deadline,
-            custody: Arc::clone(&self.custody),
-        };
-        let submission = async {
-            if first_submission {
-                self.custody.begin_preparation_final_submission(
-                    consumed.clone(),
-                    submission_deadline.clone(),
-                    request.clone(),
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearReadyFinal { consumed, request },
                 )?;
             }
-            Ok::<_, AutonomousWorkflowLeaseError>(
-                self.executor.submit_preparation_final(&lease).await,
-            )
-        };
-        let outcome = match if first_submission {
-            await_bounded(shutdown, &submission_deadline, submission).await
-        } else {
-            await_custody(shutdown, submission).await
-        } {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
-            Err(error) => {
-                return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
-            }
-        };
-        if !self
-            .custody
-            .pending_preparation_final(&consumed)
-            .is_ok_and(|pending| pending == request)
-        {
-            return Err(AutonomousWorkflowError::AuthorityRejected);
-        }
-        self.finish_preparation_final(consumed, outcome, shutdown, continue_after)
-            .await
-    }
-
-    async fn finish_preparation_final(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        outcome: Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError>,
-        shutdown: &CancellationToken,
-        continue_after: bool,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        match outcome {
-            Ok(AutonomousWorkflowExecutionOutcome::FinalRequestOperation) => {
-                Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration))
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::Completed) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Completed(
-                    AutonomousWorkflowPhase::Preparation,
-                )))
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::EvidenceFailure(kind)) => {
-                if !continue_after {
-                    self.custody
-                        .set_orchestration(OrchestrationCustody::SettledFinalEvidence {
-                            consumed: Box::new(consumed),
-                            kind,
-                        });
-                    return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
-                }
-                let request = QuarantineLogicalJobOrchestration::new(consumed, kind);
-                self.custody
-                    .set_orchestration(OrchestrationCustody::Quarantine {
-                        request: Box::new(request.clone()),
-                        submitted: false,
-                    });
-                self.submit_orchestration_quarantine(request, shutdown, false)
-                    .await
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::Retryable) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration))
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::FinalRequestReady) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                Err(AutonomousWorkflowError::AuthorityRejected)
-            }
-            Err(AutonomousWorkflowLeaseError::Shutdown) => Err(AutonomousWorkflowError::Shutdown),
-            Err(error) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration)
-            }
-        }
-    }
-
-    async fn start_activation_final_submission(
-        &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalJobActivation,
-        shutdown: &CancellationToken,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        if let Err(error) = deadline.checkpoint(shutdown) {
-            if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-            }
-            return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
+            return unavailable_or_shutdown(error, P::QUEUE);
         }
         Box::pin(
-            self.resolve_activation_final_submission(
+            self.resolve_phase_final_submission::<P>(
                 consumed, deadline, request, shutdown, true, true,
             ),
         )
         .await
     }
 
-    async fn resolve_activation_final_submission(
+    async fn resolve_phase_final_submission<P: AutonomousPhaseAdapter>(
         &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
+        consumed: P::Consumed,
         deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalJobActivation,
+        request: P::ReadyFinal,
         shutdown: &CancellationToken,
         first_submission: bool,
         continue_after: bool,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
         let submission_deadline = deadline.clone();
-        let lease = AutonomousActivationLease {
-            selections: Arc::clone(&self.selections),
-            activations: Arc::clone(&self.activations),
-            consumed: consumed.clone(),
+        let lease = P::lease_from_core(PhaseLeaseCore::new(
+            Arc::clone(&self.selections),
+            P::repository(self),
+            consumed.clone(),
             deadline,
-            custody: Arc::clone(&self.custody),
-        };
+            Arc::clone(&self.custody),
+        ));
         let submission = async {
             if first_submission {
-                self.custody.begin_activation_final_submission(
-                    consumed.clone(),
-                    submission_deadline.clone(),
-                    request.clone(),
-                )?;
+                expect_applied(&P::transition(
+                    &self.custody,
+                    PhaseCustodyTransition::BeginFinalSubmission {
+                        consumed: consumed.clone(),
+                        deadline: submission_deadline.clone(),
+                        request: request.clone(),
+                    },
+                )?)?;
             }
             Ok::<_, AutonomousWorkflowLeaseError>(
-                self.executor.submit_activation_final(&lease).await,
+                P::submit_final(self.executor.as_ref(), &lease).await,
             )
         };
         let outcome = match if first_submission {
@@ -3141,195 +3256,87 @@ impl AutonomousWorkflowService {
         } {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
-            Err(error) => {
-                return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
-            }
+            Err(error) => return unavailable_or_shutdown(error, P::QUEUE),
         };
-        if !self
-            .custody
-            .pending_activation_final(&consumed)
-            .is_ok_and(|pending| pending == request)
-        {
+        if !matches!(
+            P::snapshot(&self.custody),
+            Some(PhaseCustodySnapshot::PendingFinal {
+                consumed: pending_consumed,
+                request: pending_request,
+                ..
+            }) if pending_consumed == consumed && pending_request == request
+        ) {
             return Err(AutonomousWorkflowError::AuthorityRejected);
         }
-        self.finish_activation_final(consumed, outcome, shutdown, continue_after)
+        self.finish_phase_final::<P>(consumed, request, outcome, shutdown, continue_after)
             .await
     }
 
-    async fn finish_activation_final(
+    async fn finish_phase_final<P: AutonomousPhaseAdapter>(
         &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
+        consumed: P::Consumed,
+        request: P::ReadyFinal,
         outcome: Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError>,
         shutdown: &CancellationToken,
         continue_after: bool,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
         match outcome {
             Ok(AutonomousWorkflowExecutionOutcome::FinalRequestOperation) => {
-                Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration))
+                Ok(unavailable_poll(P::QUEUE))
             }
             Ok(AutonomousWorkflowExecutionOutcome::Completed) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Completed(
-                    AutonomousWorkflowPhase::Activation,
-                )))
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::EvidenceFailure(kind)) => {
-                if !continue_after {
-                    self.custody
-                        .set_orchestration(OrchestrationCustody::SettledFinalEvidence {
-                            consumed: Box::new(consumed),
-                            kind,
-                        });
-                    return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
-                }
-                let request = QuarantineLogicalJobOrchestration::new(consumed, kind);
-                self.custody
-                    .set_orchestration(OrchestrationCustody::Quarantine {
-                        request: Box::new(request.clone()),
-                        submitted: false,
-                    });
-                self.submit_orchestration_quarantine(request, shutdown, false)
-                    .await
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::Retryable) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration))
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::FinalRequestReady) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                Err(AutonomousWorkflowError::AuthorityRejected)
-            }
-            Err(AutonomousWorkflowLeaseError::Shutdown) => Err(AutonomousWorkflowError::Shutdown),
-            Err(error) => {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-                unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration)
-            }
-        }
-    }
-
-    async fn start_materialization_final_submission(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalInstanceMaterialization,
-        shutdown: &CancellationToken,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        if let Err(error) = deadline.checkpoint(shutdown) {
-            if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-            }
-            return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Materialization);
-        }
-        Box::pin(self.resolve_materialization_final_submission(
-            consumed, deadline, request, shutdown, true, true,
-        ))
-        .await
-    }
-
-    async fn resolve_materialization_final_submission(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        deadline: AutonomousWorkflowDeadline,
-        request: ReadyLogicalInstanceMaterialization,
-        shutdown: &CancellationToken,
-        first_submission: bool,
-        continue_after: bool,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        let submission_deadline = deadline.clone();
-        let lease = AutonomousMaterializationLease {
-            selections: Arc::clone(&self.selections),
-            materializations: Arc::clone(&self.materializations),
-            consumed: consumed.clone(),
-            deadline,
-            custody: Arc::clone(&self.custody),
-        };
-        let submission = async {
-            if first_submission {
-                self.custody.begin_materialization_final_submission(
-                    consumed.clone(),
-                    submission_deadline.clone(),
-                    request.clone(),
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearFinal { consumed, request },
                 )?;
-            }
-            Ok::<_, AutonomousWorkflowLeaseError>(
-                self.executor.submit_materialization_final(&lease).await,
-            )
-        };
-        let outcome = match if first_submission {
-            await_bounded(shutdown, &submission_deadline, submission).await
-        } else {
-            await_custody(shutdown, submission).await
-        } {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(_)) => return Err(AutonomousWorkflowError::AuthorityRejected),
-            Err(error) => {
-                return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Materialization);
-            }
-        };
-        if !self
-            .custody
-            .pending_materialization_final(&consumed)
-            .is_ok_and(|pending| pending == request)
-        {
-            return Err(AutonomousWorkflowError::AuthorityRejected);
-        }
-        self.finish_materialization_final(consumed, outcome, shutdown, continue_after)
-            .await
-    }
-
-    async fn finish_materialization_final(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        outcome: Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError>,
-        shutdown: &CancellationToken,
-        continue_after: bool,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        match outcome {
-            Ok(AutonomousWorkflowExecutionOutcome::FinalRequestOperation) => {
-                Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization))
-            }
-            Ok(AutonomousWorkflowExecutionOutcome::Completed) => {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
                 Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Completed(
-                    AutonomousWorkflowPhase::Materialization,
+                    P::PHASE,
                 )))
             }
             Ok(AutonomousWorkflowExecutionOutcome::EvidenceFailure(kind)) => {
                 if !continue_after {
-                    self.custody.set_materialization(
-                        MaterializationCustody::SettledFinalEvidence {
-                            consumed: Box::new(consumed),
+                    apply_service_transition::<P>(
+                        &self.custody,
+                        PhaseCustodyTransition::SettleFinalEvidence {
+                            consumed,
+                            request,
                             kind,
                         },
-                    );
-                    return Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization));
+                    )?;
+                    return Ok(unavailable_poll(P::QUEUE));
                 }
-                let request = QuarantineLogicalInstanceMaterialization::new(consumed, kind);
-                self.custody
-                    .set_materialization(MaterializationCustody::Quarantine {
-                        request: Box::new(request.clone()),
-                        submitted: false,
-                    });
-                self.submit_materialization_quarantine(request, shutdown, false)
-                    .await
+                let quarantine = P::quarantine_request(consumed.clone(), kind);
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::BeginFinalQuarantine {
+                        consumed,
+                        request,
+                        quarantine: quarantine.clone(),
+                    },
+                )?;
+                P::submit_quarantine(self, quarantine, shutdown).await
             }
             Ok(AutonomousWorkflowExecutionOutcome::Retryable) => {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-                Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization))
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearFinal { consumed, request },
+                )?;
+                Ok(unavailable_poll(P::QUEUE))
             }
             Ok(AutonomousWorkflowExecutionOutcome::FinalRequestReady) => {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearFinal { consumed, request },
+                )?;
                 Err(AutonomousWorkflowError::AuthorityRejected)
             }
             Err(AutonomousWorkflowLeaseError::Shutdown) => Err(AutonomousWorkflowError::Shutdown),
             Err(error) => {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-                unavailable_or_shutdown(error, AutonomousWorkflowQueue::Materialization)
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearFinal { consumed, request },
+                )?;
+                unavailable_or_shutdown(error, P::QUEUE)
             }
         }
     }
@@ -3601,88 +3608,76 @@ impl AutonomousWorkflowService {
                 }
             }
         };
-        self.custody
-            .set_orchestration(OrchestrationCustody::Active {
-                consumed: Box::new(consumed.clone()),
-                deadline: deadline.clone(),
-            });
+        self.custody.set_orchestration(match consumed.authority() {
+            ConsumedLogicalJobOrchestrationAuthority::Preparation(_) => {
+                OrchestrationCustody::Preparation(Box::new(PhaseCustodySnapshot::Active {
+                    consumed: consumed.clone(),
+                    deadline: deadline.clone(),
+                }))
+            }
+            ConsumedLogicalJobOrchestrationAuthority::Activation(_) => {
+                OrchestrationCustody::Activation(Box::new(PhaseCustodySnapshot::Active {
+                    consumed: consumed.clone(),
+                    deadline: deadline.clone(),
+                }))
+            }
+        });
         if !continue_after {
             return Ok(unavailable_poll(AutonomousWorkflowQueue::Orchestration));
         }
         Box::pin(self.execute_orchestration_active(consumed, deadline, shutdown)).await
     }
 
-    async fn execute_orchestration_active(
+    async fn execute_phase<P: AutonomousPhaseAdapter>(
         &self,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
+        consumed: P::Consumed,
         deadline: AutonomousWorkflowDeadline,
         shutdown: &CancellationToken,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        if let Err(error) = deadline.checkpoint(shutdown) {
-            if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
-            }
-            return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Orchestration);
-        }
-        match consumed.authority() {
-            ConsumedLogicalJobOrchestrationAuthority::Preparation(_) => {
-                let mut lease = AutonomousPreparationLease {
-                    selections: Arc::clone(&self.selections),
-                    preparations: Arc::clone(&self.preparations),
-                    consumed,
-                    deadline: deadline.clone(),
-                    custody: Arc::clone(&self.custody),
-                };
-                let execution = self.executor.execute_preparation(
-                    &mut lease,
-                    shutdown.clone(),
-                    deadline.clone(),
-                );
-                let disposition = await_bounded(shutdown, &deadline, execution).await;
-                Box::pin(self.finish_orchestration(
-                    AutonomousWorkflowPhase::Preparation,
-                    lease.consumed,
-                    disposition,
-                    shutdown,
-                ))
-                .await
-            }
-            ConsumedLogicalJobOrchestrationAuthority::Activation(_) => {
-                let mut lease = AutonomousActivationLease {
-                    selections: Arc::clone(&self.selections),
-                    activations: Arc::clone(&self.activations),
-                    consumed,
-                    deadline: deadline.clone(),
-                    custody: Arc::clone(&self.custody),
-                };
-                let execution = self.executor.execute_activation(
-                    &mut lease,
-                    shutdown.clone(),
-                    deadline.clone(),
-                );
-                let disposition = await_bounded(shutdown, &deadline, execution).await;
-                Box::pin(self.finish_orchestration(
-                    AutonomousWorkflowPhase::Activation,
-                    lease.consumed,
-                    disposition,
-                    shutdown,
-                ))
-                .await
-            }
-        }
+    ) -> (P::Consumed, PhaseExecutionDisposition) {
+        let mut lease = P::lease_from_core(PhaseLeaseCore::new(
+            Arc::clone(&self.selections),
+            P::repository(self),
+            consumed,
+            deadline.clone(),
+            Arc::clone(&self.custody),
+        ));
+        let execution = P::execute(
+            self.executor.as_ref(),
+            &mut lease,
+            shutdown.clone(),
+            deadline.clone(),
+        );
+        let disposition = await_bounded(shutdown, &deadline, execution).await;
+        let core = P::into_core(lease);
+        (core.consumed, disposition)
     }
 
-    async fn finish_orchestration(
+    fn phase_active_matches<P: AutonomousPhaseAdapter>(&self, consumed: &P::Consumed) -> bool {
+        matches!(
+            P::snapshot(&self.custody),
+            Some(PhaseCustodySnapshot::Active { consumed: active, .. }) if &active == consumed
+        )
+    }
+
+    fn clear_phase_if_active<P: AutonomousPhaseAdapter>(
         &self,
-        phase: AutonomousWorkflowPhase,
-        consumed: ConsumedSelectedLogicalJobOrchestration,
-        disposition: Result<
-            Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError>,
-            AutonomousWorkflowLeaseError,
-        >,
+    ) -> Result<(), AutonomousWorkflowError> {
+        let Some(PhaseCustodySnapshot::Active { consumed, .. }) = P::snapshot(&self.custody) else {
+            return Ok(());
+        };
+        apply_service_transition::<P>(
+            &self.custody,
+            PhaseCustodyTransition::ClearActive { consumed },
+        )
+    }
+
+    async fn finish_phase_execution<P: AutonomousPhaseAdapter>(
+        &self,
+        consumed: P::Consumed,
+        disposition: PhaseExecutionDisposition,
         shutdown: &CancellationToken,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        let disposition = match disposition {
+        let outcome = match disposition {
             Err(AutonomousWorkflowLeaseError::Shutdown)
             | Ok(Err(AutonomousWorkflowLeaseError::Shutdown)) => {
                 return Err(AutonomousWorkflowError::Shutdown);
@@ -3695,82 +3690,68 @@ impl AutonomousWorkflowService {
                 AutonomousWorkflowLeaseError::DeadlineElapsed
                 | AutonomousWorkflowLeaseError::Unavailable,
             )) => {
-                self.custody.clear_orchestration_if_active();
-                return Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
-                    AutonomousWorkflowQueue::Orchestration,
-                )));
+                self.clear_phase_if_active::<P>()?;
+                return Ok(unavailable_poll(P::QUEUE));
             }
             Ok(Ok(AutonomousWorkflowExecutionOutcome::Retryable)) => {
-                if !self.custody.orchestration_is_active(&consumed) {
+                if !self.phase_active_matches::<P>(&consumed) {
                     return Err(AutonomousWorkflowError::AuthorityRejected);
                 }
-                self.custody.clear_orchestration_if_active();
-                return Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
-                    AutonomousWorkflowQueue::Orchestration,
-                )));
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearActive {
+                        consumed: consumed.clone(),
+                    },
+                )?;
+                return Ok(unavailable_poll(P::QUEUE));
             }
             Err(AutonomousWorkflowLeaseError::AuthorityRejected)
             | Ok(Err(AutonomousWorkflowLeaseError::AuthorityRejected)) => {
-                self.custody.clear_orchestration_if_active();
+                self.clear_phase_if_active::<P>()?;
                 return Err(AutonomousWorkflowError::AuthorityRejected);
             }
             Ok(Ok(outcome)) => outcome,
         };
-        match disposition {
+        match outcome {
             AutonomousWorkflowExecutionOutcome::Completed => {
-                if !self.custody.orchestration_is_active(&consumed) {
+                if !self.phase_active_matches::<P>(&consumed) {
                     return Err(AutonomousWorkflowError::AuthorityRejected);
                 }
-                self.custody.set_orchestration(OrchestrationCustody::Idle);
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearActive { consumed },
+                )?;
                 Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Completed(
-                    phase,
+                    P::PHASE,
                 )))
             }
             AutonomousWorkflowExecutionOutcome::EvidenceFailure(kind) => {
-                if !self.custody.orchestration_is_active(&consumed) {
+                if !self.phase_active_matches::<P>(&consumed) {
                     return Err(AutonomousWorkflowError::AuthorityRejected);
                 }
                 if shutdown.is_cancelled() {
                     return Err(AutonomousWorkflowError::Shutdown);
                 }
-                let request = QuarantineLogicalJobOrchestration::new(consumed, kind);
-                self.custody
-                    .set_orchestration(OrchestrationCustody::Quarantine {
-                        request: Box::new(request.clone()),
-                        submitted: false,
-                    });
-                self.submit_orchestration_quarantine(request, shutdown, false)
-                    .await
+                let quarantine = P::quarantine_request(consumed.clone(), kind);
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::BeginActiveQuarantine {
+                        consumed,
+                        quarantine: quarantine.clone(),
+                    },
+                )?;
+                P::submit_quarantine(self, quarantine, shutdown).await
             }
             AutonomousWorkflowExecutionOutcome::Retryable => unreachable!("handled above"),
             AutonomousWorkflowExecutionOutcome::FinalRequestReady => {
-                match phase {
-                    AutonomousWorkflowPhase::Preparation => {
-                        let Some((deadline, request)) =
-                            self.custody.ready_preparation_final(&consumed)
-                        else {
-                            return Err(AutonomousWorkflowError::AuthorityRejected);
-                        };
-                        Box::pin(self.start_preparation_final_submission(
-                            consumed, deadline, request, shutdown,
-                        ))
-                        .await
-                    }
-                    AutonomousWorkflowPhase::Activation => {
-                        let Some((deadline, request)) =
-                            self.custody.ready_activation_final(&consumed)
-                        else {
-                            return Err(AutonomousWorkflowError::AuthorityRejected);
-                        };
-                        Box::pin(self.start_activation_final_submission(
-                            consumed, deadline, request, shutdown,
-                        ))
-                        .await
-                    }
-                    AutonomousWorkflowPhase::Materialization => {
-                        Err(AutonomousWorkflowError::AuthorityRejected)
-                    }
-                }
+                let Some((deadline, request)) = ready_phase_final::<P>(&self.custody, &consumed)
+                else {
+                    return Err(AutonomousWorkflowError::AuthorityRejected);
+                };
+                Box::pin(
+                    self.start_phase_final_submission::<P>(consumed, deadline, request, shutdown),
+                )
+                .await
             }
             AutonomousWorkflowExecutionOutcome::FinalRequestOperation => {
                 Err(AutonomousWorkflowError::AuthorityRejected)
@@ -3778,6 +3759,44 @@ impl AutonomousWorkflowService {
         }
     }
 
+    async fn execute_phase_active<P: AutonomousPhaseAdapter>(
+        &self,
+        consumed: P::Consumed,
+        deadline: AutonomousWorkflowDeadline,
+        shutdown: &CancellationToken,
+    ) -> Result<QueuePoll, AutonomousWorkflowError> {
+        if let Err(error) = deadline.checkpoint(shutdown) {
+            if error != AutonomousWorkflowLeaseError::Shutdown {
+                apply_service_transition::<P>(
+                    &self.custody,
+                    PhaseCustodyTransition::ClearActive { consumed },
+                )?;
+            }
+            return unavailable_or_shutdown(error, P::QUEUE);
+        }
+        let (consumed, disposition) = self.execute_phase::<P>(consumed, deadline, shutdown).await;
+        Box::pin(self.finish_phase_execution::<P>(consumed, disposition, shutdown)).await
+    }
+
+    async fn execute_orchestration_active(
+        &self,
+        consumed: ConsumedSelectedLogicalJobOrchestration,
+        deadline: AutonomousWorkflowDeadline,
+        shutdown: &CancellationToken,
+    ) -> Result<QueuePoll, AutonomousWorkflowError> {
+        match consumed.authority() {
+            ConsumedLogicalJobOrchestrationAuthority::Preparation(_) => {
+                Box::pin(
+                    self.execute_phase_active::<PreparationPhase>(consumed, deadline, shutdown),
+                )
+                .await
+            }
+            ConsumedLogicalJobOrchestrationAuthority::Activation(_) => {
+                Box::pin(self.execute_phase_active::<ActivationPhase>(consumed, deadline, shutdown))
+                    .await
+            }
+        }
+    }
     async fn submit_orchestration_quarantine(
         &self,
         request: QuarantineLogicalJobOrchestration,
@@ -4046,10 +4065,12 @@ impl AutonomousWorkflowService {
             },
         };
         self.custody
-            .set_materialization(MaterializationCustody::Active {
-                consumed: Box::new(consumed.clone()),
-                deadline: deadline.clone(),
-            });
+            .set_materialization(MaterializationCustody::Phase(Box::new(
+                PhaseCustodySnapshot::Active {
+                    consumed: consumed.clone(),
+                    deadline: deadline.clone(),
+                },
+            )));
         if !continue_after {
             return Ok(unavailable_poll(AutonomousWorkflowQueue::Materialization));
         }
@@ -4062,116 +4083,9 @@ impl AutonomousWorkflowService {
         deadline: AutonomousWorkflowDeadline,
         shutdown: &CancellationToken,
     ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        if let Err(error) = deadline.checkpoint(shutdown) {
-            if error != AutonomousWorkflowLeaseError::Shutdown {
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-            }
-            return unavailable_or_shutdown(error, AutonomousWorkflowQueue::Materialization);
-        }
-        let mut lease = AutonomousMaterializationLease {
-            selections: Arc::clone(&self.selections),
-            materializations: Arc::clone(&self.materializations),
-            consumed,
-            deadline: deadline.clone(),
-            custody: Arc::clone(&self.custody),
-        };
-        let execution =
-            self.executor
-                .execute_materialization(&mut lease, shutdown.clone(), deadline.clone());
-        let disposition = await_bounded(shutdown, &deadline, execution).await;
-        Box::pin(self.finish_materialization(lease.consumed, disposition, shutdown)).await
+        Box::pin(self.execute_phase_active::<MaterializationPhase>(consumed, deadline, shutdown))
+            .await
     }
-
-    async fn finish_materialization(
-        &self,
-        consumed: ConsumedSelectedLogicalInstanceMaterialization,
-        disposition: Result<
-            Result<AutonomousWorkflowExecutionOutcome, AutonomousWorkflowLeaseError>,
-            AutonomousWorkflowLeaseError,
-        >,
-        shutdown: &CancellationToken,
-    ) -> Result<QueuePoll, AutonomousWorkflowError> {
-        let disposition = match disposition {
-            Err(AutonomousWorkflowLeaseError::Shutdown)
-            | Ok(Err(AutonomousWorkflowLeaseError::Shutdown)) => {
-                return Err(AutonomousWorkflowError::Shutdown);
-            }
-            Err(
-                AutonomousWorkflowLeaseError::DeadlineElapsed
-                | AutonomousWorkflowLeaseError::Unavailable,
-            )
-            | Ok(Err(
-                AutonomousWorkflowLeaseError::DeadlineElapsed
-                | AutonomousWorkflowLeaseError::Unavailable,
-            )) => {
-                self.custody.clear_materialization_if_active();
-                return Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
-                    AutonomousWorkflowQueue::Materialization,
-                )));
-            }
-            Ok(Ok(AutonomousWorkflowExecutionOutcome::Retryable)) => {
-                if !self.custody.materialization_is_active(&consumed) {
-                    return Err(AutonomousWorkflowError::AuthorityRejected);
-                }
-                self.custody.clear_materialization_if_active();
-                return Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Unavailable(
-                    AutonomousWorkflowQueue::Materialization,
-                )));
-            }
-            Err(AutonomousWorkflowLeaseError::AuthorityRejected)
-            | Ok(Err(AutonomousWorkflowLeaseError::AuthorityRejected)) => {
-                self.custody.clear_materialization_if_active();
-                return Err(AutonomousWorkflowError::AuthorityRejected);
-            }
-            Ok(Ok(outcome)) => outcome,
-        };
-        match disposition {
-            AutonomousWorkflowExecutionOutcome::Completed => {
-                if !self.custody.materialization_is_active(&consumed) {
-                    return Err(AutonomousWorkflowError::AuthorityRejected);
-                }
-                self.custody
-                    .set_materialization(MaterializationCustody::Idle);
-                Ok(QueuePoll::Outcome(AutonomousWorkflowOutcome::Completed(
-                    AutonomousWorkflowPhase::Materialization,
-                )))
-            }
-            AutonomousWorkflowExecutionOutcome::EvidenceFailure(kind) => {
-                if !self.custody.materialization_is_active(&consumed) {
-                    return Err(AutonomousWorkflowError::AuthorityRejected);
-                }
-                if shutdown.is_cancelled() {
-                    return Err(AutonomousWorkflowError::Shutdown);
-                }
-                let request = QuarantineLogicalInstanceMaterialization::new(consumed, kind);
-                self.custody
-                    .set_materialization(MaterializationCustody::Quarantine {
-                        request: Box::new(request.clone()),
-                        submitted: false,
-                    });
-                self.submit_materialization_quarantine(request, shutdown, false)
-                    .await
-            }
-            AutonomousWorkflowExecutionOutcome::Retryable => unreachable!("handled above"),
-            AutonomousWorkflowExecutionOutcome::FinalRequestReady => {
-                let Some((deadline, request)) = self.custody.ready_materialization_final(&consumed)
-                else {
-                    return Err(AutonomousWorkflowError::AuthorityRejected);
-                };
-                Box::pin(
-                    self.start_materialization_final_submission(
-                        consumed, deadline, request, shutdown,
-                    ),
-                )
-                .await
-            }
-            AutonomousWorkflowExecutionOutcome::FinalRequestOperation => {
-                Err(AutonomousWorkflowError::AuthorityRejected)
-            }
-        }
-    }
-
     async fn submit_materialization_quarantine(
         &self,
         request: QuarantineLogicalInstanceMaterialization,
